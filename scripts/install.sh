@@ -2,7 +2,7 @@
 #
 # File:        intstall.sh
 #
-# Description: A utility script that builds FLAP project
+# Description: A utility script that builds FOSSIL project
 #
 # License:     GPL3+
 #
@@ -27,7 +27,7 @@ set -C # noclobber
 
 # INTERNAL VARIABLES AND INITIALIZATIONS
 readonly USERNAME="szaghi"
-readonly PROJECT="FLAP"
+readonly PROJECT="FOSSIL"
 readonly GITHUB="https://github.com/$USERNAME/$PROJECT"
 readonly PROGRAM=`basename "$0"`
 
