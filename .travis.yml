@@ -58,3 +58,16 @@ before_deploy:
   - $CLEAN
   - $MAKETAR
   - mv FOSSIL.tar.gz FOSSIL-$TRAVIS_TAG.tar.gz
+
+deploy:
+  provider: releases
+  api_key:
+    secure: Tg2+FOjVMrh6W1K6R47pAdpzHe3JHGRiuf6d6BkSHOlYvcWt5uxaxJZb1w++0slNBe5dRlmE/ei43rCjZtC874j77gmow7DsUiMaS/rrA2xnhexjlWbThv8yv3MfV+yhJQrXZb6WvUnCKkXgTB91H1N2WWiHEF4dEM8LTkLfUgz8dUZh26f/8LruURRPudsomnw3MoOTW47DvimWG/LQgYTgOLTB1qDWfnmefPoSP59VSKH3bYNABLHU+Jhsvae/MBT0poffIBZ6dSclUOFcWFhH/XqeTyB8T4YBFu1t4GMQrWhLWFUH+f73H/PkwWh+r2FOdmdRAL31op86GxXUO1XB0NrAH62V1y49yyAtRIgz2kC1KlLByQGyvO3wWJ54RsKvBv+AFzlvvbPyZkx5s0XWwxjkM9xz2FWESOIGGGaontR79viH9fv1dppCaD1f+/KLbYnwHWs5LwBbASAEqL0T6EgLa0sSNtpRccDJA1Yvu4k1LZOHkH2OuWQ/KWbWOQx0Hf7PYcqVeLMl2yjO0YoFnPimSqqb0cF+I28ENOMDHP/JiimJVzQ7o5fKbEywmcM9sGqIA/2iM1fJ1KOHvXHZEXKSEezjlF5koenihLg6gI+DNThkSdyOR0lNqu7iqNPURnOMSVTTzNbiqHl9s/O6vKq7nNwsANXUYJbAN0Q=
+  file: 
+    - FOSSIL-$TRAVIS_TAG.tar.gz
+    - ./scripts/install.sh
+  skip_cleanup: true
+  overwrite: true
+  on:
+    tags: true
+    repo: szaghi/FOSSIL
