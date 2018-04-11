@@ -4,7 +4,8 @@ module fossil_facet_object
 !< FOSSIL, facet class definition.
 
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
-use penf, only : I2P, I4P, R4P, str
+use penf, only : I2P, I4P, R4P, str, ZeroR4P
+use vecfor, only : face_normal3_R4P, vector_R4P
 
 implicit none
 private
@@ -15,15 +16,17 @@ integer(I4P), parameter :: FRLEN=80 !< Maximum length of facet record string.
 
 type :: facet_object
    !< FOSSIL, facet class.
-   real(R4P) :: normal(1:3)=[0._R4P,0._R4P,0._R4P]   !< Facet (outward) normal (versor).
-   real(R4P) :: vertex_1(1:3)=[0._R4P,0._R4P,0._R4P] !< Facet vertex 1.
-   real(R4P) :: vertex_2(1:3)=[0._R4P,0._R4P,0._R4P] !< Facet vertex 2.
-   real(R4P) :: vertex_3(1:3)=[0._R4P,0._R4P,0._R4P] !< Facet vertex 3.
+   type(vector_R4P) :: normal   !< Facet (outward) normal (versor).
+   type(vector_R4P) :: vertex_1 !< Facet vertex 1.
+   type(vector_R4P) :: vertex_2 !< Facet vertex 2.
+   type(vector_R4P) :: vertex_3 !< Facet vertex 3.
    contains
       ! public methods
+      procedure, pass(self) :: check_normal          !< Check normal consistency.
       procedure, pass(self) :: initialize            !< Initialize facet.
       procedure, pass(self) :: load_from_file_ascii  !< Load facet from ASCII file.
       procedure, pass(self) :: load_from_file_binary !< Load facet from binary file.
+      procedure, pass(self) :: sanitize_normal       !< Sanitize normal, make normal consistent with vertices.
       procedure, pass(self) :: save_into_file_ascii  !< Save facet into ASCII file.
       procedure, pass(self) :: save_into_file_binary !< Save facet into binary file.
       ! operators
@@ -34,6 +37,18 @@ endtype facet_object
 
 contains
    ! public methods
+   elemental function check_normal(self) result(is_consistent)
+   !< Check normal consistency.
+   class(facet_object), intent(in) :: self          !< Facet.
+   logical                         :: is_consistent !< Consistency check result.
+   type(vector_R4P)                :: normal        !< Normal computed by means of vertices data.
+
+   normal = face_normal3_R4P(pt1=self%vertex_1, pt2=self%vertex_2, pt3=self%vertex_3, norm='y')
+   is_consistent = ((abs(normal%x - self%normal%x)<=2*ZeroR4P).and.&
+                    (abs(normal%y - self%normal%y)<=2*ZeroR4P).and.&
+                    (abs(normal%z - self%normal%z)<=2*ZeroR4P))
+   endfunction check_normal
+
    elemental subroutine initialize(self)
    !< Initialize facet.
    class(facet_object), intent(inout) :: self  !< Facet.
@@ -57,15 +72,15 @@ contains
    contains
       subroutine load_facet_record(prefix, record)
       !< Load a facet *record*, namely normal or vertex data.
-      character(*), intent(in)  :: prefix       !< Record prefix string.
-      real(R4P),    intent(out) :: record(1:3)  !< Record data.
-      character(FRLEN)          :: facet_record !< Facet record string buffer.
-      integer(I4P)              :: i            !< Counter.
+      character(*),     intent(in)  :: prefix       !< Record prefix string.
+      type(vector_R4P), intent(out) :: record       !< Record data.
+      character(FRLEN)              :: facet_record !< Facet record string buffer.
+      integer(I4P)                  :: i            !< Counter.
 
       read(file_unit, '(A)') facet_record
       i = index(string=facet_record, substring=prefix)
       if (i>0) then
-         read(facet_record(i+len(prefix):), *) record(1), record(2), record(3)
+         read(facet_record(i+len(prefix):), *) record%x, record%y, record%z
       else
          write(stderr, '(A)') 'error: impossible to read "'//prefix//'" from file unit "'//trim(str(file_unit))//'"!'
       endif
@@ -78,31 +93,48 @@ contains
    integer(I4P),        intent(in)    :: file_unit !< File unit.
    integer(I2P)                       :: padding   !< Facet padding.
 
-   read(file_unit) self%normal(1), self%normal(2), self%normal(3)
-   read(file_unit) self%vertex_1(1), self%vertex_1(2), self%vertex_1(3)
-   read(file_unit) self%vertex_2(1), self%vertex_2(2), self%vertex_2(3)
-   read(file_unit) self%vertex_3(1), self%vertex_3(2), self%vertex_3(3)
+   read(file_unit) self%normal%x, self%normal%y, self%normal%z
+   read(file_unit) self%vertex_1%x, self%vertex_1%y, self%vertex_1%z
+   read(file_unit) self%vertex_2%x, self%vertex_2%y, self%vertex_2%z
+   read(file_unit) self%vertex_3%x, self%vertex_3%y, self%vertex_3%z
    read(file_unit) padding
    endsubroutine load_from_file_binary
+
+   elemental subroutine sanitize_normal(self)
+   !< Sanitize normal, make normal consistent with vertices.
+   !<
+   !<```fortran
+   !< type(facet_object) :: facet
+   !< facet%vertex_1 = -0.231369_R4P * ex_R4P + 0.0226865_R4P * ey_R4P + 1._R4P * ez_R4P
+   !< facet%vertex_2 = -0.227740_R4P * ex_R4P + 0.0245457_R4P * ey_R4P + 0._R4P * ez_R4P
+   !< facet%vertex_2 = -0.235254_R4P * ex_R4P + 0.0201881_R4P * ey_R4P + 0._R4P * ez_R4P
+   !< call facet%sanitize_normal
+   !< print "(3(F3.1,1X))", facet%normal%x, facet%normal%y, facet%normal%z
+   !<```
+   !=> -0.501673222 0.865057290 -2.12257713<<<
+   class(facet_object), intent(inout) :: self !< Facet.
+
+   self%normal = face_normal3_R4P(pt1=self%vertex_1, pt2=self%vertex_2, pt3=self%vertex_3, norm='y')
+   endsubroutine sanitize_normal
 
    subroutine save_into_file_ascii(self, file_unit)
    !< Save facet into ASCII file.
    class(facet_object), intent(in) :: self      !< Facet.
    integer(I4P),        intent(in) :: file_unit !< File unit.
 
-   write(file_unit, '(A)') '  facet normal '//trim(str(self%normal(1)))//' '//&
-                                              trim(str(self%normal(2)))//' '//&
-                                              trim(str(self%normal(3)))
+   write(file_unit, '(A)') '  facet normal '//trim(str(self%normal%x))//' '//&
+                                              trim(str(self%normal%y))//' '//&
+                                              trim(str(self%normal%z))
    write(file_unit, '(A)') '    outer loop'
-   write(file_unit, '(A)') '      vertex '//trim(str(self%vertex_1(1)))//' '//&
-                                            trim(str(self%vertex_1(2)))//' '//&
-                                            trim(str(self%vertex_1(3)))
-   write(file_unit, '(A)') '      vertex '//trim(str(self%vertex_2(1)))//' '//&
-                                            trim(str(self%vertex_2(2)))//' '//&
-                                            trim(str(self%vertex_2(3)))
-   write(file_unit, '(A)') '      vertex '//trim(str(self%vertex_3(1)))//' '//&
-                                            trim(str(self%vertex_3(2)))//' '//&
-                                            trim(str(self%vertex_3(3)))
+   write(file_unit, '(A)') '      vertex '//trim(str(self%vertex_1%x))//' '//&
+                                            trim(str(self%vertex_1%y))//' '//&
+                                            trim(str(self%vertex_1%z))
+   write(file_unit, '(A)') '      vertex '//trim(str(self%vertex_2%x))//' '//&
+                                            trim(str(self%vertex_2%y))//' '//&
+                                            trim(str(self%vertex_2%z))
+   write(file_unit, '(A)') '      vertex '//trim(str(self%vertex_3%x))//' '//&
+                                            trim(str(self%vertex_3%y))//' '//&
+                                            trim(str(self%vertex_3%z))
    write(file_unit, '(A)') '    endloop'
    write(file_unit, '(A)') '  endfacet'
    endsubroutine save_into_file_ascii
@@ -112,10 +144,10 @@ contains
    class(facet_object), intent(in) :: self      !< Facet.
    integer(I4P),        intent(in) :: file_unit !< File unit.
 
-   write(file_unit) self%normal(1), self%normal(2), self%normal(3)
-   write(file_unit) self%vertex_1(1), self%vertex_1(2), self%vertex_1(3)
-   write(file_unit) self%vertex_2(1), self%vertex_2(2), self%vertex_2(3)
-   write(file_unit) self%vertex_3(1), self%vertex_3(2), self%vertex_3(3)
+   write(file_unit) self%normal%x, self%normal%y, self%normal%z
+   write(file_unit) self%vertex_1%x, self%vertex_1%y, self%vertex_1%z
+   write(file_unit) self%vertex_2%x, self%vertex_2%y, self%vertex_2%z
+   write(file_unit) self%vertex_3%x, self%vertex_3%y, self%vertex_3%z
    write(file_unit) 0_I2P
    endsubroutine save_into_file_binary
 

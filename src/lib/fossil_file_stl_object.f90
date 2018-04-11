@@ -22,12 +22,13 @@ type :: file_stl_object
    logical                         :: is_open=.false. !< Sentinel to check if file is open.
    contains
       ! public methods
-      procedure, pass(self) :: close_file      !< Close file.
-      procedure, pass(self) :: destroy         !< Destroy file.
-      procedure, pass(self) :: initialize      !< Initialize file.
-      procedure, pass(self) :: load_from_file  !< Load from file.
-      procedure, pass(self) :: open_file       !< Open file, once initialized.
-      procedure, pass(self) :: save_into_file  !< Save into file.
+      procedure, pass(self) :: close_file       !< Close file.
+      procedure, pass(self) :: destroy          !< Destroy file.
+      procedure, pass(self) :: initialize       !< Initialize file.
+      procedure, pass(self) :: load_from_file   !< Load from file.
+      procedure, pass(self) :: open_file        !< Open file, once initialized.
+      procedure, pass(self) :: sanitize_normals !< Sanitize normals, make normals consistent with vertices.
+      procedure, pass(self) :: save_into_file   !< Save into file.
       ! operators
       generic :: assignment(=) => file_stl_assign_file_stl       !< Overload `=`.
       procedure, pass(lhs),  private :: file_stl_assign_file_stl !< Operator `=`.
@@ -133,6 +134,13 @@ contains
       write(stderr, '(A)') 'error: file name has not be initialized, impossible to open file!'
    endif
    endsubroutine open_file
+
+   elemental subroutine sanitize_normals(self)
+   !< Sanitize normals, make normals consistent with vertices.
+   class(file_stl_object), intent(inout) :: self !< File STL.
+
+   if (self%facets_number>0) call self%facet%sanitize_normal
+   endsubroutine sanitize_normals
 
    subroutine save_into_file(self, file_name, is_ascii)
    !< Save into file.
