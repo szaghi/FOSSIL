@@ -4,8 +4,8 @@ module fossil_facet_object
 !< FOSSIL, facet class definition.
 
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
-use penf, only : I2P, I4P, R4P, str, ZeroR4P
-use vecfor, only : face_normal3_R4P, vector_R4P
+use penf, only : I2P, I4P, R4P, R8P, str, ZeroR4P
+use vecfor, only : face_normal3_R4P, normalized_R8P, normL2_R8P, ex_R8P, ey_R8P, ez_R8P, vector_R4P, vector_R8P
 
 implicit none
 private
@@ -20,9 +20,12 @@ type :: facet_object
    type(vector_R4P) :: vertex_1 !< Facet vertex 1.
    type(vector_R4P) :: vertex_2 !< Facet vertex 2.
    type(vector_R4P) :: vertex_3 !< Facet vertex 3.
+   type(vector_R8P) :: e1, e2   !< Versors of local (plane) reference system.
    contains
       ! public methods
       procedure, pass(self) :: check_normal          !< Check normal consistency.
+      procedure, pass(self) :: compute_local_system  !< Compute local (plane) reference system.
+      procedure, pass(self) :: distance              !< Compute the (unsigned) distance from a point to the facet surface.
       procedure, pass(self) :: initialize            !< Initialize facet.
       procedure, pass(self) :: load_from_file_ascii  !< Load facet from ASCII file.
       procedure, pass(self) :: load_from_file_binary !< Load facet from binary file.
@@ -48,6 +51,37 @@ contains
                     (abs(normal%y - self%normal%y)<=2*ZeroR4P).and.&
                     (abs(normal%z - self%normal%z)<=2*ZeroR4P))
    endfunction check_normal
+
+   pure subroutine compute_local_system(self)
+   !< Compute local (plane) reference system.
+   class(facet_object), intent(inout) :: self !< Facet.
+
+   ! self%e1 = normalized_R8P(self%vertex_2 - self%vertex_1)
+   ! self%e2 = normalized_R8P(self%e2.cross.self%normal)
+   endsubroutine compute_local_system
+
+   pure function distance(self, point)
+   !< Compute the (unsigned) distance from a point to the facet surface.
+   !<
+   !< @note STL facet data are saved in R4P kind: all computations are promoted to R8P because, in general, R8P is the default kind
+   !< for which the results are expected.
+   class(facet_object), intent(in) :: self       !< Facet.
+   type(vector_R8P),    intent(in) :: point      !< Point coordinates.
+   real(R8P)                       :: distance   !< Closest distance from (x,y,z) to the triangulated surface.
+   type(vector_R8P)                :: v1, v2, v3 !< Facet vertices promoted to R8P kind.
+
+   v1 = self%vertex_1%x * ex_R8P + self%vertex_1%y * ey_R8P + self%vertex_1%z * ez_R8P
+   v2 = self%vertex_2%x * ex_R8P + self%vertex_2%y * ey_R8P + self%vertex_2%z * ez_R8P
+   v3 = self%vertex_3%x * ex_R8P + self%vertex_3%y * ey_R8P + self%vertex_3%z * ez_R8P
+
+   distance = abs(point%distance_to_plane(pt1=v1, pt2=v2, pt3=v3))  ! distance from facet plane
+   distance = min(distance, point%distance_to_line(pt1=v1, pt2=v2)) ! distance to edge vertex1-vertex2
+   distance = min(distance, point%distance_to_line(pt1=v2, pt2=v3)) ! distance to edge vertex2-vertex3
+   distance = min(distance, point%distance_to_line(pt1=v3, pt2=v1)) ! distance to edge vertex3-vertex1
+   distance = min(distance, normL2_R8P(point - v1))                 ! distance to vertex1
+   distance = min(distance, normL2_R8P(point - v2))                 ! distance to vertex2
+   distance = min(distance, normL2_R8P(point - v3))                 ! distance to vertex3
+   endfunction
 
    elemental subroutine initialize(self)
    !< Initialize facet.
@@ -162,5 +196,7 @@ contains
    lhs%vertex_1 = rhs%vertex_1
    lhs%vertex_2 = rhs%vertex_2
    lhs%vertex_3 = rhs%vertex_3
+   lhs%e1 = rhs%e1
+   lhs%e2 = rhs%e2
    endsubroutine facet_assign_facet
 endmodule fossil_facet_object

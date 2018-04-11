@@ -5,7 +5,8 @@ module fossil_file_stl_object
 
 use fossil_facet_object, only : facet_object, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
-use penf, only : I4P
+use penf, only : I4P, R8P, MaxR8P
+use vecfor, only : vector_R8P
 
 implicit none
 private
@@ -24,6 +25,7 @@ type :: file_stl_object
       ! public methods
       procedure, pass(self) :: close_file       !< Close file.
       procedure, pass(self) :: destroy          !< Destroy file.
+      procedure, pass(self) :: distance         !< Compute the (closest) distance from a point to the triangulated surface.
       procedure, pass(self) :: initialize       !< Initialize file.
       procedure, pass(self) :: load_from_file   !< Load from file.
       procedure, pass(self) :: open_file        !< Open file, once initialized.
@@ -61,6 +63,23 @@ contains
 
    self = fresh
    endsubroutine destroy
+
+   pure function distance(self, point)
+   !< Compute the (closest) distance from a point to the triangulated surface.
+   class(file_stl_object), intent(in) :: self       !< File STL.
+   type(vector_R8P),       intent(in) :: point      !< Point coordinates.
+   real(R8P)                          :: distance   !< Closest distance from (x,y,z) to the triangulated surface.
+   real(R8P)                          :: distance_  !< Closest distance, temporary buffer.
+   integer(I4P)                       :: f          !< Counter.
+
+   distance = MaxR8P
+   if (self%facets_number > 0) then
+      do f=1, self%facets_number
+         distance_ = self%facet(f)%distance(point=point)
+         if (abs(distance_)<=abs(distance)) distance = distance_
+      enddo
+   endif
+   endfunction
 
    elemental subroutine initialize(self, skip_destroy, file_name, is_ascii)
    !< Initialize file.
