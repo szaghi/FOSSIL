@@ -21,18 +21,24 @@ logical                       :: are_tests_passed(1) !< Result of tests check.
 
 are_tests_passed = .false.
 
-call file_stl%initialize(file_name='src/tests/naca0012-binary.stl', is_ascii=.false.)
+call file_stl%initialize(file_name='src/tests/naca0012-ascii.stl', is_ascii=.true.)
+! call file_stl%initialize(file_name='src/tests/tubi-clean.stl', is_ascii=.false.)
 call file_stl%load_from_file
+call file_stl%compute_metrix
 
-emin = -2._R8P * ex_R8P - 0.1_R8P * ey_R8P - 1._R8P * ez_R8P
+emin = -0.5_R8P * ex_R8P - 0.2_R8P * ey_R8P - 0.5_R8P * ez_R8P
+! emin = -110._R8P * ex_R8P - 55._R8P * ey_R8P - 5._R8P * ez_R8P
 
-ni = 32
-nj = 32
-nk = 32
+ni = 64
+nj = 64
+nk = 64
 
-Dx = 4._R8P  / ni ! x in [-2, 2]
-Dy = 0.2_R8P / nj ! y in [-0.1, 0.1]
-Dz = 4._R8P  / nk ! z in [-1, 3]
+Dx = 2._R8P  / ni ! x in [-0.5, 1.5]
+Dy = 0.4_R8P / nj ! y in [-0.2, 0.2]
+Dz = 2._R8P  / nk ! z in [-0.5, 1.5]
+! Dx = 220._R8P / ni ! x in [-110, 110]
+! Dy = 110._R8P / nj ! y in [-55, 55]
+! Dz = 130._R8P / nk ! z in [-5, 125]
 
 allocate(grid(1:ni, 1:nj, 1:nk))
 allocate(distance(1:ni, 1:nj, 1:nk))
@@ -49,7 +55,9 @@ print*, 'compute distances'
 do k=1, nk
    do j=1, nj
       do i=1, ni
-         distance(i, j, k) = file_stl%distance(point=grid(i, j, k))
+         ! distance(i, j, k) = file_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm='winding_number')
+         ! distance(i, j, k) = file_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm='solid_angle')
+         distance(i, j, k) = file_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm='ray_intersections')
       enddo
    enddo
 enddo
