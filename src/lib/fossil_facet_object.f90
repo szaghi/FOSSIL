@@ -38,14 +38,13 @@ type :: facet_object
       procedure, pass(self) :: compute_metrix        !< Compute local (plane) metrix.
       procedure, pass(self) :: distance              !< Compute the (unsigned, squared) distance from a point to the facet surface.
       procedure, pass(self) :: initialize            !< Initialize facet.
-      procedure, pass(self) :: ray_intersect         !< Return true if facet is intersected by a ray.
+      procedure, pass(self) :: do_ray_intersect      !< Return true if facet is intersected by a ray.
       procedure, pass(self) :: load_from_file_ascii  !< Load facet from ASCII file.
       procedure, pass(self) :: load_from_file_binary !< Load facet from binary file.
       procedure, pass(self) :: sanitize_normal       !< Sanitize normal, make normal consistent with vertices.
       procedure, pass(self) :: save_into_file_ascii  !< Save facet into ASCII file.
       procedure, pass(self) :: save_into_file_binary !< Save facet into binary file.
       procedure, pass(self) :: solid_angle           !< Return the (projected) solid angle of the facet with respect the point.
-      procedure, pass(self) :: winding_number        !< Return the winding number contribution of the facet with respect point.
       ! operators
       generic :: assignment(=) => facet_assign_facet !< Overload `=`.
       ! private methods
@@ -237,7 +236,7 @@ contains
    self = fresh
    endsubroutine initialize
 
-   pure function ray_intersect(self, ray_origin, ray_direction) result(intersect)
+   pure function do_ray_intersect(self, ray_origin, ray_direction) result(intersect)
    !< Return true if facet is intersected by ray from point and oriented as ray direction vector.
    !<
    !< This based on Moller–Trumbore intersection algorithm.
@@ -264,7 +263,7 @@ contains
    if ((v < 0._R8P).or.(u + v > 1._R8P)) return
    t = f * self%E1.dot.q
    if (t > EPS) intersect = .true.
-   endfunction ray_intersect
+   endfunction do_ray_intersect
 
    subroutine load_from_file_ascii(self, file_unit)
    !< Load facet from ASCII file.
@@ -383,111 +382,6 @@ contains
 
    solid_angle = 2._R8P * atan2(numerator, denominator)
    endfunction solid_angle
-
-   pure function winding_number(self, point)
-   !< Return the winding number contribution of the facet with respect point.
-   !<
-   !< @note Raise error if the facet contains point.
-   class(facet_object), intent(in) :: self           !< Facet.
-   type(vector_R8P),    intent(in) :: point          !< Point.
-   integer(I4P)                    :: winding_number !< Winding number contribution.
-   integer(I4P)                    :: v1_sign        !< Vertex 1 integer sign.
-   integer(I4P)                    :: v2_sign        !< Vertex 2 integer sign.
-   integer(I4P)                    :: v3_sign        !< Vertex 3 integer sign.
-   integer(I4P)                    :: face_boundary  !< Face boundaries count.
-
-   v1_sign = vertex_sign(V=self%vertex_1, P=point)
-   v2_sign = vertex_sign(V=self%vertex_2, P=point)
-   v3_sign = vertex_sign(V=self%vertex_3, P=point)
-
-                           face_boundary = 0
-   if (v1_sign /= v2_sign) face_boundary = face_boundary + edge_sign(V1=self%vertex_1, V2=self%vertex_2, P=point)
-   if (v2_sign /= v3_sign) face_boundary = face_boundary + edge_sign(V1=self%vertex_2, V2=self%vertex_3, P=point)
-   if (v3_sign /= v1_sign) face_boundary = face_boundary + edge_sign(V1=self%vertex_3, V2=self%vertex_1, P=point)
-   if (face_boundary == 0) then
-      winding_number = 0
-      return
-   endif
-   winding_number = triangle_sign(V1=self%vertex_1, V2=self%vertex_2, V3=self%vertex_3, P=point)
-   contains
-      pure function integer_sign(a)
-      !< Return 1 if a is positive, -1 if it's negative and 0 if it's zero.
-      real(R8P), intent(in) :: a            !< Generic coordinate.
-      integer(I4P)          :: integer_sign !< Integer sign of "a".
-
-      if     (a > 0._R8P) then
-         integer_sign = 1
-      elseif (a < 0._R8P) then
-         integer_sign = -1
-      else
-         integer_sign = 0
-      endif
-      endfunction integer_sign
-
-      pure function vertex_sign(V, P)
-      !< Return the integer sign of the vertex V with respect to P.
-      type(vector_R8P), intent(in) :: V           !< Vertex.
-      type(vector_R8P), intent(in) :: P           !< Point of reference.
-      integer(I4P)                 :: vertex_sign !< Integer sign of vertex "V" with respect "P".
-      integer(I4P)                 :: signs(3)    !< Integer signs.
-
-      signs(1) = integer_sign(V%x - P%x)
-      signs(2) = integer_sign(V%y - P%y)
-      signs(3) = integer_sign(V%z - P%z)
-      if     (any(signs == -1)) then
-         vertex_sign = -1
-      elseif (any(signs == 1)) then
-         vertex_sign = 1
-      else
-         vertex_sign = 0
-         ! raise error: "V coincides with P"
-      endif
-      endfunction vertex_sign
-
-      pure function edge_sign(V1, V2, P)
-      !< Return the integer sign of the edge V1->V2 with respect to P.
-      type(vector_R8P), intent(in) :: V1        !< Vertex 1.
-      type(vector_R8P), intent(in) :: V2        !< Vertex 2.
-      type(vector_R8P), intent(in) :: P         !< Point of reference.
-      integer(I4P)                 :: edge_sign !< Integer sign of edge "V1->V2" with respect "P".
-      integer(I4P)                 :: signs(3)  !< Integer signs.
-
-      signs(1) = integer_sign((V1%y - P%y) * (V2%x - P%x) - (V1%x - P%x) * (V2%y - P%y))
-      signs(2) = integer_sign((V1%z - P%z) * (V2%x - P%x) - (V1%x - P%x) * (V2%z - P%z))
-      signs(3) = integer_sign((V1%z - P%z) * (V2%y - P%y) - (V1%y - P%y) * (V2%z - P%z))
-      if     (any(signs == -1)) then
-         edge_sign = -1
-      elseif (any(signs == 1)) then
-         edge_sign = 1
-      else
-         edge_sign = 0
-         ! raise error: "V1->V2 is collinear with P"
-      endif
-      endfunction edge_sign
-
-      pure function triangle_sign(V1, V2, V3, P)
-      !< Return the integer sign of the triangle V1->V2->V3 with respect to P.
-      type(vector_R8P), intent(in) :: V1            !< Vertex 1.
-      type(vector_R8P), intent(in) :: V2            !< Vertex 2.
-      type(vector_R8P), intent(in) :: V3            !< Vertex 3.
-      type(vector_R8P), intent(in) :: P             !< Point of reference.
-      integer(I4P)                 :: triangle_sign !< Integer sign of triangle "V1->V2->V3" with respect "P".
-      real(R8P)                    :: m1_0, m1_1    !< Edge 1 2D coefficients.
-      real(R8P)                    :: m2_0, m2_1    !< Edge 2 2D coefficients.
-      real(R8P)                    :: m3_0, m3_1    !< Edge 3 2D coefficients.
-
-      m1_0 = V1%x - P%x
-      m1_1 = V1%y - P%y
-      m2_0 = V2%x - P%x
-      m2_1 = V2%y - P%y
-      m3_0 = V3%x - P%x
-      m3_1 = V3%y - P%y
-      triangle_sign = integer_sign((m1_0 * m2_1 - m1_1 * m2_0) * (V3%z - P%z) + &
-                                   (m2_0 * m3_1 - m2_1 * m3_0) * (V1%z - P%z) + &
-                                   (m3_0 * m1_1 - m3_1 * m1_0) * (V2%z - P%z))
-      ! if triangle sign == 0 raise errort: "V1->V2->V3 complanar with P"
-      endfunction triangle_sign
-   endfunction winding_number
 
    ! private methods
    ! `=` operator

@@ -3,6 +3,7 @@
 module fossil_file_stl_object
 !< FOSSIL,  STL file class definition.
 
+use fossil_aabb_object, only : aabb_object
 use fossil_facet_object, only : facet_object, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : I4P, R8P, MaxR8P
@@ -21,7 +22,7 @@ type :: file_stl_object
    character(FRLEN)                :: header          !< File header.
    integer(I4P)                    :: facets_number=0 !< Facets number.
    type(facet_object), allocatable :: facet(:)        !< Facets.
-   type(vector_R8P)                :: bb(2)           !< Axis-aligned bounding box (AABB), bb(1)=min, bb(2)=max.
+   type(aabb_object)               :: aabb            !< AABB tree.
    logical                         :: is_ascii=.true. !< Sentinel to check if file is ASCII.
    logical                         :: is_open=.false. !< Sentinel to check if file is open.
    contains
@@ -33,7 +34,6 @@ type :: file_stl_object
       procedure, pass(self) :: initialize                    !< Initialize file.
       procedure, pass(self) :: is_point_inside_polyhedron_ri !< Determinate is a point is inside or not STL facets by ray intersect.
       procedure, pass(self) :: is_point_inside_polyhedron_sa !< Determinate is a point is inside or not STL facets by solid angle.
-      procedure, pass(self) :: is_point_inside_polyhedron_wn !< Determinate is a point is inside or not STL facets by winding numb.
       procedure, pass(self) :: load_from_file                !< Load from file.
       procedure, pass(self) :: open_file                     !< Open file, once initialized.
       procedure, pass(self) :: sanitize_normals              !< Sanitize normals, make normals consistent with vertices.
@@ -50,7 +50,6 @@ endtype file_stl_object
 
 contains
    ! public methods
-
    subroutine close_file(self)
    !< Close file.
    class(file_stl_object), intent(inout) :: self       !< File STL.
@@ -69,12 +68,6 @@ contains
 
    if (self%facets_number>0) then
      call self%facet%compute_metrix
-     self%bb(1)%x = minval(self%facet(:)%bb(1)%x)
-     self%bb(1)%y = minval(self%facet(:)%bb(1)%y)
-     self%bb(1)%z = minval(self%facet(:)%bb(1)%z)
-     self%bb(2)%x = maxval(self%facet(:)%bb(2)%x)
-     self%bb(2)%y = maxval(self%facet(:)%bb(2)%y)
-     self%bb(2)%z = maxval(self%facet(:)%bb(2)%z)
    endif
    endsubroutine compute_metrix
 
@@ -112,12 +105,10 @@ contains
    endif
    if (present(is_signed)) then
       if (is_signed) then
-        sign_algorithm_ = 'solid_angle' ; if (present(sign_algorithm)) sign_algorithm_ = sign_algorithm
+        sign_algorithm_ = 'ray_intersections' ; if (present(sign_algorithm)) sign_algorithm_ = sign_algorithm
         select case(sign_algorithm_)
         case('solid_angle')
            if (self%is_point_inside_polyhedron_sa(point=point)) distance = -distance
-        case('winding_number')
-           if (self%is_point_inside_polyhedron_wn(point=point)) distance = -distance
         case('ray_intersections')
            if (self%is_point_inside_polyhedron_ri(point=point)) distance = -distance
         case default
@@ -159,7 +150,7 @@ contains
 
       intersections_number = 0
       do f=1, self%facets_number
-         if (self%facet(f)%ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) &
+         if (self%facet(f)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) &
             intersections_number = intersections_number + 1
       enddo
       if (mod(intersections_number, 2) == 0) then
@@ -190,28 +181,6 @@ contains
      is_inside = .false.
    endif
    endfunction is_point_inside_polyhedron_sa
-
-   pure function is_point_inside_polyhedron_wn(self, point) result(is_inside)
-   !< Determinate is a point is inside or not to a polyhedron described by STL facets by means of winding number criteria.
-   !<
-   !< @note STL's metrix must be already computed.
-   class(file_stl_object), intent(in) :: self           !< File STL.
-   type(vector_R8P),       intent(in) :: point          !< Point coordinates.
-   logical                            :: is_inside      !< Check result.
-   integer(I4P)                       :: winding_number !< Winding number of STL polyhedra with respect point.
-   integer(I4P)                       :: f              !< Counter.
-
-   winding_number = 0
-   do f=1, self%facets_number
-      winding_number = winding_number + self%facet(f)%winding_number(point=point)
-   enddo
-   winding_number = winding_number / 2
-   if (winding_number == 0) then
-     is_inside = .false.
-   else
-     is_inside = .true.
-   endif
-   endfunction is_point_inside_polyhedron_wn
 
    elemental subroutine initialize(self, skip_destroy, file_name, is_ascii)
    !< Initialize file.
@@ -322,11 +291,8 @@ contains
    class(file_stl_object), intent(inout) :: lhs !< Left hand side.
    type(file_stl_object),  intent(in)    :: rhs !< Right hand side.
 
-   if (allocated(rhs%file_name)) then
-      lhs%file_name = rhs%file_name
-   else
-      if (allocated(lhs%file_name))  deallocate(lhs%file_name)
-   endif
+   if (allocated(lhs%file_name)) deallocate(lhs%file_name)
+   if (allocated(rhs%file_name)) lhs%file_name = rhs%file_name
    lhs%file_unit = rhs%file_unit
    lhs%header = rhs%header
    lhs%facets_number = rhs%facets_number
@@ -419,69 +385,4 @@ contains
       write(stderr, '(A)') 'error: file is not open, impossible to write trailer into file!'
    endif
    endsubroutine save_trailer_into_file
-
-   ! non TBP
-   pure function closest_point_on_aabb(aabb, point) result(closest)
-   !< Given point, return the point on (or in) AABB that is closest.
-   type(vector_R8P), intent(in) :: aabb(2) !< Axis-aligned bounding-box in min-max form.
-   type(vector_R8P), intent(in) :: point   !< Point queried.
-   type(vector_R8P)             :: closest !< Closest point on (on in) aabb to point.
-
-   closest = point
-   closest%x = max(closest%x, aabb(1)%x) ; closest%x = min(closest%x, aabb(2)%x)
-   closest%y = max(closest%y, aabb(1)%y) ; closest%y = min(closest%y, aabb(2)%y)
-   closest%z = max(closest%z, aabb(1)%z) ; closest%z = min(closest%z, aabb(2)%z)
-   endfunction closest_point_on_aabb
-
-   pure function distance_point_to_aabb(aabb, point) result(distance)
-   !< Given point, return the (square) distance from point to AABB.
-   type(vector_R8P), intent(in) :: aabb(2)  !< Axis-aligned bounding-box in min-max form.
-   type(vector_R8P), intent(in) :: point    !< Point queried.
-   real(R8P)                    :: distance !< Distance from point to aabb.
-
-   distance = 0._R8P
-   if (point%x < aabb(1)%x) distance = distance + (aabb(1)%x - point%x) * (aabb(1)%x - point%x)
-   if (point%y < aabb(1)%y) distance = distance + (aabb(1)%y - point%y) * (aabb(1)%y - point%y)
-   if (point%z < aabb(1)%z) distance = distance + (aabb(1)%z - point%z) * (aabb(1)%z - point%z)
-   if (point%x > aabb(2)%x) distance = distance + (point%x - aabb(2)%x) * (point%x - aabb(2)%x)
-   if (point%y > aabb(2)%y) distance = distance + (point%y - aabb(2)%y) * (point%y - aabb(2)%y)
-   if (point%z > aabb(2)%z) distance = distance + (point%z - aabb(2)%z) * (point%z - aabb(2)%z)
-   endfunction distance_point_to_aabb
-
-   pure function do_segment_intersect_aabb(aabb, point_1, point_2) result(do_intersect)
-   !< Given segment point_1->point_2, return true if the segment intersect AABB.
-   type(vector_R8P), intent(in) :: aabb(2)            !< Axis-aligned bounding-box in min-max form.
-   type(vector_R8P), intent(in) :: point_1, point_2   !< Segment.
-   logical                      :: do_intersect       !< Test result.
-   type(vector_R8P)             :: aabb_center        !< AABB center.
-   type(vector_R8P)             :: aabb_halflength    !< AABB halflength.
-   type(vector_R8P)             :: segment_midpoint   !< Segment midpoint.
-   type(vector_R8P)             :: segment_halflength !< Segment halflength.
-   real(R8P)                    :: adx, ady, adz      !< Separating axis.
-   real(R8P), parameter         :: eps=1e-6_R8P       !< Small epsilon to control round off errors.
-
-   do_intersect = .false.
-   aabb_center = 0.5_R8P * (aabb(1) + aabb(2))
-   aabb_halflength = aabb(2) - aabb_center
-   segment_midpoint = 0.5_R8P * (point_1 + point_2)
-   segment_halflength = point_2 - segment_midpoint
-   segment_midpoint = segment_midpoint - aabb_center
-   adx = abs(segment_halflength%x)
-   if (abs(segment_midpoint%x) > aabb_halflength%x + adx) return
-   ady = abs(segment_halflength%y)
-   if (abs(segment_midpoint%y) > aabb_halflength%y + ady) return
-   adz = abs(segment_halflength%z)
-   if (abs(segment_midpoint%z) > aabb_halflength%z + adz) return
-   adx = adx + eps
-   ady = ady + eps
-   adz = adz + eps
-   if (abs(segment_midpoint%y * segment_halflength%z - segment_midpoint%z * segment_halflength%y) > &
-      aabb_halflength%y * adz + aabb_halflength%z * ady) return
-   if (abs(segment_midpoint%z * segment_halflength%x - segment_midpoint%x * segment_halflength%z) > &
-      aabb_halflength%x * adz + aabb_halflength%z * adx) return
-   if (abs(segment_midpoint%x * segment_halflength%y - segment_midpoint%y * segment_halflength%x) > &
-      aabb_halflength%x * ady + aabb_halflength%y * adx) return
-   ! no separating axis found
-   do_intersect = .true.
-   endfunction do_segment_intersect_aabb
 endmodule fossil_file_stl_object
