@@ -237,14 +237,14 @@ contains
    endsubroutine initialize
 
    pure function do_ray_intersect(self, ray_origin, ray_direction) result(intersect)
-   !< Return true if facet is intersected by ray from point and oriented as ray direction vector.
+   !< Return true if facet is intersected by ray from origin and oriented as ray direction vector.
    !<
    !< This based on Moller–Trumbore intersection algorithm.
    !<
    !< @note Facet's metrix must be already computed.
    class(facet_object), intent(in) :: self          !< Facet.
    type(vector_R8P),    intent(in) :: ray_origin    !< Ray origin.
-   type(vector_R8P),    intent(in) :: ray_direction !< Ray directio.
+   type(vector_R8P),    intent(in) :: ray_direction !< Ray direction.
    logical                         :: intersect     !< Intersection test result.
    type(vector_R8P)                :: h, s, q       !< Projection vectors.
    real(R8P)                       :: a, f, u, v, t !< Baricentric abscissa.
