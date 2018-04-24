@@ -26,6 +26,14 @@ call file_stl%initialize(file_name='src/tests/naca0012-ascii.stl', is_ascii=.tru
 call file_stl%load_from_file
 call file_stl%compute_metrix
 
+print*, 'cazzo : press enter to create AABB'
+read(*,*)
+call file_stl%create_aabb_tree(refinement_levels=3)
+print*, 'cazzo : AABB made'
+print*, 'cazzo : press enter to stop'
+read(*,*)
+stop
+
 emin = -0.5_R8P * ex_R8P - 0.2_R8P * ey_R8P - 0.5_R8P * ez_R8P
 ! emin = -110._R8P * ex_R8P - 55._R8P * ey_R8P - 5._R8P * ez_R8P
 

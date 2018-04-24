@@ -3,7 +3,7 @@
 module fossil_file_stl_object
 !< FOSSIL,  STL file class definition.
 
-use fossil_aabb_object, only : aabb_object
+use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object, only : facet_object, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : I4P, R8P, MaxR8P
@@ -22,13 +22,14 @@ type :: file_stl_object
    character(FRLEN)                :: header          !< File header.
    integer(I4P)                    :: facets_number=0 !< Facets number.
    type(facet_object), allocatable :: facet(:)        !< Facets.
-   type(aabb_object)               :: aabb            !< AABB tree.
+   type(aabb_tree_object)          :: aabb            !< AABB tree.
    logical                         :: is_ascii=.true. !< Sentinel to check if file is ASCII.
    logical                         :: is_open=.false. !< Sentinel to check if file is open.
    contains
       ! public methods
       procedure, pass(self) :: close_file                    !< Close file.
       procedure, pass(self) :: compute_metrix                !< Compute facets metrix.
+      procedure, pass(self) :: create_aabb_tree              !< Create the AABB tree.
       procedure, pass(self) :: destroy                       !< Destroy file.
       procedure, pass(self) :: distance                      !< Compute the (closest) distance from point to triangulated surface.
       procedure, pass(self) :: initialize                    !< Initialize file.
@@ -62,14 +63,29 @@ contains
    endif
    endsubroutine close_file
 
-   pure subroutine compute_metrix(self)
+   pure subroutine compute_metrix(self, refinement_levels)
    !< Compute facets metrix.
-   class(file_stl_object), intent(inout) :: self  !< File STL.
+   class(file_stl_object), intent(inout)        :: self               !< File STL.
+   integer(I4P),           intent(in), optional :: refinement_levels  !< Total number of refinement levels used.
+   integer(I4P)                                 :: refinement_levels_ !< Total number of refinement levels used.
 
    if (self%facets_number>0) then
-     call self%facet%compute_metrix
+      refinement_levels_ = 0 ; if (present(refinement_levels)) refinement_levels_ = refinement_levels
+      call self%facet%compute_metrix
+      ! call self%create_aabb_tree(refinement_levels=refinement_levels_)
    endif
    endsubroutine compute_metrix
+
+   ! pure subroutine create_aabb_tree(self, refinement_levels)
+   subroutine create_aabb_tree(self, refinement_levels)
+   !< Create AABB tree.
+   !<
+   !< @note Facets metrix must be already computed.
+   class(file_stl_object), intent(inout) :: self              !< File STL.
+   integer(I4P),           intent(in)    :: refinement_levels !< Total number of refinement levels used.
+
+   call self%aabb%initialize(refinement_levels=refinement_levels, facet=self%facet)
+   endsubroutine create_aabb_tree
 
    elemental subroutine destroy(self)
    !< Destroy file.
@@ -298,6 +314,7 @@ contains
    lhs%facets_number = rhs%facets_number
    if (allocated(lhs%facet)) deallocate(lhs%facet)
    if (allocated(rhs%facet)) allocate(lhs%facet(1:lhs%facets_number), source=rhs%facet)
+   lhs%aabb = rhs%aabb
    lhs%is_ascii = rhs%is_ascii
    lhs%is_open = rhs%is_open
    endsubroutine file_stl_assign_file_stl

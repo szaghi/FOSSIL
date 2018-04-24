@@ -1,7 +1,7 @@
-!< FOSSIL,  Axis-Aligned Bounding Box (AABB) class definition.
+!< FOSSIL, Axis-Aligned Bounding Box (AABB) class definition.
 
 module fossil_aabb_object
-!< FOSSIL,  Axis-Aligned Bounding Box (AABB) class definition.
+!< FOSSIL, Axis-Aligned Bounding Box (AABB) class definition.
 
 use fossil_facet_object, only : facet_object, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
@@ -13,26 +13,30 @@ private
 public :: aabb_object
 
 type :: aabb_object
-   !< FOSSIL  Axis-Aligned Bounding Box (AABB) class.
-   type(vector_R8P) :: bmin !< Minimum point of AABB.
-   type(vector_R8P) :: bmax !< Maximum point of AABB.
+   !< FOSSIL Axis-Aligned Bounding Box (AABB) class.
+   type(vector_R8P)                :: bmin            !< Minimum point of AABB.
+   type(vector_R8P)                :: bmax            !< Maximum point of AABB.
+   integer(I4P)                    :: facets_number=0 !< Facets number.
+   type(facet_object), allocatable :: facet(:)        !< Facets.
    contains
       ! public methods
       procedure, pass(self) :: closest_point    !< Return closest point on AABB from point reference.
-      procedure, pass(self) :: destroy          !< Destroy file.
+      procedure, pass(self) :: compute_octant   !< Compute AABB octants.
+      procedure, pass(self) :: destroy          !< Destroy AABB.
       procedure, pass(self) :: distance         !< Return the (square) distance from point to AABB.
       procedure, pass(self) :: do_ray_intersect !< Return true if AABB is intersected by ray.
-      procedure, pass(self) :: initialize       !< Initialize file.
+      procedure, pass(self) :: initialize       !< Initialize AABB.
+      procedure, pass(self) :: vertex           !< Return AABB vertices.
       ! operators
-      generic :: assignment(=) => aabb_assign_aabb       !< Overload `=`.
-      procedure, pass(lhs),  private :: aabb_assign_aabb !< Operator `=`.
+      generic :: assignment(=) => aabb_assign_aabb      !< Overload `=`.
+      procedure, pass(lhs), private :: aabb_assign_aabb !< Operator `=`.
 endtype aabb_object
 
 contains
    ! public methods
    pure function closest_point(self, point) result(closest)
    !< Return closest point on (or in) AABB from point reference.
-   class(aabb_object), intent(in) :: self    !< AABB box.
+   class(aabb_object), intent(in) :: self    !< AABB.
    type(vector_R8P),   intent(in) :: point   !< Point reference.
    type(vector_R8P)               :: closest !< Closest point on (on in) aabb to point.
 
@@ -42,19 +46,34 @@ contains
    closest%z = max(closest%z, self%bmin%z) ; closest%z = min(closest%z, self%bmax%z)
    endfunction closest_point
 
+   pure subroutine compute_octant(self, octant)
+   !< Return AABB octants.
+   class(aabb_object), intent(in)  :: self      !< AABB.
+   type(aabb_object),  intent(out) :: octant(8) !< AABB octants.
+   type(vector_R8P)                :: vertex(8) !< AABB vertices.
+   integer(I4P)                    :: o         !< Counter.
+
+   vertex = self%vertex()
+   octant(1)%bmin = self%bmin      ; octant(1)%bmax = 0.5_R8P * (self%bmin + self%bmax)
+   octant(8)%bmin = octant(1)%bmax ; octant(8)%bmax = self%bmax
+   do o=2, 7 ! loop over remaining octants
+      octant(o)%bmin = 0.5_R8P * (self%bmin + vertex(o)) ; octant(o)%bmax = 0.5_R8P * (vertex(o) + self%bmax)
+   enddo
+   endsubroutine compute_octant
+
    elemental subroutine destroy(self)
-   !< Destroy file.
-   class(aabb_object), intent(inout) :: self  !< AABB box.
-   type(aabb_object)                 :: fresh !< Fresh instance of file STL.
+   !< Destroy AABB.
+   class(aabb_object), intent(inout) :: self  !< AABB.
+   type(aabb_object)                 :: fresh !< Fresh instance of AABB box.
 
    self = fresh
    endsubroutine destroy
 
    pure function distance(self, point)
    !< Return the (square) distance from point to AABB.
-   class(aabb_object), intent(in) :: self     !< AABB box.
+   class(aabb_object), intent(in) :: self     !< AABB.
    type(vector_R8P),   intent(in) :: point    !< Point reference.
-   real(R8P)                      :: distance !< Distance from point to aabb.
+   real(R8P)                      :: distance !< Distance from point to AABB.
 
    distance = 0._R8P
    if (point%x < self%bmin%x) distance = distance + (self%bmin%x - point%x) * (self%bmin%x - point%x)
@@ -132,8 +151,8 @@ contains
    endfunction do_ray_intersect
 
    pure subroutine initialize(self, facet, bmin, bmax)
-   !< Initialize file.
-   class(aabb_object), intent(inout)        :: self     !< AABB box.
+   !< Initialize AABB.
+   class(aabb_object), intent(inout)        :: self     !< AABB.
    type(facet_object), intent(in), optional :: facet(:) !< Facets list.
    type(vector_R8P),   intent(in), optional :: bmin     !< Minimum point of AABB.
    type(vector_R8P),   intent(in), optional :: bmax     !< Maximum point of AABB.
@@ -152,6 +171,21 @@ contains
    endif
    endsubroutine initialize
 
+   pure function vertex(self)
+   !< Return AABB vertices.
+   class(aabb_object), intent(in) :: self      !< AABB.
+   type(vector_R8P)               :: vertex(8) !< AABB vertices.
+
+   vertex(1) = self%bmin
+   vertex(2) = self%bmax%x * ex_R8P + self%bmin%y * ey_R8P + self%bmin%z * ez_R8P
+   vertex(3) = self%bmin%x * ex_R8P + self%bmax%y * ey_R8P + self%bmin%z * ez_R8P
+   vertex(4) = self%bmax%x * ex_R8P + self%bmax%y * ey_R8P + self%bmin%z * ez_R8P
+   vertex(5) = self%bmin%x * ex_R8P + self%bmin%y * ey_R8P + self%bmax%z * ez_R8P
+   vertex(6) = self%bmax%x * ex_R8P + self%bmin%y * ey_R8P + self%bmax%z * ez_R8P
+   vertex(7) = self%bmin%x * ex_R8P + self%bmax%y * ey_R8P + self%bmax%z * ez_R8P
+   vertex(8) = self%bmax
+   endfunction vertex
+
    ! operators
    ! =
    pure subroutine aabb_assign_aabb(lhs, rhs)
@@ -161,5 +195,8 @@ contains
 
    lhs%bmin = rhs%bmin
    lhs%bmax = rhs%bmax
+   lhs%facets_number = rhs%facets_number
+   if (allocated(lhs%facet)) deallocate(lhs%facet)
+   if (allocated(rhs%facet)) allocate(lhs%facet(1:lhs%facets_number), source=rhs%facet)
    endsubroutine aabb_assign_aabb
 endmodule fossil_aabb_object
