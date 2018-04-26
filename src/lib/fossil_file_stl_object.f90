@@ -31,7 +31,7 @@ type :: file_stl_object
       procedure, pass(self) :: compute_metrix                !< Compute facets metrix.
       procedure, pass(self) :: create_aabb_tree              !< Create the AABB tree.
       procedure, pass(self) :: destroy                       !< Destroy file.
-      procedure, pass(self) :: distance                      !< Compute the (closest) distance from point to triangulated surface.
+      procedure, pass(self) :: distance                      !< Compute the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: initialize                    !< Initialize file.
       procedure, pass(self) :: is_point_inside_polyhedron_ri !< Determinate is a point is inside or not STL facets by ray intersect.
       procedure, pass(self) :: is_point_inside_polyhedron_sa !< Determinate is a point is inside or not STL facets by solid angle.
@@ -63,28 +63,25 @@ contains
    endif
    endsubroutine close_file
 
-   pure subroutine compute_metrix(self, refinement_levels)
+   pure subroutine compute_metrix(self)
    !< Compute facets metrix.
-   class(file_stl_object), intent(inout)        :: self               !< File STL.
-   integer(I4P),           intent(in), optional :: refinement_levels  !< Total number of refinement levels used.
-   integer(I4P)                                 :: refinement_levels_ !< Total number of refinement levels used.
+   class(file_stl_object), intent(inout) :: self !< File STL.
 
    if (self%facets_number>0) then
-      refinement_levels_ = 0 ; if (present(refinement_levels)) refinement_levels_ = refinement_levels
       call self%facet%compute_metrix
-      ! call self%create_aabb_tree(refinement_levels=refinement_levels_)
    endif
    endsubroutine compute_metrix
 
-   ! pure subroutine create_aabb_tree(self, refinement_levels)
    subroutine create_aabb_tree(self, refinement_levels)
    !< Create AABB tree.
    !<
    !< @note Facets metrix must be already computed.
-   class(file_stl_object), intent(inout) :: self              !< File STL.
-   integer(I4P),           intent(in)    :: refinement_levels !< Total number of refinement levels used.
+   class(file_stl_object), intent(inout)        :: self               !< File STL.
+   integer(I4P),           intent(in), optional :: refinement_levels  !< Total number of refinement levels used.
+   integer(I4P)                                 :: refinement_levels_ !< Total number of refinement levels used, local variable.
 
-   call self%aabb%initialize(refinement_levels=refinement_levels, facet=self%facet)
+   refinement_levels_ = 2 ; if (present(refinement_levels)) refinement_levels_ = refinement_levels
+   call self%aabb%initialize(refinement_levels=refinement_levels_, facet=self%facet)
    endsubroutine create_aabb_tree
 
    elemental subroutine destroy(self)
@@ -96,7 +93,7 @@ contains
    endsubroutine destroy
 
    pure function distance(self, point, is_signed, sign_algorithm, is_square_root)
-   !< Compute the (closest) distance from a point to the triangulated surface.
+   !< Compute the (minimum) distance from a point to the triangulated surface.
    !<
    !< @note STL's metrix must be already computed.
    class(file_stl_object), intent(in)           :: self            !< File STL.
@@ -104,21 +101,29 @@ contains
    logical,                intent(in), optional :: is_signed       !< Sentinel to trigger signed distance.
    character(*),           intent(in), optional :: sign_algorithm  !< Algorithm used for "point in polyhedron" test.
    logical,                intent(in), optional :: is_square_root  !< Sentinel to trigger square-root distance.
-   real(R8P)                                    :: distance        !< Closest distance from point to the triangulated surface.
-   real(R8P)                                    :: distance_       !< Closest distance, temporary buffer.
+   real(R8P)                                    :: distance        !< Minimum distance from point to the triangulated surface.
+   real(R8P)                                    :: distance_       !< Minimum distance, temporary buffer.
    character(len=:), allocatable                :: sign_algorithm_ !< Algorithm used for "point in polyhedron" test, local variable.
    integer(I4P)                                 :: f               !< Counter.
 
-   distance = MaxR8P
    if (self%facets_number > 0) then
-      do f=1, self%facets_number
-         distance_ = self%facet(f)%distance(point=point)
-         if (abs(distance_)<=abs(distance)) distance = distance_
-      enddo
+      if (self%aabb%is_initialized) then
+         ! exploit AABB refinement levels
+         distance = self%aabb%distance(point=point)
+      else
+         ! brute search over all facets
+         distance = MaxR8P
+         do f=1, self%facets_number
+            distance_ = self%facet(f)%distance(point=point)
+            if (abs(distance_) <= abs(distance)) distance = distance_
+         enddo
+      endif
    endif
+
    if (present(is_square_root)) then
       if (is_square_root) distance = sqrt(distance)
    endif
+
    if (present(is_signed)) then
       if (is_signed) then
         sign_algorithm_ = 'ray_intersections' ; if (present(sign_algorithm)) sign_algorithm_ = sign_algorithm
@@ -212,15 +217,16 @@ contains
    if (present(is_ascii)) self%is_ascii = is_ascii
    endsubroutine initialize
 
-   subroutine load_from_file(self, file_name, is_ascii)
+   subroutine load_from_file(self, file_name, is_ascii, guess_format)
    !< Load from file.
-   class(file_stl_object), intent(inout)        :: self      !< File STL.
-   character(*),           intent(in), optional :: file_name !< File name.
-   logical,                intent(in), optional :: is_ascii  !< Sentinel to check if file is ASCII.
-   integer(I4P)                                 :: f         !< Counter.
+   class(file_stl_object), intent(inout)        :: self         !< File STL.
+   character(*),           intent(in), optional :: file_name    !< File name.
+   logical,                intent(in), optional :: is_ascii     !< Sentinel to check if file is ASCII.
+   logical,                intent(in), optional :: guess_format !< Sentinel to try to guess format directly from file.
+   integer(I4P)                                 :: f            !< Counter.
 
    call self%initialize(skip_destroy=.true., file_name=file_name, is_ascii=is_ascii)
-   call self%open_file(file_action='read')
+   call self%open_file(file_action='read', guess_format=guess_format)
    call self%load_facets_number_from_file
    call self%allocate_facets
    call self%load_header_from_file
@@ -236,17 +242,31 @@ contains
    call self%close_file
    endsubroutine load_from_file
 
-   subroutine open_file(self, file_action)
+   subroutine open_file(self, file_action, guess_format)
    !< Open file, once initialized.
-   class(file_stl_object), intent(inout) :: self        !< File STL.
-   character(*),           intent(in)    :: file_action !< File action, "read" or "write".
-   logical                               :: file_exist  !< Sentinel to check if file exist.
+   class(file_stl_object), intent(inout)        :: self          !< File STL.
+   character(*),           intent(in)           :: file_action   !< File action, "read" or "write".
+   logical,                intent(in), optional :: guess_format  !< Sentinel to try to guess format directly from file.
+   logical                                      :: guess_format_ !< Sentinel to try to guess format directly from file, local var.
+   logical                                      :: file_exist    !< Sentinel to check if file exist.
+   character(5)                                 :: ascii_header  !< Ascii header sentinel.
 
    if (allocated(self%file_name)) then
       select case(trim(adjustl(file_action)))
       case('read')
+         guess_format_ = .false. ; if (present(guess_format)) guess_format_ = guess_format
          inquire(file=self%file_name, exist=file_exist)
          if (file_exist) then
+            if (guess_format_) then
+               open(newunit=self%file_unit, file=self%file_name, form='formatted')
+               read(self%file_unit, '(A)') ascii_header
+               close(self%file_unit)
+               if (ascii_header=='solid') then
+                  self%is_ascii = .true.
+               else
+                  self%is_ascii = .false.
+               endif
+            endif
             if (self%is_ascii) then
                open(newunit=self%file_unit, file=self%file_name,                  form='formatted')
             else

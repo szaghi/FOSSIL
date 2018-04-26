@@ -17,14 +17,23 @@ public :: aabb_node_object
 
 type :: aabb_node_object
    !< FOSSIL Axis-Aligned Bounding Box (AABB) tree-node class.
+   private
    type(aabb_object), allocatable :: aabb !< AABB data.
    contains
       ! public methods
-      procedure, pass(self) :: closest_point    !< Return closest point on AABB from point reference.
-      procedure, pass(self) :: destroy          !< Destroy AABB.
-      procedure, pass(self) :: distance         !< Return the (square) distance from point to AABB.
-      procedure, pass(self) :: do_ray_intersect !< Return true if AABB is intersected by ray.
-      procedure, pass(self) :: initialize       !< Initialize AABB.
+      procedure, pass(self) :: add_facets                  !< Add facets to AABB.
+      procedure, pass(self) :: bmin                        !< Return AABB bmin.
+      procedure, pass(self) :: bmax                        !< Return AABB bmax.
+      procedure, pass(self) :: closest_point               !< Return closest point on AABB from point reference.
+      procedure, pass(self) :: compute_octants             !< Compute AABB octants.
+      procedure, pass(self) :: destroy                     !< Destroy AABB.
+      procedure, pass(self) :: distance                    !< Return the (square) distance from point to AABB.
+      procedure, pass(self) :: distance_from_facets        !< Return the (square) distance from point to AABB's facets.
+      procedure, pass(self) :: do_ray_intersect            !< Return true if AABB is intersected by ray.
+      procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
+      procedure, pass(self) :: initialize                  !< Initialize AABB.
+      procedure, pass(self) :: is_allocated                !< Return true is node is allocated.
+      procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB geometry into Tecplot ascii file.
       ! operators
       generic :: assignment(=) => aabb_node_assign_aabb_node      !< Overload `=`.
       procedure, pass(lhs), private :: aabb_node_assign_aabb_node !< Operator `=`.
@@ -32,6 +41,32 @@ endtype aabb_node_object
 
 contains
    ! public methods
+   subroutine add_facets(self, facet)
+   !< Add facets to AABB.
+   !<
+   !< @note Facets added to AABB are removed to facets list that is also returned.
+   class(aabb_node_object),         intent(inout) :: self     !< AABB.
+   type(facet_object), allocatable, intent(inout) :: facet(:) !< Facets list.
+
+   if (allocated(self%aabb)) call self%aabb%add_facets(facet=facet)
+   endsubroutine add_facets
+
+   pure function bmin(self)
+   !< Return AABB bmin.
+   class(aabb_node_object), intent(in) :: self !< AABB box.
+   type(vector_R8P)                    :: bmin !< AABB bmin.
+
+   bmin = self%aabb%bmin
+   endfunction bmin
+
+   pure function bmax(self)
+   !< Return AABB bmax.
+   class(aabb_node_object), intent(in) :: self !< AABB box.
+   type(vector_R8P)                    :: bmax !< AABB bmax.
+
+   bmax = self%aabb%bmax
+   endfunction bmax
+
    pure function closest_point(self, point) result(closest)
    !< Return closest point on (or in) AABB from point reference.
    class(aabb_node_object), intent(in) :: self    !< AABB box.
@@ -42,12 +77,25 @@ contains
    if (allocated(self%aabb)) closest = self%aabb%closest_point(point=point)
    endfunction closest_point
 
+   pure subroutine compute_octants(self, octant)
+   !< Return AABB octants.
+   class(aabb_node_object), intent(in)  :: self      !< AABB.
+   type(aabb_object),       intent(out) :: octant(8) !< AABB octants.
+   type(vector_R8P)                     :: vertex(8) !< AABB vertices.
+   integer(I4P)                         :: o         !< Counter.
+
+   call self%aabb%compute_octants(octant=octant)
+   endsubroutine compute_octants
+
    elemental subroutine destroy(self)
    !< Destroy AABB.
    class(aabb_node_object), intent(inout) :: self  !< AABB.
    type(aabb_node_object)                 :: fresh !< Fresh instance of AABB.
 
-   self = fresh
+   if (allocated(self%aabb)) then
+      call self%aabb%destroy
+      deallocate(self%aabb)
+   endif
    endsubroutine destroy
 
    pure function distance(self, point)
@@ -56,9 +104,19 @@ contains
    type(vector_R8P),        intent(in) :: point    !< Point reference.
    real(R8P)                           :: distance !< Distance from point to AABB.
 
-   distance = 0._R8P
+   distance = MaxR8P
    if (allocated(self%aabb)) distance = self%aabb%distance(point=point)
    endfunction distance
+
+   pure function distance_from_facets(self, point) result(distance)
+   !< Return the (square) distance from point to AABB's facets.
+   class(aabb_node_object), intent(in) :: self      !< AABB.
+   type(vector_R8P),        intent(in) :: point     !< Point reference.
+   real(R8P)                           :: distance  !< Distance from point to AABB's facets.
+
+   distance = MaxR8P
+   if (allocated(self%aabb)) distance = self%aabb%distance_from_facets(point=point)
+   endfunction distance_from_facets
 
    pure function do_ray_intersect(self, ray_origin, ray_direction) result(do_intersect)
    !< Return true if AABB is intersected by ray from origin and oriented as ray direction vector.
@@ -70,6 +128,15 @@ contains
    do_intersect = .false.
    if (allocated(self%aabb)) do_intersect = self%aabb%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)
    endfunction do_ray_intersect
+
+   pure function has_facets(self)
+   !< Return true if AABB has facets.
+   class(aabb_node_object), intent(in) :: self       !< AABB box.
+   logical                             :: has_facets !< Check result.
+
+   has_facets = allocated(self%aabb)
+   if (has_facets) has_facets = self%aabb%has_facets()
+   endfunction has_facets
 
    pure subroutine initialize(self, facet, bmin, bmax)
    !< Initialize AABB.
@@ -84,6 +151,23 @@ contains
       call self%aabb%initialize(facet=facet, bmin=bmin, bmax=bmax)
    endif
    endsubroutine initialize
+
+   pure function is_allocated(self)
+   !< Return true if node is allocated.
+   class(aabb_node_object), intent(in) :: self         !< AABB box.
+   logical                             :: is_allocated !< Check result.
+
+   is_allocated = allocated(self%aabb)
+   endfunction is_allocated
+
+   subroutine  save_geometry_tecplot_ascii(self, file_unit, aabb_name)
+   !< Save AABB geometry into Tecplot ascii file.
+   class(aabb_node_object), intent(in)           :: self       !< AABB.
+   integer(I4P),            intent(in)           :: file_unit  !< File unit.
+   character(*),            intent(in), optional :: aabb_name  !< Name of AABB.
+
+   if (allocated(self%aabb)) call self%aabb%save_geometry_tecplot_ascii(file_unit=file_unit, aabb_name=aabb_name)
+   endsubroutine  save_geometry_tecplot_ascii
 
    ! operators
    ! =

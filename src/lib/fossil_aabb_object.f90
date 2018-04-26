@@ -5,7 +5,7 @@ module fossil_aabb_object
 
 use fossil_facet_object, only : facet_object, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
-use penf, only : I4P, R8P, MaxR8P
+use penf, only : FR8P, I4P, R8P, MaxR8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 
 implicit none
@@ -20,13 +20,18 @@ type :: aabb_object
    type(facet_object), allocatable :: facet(:)        !< Facets.
    contains
       ! public methods
-      procedure, pass(self) :: closest_point    !< Return closest point on AABB from point reference.
-      procedure, pass(self) :: compute_octant   !< Compute AABB octants.
-      procedure, pass(self) :: destroy          !< Destroy AABB.
-      procedure, pass(self) :: distance         !< Return the (square) distance from point to AABB.
-      procedure, pass(self) :: do_ray_intersect !< Return true if AABB is intersected by ray.
-      procedure, pass(self) :: initialize       !< Initialize AABB.
-      procedure, pass(self) :: vertex           !< Return AABB vertices.
+      procedure, pass(self) :: add_facets                  !< Add facets to AABB.
+      procedure, pass(self) :: closest_point               !< Return closest point on AABB from point reference.
+      procedure, pass(self) :: compute_octants             !< Compute AABB octants.
+      procedure, pass(self) :: destroy                     !< Destroy AABB.
+      procedure, pass(self) :: distance                    !< Return the (square) distance from point to AABB.
+      procedure, pass(self) :: distance_from_facets        !< Return the (square) distance from point to AABB's facets.
+      procedure, pass(self) :: do_ray_intersect            !< Return true if AABB is intersected by ray.
+      procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
+      procedure, pass(self) :: initialize                  !< Initialize AABB.
+      procedure, pass(self) :: is_inside                   !< Return the true if point is inside ABB.
+      procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB geometry into Tecplot ascii file.
+      procedure, pass(self) :: vertex                      !< Return AABB vertices.
       ! operators
       generic :: assignment(=) => aabb_assign_aabb      !< Overload `=`.
       procedure, pass(lhs), private :: aabb_assign_aabb !< Operator `=`.
@@ -34,6 +39,56 @@ endtype aabb_object
 
 contains
    ! public methods
+   subroutine add_facets(self, facet)
+   !< Add facets to AABB.
+   !<
+   !< @note Previously stored facets are lost.
+   !<
+   !< @note Facets added to AABB are removed to facets list that is also returned.
+   class(aabb_object),              intent(inout) :: self              !< AABB.
+   type(facet_object), allocatable, intent(inout) :: facet(:)          !< Facets list.
+   integer(I4P)                                   :: scratch_unit_add  !< Scratch unit file for added facets.
+   integer(I4P)                                   :: scratch_unit_rem  !< Scratch unit file for remaining facets.
+   integer(I4P)                                   :: rem_facets_number !< Remaining facets number.
+   integer(I4P)                                   :: f                 !< Counter.
+
+   self%facets_number = 0
+   rem_facets_number = 0
+   if (allocated(self%facet)) deallocate(self%facet)
+   open(newunit=scratch_unit_add, status='scratch', access='stream', form='unformatted')
+   open(newunit=scratch_unit_rem, status='scratch', access='stream', form='unformatted')
+   do f=1, size(facet, dim=1)
+      if (self%is_inside(point=facet(f)%vertex_1).and.&
+          self%is_inside(point=facet(f)%vertex_2).and.&
+          self%is_inside(point=facet(f)%vertex_3)) then
+         self%facets_number = self%facets_number + 1
+         call facet(f)%save_into_file_binary(file_unit=scratch_unit_add)
+      else
+         rem_facets_number = rem_facets_number + 1
+         call facet(f)%save_into_file_binary(file_unit=scratch_unit_rem)
+      endif
+   enddo
+   if (self%facets_number > 0) then
+      allocate(self%facet(1:self%facets_number))
+      rewind(unit=scratch_unit_add)
+      do f=1, self%facets_number
+         call self%facet(f)%load_from_file_binary(file_unit=scratch_unit_add)
+         call self%facet(f)%compute_metrix
+      enddo
+   endif
+   close(unit=scratch_unit_add)
+   deallocate(facet)
+   if (rem_facets_number > 0) then
+      allocate(facet(1:rem_facets_number))
+      rewind(unit=scratch_unit_rem)
+      do f=1, rem_facets_number
+         call facet(f)%load_from_file_binary(file_unit=scratch_unit_rem)
+         call facet(f)%compute_metrix
+      enddo
+   endif
+   close(unit=scratch_unit_rem)
+   endsubroutine add_facets
+
    pure function closest_point(self, point) result(closest)
    !< Return closest point on (or in) AABB from point reference.
    class(aabb_object), intent(in) :: self    !< AABB.
@@ -46,7 +101,7 @@ contains
    closest%z = max(closest%z, self%bmin%z) ; closest%z = min(closest%z, self%bmax%z)
    endfunction closest_point
 
-   pure subroutine compute_octant(self, octant)
+   pure subroutine compute_octants(self, octant)
    !< Return AABB octants.
    class(aabb_object), intent(in)  :: self      !< AABB.
    type(aabb_object),  intent(out) :: octant(8) !< AABB octants.
@@ -59,7 +114,7 @@ contains
    do o=2, 7 ! loop over remaining octants
       octant(o)%bmin = 0.5_R8P * (self%bmin + vertex(o)) ; octant(o)%bmax = 0.5_R8P * (vertex(o) + self%bmax)
    enddo
-   endsubroutine compute_octant
+   endsubroutine compute_octants
 
    elemental subroutine destroy(self)
    !< Destroy AABB.
@@ -75,7 +130,7 @@ contains
    type(vector_R8P),   intent(in) :: point    !< Point reference.
    real(R8P)                      :: distance !< Distance from point to AABB.
 
-   distance = 0._R8P
+   distance = MaxR8P
    if (point%x < self%bmin%x) distance = distance + (self%bmin%x - point%x) * (self%bmin%x - point%x)
    if (point%y < self%bmin%y) distance = distance + (self%bmin%y - point%y) * (self%bmin%y - point%y)
    if (point%z < self%bmin%z) distance = distance + (self%bmin%z - point%z) * (self%bmin%z - point%z)
@@ -83,6 +138,23 @@ contains
    if (point%y > self%bmax%y) distance = distance + (point%y - self%bmax%y) * (point%y - self%bmax%y)
    if (point%z > self%bmax%z) distance = distance + (point%z - self%bmax%z) * (point%z - self%bmax%z)
    endfunction distance
+
+   pure function distance_from_facets(self, point) result(distance)
+   !< Return the (square) distance from point to AABB's facets.
+   class(aabb_object), intent(in) :: self      !< AABB.
+   type(vector_R8P),   intent(in) :: point     !< Point reference.
+   real(R8P)                      :: distance  !< Distance from point to AABB's facets.
+   real(R8P)                      :: distance_ !< Distance from point to AABB's facets, local variable.
+   integer(I4P)                   :: f         !< Counter.
+
+   distance = MaxR8P
+   if (allocated(self%facet)) then
+      do f=1, self%facets_number
+         distance_ = self%facet(f)%distance(point=point)
+         if (abs(distance_) <= abs(distance)) distance = distance_
+      enddo
+   endif
+   endfunction distance_from_facets
 
    pure function do_ray_intersect(self, ray_origin, ray_direction) result(do_intersect)
    !< Return true if AABB is intersected by ray from origin and oriented as ray direction vector.
@@ -150,26 +222,66 @@ contains
       endsubroutine check_slab
    endfunction do_ray_intersect
 
+   pure function has_facets(self)
+   !< Return true if AABB has facets.
+   class(aabb_object), intent(in) :: self       !< AABB box.
+   logical                        :: has_facets !< Check result.
+
+   has_facets = self%facets_number > 0
+   endfunction has_facets
+
    pure subroutine initialize(self, facet, bmin, bmax)
    !< Initialize AABB.
    class(aabb_object), intent(inout)        :: self     !< AABB.
    type(facet_object), intent(in), optional :: facet(:) !< Facets list.
    type(vector_R8P),   intent(in), optional :: bmin     !< Minimum point of AABB.
    type(vector_R8P),   intent(in), optional :: bmax     !< Maximum point of AABB.
+   real(R8P)                                :: eps(3)   !< Small epsilon.
 
    call self%destroy
    if (present(facet)) then
-      self%bmin%x = minval(facet(:)%bb(1)%x)
-      self%bmin%y = minval(facet(:)%bb(1)%y)
-      self%bmin%z = minval(facet(:)%bb(1)%z)
-      self%bmax%x = maxval(facet(:)%bb(2)%x)
-      self%bmax%y = maxval(facet(:)%bb(2)%y)
-      self%bmax%z = maxval(facet(:)%bb(2)%z)
+      eps(1) = (maxval(facet(:)%bb(2)%x) - minval(facet(:)%bb(1)%x)) / 50._R8P
+      eps(2) = (maxval(facet(:)%bb(2)%y) - minval(facet(:)%bb(1)%y)) / 50._R8P
+      eps(3) = (maxval(facet(:)%bb(2)%z) - minval(facet(:)%bb(1)%z)) / 50._R8P
+      self%bmin%x = minval(facet(:)%bb(1)%x) - eps(1)
+      self%bmin%y = minval(facet(:)%bb(1)%y) - eps(2)
+      self%bmin%z = minval(facet(:)%bb(1)%z) - eps(3)
+      self%bmax%x = maxval(facet(:)%bb(2)%x) + eps(1)
+      self%bmax%y = maxval(facet(:)%bb(2)%y) + eps(2)
+      self%bmax%z = maxval(facet(:)%bb(2)%z) + eps(3)
    elseif (present(bmin).and.present(bmax)) then
       self%bmin = bmin
       self%bmax = bmax
    endif
    endsubroutine initialize
+
+   pure function is_inside(self, point)
+   !< Return the true if point is inside ABB.
+   class(aabb_object), intent(in) :: self      !< AABB.
+   type(vector_R8P),   intent(in) :: point     !< Point reference.
+   logical                        :: is_inside !< Check result.
+
+   is_inside = ((point%x >= self%bmin%x.and.point%x <= self%bmax%x).and.&
+                (point%y >= self%bmin%y.and.point%y <= self%bmax%y).and.&
+                (point%z >= self%bmin%z.and.point%z <= self%bmax%z))
+   endfunction is_inside
+
+   subroutine  save_geometry_tecplot_ascii(self, file_unit, aabb_name)
+   !< Save AABB geometry into Tecplot ascii file.
+   class(aabb_object), intent(in)           :: self       !< AABB.
+   integer(I4P),       intent(in)           :: file_unit  !< File unit.
+   character(*),       intent(in), optional :: aabb_name  !< Name of AABB.
+   character(len=:), allocatable            :: aabb_name_ !< Name of AABB, local variable.
+   type(vector_R8P)                         :: vertex(8)  !< AABB vertices.
+   integer(I4P)                             :: v          !< Counter.
+
+   aabb_name_ = 'AABB' ; if (present(aabb_name)) aabb_name_ = aabb_name
+   write(file_unit, '(A)') 'ZONE T="'//aabb_name//'", I=2, J=2, K=2'
+   vertex = self%vertex()
+   do v=1, 8
+      write(file_unit, '(3('//FR8P//',1X))') vertex(v)%x, vertex(v)%y, vertex(v)%z
+   enddo
+   endsubroutine  save_geometry_tecplot_ascii
 
    pure function vertex(self)
    !< Return AABB vertices.

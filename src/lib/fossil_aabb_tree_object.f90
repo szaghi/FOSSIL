@@ -11,7 +11,7 @@ use fossil_aabb_object, only : aabb_object
 use fossil_aabb_node_object, only : aabb_node_object
 use fossil_facet_object, only : facet_object, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
-use penf, only : I4P, R8P, MaxR8P
+use penf, only : I4P, R8P, MaxR8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 
 implicit none
@@ -24,14 +24,16 @@ type :: aabb_tree_object
    !< FOSSIL Axis-Aligned Bounding Box (AABB) tree class.
    !<
    !< @note The tree is assumed to be an **octree**.
-   integer(I4P)                        :: refinement_levels=0 !< Total number of refinement levels used.
-   integer(I4P)                        :: nodes_number=0      !< Total number of tree nodes.
-   type(aabb_node_object), allocatable :: node(:)             !< AABB tree nodes [0:nodes_number-1].
-
+   integer(I4P)                        :: refinement_levels=0    !< Total number of refinement levels used.
+   integer(I4P)                        :: nodes_number=0         !< Total number of tree nodes.
+   type(aabb_node_object), allocatable :: node(:)                !< AABB tree nodes [0:nodes_number-1].
+   logical                             :: is_initialized=.false. !< Sentinel to check is AABB tree is initialized.
    contains
       ! public methods
-      procedure, pass(self) :: destroy                       !< Destroy AABB tree.
-      procedure, pass(self) :: initialize                    !< Initialize AABB tree.
+      procedure, pass(self) :: destroy                     !< Destroy AABB tree.
+      procedure, pass(self) :: distance                    !< Compute the (minimum) distance from point to triangulated surface.
+      procedure, pass(self) :: initialize                  !< Initialize AABB tree.
+      procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB tree boxes geometry into Tecplot ascii file.
       ! operators
       generic :: assignment(=) => aabb_tree_assign_aabb_tree      !< Overload `=`.
       procedure, pass(lhs), private :: aabb_tree_assign_aabb_tree !< Operator `=`.
@@ -47,18 +49,56 @@ contains
    self = fresh
    endsubroutine destroy
 
-   ! pure subroutine initialize(self, refinement_levels, facet, bmin, bmax)
+   pure function distance(self, point)
+   !< Compute the (minimum) distance from a point to the triangulated surface.
+   class(aabb_tree_object), intent(in) :: self             !< AABB tree.
+   type(vector_R8P),        intent(in) :: point            !< Point coordinates.
+   real(R8P)                           :: distance         !< Minimum distance from point to the triangulated surface.
+   ! real(R8P)                           :: distance_        !< Minimum distance, temporary buffer.
+   ! integer(I4P)                        :: level            !< Counter.
+   ! integer(I4P)                        :: b, bb, bbb, bbbb !< Counter.
+   ! integer(I4P)                        :: bbb_closest      !< Counter.
+   ! integer(I4P)                        :: f                !< Counter.
+
+   ! associate(node=>self%node)
+   !    distance = MaxR8P
+   !    level = -1
+   !    do                                                         ! loop over refinement levels
+   !       level = level + 1
+   !       if (level > self%refinement_levels) exit
+   !       bbb_closest = -1
+   !       b = first_node(level=level)                             ! first node at level
+   !       do bb=1, nodes_number_at_level(level=level), TREE_RATIO ! loop over nodes at level
+   !          bbb = b + bb - 1                                     ! node numeration in tree
+   !          distance_ = node(bbb)%distance(point=point)          ! node distance
+   !          if (abs(distance_) <= abs(distance)) then
+   !             distance = distance_                              ! update minimum distance
+   !             bbb_closest = bbb                                 ! store closeste node
+   !          endif
+   !       enddo
+   !       if (bbb_closest >=0) then
+   !          bbbb = first_child_node(node=bbb)
+   !       endif
+
+   !          do bbbb=0, TREE_RATIO-1                                                               ! loop over children
+   !             call node(bbb+bbbb)%initialize(bmin=octant(bbbb+1)%bmin, bmax=octant(bbbb+1)%bmax) ! initialize node
+   !          enddo
+   !    enddo
+   ! endassociate
+   endfunction distance
+
    subroutine initialize(self, refinement_levels, facet, bmin, bmax)
    !< Initialize AABB tree.
-   class(aabb_tree_object), intent(inout)        :: self              !< AABB box.
+   class(aabb_tree_object), intent(inout)        :: self              !< AABB tree.
    integer(I4P),            intent(in)           :: refinement_levels !< Total number of refinement levels used.
    type(facet_object),      intent(in), optional :: facet(:)          !< Facets list.
    type(vector_R8P),        intent(in), optional :: bmin              !< Minimum point of AABB.
    type(vector_R8P),        intent(in), optional :: bmax              !< Maximum point of AABB.
    integer(I4P)                                  :: level             !< Counter.
    integer(I4P)                                  :: b, bb, bbb, bbbb  !< Counter.
-   type(aabb_node_object)                        :: parent            !< Parent node.
+   integer(I4P)                                  :: parent            !< Parent node index.
    type(aabb_object)                             :: octant(8)         !< AABB octants.
+   type(facet_object), allocatable               :: facet_(:)         !< Facets list, local variable.
 
    call self%destroy
    self%refinement_levels = refinement_levels
@@ -71,9 +111,9 @@ contains
          b = first_node(level=level)                                                                 ! first node at level
          do bb=1, nodes_number_at_level(level=level), TREE_RATIO                                     ! loop over nodes at level
             bbb = b + bb - 1                                                                         ! node numeration in tree
-            parent = node(parent_node(node=bbb))                                                     ! parent of the current node
-            if (allocated(parent%aabb)) then                                                         ! create children nodes
-               call parent%aabb%compute_octant(octant)                                               ! compute parent AABB octants
+            parent = parent_node(node=bbb)                                                           ! parent of the current node
+            if (node(parent)%is_allocated()) then                                                    ! create children nodes
+               call node(parent)%compute_octants(octant=octant)                                      ! compute parent AABB octants
                do bbbb=0, TREE_RATIO-1                                                               ! loop over children
                   call node(bbb+bbbb)%initialize(bmin=octant(bbbb+1)%bmin, bmax=octant(bbbb+1)%bmax) ! initialize node
                enddo
@@ -81,8 +121,50 @@ contains
          enddo
       enddo
       ! fill all tree nodes with facets
+      if (present(facet)) then
+         allocate(facet_, source=facet)
+         do level=self%refinement_levels, 1, -1         ! loop over refinement levels
+            b = first_node(level=level)                 ! first node at level
+            do bb=1, nodes_number_at_level(level=level) ! loop over nodes at level
+               bbb = b + bb - 1                         ! node numeration in tree
+               call node(bbb)%add_facets(facet=facet_)  ! add facets to node
+            enddo
+         enddo
+         ! destroy void nodes
+         do level=self%refinement_levels, 1, -1                        ! loop over refinement levels
+            b = first_node(level=level)                                ! first node at level
+            do bb=1, nodes_number_at_level(level=level)                ! loop over nodes at level
+               bbb = b + bb - 1                                        ! node numeration in tree
+               if (.not.node(bbb)%has_facets()) call node(bbb)%destroy ! destroy void node
+            enddo
+         enddo
+      endif
    endassociate
+   self%is_initialized = .true.
    endsubroutine initialize
+
+   subroutine save_geometry_tecplot_ascii(self, file_name)
+   !< Save AABB tree boxes geometry into Tecplot ascii file.
+   class(aabb_tree_object), intent(in) :: self       !< AABB tree.
+   character(*),            intent(in) :: file_name  !< File name.
+   integer(I4P)                        :: file_unit  !< File unit.
+   integer(I4P)                        :: level      !< Counter.
+   integer(I4P)                        :: b, bb, bbb !< Counter.
+
+   associate(node=>self%node)
+      open(newunit=file_unit, file=trim(adjustl(file_name)))
+      write(file_unit, '(A)') 'VARIABLES=x y z'
+      do level=0, self%refinement_levels
+         b = first_node(level=level)
+         do bb=1, nodes_number_at_level(level=level)
+            bbb = b + bb - 1
+            call node(bbb)%save_geometry_tecplot_ascii(file_unit=file_unit, aabb_name='aabb-l_'//trim(str(level, .true.))//&
+                                                                                          '-b_'//trim(str(bbb, .true.)))
+         enddo
+      enddo
+      close(file_unit)
+   endassociate
+   endsubroutine  save_geometry_tecplot_ascii
 
    ! operators
    ! =
@@ -106,6 +188,7 @@ contains
          lhs%node(b) = rhs%node(b)
       enddo
    endif
+   lhs%is_initialized = rhs%is_initialized
    endsubroutine aabb_tree_assign_aabb_tree
 
    ! non TBP
