@@ -4,7 +4,7 @@ program fossil_test_distance
 !< FOSSIL, test distance computation.
 
 use fossil, only : file_stl_object
-use penf, only : I4P, R8P, str
+use penf, only : I4P, I8P, R8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 
 implicit none
@@ -16,17 +16,18 @@ integer(I4P)                  :: ni, nj, nk          !< Grid dimensions.
 integer(I4P)                  :: i, j, k             !< Counter.
 real(R8P)                     :: Dx, Dy, Dz          !< Space steps.
 integer(I4P)                  :: file_unit           !< File unit.
+integer(I8P)                  :: timing(4)           !< Tic toc timing.
 logical                       :: are_tests_passed(1) !< Result of tests check.
 
 are_tests_passed = .false.
 
+! call file_stl%initialize(file_name='src/tests/dragon.stl')
 call file_stl%initialize(file_name='src/tests/naca0012-binary.stl')
-call file_stl%initialize(file_name='src/tests/dragon.stl')
 call file_stl%load_from_file(guess_format=.true.)
 call file_stl%compute_metrix
-call file_stl%create_aabb_tree(refinement_levels=2)
-call file_stl%aabb%save_geometry_tecplot_ascii(file_name='fossil_test_distance_aabb_tree.dat')
-stop
+call file_stl%create_aabb_tree(refinement_levels=4)
+! call file_stl%aabb%save_geometry_tecplot_ascii(file_name='fossil_test_distance_aabb_tree.dat')
+! call file_stl%aabb%save_into_file_stl(base_file_name='fossil_test_distance_', is_ascii=.true.)
 
 associate(bmin=>file_stl%aabb%node(0)%bmin(), bmax=>file_stl%aabb%node(0)%bmax())
    ni = 64
@@ -49,7 +50,35 @@ associate(bmin=>file_stl%aabb%node(0)%bmin(), bmax=>file_stl%aabb%node(0)%bmax()
    enddo
 endassociate
 
-print*, 'compute distances'
+! file_stl%aabb%is_initialized = .false.
+! print*, 'compute distances brute force'
+! call system_clock(timing(1))
+! do k=-4, nk + 5
+!    do j=-4, nj + 5
+!       do i=-4, ni + 5
+!          distance(i, j, k) = file_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm='ray_intersections')
+!       enddo
+!    enddo
+! enddo
+! call system_clock(timing(2))
+! print*, 'brute force timing: ', timing(2) - timing(1)
+
+! print*, 'save output'
+! open(newunit=file_unit, file='fossil_test_distance-brute.dat')
+! write(file_unit, '(A)')'VARIABLES = x y z distance'
+! write(file_unit, '(A)')'ZONE T="distance", I='//trim(str(ni+10))//', J='//trim(str(nj+10))//', K='//trim(str(nk+10))//''
+! do k=-4, nk + 5
+!    do j=-4, nj + 5
+!       do i=-4, ni + 5
+!          write(file_unit, '(A)') str(grid(i,j,k)%x)//' '//str(grid(i,j,k)%y)//' '//str(grid(i,j,k)%z)//' '//str(distance(i,j,k))
+!       enddo
+!    enddo
+! enddo
+! close(file_unit)
+
+file_stl%aabb%is_initialized = .true.
+print*, 'compute distances AABB'
+call system_clock(timing(3))
 do k=-4, nk + 5
    do j=-4, nj + 5
       do i=-4, ni + 5
@@ -57,9 +86,11 @@ do k=-4, nk + 5
       enddo
    enddo
 enddo
+call system_clock(timing(4))
+print*, 'brute force timing: ', timing(4) - timing(3)
 
 print*, 'save output'
-open(newunit=file_unit, file='fossil_test_distance.dat')
+open(newunit=file_unit, file='fossil_test_distance-aabb.dat')
 write(file_unit, '(A)')'VARIABLES = x y z distance'
 write(file_unit, '(A)')'ZONE T="distance", I='//trim(str(ni+10))//', J='//trim(str(nj+10))//', K='//trim(str(nk+10))//''
 do k=-4, nk + 5

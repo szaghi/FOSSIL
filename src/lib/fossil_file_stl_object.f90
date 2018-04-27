@@ -47,6 +47,7 @@ type :: file_stl_object
       procedure, pass(self), private :: load_facets_number_from_file !< Load facets number from file.
       procedure, pass(self), private :: load_header_from_file        !< Load header from file.
       procedure, pass(self), private :: save_header_into_file        !< Save header into file.
+      procedure, pass(self), private :: save_trailer_into_file       !< Save trailer into file.
 endtype file_stl_object
 
 contains
@@ -92,7 +93,7 @@ contains
    self = fresh
    endsubroutine destroy
 
-   pure function distance(self, point, is_signed, sign_algorithm, is_square_root)
+   pure function distance(self, point, is_signed, sign_algorithm, is_square_root, aabb_cloud)
    !< Compute the (minimum) distance from a point to the triangulated surface.
    !<
    !< @note STL's metrix must be already computed.
@@ -101,6 +102,7 @@ contains
    logical,                intent(in), optional :: is_signed       !< Sentinel to trigger signed distance.
    character(*),           intent(in), optional :: sign_algorithm  !< Algorithm used for "point in polyhedron" test.
    logical,                intent(in), optional :: is_square_root  !< Sentinel to trigger square-root distance.
+   integer(I4P),           intent(in), optional :: aabb_cloud      !< Number of AABBs making "cloud" research.
    real(R8P)                                    :: distance        !< Minimum distance from point to the triangulated surface.
    real(R8P)                                    :: distance_       !< Minimum distance, temporary buffer.
    character(len=:), allocatable                :: sign_algorithm_ !< Algorithm used for "point in polyhedron" test, local variable.
@@ -109,9 +111,9 @@ contains
    if (self%facets_number > 0) then
       if (self%aabb%is_initialized) then
          ! exploit AABB refinement levels
-         distance = self%aabb%distance(point=point)
+         distance = self%aabb%distance(point=point, aabb_cloud=aabb_cloud)
       else
-         ! brute search over all facets
+         ! brute-force search over all facets
          distance = MaxR8P
          do f=1, self%facets_number
             distance_ = self%facet(f)%distance(point=point)
@@ -317,6 +319,7 @@ contains
          call self%facet(f)%save_into_file_binary(file_unit=self%file_unit)
       enddo
    endif
+   call self%save_trailer_into_file
    call self%close_file
    endsubroutine save_into_file
 

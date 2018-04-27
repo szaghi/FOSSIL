@@ -31,6 +31,8 @@ type :: aabb_object
       procedure, pass(self) :: initialize                  !< Initialize AABB.
       procedure, pass(self) :: is_inside                   !< Return the true if point is inside ABB.
       procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB geometry into Tecplot ascii file.
+      procedure, pass(self) :: save_facets_into_file_stl   !< Save facets into file STL.
+      procedure, pass(self) :: update_extents              !< Update AABB bounding box extents.
       procedure, pass(self) :: vertex                      !< Return AABB vertices.
       ! operators
       generic :: assignment(=) => aabb_assign_aabb      !< Overload `=`.
@@ -129,14 +131,12 @@ contains
    class(aabb_object), intent(in) :: self     !< AABB.
    type(vector_R8P),   intent(in) :: point    !< Point reference.
    real(R8P)                      :: distance !< Distance from point to AABB.
+   real(R8P)                      :: dx, dy, dz !< Distance components.
 
-   distance = MaxR8P
-   if (point%x < self%bmin%x) distance = distance + (self%bmin%x - point%x) * (self%bmin%x - point%x)
-   if (point%y < self%bmin%y) distance = distance + (self%bmin%y - point%y) * (self%bmin%y - point%y)
-   if (point%z < self%bmin%z) distance = distance + (self%bmin%z - point%z) * (self%bmin%z - point%z)
-   if (point%x > self%bmax%x) distance = distance + (point%x - self%bmax%x) * (point%x - self%bmax%x)
-   if (point%y > self%bmax%y) distance = distance + (point%y - self%bmax%y) * (point%y - self%bmax%y)
-   if (point%z > self%bmax%z) distance = distance + (point%z - self%bmax%z) * (point%z - self%bmax%z)
+   dx = max(self%bmin%x - point%x, 0._R8P, point%x - self%bmax%x)
+   dy = max(self%bmin%y - point%y, 0._R8P, point%y - self%bmax%y)
+   dz = max(self%bmin%z - point%z, 0._R8P, point%z - self%bmax%z)
+   distance = dx * dx + dy * dy + dz * dz
    endfunction distance
 
    pure function distance_from_facets(self, point) result(distance)
@@ -236,19 +236,10 @@ contains
    type(facet_object), intent(in), optional :: facet(:) !< Facets list.
    type(vector_R8P),   intent(in), optional :: bmin     !< Minimum point of AABB.
    type(vector_R8P),   intent(in), optional :: bmax     !< Maximum point of AABB.
-   real(R8P)                                :: eps(3)   !< Small epsilon.
 
    call self%destroy
    if (present(facet)) then
-      eps(1) = (maxval(facet(:)%bb(2)%x) - minval(facet(:)%bb(1)%x)) / 50._R8P
-      eps(2) = (maxval(facet(:)%bb(2)%y) - minval(facet(:)%bb(1)%y)) / 50._R8P
-      eps(3) = (maxval(facet(:)%bb(2)%z) - minval(facet(:)%bb(1)%z)) / 50._R8P
-      self%bmin%x = minval(facet(:)%bb(1)%x) - eps(1)
-      self%bmin%y = minval(facet(:)%bb(1)%y) - eps(2)
-      self%bmin%z = minval(facet(:)%bb(1)%z) - eps(3)
-      self%bmax%x = maxval(facet(:)%bb(2)%x) + eps(1)
-      self%bmax%y = maxval(facet(:)%bb(2)%y) + eps(2)
-      self%bmax%z = maxval(facet(:)%bb(2)%z) + eps(3)
+      call compute_bb_from_facets(facet=facet, bmin=self%bmin, bmax=self%bmax)
    elseif (present(bmin).and.present(bmax)) then
       self%bmin = bmin
       self%bmax = bmax
@@ -283,6 +274,56 @@ contains
    enddo
    endsubroutine  save_geometry_tecplot_ascii
 
+   subroutine save_facets_into_file_stl(self, file_name, is_ascii)
+   !< Save facets into file STL.
+   class(aabb_object), intent(in) :: self      !< AABB.
+   character(*),       intent(in) :: file_name !< File name.
+   logical,            intent(in) :: is_ascii  !< Sentinel to check if file is ASCII.
+   integer(I4P)                   :: file_unit !< File unit.
+   integer(I4P)                   :: f         !< Counter.
+
+   if (self%facets_number > 0) then
+      call open_file
+      if (is_ascii) then
+         do f=1, self%facets_number
+            call self%facet(f)%save_into_file_ascii(file_unit=file_unit)
+         enddo
+      else
+         do f=1, self%facets_number
+            call self%facet(f)%save_into_file_binary(file_unit=file_unit)
+         enddo
+      endif
+      call close_file
+   endif
+   contains
+      subroutine open_file()
+      !< Open STL file.
+
+      if (is_ascii) then
+         open(newunit=file_unit, file=trim(adjustl(file_name)),                  form='formatted')
+         write(file_unit, '(A)') 'solid '//trim(adjustl(file_name))
+      else
+         open(newunit=file_unit, file=trim(adjustl(file_name)), access='stream', form='unformatted')
+         write(file_unit) repeat('a', 80)
+         write(file_unit) self%facets_number
+      endif
+      endsubroutine open_file
+
+      subroutine close_file()
+      !< Close STL file.
+
+      if (is_ascii) write(file_unit, '(A)') 'endsolid '//trim(adjustl(file_name))
+      close(unit=file_unit)
+      endsubroutine close_file
+   endsubroutine save_facets_into_file_stl
+
+   pure subroutine update_extents(self)
+   !< Update AABB bounding box extents.
+   class(aabb_object), intent(inout) :: self !< AABB.
+
+   if (self%facets_number > 0) call compute_bb_from_facets(facet=self%facet, bmin=self%bmin, bmax=self%bmax)
+   endsubroutine update_extents
+
    pure function vertex(self)
    !< Return AABB vertices.
    class(aabb_object), intent(in) :: self      !< AABB.
@@ -311,4 +352,25 @@ contains
    if (allocated(lhs%facet)) deallocate(lhs%facet)
    if (allocated(rhs%facet)) allocate(lhs%facet(1:lhs%facets_number), source=rhs%facet)
    endsubroutine aabb_assign_aabb
+
+   ! non TBP
+   pure subroutine compute_bb_from_facets(facet, bmin, bmax)
+   !< Compute AABB extents (minimum and maximum bounding box) from facets list.
+   !<
+   !< @note Facets' metrix must be already computed.
+   type(facet_object), intent(in)    :: facet(:) !< Facets list.
+   type(vector_R8P),   intent(inout) :: bmin     !< Minimum point of AABB.
+   type(vector_R8P),   intent(inout) :: bmax     !< Maximum point of AABB.
+   real(R8P)                         :: eps(3) !< Small epsilon.
+
+   eps(1) = (maxval(facet(:)%bb(2)%x) - minval(facet(:)%bb(1)%x)) / 100._R8P
+   eps(2) = (maxval(facet(:)%bb(2)%y) - minval(facet(:)%bb(1)%y)) / 100._R8P
+   eps(3) = (maxval(facet(:)%bb(2)%z) - minval(facet(:)%bb(1)%z)) / 100._R8P
+   bmin%x = minval(facet(:)%bb(1)%x) - eps(1)
+   bmin%y = minval(facet(:)%bb(1)%y) - eps(2)
+   bmin%z = minval(facet(:)%bb(1)%z) - eps(3)
+   bmax%x = maxval(facet(:)%bb(2)%x) + eps(1)
+   bmax%y = maxval(facet(:)%bb(2)%y) + eps(2)
+   bmax%z = maxval(facet(:)%bb(2)%z) + eps(3)
+   endsubroutine compute_bb_from_facets
 endmodule fossil_aabb_object

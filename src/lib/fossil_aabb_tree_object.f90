@@ -34,6 +34,7 @@ type :: aabb_tree_object
       procedure, pass(self) :: distance                    !< Compute the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: initialize                  !< Initialize AABB tree.
       procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB tree boxes geometry into Tecplot ascii file.
+      procedure, pass(self) :: save_into_file_stl          !< Save  AABB tree boxes facets into files STL.
       ! operators
       generic :: assignment(=) => aabb_tree_assign_aabb_tree      !< Overload `=`.
       procedure, pass(lhs), private :: aabb_tree_assign_aabb_tree !< Operator `=`.
@@ -49,42 +50,49 @@ contains
    self = fresh
    endsubroutine destroy
 
-   pure function distance(self, point)
+   pure function distance(self, point, aabb_cloud)
    !< Compute the (minimum) distance from a point to the triangulated surface.
-   class(aabb_tree_object), intent(in) :: self             !< AABB tree.
-   type(vector_R8P),        intent(in) :: point            !< Point coordinates.
-   real(R8P)                           :: distance         !< Minimum distance from point to the triangulated surface.
-   ! real(R8P)                           :: distance_        !< Minimum distance, temporary buffer.
-   ! integer(I4P)                        :: level            !< Counter.
-   ! integer(I4P)                        :: b, bb, bbb, bbbb !< Counter.
-   ! integer(I4P)                        :: bbb_closest      !< Counter.
-   ! integer(I4P)                        :: f                !< Counter.
+   class(aabb_tree_object), intent(in)           :: self              !< AABB tree.
+   type(vector_R8P),        intent(in)           :: point             !< Point coordinates.
+   integer(I4P),            intent(in), optional :: aabb_cloud        !< Number of AABBs making "cloud" research.
+   integer(I4P)                                  :: aabb_cloud_       !< Number of AABBs making "cloud" research, local variable.
+   real(R8P)                                     :: distance          !< Minimum distance from point to the triangulated surface.
+   real(R8P), allocatable                        :: distance_(:,:)    !< Minimum distance, temporary buffer.
+   integer(I4P), allocatable                     :: aabb_closest(:,:) !< Index of closest AABB.
+   integer(I4P)                                  :: level             !< Counter.
+   integer(I4P)                                  :: cloud_maxloc      !< Counter.
+   integer(I4P)                                  :: b, bb, bbb        !< Counter.
+   integer(I4P)                                  :: d                 !< Counter.
 
-   ! associate(node=>self%node)
-   !    distance = MaxR8P
-   !    level = -1
-   !    do                                                         ! loop over refinement levels
-   !       level = level + 1
-   !       if (level > self%refinement_levels) exit
-   !       bbb_closest = -1
-   !       b = first_node(level=level)                             ! first node at level
-   !       do bb=1, nodes_number_at_level(level=level), TREE_RATIO ! loop over nodes at level
-   !          bbb = b + bb - 1                                     ! node numeration in tree
-   !          distance_ = node(bbb)%distance(point=point)          ! node distance
-   !          if (abs(distance_) <= abs(distance)) then
-   !             distance = distance_                              ! update minimum distance
-   !             bbb_closest = bbb                                 ! store closeste node
-   !          endif
-   !       enddo
-   !       if (bbb_closest >=0) then
-   !          bbbb = first_child_node(node=bbb)
-   !       endif
-
-   !          do bbbb=0, TREE_RATIO-1                                                               ! loop over children
-   !             call node(bbb+bbbb)%initialize(bmin=octant(bbbb+1)%bmin, bmax=octant(bbbb+1)%bmax) ! initialize node
-   !          enddo
-   !    enddo
-   ! endassociate
+   associate(node=>self%node)
+      aabb_cloud_ = 1 ; if (present(aabb_cloud)) aabb_cloud_ = aabb_cloud
+      allocate(distance_(0:self%refinement_levels, 1:aabb_cloud_))
+      allocate(aabb_closest(0:self%refinement_levels, 1:aabb_cloud_))
+      distance_ = MaxR8P
+      aabb_closest = -1
+      do level=0, self%refinement_levels                    ! loop over refinement levels
+         b = first_node(level=level)                        ! first node at finest level
+         do bb=1, nodes_number_at_level(level=level)        ! loop over nodes at level
+            bbb = b + bb - 1                                ! node numeration in tree
+            if (node(bbb)%is_allocated()) then
+               distance = node(bbb)%distance(point=point)   ! node distance
+               cloud_maxloc = maxloc(distance_(level,:), dim=1)
+               if (distance <= distance_(level, cloud_maxloc)) then
+                  distance_(level, cloud_maxloc) = distance ! update minimum distance
+                  aabb_closest(level, cloud_maxloc) = bbb   ! store closest node
+               endif
+            endif
+         enddo
+      enddo
+      distance = MaxR8P
+      do level=0, self%refinement_levels
+         do d=1, aabb_cloud_
+            if (aabb_closest(level, d) >= 0) then
+               distance = min(distance, node(aabb_closest(level, d))%distance_from_facets(point=point))
+            endif
+         enddo
+      enddo
+   endassociate
    endfunction distance
 
    subroutine initialize(self, refinement_levels, facet, bmin, bmax)
@@ -120,17 +128,23 @@ contains
             endif
          enddo
       enddo
+
       ! fill all tree nodes with facets
       if (present(facet)) then
          allocate(facet_, source=facet)
-         do level=self%refinement_levels, 1, -1         ! loop over refinement levels
-            b = first_node(level=level)                 ! first node at level
-            do bb=1, nodes_number_at_level(level=level) ! loop over nodes at level
-               bbb = b + bb - 1                         ! node numeration in tree
-               call node(bbb)%add_facets(facet=facet_)  ! add facets to node
+
+         ! add facets to nodes
+         do level=self%refinement_levels, 0, -1           ! loop over refinement levels
+            b = first_node(level=level)                   ! first node at level
+            do bb=1, nodes_number_at_level(level=level)   ! loop over nodes at level
+               bbb = b + bb - 1                           ! node numeration in tree
+               if (allocated(facet_)) then                ! check if facets list still has facets
+                  call node(bbb)%add_facets(facet=facet_) ! add facets to node and prune added facets from list
+               endif
             enddo
          enddo
-         ! destroy void nodes
+
+         ! destroy void nodes (except root node)
          do level=self%refinement_levels, 1, -1                        ! loop over refinement levels
             b = first_node(level=level)                                ! first node at level
             do bb=1, nodes_number_at_level(level=level)                ! loop over nodes at level
@@ -152,19 +166,46 @@ contains
    integer(I4P)                        :: b, bb, bbb !< Counter.
 
    associate(node=>self%node)
-      open(newunit=file_unit, file=trim(adjustl(file_name)))
-      write(file_unit, '(A)') 'VARIABLES=x y z'
-      do level=0, self%refinement_levels
-         b = first_node(level=level)
-         do bb=1, nodes_number_at_level(level=level)
-            bbb = b + bb - 1
-            call node(bbb)%save_geometry_tecplot_ascii(file_unit=file_unit, aabb_name='aabb-l_'//trim(str(level, .true.))//&
-                                                                                          '-b_'//trim(str(bbb, .true.)))
+      if (self%is_initialized) then
+         open(newunit=file_unit, file=trim(adjustl(file_name)))
+         write(file_unit, '(A)') 'VARIABLES=x y z'
+         do level=0, self%refinement_levels
+            b = first_node(level=level)
+            do bb=1, nodes_number_at_level(level=level)
+               bbb = b + bb - 1
+               call node(bbb)%save_geometry_tecplot_ascii(file_unit=file_unit, aabb_name='aabb-l_'//trim(str(level, .true.))//&
+                                                                                             '-b_'//trim(str(bbb, .true.)))
+            enddo
          enddo
-      enddo
-      close(file_unit)
+         close(file_unit)
+      endif
    endassociate
-   endsubroutine  save_geometry_tecplot_ascii
+   endsubroutine save_geometry_tecplot_ascii
+
+   subroutine save_into_file_stl(self, base_file_name, is_ascii)
+   !< Save  AABB tree boxes facets into files STL.
+   class(aabb_tree_object), intent(in)           :: self           !< AABB tree.
+   character(*),            intent(in)           :: base_file_name !< File name.
+   logical,                 intent(in), optional :: is_ascii       !< Sentinel to check if file is ASCII.
+   logical                                       :: is_ascii_      !< Sentinel to check if file is ASCII, local variable.
+   integer(I4P)                                  :: level          !< Counter.
+   integer(I4P)                                  :: b, bb, bbb     !< Counter.
+
+   associate(node=>self%node)
+      if (self%is_initialized) then
+         is_ascii_ = .false. ; if (present(is_ascii)) is_ascii_ = is_ascii
+         do level=0, self%refinement_levels
+            b = first_node(level=level)
+            do bb=1, nodes_number_at_level(level=level)
+               bbb = b + bb - 1
+               call node(bbb)%save_facets_into_file_stl(file_name=trim(adjustl(base_file_name))//       &
+                                                                  'aabb-l_'//trim(str(level, .true.))// &
+                                                                      '-b_'//trim(str(bbb, .true.))//'.stl', is_ascii=is_ascii_)
+            enddo
+         enddo
+      endif
+   endassociate
+   endsubroutine save_into_file_stl
 
    ! operators
    ! =

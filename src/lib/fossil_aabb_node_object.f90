@@ -34,6 +34,8 @@ type :: aabb_node_object
       procedure, pass(self) :: initialize                  !< Initialize AABB.
       procedure, pass(self) :: is_allocated                !< Return true is node is allocated.
       procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB geometry into Tecplot ascii file.
+      procedure, pass(self) :: save_facets_into_file_stl   !< Save facets into file STL.
+      procedure, pass(self) :: update_extents              !< Update AABB bounding box extents.
       ! operators
       generic :: assignment(=) => aabb_node_assign_aabb_node      !< Overload `=`.
       procedure, pass(lhs), private :: aabb_node_assign_aabb_node !< Operator `=`.
@@ -56,7 +58,7 @@ contains
    class(aabb_node_object), intent(in) :: self !< AABB box.
    type(vector_R8P)                    :: bmin !< AABB bmin.
 
-   bmin = self%aabb%bmin
+   if (allocated(self%aabb)) bmin = self%aabb%bmin
    endfunction bmin
 
    pure function bmax(self)
@@ -64,7 +66,7 @@ contains
    class(aabb_node_object), intent(in) :: self !< AABB box.
    type(vector_R8P)                    :: bmax !< AABB bmax.
 
-   bmax = self%aabb%bmax
+   if (allocated(self%aabb)) bmax = self%aabb%bmax
    endfunction bmax
 
    pure function closest_point(self, point) result(closest)
@@ -168,6 +170,22 @@ contains
 
    if (allocated(self%aabb)) call self%aabb%save_geometry_tecplot_ascii(file_unit=file_unit, aabb_name=aabb_name)
    endsubroutine  save_geometry_tecplot_ascii
+
+   subroutine save_facets_into_file_stl(self, file_name, is_ascii)
+   !< Save facets into file STL.
+   class(aabb_node_object), intent(in) :: self      !< AABB.
+   character(*),            intent(in) :: file_name !< File name.
+   logical,                 intent(in) :: is_ascii  !< Sentinel to check if file is ASCII.
+
+   if (allocated(self%aabb)) call self%aabb%save_facets_into_file_stl(file_name=file_name, is_ascii=is_ascii)
+   endsubroutine save_facets_into_file_stl
+
+   pure subroutine update_extents(self)
+   !< Update AABB bounding box extents.
+   class(aabb_node_object), intent(inout) :: self !< AABB.
+
+   if (allocated(self%aabb)) call self%aabb%update_extents
+   endsubroutine update_extents
 
    ! operators
    ! =
