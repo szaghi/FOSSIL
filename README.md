@@ -13,7 +13,7 @@
 
 ### FOSSIL, FOrtran Stereo (si) Litography parser
 
-+ FOSSIL is a pure Fortran (KISS) library for IO of STL (Stereo Litography) files for modern (2003+) Fortran projects;
++ FOSSIL is a pure Fortran (KISS) library for IO and manipulation of STL (Stereo Litography) files for modern (2003+) Fortran projects;
 + FOSSIL is Fortran 2003+ standard compliant;
 - FOSSIL is OOP designed;
 - FOSSIL is TDD designed;
@@ -42,13 +42,33 @@
 
 ## What is FOSSIL?
 
-To be written.
+FOSSIL is a pure Fortran (KISS) library for IO and manipulation of STL (Stereo Litography) files for modern (2003+) Fortran projects.
+
+FOSSIL provides a simple API to IO STL files and also to manipulate the triangulated surface contained into the STL file.
+
+![dragon](doc/dragon.jpg)
 
 Go to [Top](#top)
 
 ## Main features
 
-To be written.
+* [X] User-friendly methods for IO STL files:
+    * [x] input:
+        * [x] automatic guessing of file format (ASCII or BINARY);
+        * [x] automatic loading of all facets;
+    * [x] output:
+        * [x] automatic saving of all facets;
+* [x] powerful surface manipulation:
+    * [ ] sanitize normals:
+        * [ ] reverse normals:
+        * [ ] make normals consistent:
+    * [x] compute minimal distance;
+    * [x] point-in-polyhedron test for distance sign computation:
+        * [x] by means of solid angle computation;
+        * [x] by means of rays intersection count;
+    * [ ] fill holes;
+    * [ ] check watertight resistence;
+* [ ] errors trapping mechanism.
 
 Any feature request is welcome.
 
