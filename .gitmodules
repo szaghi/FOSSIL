@@ -1,3 +1,12 @@
 [submodule "src/third_party/PENF"]
 	path = src/third_party/PENF
 	url = https://github.com/szaghi/PENF
+[submodule "src/third_party/VecFor"]
+	path = src/third_party/VecFor
+	url = https://github.com/szaghi/VecFor
+[submodule "src/third_party/FLAP"]
+	path = src/third_party/FLAP
+	url = https://github.com/szaghi/FLAP
+[submodule "src/third_party/FACE"]
+	path = src/third_party/FACE
+	url = https://github.com/szaghi/FACE

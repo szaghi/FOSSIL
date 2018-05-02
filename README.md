@@ -13,7 +13,7 @@
 
 ### FOSSIL, FOrtran Stereo (si) Litography parser
 
-+ FOSSIL is a pure Fortran (KISS) library for IO of STL (Stereo Litography) files for modern (2003+) Fortran projects;
++ FOSSIL is a pure Fortran (KISS) library for IO and manipulation of STL (Stereo Litography) files for modern (2003+) Fortran projects;
 + FOSSIL is Fortran 2003+ standard compliant;
 - FOSSIL is OOP designed;
 - FOSSIL is TDD designed;
@@ -42,13 +42,42 @@
 
 ## What is FOSSIL?
 
-To be written.
+FOSSIL is a pure Fortran (KISS) library for IO and manipulation of STL (Stereo Litography) files for modern (2003+) Fortran projects.
+
+FOSSIL provides a simple API to IO STL files and also to manipulate the triangulated surface contained into the STL file.
+
+![dragon](doc/dragon.jpg)
+
+> the dragon STL test (src/tests/dragon.stl) is composed by 6588 triangular facets. The signed distance computation on a uniform
+> grid of `64^3` is accelerated by a factor of 7x using AABB algorithm with respect the simple brute force.
 
 Go to [Top](#top)
 
 ## Main features
 
-To be written.
+* [X] User-friendly methods for IO STL files:
+    * [x] input:
+        * [x] automatic guessing of file format (ASCII or BINARY);
+        * [x] automatic loading of all facets;
+    * [x] output:
+        * [x] automatic saving of all facets;
+* [x] powerful surface analysis and manipulation:
+    * [ ] sanitize normals:
+        * [ ] reverse normals:
+        * [ ] make normals consistent:
+    * [x] compute minimal distance:
+        * [x] square distance;
+        * [x] square root distance;
+        * [x] signed distance:
+            * [x] by means of solid angle computation;
+            * [x] by means of rays intersection count;
+        * [x] AABB (Axis-Aligned Bounding Box) tree acceleration with user defined refinement levels;
+    * [x] point-in-polyhedra test:
+        * [x] by means of solid angle computation;
+        * [x] by means of rays intersection count;
+    * [ ] fill holes;
+    * [ ] check surface watertight;
+* [ ] errors trapping mechanism.
 
 Any feature request is welcome.
 
