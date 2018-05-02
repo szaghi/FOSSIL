@@ -152,6 +152,15 @@ contains
                if (.not.node(bbb)%has_facets()) call node(bbb)%destroy ! destroy void node
             enddo
          enddo
+
+         ! update AABB extents
+         do level=self%refinement_levels, 1, -1         ! loop over refinement levels
+            b = first_node(level=level)                 ! first node at level
+            do bb=1, nodes_number_at_level(level=level) ! loop over nodes at level
+               bbb = b + bb - 1                         ! node numeration in tree
+               call node(bbb)%update_extents            ! update extents
+            enddo
+         enddo
       endif
    endassociate
    self%is_initialized = .true.
