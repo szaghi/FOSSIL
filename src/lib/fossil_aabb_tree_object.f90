@@ -50,47 +50,40 @@ contains
    self = fresh
    endsubroutine destroy
 
-   pure function distance(self, point, aabb_cloud)
+   pure function distance(self, point)
    !< Compute the (minimum) distance from a point to the triangulated surface.
-   class(aabb_tree_object), intent(in)           :: self              !< AABB tree.
-   type(vector_R8P),        intent(in)           :: point             !< Point coordinates.
-   integer(I4P),            intent(in), optional :: aabb_cloud        !< Number of AABBs making "cloud" research.
-   integer(I4P)                                  :: aabb_cloud_       !< Number of AABBs making "cloud" research, local variable.
-   real(R8P)                                     :: distance          !< Minimum distance from point to the triangulated surface.
-   real(R8P), allocatable                        :: distance_(:,:)    !< Minimum distance, temporary buffer.
-   integer(I4P), allocatable                     :: aabb_closest(:,:) !< Index of closest AABB.
-   integer(I4P)                                  :: level             !< Counter.
-   integer(I4P)                                  :: cloud_maxloc      !< Counter.
-   integer(I4P)                                  :: b, bb, bbb        !< Counter.
-   integer(I4P)                                  :: d                 !< Counter.
+   class(aabb_tree_object), intent(in) :: self            !< AABB tree.
+   type(vector_R8P),        intent(in) :: point           !< Point coordinates.
+   real(R8P)                           :: distance        !< Minimum distance from point to the triangulated surface.
+   real(R8P), allocatable              :: distance_(:)    !< Minimum distance, temporary buffer.
+   integer(I4P), allocatable           :: aabb_closest(:) !< Index of closest AABB.
+   integer(I4P)                        :: level           !< Counter.
+   integer(I4P)                        :: b, bb, bbb      !< Counter.
+   integer(I4P)                        :: d               !< Counter.
 
    associate(node=>self%node)
-      aabb_cloud_ = 1 ; if (present(aabb_cloud)) aabb_cloud_ = aabb_cloud
-      allocate(distance_(0:self%refinement_levels, 1:aabb_cloud_))
-      allocate(aabb_closest(0:self%refinement_levels, 1:aabb_cloud_))
+      allocate(distance_(0:self%refinement_levels))
+      allocate(aabb_closest(0:self%refinement_levels))
       distance_ = MaxR8P
       aabb_closest = -1
-      do level=0, self%refinement_levels                    ! loop over refinement levels
-         b = first_node(level=level)                        ! first node at finest level
-         do bb=1, nodes_number_at_level(level=level)        ! loop over nodes at level
-            bbb = b + bb - 1                                ! node numeration in tree
+      do level=0, self%refinement_levels                  ! loop over refinement levels
+         b = first_node(level=level)                      ! first node at finest level
+         do bb=1, nodes_number_at_level(level=level)      ! loop over nodes at level
+            bbb = b + bb - 1                              ! node numeration in tree
             if (node(bbb)%is_allocated()) then
-               distance = node(bbb)%distance(point=point)   ! node distance
-               cloud_maxloc = maxloc(distance_(level,:), dim=1)
-               if (distance <= distance_(level, cloud_maxloc)) then
-                  distance_(level, cloud_maxloc) = distance ! update minimum distance
-                  aabb_closest(level, cloud_maxloc) = bbb   ! store closest node
+               distance = node(bbb)%distance(point=point) ! node distance
+               if (distance <= distance_(level)) then
+                  distance_(level) = distance             ! update minimum distance
+                  aabb_closest(level) = bbb               ! store closest node
                endif
             endif
          enddo
       enddo
       distance = MaxR8P
       do level=0, self%refinement_levels
-         do d=1, aabb_cloud_
-            if (aabb_closest(level, d) >= 0) then
-               distance = min(distance, node(aabb_closest(level, d))%distance_from_facets(point=point))
-            endif
-         enddo
+         if (aabb_closest(level) >= 0) then
+            distance = min(distance, node(aabb_closest(level))%distance_from_facets(point=point))
+         endif
       enddo
    endassociate
    endfunction distance
