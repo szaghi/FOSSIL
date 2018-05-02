@@ -33,6 +33,7 @@ type :: aabb_tree_object
       procedure, pass(self) :: destroy                     !< Destroy AABB tree.
       procedure, pass(self) :: distance                    !< Compute the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: initialize                  !< Initialize AABB tree.
+      procedure, pass(self) :: ray_intersections_number    !< Return ray intersections number.
       procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB tree boxes geometry into Tecplot ascii file.
       procedure, pass(self) :: save_into_file_stl          !< Save  AABB tree boxes facets into files STL.
       ! operators
@@ -59,7 +60,6 @@ contains
    integer(I4P), allocatable           :: aabb_closest(:) !< Index of closest AABB.
    integer(I4P)                        :: level           !< Counter.
    integer(I4P)                        :: b, bb, bbb      !< Counter.
-   integer(I4P)                        :: d               !< Counter.
 
    associate(node=>self%node)
       allocate(distance_(0:self%refinement_levels))
@@ -158,6 +158,30 @@ contains
    endassociate
    self%is_initialized = .true.
    endsubroutine initialize
+
+   pure function ray_intersections_number(self, ray_origin, ray_direction) result(intersections_number)
+   !< Return ray intersections number.
+   class(aabb_tree_object), intent(in) :: self                 !< AABB tree.
+   type(vector_R8P),        intent(in) :: ray_origin           !< Ray origin.
+   type(vector_R8P),        intent(in) :: ray_direction        !< Ray direction.
+   integer(I4P)                        :: intersections_number !< Intersection number.
+   integer(I4P)                        :: level                !< Counter.
+   integer(I4P)                        :: b, bb, bbb           !< Counter.
+
+   intersections_number = 0
+   associate(node=>self%node)
+      do level=0, self%refinement_levels                  ! loop over refinement levels
+         b = first_node(level=level)                      ! first node at finest level
+         do bb=1, nodes_number_at_level(level=level)      ! loop over nodes at level
+            bbb = b + bb - 1                              ! node numeration in tree
+            if (node(bbb)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) then
+               intersections_number = intersections_number + &
+                                      node(bbb)%ray_intersections_number(ray_origin=ray_origin, ray_direction=ray_direction)
+            endif
+         enddo
+      enddo
+   endassociate
+   endfunction ray_intersections_number
 
    subroutine save_geometry_tecplot_ascii(self, file_name)
    !< Save AABB tree boxes geometry into Tecplot ascii file.

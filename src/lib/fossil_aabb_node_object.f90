@@ -33,6 +33,7 @@ type :: aabb_node_object
       procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
       procedure, pass(self) :: initialize                  !< Initialize AABB.
       procedure, pass(self) :: is_allocated                !< Return true is node is allocated.
+      procedure, pass(self) :: ray_intersections_number    !< Return ray intersections number.
       procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB geometry into Tecplot ascii file.
       procedure, pass(self) :: save_facets_into_file_stl   !< Save facets into file STL.
       procedure, pass(self) :: update_extents              !< Update AABB bounding box extents.
@@ -161,6 +162,18 @@ contains
 
    is_allocated = allocated(self%aabb)
    endfunction is_allocated
+
+   pure function ray_intersections_number(self, ray_origin, ray_direction) result(intersections_number)
+   !< Return ray intersections number.
+   class(aabb_node_object), intent(in) :: self                 !< AABB.
+   type(vector_R8P),        intent(in) :: ray_origin           !< Ray origin.
+   type(vector_R8P),        intent(in) :: ray_direction        !< Ray direction.
+   integer(I4P)                        :: intersections_number !< Intersection number.
+
+   intersections_number = 0
+   if (allocated(self%aabb)) &
+      intersections_number = self%aabb%ray_intersections_number(ray_origin=ray_origin, ray_direction=ray_direction)
+   endfunction ray_intersections_number
 
    subroutine  save_geometry_tecplot_ascii(self, file_unit, aabb_name)
    !< Save AABB geometry into Tecplot ascii file.

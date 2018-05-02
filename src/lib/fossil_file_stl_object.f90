@@ -166,15 +166,23 @@ contains
       !< Generic line intersect test.
       type(vector_R8P), intent(in) :: ray_origin           !< Ray origin.
       type(vector_R8P), intent(in) :: ray_direction        !< Ray direction.
-      integer(I4P)                 :: intersections_number !< Winding number of STL polyhedra with respect point.
+      integer(I4P)                 :: intersections_number !< Ray intersections number of STL polyhedra with respect point.
       integer(I4P)                 :: f                    !< Counter.
       logical                      :: is_inside_by         !< Test result.
 
       intersections_number = 0
-      do f=1, self%facets_number
-         if (self%facet(f)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) &
-            intersections_number = intersections_number + 1
-      enddo
+
+      if (self%aabb%is_initialized) then
+         ! exploit AABB refinement levels
+         intersections_number = self%aabb%ray_intersections_number(ray_origin=ray_origin, ray_direction=ray_direction)
+      else
+         ! brute-force search over all facets
+         do f=1, self%facets_number
+            if (self%facet(f)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) &
+               intersections_number = intersections_number + 1
+         enddo
+      endif
+
       if (mod(intersections_number, 2) == 0) then
         is_inside_by = .false.
       else
