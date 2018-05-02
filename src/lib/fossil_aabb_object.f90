@@ -30,6 +30,7 @@ type :: aabb_object
       procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
       procedure, pass(self) :: initialize                  !< Initialize AABB.
       procedure, pass(self) :: is_inside                   !< Return the true if point is inside ABB.
+      procedure, pass(self) :: ray_intersections_number    !< Return ray intersections number.
       procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB geometry into Tecplot ascii file.
       procedure, pass(self) :: save_facets_into_file_stl   !< Save facets into file STL.
       procedure, pass(self) :: update_extents              !< Update AABB bounding box extents.
@@ -148,7 +149,7 @@ contains
    integer(I4P)                   :: f         !< Counter.
 
    distance = MaxR8P
-   if (allocated(self%facet)) then
+   if (self%facets_number > 0) then
       do f=1, self%facets_number
          distance_ = self%facet(f)%distance(point=point)
          if (abs(distance_) <= abs(distance)) distance = distance_
@@ -256,6 +257,23 @@ contains
                 (point%y >= self%bmin%y.and.point%y <= self%bmax%y).and.&
                 (point%z >= self%bmin%z.and.point%z <= self%bmax%z))
    endfunction is_inside
+
+   pure function ray_intersections_number(self, ray_origin, ray_direction) result(intersections_number)
+   !< Return ray intersections number.
+   class(aabb_object), intent(in) :: self                 !< AABB.
+   type(vector_R8P),   intent(in) :: ray_origin           !< Ray origin.
+   type(vector_R8P),   intent(in) :: ray_direction        !< Ray direction.
+   integer(I4P)                   :: intersections_number !< Intersection number.
+   integer(I4P)                   :: f                    !< Counter.
+
+   intersections_number = 0
+   if (self%facets_number > 0) then
+      do f=1, self%facets_number
+         if (self%facet(f)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) &
+            intersections_number = intersections_number + 1
+      enddo
+   endif
+   endfunction ray_intersections_number
 
    subroutine  save_geometry_tecplot_ascii(self, file_unit, aabb_name)
    !< Save AABB geometry into Tecplot ascii file.

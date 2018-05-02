@@ -93,7 +93,7 @@ contains
    self = fresh
    endsubroutine destroy
 
-   pure function distance(self, point, is_signed, sign_algorithm, is_square_root, aabb_cloud)
+   pure function distance(self, point, is_signed, sign_algorithm, is_square_root)
    !< Compute the (minimum) distance from a point to the triangulated surface.
    !<
    !< @note STL's metrix must be already computed.
@@ -102,7 +102,6 @@ contains
    logical,                intent(in), optional :: is_signed       !< Sentinel to trigger signed distance.
    character(*),           intent(in), optional :: sign_algorithm  !< Algorithm used for "point in polyhedron" test.
    logical,                intent(in), optional :: is_square_root  !< Sentinel to trigger square-root distance.
-   integer(I4P),           intent(in), optional :: aabb_cloud      !< Number of AABBs making "cloud" research.
    real(R8P)                                    :: distance        !< Minimum distance from point to the triangulated surface.
    real(R8P)                                    :: distance_       !< Minimum distance, temporary buffer.
    character(len=:), allocatable                :: sign_algorithm_ !< Algorithm used for "point in polyhedron" test, local variable.
@@ -111,7 +110,7 @@ contains
    if (self%facets_number > 0) then
       if (self%aabb%is_initialized) then
          ! exploit AABB refinement levels
-         distance = self%aabb%distance(point=point, aabb_cloud=aabb_cloud)
+         distance = self%aabb%distance(point=point)
       else
          ! brute-force search over all facets
          distance = MaxR8P
@@ -167,15 +166,23 @@ contains
       !< Generic line intersect test.
       type(vector_R8P), intent(in) :: ray_origin           !< Ray origin.
       type(vector_R8P), intent(in) :: ray_direction        !< Ray direction.
-      integer(I4P)                 :: intersections_number !< Winding number of STL polyhedra with respect point.
+      integer(I4P)                 :: intersections_number !< Ray intersections number of STL polyhedra with respect point.
       integer(I4P)                 :: f                    !< Counter.
       logical                      :: is_inside_by         !< Test result.
 
       intersections_number = 0
-      do f=1, self%facets_number
-         if (self%facet(f)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) &
-            intersections_number = intersections_number + 1
-      enddo
+
+      if (self%aabb%is_initialized) then
+         ! exploit AABB refinement levels
+         intersections_number = self%aabb%ray_intersections_number(ray_origin=ray_origin, ray_direction=ray_direction)
+      else
+         ! brute-force search over all facets
+         do f=1, self%facets_number
+            if (self%facet(f)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) &
+               intersections_number = intersections_number + 1
+         enddo
+      endif
+
       if (mod(intersections_number, 2) == 0) then
         is_inside_by = .false.
       else

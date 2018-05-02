@@ -48,6 +48,9 @@ FOSSIL provides a simple API to IO STL files and also to manipulate the triangul
 
 ![dragon](doc/dragon.jpg)
 
+> the dragon STL test (src/tests/dragon.stl) is composed by 6588 triangular facets. The signed distance computation on a uniform
+> grid of `64^3` is accelerated by a factor of 7x using AABB algorithm with respect the simple brute force.
+
 Go to [Top](#top)
 
 ## Main features
@@ -58,16 +61,22 @@ Go to [Top](#top)
         * [x] automatic loading of all facets;
     * [x] output:
         * [x] automatic saving of all facets;
-* [x] powerful surface manipulation:
+* [x] powerful surface analysis and manipulation:
     * [ ] sanitize normals:
         * [ ] reverse normals:
         * [ ] make normals consistent:
-    * [x] compute minimal distance;
-    * [x] point-in-polyhedron test for distance sign computation:
+    * [x] compute minimal distance:
+        * [x] square distance;
+        * [x] square root distance;
+        * [x] signed distance:
+            * [x] by means of solid angle computation;
+            * [x] by means of rays intersection count;
+        * [x] AABB (Axis-Aligned Bounding Box) tree acceleration with user defined refinement levels;
+    * [x] point-in-polyhedra test:
         * [x] by means of solid angle computation;
         * [x] by means of rays intersection count;
     * [ ] fill holes;
-    * [ ] check watertight resistence;
+    * [ ] check surface watertight;
 * [ ] errors trapping mechanism.
 
 Any feature request is welcome.
