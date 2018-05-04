@@ -4,6 +4,7 @@ module fossil_aabb_object
 !< FOSSIL, Axis-Aligned Bounding Box (AABB) class definition.
 
 use fossil_facet_object, only : facet_object, FRLEN
+use fossil_utils, only : EPS
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : FR8P, I4P, R8P, MaxR8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
@@ -192,9 +193,8 @@ contains
       real(R8P), intent(inout) :: tmin, tmax   !< Minimum maximum ray intersections with box slabs.
       real(R8P)                :: ood, t1, t2  !< Intersection coefficients.
       real(R8P)                :: tmp          !< Temporary buffer.
-      real(R8P), parameter     :: eps=1e-6_R8P !< Small epsilon to control round off errors.
 
-      if ((d) < eps) then
+      if ((d) < EPS) then
          ! ray is parallel to slab, no hit if origin not within slab
          if ((o < aabb_min).or.(o > aabb_max)) then
             must_return = .true.
@@ -379,16 +379,16 @@ contains
    type(facet_object), intent(in)    :: facet(:) !< Facets list.
    type(vector_R8P),   intent(inout) :: bmin     !< Minimum point of AABB.
    type(vector_R8P),   intent(inout) :: bmax     !< Maximum point of AABB.
-   real(R8P)                         :: eps(3) !< Small epsilon.
+   real(R8P)                         :: toll(3)  !< Small tollerance on AABB inclusion.
 
-   eps(1) = (maxval(facet(:)%bb(2)%x) - minval(facet(:)%bb(1)%x)) / 100._R8P
-   eps(2) = (maxval(facet(:)%bb(2)%y) - minval(facet(:)%bb(1)%y)) / 100._R8P
-   eps(3) = (maxval(facet(:)%bb(2)%z) - minval(facet(:)%bb(1)%z)) / 100._R8P
-   bmin%x = minval(facet(:)%bb(1)%x) - eps(1)
-   bmin%y = minval(facet(:)%bb(1)%y) - eps(2)
-   bmin%z = minval(facet(:)%bb(1)%z) - eps(3)
-   bmax%x = maxval(facet(:)%bb(2)%x) + eps(1)
-   bmax%y = maxval(facet(:)%bb(2)%y) + eps(2)
-   bmax%z = maxval(facet(:)%bb(2)%z) + eps(3)
+   toll(1) = (maxval(facet(:)%bb(2)%x) - minval(facet(:)%bb(1)%x)) / 100._R8P
+   toll(2) = (maxval(facet(:)%bb(2)%y) - minval(facet(:)%bb(1)%y)) / 100._R8P
+   toll(3) = (maxval(facet(:)%bb(2)%z) - minval(facet(:)%bb(1)%z)) / 100._R8P
+   bmin%x = minval(facet(:)%bb(1)%x) - toll(1)
+   bmin%y = minval(facet(:)%bb(1)%y) - toll(2)
+   bmin%z = minval(facet(:)%bb(1)%z) - toll(3)
+   bmax%x = maxval(facet(:)%bb(2)%x) + toll(1)
+   bmax%y = maxval(facet(:)%bb(2)%y) + toll(2)
+   bmax%z = maxval(facet(:)%bb(2)%z) + toll(3)
    endsubroutine compute_bb_from_facets
 endmodule fossil_aabb_object
