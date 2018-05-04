@@ -5,6 +5,7 @@ module fossil_file_stl_object
 
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object, only : facet_object, FRLEN
+use fossil_utils, only : PI
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : I4P, R8P, MaxR8P
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
@@ -12,8 +13,6 @@ use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 implicit none
 private
 public :: file_stl_object
-
-real(R8P), parameter :: PI = 4._R8P * atan(1._R8P)
 
 type :: file_stl_object
    !< FOSSIL STL file class.

@@ -3,6 +3,7 @@
 module fossil_facet_object
 !< FOSSIL, facet class definition.
 
+use fossil_utils, only : EPS
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : FR4P, I2P, I4P, R4P, R8P, str, ZeroR8P
 use vecfor, only : face_normal3_R8P, sq_norm_R8P, normL2_R8P, vector_R4P, vector_R8P
@@ -21,14 +22,14 @@ type :: facet_object
    type(vector_R8P) :: vertex_2  !< Facet vertex 2.
    type(vector_R8P) :: vertex_3  !< Facet vertex 3.
    ! metrix
-   ! triangle plane (parametric) equation: T(s,t) = B + s*E0 + t*E1
-   type(vector_R8P) :: E0         !< Edge 2-1, `V2-V1`.
-   type(vector_R8P) :: E1         !< Edge 3-1, `V3-V1`.
-   real(R8P)        :: a=0._R8P   !< `E0.dot.E0`.
-   real(R8P)        :: b=0._R8P   !< `E0.dot.E1`.
-   real(R8P)        :: c=0._R8P   !< `E1.dot.E1`.
+   ! triangle plane parametric equation: T(s,t) = B + s*E12 + t*E13
+   type(vector_R8P) :: E12        !< Edge 1-2, `V2-V1`.
+   type(vector_R8P) :: E13        !< Edge 1-3, `V3-V1`.
+   real(R8P)        :: a=0._R8P   !< `E12.dot.E12`.
+   real(R8P)        :: b=0._R8P   !< `E12.dot.E13`.
+   real(R8P)        :: c=0._R8P   !< `E13.dot.E13`.
    real(R8P)        :: det=0._R8P !< `a*c - b*b`.
-   ! triangle plane equation: ax + by + cz - d = 0, normal == [a, b, c]
+   ! triangle plane equation: nx*x + ny*y + nz*z - d = 0, normal == [nx, ny, nz]
    real(R8P) :: d=0._R8P !< `normal.dot.vertex_1`
    ! auxiliary
    type(vector_R8P) :: bb(2) !< Axis-aligned bounding box (AABB), bb(1)=min, bb(2)=max.
@@ -37,8 +38,8 @@ type :: facet_object
       procedure, pass(self) :: check_normal          !< Check normal consistency.
       procedure, pass(self) :: compute_metrix        !< Compute local (plane) metrix.
       procedure, pass(self) :: distance              !< Compute the (unsigned, squared) distance from a point to the facet surface.
-      procedure, pass(self) :: initialize            !< Initialize facet.
       procedure, pass(self) :: do_ray_intersect      !< Return true if facet is intersected by a ray.
+      procedure, pass(self) :: initialize            !< Initialize facet.
       procedure, pass(self) :: load_from_file_ascii  !< Load facet from ASCII file.
       procedure, pass(self) :: load_from_file_binary !< Load facet from binary file.
       procedure, pass(self) :: sanitize_normal       !< Sanitize normal, make normal consistent with vertices.
@@ -71,11 +72,11 @@ contains
 
    call self%sanitize_normal
 
-   self%E0  = self%vertex_2 - self%vertex_1
-   self%E1  = self%vertex_3 - self%vertex_1
-   self%a   = self%E0.dot.self%E0
-   self%b   = self%E0.dot.self%E1
-   self%c   = self%E1.dot.self%E1
+   self%E12 = self%vertex_2 - self%vertex_1
+   self%E13 = self%vertex_3 - self%vertex_1
+   self%a   = self%E12.dot.self%E12
+   self%b   = self%E12.dot.self%E13
+   self%c   = self%E13.dot.self%E13
    self%det = self%a * self%c - self%b * self%b
 
    self%d = self%normal.dot.self%vertex_1
@@ -101,8 +102,8 @@ contains
 
    associate(a=>self%a, b=>self%b, c=>self%c, det=>self%det)
    V1P = self%vertex_1 - point
-   d = self%E0.dot.V1P
-   e = self%E1.dot.V1P
+   d = self%E12.dot.V1P
+   e = self%E13.dot.V1P
    f = V1P.dot.V1P
    s = self%b * e - self%c * d
    t = self%b * d - self%a * e
@@ -228,14 +229,6 @@ contains
    endassociate
    endfunction
 
-   elemental subroutine initialize(self)
-   !< Initialize facet.
-   class(facet_object), intent(inout) :: self  !< Facet.
-   type(facet_object)                 :: fresh !< Fresh instance of facet.
-
-   self = fresh
-   endsubroutine initialize
-
    pure function do_ray_intersect(self, ray_origin, ray_direction) result(intersect)
    !< Return true if facet is intersected by ray from origin and oriented as ray direction vector.
    !<
@@ -248,22 +241,29 @@ contains
    logical                         :: intersect     !< Intersection test result.
    type(vector_R8P)                :: h, s, q       !< Projection vectors.
    real(R8P)                       :: a, f, u, v, t !< Baricentric abscissa.
-   real(R8P), parameter            :: EPS=1e-7_R8P  !< Small espilon for round off errors control.
 
    intersect = .false.
-   h = ray_direction.cross.self%E1
-   a = self%E0.dot.h
+   h = ray_direction.cross.self%E13
+   a = self%E12.dot.h
    if ((a > -EPS).and.(a < EPS)) return
    f = 1._R8P / a
    s = ray_origin - self%vertex_1
    u = f * (s.dot.h)
    if ((u < 0._R8P).or.(u > 1._R8P)) return
-   q = s.cross.self%E0
+   q = s.cross.self%E12
    v = f * ray_direction.dot.q
    if ((v < 0._R8P).or.(u + v > 1._R8P)) return
-   t = f * self%E1.dot.q
+   t = f * self%E13.dot.q
    if (t > EPS) intersect = .true.
    endfunction do_ray_intersect
+
+   elemental subroutine initialize(self)
+   !< Initialize facet.
+   class(facet_object), intent(inout) :: self  !< Facet.
+   type(facet_object)                 :: fresh !< Fresh instance of facet.
+
+   self = fresh
+   endsubroutine initialize
 
    subroutine load_from_file_ascii(self, file_unit)
    !< Load facet from ASCII file.
@@ -394,8 +394,8 @@ contains
    lhs%vertex_1 = rhs%vertex_1
    lhs%vertex_2 = rhs%vertex_2
    lhs%vertex_3 = rhs%vertex_3
-   lhs%E0 = rhs%E0
-   lhs%E1 = rhs%E1
+   lhs%E12 = rhs%E12
+   lhs%E13 = rhs%E13
    lhs%a = rhs%a
    lhs%b = rhs%b
    lhs%c = rhs%c
