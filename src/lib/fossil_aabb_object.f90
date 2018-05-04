@@ -3,7 +3,7 @@
 module fossil_aabb_object
 !< FOSSIL, Axis-Aligned Bounding Box (AABB) class definition.
 
-use fossil_facet_object, only : facet_object, FRLEN
+use fossil_facet_object, only : facet_object
 use fossil_utils, only : EPS
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : FR8P, I4P, R8P, MaxR8P, str

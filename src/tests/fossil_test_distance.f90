@@ -30,6 +30,20 @@ are_tests_passed = .false.
 call cli_parse
 call file_stl%initialize(file_name=trim(adjustl(file_name_stl)))
 call file_stl%load_from_file(guess_format=.true.)
+
+call file_stl%build_connectivity
+do i=1, file_stl%facets_number
+   print*, 'f: ', i, 'fc12: ', file_stl%facet(i)%fcon_edge_12, &
+                     'fc23: ', file_stl%facet(i)%fcon_edge_23, &
+                     'fc31: ', file_stl%facet(i)%fcon_edge_31
+enddo
+call file_stl%compute_volume
+print*, 'volume ', file_stl%volume
+call file_stl%reverse_normals
+call file_stl%compute_volume
+print*, 'volume ', file_stl%volume
+stop
+
 call file_stl%compute_metrix
 call file_stl%create_aabb_tree(refinement_levels=refinement_levels)
 
