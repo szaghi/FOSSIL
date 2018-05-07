@@ -5,7 +5,7 @@ module fossil_file_stl_object
 
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object, only : facet_object
-use fossil_utils, only : PI, FRLEN
+use fossil_utils, only : EPS, PI, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : I4P, R8P, MaxR8P
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
@@ -192,12 +192,12 @@ contains
    logical                            :: is_inside_by_y !< Test result by y-aligned ray intersections.
    logical                            :: is_inside_by_z !< Test result by z-aligned ray intersections.
 
-   is_inside_by_x = is_inside_by_ray_intersect(ray_origin=point, ray_direction=ex_R8P)
-   is_inside_by_y = is_inside_by_ray_intersect(ray_origin=point, ray_direction=ey_R8P)
+   is_inside_by_x = is_inside_by_ray_intersect(ray_origin=point, ray_direction=      ex_R8P + EPS * ey_R8P + EPS * ez_R8P)
+   is_inside_by_y = is_inside_by_ray_intersect(ray_origin=point, ray_direction=EPS * ex_R8P +       ey_R8P + EPS * ez_R8P)
    if (is_inside_by_x.and.is_inside_by_y) then
      is_inside = .true.
    else
-      is_inside_by_z = is_inside_by_ray_intersect(ray_origin=point, ray_direction=ez_R8P)
+      is_inside_by_z = is_inside_by_ray_intersect(ray_origin=point, ray_direction=EPS * ex_R8P + EPS * ey_R8P + ez_R8P)
       is_inside = ((is_inside_by_x.and.is_inside_by_y).or.&
                    (is_inside_by_x.and.is_inside_by_z).or.&
                    (is_inside_by_y.and.is_inside_by_z))
@@ -350,30 +350,45 @@ contains
    if (self%facets_number>0) call self%facet%reverse_normal
    endsubroutine reverse_normals
 
-   elemental subroutine sanitize_normals(self)
+   pure subroutine sanitize_normals(self)
    !< Sanitize facets normals, make them consistent.
    !<
    !< @note Facets connectivity and normals must be already computed.
    class(file_stl_object), intent(inout) :: self             !< File STL.
    logical, allocatable                  :: facet_checked(:) !< List of facets checked.
-   integer(I4P)                          :: f                !< Counter.
+   integer(I4P)                          :: f, ff            !< Counter.
 
    if (self%facets_number>0) then
       allocate(facet_checked(1:self%facets_number))
       facet_checked = .false.
       f = 1
+      facet_checked(f) = .true.
       do
-         if (f >= self%facets_number) exit
-         if (self%facet(f)%fcon_edge_12>0) then
-            associate(normal=>self%facet(f)%normal, n_normal=>self%facet(self%facet(f)%fcon_edge_12)%normal)
-               if (.not.facet_checked(self%facet(f)%fcon_edge_12)) then
-                  ! if (normal.dot.n_normal<0) call self%facet(self%facet(f)%fcon_edge_12)%reverse_normal
-                  facet_checked(self%facet(f)%fcon_edge_12) = .true.
-               endif
-            endassociate
+         ff = 0
+         if     (self%facet(f)%fcon_edge_12>0.and.(.not.facet_checked(self%facet(f)%fcon_edge_12))) then
+            call self%facet(f)%make_normal_consistent(edge_dir='edge_12', other=self%facet(self%facet(f)%fcon_edge_12))
+            facet_checked(self%facet(f)%fcon_edge_12) = .true.
+            ff = self%facet(f)%fcon_edge_12
+         endif
+         if (self%facet(f)%fcon_edge_23>0.and.(.not.facet_checked(self%facet(f)%fcon_edge_23))) then
+            call self%facet(f)%make_normal_consistent(edge_dir='edge_23', other=self%facet(self%facet(f)%fcon_edge_23))
+            facet_checked(self%facet(f)%fcon_edge_23) = .true.
+            ff = self%facet(f)%fcon_edge_23
+         endif
+         if (self%facet(f)%fcon_edge_31>0.and.(.not.facet_checked(self%facet(f)%fcon_edge_31))) then
+            call self%facet(f)%make_normal_consistent(edge_dir='edge_31', other=self%facet(self%facet(f)%fcon_edge_31))
+            facet_checked(self%facet(f)%fcon_edge_31) = .true.
+            ff = self%facet(f)%fcon_edge_31
+         endif
+         if (ff==0) then
+            exit
+         else
+            f = ff
          endif
       enddo
    endif
+   call self%compute_volume
+   if (self%volume < 0) call self%reverse_normals
    endsubroutine sanitize_normals
 
    subroutine save_into_file(self, file_name, is_ascii)

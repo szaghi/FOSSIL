@@ -51,6 +51,7 @@ type :: facet_object
       procedure, pass(self) :: initialize                  !< Initialize facet.
       procedure, pass(self) :: load_from_file_ascii        !< Load facet from ASCII file.
       procedure, pass(self) :: load_from_file_binary       !< Load facet from binary file.
+      procedure, pass(self) :: make_normal_consistent      !< Make normal of other facet consistent with self.
       procedure, pass(self) :: reverse_normal              !< Reverse facet normal.
       procedure, pass(self) :: save_into_file_ascii        !< Save facet into ASCII file.
       procedure, pass(self) :: save_into_file_binary       !< Save facet into binary file.
@@ -61,7 +62,9 @@ type :: facet_object
       ! operators
       generic :: assignment(=) => facet_assign_facet !< Overload `=`.
       ! private methods
-      procedure, pass(lhs)  :: facet_assign_facet !< Operator `=`.
+      procedure, pass(lhs)  :: facet_assign_facet           !< Operator `=`.
+      procedure, pass(self) :: edge_connection_in_other_ref !< Return the edge of connection in the other reference.
+      procedure, pass(self) :: flip_edge                    !< Flip facet edge.
 endtype facet_object
 
 contains
@@ -431,18 +434,37 @@ contains
    read(file_unit) padding
    endsubroutine load_from_file_binary
 
+   pure subroutine make_normal_consistent(self, edge_dir, other)
+   !< Make normal of other facet consistent with self.
+   class(facet_object), intent(in)    :: self           !< Facet.
+   character(*),        intent(in)    :: edge_dir       !< Edge (in self numeration) along which other is connected.
+   type(facet_object),  intent(inout) :: other          !< Other facet to make consistent with self.
+   character(len(edge_dir))           :: edge_dir_other !< Edge (in self numeration) along which other is connected.
+   type(vector_R8P)                   :: edge           !< Edge of connection in the self reference.
+   type(vector_R8P)                   :: edge_other     !< Edge of connection in the other reference.
+
+   call self%edge_connection_in_other_ref(other=other, edge_dir=edge_dir_other, edge=edge_other)
+   ! get self edge
+   select case(edge_dir)
+   case('edge_12')
+      edge = self%vertex_2 - self%vertex_1
+   case('edge_23')
+      edge = self%vertex_3 - self%vertex_2
+   case('edge_31')
+      edge = self%vertex_1 - self%vertex_3
+   endselect
+   if (edge%dotproduct(edge_other)>0) then
+      ! other numeration is consistent, normal has wrong orientation
+      call other%flip_edge(edge_dir=edge_dir_other)
+   endif
+   endsubroutine make_normal_consistent
+
    elemental subroutine reverse_normal(self)
    !< Reverse facet normal.
-   !<
-   !< @note If necessary vertices occurrencies must be recomputed.
    class(facet_object), intent(inout) :: self   !< Facet.
    type(vector_R8P)                   :: vertex !< Temporary vertex variable.
 
-   vertex = self%vertex_2
-   self%vertex_2 = self%vertex_3
-   self%vertex_3 = vertex
-
-   call self%compute_normal
+   call self%flip_edge(edge_dir='edge_23')
    endsubroutine reverse_normal
 
    subroutine save_into_file_ascii(self, file_unit)
@@ -584,4 +606,79 @@ contains
    if (allocated(lhs%vertex_3_occurrence)) deallocate(lhs%vertex_3_occurrence)
    if (allocated(rhs%vertex_3_occurrence)) lhs%vertex_3_occurrence = rhs%vertex_3_occurrence
    endsubroutine facet_assign_facet
+
+   pure subroutine edge_connection_in_other_ref(self, other, edge_dir, edge)
+   !< Return the edge of connection in the other reference.
+   class(facet_object), intent(in)  :: self     !< Facet.
+   type(facet_object),  intent(in)  :: other    !< Other facet.
+   character(*),        intent(out) :: edge_dir !< Edge (in other numeration) along which self is connected.
+   type(vector_R8P),    intent(out) :: edge     !< Edge (in other numeration) along which self is connected.
+
+   if     (other%fcon_edge_12 == self%id) then
+      edge_dir = 'edge_12'
+      edge = other%vertex_2 - other%vertex_1
+   elseif (other%fcon_edge_23 == self%id) then
+      edge_dir = 'edge_23'
+      edge = other%vertex_3 - other%vertex_2
+   elseif (other%fcon_edge_31 == self%id) then
+      edge_dir = 'edge_31'
+      edge = other%vertex_1 - other%vertex_3
+   endif
+   endsubroutine edge_connection_in_other_ref
+
+   pure subroutine flip_edge(self, edge_dir)
+   !< Flip facet edge.
+   class(facet_object), intent(inout) :: self     !< Facet.
+   character(*),        intent(in)    :: edge_dir !< Edge to be flipped.
+   integer(I4P)                       :: fcon     !< Temporary facet connectiviy variable.
+
+   select case(edge_dir)
+   case('edge_12')
+      call flip_vertices(a=self%vertex_1, b=self%vertex_2,                     &
+                         fcon_bc=self%fcon_edge_23, fcon_ca=self%fcon_edge_31, &
+                         vertex_a_occurrence=self%vertex_1_occurrence, vertex_b_occurrence=self%vertex_2_occurrence)
+   case('edge_23')
+      call flip_vertices(a=self%vertex_2, b=self%vertex_3,                     &
+                         fcon_bc=self%fcon_edge_12, fcon_ca=self%fcon_edge_31, &
+                         vertex_a_occurrence=self%vertex_2_occurrence, vertex_b_occurrence=self%vertex_3_occurrence)
+   case('edge_31')
+      call flip_vertices(a=self%vertex_3, b=self%vertex_1,                     &
+                         fcon_bc=self%fcon_edge_12, fcon_ca=self%fcon_edge_23, &
+                         vertex_a_occurrence=self%vertex_3_occurrence, vertex_b_occurrence=self%vertex_1_occurrence)
+   endselect
+   call self%compute_metrix
+   contains
+      pure subroutine flip_vertices(a, b, fcon_bc, fcon_ca, vertex_a_occurrence, vertex_b_occurrence)
+      !< Flip two vertices of facet.
+      type(vector_R8P),          intent(inout) :: a, b                   !< Vertices to be flipped.
+      integer(I4P),              intent(inout) :: fcon_bc                !< Connected face ID along edge b-c.
+      integer(I4P),              intent(inout) :: fcon_ca                !< Connected face ID along edge c-a.
+      integer(I4P), allocatable, intent(inout) :: vertex_a_occurrence(:) !< List of vertex a "occurrencies".
+      integer(I4P), allocatable, intent(inout) :: vertex_b_occurrence(:) !< List of vertex b "occurrencies".
+      type(vector_R8P)                         :: vertex                 !< Temporary vertex variable.
+      integer(I4P)                             :: fcon                   !< Temporary connected face ID.
+      integer(I4P), allocatable                :: vertex_occurrence(:)   !< Temporary list of vertex "occurrencies".
+
+      ! flip vertex
+      vertex = a
+      a = b
+      b = vertex
+      ! flip facet connectivity
+      fcon = fcon_bc
+      fcon_bc = fcon_ca
+      fcon_ca = fcon
+      ! flip vertex occurrences
+      if (allocated(vertex_a_occurrence).and.allocated(vertex_a_occurrence)) then
+         vertex_occurrence = vertex_a_occurrence
+         vertex_a_occurrence = vertex_b_occurrence
+         vertex_b_occurrence = vertex_occurrence
+      elseif (allocated(vertex_a_occurrence)) then
+         vertex_b_occurrence = vertex_a_occurrence
+         deallocate(vertex_a_occurrence)
+      elseif (allocated(vertex_b_occurrence)) then
+         vertex_a_occurrence = vertex_b_occurrence
+         deallocate(vertex_b_occurrence)
+      endif
+      endsubroutine flip_vertices
+   endsubroutine flip_edge
 endmodule fossil_facet_object

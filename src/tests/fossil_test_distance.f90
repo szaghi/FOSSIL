@@ -18,6 +18,7 @@ integer(I4P)                  :: refinement_levels       !< AABB refinement leve
 logical                       :: save_aabb_tree_geometry !< Sentinel to save AABB geometry.
 logical                       :: save_aabb_tree_stl      !< Sentinel to save AABB stl.
 logical                       :: test_brute_force        !< Sentinel to test also brute force.
+character(999)                :: sign_algorithm          !< Algorithm used for "point in polyhedron" test.
 integer(I4P)                  :: ni, nj, nk              !< Grid dimensions.
 integer(I4P)                  :: i, j, k                 !< Counter.
 real(R8P)                     :: Dx, Dy, Dz              !< Space steps.
@@ -32,17 +33,7 @@ call file_stl%initialize(file_name=trim(adjustl(file_name_stl)))
 call file_stl%load_from_file(guess_format=.true.)
 
 call file_stl%build_connectivity
-do i=1, file_stl%facets_number
-   print*, 'f: ', i, 'fc12: ', file_stl%facet(i)%fcon_edge_12, &
-                     'fc23: ', file_stl%facet(i)%fcon_edge_23, &
-                     'fc31: ', file_stl%facet(i)%fcon_edge_31
-enddo
-call file_stl%compute_volume
-print*, 'volume ', file_stl%volume
-call file_stl%reverse_normals
-call file_stl%compute_volume
-print*, 'volume ', file_stl%volume
-stop
+call file_stl%sanitize_normals
 
 call file_stl%compute_metrix
 call file_stl%create_aabb_tree(refinement_levels=refinement_levels)
@@ -80,7 +71,7 @@ if (test_brute_force) then
    do k=-4, nk + 5
       do j=-4, nj + 5
          do i=-4, ni + 5
-            distance(i, j, k) = file_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm='ray_intersections')
+            distance(i, j, k) = file_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm=trim(sign_algorithm))
          enddo
       enddo
    enddo
@@ -107,7 +98,7 @@ call system_clock(timing(3))
 do k=-4, nk + 5
    do j=-4, nj + 5
       do i=-4, ni + 5
-         distance(i, j, k) = file_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm='ray_intersections')
+         distance(i, j, k) = file_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm=trim(sign_algorithm))
       enddo
    enddo
 enddo
@@ -170,6 +161,12 @@ contains
                def='.false.',                  &
                act='store_true')
 
+  call cli%add(switch='--sign_algorithm',                         &
+               help='algorithm used to compute sign of distance', &
+               required=.false.,                                  &
+               def='ray_intersections',                           &
+               act='store')
+
   call cli%parse(error=error) ; if (error/=0) stop
 
   call cli%get(switch='--stl',                     val=file_name_stl,           error=error) ; if (error/=0) stop
@@ -177,5 +174,6 @@ contains
   call cli%get(switch='--save_aabb_tree_geometry', val=save_aabb_tree_geometry, error=error) ; if (error/=0) stop
   call cli%get(switch='--save_aabb_tree_stl',      val=save_aabb_tree_stl,      error=error) ; if (error/=0) stop
   call cli%get(switch='--brute_force',             val=test_brute_force,        error=error) ; if (error/=0) stop
+  call cli%get(switch='--sign_algorithm',          val=sign_algorithm,          error=error) ; if (error/=0) stop
   endsubroutine cli_parse
 endprogram fossil_test_distance
