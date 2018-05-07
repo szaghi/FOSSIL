@@ -4,8 +4,8 @@ module fossil_file_stl_object
 !< FOSSIL,  STL file class definition.
 
 use fossil_aabb_tree_object, only : aabb_tree_object
-use fossil_facet_object, only : facet_object, FRLEN
-use fossil_utils, only : PI
+use fossil_facet_object, only : facet_object
+use fossil_utils, only : EPS, PI, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : I4P, R8P, MaxR8P
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
@@ -22,12 +22,16 @@ type :: file_stl_object
    integer(I4P)                    :: facets_number=0 !< Facets number.
    type(facet_object), allocatable :: facet(:)        !< Facets.
    type(aabb_tree_object)          :: aabb            !< AABB tree.
+   real(R8P)                       :: volume=0._R8P   !< Volume bounded by STL surface.
    logical                         :: is_ascii=.true. !< Sentinel to check if file is ASCII.
    logical                         :: is_open=.false. !< Sentinel to check if file is open.
    contains
       ! public methods
+      procedure, pass(self) :: build_connectivity            !< Build facets connectivity.
       procedure, pass(self) :: close_file                    !< Close file.
       procedure, pass(self) :: compute_metrix                !< Compute facets metrix.
+      procedure, pass(self) :: compute_normals               !< Compute facets normals by means of vertices data.
+      procedure, pass(self) :: compute_volume                !< Compute volume bounded by STL surface.
       procedure, pass(self) :: create_aabb_tree              !< Create the AABB tree.
       procedure, pass(self) :: destroy                       !< Destroy file.
       procedure, pass(self) :: distance                      !< Compute the (minimum) distance from point to triangulated surface.
@@ -36,7 +40,8 @@ type :: file_stl_object
       procedure, pass(self) :: is_point_inside_polyhedron_sa !< Determinate is a point is inside or not STL facets by solid angle.
       procedure, pass(self) :: load_from_file                !< Load from file.
       procedure, pass(self) :: open_file                     !< Open file, once initialized.
-      procedure, pass(self) :: sanitize_normals              !< Sanitize normals, make normals consistent with vertices.
+      procedure, pass(self) :: reverse_normals               !< Reverse facets normals.
+      procedure, pass(self) :: sanitize_normals              !< Sanitize facets normals, make them consistent.
       procedure, pass(self) :: save_into_file                !< Save into file.
       ! operators
       generic :: assignment(=) => file_stl_assign_file_stl       !< Overload `=`.
@@ -51,6 +56,23 @@ endtype file_stl_object
 
 contains
    ! public methods
+   pure subroutine build_connectivity(self)
+   !< Build facets connectivity.
+   class(file_stl_object), intent(inout) :: self   !< File STL.
+   integer(I4P)                          :: f1, f2 !< Counter.
+
+   if (self%facets_number>0) then
+      do f1=1, self%facets_number - 1
+         do f2=f1 + 1, self%facets_number
+            call self%facet(f1)%check_vertices_occurrencies(other=self%facet(f2))
+         enddo
+      enddo
+      do f1=1, self%facets_number
+         call self%facet(f1)%update_connectivity
+      enddo
+   endif
+   endsubroutine build_connectivity
+
    subroutine close_file(self)
    !< Close file.
    class(file_stl_object), intent(inout) :: self       !< File STL.
@@ -71,6 +93,26 @@ contains
       call self%facet%compute_metrix
    endif
    endsubroutine compute_metrix
+
+   elemental subroutine compute_normals(self)
+   !< Compute facets normals by means of vertices data.
+   class(file_stl_object), intent(inout) :: self !< File STL.
+
+   if (self%facets_number>0) call self%facet%compute_normal
+   endsubroutine compute_normals
+
+   elemental subroutine compute_volume(self)
+   !< Compute volume bounded by STL surface.
+   class(file_stl_object), intent(inout) :: self !< File STL.
+   integer(I4P)                          :: f    !< Counter.
+
+   if (self%facets_number>0) then
+      self%volume = 0._R8P
+      do f=1, self%facets_number
+         self%volume = self%volume + self%facet(f)%tetrahedron_volume(apex=self%facet(1)%vertex_1)
+      enddo
+   endif
+   endsubroutine compute_volume
 
    subroutine create_aabb_tree(self, refinement_levels)
    !< Create AABB tree.
@@ -150,12 +192,12 @@ contains
    logical                            :: is_inside_by_y !< Test result by y-aligned ray intersections.
    logical                            :: is_inside_by_z !< Test result by z-aligned ray intersections.
 
-   is_inside_by_x = is_inside_by_ray_intersect(ray_origin=point, ray_direction=ex_R8P)
-   is_inside_by_y = is_inside_by_ray_intersect(ray_origin=point, ray_direction=ey_R8P)
+   is_inside_by_x = is_inside_by_ray_intersect(ray_origin=point, ray_direction=      ex_R8P + EPS * ey_R8P + EPS * ez_R8P)
+   is_inside_by_y = is_inside_by_ray_intersect(ray_origin=point, ray_direction=EPS * ex_R8P +       ey_R8P + EPS * ez_R8P)
    if (is_inside_by_x.and.is_inside_by_y) then
      is_inside = .true.
    else
-      is_inside_by_z = is_inside_by_ray_intersect(ray_origin=point, ray_direction=ez_R8P)
+      is_inside_by_z = is_inside_by_ray_intersect(ray_origin=point, ray_direction=EPS * ex_R8P + EPS * ey_R8P + ez_R8P)
       is_inside = ((is_inside_by_x.and.is_inside_by_y).or.&
                    (is_inside_by_x.and.is_inside_by_z).or.&
                    (is_inside_by_y.and.is_inside_by_z))
@@ -241,9 +283,11 @@ contains
    if (self%is_ascii) then
       do f=1, self%facets_number
          call self%facet(f)%load_from_file_ascii(file_unit=self%file_unit)
+         self%facet(f)%id = f
       enddo
    else
       do f=1, self%facets_number
+         self%facet(f)%id = f
          call self%facet(f)%load_from_file_binary(file_unit=self%file_unit)
       enddo
    endif
@@ -299,11 +343,52 @@ contains
    endif
    endsubroutine open_file
 
-   elemental subroutine sanitize_normals(self)
-   !< Sanitize normals, make normals consistent with vertices.
+   elemental subroutine reverse_normals(self)
+   !< Reverse facets normals.
    class(file_stl_object), intent(inout) :: self !< File STL.
 
-   if (self%facets_number>0) call self%facet%sanitize_normal
+   if (self%facets_number>0) call self%facet%reverse_normal
+   endsubroutine reverse_normals
+
+   pure subroutine sanitize_normals(self)
+   !< Sanitize facets normals, make them consistent.
+   !<
+   !< @note Facets connectivity and normals must be already computed.
+   class(file_stl_object), intent(inout) :: self             !< File STL.
+   logical, allocatable                  :: facet_checked(:) !< List of facets checked.
+   integer(I4P)                          :: f, ff            !< Counter.
+
+   if (self%facets_number>0) then
+      allocate(facet_checked(1:self%facets_number))
+      facet_checked = .false.
+      f = 1
+      facet_checked(f) = .true.
+      do
+         ff = 0
+         if     (self%facet(f)%fcon_edge_12>0.and.(.not.facet_checked(self%facet(f)%fcon_edge_12))) then
+            call self%facet(f)%make_normal_consistent(edge_dir='edge_12', other=self%facet(self%facet(f)%fcon_edge_12))
+            facet_checked(self%facet(f)%fcon_edge_12) = .true.
+            ff = self%facet(f)%fcon_edge_12
+         endif
+         if (self%facet(f)%fcon_edge_23>0.and.(.not.facet_checked(self%facet(f)%fcon_edge_23))) then
+            call self%facet(f)%make_normal_consistent(edge_dir='edge_23', other=self%facet(self%facet(f)%fcon_edge_23))
+            facet_checked(self%facet(f)%fcon_edge_23) = .true.
+            ff = self%facet(f)%fcon_edge_23
+         endif
+         if (self%facet(f)%fcon_edge_31>0.and.(.not.facet_checked(self%facet(f)%fcon_edge_31))) then
+            call self%facet(f)%make_normal_consistent(edge_dir='edge_31', other=self%facet(self%facet(f)%fcon_edge_31))
+            facet_checked(self%facet(f)%fcon_edge_31) = .true.
+            ff = self%facet(f)%fcon_edge_31
+         endif
+         if (ff==0) then
+            exit
+         else
+            f = ff
+         endif
+      enddo
+   endif
+   call self%compute_volume
+   if (self%volume < 0) call self%reverse_normals
    endsubroutine sanitize_normals
 
    subroutine save_into_file(self, file_name, is_ascii)

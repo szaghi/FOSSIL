@@ -9,7 +9,7 @@ module fossil_aabb_tree_object
 
 use fossil_aabb_object, only : aabb_object
 use fossil_aabb_node_object, only : aabb_node_object
-use fossil_facet_object, only : facet_object, FRLEN
+use fossil_facet_object, only : facet_object
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : I4P, R8P, MaxR8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
