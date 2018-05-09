@@ -108,7 +108,7 @@ Go to [Top](#top)
 
 ## Documentation
 
-Besides this README file the FOSSIL documentation is contained into its own [wiki](https://github.com/szaghi/FOSSIL/wiki). Detailed documentation of the API is contained into the [GitHub Pages](http://szaghi.github.io/FOSSIL/index.html) that can also be created locally by means of [ford tool](https://github.com/cmacmackin/ford).
+Besides this README file the FOSSIL documentation is contained into its own [wiki](https://github.com/szaghi/FOSSIL/wiki). Detailed documentation of the API is contained into the [GitHub Pages](http://szaghi.github.io/FOSSIL/) that can also be created locally by means of [ford tool](https://github.com/cmacmackin/ford).
 
 ### A Taste of FOSSIL
 

@@ -197,10 +197,8 @@ jobs         = 2
 # rules
 [rule-makedoc]
 help   = Build documentation from source files
-rule_1 = rm -rf doc/html/*
-rule_2 = ford doc/main_page.md --debug
-rule_3 = cp -r doc/html/publish/* doc/html/
-rule_4 = rm -rf doc/html/publish
+rule_1 = rm -rf docs/*
+rule_2 = ford pre_docs/main_page.md --debug
 
 [rule-deldoc]
 help = Delete documentation

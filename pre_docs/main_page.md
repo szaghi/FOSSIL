@@ -3,7 +3,7 @@ src_dir: ../src/lib
 src_dir: ../src/tests
 exclude_dir: ../src/third_party/PENF/src/lib
              ../src/third_party/PENF/src/tests
-output_dir: html/publish/
+output_dir: ../docs/
 project_github: https://github.com/szaghi/FOSSIL
 summary: FOSSIL, FOrtran Stereo (si) Litography parser
 author: Stefano Zaghi
