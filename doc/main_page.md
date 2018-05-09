@@ -1,5 +1,6 @@
 project: FOSSIL
-src_dir: ../src
+src_dir: ../src/lib
+src_dir: ../src/tests
 exclude_dir: ../src/third_party/PENF/src/lib
              ../src/third_party/PENF/src/tests
 output_dir: html/publish/
