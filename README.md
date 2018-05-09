@@ -46,7 +46,7 @@ FOSSIL is a pure Fortran (KISS) library for IO and manipulation of STL (Stereo L
 
 FOSSIL provides a simple API to IO STL files and also to manipulate the triangulated surface contained into the STL file.
 
-![dragon](doc/dragon.jpg)
+![dragon](pre_docs/dragon.jpg)
 
 > the dragon STL test (src/tests/dragon.stl) is composed by 6588 triangular facets. The signed distance computation on a uniform
 > grid of `64^3` is accelerated by a factor of 7x using AABB algorithm with respect the simple brute force.
