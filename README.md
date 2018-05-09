@@ -58,13 +58,19 @@ Go to [Top](#top)
 * [X] User-friendly methods for IO STL files:
     * [x] input:
         * [x] automatic guessing of file format (ASCII or BINARY);
-        * [x] automatic loading of all facets;
+        * [x] load STL file effortless;
     * [x] output:
-        * [x] automatic saving of all facets;
+        * [x] save STL file effortless;
 * [x] powerful surface analysis and manipulation:
-    * [ ] sanitize normals:
-        * [ ] reverse normals:
-        * [ ] make normals consistent:
+    * [x] build facets connectivity;
+    * [x] sanitize normals:
+        * [x] reverse normals:
+        * [x] make normals consistent:
+    * [x] compute volume;
+    * [x] rotate facets;
+    * [x] translate facets;
+    * [x] mirror facets;
+    * [x] resize (scale) facets;
     * [x] compute minimal distance:
         * [x] square distance;
         * [x] square root distance;
@@ -106,6 +112,52 @@ Besides this README file the FOSSIL documentation is contained into its own [wik
 
 ### A Taste of FOSSIL
 
-To be written.
+FOSSIL is an KISS library:
+
+#### simple load
+> effortless load of file (with STL surface analysis)
+```fortran
+use fossil
+type(file_stl_object) :: file_stl ! STL file handler.
+call file_stl%initialize(file_name='cube.stl')
+call file_stl%load_from_file(guess_format=.true.)
+```
+
+#### print STL statistics
+> print main informations of STL
+```fortran
+print '(A)', file_stl%statistics()
+```
+> upon exection will print something like
+```bash
+Mesh_1
+file name:   src/tests/cube.stl
+file format: ascii
+X extents: [ 0.000000000000000E+000, +0.100000000000000E+001]
+Y extents: [ 0.000000000000000E+000, +0.100000000000000E+001]
+Z extents: [ 0.000000000000000E+000, +0.100000000000000E+001]
+volume: -0.100000000000000E+001
+number of facets: +12
+```
+
+#### sanitiza normals
+> make normals consistent
+```fortran
+call file_stl%sanitize_normals
+```
+
+#### simple manipulations
+> simply manipulate geometry
+```fortran
+call file_stl%resize(factor=3.4*ex + 2*ey + 0.5*ez) ! ex, ey, ez being axis versors
+call file_stl%resize(x=0.5, z=1.2)                  ! scale only x and z axis
+call file_stl%mirror(normal=ex)                     ! mirror respect yz-plane
+call file_stl%mirror(normal=ex+ey)                  ! mirror respect plane with normal ex+ey
+call file_stl%mirror(matrix=matrix)                 ! mirror by a given mirroring matrix
+call file_stl%rotate(axis=ex, angle=1.57)           ! rotate around x axis by pi/2
+call file_stl%rotate(matrix=matrix)                 ! rotati by a given rotating matrix
+call file_stl%translate(delta=3*ex + 2*ey + 0.5*ez) ! translate by a vectorial delta
+call file_stl%translate(x=0.5, z=1.2)               ! translate by only x and z delta
+```
 
 Go to [Top](#top)
