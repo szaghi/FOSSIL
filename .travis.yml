@@ -23,7 +23,7 @@ addons:
 env:
   global:
     - MAKECOVERAGE="FoBiS.py rule -ex makecoverage"
-    - MAKEDOC="./scripts/makedoc.sh szaghi/FOSSIL"
+    - MAKEDOC="FoBiS.py rule -ex makedoc"
     - CLEAN="FoBiS.py rule -ex clean"
     - MAKETAR="FoBiS.py rule -ex maketar"
 
