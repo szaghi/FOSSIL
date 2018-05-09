@@ -7,8 +7,8 @@ use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object, only : facet_object
 use fossil_utils, only : EPS, PI, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
-use penf, only : I4P, R8P, MaxR8P
-use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
+use penf, only : I4P, R8P, MaxR8P, str
+use vecfor, only : ex_R8P, ey_R8P, ez_R8P, mirror_matrix_R8P, rotation_matrix_R8P, vector_R8P
 
 implicit none
 private
@@ -22,27 +22,37 @@ type :: file_stl_object
    integer(I4P)                    :: facets_number=0 !< Facets number.
    type(facet_object), allocatable :: facet(:)        !< Facets.
    type(aabb_tree_object)          :: aabb            !< AABB tree.
+   type(vector_R8P)                :: bmin            !< Minimum point of STL.
+   type(vector_R8P)                :: bmax            !< Maximum point of STL.
    real(R8P)                       :: volume=0._R8P   !< Volume bounded by STL surface.
    logical                         :: is_ascii=.true. !< Sentinel to check if file is ASCII.
    logical                         :: is_open=.false. !< Sentinel to check if file is open.
    contains
       ! public methods
-      procedure, pass(self) :: build_connectivity            !< Build facets connectivity.
-      procedure, pass(self) :: close_file                    !< Close file.
-      procedure, pass(self) :: compute_metrix                !< Compute facets metrix.
-      procedure, pass(self) :: compute_normals               !< Compute facets normals by means of vertices data.
-      procedure, pass(self) :: compute_volume                !< Compute volume bounded by STL surface.
-      procedure, pass(self) :: create_aabb_tree              !< Create the AABB tree.
-      procedure, pass(self) :: destroy                       !< Destroy file.
-      procedure, pass(self) :: distance                      !< Compute the (minimum) distance from point to triangulated surface.
-      procedure, pass(self) :: initialize                    !< Initialize file.
-      procedure, pass(self) :: is_point_inside_polyhedron_ri !< Determinate is a point is inside or not STL facets by ray intersect.
-      procedure, pass(self) :: is_point_inside_polyhedron_sa !< Determinate is a point is inside or not STL facets by solid angle.
-      procedure, pass(self) :: load_from_file                !< Load from file.
-      procedure, pass(self) :: open_file                     !< Open file, once initialized.
-      procedure, pass(self) :: reverse_normals               !< Reverse facets normals.
-      procedure, pass(self) :: sanitize_normals              !< Sanitize facets normals, make them consistent.
-      procedure, pass(self) :: save_into_file                !< Save into file.
+      procedure, pass(self) :: analize                         !< Analize STL.
+      procedure, pass(self) :: build_connectivity              !< Build facets connectivity.
+      procedure, pass(self) :: close_file                      !< Close file.
+      procedure, pass(self) :: compute_metrix                  !< Compute facets metrix.
+      procedure, pass(self) :: compute_normals                 !< Compute facets normals by means of vertices data.
+      procedure, pass(self) :: compute_volume                  !< Compute volume bounded by STL surface.
+      procedure, pass(self) :: create_aabb_tree                !< Create the AABB tree.
+      procedure, pass(self) :: destroy                         !< Destroy file.
+      procedure, pass(self) :: distance                        !< Compute the (minimum) distance from point to triangulated surface.
+      procedure, pass(self) :: initialize                      !< Initialize file.
+      procedure, pass(self) :: is_point_inside_polyhedron_ri   !< Determinate is point is inside or not STL facets by ray intersect.
+      procedure, pass(self) :: is_point_inside_polyhedron_sa   !< Determinate is point is inside or not STL facets by solid angle.
+      procedure, pass(self) :: load_from_file                  !< Load from file.
+      generic               :: mirror => mirror_by_normal, &
+                                         mirror_by_matrix      !< Mirror facets.
+      procedure, pass(self) :: open_file                       !< Open file, once initialized.
+      procedure, pass(self) :: reverse_normals                 !< Reverse facets normals.
+      procedure, pass(self) :: resize                          !< Resize (scale) facets by x or y or z or vectorial factors.
+      generic               :: rotate => rotate_by_axis_angle, &
+                                         rotate_by_matrix      !< Rotate facets.
+      procedure, pass(self) :: sanitize_normals                !< Sanitize facets normals, make them consistent.
+      procedure, pass(self) :: save_into_file                  !< Save into file.
+      procedure, pass(self) :: statistics                      !< Return STL statistics.
+      procedure, pass(self) :: translate                       !< Translate facet given vectorial delta.
       ! operators
       generic :: assignment(=) => file_stl_assign_file_stl       !< Overload `=`.
       procedure, pass(lhs),  private :: file_stl_assign_file_stl !< Operator `=`.
@@ -50,12 +60,29 @@ type :: file_stl_object
       procedure, pass(self), private :: allocate_facets              !< Allocate facets.
       procedure, pass(self), private :: load_facets_number_from_file !< Load facets number from file.
       procedure, pass(self), private :: load_header_from_file        !< Load header from file.
+      procedure, pass(self), private :: mirror_by_normal             !< Mirror facets given normal of mirroring plane.
+      procedure, pass(self), private :: mirror_by_matrix             !< Mirror facets given matrix.
+      procedure, pass(self), private :: rotate_by_axis_angle         !< Rotate facets given axis and angle.
+      procedure, pass(self), private :: rotate_by_matrix             !< Rotate facets given matrix.
       procedure, pass(self), private :: save_header_into_file        !< Save header into file.
       procedure, pass(self), private :: save_trailer_into_file       !< Save trailer into file.
 endtype file_stl_object
 
 contains
    ! public methods
+   pure subroutine analize(self)
+   !< Analize STL.
+   !<
+   !< Buil connectivity, compute metrix, compute volume.
+   class(file_stl_object), intent(inout) :: self   !< File STL.
+
+   if (self%facets_number>0) then
+      call self%build_connectivity
+      call self%compute_metrix
+      call self%compute_volume
+   endif
+   endsubroutine analize
+
    pure subroutine build_connectivity(self)
    !< Build facets connectivity.
    class(file_stl_object), intent(inout) :: self   !< File STL.
@@ -91,6 +118,13 @@ contains
 
    if (self%facets_number>0) then
       call self%facet%compute_metrix
+      ! computing bounding box extents
+      self%bmin%x = minval(self%facet(:)%bb(1)%x)
+      self%bmin%y = minval(self%facet(:)%bb(1)%y)
+      self%bmin%z = minval(self%facet(:)%bb(1)%z)
+      self%bmax%x = maxval(self%facet(:)%bb(2)%x)
+      self%bmax%y = maxval(self%facet(:)%bb(2)%y)
+      self%bmax%z = maxval(self%facet(:)%bb(2)%z)
    endif
    endsubroutine compute_metrix
 
@@ -267,14 +301,17 @@ contains
    if (present(is_ascii)) self%is_ascii = is_ascii
    endsubroutine initialize
 
-   subroutine load_from_file(self, file_name, is_ascii, guess_format)
+   subroutine load_from_file(self, file_name, is_ascii, guess_format, disable_analysis)
    !< Load from file.
-   class(file_stl_object), intent(inout)        :: self         !< File STL.
-   character(*),           intent(in), optional :: file_name    !< File name.
-   logical,                intent(in), optional :: is_ascii     !< Sentinel to check if file is ASCII.
-   logical,                intent(in), optional :: guess_format !< Sentinel to try to guess format directly from file.
-   integer(I4P)                                 :: f            !< Counter.
+   class(file_stl_object), intent(inout)        :: self              !< File STL.
+   character(*),           intent(in), optional :: file_name         !< File name.
+   logical,                intent(in), optional :: is_ascii          !< Sentinel to check if file is ASCII.
+   logical,                intent(in), optional :: guess_format      !< Sentinel to try to guess format directly from file.
+   logical,                intent(in), optional :: disable_analysis  !< Sentinel to disable STL analysis.
+   logical                                      :: disable_analysis_ !< Sentinel to disable STL analysis, local variable.
+   integer(I4P)                                 :: f                 !< Counter.
 
+   disable_analysis_ = .false. ; if (present(disable_analysis)) disable_analysis_ = disable_analysis
    call self%initialize(skip_destroy=.true., file_name=file_name, is_ascii=is_ascii)
    call self%open_file(file_action='read', guess_format=guess_format)
    call self%load_facets_number_from_file
@@ -292,6 +329,7 @@ contains
       enddo
    endif
    call self%close_file
+   if (.not.disable_analysis_) call self%analize
    endsubroutine load_from_file
 
    subroutine open_file(self, file_action, guess_format)
@@ -414,6 +452,82 @@ contains
    call self%close_file
    endsubroutine save_into_file
 
+   elemental subroutine resize(self, x, y, z, factor, recompute_metrix)
+   !< Resize (scale) facets by x or y or z or vectorial factors.
+   !<
+   !< @note The name `scale` has not been used, it been a Fortran built-in.
+   class(file_stl_object), intent(inout)        :: self             !< File STL.
+   real(R8P),              intent(in), optional :: x                !< Factor along x axis.
+   real(R8P),              intent(in), optional :: y                !< Factor along y axis.
+   real(R8P),              intent(in), optional :: z                !< Factor along z axis.
+   type(vector_R8P),       intent(in), optional :: factor           !< Vectorial factor.
+   logical,                intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+   type(vector_R8P)                             :: factor_          !< Vectorial factor, local variable.
+
+   if (self%facets_number>0) then
+      factor_ = 1._R8P
+      if (present(factor)) then
+         factor_ = factor
+      else
+         if (present(x)) factor_%x = x
+         if (present(y)) factor_%y = y
+         if (present(z)) factor_%z = z
+      endif
+      call self%facet%resize(factor=factor_, recompute_metrix=recompute_metrix)
+   endif
+   endsubroutine resize
+
+   pure function statistics(self, prefix) result(stats)
+   !< Return STL statistics.
+   class(file_stl_object), intent(in)           :: self             !< File STL.
+   character(*),           intent(in), optional :: prefix           !< Lines prefix.
+   character(len=:), allocatable                :: stats            !< STL statistics.
+   character(len=:), allocatable                :: prefix_          !< Lines prefix, local variable.
+   character(1), parameter                      :: NL=new_line('a') !< Line terminator.
+
+   prefix_ = '' ; if (present(prefix)) prefix_ = prefix
+   stats = prefix_//self%header//NL
+   if (allocated(self%file_name)) stats=stats//prefix_//'file name:   '//self%file_name//NL
+   if (self%is_ascii) then
+      stats=stats//prefix_//'file format: ascii'//NL
+   else
+      stats=stats//prefix_//'file format: binary'//NL
+   endif
+   if (self%facets_number > 0) then
+      stats=stats//prefix_//'X extents: ['//trim(str(self%bmin%x))//', '//trim(str(self%bmax%x))//']'//NL
+      stats=stats//prefix_//'Y extents: ['//trim(str(self%bmin%y))//', '//trim(str(self%bmax%y))//']'//NL
+      stats=stats//prefix_//'Z extents: ['//trim(str(self%bmin%z))//', '//trim(str(self%bmax%z))//']'//NL
+      stats=stats//prefix_//'volume: '//trim(str(self%volume))//NL
+      stats=stats//prefix_//'number of facets: '//trim(str(self%facets_number))//NL
+      ! stats=stats//prefix_//'number of facets with 1 edge disconnected: '//trim(str(self%facets_1disconnect_number))//NL
+      ! stats=stats//prefix_//'number of facets with 2 edge disconnected: '//trim(str(self%facets_2disconnect_number))//NL
+      ! stats=stats//prefix_//'number of facets with 3 edge disconnected: '//trim(str(self%facets_3disconnect_number))//NL
+   endif
+   endfunction statistics
+
+   elemental subroutine translate(self, x, y, z, delta, recompute_metrix)
+   !< Translate facets x or y or z or vectorial delta increments.
+   class(file_stl_object), intent(inout)        :: self             !< File STL.
+   real(R8P),              intent(in), optional :: x                !< Increment along x axis.
+   real(R8P),              intent(in), optional :: y                !< Increment along y axis.
+   real(R8P),              intent(in), optional :: z                !< Increment along z axis.
+   type(vector_R8P),       intent(in), optional :: delta            !< Vectorial increment.
+   logical,                intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+   type(vector_R8P)                             :: delta_           !< Vectorial increment, local variable.
+
+   if (self%facets_number>0) then
+      delta_ = 0._R8P
+      if (present(delta)) then
+         delta_ = delta
+      else
+         if (present(x)) delta_%x = x
+         if (present(y)) delta_%y = y
+         if (present(z)) delta_%z = z
+      endif
+      call self%facet%translate(delta=delta_, recompute_metrix=recompute_metrix)
+   endif
+   endsubroutine translate
+
    ! operators
    ! =
    pure subroutine file_stl_assign_file_stl(lhs, rhs)
@@ -429,6 +543,8 @@ contains
    if (allocated(lhs%facet)) deallocate(lhs%facet)
    if (allocated(rhs%facet)) allocate(lhs%facet(1:lhs%facets_number), source=rhs%facet)
    lhs%aabb = rhs%aabb
+   lhs%bmin = rhs%bmin
+   lhs%bmax = rhs%bmax
    lhs%is_ascii = rhs%is_ascii
    lhs%is_open = rhs%is_open
    endsubroutine file_stl_assign_file_stl
@@ -479,7 +595,7 @@ contains
       rewind(self%file_unit)
       if (self%is_ascii) then
          read(self%file_unit, '(A)') self%header
-         self%header = trim(self%header(index(self%header, 'solid')+1:))
+         self%header = trim(adjustl(self%header(index(self%header, 'solid')+6:)))
       else
          read(self%file_unit) self%header
          read(self%file_unit) self%facets_number
@@ -488,6 +604,69 @@ contains
       write(stderr, '(A)') 'error: file is not open, impossible to load header from file!'
    endif
    endsubroutine load_header_from_file
+
+   elemental subroutine mirror_by_normal(self, normal, recompute_metrix)
+   !< Mirror facets given normal of mirroring plane.
+   class(file_stl_object), intent(inout)        :: self             !< File STL.
+   type(vector_R8P),       intent(in)           :: normal           !< Normal of mirroring plane.
+   logical,                intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+   real(R8P)                                    :: matrix(3,3)      !< Mirroring matrix.
+   integer(I4P)                                 :: f                !< Counter.
+
+   if (self%facets_number>0) then
+      matrix = mirror_matrix_R8P(normal=normal)
+      do f=1, self%facets_number
+         call self%facet(f)%mirror(matrix=matrix, recompute_metrix=recompute_metrix)
+      enddo
+   endif
+   endsubroutine mirror_by_normal
+
+   pure subroutine mirror_by_matrix(self, matrix, recompute_metrix)
+   !< Mirror facet given matrix (of mirroring).
+   class(file_stl_object), intent(inout)        :: self             !< File STL.
+   real(R8P),              intent(in)           :: matrix(3,3)      !< Mirroring matrix.
+   logical,                intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+   integer(I4P)                                 :: f                !< Counter.
+
+   if (self%facets_number>0) then
+      do f=1, self%facets_number
+         call self%facet(f)%mirror(matrix=matrix, recompute_metrix=recompute_metrix)
+      enddo
+   endif
+   endsubroutine mirror_by_matrix
+
+   elemental subroutine rotate_by_axis_angle(self, axis, angle, recompute_metrix)
+   !< Rotate facets given axis and angle.
+   !<
+   !< Angle must be in radiants.
+   class(file_stl_object), intent(inout)        :: self             !< File STL.
+   type(vector_R8P),       intent(in)           :: axis             !< Axis of rotation.
+   real(R8P),              intent(in)           :: angle            !< Angle of rotation.
+   logical,                intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+   real(R8P)                                    :: matrix(3,3)      !< Rotation matrix.
+   integer(I4P)                                 :: f                !< Counter.
+
+   if (self%facets_number>0) then
+      matrix = rotation_matrix_R8P(axis=axis, angle=angle)
+      do f=1, self%facets_number
+         call self%facet(f)%rotate(matrix=matrix, recompute_metrix=recompute_metrix)
+      enddo
+   endif
+   endsubroutine rotate_by_axis_angle
+
+   pure subroutine rotate_by_matrix(self, matrix, recompute_metrix)
+   !< Rotate facet given matrix (of ratation).
+   class(file_stl_object), intent(inout)        :: self             !< File STL.
+   real(R8P),              intent(in)           :: matrix(3,3)      !< Rotation matrix.
+   logical,                intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+   integer(I4P)                                 :: f                !< Counter.
+
+   if (self%facets_number>0) then
+      do f=1, self%facets_number
+         call self%facet(f)%rotate(matrix=matrix, recompute_metrix=recompute_metrix)
+      enddo
+   endif
+   endsubroutine rotate_by_matrix
 
    subroutine save_header_into_file(self)
    !< Save header into file.

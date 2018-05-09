@@ -19,8 +19,6 @@ call cli_parse
 call file_stl%initialize(file_name=trim(adjustl(file_name_stl)))
 call file_stl%load_from_file(guess_format=.true.)
 
-call file_stl%build_connectivity
-call file_stl%compute_volume
 print*, 'volume before sanitize normals: ', file_stl%volume
 are_tests_passed(1) = file_stl%volume < 0._R8P
 call file_stl%sanitize_normals
