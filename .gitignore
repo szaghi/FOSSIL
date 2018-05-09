@@ -25,7 +25,7 @@
 *.log
 
 # special directories
-doc/html/
+docs/html/
 exe/
 reference/
 wiki/

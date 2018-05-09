@@ -6,7 +6,7 @@ module fossil_facet_object
 use fossil_utils, only : EPS, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : FR4P, I2P, I4P, R4P, R8P, str, ZeroR8P
-use vecfor, only : angle_R8P, face_normal3_R8P, normL2_R8P, vector_R8P
+use vecfor, only : angle_R8P, face_normal3_R8P, mirror_matrix_R8P, normL2_R8P, rotation_matrix_R8P, vector_R8P
 
 implicit none
 private
@@ -14,10 +14,10 @@ public :: facet_object
 
 type :: facet_object
    !< FOSSIL, facet class.
-   type(vector_R8P) :: normal    !< Facet (outward) normal (versor), `(v2-v1).cross.(v3-v1)`.
-   type(vector_R8P) :: vertex_1  !< Facet vertex 1.
-   type(vector_R8P) :: vertex_2  !< Facet vertex 2.
-   type(vector_R8P) :: vertex_3  !< Facet vertex 3.
+   type(vector_R8P) :: normal   !< Facet (outward) normal (versor), `(v2-v1).cross.(v3-v1)`.
+   type(vector_R8P) :: vertex_1 !< Facet vertex 1.
+   type(vector_R8P) :: vertex_2 !< Facet vertex 2.
+   type(vector_R8P) :: vertex_3 !< Facet vertex 3.
    ! metrix
    ! triangle plane parametric equation: T(s,t) = B + s*E12 + t*E13
    type(vector_R8P) :: E12        !< Edge 1-2, `V2-V1`.
@@ -40,31 +40,41 @@ type :: facet_object
    integer(I4P), allocatable :: vertex_3_occurrence(:) !< List of vertex 3 "occurrencies", list of facets global ID containing it.
    contains
       ! public methods
-      procedure, pass(self) :: add_vertex_occurrence       !< Add vertex occurence.
-      procedure, pass(self) :: check_normal                !< Check normal consistency.
-      procedure, pass(self) :: check_vertices_occurrencies !< Check if vertices of facet are *identical* to the ones of other facet.
-      procedure, pass(self) :: compute_metrix              !< Compute local (plane) metrix.
-      procedure, pass(self) :: compute_normal              !< Compute normal by means of vertices data.
-      procedure, pass(self) :: destroy                     !< Destroy facet.
-      procedure, pass(self) :: distance                    !< Compute the (unsigned, squared) distance from a point to facet.
-      procedure, pass(self) :: do_ray_intersect            !< Return true if facet is intersected by a ray.
-      procedure, pass(self) :: initialize                  !< Initialize facet.
-      procedure, pass(self) :: load_from_file_ascii        !< Load facet from ASCII file.
-      procedure, pass(self) :: load_from_file_binary       !< Load facet from binary file.
-      procedure, pass(self) :: make_normal_consistent      !< Make normal of other facet consistent with self.
-      procedure, pass(self) :: reverse_normal              !< Reverse facet normal.
-      procedure, pass(self) :: save_into_file_ascii        !< Save facet into ASCII file.
-      procedure, pass(self) :: save_into_file_binary       !< Save facet into binary file.
-      procedure, pass(self) :: solid_angle                 !< Return the (projected) solid angle of the facet with respect point.
-      procedure, pass(self) :: tetrahedron_volume          !< Return the volume of tetrahedron built by facet and a given apex.
-      procedure, pass(self) :: update_connectivity         !< Update facet connectivity.
-      procedure, pass(self) :: vertex_global_id            !< Return the vertex global id given the local one.
+      procedure, pass(self) :: add_vertex_occurrence           !< Add vertex occurence.
+      procedure, pass(self) :: check_normal                    !< Check normal consistency.
+      procedure, pass(self) :: check_vertices_occurrencies     !< Check if vertices of facet are *identical* to ones of other facet.
+      procedure, pass(self) :: compute_metrix                  !< Compute local (plane) metrix.
+      procedure, pass(self) :: compute_normal                  !< Compute normal by means of vertices data.
+      procedure, pass(self) :: destroy                         !< Destroy facet.
+      procedure, pass(self) :: distance                        !< Compute the (unsigned, squared) distance from a point to facet.
+      procedure, pass(self) :: do_ray_intersect                !< Return true if facet is intersected by a ray.
+      procedure, pass(self) :: initialize                      !< Initialize facet.
+      procedure, pass(self) :: load_from_file_ascii            !< Load facet from ASCII file.
+      procedure, pass(self) :: load_from_file_binary           !< Load facet from binary file.
+      procedure, pass(self) :: make_normal_consistent          !< Make normal of other facet consistent with self.
+      generic               :: mirror => mirror_by_normal, &
+                                         mirror_by_matrix      !< Mirror facet.
+      procedure, pass(self) :: reverse_normal                  !< Reverse facet normal.
+      procedure, pass(self) :: resize                          !< Resize (scale) facet by x or y or z or vectorial factors.
+      generic               :: rotate => rotate_by_axis_angle, &
+                                         rotate_by_matrix      !< Rotate facet.
+      procedure, pass(self) :: save_into_file_ascii            !< Save facet into ASCII file.
+      procedure, pass(self) :: save_into_file_binary           !< Save facet into binary file.
+      procedure, pass(self) :: solid_angle                     !< Return the (projected) solid angle of the facet with respect point.
+      procedure, pass(self) :: tetrahedron_volume              !< Return the volume of tetrahedron built by facet and a given apex.
+      procedure, pass(self) :: translate                       !< Translate facet given vectorial delta.
+      procedure, pass(self) :: update_connectivity             !< Update facet connectivity.
+      procedure, pass(self) :: vertex_global_id                !< Return the vertex global id given the local one.
       ! operators
       generic :: assignment(=) => facet_assign_facet !< Overload `=`.
       ! private methods
-      procedure, pass(lhs)  :: facet_assign_facet           !< Operator `=`.
-      procedure, pass(self) :: edge_connection_in_other_ref !< Return the edge of connection in the other reference.
-      procedure, pass(self) :: flip_edge                    !< Flip facet edge.
+      procedure, pass(self), private :: edge_connection_in_other_ref !< Return the edge of connection in the other reference.
+      procedure, pass(lhs),  private :: facet_assign_facet           !< Operator `=`.
+      procedure, pass(self), private :: flip_edge                    !< Flip facet edge.
+      procedure, pass(self), private :: mirror_by_normal             !< Mirror facet given normal of mirroring plane.
+      procedure, pass(self), private :: mirror_by_matrix             !< Mirror facet given matrix.
+      procedure, pass(self), private :: rotate_by_axis_angle         !< Rotate facet given axis and angle.
+      procedure, pass(self), private :: rotate_by_matrix             !< Rotate facet given matrix.
 endtype facet_object
 
 contains
@@ -459,6 +469,22 @@ contains
    endif
    endsubroutine make_normal_consistent
 
+   elemental subroutine resize(self, factor, recompute_metrix)
+   !< Resize (scale) facet by x or y or z or vectorial factors.
+   !<
+   !< @note The name `scale` has not been used, it been a Fortran built-in.
+   class(facet_object), intent(inout)        :: self             !< Facet
+   type(vector_R8P),    intent(in)           :: factor           !< Vectorial factor.
+   logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+
+   self%vertex_1 = self%vertex_1 * factor
+   self%vertex_2 = self%vertex_2 * factor
+   self%vertex_3 = self%vertex_3 * factor
+   if (present(recompute_metrix)) then
+      if (recompute_metrix) call self%compute_metrix
+   endif
+   endsubroutine resize
+
    elemental subroutine reverse_normal(self)
    !< Reverse facet normal.
    class(facet_object), intent(inout) :: self   !< Facet.
@@ -534,6 +560,20 @@ contains
             apex%distance_to_plane(pt1=self%vertex_1, pt2=self%vertex_2, pt3=self%vertex_3) / 3._R8P
    endfunction
 
+   elemental subroutine translate(self, delta, recompute_metrix)
+   !< Translate facet given vectorial delta.
+   class(facet_object), intent(inout)        :: self             !< Facet.
+   type(vector_R8P),    intent(in)           :: delta            !< Translation delta.
+   logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+
+   self%vertex_1 = self%vertex_1 + delta
+   self%vertex_2 = self%vertex_2 + delta
+   self%vertex_3 = self%vertex_3 + delta
+   if (present(recompute_metrix)) then
+      if (recompute_metrix) call self%compute_metrix
+   endif
+   endsubroutine translate
+
    pure subroutine update_connectivity(self)
    !< Update facet connectivity.
    !<
@@ -577,55 +617,6 @@ contains
    endfunction vertex_global_id
 
    ! private methods
-   ! `=` operator
-   pure subroutine facet_assign_facet(lhs, rhs)
-   !< Operator `=`.
-   class(facet_object), intent(inout) :: lhs !< Left hand side.
-   type(facet_object),  intent(in)    :: rhs !< Right hand side.
-
-   lhs%normal = rhs%normal
-   lhs%vertex_1 = rhs%vertex_1
-   lhs%vertex_2 = rhs%vertex_2
-   lhs%vertex_3 = rhs%vertex_3
-   lhs%E12 = rhs%E12
-   lhs%E13 = rhs%E13
-   lhs%a = rhs%a
-   lhs%b = rhs%b
-   lhs%c = rhs%c
-   lhs%d = rhs%d
-   lhs%det = rhs%det
-   lhs%bb = rhs%bb
-   lhs%id = rhs%id
-   lhs%fcon_edge_12 = rhs%fcon_edge_12
-   lhs%fcon_edge_23 = rhs%fcon_edge_23
-   lhs%fcon_edge_31 = rhs%fcon_edge_31
-   if (allocated(lhs%vertex_1_occurrence)) deallocate(lhs%vertex_1_occurrence)
-   if (allocated(rhs%vertex_1_occurrence)) lhs%vertex_1_occurrence = rhs%vertex_1_occurrence
-   if (allocated(lhs%vertex_2_occurrence)) deallocate(lhs%vertex_2_occurrence)
-   if (allocated(rhs%vertex_2_occurrence)) lhs%vertex_2_occurrence = rhs%vertex_2_occurrence
-   if (allocated(lhs%vertex_3_occurrence)) deallocate(lhs%vertex_3_occurrence)
-   if (allocated(rhs%vertex_3_occurrence)) lhs%vertex_3_occurrence = rhs%vertex_3_occurrence
-   endsubroutine facet_assign_facet
-
-   pure subroutine edge_connection_in_other_ref(self, other, edge_dir, edge)
-   !< Return the edge of connection in the other reference.
-   class(facet_object), intent(in)  :: self     !< Facet.
-   type(facet_object),  intent(in)  :: other    !< Other facet.
-   character(*),        intent(out) :: edge_dir !< Edge (in other numeration) along which self is connected.
-   type(vector_R8P),    intent(out) :: edge     !< Edge (in other numeration) along which self is connected.
-
-   if     (other%fcon_edge_12 == self%id) then
-      edge_dir = 'edge_12'
-      edge = other%vertex_2 - other%vertex_1
-   elseif (other%fcon_edge_23 == self%id) then
-      edge_dir = 'edge_23'
-      edge = other%vertex_3 - other%vertex_2
-   elseif (other%fcon_edge_31 == self%id) then
-      edge_dir = 'edge_31'
-      edge = other%vertex_1 - other%vertex_3
-   endif
-   endsubroutine edge_connection_in_other_ref
-
    pure subroutine flip_edge(self, edge_dir)
    !< Flip facet edge.
    class(facet_object), intent(inout) :: self     !< Facet.
@@ -681,4 +672,109 @@ contains
       endif
       endsubroutine flip_vertices
    endsubroutine flip_edge
+
+   pure subroutine mirror_by_normal(self, normal, recompute_metrix)
+   !< Mirror facet given normal of mirroring plane.
+   class(facet_object), intent(inout)        :: self             !< Facet.
+   type(vector_R8P),    intent(in)           :: normal           !< Normal of mirroring plane.
+   logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+
+   call self%mirror_by_matrix(matrix=mirror_matrix_R8P(normal=normal))
+   if (present(recompute_metrix)) then
+      if (recompute_metrix) call self%compute_metrix
+   endif
+   endsubroutine mirror_by_normal
+
+   pure subroutine mirror_by_matrix(self, matrix, recompute_metrix)
+   !< Mirror facet given matrix (of mirroring).
+   class(facet_object), intent(inout)        :: self             !< Facet.
+   real(R8P),           intent(in)           :: matrix(3,3)      !< Mirroring matrix.
+   logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+
+   call self%vertex_1%mirror(matrix=matrix)
+   call self%vertex_2%mirror(matrix=matrix)
+   call self%vertex_3%mirror(matrix=matrix)
+   if (present(recompute_metrix)) then
+      if (recompute_metrix) call self%compute_metrix
+   endif
+   endsubroutine mirror_by_matrix
+
+   pure subroutine rotate_by_axis_angle(self, axis, angle, recompute_metrix)
+   !< Rotate facet given axis and angle.
+   !<
+   !< Angle must be in radiants.
+   class(facet_object), intent(inout)        :: self             !< Facet.
+   type(vector_R8P),    intent(in)           :: axis             !< Axis of rotation.
+   real(R8P),           intent(in)           :: angle            !< Angle of rotation.
+   logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+
+   call self%rotate_by_matrix(matrix=rotation_matrix_R8P(axis=axis, angle=angle))
+   if (present(recompute_metrix)) then
+      if (recompute_metrix) call self%compute_metrix
+   endif
+   endsubroutine rotate_by_axis_angle
+
+   pure subroutine rotate_by_matrix(self, matrix, recompute_metrix)
+   !< Rotate facet given matrix (of ratation).
+   class(facet_object), intent(inout)        :: self             !< Facet.
+   real(R8P),           intent(in)           :: matrix(3,3)      !< Rotation matrix.
+   logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+
+   call self%vertex_1%rotate(matrix=matrix)
+   call self%vertex_2%rotate(matrix=matrix)
+   call self%vertex_3%rotate(matrix=matrix)
+   if (present(recompute_metrix)) then
+      if (recompute_metrix) call self%compute_metrix
+   endif
+   endsubroutine rotate_by_matrix
+
+   ! `=` operator
+   pure subroutine edge_connection_in_other_ref(self, other, edge_dir, edge)
+   !< Return the edge of connection in the other reference.
+   class(facet_object), intent(in)  :: self     !< Facet.
+   type(facet_object),  intent(in)  :: other    !< Other facet.
+   character(*),        intent(out) :: edge_dir !< Edge (in other numeration) along which self is connected.
+   type(vector_R8P),    intent(out) :: edge     !< Edge (in other numeration) along which self is connected.
+
+   if     (other%fcon_edge_12 == self%id) then
+      edge_dir = 'edge_12'
+      edge = other%vertex_2 - other%vertex_1
+   elseif (other%fcon_edge_23 == self%id) then
+      edge_dir = 'edge_23'
+      edge = other%vertex_3 - other%vertex_2
+   elseif (other%fcon_edge_31 == self%id) then
+      edge_dir = 'edge_31'
+      edge = other%vertex_1 - other%vertex_3
+   endif
+   endsubroutine edge_connection_in_other_ref
+
+   pure subroutine facet_assign_facet(lhs, rhs)
+   !< Operator `=`.
+   class(facet_object), intent(inout) :: lhs !< Left hand side.
+   type(facet_object),  intent(in)    :: rhs !< Right hand side.
+
+   lhs%normal = rhs%normal
+   lhs%vertex_1 = rhs%vertex_1
+   lhs%vertex_2 = rhs%vertex_2
+   lhs%vertex_3 = rhs%vertex_3
+   lhs%E12 = rhs%E12
+   lhs%E13 = rhs%E13
+   lhs%a = rhs%a
+   lhs%b = rhs%b
+   lhs%c = rhs%c
+   lhs%d = rhs%d
+   lhs%det = rhs%det
+   lhs%bb = rhs%bb
+   lhs%id = rhs%id
+   lhs%fcon_edge_12 = rhs%fcon_edge_12
+   lhs%fcon_edge_23 = rhs%fcon_edge_23
+   lhs%fcon_edge_31 = rhs%fcon_edge_31
+   if (allocated(lhs%vertex_1_occurrence)) deallocate(lhs%vertex_1_occurrence)
+   if (allocated(rhs%vertex_1_occurrence)) lhs%vertex_1_occurrence = rhs%vertex_1_occurrence
+   if (allocated(lhs%vertex_2_occurrence)) deallocate(lhs%vertex_2_occurrence)
+   if (allocated(rhs%vertex_2_occurrence)) lhs%vertex_2_occurrence = rhs%vertex_2_occurrence
+   if (allocated(lhs%vertex_3_occurrence)) deallocate(lhs%vertex_3_occurrence)
+   if (allocated(rhs%vertex_3_occurrence)) lhs%vertex_3_occurrence = rhs%vertex_3_occurrence
+   endsubroutine facet_assign_facet
+
 endmodule fossil_facet_object

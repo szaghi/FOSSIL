@@ -31,11 +31,9 @@ are_tests_passed = .false.
 call cli_parse
 call file_stl%initialize(file_name=trim(adjustl(file_name_stl)))
 call file_stl%load_from_file(guess_format=.true.)
-
-call file_stl%build_connectivity
 call file_stl%sanitize_normals
+print*, file_stl%statistics()
 
-call file_stl%compute_metrix
 call file_stl%create_aabb_tree(refinement_levels=refinement_levels)
 
 are_tests_passed = int(file_stl%distance(point=0*ex_R8P), I4P) == 0_I4P
