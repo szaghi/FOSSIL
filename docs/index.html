@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+	 
+	 <meta name="description" content="FOSSIL, FOrtran Stereo (si) Litography parser">
+    
+    <meta name="author" content="Stefano Zaghi" >
+    <link rel="icon" href="./favicon.png">
+
+    <title> FOSSIL </title>
+
+    <link href="./css/bootstrap.min.css" rel="stylesheet">
+    <link href="./css/pygments.css" rel="stylesheet">
+    <link href="./css/font-awesome.min.css" rel="stylesheet">
+    <link href="./css/local.css" rel="stylesheet">
+    
+
+    <!-- HTML5 shim and Respond.js for IE8 support of HTML5 elements and media queries -->
+    <!--[if lt IE 9]>
+      <script src="https://oss.maxcdn.com/html5shiv/3.7.2/html5shiv.min.js"></script>
+      <script src="https://oss.maxcdn.com/respond/1.4.2/respond.min.js"></script>
+    <![endif]-->
+    
+    <script src="./js/jquery-2.1.3.min.js"></script>
+    <script src="./js/svg-pan-zoom.min.js"></script>
+
+    
+    <script src="./tipuesearch/tipuesearch_content.js"></script>
+    <link  href="./tipuesearch/tipuesearch.css" rel="stylesheet">
+    <script src="./tipuesearch/tipuesearch_set.js"></script>
+    <script src="./tipuesearch/tipuesearch.js"></script>
+    
+
+  </head>
+
+  <body>
+
+    <!-- Fixed navbar -->
+    <nav class="navbar navbar-inverse navbar-fixed-top">
+      <div class="container">
+        <div class="navbar-header">
+          <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar" aria-expanded="false" aria-controls="navbar">
+            <span class="sr-only">Toggle navigation</span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+          </button>
+          <a class="navbar-brand" href="./index.html">FOSSIL </a>
+        </div>
+        <div id="navbar" class="navbar-collapse collapse">
+          <ul class="nav navbar-nav">
+				
+            <li class="dropdown hidden-xs visible-sm visible-md hidden-lg">
+              <a href="#" class="dropdown-toggle"
+              data-toggle="dropdown" role="button"
+              aria-haspopup="true"
+		 aria-expanded="false">Contents <span class="caret"></span></a>
+	      <ul class="dropdown-menu">
+              
+            <li><a href="./lists/files.html">Source Files</a></li>
+				
+				
+            <li><a href="./lists/modules.html">Modules</a></li>
+				
+            
+                                
+            <li><a href="./lists/procedures.html">Procedures</a></li>
+				
+								
+            <li><a href="./lists/types.html">Derived Types</a></li>
+				
+				
+            <li><a href="./lists/programs.html">Programs</a></li>
+				
+            </ul>
+            </li>
+
+<li class="visible-xs hidden-sm visible-lg"><a href="./lists/files.html">Source Files</a></li>
+
+
+<li class="visible-xs hidden-sm visible-lg"><a href="./lists/modules.html">Modules</a></li>
+
+
+
+<li class="visible-xs hidden-sm visible-lg"><a href="./lists/procedures.html">Procedures</a></li>
+
+                             
+<li class="visible-xs hidden-sm visible-lg"><a href="./lists/types.html">Derived Types</a></li>
+
+
+<li class="visible-xs hidden-sm visible-lg"><a href="./lists/programs.html">Programs</a></li>
+
+          </ul>
+        
+        <form action="./search.html" class="navbar-form navbar-right" role="search">
+        <div class="form-group">
+          <input type="text" class="form-control" placeholder="Search" name="q" id="tipue_search_input" autocomplete="off" required>
+        </div>
+<!--
+        <button type="submit" class="btn btn-default">Submit</button>
+-->
+        </form>
+        
+        </div><!--/.nav-collapse -->
+      </div>
+    </nav>
+
+    <div class="container">
+    
+      <!-- Main component for a primary marketing message or call to action -->
+      <div class="jumbotron">
+        <p>FOSSIL, FOrtran Stereo (si) Litography parser</p>
+        	 
+	<p> Find us on&hellip;</p>
+        <p>
+        	 
+          <a class="btn btn-lg btn-primary" href="https://github.com/szaghi/FOSSIL" role="button">GitHub</a>
+			 
+			 
+			 
+			 
+	         
+			 
+        </p>
+      </div>
+
+      <div class="row" id='text'>
+		  
+        <div class="col-md-8">
+		  
+          <h1>FOSSIL</h1>
+          <p><a name="top"></a></p>
+<h1 id="fossil"><a class="toclink" href="#fossil">FOSSIL <a href=""><img alt="GitHub tag" src="https://img.shields.io/github/tag/szaghi/FOSSIL.svg"></a></a></h1>
+<p><a href=""><img alt="License" src="https://img.shields.io/badge/license-GNU%20GeneraL%20Public%20License%20v3%20,%20GPLv3-blue.svg"></a>
+<a href=""><img alt="License" src="https://img.shields.io/badge/license-BSD2-red.svg"></a>
+<a href=""><img alt="License" src="https://img.shields.io/badge/license-BSD3-red.svg"></a>
+<a href=""><img alt="License" src="https://img.shields.io/badge/license-MIT-red.svg"></a></p>
+<p><a href=""><img alt="Status" src="https://img.shields.io/badge/status-stable-brightgreen.svg"></a>
+<a href="https://travis-ci.org/szaghi/FOSSIL"><img alt="Build Status" src="https://travis-ci.org/szaghi/FOSSIL.svg?branch=master"></a>
+<a href="http://codecov.io/github/szaghi/FOSSIL?branch=master"><img alt="Coverage Status" src="https://img.shields.io/codecov/c/github/szaghi/FOSSIL.svg"></a></p>
+<h3 id="fossil-fortran-stereo-si-litography-parser"><a class="toclink" href="#fossil-fortran-stereo-si-litography-parser">FOSSIL, FOrtran Stereo (si) Litography parser</a></h3>
+<ul>
+<li>FOSSIL is a pure Fortran (KISS) library for IO and manipulation of STL (Stereo Litography) files for modern (2003+) Fortran projects;</li>
+<li>FOSSIL is Fortran 2003+ standard compliant;</li>
+<li>FOSSIL is OOP designed;</li>
+<li>FOSSIL is TDD designed;</li>
+<li>FOSSIL is a Free, Open Source Project.</li>
+</ul>
+<h4 id="issues"><a class="toclink" href="#issues">Issues</a></h4>
+<p><a href=""><img alt="GitHub issues" src="https://img.shields.io/github/issues/szaghi/FOSSIL.svg"></a>
+<a href="https://waffle.io/szaghi/FOSSIL"><img alt="Ready in backlog" src="https://badge.waffle.io/szaghi/FOSSIL.png?label=ready&amp;title=Ready"></a>
+<a href="https://waffle.io/szaghi/FOSSIL"><img alt="In Progress" src="https://badge.waffle.io/szaghi/FOSSIL.png?label=in%20progress&amp;title=In%20Progress"></a>
+<a href="https://waffle.io/szaghi/FOSSIL"><img alt="Open bugs" src="https://badge.waffle.io/szaghi/FOSSIL.png?label=bug&amp;title=Open%20Bugs"></a></p>
+<h4 id="compiler-support"><a class="toclink" href="#compiler-support">Compiler Support</a></h4>
+<p><a href=""><img alt="Compiler" src="https://img.shields.io/badge/GNU-v5.3.0+-orange.svg"></a>
+<a href=""><img alt="Compiler" src="https://img.shields.io/badge/Intel-v16.x+-brightgreen.svg"></a>
+<a href=""><img alt="Compiler" src="https://img.shields.io/badge/IBM%20XL-not%20tested-yellow.svg"></a>
+<a href=""><img alt="Compiler" src="https://img.shields.io/badge/g95-not%20tested-yellow.svg"></a>
+<a href=""><img alt="Compiler" src="https://img.shields.io/badge/NAG-not%20tested-yellow.svg"></a>
+<a href=""><img alt="Compiler" src="https://img.shields.io/badge/PGI-not%20tested-yellow.svg"></a></p>
+<hr>
+<p><a href="#what-is-fossil?">What is FOSSIL?</a> | <a href="#main-features">Main features</a> | <a href="#copyrights">Copyrights</a> | <a href="#documentation">Documentation</a> | <a href="#a-taste-of-fossil">A Taste of FOSSIL</a></p>
+<hr>
+<h2 id="what-is-fossil"><a class="toclink" href="#what-is-fossil">What is FOSSIL?</a></h2>
+<p>FOSSIL is a pure Fortran (KISS) library for IO and manipulation of STL (Stereo Litography) files for modern (2003+) Fortran projects.</p>
+<p>FOSSIL provides a simple API to IO STL files and also to manipulate the triangulated surface contained into the STL file.</p>
+<p><img alt="dragon" src="doc/dragon.jpg"></p>
+<blockquote>
+<p>the dragon STL test (src/tests/dragon.stl) is composed by 6588 triangular facets. The signed distance computation on a uniform
+grid of <code>64^3</code> is accelerated by a factor of 7x using AABB algorithm with respect the simple brute force.</p>
+</blockquote>
+<p>Go to <a href="#top">Top</a></p>
+<h2 id="main-features"><a class="toclink" href="#main-features">Main features</a></h2>
+<ul class="checklist">
+<li><input type="checkbox" disabled checked> User-friendly methods for IO STL files:<ul class="checklist">
+<li><input type="checkbox" disabled checked> input:<ul class="checklist">
+<li><input type="checkbox" disabled checked> automatic guessing of file format (ASCII or BINARY);</li>
+<li><input type="checkbox" disabled checked> load STL file effortless;</li>
+</ul>
+</li>
+<li><input type="checkbox" disabled checked> output:<ul class="checklist">
+<li><input type="checkbox" disabled checked> save STL file effortless;</li>
+</ul>
+</li>
+</ul>
+</li>
+<li><input type="checkbox" disabled checked> powerful surface analysis and manipulation:<ul class="checklist">
+<li><input type="checkbox" disabled checked> build facets connectivity;</li>
+<li><input type="checkbox" disabled checked> sanitize normals:<ul class="checklist">
+<li><input type="checkbox" disabled checked> reverse normals:</li>
+<li><input type="checkbox" disabled checked> make normals consistent:</li>
+</ul>
+</li>
+<li><input type="checkbox" disabled checked> compute volume;</li>
+<li><input type="checkbox" disabled checked> rotate facets;</li>
+<li><input type="checkbox" disabled checked> translate facets;</li>
+<li><input type="checkbox" disabled checked> mirror facets;</li>
+<li><input type="checkbox" disabled checked> resize (scale) facets;</li>
+<li><input type="checkbox" disabled checked> compute minimal distance:<ul class="checklist">
+<li><input type="checkbox" disabled checked> square distance;</li>
+<li><input type="checkbox" disabled checked> square root distance;</li>
+<li><input type="checkbox" disabled checked> signed distance:<ul class="checklist">
+<li><input type="checkbox" disabled checked> by means of solid angle computation;</li>
+<li><input type="checkbox" disabled checked> by means of rays intersection count;</li>
+</ul>
+</li>
+<li><input type="checkbox" disabled checked> AABB (Axis-Aligned Bounding Box) tree acceleration with user defined refinement levels;</li>
+</ul>
+</li>
+<li><input type="checkbox" disabled checked> point-in-polyhedra test:<ul class="checklist">
+<li><input type="checkbox" disabled checked> by means of solid angle computation;</li>
+<li><input type="checkbox" disabled checked> by means of rays intersection count;</li>
+</ul>
+</li>
+<li><input type="checkbox" disabled> fill holes;</li>
+<li><input type="checkbox" disabled> check surface watertight;</li>
+</ul>
+</li>
+<li><input type="checkbox" disabled> errors trapping mechanism.</li>
+</ul>
+<p>Any feature request is welcome.</p>
+<p>Go to <a href="#top">Top</a></p>
+<h2 id="copyrights"><a class="toclink" href="#copyrights">Copyrights</a></h2>
+<p>FOSSIL is an open source project, it is distributed under a multi-licensing system:</p>
+<ul>
+<li>for FOSS projects:</li>
+<li><a href="http://www.gnu.org/licenses/gpl-3.0.html">GPL v3</a>;</li>
+<li>for closed source/commercial projects:</li>
+<li><a href="http://opensource.org/licenses/BSD-2-Clause">BSD 2-Clause</a>;</li>
+<li><a href="http://opensource.org/licenses/BSD-3-Clause">BSD 3-Clause</a>;</li>
+<li><a href="http://opensource.org/licenses/MIT">MIT</a>.</li>
+</ul>
+<p>Anyone is interest to use, to develop or to contribute to FOSSIL is welcome, feel free to select the license that best matches your soul!</p>
+<p>More details can be found on <a href="https://github.com/szaghi/FOSSIL/wiki/Copyrights">wiki</a>.</p>
+<p>Go to <a href="#top">Top</a></p>
+<h2 id="documentation"><a class="toclink" href="#documentation">Documentation</a></h2>
+<p>Besides this README file the FOSSIL documentation is contained into its own <a href="https://github.com/szaghi/FOSSIL/wiki">wiki</a>. Detailed documentation of the API is contained into the <a href="http://szaghi.github.io/FOSSIL/index.html">GitHub Pages</a> that can also be created locally by means of <a href="https://github.com/cmacmackin/ford">ford tool</a>.</p>
+<h3 id="a-taste-of-fossil"><a class="toclink" href="#a-taste-of-fossil">A Taste of FOSSIL</a></h3>
+<p>FOSSIL is an KISS library:</p>
+<h4 id="simple-load"><a class="toclink" href="#simple-load">simple load</a></h4>
+<blockquote>
+<p>effortless load of file (with STL surface analysis)</p>
+</blockquote>
+<div class="codehilite"><pre><span></span><span class="k">use </span><span class="n">fossil</span>
+<span class="k">type</span><span class="p">(</span><span class="n">file_stl_object</span><span class="p">)</span> <span class="kd">::</span> <span class="n">file_stl</span> <span class="c">! STL file handler.</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">initialize</span><span class="p">(</span><span class="n">file_name</span><span class="o">=</span><span class="s1">&#39;cube.stl&#39;</span><span class="p">)</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">load_from_file</span><span class="p">(</span><span class="n">guess_format</span><span class="o">=</span><span class="p">.</span><span class="n">true</span><span class="p">.)</span>
+</pre></div>
+
+
+<h4 id="print-stl-statistics"><a class="toclink" href="#print-stl-statistics">print STL statistics</a></h4>
+<blockquote>
+<p>print main informations of STL</p>
+</blockquote>
+<div class="codehilite"><pre><span></span><span class="k">print</span> <span class="s1">&#39;(A)&#39;</span><span class="p">,</span> <span class="n">file_stl</span><span class="p">%</span><span class="n">statistics</span><span class="p">()</span>
+</pre></div>
+
+
+<blockquote>
+<p>upon exection will print something like</p>
+</blockquote>
+<div class="codehilite"><pre><span></span>Mesh_1
+file name:   src/tests/cube.stl
+file format: ascii
+X extents: <span class="o">[</span> <span class="m">0</span>.000000000000000E+000, +0.100000000000000E+001<span class="o">]</span>
+Y extents: <span class="o">[</span> <span class="m">0</span>.000000000000000E+000, +0.100000000000000E+001<span class="o">]</span>
+Z extents: <span class="o">[</span> <span class="m">0</span>.000000000000000E+000, +0.100000000000000E+001<span class="o">]</span>
+volume: -0.100000000000000E+001
+number of facets: +12
+</pre></div>
+
+
+<h4 id="sanitiza-normals"><a class="toclink" href="#sanitiza-normals">sanitiza normals</a></h4>
+<blockquote>
+<p>make normals consistent</p>
+</blockquote>
+<div class="codehilite"><pre><span></span><span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">sanitize_normals</span>
+</pre></div>
+
+
+<h4 id="simple-manipulations"><a class="toclink" href="#simple-manipulations">simple manipulations</a></h4>
+<blockquote>
+<p>simply manipulate geometry</p>
+</blockquote>
+<div class="codehilite"><pre><span></span><span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">resize</span><span class="p">(</span><span class="n">factor</span><span class="o">=</span><span class="mf">3.4</span><span class="o">*</span><span class="n">ex</span> <span class="o">+</span> <span class="mi">2</span><span class="o">*</span><span class="n">ey</span> <span class="o">+</span> <span class="mf">0.5</span><span class="o">*</span><span class="n">ez</span><span class="p">)</span> <span class="c">! ex, ey, ez being axis versors</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">resize</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">z</span><span class="o">=</span><span class="mf">1.2</span><span class="p">)</span>                  <span class="c">! scale only x and z axis</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">mirror</span><span class="p">(</span><span class="n">normal</span><span class="o">=</span><span class="n">ex</span><span class="p">)</span>                     <span class="c">! mirror respect yz-plane</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">mirror</span><span class="p">(</span><span class="n">normal</span><span class="o">=</span><span class="n">ex</span><span class="o">+</span><span class="n">ey</span><span class="p">)</span>                  <span class="c">! mirror respect plane with normal ex+ey</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">mirror</span><span class="p">(</span><span class="n">matrix</span><span class="o">=</span><span class="n">matrix</span><span class="p">)</span>                 <span class="c">! mirror by a given mirroring matrix</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">rotate</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="n">ex</span><span class="p">,</span> <span class="n">angle</span><span class="o">=</span><span class="mf">1.57</span><span class="p">)</span>           <span class="c">! rotate around x axis by pi/2</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">rotate</span><span class="p">(</span><span class="n">matrix</span><span class="o">=</span><span class="n">matrix</span><span class="p">)</span>                 <span class="c">! rotati by a given rotating matrix</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">translate</span><span class="p">(</span><span class="n">delta</span><span class="o">=</span><span class="mi">3</span><span class="o">*</span><span class="n">ex</span> <span class="o">+</span> <span class="mi">2</span><span class="o">*</span><span class="n">ey</span> <span class="o">+</span> <span class="mf">0.5</span><span class="o">*</span><span class="n">ez</span><span class="p">)</span> <span class="c">! translate by a vectorial delta</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">translate</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">z</span><span class="o">=</span><span class="mf">1.2</span><span class="p">)</span>               <span class="c">! translate by only x and z delta</span>
+</pre></div>
+
+
+<p>Go to <a href="#top">Top</a></p>
+        </div>
+		  
+        <div class="col-md-4">
+	  <div class="well">
+          <h2>Developer Info</h2>
+          <h4>Stefano Zaghi</h4>
+          
+          
+			   
+            <div class="text-center"><div class="btn-group" role="group">
+              
+              <a class="btn btn-lg btn-primary" href="mailto:stefano.zaghi@gmail.com"><i class="fa fa-envelope fa-lg"></i></a>
+              
+              
+              
+              <a class="btn btn-lg btn-primary" href="https://github.com/szaghi"><i class="fa fa-github fa-lg"></i></a>
+				  
+				  
+              
+              
+              
+              
+            </div></div>
+            
+       </div>
+       </div>
+       
+      </div>
+      
+      
+      
+      
+		
+      <div class="row">
+        <div class="col-xs-6 col-sm-3">
+              <h3>Source Files</h3>
+              <ul>
+                
+                  
+                    <li><a href='./sourcefile/fossil.f90.html'>fossil.f90</a></li>
+                  
+                
+                  
+                    <li><a href='./sourcefile/fossil_aabb_node_object.f90.html'>fossil_aabb_node_object.f90</a></li>
+                  
+                
+                  
+                    <li><a href='./sourcefile/fossil_aabb_object.f90.html'>fossil_aabb_object.f90</a></li>
+                  
+                
+                  
+                    <li><a href='./sourcefile/fossil_aabb_tree_object.f90.html'>fossil_aabb_tree_object.f90</a></li>
+                  
+                
+                  
+                    <li><a href='./sourcefile/fossil_facet_object.f90.html'>fossil_facet_object.f90</a></li>
+                  
+                
+                  
+                    <li><a href='./sourcefile/fossil_file_stl_object.f90.html'>fossil_file_stl_object.f90</a></li>
+                  
+                
+                  
+                    <li><a href='./sourcefile/fossil_test_distance.f90.html'>fossil_test_distance.f90</a></li>
+                  
+                
+                  
+                    <li><a href='./sourcefile/fossil_test_load_save_ascii.f90.html'>fossil_test_load_save_ascii.f90</a></li>
+                  
+                
+                  
+                    <li><a href='./sourcefile/fossil_test_load_save_binary.f90.html'>fossil_test_load_save_binary.f90</a></li>
+                  
+                
+                  
+                    <li><a href='./sourcefile/fossil_test_mirror.f90.html'>fossil_test_mirror.f90</a></li>
+                  
+                
+                  
+                    <li><a href="./lists/files.html"><em>All source files&hellip;</em></a></li>
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+              </ul>
+          </div>
+          
+		  <div class="col-xs-6 col-sm-3">
+              <h3>Modules</h3>
+              <ul>
+                
+                  
+                    <li><a href='./module/fossil.html'>fossil</a></li>
+                  
+                
+                  
+                    <li><a href='./module/fossil_aabb_node_object.html'>fossil_aabb_node_object</a></li>
+                  
+                
+                  
+                    <li><a href='./module/fossil_aabb_object.html'>fossil_aabb_object</a></li>
+                  
+                
+                  
+                    <li><a href='./module/fossil_aabb_tree_object.html'>fossil_aabb_tree_object</a></li>
+                  
+                
+                  
+                    <li><a href='./module/fossil_facet_object.html'>fossil_facet_object</a></li>
+                  
+                
+                  
+                    <li><a href='./module/fossil_file_stl_object.html'>fossil_file_stl_object</a></li>
+                  
+                
+                  
+                    <li><a href='./module/fossil_utils.html'>fossil_utils</a></li>
+                  
+                
+              </ul>
+          </div>
+          
+          
+		  <div class="col-xs-6 col-sm-3">
+              <h3>Procedures</h3>
+              <ul>
+                
+                  
+                    <li><a href='./proc/aabb_assign_aabb.html'>aabb_assign_aabb</a></li>
+                  
+                
+                  
+                    <li><a href='./proc/aabb_node_assign_aabb_node.html'>aabb_node_assign_aabb_node</a></li>
+                  
+                
+                  
+                    <li><a href='./proc/aabb_tree_assign_aabb_tree.html'>aabb_tree_assign_aabb_tree</a></li>
+                  
+                
+                  
+                    <li><a href='./proc/add_facets.html'>add_facets</a></li>
+                  
+                
+                  
+                    <li><a href='./proc/add_facets%7E2.html'>add_facets</a></li>
+                  
+                
+                  
+                    <li><a href='./proc/add_vertex_occurrence.html'>add_vertex_occurrence</a></li>
+                  
+                
+                  
+                    <li><a href='./proc/allocate_facets.html'>allocate_facets</a></li>
+                  
+                
+                  
+                    <li><a href='./proc/analize.html'>analize</a></li>
+                  
+                
+                  
+                    <li><a href='./proc/bmax.html'>bmax</a></li>
+                  
+                
+                  
+                    <li><a href='./proc/bmin.html'>bmin</a></li>
+                  
+                
+                  
+                    <li><a href="./lists/procedures.html"><em>All procedures&hellip;</em></a></li>
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+                  
+                
+              </ul>
+          </div>
+          
+          
+		  <div class="col-xs-6 col-sm-3">
+              <h3>Derived Types</h3>
+              <ul>
+                
+                  
+                    <li><a href='./type/aabb_node_object.html'>aabb_node_object</a></li>
+                  
+                
+                  
+                    <li><a href='./type/aabb_object.html'>aabb_object</a></li>
+                  
+                
+                  
+                    <li><a href='./type/aabb_tree_object.html'>aabb_tree_object</a></li>
+                  
+                
+                  
+                    <li><a href='./type/facet_object.html'>facet_object</a></li>
+                  
+                
+                  
+                    <li><a href='./type/file_stl_object.html'>file_stl_object</a></li>
+                  
+                
+              </ul>
+          </div>
+          
+      </div>
+
+    <hr>    
+    </div> <!-- /container -->
+    <footer>
+      <div class="container">
+      <div class="row">
+        <div class="col-xs-6 col-md-4"><p>&copy; 2018 </p></div>
+        <div class="col-xs-6 col-md-4 col-md-push-4">
+          <p class="text-right">
+            Documentation generated by 
+            <a href="https://github.com/cmacmackin/ford">FORD</a>
+            
+          </p>
+        </div>
+        <div class="col-xs-12 col-md-4 col-md-pull-4"><p class="text-center"> FOSSIL was developed by Stefano Zaghi</p></div>
+      </div>
+      <br>
+      </div> <!-- /container -->    
+    </footer>
+
+    <!-- Bootstrap core JavaScript
+    ================================================== -->
+    <!-- Placed at the end of the document so the pages load faster -->
+<!--
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.1/jquery.min.js"></script>
+-->
+    <script src="./js/bootstrap.min.js"></script>
+    <!-- IE10 viewport hack for Surface/desktop Windows 8 bug -->
+    <script src="./js/ie10-viewport-bug-workaround.js"></script>
+
+    <!-- MathJax JavaScript
+    ================================================== -->
+    <!-- Placed at the end of the document so the pages load faster -->
+    <script type="text/x-mathjax-config">
+      MathJax.Hub.Config({
+        TeX: { extensions: ['AMSmath.js','AMSsymbols.js','noErrors.js','noUndefined.js'], equationNumbers: { autoNumber: 'AMS' } },
+        jax: ['input/TeX','input/MathML','output/HTML-CSS'],
+        extensions: ['tex2jax.js','mml2jax.js','MathMenu.js','MathZoom.js'],
+        'HTML-CSS': { 
+           styles: { '.MathJax_Display, .MathJax .mo, .MathJax .mi, .MathJax .mn': {color: '#000000 ! important'} }
+        }
+      });
+    </script>
+    <script src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+  </body>
+</html>

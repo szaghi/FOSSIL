@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+	 
+	 <meta name="description" content="FOSSIL, FOrtran Stereo (si) Litography parser">
+    
+    <meta name="author" content="Stefano Zaghi" >
+    <link rel="icon" href="../favicon.png">
+
+    <title>fossil_test_sanitize_normals &ndash; FOSSIL</title>
+
+    <link href="../css/bootstrap.min.css" rel="stylesheet">
+    <link href="../css/pygments.css" rel="stylesheet">
+    <link href="../css/font-awesome.min.css" rel="stylesheet">
+    <link href="../css/local.css" rel="stylesheet">
+    
+
+    <!-- HTML5 shim and Respond.js for IE8 support of HTML5 elements and media queries -->
+    <!--[if lt IE 9]>
+      <script src="https://oss.maxcdn.com/html5shiv/3.7.2/html5shiv.min.js"></script>
+      <script src="https://oss.maxcdn.com/respond/1.4.2/respond.min.js"></script>
+    <![endif]-->
+    
+    <script src="../js/jquery-2.1.3.min.js"></script>
+    <script src="../js/svg-pan-zoom.min.js"></script>
+
+    
+    <script src="../tipuesearch/tipuesearch_content.js"></script>
+    <link  href="../tipuesearch/tipuesearch.css" rel="stylesheet">
+    <script src="../tipuesearch/tipuesearch_set.js"></script>
+    <script src="../tipuesearch/tipuesearch.js"></script>
+    
+
+  </head>
+
+  <body>
+
+    <!-- Fixed navbar -->
+    <nav class="navbar navbar-inverse navbar-fixed-top">
+      <div class="container">
+        <div class="navbar-header">
+          <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar" aria-expanded="false" aria-controls="navbar">
+            <span class="sr-only">Toggle navigation</span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+          </button>
+          <a class="navbar-brand" href="../index.html">FOSSIL </a>
+        </div>
+        <div id="navbar" class="navbar-collapse collapse">
+          <ul class="nav navbar-nav">
+				
+            <li class="dropdown hidden-xs visible-sm visible-md hidden-lg">
+              <a href="#" class="dropdown-toggle"
+              data-toggle="dropdown" role="button"
+              aria-haspopup="true"
+		 aria-expanded="false">Contents <span class="caret"></span></a>
+	      <ul class="dropdown-menu">
+              
+            <li><a href="../lists/files.html">Source Files</a></li>
+				
+				
+            <li><a href="../lists/modules.html">Modules</a></li>
+				
+            
+                                
+            <li><a href="../lists/procedures.html">Procedures</a></li>
+				
+								
+            <li><a href="../lists/types.html">Derived Types</a></li>
+				
+				
+            <li><a href="../lists/programs.html">Programs</a></li>
+				
+            </ul>
+            </li>
+
+<li class="visible-xs hidden-sm visible-lg"><a href="../lists/files.html">Source Files</a></li>
+
+
+<li class="visible-xs hidden-sm visible-lg"><a href="../lists/modules.html">Modules</a></li>
+
+
+
+<li class="visible-xs hidden-sm visible-lg"><a href="../lists/procedures.html">Procedures</a></li>
+
+                             
+<li class="visible-xs hidden-sm visible-lg"><a href="../lists/types.html">Derived Types</a></li>
+
+
+<li class="visible-xs hidden-sm visible-lg"><a href="../lists/programs.html">Programs</a></li>
+
+          </ul>
+        
+        <form action="../search.html" class="navbar-form navbar-right" role="search">
+        <div class="form-group">
+          <input type="text" class="form-control" placeholder="Search" name="q" id="tipue_search_input" autocomplete="off" required>
+        </div>
+<!--
+        <button type="submit" class="btn btn-default">Submit</button>
+-->
+        </form>
+        
+        </div><!--/.nav-collapse -->
+      </div>
+    </nav>
+
+    <div class="container">
+    
+  
+  <div class="row">
+    <h1>fossil_test_sanitize_normals
+    <small>Program</small>
+    
+    </h1>
+    
+<div class="row">
+  <div class="col-lg-12">
+<div class="well well-sm">
+  <ul class="list-inline" style="margin-bottom:0px;display:inline">
+     
+     
+     
+     
+    
+    
+     <li><i class="fa fa-list-ol"></i>
+       <a data-toggle="tooltip"
+	  data-placement="bottom" data-html="true"
+	  title=" 7.8% of total for programs.">31 statements</a>
+     </li> 
+     
+     
+    <li><i class="fa fa-code"></i><a href="../src/fossil_test_sanitize_normals.f90"> Source File</a></li>
+     
+  </ul>
+  <ol class="breadcrumb in-well text-right">
+  
+     <li><a href='../sourcefile/fossil_test_sanitize_normals.f90.html'>fossil_test_sanitize_normals.f90</a></li>
+  
+     <li class="active">fossil_test_sanitize_normals</li>
+  </ol>
+</div>
+</div>
+</div>
+<script>
+  $(function () {
+  $('[data-toggle="tooltip"]').tooltip()
+  })
+</script>
+
+  </div>
+  
+  <div class="row">
+    <div class="col-md-3 hidden-xs hidden-sm visible-md visible-lg">
+    
+<div id="sidebar">
+  
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#vars-0">Variables</a></h3></div>
+  <div id="vars-0" class="panel-collapse collapse">
+    <div class="list-group">
+      
+      <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html#variable-file_stl">file_stl</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html#variable-file_name_stl">file_name_stl</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html#variable-are_tests_passed%7E2">are_tests_passed</a>
+      
+    </div>
+  </div>
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#subs-0">Subroutines</a></h3></div>
+  <div class="list-group">
+    <div id="subs-0" class="panel-collapse collapse">
+      
+      <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html#proc-cli_parse">cli_parse</a>
+      
+    </div>
+  </div>
+</div>
+
+
+
+
+
+
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title">Source Code</h3></div>
+  <div class="list-group">
+    <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html#src">fossil_test_sanitize_normals</a>
+  </div>
+</div>
+
+
+  <hr>
+  
+
+<div class="panel panel-default">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#allprogs-0">All Programs</a></h3></div>
+  <div id="allprogs-0" class="panel-collapse collapse">
+    <div class="list-group">
+      
+      <a class="list-group-item" href="../program/fossil_test_distance.html">fossil_test_distance</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_load_save_ascii.html">fossil_test_load_save_ascii</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_load_save_binary.html">fossil_test_load_save_binary</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_mirror.html">fossil_test_mirror</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_resize.html">fossil_test_resize</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_rotate.html">fossil_test_rotate</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html">fossil_test_sanitize_normals</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_translate.html">fossil_test_translate</a>
+      
+    </div>
+  </div>
+</div>
+
+
+</div>  
+
+    </div>
+    
+    <div class="col-md-9" id='text'>
+    
+  
+    <ul class="list-inline">
+      <li><h4>Uses:</h4></li>
+      
+      <li>flap</li>
+      
+      <li><a href='../module/fossil.html'>fossil</a></li>
+      
+      <li>penf</li>
+      
+    </ul>
+    
+                <div class="depgraph"><?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 2.40.1 (20161225.0304)
+ -->
+<!-- Title: program~~fossil_test_sanitize_normals~~UsesGraph Pages: 1 -->
+<svg id="programfossil_test_sanitize_normalsUsesGraph" width="641pt" height="278pt"
+ viewBox="0.00 0.00 641.00 277.58" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph" class="graph" transform="scale(.5333 .5333) rotate(0) translate(4 516.5211)">
+<title>program~~fossil_test_sanitize_normals~~UsesGraph</title>
+<polygon fill="#ffffff" stroke="transparent" points="-4,4 -4,-516.5211 1198,-516.5211 1198,4 -4,4"/>
+<!-- program~fossil_test_sanitize_normals -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node1" class="node">
+<title>program~fossil_test_sanitize_normals</title>
+<polygon fill="none" stroke="#000000" points="1194,-471 1048,-471 1048,-447 1194,-447 1194,-471"/>
+<text text-anchor="middle" x="1121" y="-456.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#000000">fossil_test_sanitize_normals</text>
+</g>
+<!-- flap -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node2" class="node">
+<title>flap</title>
+<polygon fill="#337ab7" stroke="#337ab7" points="1012,-511 958,-511 958,-487 1012,-487 1012,-511"/>
+<text text-anchor="middle" x="985" y="-496.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">flap</text>
+</g>
+<!-- flap&#45;&gt;program~fossil_test_sanitize_normals -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge30" class="edge">
+<title>flap&#45;&gt;program~fossil_test_sanitize_normals</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M1012.1948,-491.0015C1028.8392,-486.1061 1050.6596,-479.6883 1070.3871,-473.8861"/>
+<polygon fill="#000000" stroke="#000000" points="1071.5657,-477.1878 1080.1718,-471.0083 1069.5905,-470.4723 1071.5657,-477.1878"/>
+</g>
+<!-- module~fossil -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node3" class="node">
+<title>module~fossil</title>
+<g id="a_program~~fossil_test_sanitize_normals~~UsesGraph_node3"><a xlink:href="../module/fossil.html" xlink:title="fossil">
+<polygon fill="#337ab7" stroke="#337ab7" points="1012,-261 958,-261 958,-237 1012,-237 1012,-261"/>
+<text text-anchor="middle" x="985" y="-246.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil</text>
+</a>
+</g>
+</g>
+<!-- module~fossil&#45;&gt;program~fossil_test_sanitize_normals -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge31" class="edge">
+<title>module~fossil&#45;&gt;program~fossil_test_sanitize_normals</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M992.8998,-261.1982C1015.2936,-295.7768 1079.3828,-394.7382 1107.5006,-438.1554"/>
+<polygon fill="#000000" stroke="#000000" points="1104.7048,-440.2771 1113.0784,-446.7681 1110.5803,-436.472 1104.7048,-440.2771"/>
+</g>
+<!-- penf -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node4" class="node">
+<title>penf</title>
+<polygon fill="#337ab7" stroke="#337ab7" points="54,-129 0,-129 0,-105 54,-105 54,-129"/>
+<text text-anchor="middle" x="27" y="-114.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">penf</text>
+</g>
+<!-- penf&#45;&gt;program~fossil_test_sanitize_normals -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge32" class="edge">
+<title>penf&#45;&gt;program~fossil_test_sanitize_normals</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M716,-459C830.3244,-407.842 981.6393,-427.8781 1063.114,-444.8003"/>
+<polygon fill="#000000" stroke="#000000" points="1062.6659,-448.2834 1073.1763,-446.9486 1064.1276,-441.4377 1062.6659,-448.2834"/>
+</g>
+<!-- module~fossil_file_stl_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node5" class="node">
+<title>module~fossil_file_stl_object</title>
+<g id="a_program~~fossil_test_sanitize_normals~~UsesGraph_node5"><a xlink:href="../module/fossil_file_stl_object.html" xlink:title="fossil_file_stl_object">
+<polygon fill="#337ab7" stroke="#337ab7" points="922,-261 815,-261 815,-237 922,-237 922,-261"/>
+<text text-anchor="middle" x="868.5" y="-246.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_file_stl_object</text>
+</a>
+</g>
+</g>
+<!-- penf&#45;&gt;module~fossil_file_stl_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge21" class="edge">
+<title>penf&#45;&gt;module~fossil_file_stl_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M133.5,-383C339.9166,-542.8642 466.6931,-536.5272 716,-459"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M716,-459C797.4618,-422.5474 844.1591,-316.7891 861.1215,-270.7928"/>
+<polygon fill="#000000" stroke="#000000" points="864.4826,-271.7876 864.5465,-261.193 857.8897,-269.4354 864.4826,-271.7876"/>
+</g>
+<!-- module~fossil_facet_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node6" class="node">
+<title>module~fossil_facet_object</title>
+<g id="a_program~~fossil_test_sanitize_normals~~UsesGraph_node6"><a xlink:href="../module/fossil_facet_object.html" xlink:title="fossil_facet_object">
+<polygon fill="#337ab7" stroke="#337ab7" points="313,-89 213,-89 213,-65 313,-65 313,-89"/>
+<text text-anchor="middle" x="263" y="-74.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_facet_object</text>
+</a>
+</g>
+</g>
+<!-- penf&#45;&gt;module~fossil_facet_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge26" class="edge">
+<title>penf&#45;&gt;module~fossil_facet_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M54.1832,-118.1444C75.7296,-118.7756 106.5844,-119.0662 133.5,-117"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M133.5,-117C166.1621,-114.4927 201.5971,-102.8833 227.13,-92.8128"/>
+<polygon fill="#000000" stroke="#000000" points="228.4535,-96.0531 236.4045,-89.0508 225.8222,-89.5664 228.4535,-96.0531"/>
+</g>
+<!-- module~fossil_aabb_tree_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node7" class="node">
+<title>module~fossil_aabb_tree_object</title>
+<g id="a_program~~fossil_test_sanitize_normals~~UsesGraph_node7"><a xlink:href="../module/fossil_aabb_tree_object.html" xlink:title="fossil_aabb_tree_object">
+<polygon fill="#337ab7" stroke="#337ab7" points="779,-109 653,-109 653,-85 779,-85 779,-109"/>
+<text text-anchor="middle" x="716" y="-94.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_aabb_tree_object</text>
+</a>
+</g>
+</g>
+<!-- penf&#45;&gt;module~fossil_aabb_tree_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge12" class="edge">
+<title>penf&#45;&gt;module~fossil_aabb_tree_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M133.5,-383C228.8708,-452.8635 281.2806,-382.1765 399.5,-383"/>
+</g>
+<!-- module~fossil_utils -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node8" class="node">
+<title>module~fossil_utils</title>
+<g id="a_program~~fossil_test_sanitize_normals~~UsesGraph_node8"><a xlink:href="../module/fossil_utils.html" xlink:title="fossil_utils">
+<polygon fill="#337ab7" stroke="#337ab7" points="164,-89 103,-89 103,-65 164,-65 164,-89"/>
+<text text-anchor="middle" x="133.5" y="-74.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_utils</text>
+</a>
+</g>
+</g>
+<!-- penf&#45;&gt;module~fossil_utils -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge17" class="edge">
+<title>penf&#45;&gt;module~fossil_utils</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M54.15,-106.8028C65.9363,-102.376 79.989,-97.098 92.9704,-92.2224"/>
+<polygon fill="#000000" stroke="#000000" points="94.5024,-95.3858 102.6332,-88.5932 92.0411,-88.8327 94.5024,-95.3858"/>
+</g>
+<!-- module~fossil_aabb_node_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node11" class="node">
+<title>module~fossil_aabb_node_object</title>
+<g id="a_program~~fossil_test_sanitize_normals~~UsesGraph_node11"><a xlink:href="../module/fossil_aabb_node_object.html" xlink:title="fossil_aabb_node_object">
+<polygon fill="#337ab7" stroke="#337ab7" points="617,-188 486,-188 486,-164 617,-164 617,-188"/>
+<text text-anchor="middle" x="551.5" y="-173.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_aabb_node_object</text>
+</a>
+</g>
+</g>
+<!-- penf&#45;&gt;module~fossil_aabb_node_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge2" class="edge">
+<title>penf&#45;&gt;module~fossil_aabb_node_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M27.4221,-129.1244C29.6739,-172.7516 43.8982,-322.3578 133.5,-383"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M133.5,-383C160.1298,-401.023 368.5065,-277.5662 399.5,-269"/>
+</g>
+<!-- module~fossil_aabb_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node12" class="node">
+<title>module~fossil_aabb_object</title>
+<g id="a_program~~fossil_test_sanitize_normals~~UsesGraph_node12"><a xlink:href="../module/fossil_aabb_object.html" xlink:title="fossil_aabb_object">
+<polygon fill="#337ab7" stroke="#337ab7" points="450,-128 349,-128 349,-104 450,-104 450,-128"/>
+<text text-anchor="middle" x="399.5" y="-113.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_aabb_object</text>
+</a>
+</g>
+</g>
+<!-- penf&#45;&gt;module~fossil_aabb_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge7" class="edge">
+<title>penf&#45;&gt;module~fossil_aabb_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M133.5,-117C190.8867,-112.5947 205.5975,-112.8049 263,-117"/>
+</g>
+<!-- module~fossil_file_stl_object&#45;&gt;module~fossil -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge28" class="edge">
+<title>module~fossil_file_stl_object&#45;&gt;module~fossil</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M922.3168,-249C930.8563,-249 939.5237,-249 947.579,-249"/>
+<polygon fill="#000000" stroke="#000000" points="947.7538,-252.5001 957.7537,-249 947.7537,-245.5001 947.7538,-252.5001"/>
+</g>
+<!-- module~fossil_facet_object&#45;&gt;module~fossil -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge29" class="edge">
+<title>module~fossil_facet_object&#45;&gt;module~fossil</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M289.4157,-64.9688C339.4523,-43.3125 451.9671,0 551.5,0 551.5,0 551.5,0 716,0 849.5501,0 944.9124,-167.3309 974.9496,-227.6493"/>
+<polygon fill="#000000" stroke="#000000" points="971.9745,-229.534 979.5015,-236.9902 978.2672,-226.4675 971.9745,-229.534"/>
+</g>
+<!-- module~fossil_facet_object&#45;&gt;module~fossil_file_stl_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge23" class="edge">
+<title>module~fossil_facet_object&#45;&gt;module~fossil_file_stl_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M313.2077,-72.7602C339.1256,-71.5474 371.1696,-71.5664 399.5,-76"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M399.5,-76C466.2432,-86.445 483.9448,-75.7947 551.5,-76"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M551.5,-76C625.0968,-76.2237 649.7226,-25.0024 716,-57"/>
+</g>
+<!-- module~fossil_facet_object&#45;&gt;module~fossil_aabb_tree_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge14" class="edge">
+<title>module~fossil_facet_object&#45;&gt;module~fossil_aabb_tree_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M551.5,-76C581.5008,-76.0912 614.3334,-79.5875 642.7218,-83.7018"/>
+<polygon fill="#000000" stroke="#000000" points="642.5572,-87.2162 652.9662,-85.2404 643.5969,-80.2939 642.5572,-87.2162"/>
+</g>
+<!-- module~fossil_facet_object&#45;&gt;module~fossil_aabb_node_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge5" class="edge">
+<title>module~fossil_facet_object&#45;&gt;module~fossil_aabb_node_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M399.5,-76C423.1921,-79.7077 431.2865,-80.0045 450,-95 472.7986,-113.2689 463.3669,-131.5264 486,-150 490.4933,-153.6675 495.5685,-156.8683 500.8561,-159.6494"/>
+<polygon fill="#000000" stroke="#000000" points="499.3557,-162.8114 509.89,-163.9421 502.36,-156.4889 499.3557,-162.8114"/>
+</g>
+<!-- module~fossil_facet_object&#45;&gt;module~fossil_aabb_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge9" class="edge">
+<title>module~fossil_facet_object&#45;&gt;module~fossil_aabb_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M305.0683,-89.0195C318.4316,-92.8376 333.3732,-97.1066 347.358,-101.1023"/>
+<polygon fill="#000000" stroke="#000000" points="346.7588,-104.5711 357.3356,-103.953 348.6819,-97.8404 346.7588,-104.5711"/>
+</g>
+<!-- module~fossil_aabb_tree_object&#45;&gt;module~fossil_file_stl_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge18" class="edge">
+<title>module~fossil_aabb_tree_object&#45;&gt;module~fossil_file_stl_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M728.2219,-109.1819C754.5455,-135.4191 816.7987,-197.4682 848.7812,-229.3459"/>
+<polygon fill="#000000" stroke="#000000" points="846.6664,-232.1796 856.2199,-236.7601 851.608,-227.2217 846.6664,-232.1796"/>
+</g>
+<!-- module~fossil_utils&#45;&gt;module~fossil_file_stl_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge19" class="edge">
+<title>module~fossil_utils&#45;&gt;module~fossil_file_stl_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M164.305,-66.4498C254.6166,-37.4303 524.4113,35.4957 716,-57"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M716,-57C741.9184,-70.5478 756.503,-57.3133 779,-76 827.7717,-116.5114 853.111,-190.4791 863.1803,-227.1667"/>
+<polygon fill="#000000" stroke="#000000" points="859.8032,-228.0871 865.7236,-236.8734 866.5746,-226.3128 859.8032,-228.0871"/>
+</g>
+<!-- module~fossil_utils&#45;&gt;module~fossil_facet_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge24" class="edge">
+<title>module~fossil_utils&#45;&gt;module~fossil_facet_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M164.1897,-77C175.7525,-77 189.3411,-77 202.678,-77"/>
+<polygon fill="#000000" stroke="#000000" points="202.7901,-80.5001 212.79,-77 202.79,-73.5001 202.7901,-80.5001"/>
+</g>
+<!-- module~fossil_utils&#45;&gt;module~fossil_aabb_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge6" class="edge">
+<title>module~fossil_utils&#45;&gt;module~fossil_aabb_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M160.091,-89.1113C185.796,-99.8728 226.155,-114.3073 263,-117"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M263,-117C287.7065,-118.8056 314.995,-118.9699 338.6376,-118.5323"/>
+<polygon fill="#000000" stroke="#000000" points="338.9553,-122.0261 348.874,-118.3018 338.7977,-115.0279 338.9553,-122.0261"/>
+</g>
+<!-- iso_fortran_env -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node9" class="node">
+<title>iso_fortran_env</title>
+<g id="a_program~~fossil_test_sanitize_normals~~UsesGraph_node9"><a xlink:href="https://gcc.gnu.org/onlinedocs/gfortran/ISO_005fFORTRAN_005fENV.html" xlink:title="iso_fortran_env">
+<polygon fill="#337ab7" stroke="#337ab7" points="177,-264 90,-264 90,-240 177,-240 177,-264"/>
+<text text-anchor="middle" x="133.5" y="-249.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">iso_fortran_env</text>
+</a>
+</g>
+</g>
+<!-- iso_fortran_env&#45;&gt;module~fossil_file_stl_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge20" class="edge">
+<title>iso_fortran_env&#45;&gt;module~fossil_file_stl_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M139.347,-264.1799C150.5606,-286.2795 177.189,-333.0882 213,-359 283.7668,-410.2048 312.9545,-409.1782 399.5,-421"/>
+</g>
+<!-- iso_fortran_env&#45;&gt;module~fossil_facet_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge27" class="edge">
+<title>iso_fortran_env&#45;&gt;module~fossil_facet_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M144.6422,-239.8464C154.1777,-228.9749 167.7855,-212.2864 177,-196 198.8255,-157.4242 183.4329,-136.0186 213,-103 215.827,-99.843 219.1286,-97.0101 222.6634,-94.4818"/>
+<polygon fill="#000000" stroke="#000000" points="224.6004,-97.3985 231.2206,-89.1266 220.8869,-91.4647 224.6004,-97.3985"/>
+</g>
+<!-- iso_fortran_env&#45;&gt;module~fossil_aabb_tree_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge15" class="edge">
+<title>iso_fortran_env&#45;&gt;module~fossil_aabb_tree_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M263,-269C339.3226,-289.5529 321.9995,-367.4685 399.5,-383"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M399.5,-383C555.9167,-414.3468 673.1895,-190.4517 706.4483,-118.6577"/>
+<polygon fill="#000000" stroke="#000000" points="709.7877,-119.7692 710.7404,-109.2173 703.4154,-116.872 709.7877,-119.7692"/>
+</g>
+<!-- iso_fortran_env&#45;&gt;module~fossil_aabb_node_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge1" class="edge">
+<title>iso_fortran_env&#45;&gt;module~fossil_aabb_node_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M177.2303,-254.8396C202.5987,-257.2028 234.9737,-261.4528 263,-269"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M263,-269C321.5798,-284.7749 341.0257,-285.1616 399.5,-269"/>
+</g>
+<!-- iso_fortran_env&#45;&gt;module~fossil_aabb_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge10" class="edge">
+<title>iso_fortran_env&#45;&gt;module~fossil_aabb_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M162.2915,-239.9224C198.1698,-224.5924 261.0859,-196.7849 313,-169 333.4387,-158.061 355.7271,-144.3597 372.5599,-133.6284"/>
+<polygon fill="#000000" stroke="#000000" points="374.7838,-136.3597 381.3038,-128.0086 370.9991,-130.4711 374.7838,-136.3597"/>
+</g>
+<!-- vecfor -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_node10" class="node">
+<title>vecfor</title>
+<polygon fill="#337ab7" stroke="#337ab7" points="160.5,-187 106.5,-187 106.5,-163 160.5,-163 160.5,-187"/>
+<text text-anchor="middle" x="133.5" y="-172.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">vecfor</text>
+</g>
+<!-- vecfor&#45;&gt;module~fossil_file_stl_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge22" class="edge">
+<title>vecfor&#45;&gt;module~fossil_file_stl_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M143.3729,-187.3062C152.3213,-198.5541 165.785,-215.7143 177,-231 193.6281,-253.6634 193.5692,-262.6882 213,-283 251.5886,-323.3381 271.4445,-321.7255 313,-359 330.3183,-374.5342 330.1748,-383.3308 349,-397 369.1084,-411.6009 375.1343,-416.117 399.5,-421"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M399.5,-421C576.7191,-463.2463 778.895,-320.3434 845.739,-267.704"/>
+<polygon fill="#000000" stroke="#000000" points="848.2758,-270.1574 853.9095,-261.1846 843.9099,-264.6858 848.2758,-270.1574"/>
+</g>
+<!-- vecfor&#45;&gt;module~fossil_facet_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge25" class="edge">
+<title>vecfor&#45;&gt;module~fossil_facet_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M145.0684,-162.7384C159.8572,-147.5036 186.7063,-121.2883 213,-103 217.6185,-99.7876 222.6848,-96.7067 227.7646,-93.8601"/>
+<polygon fill="#000000" stroke="#000000" points="229.6622,-96.8144 236.8293,-89.0117 226.3606,-90.6419 229.6622,-96.8144"/>
+</g>
+<!-- vecfor&#45;&gt;module~fossil_aabb_tree_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge13" class="edge">
+<title>vecfor&#45;&gt;module~fossil_aabb_tree_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M263,-155C390.1372,-136.3351 423.8694,-150.9226 551.5,-136"/>
+</g>
+<!-- vecfor&#45;&gt;module~fossil_aabb_node_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge3" class="edge">
+<title>vecfor&#45;&gt;module~fossil_aabb_node_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M160.8356,-186.6781C223.8391,-213.3027 375.6918,-275.7057 399.5,-269"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M399.5,-269C450.8436,-254.8092 501.884,-217.6348 529.8011,-194.8146"/>
+<polygon fill="#000000" stroke="#000000" points="532.2556,-197.3252 537.6974,-188.2347 527.7744,-191.9475 532.2556,-197.3252"/>
+</g>
+<!-- vecfor&#45;&gt;module~fossil_aabb_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge8" class="edge">
+<title>vecfor&#45;&gt;module~fossil_aabb_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M160.7673,-170.6678C186.962,-166.5348 227.6626,-160.1878 263,-155"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M263,-155C295.1094,-150.2861 330.301,-140.1032 356.9087,-131.3246"/>
+<polygon fill="#000000" stroke="#000000" points="358.2999,-134.5494 366.6618,-128.0432 356.0677,-127.9148 358.2999,-134.5494"/>
+</g>
+<!-- module~fossil_aabb_node_object&#45;&gt;module~fossil_aabb_tree_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge11" class="edge">
+<title>module~fossil_aabb_node_object&#45;&gt;module~fossil_aabb_tree_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M584.1257,-163.8921C594.7202,-159.7373 606.458,-154.8949 617,-150 640.7054,-138.993 666.7327,-124.9795 686.1489,-114.127"/>
+<polygon fill="#000000" stroke="#000000" points="688.1144,-117.037 695.1103,-109.0803 684.6795,-110.9376 688.1144,-117.037"/>
+</g>
+<!-- module~fossil_aabb_object&#45;&gt;module~fossil_aabb_tree_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge16" class="edge">
+<title>module~fossil_aabb_object&#45;&gt;module~fossil_aabb_tree_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M445.688,-128.0483C475.7915,-134.4255 515.9432,-140.1573 551.5,-136"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M551.5,-136C590.8644,-131.3975 634.4693,-120.7997 666.8893,-111.8118"/>
+<polygon fill="#000000" stroke="#000000" points="667.8987,-115.1637 676.5745,-109.0825 666,-108.4261 667.8987,-115.1637"/>
+</g>
+<!-- module~fossil_aabb_object&#45;&gt;module~fossil_aabb_node_object -->
+<g id="program~~fossil_test_sanitize_normals~~UsesGraph_edge4" class="edge">
+<title>module~fossil_aabb_object&#45;&gt;module~fossil_aabb_node_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M430.2595,-128.1419C453.7203,-137.4028 486.2244,-150.2333 511.672,-160.2784"/>
+<polygon fill="#000000" stroke="#000000" points="510.4594,-163.5625 521.046,-163.9787 513.0296,-157.0514 510.4594,-163.5625"/>
+</g>
+</g>
+</svg>
+</div>
+                <script>var panprogramfossil_test_sanitize_normalsUsesGraph = svgPanZoom('#programfossil_test_sanitize_normalsUsesGraph', {
+                    zoomEnabled: true,
+                    controlIconsEnabled: true,
+                    fit: true,
+                    center: true,});
+                    </script>
+                <div><a type="button" class="graph-help" data-toggle="modal" href="#graph-help-text">Help</a></div>
+                <div class="modal fade" id="graph-help-text" tabindex="-1" role="dialog">
+                  <div class="modal-dialog modal-lg" role="document">
+                    <div class="modal-content">
+                      <div class="modal-header">
+                        <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                        <h4 class="modal-title" id="-graph-help-label">Graph Key</h4>
+                      </div>
+                      <div class="modal-body">
+                        
+    <p>Nodes of different colours represent the following: </p>
+    <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 2.40.1 (20161225.0304)
+ -->
+<!-- Title: Graph Key Pages: 1 -->
+<svg width="490pt" height="32pt"
+ viewBox="0.00 0.00 489.50 32.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 28)">
+<title>Graph Key</title>
+<polygon fill="#ffffff" stroke="transparent" points="-4,4 -4,-28 485.5,-28 485.5,4 -4,4"/>
+<!-- Module -->
+<g id="node1" class="node">
+<title>Module</title>
+<polygon fill="#337ab7" stroke="#337ab7" points="54,-24 0,-24 0,0 54,0 54,-24"/>
+<text text-anchor="middle" x="27" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Module</text>
+</g>
+<!-- Submodule -->
+<g id="node2" class="node">
+<title>Submodule</title>
+<polygon fill="#5bc0de" stroke="#5bc0de" points="139.5,-24 72.5,-24 72.5,0 139.5,0 139.5,-24"/>
+<text text-anchor="middle" x="106" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Submodule</text>
+</g>
+<!-- Subroutine -->
+<g id="node3" class="node">
+<title>Subroutine</title>
+<polygon fill="#d9534f" stroke="#d9534f" points="222,-24 158,-24 158,0 222,0 222,-24"/>
+<text text-anchor="middle" x="190" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Subroutine</text>
+</g>
+<!-- Function -->
+<g id="node4" class="node">
+<title>Function</title>
+<polygon fill="#d94e8f" stroke="#d94e8f" points="294,-24 240,-24 240,0 294,0 294,-24"/>
+<text text-anchor="middle" x="267" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Function</text>
+</g>
+<!-- Program -->
+<g id="node5" class="node">
+<title>Program</title>
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="366,-24 312,-24 312,0 366,0 366,-24"/>
+<text text-anchor="middle" x="339" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Program</text>
+</g>
+<!-- This Page&#39;s Entity -->
+<g id="node6" class="node">
+<title>This Page&#39;s Entity</title>
+<polygon fill="none" stroke="#000000" points="481.5,-24 384.5,-24 384.5,0 481.5,0 481.5,-24"/>
+<text text-anchor="middle" x="433" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#000000">This Page&#39;s Entity</text>
+</g>
+</g>
+</svg>
+
+    
+    <p>Solid arrows point from a parent (sub)module to the submodule which is
+    descended from it. Dashed arrows point from a module being used to the
+    module or program unit using it.
+    </p>
+    
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+    
+
+    <br><br>
+    <p>FOSSIL, test normals <em>sanitization</em>.</p>
+    
+     <h3>Calls</h3>
+     
+                <div class="depgraph"><?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 2.40.1 (20161225.0304)
+ -->
+<!-- Title: program~~fossil_test_sanitize_normals~~CallsGraph Pages: 1 -->
+<svg id="programfossil_test_sanitize_normalsCallsGraph" width="245pt" height="32pt"
+ viewBox="0.00 0.00 245.00 32.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="program~~fossil_test_sanitize_normals~~CallsGraph" class="graph" transform="scale(1 1) rotate(0) translate(4 28)">
+<title>program~~fossil_test_sanitize_normals~~CallsGraph</title>
+<polygon fill="#ffffff" stroke="transparent" points="-4,4 -4,-28 241,-28 241,4 -4,4"/>
+<!-- program~fossil_test_sanitize_normals -->
+<g id="program~~fossil_test_sanitize_normals~~CallsGraph_node1" class="node">
+<title>program~fossil_test_sanitize_normals</title>
+<polygon fill="none" stroke="#000000" points="146,-24 0,-24 0,0 146,0 146,-24"/>
+<text text-anchor="middle" x="73" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#000000">fossil_test_sanitize_normals</text>
+</g>
+<!-- proc~cli_parse -->
+<g id="program~~fossil_test_sanitize_normals~~CallsGraph_node2" class="node">
+<title>proc~cli_parse</title>
+<g id="a_program~~fossil_test_sanitize_normals~~CallsGraph_node2"><a xlink:href="../proc/cli_parse.html" xlink:title="cli_parse">
+<polygon fill="#d9534f" stroke="#d9534f" points="237,-24 182,-24 182,0 237,0 237,-24"/>
+<text text-anchor="middle" x="209.5" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">cli_parse</text>
+</a>
+</g>
+</g>
+<!-- program~fossil_test_sanitize_normals&#45;&gt;proc~cli_parse -->
+<g id="program~~fossil_test_sanitize_normals~~CallsGraph_edge1" class="edge">
+<title>program~fossil_test_sanitize_normals&#45;&gt;proc~cli_parse</title>
+<path fill="none" stroke="#000000" d="M146.0453,-12C154.9482,-12 163.7416,-12 171.8158,-12"/>
+<polygon fill="#000000" stroke="#000000" points="171.9645,-15.5001 181.9645,-12 171.9644,-8.5001 171.9645,-15.5001"/>
+</g>
+</g>
+</svg>
+</div>
+                <div><a type="button" class="graph-help" data-toggle="modal" href="#graph-help-text">Help</a></div>
+                <div class="modal fade" id="graph-help-text" tabindex="-1" role="dialog">
+                  <div class="modal-dialog modal-lg" role="document">
+                    <div class="modal-content">
+                      <div class="modal-header">
+                        <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                        <h4 class="modal-title" id="-graph-help-label">Graph Key</h4>
+                      </div>
+                      <div class="modal-body">
+                        
+    <p>Nodes of different colours represent the following: </p>
+    <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 2.40.1 (20161225.0304)
+ -->
+<!-- Title: Graph Key Pages: 1 -->
+<svg width="560pt" height="32pt"
+ viewBox="0.00 0.00 559.50 32.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 28)">
+<title>Graph Key</title>
+<polygon fill="#ffffff" stroke="transparent" points="-4,4 -4,-28 555.5,-28 555.5,4 -4,4"/>
+<!-- Subroutine -->
+<g id="node1" class="node">
+<title>Subroutine</title>
+<polygon fill="#d9534f" stroke="#d9534f" points="64,-24 0,-24 0,0 64,0 64,-24"/>
+<text text-anchor="middle" x="32" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Subroutine</text>
+</g>
+<!-- Function -->
+<g id="node2" class="node">
+<title>Function</title>
+<polygon fill="#d94e8f" stroke="#d94e8f" points="136,-24 82,-24 82,0 136,0 136,-24"/>
+<text text-anchor="middle" x="109" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Function</text>
+</g>
+<!-- Interface -->
+<g id="node3" class="node">
+<title>Interface</title>
+<polygon fill="#a7506f" stroke="#a7506f" points="209.5,-24 154.5,-24 154.5,0 209.5,0 209.5,-24"/>
+<text text-anchor="middle" x="182" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Interface</text>
+</g>
+<!-- Unknown Procedure Type -->
+<g id="node4" class="node">
+<title>Unknown Procedure Type</title>
+<polygon fill="#777777" stroke="#777777" points="364,-24 228,-24 228,0 364,0 364,-24"/>
+<text text-anchor="middle" x="296" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Unknown Procedure Type</text>
+</g>
+<!-- Program -->
+<g id="node5" class="node">
+<title>Program</title>
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="436,-24 382,-24 382,0 436,0 436,-24"/>
+<text text-anchor="middle" x="409" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Program</text>
+</g>
+<!-- This Page&#39;s Entity -->
+<g id="node6" class="node">
+<title>This Page&#39;s Entity</title>
+<polygon fill="none" stroke="#000000" points="551.5,-24 454.5,-24 454.5,0 551.5,0 551.5,-24"/>
+<text text-anchor="middle" x="503" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#000000">This Page&#39;s Entity</text>
+</g>
+</g>
+</svg>
+
+    
+    <p>Solid arrows point from a procedure to one which it calls. Dashed 
+    arrows point from an interface to procedures which implement that interface.
+    This could include the module procedures in a generic interface or the
+    implementation in a submodule of an interface in a parent module.
+    </p>
+    
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+     
+    <br>
+
+     <section class="visible-xs visible-sm hidden-md">
+       
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#vars-1">Variables</a></h3></div>
+  <div id="vars-1" class="panel-collapse collapse">
+    <div class="list-group">
+      
+      <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html#variable-file_stl">file_stl</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html#variable-file_name_stl">file_name_stl</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html#variable-are_tests_passed%7E2">are_tests_passed</a>
+      
+    </div>
+  </div>
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#subs-1">Subroutines</a></h3></div>
+  <div class="list-group">
+    <div id="subs-1" class="panel-collapse collapse">
+      
+      <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html#proc-cli_parse">cli_parse</a>
+      
+    </div>
+  </div>
+</div>
+
+
+
+
+
+
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title">Source Code</h3></div>
+  <div class="list-group">
+    <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html#src">fossil_test_sanitize_normals</a>
+  </div>
+</div>
+
+
+     </section>
+     <br class="visible-xs visible-sm hidden-md">
+
+     
+
+    
+    <section>
+    <h2>Variables</h2>
+    
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+
+<th>Attributes</th><th></th><th>Name</th><th></th><th>Initial</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" id="variable-file_stl"></span>type(<a href='../type/file_stl_object.html'>file_stl_object</a>)</td>
+  
+  
+  <td></td><td>::</td>
+  <td><strong>file_stl</strong></td><td></td><td></td><td><p>STL file.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" id="variable-file_name_stl"></span>character(len=999)</td>
+  
+  
+  <td></td><td>::</td>
+  <td><strong>file_name_stl</strong></td><td></td><td></td><td><p>Input STL file name.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" id="variable-are_tests_passed%7E2"></span>logical</td>
+  
+  
+  <td></td><td>::</td>
+  <td><strong>are_tests_passed</strong>(2)</td><td></td><td></td><td><p>Result of tests check.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+    </section>
+    <br>
+    
+    
+    
+    
+    
+    
+    
+
+    
+    
+    
+
+
+    
+    <section>
+    <h2>Subroutines</h2>
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-cli_parse"></span><h3>
+subroutine <a href='../proc/cli_parse.html'>cli_parse</a>()
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Build and parse test cli.</p>
+    
+    <h4>Arguments</h4>
+    
+      <em>None</em>
+    
+    
+
+  </div>
+  </div>
+
+    
+    </section>    
+    
+    
+    
+    <section>
+    <h2 id="src">Source Code</h2>
+    <div class="highlight"><pre><span></span><span class="k">program </span><span class="n">fossil_test_sanitize_normals</span>
+<span class="c">!&lt; FOSSIL, test normals *sanitization*.</span>
+
+<span class="k">use </span><span class="n">flap</span><span class="p">,</span> <span class="n">only</span> <span class="p">:</span> <span class="n">command_line_interface</span>
+<span class="k">use </span><span class="n">fossil</span><span class="p">,</span> <span class="n">only</span> <span class="p">:</span> <span class="n">file_stl_object</span>
+<span class="k">use </span><span class="n">penf</span><span class="p">,</span> <span class="n">only</span> <span class="p">:</span> <span class="n">I4P</span><span class="p">,</span> <span class="n">R8P</span>
+
+<span class="k">implicit none</span>
+
+<span class="k">type</span><span class="p">(</span><span class="n">file_stl_object</span><span class="p">)</span> <span class="kd">::</span> <span class="n">file_stl</span>            <span class="c">!&lt; STL file.</span>
+<span class="kt">character</span><span class="p">(</span><span class="mi">999</span><span class="p">)</span>        <span class="kd">::</span> <span class="n">file_name_stl</span>       <span class="c">!&lt; Input STL file name.</span>
+<span class="kt">logical</span>               <span class="kd">::</span> <span class="n">are_tests_passed</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span> <span class="c">!&lt; Result of tests check.</span>
+
+<span class="n">are_tests_passed</span> <span class="o">=</span> <span class="p">.</span><span class="n">false</span><span class="p">.</span>
+
+<span class="k">call </span><span class="n">cli_parse</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">initialize</span><span class="p">(</span><span class="n">file_name</span><span class="o">=</span><span class="nb">trim</span><span class="p">(</span><span class="nb">adjustl</span><span class="p">(</span><span class="n">file_name_stl</span><span class="p">)))</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">load_from_file</span><span class="p">(</span><span class="n">guess_format</span><span class="o">=</span><span class="p">.</span><span class="n">true</span><span class="p">.)</span>
+
+<span class="k">print</span><span class="o">*</span><span class="p">,</span> <span class="s1">&#39;volume before sanitize normals: &#39;</span><span class="p">,</span> <span class="n">file_stl</span><span class="p">%</span><span class="n">volume</span>
+<span class="n">are_tests_passed</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="o">=</span> <span class="n">file_stl</span><span class="p">%</span><span class="n">volume</span> <span class="o">&lt;</span> <span class="mf">0._R8P</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">sanitize_normals</span>
+<span class="k">call </span><span class="n">file_stl</span><span class="p">%</span><span class="n">compute_volume</span>
+<span class="k">print</span><span class="o">*</span><span class="p">,</span> <span class="s1">&#39;volume after sanitize normals:  &#39;</span><span class="p">,</span> <span class="n">file_stl</span><span class="p">%</span><span class="n">volume</span>
+<span class="n">are_tests_passed</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span> <span class="o">=</span> <span class="nb">nint</span><span class="p">(</span><span class="n">file_stl</span><span class="p">%</span><span class="n">volume</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span>
+
+<span class="k">print</span> <span class="s1">&#39;(A,L1)&#39;</span><span class="p">,</span> <span class="s1">&#39;Are all tests passed? &#39;</span><span class="p">,</span> <span class="k">all</span><span class="p">(</span><span class="n">are_tests_passed</span><span class="p">)</span>
+<span class="k">contains</span>
+<span class="k">  subroutine </span><span class="n">cli_parse</span><span class="p">()</span>
+  <span class="c">!&lt; Build and parse test cli.</span>
+  <span class="k">type</span><span class="p">(</span><span class="n">command_line_interface</span><span class="p">)</span> <span class="kd">::</span> <span class="n">cli</span>   <span class="c">!&lt; Test command line interface.</span>
+  <span class="kt">integer</span><span class="p">(</span><span class="n">I4P</span><span class="p">)</span>                 <span class="kd">::</span> <span class="n">error</span> <span class="c">!&lt; Error trapping flag.</span>
+
+  <span class="k">call </span><span class="n">cli</span><span class="p">%</span><span class="n">init</span><span class="p">(</span><span class="n">progname</span><span class="o">=</span><span class="s1">&#39;fossil_test_sanitize_normals&#39;</span><span class="p">,</span>                              <span class="p">&amp;</span>
+                <span class="n">authors</span><span class="o">=</span><span class="s1">&#39;S. Zaghi&#39;</span><span class="p">,</span>                                                   <span class="p">&amp;</span>
+                <span class="n">help</span><span class="o">=</span><span class="s1">&#39;Usage: &#39;</span><span class="p">,</span>                                                       <span class="p">&amp;</span>
+                <span class="n">examples</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;fossil_test_sanitize_normals --stl src/tests/dragon.stl&quot;</span><span class="p">],</span> <span class="p">&amp;</span>
+                <span class="n">epilog</span><span class="o">=</span><span class="nb">new_line</span><span class="p">(</span><span class="s1">&#39;a&#39;</span><span class="p">)</span><span class="o">//</span><span class="s2">&quot;all done&quot;</span><span class="p">)</span>
+
+  <span class="k">call </span><span class="n">cli</span><span class="p">%</span><span class="n">add</span><span class="p">(</span><span class="n">switch</span><span class="o">=</span><span class="s1">&#39;--stl&#39;</span><span class="p">,</span>                        <span class="p">&amp;</span>
+               <span class="n">help</span><span class="o">=</span><span class="s1">&#39;STL (input) file name&#39;</span><span class="p">,</span>          <span class="p">&amp;</span>
+               <span class="n">required</span><span class="o">=</span><span class="p">.</span><span class="n">false</span><span class="p">.,</span>                      <span class="p">&amp;</span>
+               <span class="n">def</span><span class="o">=</span><span class="s1">&#39;src/tests/cube-inconsistent.stl&#39;</span><span class="p">,</span> <span class="p">&amp;</span>
+               <span class="n">act</span><span class="o">=</span><span class="s1">&#39;store&#39;</span><span class="p">)</span>
+
+  <span class="k">call </span><span class="n">cli</span><span class="p">%</span><span class="n">parse</span><span class="p">(</span><span class="n">error</span><span class="o">=</span><span class="n">error</span><span class="p">)</span> <span class="p">;</span> <span class="k">if</span> <span class="p">(</span><span class="n">error</span><span class="o">/=</span><span class="mi">0</span><span class="p">)</span> <span class="k">stop</span>
+
+<span class="k">  call </span><span class="n">cli</span><span class="p">%</span><span class="n">get</span><span class="p">(</span><span class="n">switch</span><span class="o">=</span><span class="s1">&#39;--stl&#39;</span><span class="p">,</span> <span class="n">val</span><span class="o">=</span><span class="n">file_name_stl</span><span class="p">,</span> <span class="n">error</span><span class="o">=</span><span class="n">error</span><span class="p">)</span> <span class="p">;</span> <span class="k">if</span> <span class="p">(</span><span class="n">error</span><span class="o">/=</span><span class="mi">0</span><span class="p">)</span> <span class="k">stop</span>
+<span class="k">  </span><span class="n">endsubroutine</span> <span class="n">cli_parse</span>
+<span class="n">endprogram</span> <span class="n">fossil_test_sanitize_normals</span>
+</pre></div>
+
+    </section>
+    
+    
+    </div>
+  </div>
+
+  <section class="visible-xs visible-sm hidden-md">
+    <hr>
+    
+
+<div class="panel panel-default">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#allprogs-1">All Programs</a></h3></div>
+  <div id="allprogs-1" class="panel-collapse collapse">
+    <div class="list-group">
+      
+      <a class="list-group-item" href="../program/fossil_test_distance.html">fossil_test_distance</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_load_save_ascii.html">fossil_test_load_save_ascii</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_load_save_binary.html">fossil_test_load_save_binary</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_mirror.html">fossil_test_mirror</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_resize.html">fossil_test_resize</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_rotate.html">fossil_test_rotate</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_sanitize_normals.html">fossil_test_sanitize_normals</a>
+      
+      <a class="list-group-item" href="../program/fossil_test_translate.html">fossil_test_translate</a>
+      
+    </div>
+  </div>
+</div>
+
+
+  </section>
+  
+    <hr>    
+    </div> <!-- /container -->
+    <footer>
+      <div class="container">
+      <div class="row">
+        <div class="col-xs-6 col-md-4"><p>&copy; 2018 </p></div>
+        <div class="col-xs-6 col-md-4 col-md-push-4">
+          <p class="text-right">
+            Documentation generated by 
+            <a href="https://github.com/cmacmackin/ford">FORD</a>
+            
+          </p>
+        </div>
+        <div class="col-xs-12 col-md-4 col-md-pull-4"><p class="text-center"> FOSSIL was developed by Stefano Zaghi</p></div>
+      </div>
+      <br>
+      </div> <!-- /container -->    
+    </footer>
+
+    <!-- Bootstrap core JavaScript
+    ================================================== -->
+    <!-- Placed at the end of the document so the pages load faster -->
+<!--
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.1/jquery.min.js"></script>
+-->
+    <script src="../js/bootstrap.min.js"></script>
+    <!-- IE10 viewport hack for Surface/desktop Windows 8 bug -->
+    <script src="../js/ie10-viewport-bug-workaround.js"></script>
+
+    <!-- MathJax JavaScript
+    ================================================== -->
+    <!-- Placed at the end of the document so the pages load faster -->
+    <script type="text/x-mathjax-config">
+      MathJax.Hub.Config({
+        TeX: { extensions: ['AMSmath.js','AMSsymbols.js','noErrors.js','noUndefined.js'], equationNumbers: { autoNumber: 'AMS' } },
+        jax: ['input/TeX','input/MathML','output/HTML-CSS'],
+        extensions: ['tex2jax.js','mml2jax.js','MathMenu.js','MathZoom.js'],
+        'HTML-CSS': { 
+           styles: { '.MathJax_Display, .MathJax .mo, .MathJax .mi, .MathJax .mn': {color: '#000000 ! important'} }
+        }
+      });
+    </script>
+    <script src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+  </body>
+</html>

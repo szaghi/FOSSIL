@@ -1,0 +1,2448 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+	 
+	 <meta name="description" content="FOSSIL, FOrtran Stereo (si) Litography parser">
+    
+    <meta name="author" content="Stefano Zaghi" >
+    <link rel="icon" href="../favicon.png">
+
+    <title>fossil_aabb_node_object &ndash; FOSSIL</title>
+
+    <link href="../css/bootstrap.min.css" rel="stylesheet">
+    <link href="../css/pygments.css" rel="stylesheet">
+    <link href="../css/font-awesome.min.css" rel="stylesheet">
+    <link href="../css/local.css" rel="stylesheet">
+    
+
+    <!-- HTML5 shim and Respond.js for IE8 support of HTML5 elements and media queries -->
+    <!--[if lt IE 9]>
+      <script src="https://oss.maxcdn.com/html5shiv/3.7.2/html5shiv.min.js"></script>
+      <script src="https://oss.maxcdn.com/respond/1.4.2/respond.min.js"></script>
+    <![endif]-->
+    
+    <script src="../js/jquery-2.1.3.min.js"></script>
+    <script src="../js/svg-pan-zoom.min.js"></script>
+
+    
+    <script src="../tipuesearch/tipuesearch_content.js"></script>
+    <link  href="../tipuesearch/tipuesearch.css" rel="stylesheet">
+    <script src="../tipuesearch/tipuesearch_set.js"></script>
+    <script src="../tipuesearch/tipuesearch.js"></script>
+    
+
+  </head>
+
+  <body>
+
+    <!-- Fixed navbar -->
+    <nav class="navbar navbar-inverse navbar-fixed-top">
+      <div class="container">
+        <div class="navbar-header">
+          <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar" aria-expanded="false" aria-controls="navbar">
+            <span class="sr-only">Toggle navigation</span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+          </button>
+          <a class="navbar-brand" href="../index.html">FOSSIL </a>
+        </div>
+        <div id="navbar" class="navbar-collapse collapse">
+          <ul class="nav navbar-nav">
+				
+            <li class="dropdown hidden-xs visible-sm visible-md hidden-lg">
+              <a href="#" class="dropdown-toggle"
+              data-toggle="dropdown" role="button"
+              aria-haspopup="true"
+		 aria-expanded="false">Contents <span class="caret"></span></a>
+	      <ul class="dropdown-menu">
+              
+            <li><a href="../lists/files.html">Source Files</a></li>
+				
+				
+            <li><a href="../lists/modules.html">Modules</a></li>
+				
+            
+                                
+            <li><a href="../lists/procedures.html">Procedures</a></li>
+				
+								
+            <li><a href="../lists/types.html">Derived Types</a></li>
+				
+				
+            <li><a href="../lists/programs.html">Programs</a></li>
+				
+            </ul>
+            </li>
+
+<li class="visible-xs hidden-sm visible-lg"><a href="../lists/files.html">Source Files</a></li>
+
+
+<li class="visible-xs hidden-sm visible-lg"><a href="../lists/modules.html">Modules</a></li>
+
+
+
+<li class="visible-xs hidden-sm visible-lg"><a href="../lists/procedures.html">Procedures</a></li>
+
+                             
+<li class="visible-xs hidden-sm visible-lg"><a href="../lists/types.html">Derived Types</a></li>
+
+
+<li class="visible-xs hidden-sm visible-lg"><a href="../lists/programs.html">Programs</a></li>
+
+          </ul>
+        
+        <form action="../search.html" class="navbar-form navbar-right" role="search">
+        <div class="form-group">
+          <input type="text" class="form-control" placeholder="Search" name="q" id="tipue_search_input" autocomplete="off" required>
+        </div>
+<!--
+        <button type="submit" class="btn btn-default">Submit</button>
+-->
+        </form>
+        
+        </div><!--/.nav-collapse -->
+      </div>
+    </nav>
+
+    <div class="container">
+    
+  
+  <div class="row">
+    <h1>fossil_aabb_node_object 
+    <small>Module</small>
+    
+    </h1>
+    
+<div class="row">
+  <div class="col-lg-12">
+<div class="well well-sm">
+  <ul class="list-inline" style="margin-bottom:0px;display:inline">
+     
+     
+     
+     
+    
+    
+     <li><i class="fa fa-list-ol"></i>
+       <a data-toggle="tooltip"
+	  data-placement="bottom" data-html="true"
+	  title=" 7.9% of total for modules and submodules.">151 statements</a>
+     </li> 
+     
+     
+    <li><i class="fa fa-code"></i><a href="../src/fossil_aabb_node_object.f90"> Source File</a></li>
+     
+  </ul>
+  <ol class="breadcrumb in-well text-right">
+  
+     <li><a href='../sourcefile/fossil_aabb_node_object.f90.html'>fossil_aabb_node_object.f90</a></li>
+  
+     <li class="active">fossil_aabb_node_object</li>
+  </ol>
+</div>
+</div>
+</div>
+<script>
+  $(function () {
+  $('[data-toggle="tooltip"]').tooltip()
+  })
+</script>
+
+  </div>
+  
+  <div class="row">
+    <div class="col-md-3 hidden-xs hidden-sm visible-md visible-lg">
+    
+<div id="sidebar">
+  
+
+
+
+
+
+
+
+
+
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#types-0">Derived Types</a></h3></div>
+  <div id="types-0" class="panel-collapse collapse">
+    <div class="list-group">
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#type-aabb_node_object">aabb_node_object</a>
+      
+    </div>
+  </div>
+</div>
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#funcs-0">Functions</a></h3></div>
+  <div id="funcs-0" class="panel-collapse collapse">
+    <div class="list-group">
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-bmin">bmin</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-bmax">bmax</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-closest_point%7E2">closest_point</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-distance%7E4">distance</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-distance_from_facets%7E2">distance_from_facets</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-do_ray_intersect%7E3">do_ray_intersect</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-has_facets%7E2">has_facets</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-is_allocated">is_allocated</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-ray_intersections_number%7E2">ray_intersections_number</a>
+      
+    </div>
+  </div>
+</div>
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#subs-0">Subroutines</a></h3></div>
+  <div class="list-group">
+    <div id="subs-0" class="panel-collapse collapse">
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-add_facets%7E2">add_facets</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-compute_octants%7E2">compute_octants</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-destroy%7E4">destroy</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-initialize%7E4">initialize</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-save_geometry_tecplot_ascii%7E2">save_geometry_tecplot_ascii</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-save_facets_into_file_stl%7E2">save_facets_into_file_stl</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-update_extents%7E2">update_extents</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-aabb_node_assign_aabb_node">aabb_node_assign_aabb_node</a>
+      
+    </div>
+  </div>
+</div>
+
+
+
+
+
+
+
+
+
+  <hr>
+  
+
+<div class="panel panel-default">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#allmods-0">All Modules</a></h3></div>
+  <div id="allmods-0" class="panel-collapse collapse">
+    <div class="list-group">
+      
+      <a class="list-group-item" href="../module/fossil.html">fossil</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html">fossil_aabb_node_object</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_object.html">fossil_aabb_object</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_tree_object.html">fossil_aabb_tree_object</a>
+      
+      <a class="list-group-item" href="../module/fossil_facet_object.html">fossil_facet_object</a>
+      
+      <a class="list-group-item" href="../module/fossil_file_stl_object.html">fossil_file_stl_object</a>
+      
+      <a class="list-group-item" href="../module/fossil_utils.html">fossil_utils</a>
+      
+    </div>
+  </div>
+</div>
+
+
+</div>  
+
+    </div>
+    
+    <div class="col-md-9" id='text'>
+      
+    
+  
+    <ul class="list-inline">
+      <li><h4>Uses:</h4></li>
+      
+      <li><a href='../module/fossil_aabb_object.html'>fossil_aabb_object</a></li>
+      
+      <li><a href='../module/fossil_facet_object.html'>fossil_facet_object</a></li>
+      
+      <li><a href="https://gcc.gnu.org/onlinedocs/gfortran/ISO_005fFORTRAN_005fENV.html">iso_fortran_env</a></li>
+      
+      <li>penf</li>
+      
+      <li>vecfor</li>
+      
+    </ul>
+    
+                <div class="depgraph"><?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 2.40.1 (20161225.0304)
+ -->
+<!-- Title: module~~fossil_aabb_node_object~~UsesGraph Pages: 1 -->
+<svg id="modulefossil_aabb_node_objectUsesGraph" width="625pt" height="213pt"
+ viewBox="0.00 0.00 625.00 212.61" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="module~~fossil_aabb_node_object~~UsesGraph" class="graph" transform="scale(1 1) rotate(0) translate(4 208.6119)">
+<title>module~~fossil_aabb_node_object~~UsesGraph</title>
+<polygon fill="#ffffff" stroke="transparent" points="-4,4 -4,-208.6119 621,-208.6119 621,4 -4,4"/>
+<!-- module~fossil_aabb_node_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_node1" class="node">
+<title>module~fossil_aabb_node_object</title>
+<polygon fill="none" stroke="#000000" points="617,-98.8575 486,-98.8575 486,-74.8575 617,-74.8575 617,-98.8575"/>
+<text text-anchor="middle" x="551.5" y="-84.4575" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#000000">fossil_aabb_node_object</text>
+</g>
+<!-- iso_fortran_env -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_node2" class="node">
+<title>iso_fortran_env</title>
+<g id="a_module~~fossil_aabb_node_object~~UsesGraph_node2"><a xlink:href="https://gcc.gnu.org/onlinedocs/gfortran/ISO_005fFORTRAN_005fENV.html" xlink:title="iso_fortran_env">
+<polygon fill="#337ab7" stroke="#337ab7" points="177,-180.8575 90,-180.8575 90,-156.8575 177,-156.8575 177,-180.8575"/>
+<text text-anchor="middle" x="133.5" y="-166.4575" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">iso_fortran_env</text>
+</a>
+</g>
+</g>
+<!-- iso_fortran_env&#45;&gt;module~fossil_aabb_node_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge11" class="edge">
+<title>iso_fortran_env&#45;&gt;module~fossil_aabb_node_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M177.0299,-178.7245C213.6121,-185.477 267.1223,-191.7443 313,-182.8575 391.1792,-167.7137 476.2263,-127.0519 520.5983,-103.7948"/>
+<polygon fill="#000000" stroke="#000000" points="522.4951,-106.7506 529.6899,-98.9733 519.2155,-100.5664 522.4951,-106.7506"/>
+</g>
+<!-- module~fossil_aabb_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_node5" class="node">
+<title>module~fossil_aabb_object</title>
+<g id="a_module~~fossil_aabb_node_object~~UsesGraph_node5"><a xlink:href="../module/fossil_aabb_object.html" xlink:title="fossil_aabb_object">
+<polygon fill="#337ab7" stroke="#337ab7" points="450,-98.8575 349,-98.8575 349,-74.8575 450,-74.8575 450,-98.8575"/>
+<text text-anchor="middle" x="399.5" y="-84.4575" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_aabb_object</text>
+</a>
+</g>
+</g>
+<!-- iso_fortran_env&#45;&gt;module~fossil_aabb_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge6" class="edge">
+<title>iso_fortran_env&#45;&gt;module~fossil_aabb_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M177.1388,-174.5484C202.6208,-176.4752 235.1404,-176.5051 263,-168.8575"/>
+</g>
+<!-- module~fossil_facet_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_node6" class="node">
+<title>module~fossil_facet_object</title>
+<g id="a_module~~fossil_aabb_node_object~~UsesGraph_node6"><a xlink:href="../module/fossil_facet_object.html" xlink:title="fossil_facet_object">
+<polygon fill="#337ab7" stroke="#337ab7" points="313,-98.8575 213,-98.8575 213,-74.8575 313,-74.8575 313,-98.8575"/>
+<text text-anchor="middle" x="263" y="-84.4575" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_facet_object</text>
+</a>
+</g>
+</g>
+<!-- iso_fortran_env&#45;&gt;module~fossil_facet_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge10" class="edge">
+<title>iso_fortran_env&#45;&gt;module~fossil_facet_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M160.5548,-156.6641C166.085,-153.9315 171.8007,-150.9273 177,-147.8575 199.0135,-134.8601 222.6029,-117.8898 239.4975,-105.1493"/>
+<polygon fill="#000000" stroke="#000000" points="241.8454,-107.7606 247.6782,-98.9159 237.6028,-102.1927 241.8454,-107.7606"/>
+</g>
+<!-- penf -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_node3" class="node">
+<title>penf</title>
+<polygon fill="#337ab7" stroke="#337ab7" points="54,-118.8575 0,-118.8575 0,-94.8575 54,-94.8575 54,-118.8575"/>
+<text text-anchor="middle" x="27" y="-104.4575" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">penf</text>
+</g>
+<!-- penf&#45;&gt;module~fossil_aabb_node_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge12" class="edge">
+<title>penf&#45;&gt;module~fossil_aabb_node_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M32.1592,-94.6575C40.8903,-75.8033 60.5532,-40.2594 90,-25.8575 213.8524,34.7167 262.7463,-29.3345 399.5,-46.8575"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M399.5,-46.8575C436.5012,-51.2776 477.28,-62.3645 507.2769,-71.7477"/>
+<polygon fill="#000000" stroke="#000000" points="506.4247,-75.1495 517.0154,-74.8524 508.551,-68.4803 506.4247,-75.1495"/>
+</g>
+<!-- penf&#45;&gt;module~fossil_aabb_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge3" class="edge">
+<title>penf&#45;&gt;module~fossil_aabb_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M31.9323,-119.0352C40.4714,-138.258 60.0227,-174.9766 90,-189.8575 159.3758,-224.2961 188.3097,-189.3603 263,-168.8575"/>
+</g>
+<!-- penf&#45;&gt;module~fossil_facet_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge9" class="edge">
+<title>penf&#45;&gt;module~fossil_facet_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M54.0722,-104.5632C90.0544,-101.5139 154.6583,-96.039 202.5331,-91.9818"/>
+<polygon fill="#000000" stroke="#000000" points="203.1148,-95.4451 212.7835,-91.1131 202.5236,-88.4701 203.1148,-95.4451"/>
+</g>
+<!-- module~fossil_utils -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_node7" class="node">
+<title>module~fossil_utils</title>
+<g id="a_module~~fossil_aabb_node_object~~UsesGraph_node7"><a xlink:href="../module/fossil_utils.html" xlink:title="fossil_utils">
+<polygon fill="#337ab7" stroke="#337ab7" points="164,-138.8575 103,-138.8575 103,-114.8575 164,-114.8575 164,-138.8575"/>
+<text text-anchor="middle" x="133.5" y="-124.4575" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_utils</text>
+</a>
+</g>
+</g>
+<!-- penf&#45;&gt;module~fossil_utils -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge1" class="edge">
+<title>penf&#45;&gt;module~fossil_utils</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M54.15,-111.9561C65.8207,-114.1478 79.7136,-116.7568 92.5882,-119.1745"/>
+<polygon fill="#000000" stroke="#000000" points="92.159,-122.655 102.6332,-121.0609 93.451,-115.7753 92.159,-122.655"/>
+</g>
+<!-- vecfor -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_node4" class="node">
+<title>vecfor</title>
+<polygon fill="#337ab7" stroke="#337ab7" points="160.5,-58.8575 106.5,-58.8575 106.5,-34.8575 160.5,-34.8575 160.5,-58.8575"/>
+<text text-anchor="middle" x="133.5" y="-44.4575" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">vecfor</text>
+</g>
+<!-- vecfor&#45;&gt;module~fossil_aabb_node_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge13" class="edge">
+<title>vecfor&#45;&gt;module~fossil_aabb_node_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M160.827,-45.7065C187.0649,-44.8733 227.7956,-44.2921 263,-46.8575"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M263,-46.8575C323.5062,-51.2666 339.3253,-39.147 399.5,-46.8575"/>
+</g>
+<!-- vecfor&#45;&gt;module~fossil_aabb_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge4" class="edge">
+<title>vecfor&#45;&gt;module~fossil_aabb_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M263,-46.8575C297.4385,-49.367 334.9793,-61.0687 361.9591,-71.1722"/>
+<polygon fill="#000000" stroke="#000000" points="360.806,-74.4786 371.3959,-74.8023 363.3193,-67.9453 360.806,-74.4786"/>
+</g>
+<!-- vecfor&#45;&gt;module~fossil_facet_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge8" class="edge">
+<title>vecfor&#45;&gt;module~fossil_facet_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M160.6474,-55.2428C176.2388,-60.0586 196.2815,-66.2494 214.4919,-71.8743"/>
+<polygon fill="#000000" stroke="#000000" points="213.5088,-75.2337 224.0964,-74.8409 215.5747,-68.5455 213.5088,-75.2337"/>
+</g>
+<!-- module~fossil_aabb_object&#45;&gt;module~fossil_aabb_node_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge14" class="edge">
+<title>module~fossil_aabb_object&#45;&gt;module~fossil_aabb_node_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M450.1138,-86.8575C458.3694,-86.8575 467.0765,-86.8575 475.7787,-86.8575"/>
+<polygon fill="#000000" stroke="#000000" points="475.9648,-90.3576 485.9648,-86.8575 475.9647,-83.3576 475.9648,-90.3576"/>
+</g>
+<!-- module~fossil_facet_object&#45;&gt;module~fossil_aabb_node_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge15" class="edge">
+<title>module~fossil_facet_object&#45;&gt;module~fossil_aabb_node_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M284.2993,-74.7814C310.7818,-61.1408 357.6149,-41.4905 399.5,-46.8575"/>
+</g>
+<!-- module~fossil_facet_object&#45;&gt;module~fossil_aabb_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge5" class="edge">
+<title>module~fossil_facet_object&#45;&gt;module~fossil_aabb_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M313.0525,-86.8575C321.4745,-86.8575 330.2953,-86.8575 338.9489,-86.8575"/>
+<polygon fill="#000000" stroke="#000000" points="338.9967,-90.3576 348.9967,-86.8575 338.9966,-83.3576 338.9967,-90.3576"/>
+</g>
+<!-- module~fossil_utils&#45;&gt;module~fossil_aabb_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge2" class="edge">
+<title>module~fossil_utils&#45;&gt;module~fossil_aabb_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M159.2939,-138.9462C191.0757,-153.1862 243.2846,-174.2694 263,-168.8575"/>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M263,-168.8575C307.3103,-156.6941 351.6229,-125.7589 377.2563,-105.5548"/>
+<polygon fill="#000000" stroke="#000000" points="379.61,-108.1532 385.2062,-99.157 375.2213,-102.6998 379.61,-108.1532"/>
+</g>
+<!-- module~fossil_utils&#45;&gt;module~fossil_facet_object -->
+<g id="module~~fossil_aabb_node_object~~UsesGraph_edge7" class="edge">
+<title>module~fossil_utils&#45;&gt;module~fossil_facet_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M164.1897,-117.378C179.0703,-112.7817 197.3062,-107.149 214.0428,-101.9794"/>
+<polygon fill="#000000" stroke="#000000" points="215.1654,-105.2959 223.6871,-99.0005 213.0995,-98.6077 215.1654,-105.2959"/>
+</g>
+</g>
+</svg>
+</div>
+                <div><a type="button" class="graph-help" data-toggle="modal" href="#graph-help-text">Help</a></div>
+                <div class="modal fade" id="graph-help-text" tabindex="-1" role="dialog">
+                  <div class="modal-dialog modal-lg" role="document">
+                    <div class="modal-content">
+                      <div class="modal-header">
+                        <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                        <h4 class="modal-title" id="-graph-help-label">Graph Key</h4>
+                      </div>
+                      <div class="modal-body">
+                        
+    <p>Nodes of different colours represent the following: </p>
+    <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 2.40.1 (20161225.0304)
+ -->
+<!-- Title: Graph Key Pages: 1 -->
+<svg width="490pt" height="32pt"
+ viewBox="0.00 0.00 489.50 32.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 28)">
+<title>Graph Key</title>
+<polygon fill="#ffffff" stroke="transparent" points="-4,4 -4,-28 485.5,-28 485.5,4 -4,4"/>
+<!-- Module -->
+<g id="node1" class="node">
+<title>Module</title>
+<polygon fill="#337ab7" stroke="#337ab7" points="54,-24 0,-24 0,0 54,0 54,-24"/>
+<text text-anchor="middle" x="27" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Module</text>
+</g>
+<!-- Submodule -->
+<g id="node2" class="node">
+<title>Submodule</title>
+<polygon fill="#5bc0de" stroke="#5bc0de" points="139.5,-24 72.5,-24 72.5,0 139.5,0 139.5,-24"/>
+<text text-anchor="middle" x="106" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Submodule</text>
+</g>
+<!-- Subroutine -->
+<g id="node3" class="node">
+<title>Subroutine</title>
+<polygon fill="#d9534f" stroke="#d9534f" points="222,-24 158,-24 158,0 222,0 222,-24"/>
+<text text-anchor="middle" x="190" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Subroutine</text>
+</g>
+<!-- Function -->
+<g id="node4" class="node">
+<title>Function</title>
+<polygon fill="#d94e8f" stroke="#d94e8f" points="294,-24 240,-24 240,0 294,0 294,-24"/>
+<text text-anchor="middle" x="267" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Function</text>
+</g>
+<!-- Program -->
+<g id="node5" class="node">
+<title>Program</title>
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="366,-24 312,-24 312,0 366,0 366,-24"/>
+<text text-anchor="middle" x="339" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Program</text>
+</g>
+<!-- This Page&#39;s Entity -->
+<g id="node6" class="node">
+<title>This Page&#39;s Entity</title>
+<polygon fill="none" stroke="#000000" points="481.5,-24 384.5,-24 384.5,0 481.5,0 481.5,-24"/>
+<text text-anchor="middle" x="433" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#000000">This Page&#39;s Entity</text>
+</g>
+</g>
+</svg>
+
+    
+    <p>Solid arrows point from a parent (sub)module to the submodule which is
+    descended from it. Dashed arrows point from a module being used to the
+    module or program unit using it.
+    </p>
+    
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+    
+
+    
+    <p>FOSSIL, Axis-Aligned Bounding Box (AABB) tree-node class definition.</p>
+<p>This is just a <em>container</em> for AABB tree's nodes.</p>
+    
+    
+    <h3>Used By</h3>
+    
+                <div class="depgraph"><?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 2.40.1 (20161225.0304)
+ -->
+<!-- Title: module~~fossil_aabb_node_object~~UsedByGraph Pages: 1 -->
+<svg id="modulefossil_aabb_node_objectUsedByGraph" width="641pt" height="290pt"
+ viewBox="0.00 0.00 641.00 290.23" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="module~~fossil_aabb_node_object~~UsedByGraph" class="graph" transform="scale(.8903 .8903) rotate(0) translate(4 322)">
+<title>module~~fossil_aabb_node_object~~UsedByGraph</title>
+<polygon fill="#ffffff" stroke="transparent" points="-4,4 -4,-322 716,-322 716,4 -4,4"/>
+<!-- module~fossil_aabb_node_object -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node1" class="node">
+<title>module~fossil_aabb_node_object</title>
+<polygon fill="none" stroke="#000000" points="131,-171 0,-171 0,-147 131,-147 131,-171"/>
+<text text-anchor="middle" x="65.5" y="-156.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#000000">fossil_aabb_node_object</text>
+</g>
+<!-- module~fossil_aabb_tree_object -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node2" class="node">
+<title>module~fossil_aabb_tree_object</title>
+<g id="a_module~~fossil_aabb_node_object~~UsedByGraph_node2"><a xlink:href="../module/fossil_aabb_tree_object.html" xlink:title="fossil_aabb_tree_object">
+<polygon fill="#337ab7" stroke="#337ab7" points="293,-171 167,-171 167,-147 293,-147 293,-171"/>
+<text text-anchor="middle" x="230" y="-156.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_aabb_tree_object</text>
+</a>
+</g>
+</g>
+<!-- module~fossil_aabb_node_object&#45;&gt;module~fossil_aabb_tree_object -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_edge11" class="edge">
+<title>module~fossil_aabb_node_object&#45;&gt;module~fossil_aabb_tree_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M131.4606,-159C139.7853,-159 148.3419,-159 156.7706,-159"/>
+<polygon fill="#000000" stroke="#000000" points="156.9642,-162.5001 166.9641,-159 156.9641,-155.5001 156.9642,-162.5001"/>
+</g>
+<!-- module~fossil_file_stl_object -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node3" class="node">
+<title>module~fossil_file_stl_object</title>
+<g id="a_module~~fossil_aabb_node_object~~UsedByGraph_node3"><a xlink:href="../module/fossil_file_stl_object.html" xlink:title="fossil_file_stl_object">
+<polygon fill="#337ab7" stroke="#337ab7" points="436,-171 329,-171 329,-147 436,-147 436,-171"/>
+<text text-anchor="middle" x="382.5" y="-156.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_file_stl_object</text>
+</a>
+</g>
+</g>
+<!-- module~fossil_aabb_tree_object&#45;&gt;module~fossil_file_stl_object -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_edge10" class="edge">
+<title>module~fossil_aabb_tree_object&#45;&gt;module~fossil_file_stl_object</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M293.3489,-159C301.7267,-159 310.3185,-159 318.7037,-159"/>
+<polygon fill="#000000" stroke="#000000" points="318.8013,-162.5001 328.8012,-159 318.8012,-155.5001 318.8013,-162.5001"/>
+</g>
+<!-- module~fossil -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node4" class="node">
+<title>module~fossil</title>
+<g id="a_module~~fossil_aabb_node_object~~UsedByGraph_node4"><a xlink:href="../module/fossil.html" xlink:title="fossil">
+<polygon fill="#337ab7" stroke="#337ab7" points="526,-171 472,-171 472,-147 526,-147 526,-171"/>
+<text text-anchor="middle" x="499" y="-156.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil</text>
+</a>
+</g>
+</g>
+<!-- module~fossil_file_stl_object&#45;&gt;module~fossil -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_edge9" class="edge">
+<title>module~fossil_file_stl_object&#45;&gt;module~fossil</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M436.3168,-159C444.8563,-159 453.5237,-159 461.579,-159"/>
+<polygon fill="#000000" stroke="#000000" points="461.7538,-162.5001 471.7537,-159 461.7537,-155.5001 461.7538,-162.5001"/>
+</g>
+<!-- program~fossil_test_distance -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node5" class="node">
+<title>program~fossil_test_distance</title>
+<g id="a_module~~fossil_aabb_node_object~~UsedByGraph_node5"><a xlink:href="../program/fossil_test_distance.html" xlink:title="fossil_test_distance">
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="690,-318 584,-318 584,-294 690,-294 690,-318"/>
+<text text-anchor="middle" x="637" y="-303.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_test_distance</text>
+</a>
+</g>
+</g>
+<!-- module~fossil&#45;&gt;program~fossil_test_distance -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_edge1" class="edge">
+<title>module~fossil&#45;&gt;program~fossil_test_distance</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M501.5757,-171.1055C507.566,-196.2479 524.8436,-254.3285 562,-285 565.7768,-288.1177 569.9862,-290.7735 574.4301,-293.0358"/>
+<polygon fill="#000000" stroke="#000000" points="573.2538,-296.3415 583.8179,-297.1485 576.0628,-289.9298 573.2538,-296.3415"/>
+</g>
+<!-- program~fossil_test_sanitize_normals -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node6" class="node">
+<title>program~fossil_test_sanitize_normals</title>
+<g id="a_module~~fossil_aabb_node_object~~UsedByGraph_node6"><a xlink:href="../program/fossil_test_sanitize_normals.html" xlink:title="fossil_test_sanitize_normals">
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="710,-276 564,-276 564,-252 710,-252 710,-276"/>
+<text text-anchor="middle" x="637" y="-261.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_test_sanitize_normals</text>
+</a>
+</g>
+</g>
+<!-- module~fossil&#45;&gt;program~fossil_test_sanitize_normals -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_edge2" class="edge">
+<title>module~fossil&#45;&gt;program~fossil_test_sanitize_normals</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M504.8858,-171.3017C514.3291,-189.7112 534.6206,-224.2626 562,-243 564.4061,-244.6466 566.939,-246.1649 569.5601,-247.5646"/>
+<polygon fill="#000000" stroke="#000000" points="568.2171,-250.8006 578.7567,-251.8819 571.1918,-244.4641 568.2171,-250.8006"/>
+</g>
+<!-- program~fossil_test_load_save_ascii -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node7" class="node">
+<title>program~fossil_test_load_save_ascii</title>
+<g id="a_module~~fossil_aabb_node_object~~UsedByGraph_node7"><a xlink:href="../program/fossil_test_load_save_ascii.html" xlink:title="fossil_test_load_save_ascii">
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="708,-234 566,-234 566,-210 708,-210 708,-234"/>
+<text text-anchor="middle" x="637" y="-219.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_test_load_save_ascii</text>
+</a>
+</g>
+</g>
+<!-- module~fossil&#45;&gt;program~fossil_test_load_save_ascii -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_edge3" class="edge">
+<title>module~fossil&#45;&gt;program~fossil_test_load_save_ascii</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M514.2389,-171.1631C526.5206,-180.4561 544.5591,-192.9906 562,-201 566.3775,-203.0103 570.9891,-204.8678 575.6849,-206.576"/>
+<polygon fill="#000000" stroke="#000000" points="574.7993,-209.9716 585.3937,-209.874 577.0508,-203.3435 574.7993,-209.9716"/>
+</g>
+<!-- program~fossil_test_load_save_binary -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node8" class="node">
+<title>program~fossil_test_load_save_binary</title>
+<g id="a_module~~fossil_aabb_node_object~~UsedByGraph_node8"><a xlink:href="../program/fossil_test_load_save_binary.html" xlink:title="fossil_test_load_save_binary">
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="712,-192 562,-192 562,-168 712,-168 712,-192"/>
+<text text-anchor="middle" x="637" y="-177.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_test_load_save_binary</text>
+</a>
+</g>
+</g>
+<!-- module~fossil&#45;&gt;program~fossil_test_load_save_binary -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_edge4" class="edge">
+<title>module~fossil&#45;&gt;program~fossil_test_load_save_binary</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M526.2644,-163.1489C533.9365,-164.3164 542.7112,-165.6517 551.8888,-167.0483"/>
+<polygon fill="#000000" stroke="#000000" points="551.5596,-170.5384 561.9724,-168.5828 552.6128,-163.6181 551.5596,-170.5384"/>
+</g>
+<!-- program~fossil_test_rotate -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node9" class="node">
+<title>program~fossil_test_rotate</title>
+<g id="a_module~~fossil_aabb_node_object~~UsedByGraph_node9"><a xlink:href="../program/fossil_test_rotate.html" xlink:title="fossil_test_rotate">
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="684,-150 590,-150 590,-126 684,-126 684,-150"/>
+<text text-anchor="middle" x="637" y="-135.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_test_rotate</text>
+</a>
+</g>
+</g>
+<!-- module~fossil&#45;&gt;program~fossil_test_rotate -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_edge5" class="edge">
+<title>module~fossil&#45;&gt;program~fossil_test_rotate</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M526.2644,-154.8511C541.5742,-152.5213 561.275,-149.5234 579.8052,-146.7036"/>
+<polygon fill="#000000" stroke="#000000" points="580.5843,-150.1254 589.9439,-145.1607 579.5311,-143.205 580.5843,-150.1254"/>
+</g>
+<!-- program~fossil_test_mirror -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node10" class="node">
+<title>program~fossil_test_mirror</title>
+<g id="a_module~~fossil_aabb_node_object~~UsedByGraph_node10"><a xlink:href="../program/fossil_test_mirror.html" xlink:title="fossil_test_mirror">
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="684,-108 590,-108 590,-84 684,-84 684,-108"/>
+<text text-anchor="middle" x="637" y="-93.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_test_mirror</text>
+</a>
+</g>
+</g>
+<!-- module~fossil&#45;&gt;program~fossil_test_mirror -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_edge6" class="edge">
+<title>module~fossil&#45;&gt;program~fossil_test_mirror</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M514.2389,-146.8369C526.5206,-137.5439 544.5591,-125.0094 562,-117 567.7254,-114.3707 573.8511,-112.0029 580.0418,-109.8884"/>
+<polygon fill="#000000" stroke="#000000" points="581.3182,-113.1549 589.7754,-106.7731 579.1844,-106.488 581.3182,-113.1549"/>
+</g>
+<!-- program~fossil_test_translate -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node11" class="node">
+<title>program~fossil_test_translate</title>
+<g id="a_module~~fossil_aabb_node_object~~UsedByGraph_node11"><a xlink:href="../program/fossil_test_translate.html" xlink:title="fossil_test_translate">
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="690.5,-66 583.5,-66 583.5,-42 690.5,-42 690.5,-66"/>
+<text text-anchor="middle" x="637" y="-51.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_test_translate</text>
+</a>
+</g>
+</g>
+<!-- module~fossil&#45;&gt;program~fossil_test_translate -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_edge7" class="edge">
+<title>module~fossil&#45;&gt;program~fossil_test_translate</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M504.8858,-146.6983C514.3291,-128.2888 534.6206,-93.7374 562,-75 565.7417,-72.4394 569.7898,-70.1892 574.0001,-68.2122"/>
+<polygon fill="#000000" stroke="#000000" points="575.5233,-71.3696 583.4198,-64.3059 572.8418,-64.9036 575.5233,-71.3696"/>
+</g>
+<!-- program~fossil_test_resize -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_node12" class="node">
+<title>program~fossil_test_resize</title>
+<g id="a_module~~fossil_aabb_node_object~~UsedByGraph_node12"><a xlink:href="../program/fossil_test_resize.html" xlink:title="fossil_test_resize">
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="684,-24 590,-24 590,0 684,0 684,-24"/>
+<text text-anchor="middle" x="637" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">fossil_test_resize</text>
+</a>
+</g>
+</g>
+<!-- module~fossil&#45;&gt;program~fossil_test_resize -->
+<g id="module~~fossil_aabb_node_object~~UsedByGraph_edge8" class="edge">
+<title>module~fossil&#45;&gt;program~fossil_test_resize</title>
+<path fill="none" stroke="#000000" stroke-dasharray="5,2" d="M501.5757,-146.8945C507.566,-121.7521 524.8436,-63.6715 562,-33 567.3247,-28.6046 573.5092,-25.1272 579.9985,-22.3764"/>
+<polygon fill="#000000" stroke="#000000" points="581.4699,-25.5651 589.6598,-18.8437 579.066,-18.9908 581.4699,-25.5651"/>
+</g>
+</g>
+</svg>
+</div>
+                <script>var panmodulefossil_aabb_node_objectUsedByGraph = svgPanZoom('#modulefossil_aabb_node_objectUsedByGraph', {
+                    zoomEnabled: true,
+                    controlIconsEnabled: true,
+                    fit: true,
+                    center: true,});
+                    </script>
+                <div><a type="button" class="graph-help" data-toggle="modal" href="#graph-help-text">Help</a></div>
+                <div class="modal fade" id="graph-help-text" tabindex="-1" role="dialog">
+                  <div class="modal-dialog modal-lg" role="document">
+                    <div class="modal-content">
+                      <div class="modal-header">
+                        <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                        <h4 class="modal-title" id="-graph-help-label">Graph Key</h4>
+                      </div>
+                      <div class="modal-body">
+                        
+    <p>Nodes of different colours represent the following: </p>
+    <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 2.40.1 (20161225.0304)
+ -->
+<!-- Title: Graph Key Pages: 1 -->
+<svg width="490pt" height="32pt"
+ viewBox="0.00 0.00 489.50 32.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 28)">
+<title>Graph Key</title>
+<polygon fill="#ffffff" stroke="transparent" points="-4,4 -4,-28 485.5,-28 485.5,4 -4,4"/>
+<!-- Module -->
+<g id="node1" class="node">
+<title>Module</title>
+<polygon fill="#337ab7" stroke="#337ab7" points="54,-24 0,-24 0,0 54,0 54,-24"/>
+<text text-anchor="middle" x="27" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Module</text>
+</g>
+<!-- Submodule -->
+<g id="node2" class="node">
+<title>Submodule</title>
+<polygon fill="#5bc0de" stroke="#5bc0de" points="139.5,-24 72.5,-24 72.5,0 139.5,0 139.5,-24"/>
+<text text-anchor="middle" x="106" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Submodule</text>
+</g>
+<!-- Subroutine -->
+<g id="node3" class="node">
+<title>Subroutine</title>
+<polygon fill="#d9534f" stroke="#d9534f" points="222,-24 158,-24 158,0 222,0 222,-24"/>
+<text text-anchor="middle" x="190" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Subroutine</text>
+</g>
+<!-- Function -->
+<g id="node4" class="node">
+<title>Function</title>
+<polygon fill="#d94e8f" stroke="#d94e8f" points="294,-24 240,-24 240,0 294,0 294,-24"/>
+<text text-anchor="middle" x="267" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Function</text>
+</g>
+<!-- Program -->
+<g id="node5" class="node">
+<title>Program</title>
+<polygon fill="#f0ad4e" stroke="#f0ad4e" points="366,-24 312,-24 312,0 366,0 366,-24"/>
+<text text-anchor="middle" x="339" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#ffffff">Program</text>
+</g>
+<!-- This Page&#39;s Entity -->
+<g id="node6" class="node">
+<title>This Page&#39;s Entity</title>
+<polygon fill="none" stroke="#000000" points="481.5,-24 384.5,-24 384.5,0 481.5,0 481.5,-24"/>
+<text text-anchor="middle" x="433" y="-9.6" font-family="Helvetica,sans-Serif" font-size="10.50" fill="#000000">This Page&#39;s Entity</text>
+</g>
+</g>
+</svg>
+
+    
+    <p>Solid arrows point from a parent (sub)module to the submodule which is
+    descended from it. Dashed arrows point from a module being used to the
+    module or program unit using it.
+    </p>
+    
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+    <br>
+    
+
+    <section class="visible-xs visible-sm hidden-md">
+      
+
+
+
+
+
+
+
+
+
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#types-1">Derived Types</a></h3></div>
+  <div id="types-1" class="panel-collapse collapse">
+    <div class="list-group">
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#type-aabb_node_object">aabb_node_object</a>
+      
+    </div>
+  </div>
+</div>
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#funcs-1">Functions</a></h3></div>
+  <div id="funcs-1" class="panel-collapse collapse">
+    <div class="list-group">
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-bmin">bmin</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-bmax">bmax</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-closest_point%7E2">closest_point</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-distance%7E4">distance</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-distance_from_facets%7E2">distance_from_facets</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-do_ray_intersect%7E3">do_ray_intersect</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-has_facets%7E2">has_facets</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-is_allocated">is_allocated</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-ray_intersections_number%7E2">ray_intersections_number</a>
+      
+    </div>
+  </div>
+</div>
+
+
+<div class="panel panel-primary">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#subs-1">Subroutines</a></h3></div>
+  <div class="list-group">
+    <div id="subs-1" class="panel-collapse collapse">
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-add_facets%7E2">add_facets</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-compute_octants%7E2">compute_octants</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-destroy%7E4">destroy</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-initialize%7E4">initialize</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-save_geometry_tecplot_ascii%7E2">save_geometry_tecplot_ascii</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-save_facets_into_file_stl%7E2">save_facets_into_file_stl</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-update_extents%7E2">update_extents</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html#proc-aabb_node_assign_aabb_node">aabb_node_assign_aabb_node</a>
+      
+    </div>
+  </div>
+</div>
+
+
+
+
+
+
+
+
+
+    </section>
+    <br class="visible-xs visible-sm hidden-md">
+
+    
+
+    
+    
+    
+    
+    
+
+    
+    
+    
+    <section>
+     <h2>Derived Types</h2>
+	 
+	   
+<div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="type-aabb_node_object"></span><h3>type, public :: <a href='../type/aabb_node_object.html'>aabb_node_object</a>
+    
+  </h3></div>
+  <div class="panel-body">
+    
+    
+    <p>FOSSIL Axis-Aligned Bounding Box (AABB) tree-node class.</p>
+    
+     
+     <h4>Components</h4>
+    
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th><th>Visibility</th>
+
+<th>Attributes</th><th></th><th>Name</th><th></th><th>Initial</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" id="variable-aabb%7E2"></span>type(<a href='../type/aabb_object.html'>aabb_object</a>),</td>
+  
+  <td>private,</td>
+  <td>allocatable</td><td>::</td>
+  <td><strong>aabb</strong></td><td></td><td></td><td><p>AABB data.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+     
+     
+          
+     
+     <h4>Type-Bound Procedures</h4>
+      <table class="table table-striped varlist">
+      <tbody>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-add_facets%7E2'>add_facets</a></strong>  </td>
+       <td><p>Add facets to AABB.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-bmin%7E3'>bmin</a></strong>  </td>
+       <td><p>Return AABB bmin.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-bmax%7E3'>bmax</a></strong>  </td>
+       <td><p>Return AABB bmax.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-closest_point%7E2'>closest_point</a></strong>  </td>
+       <td><p>Return closest point on AABB from point reference.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-compute_octants%7E2'>compute_octants</a></strong>  </td>
+       <td><p>Compute AABB octants.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-destroy%7E4'>destroy</a></strong>  </td>
+       <td><p>Destroy AABB.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-distance%7E4'>distance</a></strong>  </td>
+       <td><p>Return the (square) distance from point to AABB.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-distance_from_facets%7E2'>distance_from_facets</a></strong>  </td>
+       <td><p>Return the (square) distance from point to AABB's facets.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-do_ray_intersect%7E3'>do_ray_intersect</a></strong>  </td>
+       <td><p>Return true if AABB is intersected by ray.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-has_facets%7E2'>has_facets</a></strong>  </td>
+       <td><p>Return true if AABB has facets.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-initialize%7E4'>initialize</a></strong>  </td>
+       <td><p>Initialize AABB.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-is_allocated'>is_allocated</a></strong>  </td>
+       <td><p>Return true is node is allocated.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-ray_intersections_number%7E2'>ray_intersections_number</a></strong>  </td>
+       <td><p>Return ray intersections number.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-save_geometry_tecplot_ascii%7E2'>save_geometry_tecplot_ascii</a></strong>  </td>
+       <td><p>Save AABB geometry into Tecplot ascii file.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-save_facets_into_file_stl%7E2'>save_facets_into_file_stl</a></strong>  </td>
+       <td><p>Save facets into file STL.</p></td></tr>
+      
+       <tr><td>procedure, public, pass(self) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-update_extents%7E2'>update_extents</a></strong>  </td>
+       <td><p>Update AABB bounding box extents.</p></td></tr>
+      
+       <tr><td>generic, public :: <strong><a href='../type/aabb_node_object.html#boundprocedure-assignment%28%3D%29%7E4'>assignment(=)</a></strong>  => aabb_node_assign_aabb_node </td>
+       <td><p>Overload <code>=</code>.</p></td></tr>
+      
+       <tr><td>procedure, private, pass(lhs) :: <strong><a href='../type/aabb_node_object.html#boundprocedure-aabb_node_assign_aabb_node'>aabb_node_assign_aabb_node</a></strong>  </td>
+       <td><p>Operator <code>=</code>.</p></td></tr>
+      
+       </tbody>
+       </table>
+     
+  </div>
+</div>
+
+     
+    </section>
+	<br>
+    
+    
+     
+    <section>
+    <h2>Functions</h2>
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-bmin"></span><h3>
+private pure function <a href='../proc/bmin.html'>bmin</a>(self)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Return AABB bmin.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB box.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  
+  
+  
+  
+     <h4>Return Value <small>type(vector_R8P)
+  </small></h4>
+  <p>AABB bmin.</p>
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-bmax"></span><h3>
+private pure function <a href='../proc/bmax.html'>bmax</a>(self)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Return AABB bmax.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB box.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  
+  
+  
+  
+     <h4>Return Value <small>type(vector_R8P)
+  </small></h4>
+  <p>AABB bmax.</p>
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-closest_point%7E2"></span><h3>
+private pure function <a href='../proc/closest_point%7E2.html'>closest_point</a>(self, point) result(closest)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Return closest point on (or in) AABB from point reference.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB box.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(vector_R8P),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>point</strong></td><td><p>Point reference.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  
+  
+  
+  
+     <h4>Return Value <small>type(vector_R8P)
+  </small></h4>
+  <p>Closest point on (on in) aabb to point.</p>
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-distance%7E4"></span><h3>
+private pure function <a href='../proc/distance%7E4.html'>distance</a>(self, point)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Return the (square) distance from point to AABB.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(vector_R8P),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>point</strong></td><td><p>Point reference.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  
+  
+  
+  
+     <h4>Return Value <small>real(kind=R8P)
+  </small></h4>
+  <p>Distance from point to AABB.</p>
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-distance_from_facets%7E2"></span><h3>
+private pure function <a href='../proc/distance_from_facets%7E2.html'>distance_from_facets</a>(self, point) result(distance)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Return the (square) distance from point to AABB's facets.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(vector_R8P),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>point</strong></td><td><p>Point reference.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  
+  
+  
+  
+     <h4>Return Value <small>real(kind=R8P)
+  </small></h4>
+  <p>Distance from point to AABB's facets.</p>
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-do_ray_intersect%7E3"></span><h3>
+private pure function <a href='../proc/do_ray_intersect%7E3.html'>do_ray_intersect</a>(self, ray_origin, ray_direction) result(do_intersect)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Return true if AABB is intersected by ray from origin and oriented as ray direction vector.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(vector_R8P),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>ray_origin</strong></td><td><p>Ray origin.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(vector_R8P),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>ray_direction</strong></td><td><p>Ray direction.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  
+  
+  
+  
+     <h4>Return Value <small>logical
+  </small></h4>
+  <p>Test result.</p>
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-has_facets%7E2"></span><h3>
+private pure function <a href='../proc/has_facets%7E2.html'>has_facets</a>(self)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Return true if AABB has facets.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB box.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  
+  
+  
+  
+     <h4>Return Value <small>logical
+  </small></h4>
+  <p>Check result.</p>
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-is_allocated"></span><h3>
+private pure function <a href='../proc/is_allocated.html'>is_allocated</a>(self)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Return true if node is allocated.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB box.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  
+  
+  
+  
+     <h4>Return Value <small>logical
+  </small></h4>
+  <p>Check result.</p>
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-ray_intersections_number%7E2"></span><h3>
+private pure function <a href='../proc/ray_intersections_number%7E2.html'>ray_intersections_number</a>(self, ray_origin, ray_direction) result(intersections_number)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Return ray intersections number.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(vector_R8P),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>ray_origin</strong></td><td><p>Ray origin.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(vector_R8P),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>ray_direction</strong></td><td><p>Ray direction.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  
+  
+  
+  
+     <h4>Return Value <small>integer(kind=I4P)
+  </small></h4>
+  <p>Intersection number.</p>
+    
+
+  </div>
+  </div>
+
+    
+    </section>
+    <br>
+    
+
+    
+    <section>
+    <h2>Subroutines</h2>
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-add_facets%7E2"></span><h3>
+private subroutine <a href='../proc/add_facets%7E2.html'>add_facets</a>(self, facet)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Add facets to AABB.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(inout)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(<a href='../type/facet_object.html'>facet_object</a>),</td>
+  <td>intent(inout),</td>
+  <td></td>
+  
+  <td>allocatable</td><td>::</td>
+  <td><strong>facet</strong>(:)</td><td><p>Facets list.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-compute_octants%7E2"></span><h3>
+private pure subroutine <a href='../proc/compute_octants%7E2.html'>compute_octants</a>(self, octant)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Return AABB octants.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(<a href='../type/aabb_object.html'>aabb_object</a>),</td>
+  <td>intent(out)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>octant</strong>(8)</td><td><p>AABB octants.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-destroy%7E4"></span><h3>
+private elemental subroutine <a href='../proc/destroy%7E4.html'>destroy</a>(self)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Destroy AABB.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(inout)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-initialize%7E4"></span><h3>
+private pure subroutine <a href='../proc/initialize%7E4.html'>initialize</a>(self, facet, bmin, bmax)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Initialize AABB.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(inout)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(<a href='../type/facet_object.html'>facet_object</a>),</td>
+  <td>intent(in),</td>
+  <td>optional</td>
+  
+  <td></td><td>::</td>
+  <td><strong>facet</strong>(:)</td><td><p>Facets list.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(vector_R8P),</td>
+  <td>intent(in),</td>
+  <td>optional</td>
+  
+  <td></td><td>::</td>
+  <td><strong>bmin</strong></td><td><p>Minimum point of AABB.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(vector_R8P),</td>
+  <td>intent(in),</td>
+  <td>optional</td>
+  
+  <td></td><td>::</td>
+  <td><strong>bmax</strong></td><td><p>Maximum point of AABB.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-save_geometry_tecplot_ascii%7E2"></span><h3>
+private subroutine <a href='../proc/save_geometry_tecplot_ascii%7E2.html'>save_geometry_tecplot_ascii</a>(self, file_unit, aabb_name)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Save AABB geometry into Tecplot ascii file.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>integer(kind=I4P),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>file_unit</strong></td><td><p>File unit.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>character(len=*),</td>
+  <td>intent(in),</td>
+  <td>optional</td>
+  
+  <td></td><td>::</td>
+  <td><strong>aabb_name</strong></td><td><p>Name of AABB.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-save_facets_into_file_stl%7E2"></span><h3>
+private subroutine <a href='../proc/save_facets_into_file_stl%7E2.html'>save_facets_into_file_stl</a>(self, file_name, is_ascii)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Save facets into file STL.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>character(len=*),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>file_name</strong></td><td><p>File name.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>logical,</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>is_ascii</strong></td><td><p>Sentinel to check if file is ASCII.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-update_extents%7E2"></span><h3>
+private pure subroutine <a href='../proc/update_extents%7E2.html'>update_extents</a>(self)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Update AABB bounding box extents.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(inout)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>self</strong></td><td><p>AABB.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  </div>
+  </div>
+
+    
+    
+  <div class="panel panel-default">
+  <div class="panel-heading codesum"><span class="anchor" id="proc-aabb_node_assign_aabb_node"></span><h3>
+private pure subroutine <a href='../proc/aabb_node_assign_aabb_node.html'>aabb_node_assign_aabb_node</a>(lhs, rhs)
+    
+    
+	 
+</h3></div>
+  <div class="panel-body">
+       
+    
+
+
+
+
+
+
+
+<p>Operator <code>=</code>.</p>
+    
+    <h4>Arguments</h4>
+    
+      
+      
+<table class="table table-striped varlist">
+<thead><tr><th>Type</th>
+<th>Intent</th><th>Optional</th>
+<th>Attributes</th><th></th><th>Name</th><th></th></thead>
+
+
+
+<tbody>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>class(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(inout)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>lhs</strong></td><td><p>Left hand side.</p></td>
+  
+</tr>
+
+  
+  
+  
+  
+<tr>
+  
+  <td><span class="anchor" ></span>type(<a href='../type/aabb_node_object.html'>aabb_node_object</a>),</td>
+  <td>intent(in)</td>
+  <td></td>
+  
+  <td></td><td>::</td>
+  <td><strong>rhs</strong></td><td><p>Right hand side.</p></td>
+  
+</tr>
+
+</tbody>
+</table>
+
+      
+    
+    
+
+  </div>
+  </div>
+
+    
+    </section>    
+    <br>
+    
+    
+    
+    </div>
+  </div>
+
+  <section class="visible-xs visible-sm hidden-md">
+    <hr>
+    
+
+<div class="panel panel-default">
+  <div class="panel-heading text-left"><h3 class="panel-title"><a data-toggle="collapse" href="#allmods-1">All Modules</a></h3></div>
+  <div id="allmods-1" class="panel-collapse collapse">
+    <div class="list-group">
+      
+      <a class="list-group-item" href="../module/fossil.html">fossil</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_node_object.html">fossil_aabb_node_object</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_object.html">fossil_aabb_object</a>
+      
+      <a class="list-group-item" href="../module/fossil_aabb_tree_object.html">fossil_aabb_tree_object</a>
+      
+      <a class="list-group-item" href="../module/fossil_facet_object.html">fossil_facet_object</a>
+      
+      <a class="list-group-item" href="../module/fossil_file_stl_object.html">fossil_file_stl_object</a>
+      
+      <a class="list-group-item" href="../module/fossil_utils.html">fossil_utils</a>
+      
+    </div>
+  </div>
+</div>
+
+
+  </section>
+  
+    <hr>    
+    </div> <!-- /container -->
+    <footer>
+      <div class="container">
+      <div class="row">
+        <div class="col-xs-6 col-md-4"><p>&copy; 2018 </p></div>
+        <div class="col-xs-6 col-md-4 col-md-push-4">
+          <p class="text-right">
+            Documentation generated by 
+            <a href="https://github.com/cmacmackin/ford">FORD</a>
+            
+          </p>
+        </div>
+        <div class="col-xs-12 col-md-4 col-md-pull-4"><p class="text-center"> FOSSIL was developed by Stefano Zaghi</p></div>
+      </div>
+      <br>
+      </div> <!-- /container -->    
+    </footer>
+
+    <!-- Bootstrap core JavaScript
+    ================================================== -->
+    <!-- Placed at the end of the document so the pages load faster -->
+<!--
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.1/jquery.min.js"></script>
+-->
+    <script src="../js/bootstrap.min.js"></script>
+    <!-- IE10 viewport hack for Surface/desktop Windows 8 bug -->
+    <script src="../js/ie10-viewport-bug-workaround.js"></script>
+
+    <!-- MathJax JavaScript
+    ================================================== -->
+    <!-- Placed at the end of the document so the pages load faster -->
+    <script type="text/x-mathjax-config">
+      MathJax.Hub.Config({
+        TeX: { extensions: ['AMSmath.js','AMSsymbols.js','noErrors.js','noUndefined.js'], equationNumbers: { autoNumber: 'AMS' } },
+        jax: ['input/TeX','input/MathML','output/HTML-CSS'],
+        extensions: ['tex2jax.js','mml2jax.js','MathMenu.js','MathZoom.js'],
+        'HTML-CSS': { 
+           styles: { '.MathJax_Display, .MathJax .mo, .MathJax .mi, .MathJax .mn': {color: '#000000 ! important'} }
+        }
+      });
+    </script>
+    <script src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+  </body>
+</html>
