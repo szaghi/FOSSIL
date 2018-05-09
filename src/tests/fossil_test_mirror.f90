@@ -20,7 +20,7 @@ are_tests_passed = .false.
 call cli_parse
 call file_stl%initialize(file_name=trim(adjustl(file_name_stl)))
 call file_stl%load_from_file(guess_format=.true.)
-print*, file_stl%statistics()
+print '(A)', file_stl%statistics()
 
 call file_stl%mirror(normal=normal)
 call file_stl%save_into_file(file_name='fossil_test_mirror.stl')
