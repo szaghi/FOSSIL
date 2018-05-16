@@ -51,6 +51,10 @@ FOSSIL provides a simple API to IO STL files and also to manipulate the triangul
 > the dragon STL test (src/tests/dragon.stl) is composed by 6588 triangular facets. The signed distance computation on a uniform
 > grid of `64^3` is accelerated by a factor of 7x using AABB algorithm with respect the simple brute force.
 
+![disconnected-cube](pre_docs/disconnected-cube.png)
+
+> automatic repair of disconnected edges.
+
 Go to [Top](#top)
 
 ## Main features
@@ -82,7 +86,9 @@ Go to [Top](#top)
         * [x] by means of solid angle computation;
         * [x] by means of rays intersection count;
     * [ ] fill holes;
-    * [ ] check surface watertight;
+    * [x] check surface watertight:
+        * [x] identify disconected edges;
+    * [x] connect nearby facets;
 * [ ] errors trapping mechanism.
 
 Any feature request is welcome.

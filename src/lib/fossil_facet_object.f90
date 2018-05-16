@@ -3,6 +3,7 @@
 module fossil_facet_object
 !< FOSSIL, facet class definition.
 
+use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : FR4P, I2P, I4P, R4P, R8P, str, ZeroR8P
@@ -14,10 +15,8 @@ public :: facet_object
 
 type :: facet_object
    !< FOSSIL, facet class.
-   type(vector_R8P) :: normal   !< Facet (outward) normal (versor), `(v2-v1).cross.(v3-v1)`.
-   type(vector_R8P) :: vertex_1 !< Facet vertex 1.
-   type(vector_R8P) :: vertex_2 !< Facet vertex 2.
-   type(vector_R8P) :: vertex_3 !< Facet vertex 3.
+   type(vector_R8P) :: normal    !< Facet (outward) normal (versor), `(v2-v1).cross.(v3-v1)`.
+   type(vector_R8P) :: vertex(3) !< Facet vertex 1.
    ! metrix
    ! triangle plane parametric equation: T(s,t) = B + s*E12 + t*E13
    type(vector_R8P) :: E12        !< Edge 1-2, `V2-V1`.
@@ -27,25 +26,25 @@ type :: facet_object
    real(R8P)        :: c=0._R8P   !< `E13.dot.E13`.
    real(R8P)        :: det=0._R8P !< `a*c - b*b`.
    ! triangle plane equation: nx*x + ny*y + nz*z - d = 0, normal == [nx, ny, nz]
-   real(R8P) :: d=0._R8P !< `normal.dot.vertex_1`
+   real(R8P) :: d=0._R8P !< `normal.dot.vertex(1)`
    ! auxiliary
    type(vector_R8P) :: bb(2) !< Axis-aligned bounding box (AABB), bb(1)=min, bb(2)=max.
    ! connectivity
-   integer(I4P)              :: id                     !< Facet global ID.
-   integer(I4P)              :: fcon_edge_12=0_I4P     !< Connected face ID along edge 1-2.
-   integer(I4P)              :: fcon_edge_23=0_I4P     !< Connected face ID along edge 2-3.
-   integer(I4P)              :: fcon_edge_31=0_I4P     !< Connected face ID along edge 3-1.
-   integer(I4P), allocatable :: vertex_1_occurrence(:) !< List of vertex 1 "occurrencies", list of facets global ID containing it.
-   integer(I4P), allocatable :: vertex_2_occurrence(:) !< List of vertex 2 "occurrencies", list of facets global ID containing it.
-   integer(I4P), allocatable :: vertex_3_occurrence(:) !< List of vertex 3 "occurrencies", list of facets global ID containing it.
+   integer(I4P)         :: id                   !< Facet global ID.
+   integer(I4P)         :: fcon_edge_12=0_I4P   !< Connected face ID along edge 1-2.
+   integer(I4P)         :: fcon_edge_23=0_I4P   !< Connected face ID along edge 2-3.
+   integer(I4P)         :: fcon_edge_31=0_I4P   !< Connected face ID along edge 3-1.
+   type(list_id_object) :: vertex_occurrence(3) !< List of vertices "occurrencies", list of facets global ID containing them.
+   type(list_id_object) :: vertex_nearby(3)     !< List of vertices "nearby", list of vertices global ID nearby them.
    contains
       ! public methods
-      procedure, pass(self) :: add_vertex_occurrence           !< Add vertex occurence.
       procedure, pass(self) :: check_normal                    !< Check normal consistency.
-      procedure, pass(self) :: check_vertices_occurrencies     !< Check if vertices of facet are *identical* to ones of other facet.
       procedure, pass(self) :: compute_metrix                  !< Compute local (plane) metrix.
       procedure, pass(self) :: compute_normal                  !< Compute normal by means of vertices data.
+      procedure, pass(self) :: compute_vertices_nearby         !< Compute vertices nearby comparing to ones of other facet.
+      procedure, pass(self) :: connect_nearby_vertices         !< Connect nearby vertices of disconnected edges.
       procedure, pass(self) :: destroy                         !< Destroy facet.
+      procedure, pass(self) :: destroy_connectivity            !< Destroy facet connectivity.
       procedure, pass(self) :: distance                        !< Compute the (unsigned, squared) distance from a point to facet.
       procedure, pass(self) :: do_ray_intersect                !< Return true if facet is intersected by a ray.
       procedure, pass(self) :: initialize                      !< Initialize facet.
@@ -60,6 +59,7 @@ type :: facet_object
                                          rotate_by_matrix      !< Rotate facet.
       procedure, pass(self) :: save_into_file_ascii            !< Save facet into ASCII file.
       procedure, pass(self) :: save_into_file_binary           !< Save facet into binary file.
+      procedure, pass(self) :: smallest_edge_len               !< Return the smallest edge length.
       procedure, pass(self) :: solid_angle                     !< Return the (projected) solid angle of the facet with respect point.
       procedure, pass(self) :: tetrahedron_volume              !< Return the volume of tetrahedron built by facet and a given apex.
       procedure, pass(self) :: translate                       !< Translate facet given vectorial delta.
@@ -79,98 +79,17 @@ endtype facet_object
 
 contains
    ! public methods
-   elemental subroutine add_vertex_occurrence(self, vertex_id, facet_id)
-   !< Add vertex occurrence.
-   class(facet_object), intent(inout) :: self      !< Facet.
-   integer(I4P),        intent(in)    :: vertex_id !< Vertex ID in local numeration, 1, 2 or 3.
-   integer(I4P),        intent(in)    :: facet_id  !< Other facet ID containing vertex.
-
-   select case(vertex_id)
-   case(1)
-      call add_occurrence(occurrence=self%vertex_1_occurrence)
-   case(2)
-      call add_occurrence(occurrence=self%vertex_2_occurrence)
-   case(3)
-      call add_occurrence(occurrence=self%vertex_3_occurrence)
-   endselect
-   contains
-      pure subroutine add_occurrence(occurrence)
-      !< Add new occurrence into a generic occurrencies array.
-      integer(I4P), allocatable, intent(inout) :: occurrence(:)     !< Occurrences array.
-      integer(I4P), allocatable                :: occurrence_tmp(:) !< Temporary occurences array.
-      integer(I4P)                             :: no                !< Occurrences number.
-
-      if (allocated(occurrence)) then
-         no = size(occurrence, dim=1)
-         allocate(occurrence_tmp(1:no+1))
-         occurrence_tmp(1:no) = occurrence
-         occurrence_tmp(no+1) = facet_id
-         call move_alloc(from=occurrence_tmp, to=occurrence)
-      else
-         allocate(occurrence(1))
-         occurrence(1) = facet_id
-      endif
-      endsubroutine add_occurrence
-   endsubroutine add_vertex_occurrence
-
    elemental function check_normal(self) result(is_consistent)
    !< Check normal consistency.
    class(facet_object), intent(in) :: self          !< Facet.
    logical                         :: is_consistent !< Consistency check result.
    type(vector_R8P)                :: normal        !< Normal computed by means of vertices data.
 
-   normal = face_normal3_R8P(pt1=self%vertex_1, pt2=self%vertex_2, pt3=self%vertex_3, norm='y')
+   normal = face_normal3_R8P(pt1=self%vertex(1), pt2=self%vertex(2), pt3=self%vertex(3), norm='y')
    is_consistent = ((abs(normal%x - self%normal%x)<=2*ZeroR8P).and.&
                     (abs(normal%y - self%normal%y)<=2*ZeroR8P).and.&
                     (abs(normal%z - self%normal%z)<=2*ZeroR8P))
    endfunction check_normal
-
-   pure subroutine check_vertices_occurrencies(self, other)
-   !< Check if vertices of facet are *identical* (with tollerance) to the ones of other facet.
-   !<
-   !< If multiple occurrencies are found the counters are updated.
-   class(facet_object), intent(inout) :: self  !< Facet.
-   type(facet_object),  intent(inout) :: other !< Other facet.
-
-   if     (check_pair(self%vertex_1, other%vertex_1)) then
-      call self%add_vertex_occurrence( vertex_id=1, facet_id=other%id)
-      call other%add_vertex_occurrence(vertex_id=1, facet_id=self%id)
-   elseif (check_pair(self%vertex_1, other%vertex_2)) then
-      call self%add_vertex_occurrence( vertex_id=1, facet_id=other%id)
-      call other%add_vertex_occurrence(vertex_id=2, facet_id=self%id)
-   elseif (check_pair(self%vertex_1, other%vertex_3)) then
-      call self%add_vertex_occurrence( vertex_id=1, facet_id=other%id)
-      call other%add_vertex_occurrence(vertex_id=3, facet_id=self%id)
-   endif
-   if     (check_pair(self%vertex_2, other%vertex_1)) then
-      call self%add_vertex_occurrence( vertex_id=2, facet_id=other%id)
-      call other%add_vertex_occurrence(vertex_id=1, facet_id=self%id)
-   elseif (check_pair(self%vertex_2, other%vertex_2)) then
-      call self%add_vertex_occurrence( vertex_id=2, facet_id=other%id)
-      call other%add_vertex_occurrence(vertex_id=2, facet_id=self%id)
-   elseif (check_pair(self%vertex_2, other%vertex_3)) then
-      call self%add_vertex_occurrence( vertex_id=2, facet_id=other%id)
-      call other%add_vertex_occurrence(vertex_id=3, facet_id=self%id)
-   endif
-   if     (check_pair(self%vertex_3, other%vertex_1)) then
-      call self%add_vertex_occurrence( vertex_id=3, facet_id=other%id)
-      call other%add_vertex_occurrence(vertex_id=1, facet_id=self%id)
-   elseif (check_pair(self%vertex_3, other%vertex_2)) then
-      call self%add_vertex_occurrence( vertex_id=3, facet_id=other%id)
-      call other%add_vertex_occurrence(vertex_id=2, facet_id=self%id)
-   elseif (check_pair(self%vertex_3, other%vertex_3)) then
-      call self%add_vertex_occurrence( vertex_id=3, facet_id=other%id)
-      call other%add_vertex_occurrence(vertex_id=3, facet_id=self%id)
-   endif
-   contains
-      pure function check_pair(a, b)
-      !< Check equality of vertices pair.
-      type(vector_R8P), intent(in) :: a, b       !< Vertices pair.
-      logical                      :: check_pair !< Check result.
-
-      check_pair = ((abs(a%x - b%x) <= EPS).and.(abs(a%y - b%y) <= EPS).and.(abs(a%z - b%z) <= EPS))
-      endfunction check_pair
-   endsubroutine check_vertices_occurrencies
 
    elemental subroutine compute_metrix(self)
    !< Compute local (plane) metrix.
@@ -178,21 +97,21 @@ contains
 
    call self%compute_normal
 
-   self%E12 = self%vertex_2 - self%vertex_1
-   self%E13 = self%vertex_3 - self%vertex_1
+   self%E12 = self%vertex(2) - self%vertex(1)
+   self%E13 = self%vertex(3) - self%vertex(1)
    self%a   = self%E12.dot.self%E12
    self%b   = self%E12.dot.self%E13
    self%c   = self%E13.dot.self%E13
    self%det = self%a * self%c - self%b * self%b
 
-   self%d = self%normal.dot.self%vertex_1
+   self%d = self%normal.dot.self%vertex(1)
 
-   self%bb(1)%x = min(self%vertex_1%x, self%vertex_2%x, self%vertex_3%x)
-   self%bb(1)%y = min(self%vertex_1%y, self%vertex_2%y, self%vertex_3%y)
-   self%bb(1)%z = min(self%vertex_1%z, self%vertex_2%z, self%vertex_3%z)
-   self%bb(2)%x = max(self%vertex_1%x, self%vertex_2%x, self%vertex_3%x)
-   self%bb(2)%y = max(self%vertex_1%y, self%vertex_2%y, self%vertex_3%y)
-   self%bb(2)%z = max(self%vertex_1%z, self%vertex_2%z, self%vertex_3%z)
+   self%bb(1)%x = min(self%vertex(1)%x, self%vertex(2)%x, self%vertex(3)%x)
+   self%bb(1)%y = min(self%vertex(1)%y, self%vertex(2)%y, self%vertex(3)%y)
+   self%bb(1)%z = min(self%vertex(1)%z, self%vertex(2)%z, self%vertex(3)%z)
+   self%bb(2)%x = max(self%vertex(1)%x, self%vertex(2)%x, self%vertex(3)%x)
+   self%bb(2)%y = max(self%vertex(1)%y, self%vertex(2)%y, self%vertex(3)%y)
+   self%bb(2)%z = max(self%vertex(1)%z, self%vertex(2)%z, self%vertex(3)%z)
    endsubroutine compute_metrix
 
    elemental subroutine compute_normal(self)
@@ -200,25 +119,104 @@ contains
    !<
    !<```fortran
    !< type(facet_object) :: facet
-   !< facet%vertex_1 = -0.231369_R4P * ex_R4P + 0.0226865_R4P * ey_R4P + 1._R4P * ez_R4P
-   !< facet%vertex_2 = -0.227740_R4P * ex_R4P + 0.0245457_R4P * ey_R4P + 0._R4P * ez_R4P
-   !< facet%vertex_2 = -0.235254_R4P * ex_R4P + 0.0201881_R4P * ey_R4P + 0._R4P * ez_R4P
+   !< facet%vertex(1) = -0.231369_R4P * ex_R4P + 0.0226865_R4P * ey_R4P + 1._R4P * ez_R4P
+   !< facet%vertex(2) = -0.227740_R4P * ex_R4P + 0.0245457_R4P * ey_R4P + 0._R4P * ez_R4P
+   !< facet%vertex(2) = -0.235254_R4P * ex_R4P + 0.0201881_R4P * ey_R4P + 0._R4P * ez_R4P
    !< call facet%sanitize_normal
    !< print "(3(F3.1,1X))", facet%normal%x, facet%normal%y, facet%normal%z
    !<```
    !=> -0.501673222 0.865057290 -2.12257713<<<
    class(facet_object), intent(inout) :: self !< Facet.
 
-   self%normal = face_normal3_R8P(pt1=self%vertex_1, pt2=self%vertex_2, pt3=self%vertex_3, norm='y')
+   self%normal = face_normal3_R8P(pt1=self%vertex(1), pt2=self%vertex(2), pt3=self%vertex(3), norm='y')
    endsubroutine compute_normal
 
+   pure subroutine compute_vertices_nearby(self, other, tolerance_to_be_identical, tolerance_to_be_nearby)
+   !< Compute vertices nearby comparing to ones of other facet.
+   class(facet_object), intent(inout) :: self                      !< Facet.
+   type(facet_object),  intent(inout) :: other                     !< Other facet.
+   real(R8P),           intent(in)    :: tolerance_to_be_identical !< Tolerance to identify identical vertices.
+   real(R8P),           intent(in)    :: tolerance_to_be_nearby    !< Tolerance to identify nearby vertices.
+   integer(I4P)                       :: vs, vo                    !< Counter.
+
+   do vs=1, 3
+      do vo=1, 3
+         if (are_nearby(self%vertex(vs), other%vertex(vo), tolerance_to_be_nearby)) then
+            call  self%vertex_nearby(vs)%put(id=other%vertex_global_id(vo))
+            call other%vertex_nearby(vo)%put(id= self%vertex_global_id(vs))
+         endif
+      enddo
+   enddo
+   do vs=1, 3
+      do vo=1, 3
+         if (are_nearby(self%vertex(vs), other%vertex(vo), tolerance_to_be_identical)) then
+            call  self%vertex_occurrence(vs)%put(id=other%id)
+            call other%vertex_occurrence(vo)%put(id= self%id)
+         endif
+      enddo
+   enddo
+   contains
+      pure function are_nearby(a, b, tolerance)
+      !< Check equality of vertices pair.
+      type(vector_R8P), intent(in) :: a, b       !< Vertices pair.
+      real(R8P),        intent(in) :: tolerance  !< Check tolerance.
+      logical                      :: are_nearby !< Check result.
+
+      are_nearby = ((abs(a%x - b%x) <= tolerance).and.&
+                    (abs(a%y - b%y) <= tolerance).and.&
+                    (abs(a%z - b%z) <= tolerance))
+      endfunction are_nearby
+   endsubroutine compute_vertices_nearby
+
+   pure subroutine connect_nearby_vertices(self, facet)
+   !< Connect nearby vertices of disconnected edges.
+   class(facet_object), intent(inout) :: self     !< Facet.
+   type(facet_object),  intent(inout) :: facet(:) !< All facets in STL.
+
+   if     (self%fcon_edge_12==0) then
+      if (self%vertex_nearby(1)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(1), facet=facet, nearby=self%vertex_nearby(1))
+      endif
+      if (self%vertex_nearby(2)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(2), facet=facet, nearby=self%vertex_nearby(2))
+      endif
+   endif
+   if (self%fcon_edge_23==0) then
+      if (self%vertex_nearby(2)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(2), facet=facet, nearby=self%vertex_nearby(2))
+      endif
+      if (self%vertex_nearby(3)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(3), facet=facet, nearby=self%vertex_nearby(3))
+      endif
+   endif
+   if (self%fcon_edge_31==0) then
+      if (self%vertex_nearby(3)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(3), facet=facet, nearby=self%vertex_nearby(3))
+      endif
+      if (self%vertex_nearby(1)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(1), facet=facet, nearby=self%vertex_nearby(1))
+      endif
+   endif
+   endsubroutine connect_nearby_vertices
+
    elemental subroutine destroy(self)
-   !< Destroy AABB.
+   !< Destroy facet.
    class(facet_object), intent(inout) :: self  !< Facet.
    type(facet_object)                 :: fresh !< Fresh instance of facet.
 
    self = fresh
    endsubroutine destroy
+
+   elemental subroutine destroy_connectivity(self)
+   !< Destroy facet connectivity.
+   class(facet_object), intent(inout) :: self  !< Facet.
+
+   self%fcon_edge_12=0_I4P
+   self%fcon_edge_23=0_I4P
+   self%fcon_edge_31=0_I4P
+   call self%vertex_occurrence%destroy
+   call self%vertex_nearby%destroy
+   endsubroutine destroy_connectivity
 
    pure function distance(self, point)
    !< Compute the (unsigned, squared) distance from a point to the facet surface.
@@ -227,12 +225,12 @@ contains
    class(facet_object), intent(in) :: self                             !< Facet.
    type(vector_R8P),    intent(in) :: point                            !< Point.
    real(R8P)                       :: distance                         !< Closest distance from point to the facet.
-   type(vector_R8P)                :: V1P                              !< `vertex_1-point`.
+   type(vector_R8P)                :: V1P                              !< `vertex(1)-point`.
    real(R8P)                       :: d, e, f, s, t, sq, tq            !< Plane equation coefficients.
    real(R8P)                       :: tmp0, tmp1, numer, denom, invdet !< Temporary.
 
    associate(a=>self%a, b=>self%b, c=>self%c, det=>self%det)
-   V1P = self%vertex_1 - point
+   V1P = self%vertex(1) - point
    d = self%E12.dot.V1P
    e = self%E13.dot.V1P
    f = V1P.dot.V1P
@@ -358,7 +356,7 @@ contains
    endif
    distance = abs(a * sq * sq + 2._R8P * b * sq * tq + c * tq * tq + 2._R8P * d * sq + 2._R8P * e * tq + f)
    endassociate
-   endfunction
+   endfunction distance
 
    pure function do_ray_intersect(self, ray_origin, ray_direction) result(intersect)
    !< Return true if facet is intersected by ray from origin and oriented as ray direction vector.
@@ -378,7 +376,7 @@ contains
    a = self%E12.dot.h
    if ((a > -EPS).and.(a < EPS)) return
    f = 1._R8P / a
-   s = ray_origin - self%vertex_1
+   s = ray_origin - self%vertex(1)
    u = f * (s.dot.h)
    if ((u < 0._R8P).or.(u > 1._R8P)) return
    q = s.cross.self%E12
@@ -403,9 +401,9 @@ contains
 
    call load_facet_record(prefix='facet normal', record=self%normal)
    read(file_unit, *) ! outer loop
-   call load_facet_record(prefix='vertex', record=self%vertex_1)
-   call load_facet_record(prefix='vertex', record=self%vertex_2)
-   call load_facet_record(prefix='vertex', record=self%vertex_3)
+   call load_facet_record(prefix='vertex', record=self%vertex(1))
+   call load_facet_record(prefix='vertex', record=self%vertex(2))
+   call load_facet_record(prefix='vertex', record=self%vertex(3))
    read(file_unit, *) ! endloop
    read(file_unit, *) ! endfacet
    contains
@@ -436,11 +434,11 @@ contains
    read(file_unit) triplet
    self%normal%x=real(triplet(1), R8P) ; self%normal%y=real(triplet(2), R8P) ; self%normal%z=real(triplet(3), R8P)
    read(file_unit) triplet
-   self%vertex_1%x=real(triplet(1), R8P) ; self%vertex_1%y=real(triplet(2), R8P) ; self%vertex_1%z=real(triplet(3), R8P)
+   self%vertex(1)%x=real(triplet(1), R8P) ; self%vertex(1)%y=real(triplet(2), R8P) ; self%vertex(1)%z=real(triplet(3), R8P)
    read(file_unit) triplet
-   self%vertex_2%x=real(triplet(1), R8P) ; self%vertex_2%y=real(triplet(2), R8P) ; self%vertex_2%z=real(triplet(3), R8P)
+   self%vertex(2)%x=real(triplet(1), R8P) ; self%vertex(2)%y=real(triplet(2), R8P) ; self%vertex(2)%z=real(triplet(3), R8P)
    read(file_unit) triplet
-   self%vertex_3%x=real(triplet(1), R8P) ; self%vertex_3%y=real(triplet(2), R8P) ; self%vertex_3%z=real(triplet(3), R8P)
+   self%vertex(3)%x=real(triplet(1), R8P) ; self%vertex(3)%y=real(triplet(2), R8P) ; self%vertex(3)%z=real(triplet(3), R8P)
    read(file_unit) padding
    endsubroutine load_from_file_binary
 
@@ -457,11 +455,11 @@ contains
    ! get self edge
    select case(edge_dir)
    case('edge_12')
-      edge = self%vertex_2 - self%vertex_1
+      edge = self%vertex(2) - self%vertex(1)
    case('edge_23')
-      edge = self%vertex_3 - self%vertex_2
+      edge = self%vertex(3) - self%vertex(2)
    case('edge_31')
-      edge = self%vertex_1 - self%vertex_3
+      edge = self%vertex(1) - self%vertex(3)
    endselect
    if (edge%dotproduct(edge_other)>0) then
       ! other numeration is consistent, normal has wrong orientation
@@ -477,9 +475,9 @@ contains
    type(vector_R8P),    intent(in)           :: factor           !< Vectorial factor.
    logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
 
-   self%vertex_1 = self%vertex_1 * factor
-   self%vertex_2 = self%vertex_2 * factor
-   self%vertex_3 = self%vertex_3 * factor
+   self%vertex(1) = self%vertex(1) * factor
+   self%vertex(2) = self%vertex(2) * factor
+   self%vertex(3) = self%vertex(3) * factor
    if (present(recompute_metrix)) then
       if (recompute_metrix) call self%compute_metrix
    endif
@@ -500,9 +498,9 @@ contains
 
    write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '  facet normal ', self%normal%x, ' ', self%normal%y, ' ', self%normal%z
    write(file_unit, '(A)')                            '    outer loop'
-   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex_1%x, ' ', self%vertex_1%y, ' ', self%vertex_1%z
-   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex_2%x, ' ', self%vertex_2%y, ' ', self%vertex_2%z
-   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex_3%x, ' ', self%vertex_3%y, ' ', self%vertex_3%z
+   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex(1)%x, ' ', self%vertex(1)%y, ' ',self%vertex(1)%z
+   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex(2)%x, ' ', self%vertex(2)%y, ' ',self%vertex(2)%z
+   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex(3)%x, ' ', self%vertex(3)%y, ' ',self%vertex(3)%z
    write(file_unit, '(A)')                            '    endloop'
    write(file_unit, '(A)')                            '  endfacet'
    endsubroutine save_into_file_ascii
@@ -515,14 +513,24 @@ contains
 
    triplet(1) = real(self%normal%x, R4P) ; triplet(2) = real(self%normal%y, R4P) ; triplet(3) = real(self%normal%z, R4P)
    write(file_unit) triplet
-   triplet(1) = real(self%vertex_1%x, R4P) ; triplet(2) = real(self%vertex_1%y, R4P) ; triplet(3) = real(self%vertex_1%z, R4P)
+   triplet(1) = real(self%vertex(1)%x, R4P) ; triplet(2) = real(self%vertex(1)%y, R4P) ; triplet(3) = real(self%vertex(1)%z, R4P)
    write(file_unit) triplet
-   triplet(1) = real(self%vertex_2%x, R4P) ; triplet(2) = real(self%vertex_2%y, R4P) ; triplet(3) = real(self%vertex_2%z, R4P)
+   triplet(1) = real(self%vertex(2)%x, R4P) ; triplet(2) = real(self%vertex(2)%y, R4P) ; triplet(3) = real(self%vertex(2)%z, R4P)
    write(file_unit) triplet
-   triplet(1) = real(self%vertex_3%x, R4P) ; triplet(2) = real(self%vertex_3%y, R4P) ; triplet(3) = real(self%vertex_3%z, R4P)
+   triplet(1) = real(self%vertex(3)%x, R4P) ; triplet(2) = real(self%vertex(3)%y, R4P) ; triplet(3) = real(self%vertex(3)%z, R4P)
    write(file_unit) triplet
    write(file_unit) 0_I2P
    endsubroutine save_into_file_binary
+
+   pure function smallest_edge_len(self) result(smallest)
+   !< Return the smallest edge length.
+   class(facet_object), intent(in) :: self     !< Facet.
+   real(R8P)                       :: smallest !< Smallest edge length.
+
+   smallest = min(normL2_R8P(self%vertex(2)-self%vertex(1)), &
+                  normL2_R8P(self%vertex(3)-self%vertex(2)), &
+                  normL2_R8P(self%vertex(1)-self%vertex(3)))
+   endfunction smallest_edge_len
 
    pure function solid_angle(self, point)
    !< Return the (projected) solid angle of the facet with respect the point.
@@ -534,9 +542,9 @@ contains
    real(R8P)                       :: numerator                 !< Archtangent numerator.
    real(R8P)                       :: denominator               !< Archtangent denominator.
 
-   R1 = self%vertex_1 - point ; R1_norm = R1%normL2()
-   R2 = self%vertex_2 - point ; R2_norm = R2%normL2()
-   R3 = self%vertex_3 - point ; R3_norm = R3%normL2()
+   R1 = self%vertex(1) - point ; R1_norm = R1%normL2()
+   R2 = self%vertex(2) - point ; R2_norm = R2%normL2()
+   R3 = self%vertex(3) - point ; R3_norm = R3%normL2()
 
    numerator = R1.dot.(R2.cross.R3)
    denominator = R1_norm * R2_norm * R3_norm + (R1.dot.R2) * R3_norm + &
@@ -554,11 +562,11 @@ contains
    type(vector_R8P)                :: e12    !< Edge 1-2.
    type(vector_R8P)                :: e13    !< Edge 1-3.
 
-   e12 = self%vertex_2 - self%vertex_1
-   e13 = self%vertex_3 - self%vertex_1
+   e12 = self%vertex(2) - self%vertex(1)
+   e13 = self%vertex(3) - self%vertex(1)
    volume = 0.5_R8P * normL2_R8P(e12) * normL2_R8P(e13) * sin(angle_R8P(e12, e13)) * &
-            apex%distance_to_plane(pt1=self%vertex_1, pt2=self%vertex_2, pt3=self%vertex_3) / 3._R8P
-   endfunction
+            apex%distance_to_plane(pt1=self%vertex(1), pt2=self%vertex(2), pt3=self%vertex(3)) / 3._R8P
+   endfunction tetrahedron_volume
 
    elemental subroutine translate(self, delta, recompute_metrix)
    !< Translate facet given vectorial delta.
@@ -566,9 +574,9 @@ contains
    type(vector_R8P),    intent(in)           :: delta            !< Translation delta.
    logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
 
-   self%vertex_1 = self%vertex_1 + delta
-   self%vertex_2 = self%vertex_2 + delta
-   self%vertex_3 = self%vertex_3 + delta
+   self%vertex(1) = self%vertex(1) + delta
+   self%vertex(2) = self%vertex(2) + delta
+   self%vertex(3) = self%vertex(3) + delta
    if (present(recompute_metrix)) then
       if (recompute_metrix) call self%compute_metrix
    endif
@@ -580,9 +588,9 @@ contains
    !< @note Vertices occurrencies list must be already computed.
    class(facet_object), intent(inout) :: self !< Facet.
 
-   self%fcon_edge_12 = facet_connected(occurrence_1=self%vertex_1_occurrence, occurrence_2=self%vertex_2_occurrence)
-   self%fcon_edge_23 = facet_connected(occurrence_1=self%vertex_2_occurrence, occurrence_2=self%vertex_3_occurrence)
-   self%fcon_edge_31 = facet_connected(occurrence_1=self%vertex_3_occurrence, occurrence_2=self%vertex_1_occurrence)
+   self%fcon_edge_12 = facet_connected(occurrence_1=self%vertex_occurrence(1)%id, occurrence_2=self%vertex_occurrence(2)%id)
+   self%fcon_edge_23 = facet_connected(occurrence_1=self%vertex_occurrence(2)%id, occurrence_2=self%vertex_occurrence(3)%id)
+   self%fcon_edge_31 = facet_connected(occurrence_1=self%vertex_occurrence(3)%id, occurrence_2=self%vertex_occurrence(1)%id)
    contains
       pure function facet_connected(occurrence_1, occurrence_2)
       !< Return the facet ID connected by the edge. If no facet is found 0 is returned.
@@ -611,7 +619,7 @@ contains
    !< Return the vertex global id given the local one.
    class(facet_object), intent(in) :: self             !< Facet.
    integer(I4P),        intent(in) :: vertex_id        !< Local vertex id.
-   integer(I4P)                    :: vertex_global_id !< Gloval vertex id.
+   integer(I4P)                    :: vertex_global_id !< Global vertex id.
 
    vertex_global_id = (self%id - 1) * 3 + vertex_id
    endfunction vertex_global_id
@@ -625,17 +633,17 @@ contains
 
    select case(edge_dir)
    case('edge_12')
-      call flip_vertices(a=self%vertex_1, b=self%vertex_2,                     &
+      call flip_vertices(a=self%vertex(1), b=self%vertex(2),                   &
                          fcon_bc=self%fcon_edge_23, fcon_ca=self%fcon_edge_31, &
-                         vertex_a_occurrence=self%vertex_1_occurrence, vertex_b_occurrence=self%vertex_2_occurrence)
+                         vertex_a_occurrence=self%vertex_occurrence(1)%id, vertex_b_occurrence=self%vertex_occurrence(2)%id)
    case('edge_23')
-      call flip_vertices(a=self%vertex_2, b=self%vertex_3,                     &
+      call flip_vertices(a=self%vertex(2), b=self%vertex(3),                   &
                          fcon_bc=self%fcon_edge_12, fcon_ca=self%fcon_edge_31, &
-                         vertex_a_occurrence=self%vertex_2_occurrence, vertex_b_occurrence=self%vertex_3_occurrence)
+                         vertex_a_occurrence=self%vertex_occurrence(2)%id, vertex_b_occurrence=self%vertex_occurrence(3)%id)
    case('edge_31')
-      call flip_vertices(a=self%vertex_3, b=self%vertex_1,                     &
+      call flip_vertices(a=self%vertex(3), b=self%vertex(1),                   &
                          fcon_bc=self%fcon_edge_12, fcon_ca=self%fcon_edge_23, &
-                         vertex_a_occurrence=self%vertex_3_occurrence, vertex_b_occurrence=self%vertex_1_occurrence)
+                         vertex_a_occurrence=self%vertex_occurrence(3)%id, vertex_b_occurrence=self%vertex_occurrence(1)%id)
    endselect
    call self%compute_metrix
    contains
@@ -691,9 +699,9 @@ contains
    real(R8P),           intent(in)           :: matrix(3,3)      !< Mirroring matrix.
    logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
 
-   call self%vertex_1%mirror(matrix=matrix)
-   call self%vertex_2%mirror(matrix=matrix)
-   call self%vertex_3%mirror(matrix=matrix)
+   call self%vertex(1)%mirror(matrix=matrix)
+   call self%vertex(2)%mirror(matrix=matrix)
+   call self%vertex(3)%mirror(matrix=matrix)
    if (present(recompute_metrix)) then
       if (recompute_metrix) call self%compute_metrix
    endif
@@ -720,9 +728,9 @@ contains
    real(R8P),           intent(in)           :: matrix(3,3)      !< Rotation matrix.
    logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
 
-   call self%vertex_1%rotate(matrix=matrix)
-   call self%vertex_2%rotate(matrix=matrix)
-   call self%vertex_3%rotate(matrix=matrix)
+   call self%vertex(1)%rotate(matrix=matrix)
+   call self%vertex(2)%rotate(matrix=matrix)
+   call self%vertex(3)%rotate(matrix=matrix)
    if (present(recompute_metrix)) then
       if (recompute_metrix) call self%compute_metrix
    endif
@@ -738,13 +746,13 @@ contains
 
    if     (other%fcon_edge_12 == self%id) then
       edge_dir = 'edge_12'
-      edge = other%vertex_2 - other%vertex_1
+      edge = other%vertex(2) - other%vertex(1)
    elseif (other%fcon_edge_23 == self%id) then
       edge_dir = 'edge_23'
-      edge = other%vertex_3 - other%vertex_2
+      edge = other%vertex(3) - other%vertex(2)
    elseif (other%fcon_edge_31 == self%id) then
       edge_dir = 'edge_31'
-      edge = other%vertex_1 - other%vertex_3
+      edge = other%vertex(1) - other%vertex(3)
    endif
    endsubroutine edge_connection_in_other_ref
 
@@ -754,9 +762,7 @@ contains
    type(facet_object),  intent(in)    :: rhs !< Right hand side.
 
    lhs%normal = rhs%normal
-   lhs%vertex_1 = rhs%vertex_1
-   lhs%vertex_2 = rhs%vertex_2
-   lhs%vertex_3 = rhs%vertex_3
+   lhs%vertex = rhs%vertex
    lhs%E12 = rhs%E12
    lhs%E13 = rhs%E13
    lhs%a = rhs%a
@@ -769,12 +775,84 @@ contains
    lhs%fcon_edge_12 = rhs%fcon_edge_12
    lhs%fcon_edge_23 = rhs%fcon_edge_23
    lhs%fcon_edge_31 = rhs%fcon_edge_31
-   if (allocated(lhs%vertex_1_occurrence)) deallocate(lhs%vertex_1_occurrence)
-   if (allocated(rhs%vertex_1_occurrence)) lhs%vertex_1_occurrence = rhs%vertex_1_occurrence
-   if (allocated(lhs%vertex_2_occurrence)) deallocate(lhs%vertex_2_occurrence)
-   if (allocated(rhs%vertex_2_occurrence)) lhs%vertex_2_occurrence = rhs%vertex_2_occurrence
-   if (allocated(lhs%vertex_3_occurrence)) deallocate(lhs%vertex_3_occurrence)
-   if (allocated(rhs%vertex_3_occurrence)) lhs%vertex_3_occurrence = rhs%vertex_3_occurrence
+   lhs%vertex_occurrence = rhs%vertex_occurrence
+   lhs%vertex_nearby = rhs%vertex_nearby
    endsubroutine facet_assign_facet
 
+   ! non TBP
+   pure function face_id(vertex_global_id)
+   !< Return the face id containing the given vertex global id.
+   integer(I4P), intent(in) :: vertex_global_id !< Global vertex id.
+   integer(I4P)             :: face_id          !< Face id containing the given vertex global id.
+
+   face_id = (vertex_global_id - 1) / 3 + 1
+   endfunction face_id
+
+   pure subroutine merge_vertices(vertex, facet, nearby)
+   !< Merge nearby vertices.
+   type(vector_R8P),     intent(inout) :: vertex     !< Reference vertex.
+   type(facet_object),   intent(inout) :: facet(:)   !< All facets in STL.
+   type(list_id_object), intent(inout) :: nearby     !< List of nearby vertices global ID.
+   integer(I4P)                        :: v_local_id !< Vertex local ID.
+   integer(I4P)                        :: f_id       !< Face ID.
+   integer(I4P)                        :: n, nn      !< Counter.
+
+   do n=1, nearby%ids_number
+      f_id = face_id(vertex_global_id=nearby%id(n))
+      v_local_id = vertex_local_id(face_id=f_id, vertex_global_id=nearby%id(n))
+      select case(v_local_id)
+      case(1)
+         vertex = vertex + facet(f_id)%vertex(1)
+      case(2)
+         vertex = vertex + facet(f_id)%vertex(2)
+      case(3)
+         vertex = vertex + facet(f_id)%vertex(3)
+      endselect
+   enddo
+   vertex = vertex / (nearby%ids_number + 1)
+   do n=1, nearby%ids_number
+      f_id = face_id(vertex_global_id=nearby%id(n))
+      v_local_id = vertex_local_id(face_id=f_id, vertex_global_id=nearby%id(n))
+      select case(v_local_id)
+      case(1)
+         facet(f_id)%vertex(1) = vertex
+         call facet(f_id)%vertex_nearby(1)%destroy
+      case(2)
+         facet(f_id)%vertex(2) = vertex
+         call facet(f_id)%vertex_nearby(2)%destroy
+      case(3)
+         facet(f_id)%vertex(3) = vertex
+         call facet(f_id)%vertex_nearby(3)%destroy
+      endselect
+   enddo
+   call nearby%destroy
+   endsubroutine merge_vertices
+
+   pure subroutine put_in_list(id, list)
+   !< Put ID into a list.
+   integer(I4P),              intent(in)    :: id          !< ID to insert.
+   integer(I4P), allocatable, intent(inout) :: list(:)     !< List.
+   integer(I4P), allocatable                :: list_tmp(:) !< Temporary list.
+   integer(I4P)                             :: n           !< List size.
+
+   if (allocated(list)) then
+      n = size(list, dim=1)
+      allocate(list_tmp(1:n+1))
+      list_tmp(1:n) = list
+      list_tmp(n+1) = id
+      call move_alloc(from=list_tmp, to=list)
+   else
+      allocate(list(1))
+      list(1) = id
+   endif
+   endsubroutine put_in_list
+
+   pure function vertex_local_id(face_id, vertex_global_id)
+   !< Return the vertex global id given the local one.
+   integer(I4P), intent(in) :: face_id          !< Face id.
+   integer(I4P), intent(in) :: vertex_global_id !< Global vertex id.
+   integer(I4P)             :: vertex_local_id  !< Local vertex id, 1, 2 or 3.
+
+   vertex_local_id = vertex_global_id - (face_id - 1) * 3
+   endfunction vertex_local_id
 endmodule fossil_facet_object

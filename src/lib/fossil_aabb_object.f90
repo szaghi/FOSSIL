@@ -62,9 +62,9 @@ contains
    open(newunit=scratch_unit_add, status='scratch', access='stream', form='unformatted')
    open(newunit=scratch_unit_rem, status='scratch', access='stream', form='unformatted')
    do f=1, size(facet, dim=1)
-      if (self%is_inside(point=facet(f)%vertex_1).and.&
-          self%is_inside(point=facet(f)%vertex_2).and.&
-          self%is_inside(point=facet(f)%vertex_3)) then
+      if (self%is_inside(point=facet(f)%vertex(1)).and.&
+          self%is_inside(point=facet(f)%vertex(2)).and.&
+          self%is_inside(point=facet(f)%vertex(3))) then
          self%facets_number = self%facets_number + 1
          call facet(f)%save_into_file_binary(file_unit=scratch_unit_add)
       else

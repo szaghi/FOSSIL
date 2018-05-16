@@ -16,17 +16,23 @@ public :: file_stl_object
 
 type :: file_stl_object
    !< FOSSIL STL file class.
-   character(len=:), allocatable   :: file_name       !< File name
-   integer(I4P)                    :: file_unit=0     !< File unit.
-   character(FRLEN)                :: header          !< File header.
-   integer(I4P)                    :: facets_number=0 !< Facets number.
-   type(facet_object), allocatable :: facet(:)        !< Facets.
-   type(aabb_tree_object)          :: aabb            !< AABB tree.
-   type(vector_R8P)                :: bmin            !< Minimum point of STL.
-   type(vector_R8P)                :: bmax            !< Maximum point of STL.
-   real(R8P)                       :: volume=0._R8P   !< Volume bounded by STL surface.
-   logical                         :: is_ascii=.true. !< Sentinel to check if file is ASCII.
-   logical                         :: is_open=.false. !< Sentinel to check if file is open.
+   character(len=:), allocatable   :: file_name            !< File name
+   integer(I4P)                    :: file_unit=0          !< File unit.
+   character(FRLEN)                :: header               !< File header.
+   integer(I4P)                    :: facets_number=0      !< Facets number.
+   type(facet_object), allocatable :: facet(:)             !< Facets.
+   integer(I4P), allocatable       :: facet_1_de(:)        !< Facets with one disconnected edge.
+   integer(I4P)                    :: facets_1_de_number=0 !< Facets number with one disconnected edge.
+   integer(I4P), allocatable       :: facet_2_de(:)        !< Facets with two disconnected edges.
+   integer(I4P)                    :: facets_2_de_number=0 !< Facets number with two disconnected edge.
+   integer(I4P), allocatable       :: facet_3_de(:)        !< Facets with three disconnected edges.
+   integer(I4P)                    :: facets_3_de_number=0 !< Facets number with three disconnected edge.
+   type(aabb_tree_object)          :: aabb                 !< AABB tree.
+   type(vector_R8P)                :: bmin                 !< Minimum point of STL.
+   type(vector_R8P)                :: bmax                 !< Maximum point of STL.
+   real(R8P)                       :: volume=0._R8P        !< Volume bounded by STL surface.
+   logical                         :: is_ascii=.true.      !< Sentinel to check if file is ASCII.
+   logical                         :: is_open=.false.      !< Sentinel to check if file is open.
    contains
       ! public methods
       procedure, pass(self) :: analize                         !< Analize STL.
@@ -35,6 +41,7 @@ type :: file_stl_object
       procedure, pass(self) :: compute_metrix                  !< Compute facets metrix.
       procedure, pass(self) :: compute_normals                 !< Compute facets normals by means of vertices data.
       procedure, pass(self) :: compute_volume                  !< Compute volume bounded by STL surface.
+      procedure, pass(self) :: connect_nearby_vertices         !< Connect nearby vertices of disconnected edges.
       procedure, pass(self) :: create_aabb_tree                !< Create the AABB tree.
       procedure, pass(self) :: destroy                         !< Destroy file.
       procedure, pass(self) :: distance                        !< Compute the (minimum) distance from point to triangulated surface.
@@ -49,8 +56,10 @@ type :: file_stl_object
       procedure, pass(self) :: resize                          !< Resize (scale) facets by x or y or z or vectorial factors.
       generic               :: rotate => rotate_by_axis_angle, &
                                          rotate_by_matrix      !< Rotate facets.
+      procedure, pass(self) :: sanitize                        !< Sanitize STL.
       procedure, pass(self) :: sanitize_normals                !< Sanitize facets normals, make them consistent.
       procedure, pass(self) :: save_into_file                  !< Save into file.
+      procedure, pass(self) :: smallest_edge_len               !< Return the smallest edge length.
       procedure, pass(self) :: statistics                      !< Return STL statistics.
       procedure, pass(self) :: translate                       !< Translate facet given vectorial delta.
       ! operators
@@ -58,6 +67,7 @@ type :: file_stl_object
       procedure, pass(lhs),  private :: file_stl_assign_file_stl !< Operator `=`.
       ! private methods
       procedure, pass(self), private :: allocate_facets              !< Allocate facets.
+      procedure, pass(self), private :: compute_facets_disconnected  !< Compute facets with disconnected edges.
       procedure, pass(self), private :: load_facets_number_from_file !< Load facets number from file.
       procedure, pass(self), private :: load_header_from_file        !< Load header from file.
       procedure, pass(self), private :: mirror_by_normal             !< Mirror facets given normal of mirroring plane.
@@ -79,19 +89,24 @@ contains
    if (self%facets_number>0) then
       call self%build_connectivity
       call self%compute_metrix
+      call self%compute_facets_disconnected
       call self%compute_volume
    endif
    endsubroutine analize
 
    pure subroutine build_connectivity(self)
    !< Build facets connectivity.
-   class(file_stl_object), intent(inout) :: self   !< File STL.
-   integer(I4P)                          :: f1, f2 !< Counter.
+   class(file_stl_object), intent(inout) :: self              !< File STL.
+   real(R8P)                             :: smallest_edge_len !< Smallest edge length.
+   integer(I4P)                          :: f1, f2            !< Counter.
 
    if (self%facets_number>0) then
+      call self%facet%destroy_connectivity
+      smallest_edge_len = self%smallest_edge_len() * 0.9_R8P
       do f1=1, self%facets_number - 1
          do f2=f1 + 1, self%facets_number
-            call self%facet(f1)%check_vertices_occurrencies(other=self%facet(f2))
+            call self%facet(f1)%compute_vertices_nearby(other=self%facet(f2), &
+                                                        tolerance_to_be_identical=EPS, tolerance_to_be_nearby=smallest_edge_len)
          enddo
       enddo
       do f1=1, self%facets_number
@@ -143,10 +158,34 @@ contains
    if (self%facets_number>0) then
       self%volume = 0._R8P
       do f=1, self%facets_number
-         self%volume = self%volume + self%facet(f)%tetrahedron_volume(apex=self%facet(1)%vertex_1)
+         self%volume = self%volume + self%facet(f)%tetrahedron_volume(apex=self%facet(1)%vertex(1))
       enddo
    endif
    endsubroutine compute_volume
+
+   pure subroutine connect_nearby_vertices(self)
+   !< Connect nearby vertices of disconnected edges.
+   class(file_stl_object), intent(inout) :: self !< File STL.
+   integer(I4P)                          :: f    !< Counter.
+
+   if (self%facets_number>0) then
+      if     (self%facets_1_de_number>0) then
+         do f=1, self%facets_1_de_number
+            call self%facet(self%facet_1_de(f))%connect_nearby_vertices(facet=self%facet)
+         enddo
+      endif
+      if (self%facets_2_de_number>0) then
+         do f=1, self%facets_2_de_number
+            call self%facet(self%facet_2_de(f))%connect_nearby_vertices(facet=self%facet)
+         enddo
+      endif
+      if (self%facets_3_de_number>0) then
+         do f=1, self%facets_3_de_number
+            call self%facet(self%facet_3_de(f))%connect_nearby_vertices(facet=self%facet)
+         enddo
+      endif
+   endif
+   endsubroutine connect_nearby_vertices
 
    subroutine create_aabb_tree(self, refinement_levels)
    !< Create AABB tree.
@@ -381,12 +420,52 @@ contains
    endif
    endsubroutine open_file
 
+   elemental subroutine resize(self, x, y, z, factor, recompute_metrix)
+   !< Resize (scale) facets by x or y or z or vectorial factors.
+   !<
+   !< @note The name `scale` has not been used, it been a Fortran built-in.
+   class(file_stl_object), intent(inout)        :: self             !< File STL.
+   real(R8P),              intent(in), optional :: x                !< Factor along x axis.
+   real(R8P),              intent(in), optional :: y                !< Factor along y axis.
+   real(R8P),              intent(in), optional :: z                !< Factor along z axis.
+   type(vector_R8P),       intent(in), optional :: factor           !< Vectorial factor.
+   logical,                intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+   type(vector_R8P)                             :: factor_          !< Vectorial factor, local variable.
+
+   if (self%facets_number>0) then
+      factor_ = 1._R8P
+      if (present(factor)) then
+         factor_ = factor
+      else
+         if (present(x)) factor_%x = x
+         if (present(y)) factor_%y = y
+         if (present(z)) factor_%z = z
+      endif
+      call self%facet%resize(factor=factor_, recompute_metrix=recompute_metrix)
+   endif
+   endsubroutine resize
+
    elemental subroutine reverse_normals(self)
    !< Reverse facets normals.
    class(file_stl_object), intent(inout) :: self !< File STL.
 
    if (self%facets_number>0) call self%facet%reverse_normal
    endsubroutine reverse_normals
+
+   pure subroutine sanitize(self, do_analysis)
+   !< Sanitize STL.
+   class(file_stl_object), intent(inout)        :: self !< File STL.
+   logical,                intent(in), optional :: do_analysis !< Sentil for performing a first analysis.
+
+   if (self%facets_number>0) then
+      if (present(do_analysis)) then
+         if (do_analysis) call self%analize
+      endif
+      if (self%facets_1_de_number>0.or.self%facets_2_de_number>0.or.self%facets_3_de_number>0) call self%connect_nearby_vertices
+      call self%analize
+      call self%sanitize_normals
+   endif
+   endsubroutine sanitize
 
    pure subroutine sanitize_normals(self)
    !< Sanitize facets normals, make them consistent.
@@ -403,20 +482,26 @@ contains
       facet_checked(f) = .true.
       do
          ff = 0
-         if     (self%facet(f)%fcon_edge_12>0.and.(.not.facet_checked(self%facet(f)%fcon_edge_12))) then
-            call self%facet(f)%make_normal_consistent(edge_dir='edge_12', other=self%facet(self%facet(f)%fcon_edge_12))
-            facet_checked(self%facet(f)%fcon_edge_12) = .true.
-            ff = self%facet(f)%fcon_edge_12
+         if (self%facet(f)%fcon_edge_12>0) then
+            if (.not.facet_checked(self%facet(f)%fcon_edge_12)) then
+               call self%facet(f)%make_normal_consistent(edge_dir='edge_12', other=self%facet(self%facet(f)%fcon_edge_12))
+               facet_checked(self%facet(f)%fcon_edge_12) = .true.
+               ff = self%facet(f)%fcon_edge_12
+            endif
          endif
-         if (self%facet(f)%fcon_edge_23>0.and.(.not.facet_checked(self%facet(f)%fcon_edge_23))) then
-            call self%facet(f)%make_normal_consistent(edge_dir='edge_23', other=self%facet(self%facet(f)%fcon_edge_23))
-            facet_checked(self%facet(f)%fcon_edge_23) = .true.
-            ff = self%facet(f)%fcon_edge_23
+         if (self%facet(f)%fcon_edge_23>0) then
+            if (.not.facet_checked(self%facet(f)%fcon_edge_23)) then
+               call self%facet(f)%make_normal_consistent(edge_dir='edge_23', other=self%facet(self%facet(f)%fcon_edge_23))
+               facet_checked(self%facet(f)%fcon_edge_23) = .true.
+               ff = self%facet(f)%fcon_edge_23
+            endif
          endif
-         if (self%facet(f)%fcon_edge_31>0.and.(.not.facet_checked(self%facet(f)%fcon_edge_31))) then
-            call self%facet(f)%make_normal_consistent(edge_dir='edge_31', other=self%facet(self%facet(f)%fcon_edge_31))
-            facet_checked(self%facet(f)%fcon_edge_31) = .true.
-            ff = self%facet(f)%fcon_edge_31
+         if (self%facet(f)%fcon_edge_31>0) then
+            if (.not.facet_checked(self%facet(f)%fcon_edge_31)) then
+               call self%facet(f)%make_normal_consistent(edge_dir='edge_31', other=self%facet(self%facet(f)%fcon_edge_31))
+               facet_checked(self%facet(f)%fcon_edge_31) = .true.
+               ff = self%facet(f)%fcon_edge_31
+            endif
          endif
          if (ff==0) then
             exit
@@ -452,30 +537,19 @@ contains
    call self%close_file
    endsubroutine save_into_file
 
-   elemental subroutine resize(self, x, y, z, factor, recompute_metrix)
-   !< Resize (scale) facets by x or y or z or vectorial factors.
-   !<
-   !< @note The name `scale` has not been used, it been a Fortran built-in.
-   class(file_stl_object), intent(inout)        :: self             !< File STL.
-   real(R8P),              intent(in), optional :: x                !< Factor along x axis.
-   real(R8P),              intent(in), optional :: y                !< Factor along y axis.
-   real(R8P),              intent(in), optional :: z                !< Factor along z axis.
-   type(vector_R8P),       intent(in), optional :: factor           !< Vectorial factor.
-   logical,                intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
-   type(vector_R8P)                             :: factor_          !< Vectorial factor, local variable.
+   pure function smallest_edge_len(self) result(smallest)
+   !< Return the smallest edge length.
+   class(file_stl_object), intent(in) :: self     !< File STL.
+   real(R8P)                          :: smallest !< Smallest edge length.
+   integer(I4P)                       :: f        !< Counter.
 
+   smallest = MaxR8P
    if (self%facets_number>0) then
-      factor_ = 1._R8P
-      if (present(factor)) then
-         factor_ = factor
-      else
-         if (present(x)) factor_%x = x
-         if (present(y)) factor_%y = y
-         if (present(z)) factor_%z = z
-      endif
-      call self%facet%resize(factor=factor_, recompute_metrix=recompute_metrix)
+      do f=1, self%facets_number
+         smallest = min(smallest, self%facet(f)%smallest_edge_len())
+      enddo
    endif
-   endsubroutine resize
+   endfunction smallest_edge_len
 
    pure function statistics(self, prefix) result(stats)
    !< Return STL statistics.
@@ -499,9 +573,9 @@ contains
       stats=stats//prefix_//'Z extents: ['//trim(str(self%bmin%z))//', '//trim(str(self%bmax%z))//']'//NL
       stats=stats//prefix_//'volume: '//trim(str(self%volume))//NL
       stats=stats//prefix_//'number of facets: '//trim(str(self%facets_number))//NL
-      ! stats=stats//prefix_//'number of facets with 1 edge disconnected: '//trim(str(self%facets_1disconnect_number))//NL
-      ! stats=stats//prefix_//'number of facets with 2 edge disconnected: '//trim(str(self%facets_2disconnect_number))//NL
-      ! stats=stats//prefix_//'number of facets with 3 edge disconnected: '//trim(str(self%facets_3disconnect_number))//NL
+      stats=stats//prefix_//'number of facets with 1 edges disconnected: '//trim(str(self%facets_1_de_number))//NL
+      stats=stats//prefix_//'number of facets with 2 edges disconnected: '//trim(str(self%facets_2_de_number))//NL
+      stats=stats//prefix_//'number of facets with 3 edges disconnected: '//trim(str(self%facets_3_de_number))!//NL
    endif
    endfunction statistics
 
@@ -542,6 +616,15 @@ contains
    lhs%facets_number = rhs%facets_number
    if (allocated(lhs%facet)) deallocate(lhs%facet)
    if (allocated(rhs%facet)) allocate(lhs%facet(1:lhs%facets_number), source=rhs%facet)
+   lhs%facets_1_de_number = rhs%facets_1_de_number
+   if (allocated(lhs%facet_1_de)) deallocate(lhs%facet_1_de)
+   if (allocated(rhs%facet_1_de)) allocate(lhs%facet_1_de, source=rhs%facet_1_de)
+   lhs%facets_2_de_number = rhs%facets_2_de_number
+   if (allocated(lhs%facet_2_de)) deallocate(lhs%facet_2_de)
+   if (allocated(rhs%facet_2_de)) allocate(lhs%facet_2_de, source=rhs%facet_2_de)
+   lhs%facets_3_de_number = rhs%facets_3_de_number
+   if (allocated(lhs%facet_3_de)) deallocate(lhs%facet_3_de)
+   if (allocated(rhs%facet_3_de)) allocate(lhs%facet_3_de, source=rhs%facet_3_de)
    lhs%aabb = rhs%aabb
    lhs%bmin = rhs%bmin
    lhs%bmax = rhs%bmax
@@ -561,6 +644,55 @@ contains
       allocate(self%facet(1:self%facets_number))
    endif
    endsubroutine allocate_facets
+
+   pure subroutine compute_facets_disconnected(self)
+   !< Compute facets with disconnected edges.
+   class(file_stl_object), intent(inout) :: self  !< File STL.
+   logical                               :: de(3) !< Flag to check edges disconnection.
+   integer(I4P)                          :: f     !< Counter.
+
+   if (self%facets_number>0) then
+      self%facets_1_de_number = 0
+      self%facets_2_de_number = 0
+      self%facets_3_de_number = 0
+      do f=1, self%facets_number
+         de = .false.
+         if (self%facet(f)%fcon_edge_12==0_I4P) de(1) = .true.
+         if (self%facet(f)%fcon_edge_23==0_I4P) de(2) = .true.
+         if (self%facet(f)%fcon_edge_31==0_I4P) de(3) = .true.
+         select case(count(de))
+         case(1_I4P)
+            self%facets_1_de_number = self%facets_1_de_number + 1
+            call add_to_de_list(id=self%facet(f)%id, list=self%facet_1_de)
+         case(2_I4P)
+            self%facets_2_de_number = self%facets_2_de_number + 1
+            call add_to_de_list(id=self%facet(f)%id, list=self%facet_2_de)
+         case(3_I4P)
+            self%facets_3_de_number = self%facets_3_de_number + 1
+            call add_to_de_list(id=self%facet(f)%id, list=self%facet_3_de)
+         endselect
+      enddo
+   endif
+   contains
+      pure subroutine add_to_de_list(id, list)
+      !< Add given facet ID to a list of disconnected facets.
+      integer(I4P),              intent(in)    :: id      !< Facet global ID.
+      integer(I4P), allocatable, intent(inout) :: list(:) !< Disconnected facets list.
+      integer(I4P), allocatable                :: tmp(:)  !< Disconnected facets list, temporary variable.
+      integer(I4P)                             :: n       !< Size of input list.
+
+      if (allocated(list)) then
+         n = size(list, dim=1)
+         allocate(tmp(1:n+1))
+         tmp(1:n) = list
+         tmp(n+1) = id
+         call move_alloc(from=tmp, to=list)
+      else
+         allocate(list(1))
+         list(1) = id
+      endif
+      endsubroutine add_to_de_list
+   endsubroutine compute_facets_disconnected
 
    subroutine load_facets_number_from_file(self)
    !< Load facets number from file.
