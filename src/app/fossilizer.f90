@@ -13,6 +13,9 @@ implicit none
 type(command_line_interface)       :: cli                                   !< Command line interface.
 type(file_stl_object), allocatable :: file_stl(:)                           !< STL files.
 character(999),        allocatable :: file_name_stl(:)                      !< Input STL file name.
+type(file_stl_object)              :: file_stl_merge                        !< STL file to be merged.
+character(999)                     :: file_name_stl_merge                   !< Input STL file name of file to be merged.
+type(vector_R8P)                   :: clip_bb(2)                            !< Clip bounding box extents.
 logical                            :: connect_nearby                        !< Connect nearby vertices belong to disconnect edges.
 character(999)                     :: output                                !< Output file name.
 integer(I4P)                       :: stl_numbers                           !< Number of STL files.
@@ -27,13 +30,26 @@ type(vector_R8P)                   :: translate_delta                       !< T
 real(R8P)                          :: translate_x, translate_y, translate_z !< Translate scalar deltas.
 
 call cli_parse
+if (cli%is_passed(switch='--merge')) then
+   call file_stl_merge%load_from_file(file_name=trim(adjustl(file_name_stl_merge)), guess_format=.true.)
+endif
 do s=1, stl_numbers
    call file_stl(s)%load_from_file(file_name=trim(adjustl(file_name_stl(s))), guess_format=.true.)
    print '(A)', file_stl(s)%statistics()
+   if (cli%is_passed(switch='--clip')) then
+      print '(A)', 'clip surface outside AABB: '//                                                   &
+         trim(str(clip_bb(1)%x))//' '//trim(str(clip_bb(1)%y))//' '//trim(str(clip_bb(1)%z))//', '// &
+         trim(str(clip_bb(2)%x))//' '//trim(str(clip_bb(2)%y))//' '//trim(str(clip_bb(2)%z))
+      call file_stl(s)%clip(bmin=clip_bb(1), bmax=clip_bb(2))
+   endif
    if (connect_nearby) then
       print '(A)', 'connect nearby vertices belong to disconnected edges'
       call file_stl(s)%connect_nearby_vertices
       print '(A)', file_stl(s)%statistics()
+   endif
+   if (cli%is_passed(switch='--merge')) then
+      print '(A)', 'merge file: '//trim(adjustl(file_name_stl_merge))
+      call file_stl(s)%merge_solids(other=file_stl_merge)
    endif
    if (cli%is_passed(switch='--mirror_normal')) then
       print '(A)', 'mirror surface with respect mirroring plane normal: '//trim(str(mirror_normal%x))//', '//&
@@ -99,6 +115,7 @@ contains
   subroutine cli_parse()
   !< Build and parse command line interface.
   integer(I4P) :: error               !< Error trapping flag.
+  real(R8P)    :: clip_bb_(6)         !< Clipping bounding box extents.
   real(R8P)    :: mirror_normal_(3)   !< Normal of mirroring plane.
   real(R8P)    :: resize_factor_(3)   !< Resize factor.
   real(R8P)    :: rotate_axis_(3)     !< Axis of rotation.
@@ -116,11 +133,24 @@ contains
                required=.true.,               &
                act='store')
 
+  call cli%add(switch='--clip',                                                          &
+               help='extents (xyz minum and maximum, 6 reals) of clipping bounding box', &
+               required=.false.,                                                         &
+               nargs='+',                                                                &
+               def='-15.0 -5.0 0.0 3.2 3.1 7.0',                                         &
+               act='store')
+
   call cli%add(switch='--connect_nearby',                                   &
                help='connect_nearby vertices belong to disconnected edges', &
                required=.false.,                                            &
                def='.false.',                                               &
                act='store_true')
+
+  call cli%add(switch='--merge',  &
+               help='merge file', &
+               required=.false.,  &
+               def='undefined',   &
+               act='store')
 
   call cli%add(switch='--mirror_normal',         &
                help='normal of mirroring plane', &
@@ -206,24 +236,32 @@ contains
 
   call cli%parse(error=error) ; if (error/=0) stop
 
-  call cli%get_varying(switch='-i',                val=file_name_stl,    error=error) ; if (error/=0) stop
-  call cli%get(        switch='--connect_nearby',  val=connect_nearby,   error=error) ; if (error/=0) stop
-  call cli%get(        switch='--mirror_normal',   val=mirror_normal_,   error=error) ; if (error/=0) stop
-  call cli%get(        switch='--output',          val=output,           error=error) ; if (error/=0) stop
-  call cli%get(        switch='--resize_factor',   val=resize_factor_,   error=error) ; if (error/=0) stop
-  call cli%get(        switch='--resize_x',        val=resize_x,         error=error) ; if (error/=0) stop
-  call cli%get(        switch='--resize_y',        val=resize_y,         error=error) ; if (error/=0) stop
-  call cli%get(        switch='--resize_z',        val=resize_z,         error=error) ; if (error/=0) stop
-  call cli%get(        switch='--rotate_axis',     val=rotate_axis_,     error=error) ; if (error/=0) stop
-  call cli%get(        switch='--rotate_angle',    val=rotate_angle,     error=error) ; if (error/=0) stop
-  call cli%get(        switch='--sanitize',        val=sanitize,         error=error) ; if (error/=0) stop
-  call cli%get(        switch='--translate_delta', val=translate_delta_, error=error) ; if (error/=0) stop
-  call cli%get(        switch='--translate_x',     val=translate_x,      error=error) ; if (error/=0) stop
-  call cli%get(        switch='--translate_y',     val=translate_y,      error=error) ; if (error/=0) stop
-  call cli%get(        switch='--translate_z',     val=translate_z,      error=error) ; if (error/=0) stop
+  call cli%get_varying(switch='-i',                val=file_name_stl,       error=error) ; if (error/=0) stop
+  call cli%get(        switch='--clip',            val=clip_bb_,            error=error) ; if (error/=0) stop
+  call cli%get(        switch='--connect_nearby',  val=connect_nearby,      error=error) ; if (error/=0) stop
+  call cli%get(        switch='--merge',           val=file_name_stl_merge, error=error) ; if (error/=0) stop
+  call cli%get(        switch='--mirror_normal',   val=mirror_normal_,      error=error) ; if (error/=0) stop
+  call cli%get(        switch='--output',          val=output,              error=error) ; if (error/=0) stop
+  call cli%get(        switch='--resize_factor',   val=resize_factor_,      error=error) ; if (error/=0) stop
+  call cli%get(        switch='--resize_x',        val=resize_x,            error=error) ; if (error/=0) stop
+  call cli%get(        switch='--resize_y',        val=resize_y,            error=error) ; if (error/=0) stop
+  call cli%get(        switch='--resize_z',        val=resize_z,            error=error) ; if (error/=0) stop
+  call cli%get(        switch='--rotate_axis',     val=rotate_axis_,        error=error) ; if (error/=0) stop
+  call cli%get(        switch='--rotate_angle',    val=rotate_angle,        error=error) ; if (error/=0) stop
+  call cli%get(        switch='--sanitize',        val=sanitize,            error=error) ; if (error/=0) stop
+  call cli%get(        switch='--translate_delta', val=translate_delta_,    error=error) ; if (error/=0) stop
+  call cli%get(        switch='--translate_x',     val=translate_x,         error=error) ; if (error/=0) stop
+  call cli%get(        switch='--translate_y',     val=translate_y,         error=error) ; if (error/=0) stop
+  call cli%get(        switch='--translate_z',     val=translate_z,         error=error) ; if (error/=0) stop
 
   stl_numbers = size(file_name_stl, dim=1)
   allocate(file_stl(1:stl_numbers))
+  clip_bb(1)%x = clip_bb_(1)
+  clip_bb(1)%y = clip_bb_(2)
+  clip_bb(1)%z = clip_bb_(3)
+  clip_bb(2)%x = clip_bb_(4)
+  clip_bb(2)%y = clip_bb_(5)
+  clip_bb(2)%z = clip_bb_(6)
   mirror_normal%x = mirror_normal_(1)
   mirror_normal%y = mirror_normal_(2)
   mirror_normal%z = mirror_normal_(3)
