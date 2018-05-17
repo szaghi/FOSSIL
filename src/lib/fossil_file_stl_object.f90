@@ -50,6 +50,7 @@ type :: file_stl_object
       procedure, pass(self) :: is_point_inside_polyhedron_ri   !< Determinate is point is inside or not STL facets by ray intersect.
       procedure, pass(self) :: is_point_inside_polyhedron_sa   !< Determinate is point is inside or not STL facets by solid angle.
       procedure, pass(self) :: load_from_file                  !< Load from file.
+      procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
                                          mirror_by_matrix      !< Mirror facets.
       procedure, pass(self) :: open_file                       !< Open file, once initialized.
@@ -430,6 +431,35 @@ contains
    call self%close_file
    if (.not.disable_analysis_) call self%analize
    endsubroutine load_from_file
+
+   pure subroutine merge_solids(self, other)
+   !< Merge facets with ones of other STL file.
+   class(file_stl_object), intent(inout) :: self     !< File STL.
+   type(file_stl_object),  intent(in)    :: other    !< Other file STL.
+   type(facet_object), allocatable       :: facet(:) !< Facets temporary list.
+   integer(I4P)                          :: f        !< Counter.
+
+   if (other%facets_number > 0) then
+      if (self%facets_number > 0) then
+         allocate(facet(1:self%facets_number + other%facets_number))
+         do f=1, self%facets_number
+            facet(f)  =  self%facet(f)
+         enddo
+         do f=1, other%facets_number
+            facet(self%facets_number+f) = other%facet(f)
+         enddo
+         call move_alloc(from=facet, to=self%facet)
+         self%facets_number = self%facets_number + other%facets_number
+      else
+         allocate(self%facet(1:other%facets_number))
+         do f=1, other%facets_number
+            self%facet(f) = other%facet(f)
+         enddo
+         self%facets_number = other%facets_number
+      endif
+      call self%analize
+   endif
+   endsubroutine merge_solids
 
    subroutine open_file(self, file_action, guess_format)
    !< Open file, once initialized.
