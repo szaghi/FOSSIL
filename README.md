@@ -71,6 +71,8 @@ Go to [Top](#top)
         * [x] reverse normals:
         * [x] make normals consistent:
     * [x] compute volume;
+    * [x] clip surface outside a bounding box;
+    * [x] merge STL files;
     * [x] rotate facets;
     * [x] translate facets;
     * [x] mirror facets;
