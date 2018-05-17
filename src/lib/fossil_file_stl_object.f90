@@ -18,7 +18,7 @@ type :: file_stl_object
    !< FOSSIL STL file class.
    character(len=:), allocatable   :: file_name            !< File name
    integer(I4P)                    :: file_unit=0          !< File unit.
-   character(FRLEN)                :: header               !< File header.
+   character(FRLEN)                :: header=''            !< File header.
    integer(I4P)                    :: facets_number=0      !< Facets number.
    type(facet_object), allocatable :: facet(:)             !< Facets.
    integer(I4P), allocatable       :: facet_1_de(:)        !< Facets with one disconnected edge.
@@ -37,6 +37,7 @@ type :: file_stl_object
       ! public methods
       procedure, pass(self) :: analize                         !< Analize STL.
       procedure, pass(self) :: build_connectivity              !< Build facets connectivity.
+      procedure, pass(self) :: clip                            !< Clip triangulated surface given an AABB.
       procedure, pass(self) :: close_file                      !< Close file.
       procedure, pass(self) :: compute_metrix                  !< Compute facets metrix.
       procedure, pass(self) :: compute_normals                 !< Compute facets normals by means of vertices data.
@@ -114,6 +115,65 @@ contains
       enddo
    endif
    endsubroutine build_connectivity
+
+   subroutine clip(self, bmin, bmax, remainder)
+   !< Clip triangulated surface given an AABB.
+   class(file_stl_object), intent(inout)         :: self              !< File STL.
+   type(vector_R8P),       intent(in)            :: bmin, bmax        !< Bounding box extents.
+   type(file_stl_object),  intent(out), optional :: remainder         !< Remainder part of the triangulated surface.
+   type(facet_object), allocatable               :: facet(:)          !< Clipped facets.
+   integer(I4P)                                  :: facets_in_number  !< Number of facets inside bounding box.
+   integer(I4P)                                  :: facets_out_number !< Number of facets outside bounding box.
+   integer(I4P)                                  :: f, fi, fo         !< Counter.
+
+   if (self%facets_number>0) then
+      facets_in_number = 0
+      facets_out_number = 0
+      do f=1, self%facets_number
+         if (is_inside(point=self%facet(f)%vertex(1)).and.&
+             is_inside(point=self%facet(f)%vertex(2)).and.&
+             is_inside(point=self%facet(f)%vertex(3))) then
+            facets_in_number = facets_in_number + 1
+         else
+            facets_out_number = facets_out_number + 1
+         endif
+      enddo
+      if (facets_in_number>0) then
+         allocate(facet(1:facets_in_number))
+         if (present(remainder)) then
+            remainder%facets_number = facets_out_number
+            allocate(remainder%facet(1:facets_out_number))
+         endif
+         fi = 0
+         fo = 0
+         do f=1, self%facets_number
+            if (is_inside(point=self%facet(f)%vertex(1)).and.&
+                is_inside(point=self%facet(f)%vertex(2)).and.&
+                is_inside(point=self%facet(f)%vertex(3))) then
+               fi = fi + 1
+               facet(fi) = self%facet(f)
+            else
+               fo = fo + 1
+               if (present(remainder)) remainder%facet(fo) = self%facet(f)
+            endif
+         enddo
+         call move_alloc(from=facet, to=self%facet)
+         self%facets_number = facets_in_number
+         call self%analize
+         if (present(remainder)) call remainder%analize
+      endif
+   endif
+   contains
+      pure function is_inside(point)
+      !< Return the true if point is inside AABB.
+      type(vector_R8P), intent(in) :: point     !< Point reference.
+      logical                      :: is_inside !< Check result.
+
+      is_inside = ((point%x >= bmin%x.and.point%x <= bmax%x).and.&
+                   (point%y >= bmin%y.and.point%y <= bmax%y).and.&
+                   (point%z >= bmin%z.and.point%z <= bmax%z))
+      endfunction is_inside
+   endsubroutine clip
 
    subroutine close_file(self)
    !< Close file.
