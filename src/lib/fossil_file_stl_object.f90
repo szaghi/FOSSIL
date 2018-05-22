@@ -105,12 +105,20 @@ contains
    if (self%facets_number>0) then
       call self%facet%destroy_connectivity
       smallest_edge_len = self%smallest_edge_len() * 0.9_R8P
-      do f1=1, self%facets_number - 1
-         do f2=f1 + 1, self%facets_number
-            call self%facet(f1)%compute_vertices_nearby(other=self%facet(f2), &
-                                                        tolerance_to_be_identical=EPS, tolerance_to_be_nearby=smallest_edge_len)
+      if (self%aabb%is_initialized) then
+         ! exploit AABB refinement levels
+         call self%aabb%compute_vertices_nearby(tolerance_to_be_identical=EPS, &
+                                                tolerance_to_be_nearby=smallest_edge_len)
+      else
+         ! brute-force search over all facets
+         do f1=1, self%facets_number - 1
+            do f2=f1 + 1, self%facets_number
+               call self%facet(f1)%compute_vertices_nearby(other=self%facet(f2),          &
+                                                           tolerance_to_be_identical=EPS, &
+                                                           tolerance_to_be_nearby=smallest_edge_len)
+            enddo
          enddo
-      enddo
+      endif
       do f1=1, self%facets_number
          call self%facet(f1)%update_connectivity
       enddo

@@ -144,14 +144,10 @@ contains
          if (are_nearby(self%vertex(vs), other%vertex(vo), tolerance_to_be_nearby)) then
             call  self%vertex_nearby(vs)%put(id=other%vertex_global_id(vo))
             call other%vertex_nearby(vo)%put(id= self%vertex_global_id(vs))
-         endif
-      enddo
-   enddo
-   do vs=1, 3
-      do vo=1, 3
-         if (are_nearby(self%vertex(vs), other%vertex(vo), tolerance_to_be_identical)) then
-            call  self%vertex_occurrence(vs)%put(id=other%id)
-            call other%vertex_occurrence(vo)%put(id= self%id)
+            if (are_nearby(self%vertex(vs), other%vertex(vo), tolerance_to_be_identical)) then
+               call  self%vertex_occurrence(vs)%put(id=other%id)
+               call other%vertex_occurrence(vo)%put(id= self%id)
+            endif
          endif
       enddo
    enddo

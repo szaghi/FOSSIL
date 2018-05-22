@@ -30,6 +30,7 @@ type :: aabb_tree_object
    logical                             :: is_initialized=.false. !< Sentinel to check is AABB tree is initialized.
    contains
       ! public methods
+      procedure, pass(self) :: compute_vertices_nearby     !< Compute vertices nearby.
       procedure, pass(self) :: destroy                     !< Destroy AABB tree.
       procedure, pass(self) :: distance                    !< Compute the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: initialize                  !< Initialize AABB tree.
@@ -43,6 +44,14 @@ endtype aabb_tree_object
 
 contains
    ! public methods
+   pure subroutine compute_vertices_nearby(self, tolerance_to_be_identical, tolerance_to_be_nearby)
+   !< Compute vertices nearby.
+   class(aabb_tree_object), intent(inout) :: self                      !< AABB tree.
+   real(R8P),               intent(in)    :: tolerance_to_be_identical !< Tolerance to identify identical vertices.
+   real(R8P),               intent(in)    :: tolerance_to_be_nearby    !< Tolerance to identify nearby vertices.
+
+   endsubroutine compute_vertices_nearby
+
    elemental subroutine destroy(self)
    !< Destroy AABB tree.
    class(aabb_tree_object), intent(inout) :: self  !< AABB tree.
