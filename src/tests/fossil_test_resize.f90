@@ -21,6 +21,7 @@ are_tests_passed = .false.
 call cli_parse
 call file_stl%initialize(file_name=trim(adjustl(file_name_stl)))
 call file_stl%load_from_file(guess_format=.true.)
+print '(A)', file_stl%statistics()
 
 call file_stl%resize(factor=factor)
 call file_stl%save_into_file(file_name='fossil_test_resize-factor.stl')
@@ -33,6 +34,12 @@ are_tests_passed(3) = nint(file_stl%distance(point=2 * ex_R8P + 2 * ey_R8P + 0 *
 call file_stl%resize(z=z)
 are_tests_passed(4) = nint(file_stl%distance(point=2 * ex_R8P + 2 * ey_R8P + 2 * ez_R8P)) == 0
 call file_stl%save_into_file(file_name='fossil_test_resize-xyz.stl')
+
+call file_stl%initialize(file_name=trim(adjustl(file_name_stl)))
+call file_stl%load_from_file(guess_format=.true.)
+
+call file_stl%resize(factor=factor, respect_centroid=.true.)
+call file_stl%save_into_file(file_name='fossil_test_resize-factor-centroid.stl')
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 contains

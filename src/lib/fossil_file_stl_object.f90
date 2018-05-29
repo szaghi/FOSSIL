@@ -5,9 +5,10 @@ module fossil_file_stl_object
 
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object, only : facet_object
+use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, PI, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
-use penf, only : I4P, R8P, MaxR8P, str
+use penf, only : I4P, R8P, MaxR8P, str, I8P
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, mirror_matrix_R8P, rotation_matrix_R8P, vector_R8P
 
 implicit none
@@ -16,34 +17,32 @@ public :: file_stl_object
 
 type :: file_stl_object
    !< FOSSIL STL file class.
-   character(len=:), allocatable   :: file_name            !< File name
-   integer(I4P)                    :: file_unit=0          !< File unit.
-   character(FRLEN)                :: header=''            !< File header.
-   integer(I4P)                    :: facets_number=0      !< Facets number.
-   type(facet_object), allocatable :: facet(:)             !< Facets.
-   integer(I4P), allocatable       :: facet_1_de(:)        !< Facets with one disconnected edge.
-   integer(I4P)                    :: facets_1_de_number=0 !< Facets number with one disconnected edge.
-   integer(I4P), allocatable       :: facet_2_de(:)        !< Facets with two disconnected edges.
-   integer(I4P)                    :: facets_2_de_number=0 !< Facets number with two disconnected edge.
-   integer(I4P), allocatable       :: facet_3_de(:)        !< Facets with three disconnected edges.
-   integer(I4P)                    :: facets_3_de_number=0 !< Facets number with three disconnected edge.
-   type(aabb_tree_object)          :: aabb                 !< AABB tree.
-   type(vector_R8P)                :: bmin                 !< Minimum point of STL.
-   type(vector_R8P)                :: bmax                 !< Maximum point of STL.
-   real(R8P)                       :: volume=0._R8P        !< Volume bounded by STL surface.
-   logical                         :: is_ascii=.true.      !< Sentinel to check if file is ASCII.
-   logical                         :: is_open=.false.      !< Sentinel to check if file is open.
+   character(len=:), allocatable   :: file_name       !< File name
+   integer(I4P)                    :: file_unit=0     !< File unit.
+   character(FRLEN)                :: header=''       !< File header.
+   integer(I4P)                    :: facets_number=0 !< Facets number.
+   type(facet_object), allocatable :: facet(:)        !< Facets.
+   type(list_id_object)            :: facet_1_de      !< Facets with one disconnected edges.
+   type(list_id_object)            :: facet_2_de      !< Facets with two disconnected edges.
+   type(list_id_object)            :: facet_3_de      !< Facets with three disconnected edges.
+   type(aabb_tree_object)          :: aabb            !< AABB tree.
+   type(vector_R8P)                :: bmin            !< Minimum point of STL.
+   type(vector_R8P)                :: bmax            !< Maximum point of STL.
+   real(R8P)                       :: volume=0._R8P   !< Volume bounded by STL surface.
+   type(vector_R8P)                :: centroid        !< Centroid of STL surface.
+   logical                         :: is_ascii=.true. !< Sentinel to check if file is ASCII.
+   logical                         :: is_open=.false. !< Sentinel to check if file is open.
    contains
       ! public methods
       procedure, pass(self) :: analize                         !< Analize STL.
       procedure, pass(self) :: build_connectivity              !< Build facets connectivity.
       procedure, pass(self) :: clip                            !< Clip triangulated surface given an AABB.
       procedure, pass(self) :: close_file                      !< Close file.
+      procedure, pass(self) :: compute_centroid                !< Compute centroid of STL surface.
       procedure, pass(self) :: compute_metrix                  !< Compute facets metrix.
       procedure, pass(self) :: compute_normals                 !< Compute facets normals by means of vertices data.
       procedure, pass(self) :: compute_volume                  !< Compute volume bounded by STL surface.
       procedure, pass(self) :: connect_nearby_vertices         !< Connect nearby vertices of disconnected edges.
-      procedure, pass(self) :: create_aabb_tree                !< Create the AABB tree.
       procedure, pass(self) :: destroy                         !< Destroy file.
       procedure, pass(self) :: distance                        !< Compute the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: initialize                      !< Initialize file.
@@ -82,17 +81,20 @@ endtype file_stl_object
 
 contains
    ! public methods
-   pure subroutine analize(self)
+   pure subroutine analize(self, aabb_refinement_levels)
    !< Analize STL.
    !<
    !< Buil connectivity, compute metrix, compute volume.
-   class(file_stl_object), intent(inout) :: self   !< File STL.
+   class(file_stl_object), intent(inout)        :: self                   !< File STL.
+   integer(I4P),           intent(in), optional :: aabb_refinement_levels !< AABB refinement levels.
 
    if (self%facets_number>0) then
-      call self%build_connectivity
       call self%compute_metrix
+      call self%aabb%initialize(refinement_levels=aabb_refinement_levels, facet=self%facet)
+      call self%build_connectivity
       call self%compute_facets_disconnected
       call self%compute_volume
+      call self%compute_centroid
    endif
    endsubroutine analize
 
@@ -101,14 +103,18 @@ contains
    class(file_stl_object), intent(inout) :: self              !< File STL.
    real(R8P)                             :: smallest_edge_len !< Smallest edge length.
    integer(I4P)                          :: f1, f2            !< Counter.
+   type(aabb_tree_object)                :: aabb              !< Temporary AABB tree.
 
    if (self%facets_number>0) then
       call self%facet%destroy_connectivity
       smallest_edge_len = self%smallest_edge_len() * 0.9_R8P
       if (self%aabb%is_initialized) then
-         ! exploit AABB refinement levels
-         call self%aabb%compute_vertices_nearby(tolerance_to_be_identical=EPS, &
-                                                tolerance_to_be_nearby=smallest_edge_len)
+         ! exploit AABB structure
+         call aabb%initialize(facet=self%facet, refinement_levels=self%aabb%refinement_levels, do_facets_distribute=.false.)
+         call aabb%distribute_facets(facet=self%facet, is_exclusive=.false., do_update_extents=.false.)
+         call aabb%compute_vertices_nearby(facet=self%facet,              &
+                                           tolerance_to_be_identical=EPS, &
+                                           tolerance_to_be_nearby=smallest_edge_len)
       else
          ! brute-force search over all facets
          do f1=1, self%facets_number - 1
@@ -161,15 +167,19 @@ contains
                 is_inside(point=self%facet(f)%vertex(3))) then
                fi = fi + 1
                facet(fi) = self%facet(f)
+               facet(fi)%id = fi
             else
                fo = fo + 1
-               if (present(remainder)) remainder%facet(fo) = self%facet(f)
+               if (present(remainder)) then
+                  remainder%facet(fo) = self%facet(f)
+                  remainder%facet(fo)%id = fo
+               endif
             endif
          enddo
          call move_alloc(from=facet, to=self%facet)
          self%facets_number = facets_in_number
          call self%analize
-         if (present(remainder)) call remainder%analize
+         if (present(remainder)) call remainder%analize(aabb_refinement_levels=self%aabb%refinement_levels)
       endif
    endif
    contains
@@ -195,6 +205,22 @@ contains
       self%is_open = .false.
    endif
    endsubroutine close_file
+
+   pure subroutine compute_centroid(self)
+   !< Compute centroid of STL surface.
+   !<
+   !< @note Metrix and volume must be already computed.
+   class(file_stl_object), intent(inout) :: self !< File STL.
+   integer(I4P)                          :: f    !< Counter.
+
+   if (self%facets_number>0) then
+      self%centroid = 0._R8P
+      do f=1, self%facets_number
+         self%centroid = self%centroid - self%facet(f)%centroid_part()
+      enddo
+      self%centroid = self%centroid / (48 * self%volume)
+   endif
+   endsubroutine compute_centroid
 
    pure subroutine compute_metrix(self)
    !< Compute facets metrix.
@@ -238,35 +264,23 @@ contains
    integer(I4P)                          :: f    !< Counter.
 
    if (self%facets_number>0) then
-      if     (self%facets_1_de_number>0) then
-         do f=1, self%facets_1_de_number
-            call self%facet(self%facet_1_de(f))%connect_nearby_vertices(facet=self%facet)
+      if (self%facet_1_de%ids_number>0) then
+         do f=1, self%facet_1_de%ids_number
+            call self%facet(self%facet_1_de%id(f))%connect_nearby_vertices(facet=self%facet)
          enddo
       endif
-      if (self%facets_2_de_number>0) then
-         do f=1, self%facets_2_de_number
-            call self%facet(self%facet_2_de(f))%connect_nearby_vertices(facet=self%facet)
+      if (self%facet_2_de%ids_number>0) then
+         do f=1, self%facet_2_de%ids_number
+            call self%facet(self%facet_2_de%id(f))%connect_nearby_vertices(facet=self%facet)
          enddo
       endif
-      if (self%facets_3_de_number>0) then
-         do f=1, self%facets_3_de_number
-            call self%facet(self%facet_3_de(f))%connect_nearby_vertices(facet=self%facet)
+      if (self%facet_3_de%ids_number>0) then
+         do f=1, self%facet_3_de%ids_number
+            call self%facet(self%facet_3_de%id(f))%connect_nearby_vertices(facet=self%facet)
          enddo
       endif
    endif
    endsubroutine connect_nearby_vertices
-
-   subroutine create_aabb_tree(self, refinement_levels)
-   !< Create AABB tree.
-   !<
-   !< @note Facets metrix must be already computed.
-   class(file_stl_object), intent(inout)        :: self               !< File STL.
-   integer(I4P),           intent(in), optional :: refinement_levels  !< Total number of refinement levels used.
-   integer(I4P)                                 :: refinement_levels_ !< Total number of refinement levels used, local variable.
-
-   refinement_levels_ = 2 ; if (present(refinement_levels)) refinement_levels_ = refinement_levels
-   call self%aabb%initialize(refinement_levels=refinement_levels_, facet=self%facet)
-   endsubroutine create_aabb_tree
 
    elemental subroutine destroy(self)
    !< Destroy file.
@@ -293,7 +307,7 @@ contains
    if (self%facets_number > 0) then
       if (self%aabb%is_initialized) then
          ! exploit AABB refinement levels
-         distance = self%aabb%distance(point=point)
+         distance = self%aabb%distance(facet=self%facet, point=point)
       else
          ! brute-force search over all facets
          distance = MaxR8P
@@ -357,7 +371,8 @@ contains
 
       if (self%aabb%is_initialized) then
          ! exploit AABB refinement levels
-         intersections_number = self%aabb%ray_intersections_number(ray_origin=ray_origin, ray_direction=ray_direction)
+         intersections_number = self%aabb%ray_intersections_number(facet=self%facet, &
+                                                                   ray_origin=ray_origin, ray_direction=ray_direction)
       else
          ! brute-force search over all facets
          do f=1, self%facets_number
@@ -395,29 +410,32 @@ contains
    endif
    endfunction is_point_inside_polyhedron_sa
 
-   elemental subroutine initialize(self, skip_destroy, file_name, is_ascii)
+   elemental subroutine initialize(self, skip_destroy, file_name, is_ascii, aabb_refinement_levels)
    !< Initialize file.
-   class(file_stl_object), intent(inout)        :: self          !< File STL.
-   logical,                intent(in), optional :: skip_destroy  !< Flag to skip destroy file.
-   character(*),           intent(in), optional :: file_name     !< File name.
-   logical,                intent(in), optional :: is_ascii      !< Sentinel to check if file is ASCII.
-   logical                                      :: skip_destroy_ !< Flag to skip destroy file, local variable.
+   class(file_stl_object), intent(inout)        :: self                   !< File STL.
+   logical,                intent(in), optional :: skip_destroy           !< Flag to skip destroy file.
+   character(*),           intent(in), optional :: file_name              !< File name.
+   logical,                intent(in), optional :: is_ascii               !< Sentinel to check if file is ASCII.
+   integer(I4P),           intent(in), optional :: aabb_refinement_levels !< AABB refinement levels.
+   logical                                      :: skip_destroy_          !< Flag to skip destroy file, local variable.
 
    skip_destroy_ = .false. ; if (present(skip_destroy)) skip_destroy_ = skip_destroy
    if (.not.skip_destroy_) call self%destroy
    if (present(file_name)) self%file_name = trim(adjustl(file_name))
    if (present(is_ascii)) self%is_ascii = is_ascii
+   if (present(aabb_refinement_levels)) self%aabb%refinement_levels = aabb_refinement_levels
    endsubroutine initialize
 
-   subroutine load_from_file(self, file_name, is_ascii, guess_format, disable_analysis)
+   subroutine load_from_file(self, file_name, is_ascii, guess_format, aabb_refinement_levels, disable_analysis)
    !< Load from file.
-   class(file_stl_object), intent(inout)        :: self              !< File STL.
-   character(*),           intent(in), optional :: file_name         !< File name.
-   logical,                intent(in), optional :: is_ascii          !< Sentinel to check if file is ASCII.
-   logical,                intent(in), optional :: guess_format      !< Sentinel to try to guess format directly from file.
-   logical,                intent(in), optional :: disable_analysis  !< Sentinel to disable STL analysis.
-   logical                                      :: disable_analysis_ !< Sentinel to disable STL analysis, local variable.
-   integer(I4P)                                 :: f                 !< Counter.
+   class(file_stl_object), intent(inout)        :: self                   !< File STL.
+   character(*),           intent(in), optional :: file_name              !< File name.
+   logical,                intent(in), optional :: is_ascii               !< Sentinel to check if file is ASCII.
+   logical,                intent(in), optional :: guess_format           !< Sentinel to try to guess format directly from file.
+   integer(I4P),           intent(in), optional :: aabb_refinement_levels !< AABB refinement levels.
+   logical,                intent(in), optional :: disable_analysis       !< Sentinel to disable STL analysis.
+   logical                                      :: disable_analysis_      !< Sentinel to disable STL analysis, local variable.
+   integer(I4P)                                 :: f                      !< Counter.
 
    disable_analysis_ = .false. ; if (present(disable_analysis)) disable_analysis_ = disable_analysis
    call self%initialize(skip_destroy=.true., file_name=file_name, is_ascii=is_ascii)
@@ -437,7 +455,7 @@ contains
       enddo
    endif
    call self%close_file
-   if (.not.disable_analysis_) call self%analize
+   if (.not.disable_analysis_) call self%analize(aabb_refinement_levels=aabb_refinement_levels)
    endsubroutine load_from_file
 
    pure subroutine merge_solids(self, other)
@@ -518,18 +536,23 @@ contains
    endif
    endsubroutine open_file
 
-   elemental subroutine resize(self, x, y, z, factor, recompute_metrix)
+   elemental subroutine resize(self, x, y, z, factor, respect_centroid, recompute_metrix)
    !< Resize (scale) facets by x or y or z or vectorial factors.
    !<
    !< @note The name `scale` has not been used, it been a Fortran built-in.
-   class(file_stl_object), intent(inout)        :: self             !< File STL.
-   real(R8P),              intent(in), optional :: x                !< Factor along x axis.
-   real(R8P),              intent(in), optional :: y                !< Factor along y axis.
-   real(R8P),              intent(in), optional :: z                !< Factor along z axis.
-   type(vector_R8P),       intent(in), optional :: factor           !< Vectorial factor.
-   logical,                intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
-   type(vector_R8P)                             :: factor_          !< Vectorial factor, local variable.
+   !<
+   !< @note If centroid must be used for center of resize it must be already computed.
+   class(file_stl_object), intent(inout)        :: self              !< File STL.
+   real(R8P),              intent(in), optional :: x                 !< Factor along x axis.
+   real(R8P),              intent(in), optional :: y                 !< Factor along y axis.
+   real(R8P),              intent(in), optional :: z                 !< Factor along z axis.
+   type(vector_R8P),       intent(in), optional :: factor            !< Vectorial factor.
+   logical,                intent(in), optional :: respect_centroid  !< Sentinel to activate centroid as resize center.
+   logical,                intent(in), optional :: recompute_metrix  !< Sentinel to activate metrix recomputation.
+   type(vector_R8P)                             :: factor_           !< Vectorial factor, local variable.
+   logical                                      :: respect_centroid_ !< Sentinel to activate centroid as resize center, local var.
 
+   respect_centroid_ = .false. ; if (present(respect_centroid)) respect_centroid_ = respect_centroid
    if (self%facets_number>0) then
       factor_ = 1._R8P
       if (present(factor)) then
@@ -539,7 +562,14 @@ contains
          if (present(y)) factor_%y = y
          if (present(z)) factor_%z = z
       endif
-      call self%facet%resize(factor=factor_, recompute_metrix=recompute_metrix)
+      if (respect_centroid_) then
+         call self%facet%resize(factor=factor_, center=self%centroid)
+      else
+         call self%facet%resize(factor=factor_, center=0 * ex_R8P)
+      endif
+      if (present(recompute_metrix)) then
+         if (recompute_metrix) call self%compute_metrix
+      endif
    endif
    endsubroutine resize
 
@@ -559,7 +589,9 @@ contains
       if (present(do_analysis)) then
          if (do_analysis) call self%analize
       endif
-      if (self%facets_1_de_number>0.or.self%facets_2_de_number>0.or.self%facets_3_de_number>0) call self%connect_nearby_vertices
+      if (self%facet_1_de%ids_number>0.or.&
+          self%facet_2_de%ids_number>0.or.&
+          self%facet_3_de%ids_number>0) call self%connect_nearby_vertices
       call self%analize
       call self%sanitize_normals
    endif
@@ -670,10 +702,14 @@ contains
       stats=stats//prefix_//'Y extents: ['//trim(str(self%bmin%y))//', '//trim(str(self%bmax%y))//']'//NL
       stats=stats//prefix_//'Z extents: ['//trim(str(self%bmin%z))//', '//trim(str(self%bmax%z))//']'//NL
       stats=stats//prefix_//'volume: '//trim(str(self%volume))//NL
+      stats=stats//prefix_//'centroid: ['//trim(str(self%centroid%x))//', '//&
+                                           trim(str(self%centroid%y))//', '//&
+                                           trim(str(self%centroid%z))//']'//NL
       stats=stats//prefix_//'number of facets: '//trim(str(self%facets_number))//NL
-      stats=stats//prefix_//'number of facets with 1 edges disconnected: '//trim(str(self%facets_1_de_number))//NL
-      stats=stats//prefix_//'number of facets with 2 edges disconnected: '//trim(str(self%facets_2_de_number))//NL
-      stats=stats//prefix_//'number of facets with 3 edges disconnected: '//trim(str(self%facets_3_de_number))!//NL
+      stats=stats//prefix_//'number of facets with 1 edges disconnected: '//trim(str(self%facet_1_de%ids_number))//NL
+      stats=stats//prefix_//'number of facets with 2 edges disconnected: '//trim(str(self%facet_2_de%ids_number))//NL
+      stats=stats//prefix_//'number of facets with 3 edges disconnected: '//trim(str(self%facet_3_de%ids_number))//NL
+      stats=stats//prefix_//'number of AABB refinement levels: '//trim(str(self%aabb%refinement_levels))!//NL
    endif
    endfunction statistics
 
@@ -706,6 +742,7 @@ contains
    !< Operator `=`.
    class(file_stl_object), intent(inout) :: lhs !< Left hand side.
    type(file_stl_object),  intent(in)    :: rhs !< Right hand side.
+   integer(I4P)                          :: f   !< Counter.
 
    if (allocated(lhs%file_name)) deallocate(lhs%file_name)
    if (allocated(rhs%file_name)) lhs%file_name = rhs%file_name
@@ -713,19 +750,20 @@ contains
    lhs%header = rhs%header
    lhs%facets_number = rhs%facets_number
    if (allocated(lhs%facet)) deallocate(lhs%facet)
-   if (allocated(rhs%facet)) allocate(lhs%facet(1:lhs%facets_number), source=rhs%facet)
-   lhs%facets_1_de_number = rhs%facets_1_de_number
-   if (allocated(lhs%facet_1_de)) deallocate(lhs%facet_1_de)
-   if (allocated(rhs%facet_1_de)) allocate(lhs%facet_1_de, source=rhs%facet_1_de)
-   lhs%facets_2_de_number = rhs%facets_2_de_number
-   if (allocated(lhs%facet_2_de)) deallocate(lhs%facet_2_de)
-   if (allocated(rhs%facet_2_de)) allocate(lhs%facet_2_de, source=rhs%facet_2_de)
-   lhs%facets_3_de_number = rhs%facets_3_de_number
-   if (allocated(lhs%facet_3_de)) deallocate(lhs%facet_3_de)
-   if (allocated(rhs%facet_3_de)) allocate(lhs%facet_3_de, source=rhs%facet_3_de)
+   if (allocated(rhs%facet)) then
+      allocate(lhs%facet(1:lhs%facets_number))
+      do f=1, lhs%facets_number
+         lhs%facet(f) = rhs%facet(f)
+      enddo
+   endif
+   lhs%facet_1_de = rhs%facet_1_de
+   lhs%facet_2_de = rhs%facet_2_de
+   lhs%facet_3_de = rhs%facet_3_de
    lhs%aabb = rhs%aabb
    lhs%bmin = rhs%bmin
    lhs%bmax = rhs%bmax
+   lhs%volume = rhs%volume
+   lhs%centroid = rhs%centroid
    lhs%is_ascii = rhs%is_ascii
    lhs%is_open = rhs%is_open
    endsubroutine file_stl_assign_file_stl
@@ -749,10 +787,10 @@ contains
    logical                               :: de(3) !< Flag to check edges disconnection.
    integer(I4P)                          :: f     !< Counter.
 
+   call self%facet_1_de%destroy
+   call self%facet_2_de%destroy
+   call self%facet_3_de%destroy
    if (self%facets_number>0) then
-      self%facets_1_de_number = 0
-      self%facets_2_de_number = 0
-      self%facets_3_de_number = 0
       do f=1, self%facets_number
          de = .false.
          if (self%facet(f)%fcon_edge_12==0_I4P) de(1) = .true.
@@ -760,36 +798,14 @@ contains
          if (self%facet(f)%fcon_edge_31==0_I4P) de(3) = .true.
          select case(count(de))
          case(1_I4P)
-            self%facets_1_de_number = self%facets_1_de_number + 1
-            call add_to_de_list(id=self%facet(f)%id, list=self%facet_1_de)
+            call self%facet_1_de%put(id=self%facet(f)%id)
          case(2_I4P)
-            self%facets_2_de_number = self%facets_2_de_number + 1
-            call add_to_de_list(id=self%facet(f)%id, list=self%facet_2_de)
+            call self%facet_2_de%put(id=self%facet(f)%id)
          case(3_I4P)
-            self%facets_3_de_number = self%facets_3_de_number + 1
-            call add_to_de_list(id=self%facet(f)%id, list=self%facet_3_de)
+            call self%facet_3_de%put(id=self%facet(f)%id)
          endselect
       enddo
    endif
-   contains
-      pure subroutine add_to_de_list(id, list)
-      !< Add given facet ID to a list of disconnected facets.
-      integer(I4P),              intent(in)    :: id      !< Facet global ID.
-      integer(I4P), allocatable, intent(inout) :: list(:) !< Disconnected facets list.
-      integer(I4P), allocatable                :: tmp(:)  !< Disconnected facets list, temporary variable.
-      integer(I4P)                             :: n       !< Size of input list.
-
-      if (allocated(list)) then
-         n = size(list, dim=1)
-         allocate(tmp(1:n+1))
-         tmp(1:n) = list
-         tmp(n+1) = id
-         call move_alloc(from=tmp, to=list)
-      else
-         allocate(list(1))
-         list(1) = id
-      endif
-      endsubroutine add_to_de_list
    endsubroutine compute_facets_disconnected
 
    subroutine load_facets_number_from_file(self)

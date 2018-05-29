@@ -38,6 +38,7 @@ type :: facet_object
    type(list_id_object) :: vertex_nearby(3)     !< List of vertices "nearby", list of vertices global ID nearby them.
    contains
       ! public methods
+      procedure, pass(self) :: centroid_part                   !< Return facet's part to build up STL centroid.
       procedure, pass(self) :: check_normal                    !< Check normal consistency.
       procedure, pass(self) :: compute_metrix                  !< Compute local (plane) metrix.
       procedure, pass(self) :: compute_normal                  !< Compute normal by means of vertices data.
@@ -79,6 +80,26 @@ endtype facet_object
 
 contains
    ! public methods
+   pure function centroid_part(self)
+   !< Return facet's part to build up STL centroid.
+   !<
+   !< @note Facet's normal should already computed/sanitized.
+   class(facet_object), intent(in)  :: self          !< Facet.
+   type(vector_R8P)                 :: centroid_part !< Facet's part of the STL centroid.
+
+   associate(normal=>self%normal, vertex=>self%vertex)
+      centroid_part%x = normal%x * ((vertex(1)%x + vertex(2)%x) * (vertex(1)%x + vertex(2)%x) + &
+                                    (vertex(2)%x + vertex(3)%x) * (vertex(2)%x + vertex(3)%x) + &
+                                    (vertex(3)%x + vertex(1)%x) * (vertex(3)%x + vertex(1)%x))
+      centroid_part%y = normal%y * ((vertex(1)%y + vertex(2)%y) * (vertex(1)%y + vertex(2)%y) + &
+                                    (vertex(2)%y + vertex(3)%y) * (vertex(2)%y + vertex(3)%y) + &
+                                    (vertex(3)%y + vertex(1)%y) * (vertex(3)%y + vertex(1)%y))
+      centroid_part%z = normal%z * ((vertex(1)%z + vertex(2)%z) * (vertex(1)%z + vertex(2)%z) + &
+                                    (vertex(2)%z + vertex(3)%z) * (vertex(2)%z + vertex(3)%z) + &
+                                    (vertex(3)%z + vertex(1)%z) * (vertex(3)%z + vertex(1)%z))
+   endassociate
+   endfunction centroid_part
+
    elemental function check_normal(self) result(is_consistent)
    !< Check normal consistency.
    class(facet_object), intent(in) :: self          !< Facet.
@@ -463,20 +484,17 @@ contains
    endif
    endsubroutine make_normal_consistent
 
-   elemental subroutine resize(self, factor, recompute_metrix)
+   elemental subroutine resize(self, factor, center)
    !< Resize (scale) facet by x or y or z or vectorial factors.
    !<
    !< @note The name `scale` has not been used, it been a Fortran built-in.
-   class(facet_object), intent(inout)        :: self             !< Facet
-   type(vector_R8P),    intent(in)           :: factor           !< Vectorial factor.
-   logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+   class(facet_object), intent(inout) :: self   !< Facet
+   type(vector_R8P),    intent(in)    :: factor !< Vectorial factor.
+   type(vector_R8P),    intent(in)    :: center !< Center of resize.
 
-   self%vertex(1) = self%vertex(1) * factor
-   self%vertex(2) = self%vertex(2) * factor
-   self%vertex(3) = self%vertex(3) * factor
-   if (present(recompute_metrix)) then
-      if (recompute_metrix) call self%compute_metrix
-   endif
+   self%vertex(1) = (self%vertex(1) - center) * factor + center
+   self%vertex(2) = (self%vertex(2) - center) * factor + center
+   self%vertex(3) = (self%vertex(3) - center) * factor + center
    endsubroutine resize
 
    elemental subroutine reverse_normal(self)

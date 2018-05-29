@@ -7,6 +7,7 @@ use flap, only : command_line_interface
 use fossil, only : file_stl_object
 use penf, only : I4P, I8P, R8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
+use fossil_aabb_tree_object, only : aabb_tree_object
 
 implicit none
 
@@ -29,19 +30,22 @@ logical                       :: are_tests_passed(1)     !< Result of tests chec
 are_tests_passed = .false.
 
 call cli_parse
-call file_stl%initialize(file_name=trim(adjustl(file_name_stl)))
+call file_stl%initialize(file_name=trim(adjustl(file_name_stl)), aabb_refinement_levels=refinement_levels)
 call file_stl%load_from_file(guess_format=.true.)
-call file_stl%sanitize_normals
-print*, file_stl%statistics()
-
-call file_stl%create_aabb_tree(refinement_levels=refinement_levels)
+print '(A)', 'STL statistics before sanitization'
+print '(A)', file_stl%statistics()
+call file_stl%sanitize
+call file_stl%analize
+print '(A)', 'STL statistics after sanitization'
+print '(A)', file_stl%statistics()
 
 are_tests_passed = int(file_stl%distance(point=0*ex_R8P), I4P) == 0_I4P
 
 if (save_aabb_tree_geometry) call file_stl%aabb%save_geometry_tecplot_ascii(file_name='fossil_test_distance_aabb_tree.dat')
-if (save_aabb_tree_stl) call file_stl%aabb%save_into_file_stl(base_file_name='fossil_test_distance_', is_ascii=.true.)
+if (save_aabb_tree_stl) call file_stl%aabb%save_into_file_stl(facet=file_stl%facet, base_file_name='fossil_test_distance_', &
+                                                              is_ascii=.true.)
 
-associate(bmin=>file_stl%aabb%node(0)%bmin(), bmax=>file_stl%aabb%node(0)%bmax())
+associate(bmin=>file_stl%bmin, bmax=>file_stl%bmax)
    ni = 64
    nj = 64
    nk = 64
@@ -64,7 +68,7 @@ endassociate
 
 if (test_brute_force) then
    file_stl%aabb%is_initialized = .false.
-   print*, 'compute distances brute force'
+   print '(A)', 'compute distances brute force'
    call system_clock(timing(1))
    do k=-4, nk + 5
       do j=-4, nj + 5
@@ -74,9 +78,9 @@ if (test_brute_force) then
       enddo
    enddo
    call system_clock(timing(2), timing(0))
-   print*, 'brute force timing: ', real(timing(2) - timing(1))/ timing(0)
+   print '(A, F8.3)', 'brute force timing: ', real(timing(2) - timing(1))/ timing(0)
 
-   print*, 'save output'
+   print '(A)', 'save output'
    open(newunit=file_unit, file='fossil_test_distance-brute.dat')
    write(file_unit, '(A)')'VARIABLES = x y z distance'
    write(file_unit, '(A)')'ZONE T="distance", I='//trim(str(ni+10))//', J='//trim(str(nj+10))//', K='//trim(str(nk+10))//''
@@ -91,7 +95,7 @@ if (test_brute_force) then
 endif
 
 file_stl%aabb%is_initialized = .true.
-print*, 'compute distances AABB'
+print '(A)', 'compute distances AABB'
 call system_clock(timing(3))
 do k=-4, nk + 5
    do j=-4, nj + 5
@@ -101,9 +105,9 @@ do k=-4, nk + 5
    enddo
 enddo
 call system_clock(timing(4), timing(0))
-print*, 'AABB timing: ', real(timing(4) - timing(3))/ timing(0)
+print '(A, F8.3)', 'AABB timing: ', real(timing(4) - timing(3))/ timing(0)
 
-print*, 'save output'
+print '(A)', 'save output'
 open(newunit=file_unit, file='fossil_test_distance-aabb.dat')
 write(file_unit, '(A)')'VARIABLES = x y z distance'
 write(file_unit, '(A)')'ZONE T="distance", I='//trim(str(ni+10))//', J='//trim(str(nj+10))//', K='//trim(str(nk+10))//''
