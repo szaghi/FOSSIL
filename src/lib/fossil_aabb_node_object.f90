@@ -8,9 +8,8 @@ module fossil_aabb_node_object
 use fossil_aabb_object, only : aabb_object
 use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
-use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : I4P, R8P, MaxR8P
-use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
+use vecfor, only : vector_R8P
 
 implicit none
 private
@@ -204,14 +203,13 @@ contains
    if (allocated(self%aabb)) call self%aabb%save_geometry_tecplot_ascii(file_unit=file_unit, aabb_name=aabb_name)
    endsubroutine  save_geometry_tecplot_ascii
 
-   subroutine save_facets_into_file_stl(self, facet, file_name, is_ascii)
+   subroutine save_facets_into_file_stl(self, facet, file_name)
    !< Save facets into file STL.
    class(aabb_node_object), intent(in) :: self      !< AABB.
    type(facet_object),      intent(in) :: facet(:)  !< Facets list.
    character(*),            intent(in) :: file_name !< File name.
-   logical,                 intent(in) :: is_ascii  !< Sentinel to check if file is ASCII.
 
-   if (allocated(self%aabb)) call self%aabb%save_facets_into_file_stl(facet=facet, file_name=file_name, is_ascii=is_ascii)
+   if (allocated(self%aabb)) call self%aabb%save_facets_into_file_stl(facet=facet, file_name=file_name)
    endsubroutine save_facets_into_file_stl
 
    elemental subroutine translate(self, delta)

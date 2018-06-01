@@ -11,9 +11,8 @@ use fossil_aabb_object, only : aabb_object
 use fossil_aabb_node_object, only : aabb_node_object
 use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
-use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : I4P, R8P, MaxR8P, str
-use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
+use vecfor, only : vector_R8P
 
 implicit none
 private
@@ -228,19 +227,21 @@ contains
    call self%destroy
    self%refinement_levels = refinement_levels_ ; if (present(refinement_levels)) self%refinement_levels = refinement_levels
    do_facets_distribute_ = .true. ; if (present(do_facets_distribute)) do_facets_distribute_ = do_facets_distribute
-   self%nodes_number = nodes_number(refinement_levels=self%refinement_levels)
-   allocate(self%node(0:self%nodes_number-1))
-   associate(node=>self%node)
-      call node(0)%initialize(facet=facet, bmin=bmin, bmax=bmax)
-      do level=1, self%refinement_levels                                                             ! loop over refinement levels
-         b = first_node(level=level)                                                                 ! first node at level
-         do bb=1, nodes_number_at_level(level=level), TREE_RATIO                                     ! loop over nodes at level
-            bbb = b + bb - 1                                                                         ! node numeration in tree
-            parent = parent_node(node=bbb)                                                           ! parent of the current node
-            if (node(parent)%is_allocated()) then                                                    ! create children nodes
-               call node(parent)%compute_octants(octant=octant)                                      ! compute parent AABB octants
-               do bbbb=0, TREE_RATIO-1                                                               ! loop over children
-                  call node(bbb+bbbb)%initialize(bmin=octant(bbbb+1)%bmin, bmax=octant(bbbb+1)%bmax) ! initialize node
+
+   if (self%refinement_levels > 0) then
+      self%nodes_number = nodes_number(refinement_levels=self%refinement_levels)
+      allocate(self%node(0:self%nodes_number-1))
+      call self%node(0)%initialize(facet=facet, bmin=bmin, bmax=bmax)
+      do level=1, self%refinement_levels                                          ! loop over refinement levels
+         b = first_node(level=level)                                              ! first node at level
+         do bb=1, nodes_number_at_level(level=level), TREE_RATIO                  ! loop over nodes at level
+            bbb = b + bb - 1                                                      ! node numeration in tree
+            parent = parent_node(node=bbb)                                        ! parent of the current node
+            if (self%node(parent)%is_allocated()) then                            ! create children nodes
+               call self%node(parent)%compute_octants(octant=octant)              ! compute parent AABB octants
+               do bbbb=0, TREE_RATIO-1                                            ! loop over children
+                  call self%node(bbb+bbbb)%initialize(bmin=octant(bbbb+1)%bmin, &
+                                                      bmax=octant(bbbb+1)%bmax)   ! initialize node
                enddo
             endif
          enddo
@@ -248,8 +249,8 @@ contains
       if (present(facet).and.(do_facets_distribute_)) call self%distribute_facets(facet=facet,               &
                                                                                   is_exclusive=is_exclusive, &
                                                                                   do_update_extents=do_update_extents)
-   endassociate
-   self%is_initialized = .true.
+      self%is_initialized = .true.
+   endif
    endsubroutine initialize
 
    pure function ray_intersections_number(self, facet, ray_origin, ray_direction) result(intersections_number)
@@ -320,11 +321,10 @@ contains
             b = first_node(level=level)
             do bb=1, nodes_number_at_level(level=level)
                bbb = b + bb - 1
-               call node(bbb)%save_facets_into_file_stl(facet=facet,                                         &
-                                                        file_name=trim(adjustl(base_file_name))//            &
-                                                                  'aabb-l_'//trim(str(level, .true.))//      &
-                                                                      '-b_'//trim(str(bbb, .true.))//'.stl', &
-                                                        is_ascii=is_ascii_)
+               call node(bbb)%save_facets_into_file_stl(facet=facet,                                    &
+                                                        file_name=trim(adjustl(base_file_name))//       &
+                                                                  'aabb-l_'//trim(str(level, .true.))// &
+                                                                      '-b_'//trim(str(bbb, .true.))//'.stl')
             enddo
          enddo
       endif

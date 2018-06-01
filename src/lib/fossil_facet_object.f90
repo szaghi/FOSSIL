@@ -36,6 +36,9 @@ type :: facet_object
    integer(I4P)         :: fcon_edge_31=0_I4P   !< Connected face ID along edge 3-1.
    type(list_id_object) :: vertex_occurrence(3) !< List of vertices "occurrencies", list of facets global ID containing them.
    type(list_id_object) :: vertex_nearby(3)     !< List of vertices "nearby", list of vertices global ID nearby them.
+   ! pointer procedures
+   procedure(load_from_file_interface), pointer, pass(self) :: load_from_file => load_from_file_ascii !< Load from file.
+   procedure(save_into_file_interface), pointer, pass(self) :: save_into_file => save_into_file_ascii !< Save into file.
    contains
       ! public methods
       procedure, pass(self) :: centroid_part                   !< Return facet's part to build up STL centroid.
@@ -49,8 +52,6 @@ type :: facet_object
       procedure, pass(self) :: distance                        !< Compute the (unsigned, squared) distance from a point to facet.
       procedure, pass(self) :: do_ray_intersect                !< Return true if facet is intersected by a ray.
       procedure, pass(self) :: initialize                      !< Initialize facet.
-      procedure, pass(self) :: load_from_file_ascii            !< Load facet from ASCII file.
-      procedure, pass(self) :: load_from_file_binary           !< Load facet from binary file.
       procedure, pass(self) :: make_normal_consistent          !< Make normal of other facet consistent with self.
       generic               :: mirror => mirror_by_normal, &
                                          mirror_by_matrix      !< Mirror facet.
@@ -58,8 +59,7 @@ type :: facet_object
       procedure, pass(self) :: resize                          !< Resize (scale) facet by x or y or z or vectorial factors.
       generic               :: rotate => rotate_by_axis_angle, &
                                          rotate_by_matrix      !< Rotate facet.
-      procedure, pass(self) :: save_into_file_ascii            !< Save facet into ASCII file.
-      procedure, pass(self) :: save_into_file_binary           !< Save facet into binary file.
+      procedure, pass(self) :: set_io_methods                  !< Set IO method accordingly to file format.
       procedure, pass(self) :: smallest_edge_len               !< Return the smallest edge length.
       procedure, pass(self) :: solid_angle                     !< Return the (projected) solid angle of the facet with respect point.
       procedure, pass(self) :: tetrahedron_volume              !< Return the volume of tetrahedron built by facet and a given apex.
@@ -72,11 +72,33 @@ type :: facet_object
       procedure, pass(self), private :: edge_connection_in_other_ref !< Return the edge of connection in the other reference.
       procedure, pass(lhs),  private :: facet_assign_facet           !< Operator `=`.
       procedure, pass(self), private :: flip_edge                    !< Flip facet edge.
+      procedure, pass(self), private :: load_from_file_ascii         !< Load facet from ASCII file.
+      procedure, pass(self), private :: load_from_file_binary        !< Load facet from binary file.
       procedure, pass(self), private :: mirror_by_normal             !< Mirror facet given normal of mirroring plane.
       procedure, pass(self), private :: mirror_by_matrix             !< Mirror facet given matrix.
       procedure, pass(self), private :: rotate_by_axis_angle         !< Rotate facet given axis and angle.
       procedure, pass(self), private :: rotate_by_matrix             !< Rotate facet given matrix.
+      procedure, pass(self), private :: save_into_file_ascii         !< Save facet into ASCII file.
+      procedure, pass(self), private :: save_into_file_binary        !< Save facet into binary file.
 endtype facet_object
+
+interface load_from_file_interface
+   subroutine load_from_file_interface(self, file_unit)
+   !< Load facet from file, generic interface.
+   import :: facet_object, I4P
+   class(facet_object), intent(inout) :: self      !< Facet.
+   integer(I4P),        intent(in)    :: file_unit !< File unit.
+   endsubroutine load_from_file_interface
+endinterface load_from_file_interface
+
+interface save_into_file_interface
+   subroutine save_into_file_interface(self, file_unit)
+   !< Save facet into file, generic interface.
+   import :: facet_object, I4P
+   class(facet_object), intent(in) :: self      !< Facet.
+   integer(I4P),        intent(in) :: file_unit !< File unit.
+   endsubroutine save_into_file_interface
+endinterface save_into_file_interface
 
 contains
    ! public methods
@@ -411,54 +433,6 @@ contains
    self = fresh
    endsubroutine initialize
 
-   subroutine load_from_file_ascii(self, file_unit)
-   !< Load facet from ASCII file.
-   class(facet_object), intent(inout) :: self      !< Facet.
-   integer(I4P),        intent(in)    :: file_unit !< File unit.
-
-   call load_facet_record(prefix='facet normal', record=self%normal)
-   read(file_unit, *) ! outer loop
-   call load_facet_record(prefix='vertex', record=self%vertex(1))
-   call load_facet_record(prefix='vertex', record=self%vertex(2))
-   call load_facet_record(prefix='vertex', record=self%vertex(3))
-   read(file_unit, *) ! endloop
-   read(file_unit, *) ! endfacet
-   contains
-      subroutine load_facet_record(prefix, record)
-      !< Load a facet *record*, namely normal or vertex data.
-      character(*),     intent(in)  :: prefix       !< Record prefix string.
-      type(vector_R8P), intent(out) :: record       !< Record data.
-      character(FRLEN)              :: facet_record !< Facet record string buffer.
-      integer(I4P)                  :: i            !< Counter.
-
-      read(file_unit, '(A)') facet_record
-      i = index(string=facet_record, substring=prefix)
-      if (i>0) then
-         read(facet_record(i+len(prefix):), *) record%x, record%y, record%z
-      else
-         write(stderr, '(A)') 'error: impossible to read "'//prefix//'" from file unit "'//trim(str(file_unit))//'"!'
-      endif
-      endsubroutine load_facet_record
-   endsubroutine load_from_file_ascii
-
-   subroutine load_from_file_binary(self, file_unit)
-   !< Load facet from binary file.
-   class(facet_object), intent(inout) :: self       !< Facet.
-   integer(I4P),        intent(in)    :: file_unit  !< File unit.
-   integer(I2P)                       :: padding    !< Facet padding.
-   real(R4P)                          :: triplet(3) !< Triplet record of R4P kind real.
-
-   read(file_unit) triplet
-   self%normal%x=real(triplet(1), R8P) ; self%normal%y=real(triplet(2), R8P) ; self%normal%z=real(triplet(3), R8P)
-   read(file_unit) triplet
-   self%vertex(1)%x=real(triplet(1), R8P) ; self%vertex(1)%y=real(triplet(2), R8P) ; self%vertex(1)%z=real(triplet(3), R8P)
-   read(file_unit) triplet
-   self%vertex(2)%x=real(triplet(1), R8P) ; self%vertex(2)%y=real(triplet(2), R8P) ; self%vertex(2)%z=real(triplet(3), R8P)
-   read(file_unit) triplet
-   self%vertex(3)%x=real(triplet(1), R8P) ; self%vertex(3)%y=real(triplet(2), R8P) ; self%vertex(3)%z=real(triplet(3), R8P)
-   read(file_unit) padding
-   endsubroutine load_from_file_binary
-
    pure subroutine make_normal_consistent(self, edge_dir, other)
    !< Make normal of other facet consistent with self.
    class(facet_object), intent(in)    :: self           !< Facet.
@@ -505,36 +479,19 @@ contains
    call self%flip_edge(edge_dir='edge_23')
    endsubroutine reverse_normal
 
-   subroutine save_into_file_ascii(self, file_unit)
-   !< Save facet into ASCII file.
-   class(facet_object), intent(in) :: self      !< Facet.
-   integer(I4P),        intent(in) :: file_unit !< File unit.
+   elemental subroutine set_io_methods(self, is_ascii)
+   !< Set IO method accordingly to file format.
+   class(facet_object), intent(inout) :: self   !< Facet.
+   logical,             intent(in)    :: is_ascii !< Sentinel to trigger ASCII methods.
 
-   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '  facet normal ', self%normal%x, ' ', self%normal%y, ' ', self%normal%z
-   write(file_unit, '(A)')                            '    outer loop'
-   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex(1)%x, ' ', self%vertex(1)%y, ' ',self%vertex(1)%z
-   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex(2)%x, ' ', self%vertex(2)%y, ' ',self%vertex(2)%z
-   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex(3)%x, ' ', self%vertex(3)%y, ' ',self%vertex(3)%z
-   write(file_unit, '(A)')                            '    endloop'
-   write(file_unit, '(A)')                            '  endfacet'
-   endsubroutine save_into_file_ascii
-
-   subroutine save_into_file_binary(self, file_unit)
-   !< Save facet into binary file.
-   class(facet_object), intent(in) :: self      !< Facet.
-   integer(I4P),        intent(in) :: file_unit !< File unit.
-   real(R4P)                       :: triplet(3) !< Triplet record of R4P kind real.
-
-   triplet(1) = real(self%normal%x, R4P) ; triplet(2) = real(self%normal%y, R4P) ; triplet(3) = real(self%normal%z, R4P)
-   write(file_unit) triplet
-   triplet(1) = real(self%vertex(1)%x, R4P) ; triplet(2) = real(self%vertex(1)%y, R4P) ; triplet(3) = real(self%vertex(1)%z, R4P)
-   write(file_unit) triplet
-   triplet(1) = real(self%vertex(2)%x, R4P) ; triplet(2) = real(self%vertex(2)%y, R4P) ; triplet(3) = real(self%vertex(2)%z, R4P)
-   write(file_unit) triplet
-   triplet(1) = real(self%vertex(3)%x, R4P) ; triplet(2) = real(self%vertex(3)%y, R4P) ; triplet(3) = real(self%vertex(3)%z, R4P)
-   write(file_unit) triplet
-   write(file_unit) 0_I2P
-   endsubroutine save_into_file_binary
+   if (is_ascii) then
+      self%load_from_file => load_from_file_ascii
+      self%save_into_file => save_into_file_ascii
+   else
+      self%load_from_file => load_from_file_binary
+      self%save_into_file => save_into_file_binary
+   endif
+   endsubroutine set_io_methods
 
    pure function smallest_edge_len(self) result(smallest)
    !< Return the smallest edge length.
@@ -695,6 +652,54 @@ contains
       endsubroutine flip_vertices
    endsubroutine flip_edge
 
+   subroutine load_from_file_ascii(self, file_unit)
+   !< Load facet from ASCII file.
+   class(facet_object), intent(inout) :: self      !< Facet.
+   integer(I4P),        intent(in)    :: file_unit !< File unit.
+
+   call load_facet_record(prefix='facet normal', record=self%normal)
+   read(file_unit, *) ! outer loop
+   call load_facet_record(prefix='vertex', record=self%vertex(1))
+   call load_facet_record(prefix='vertex', record=self%vertex(2))
+   call load_facet_record(prefix='vertex', record=self%vertex(3))
+   read(file_unit, *) ! endloop
+   read(file_unit, *) ! endfacet
+   contains
+      subroutine load_facet_record(prefix, record)
+      !< Load a facet *record*, namely normal or vertex data.
+      character(*),     intent(in)  :: prefix       !< Record prefix string.
+      type(vector_R8P), intent(out) :: record       !< Record data.
+      character(FRLEN)              :: facet_record !< Facet record string buffer.
+      integer(I4P)                  :: i            !< Counter.
+
+      read(file_unit, '(A)') facet_record
+      i = index(string=facet_record, substring=prefix)
+      if (i>0) then
+         read(facet_record(i+len(prefix):), *) record%x, record%y, record%z
+      else
+         write(stderr, '(A)') 'error: impossible to read "'//prefix//'" from file unit "'//trim(str(file_unit))//'"!'
+      endif
+      endsubroutine load_facet_record
+   endsubroutine load_from_file_ascii
+
+   subroutine load_from_file_binary(self, file_unit)
+   !< Load facet from binary file.
+   class(facet_object), intent(inout) :: self       !< Facet.
+   integer(I4P),        intent(in)    :: file_unit  !< File unit.
+   integer(I2P)                       :: padding    !< Facet padding.
+   real(R4P)                          :: triplet(3) !< Triplet record of R4P kind real.
+
+   read(file_unit) triplet
+   self%normal%x=real(triplet(1), R8P) ; self%normal%y=real(triplet(2), R8P) ; self%normal%z=real(triplet(3), R8P)
+   read(file_unit) triplet
+   self%vertex(1)%x=real(triplet(1), R8P) ; self%vertex(1)%y=real(triplet(2), R8P) ; self%vertex(1)%z=real(triplet(3), R8P)
+   read(file_unit) triplet
+   self%vertex(2)%x=real(triplet(1), R8P) ; self%vertex(2)%y=real(triplet(2), R8P) ; self%vertex(2)%z=real(triplet(3), R8P)
+   read(file_unit) triplet
+   self%vertex(3)%x=real(triplet(1), R8P) ; self%vertex(3)%y=real(triplet(2), R8P) ; self%vertex(3)%z=real(triplet(3), R8P)
+   read(file_unit) padding
+   endsubroutine load_from_file_binary
+
    pure subroutine mirror_by_normal(self, normal, recompute_metrix)
    !< Mirror facet given normal of mirroring plane.
    class(facet_object), intent(inout)        :: self             !< Facet.
@@ -750,6 +755,37 @@ contains
    endif
    endsubroutine rotate_by_matrix
 
+   subroutine save_into_file_ascii(self, file_unit)
+   !< Save facet into ASCII file.
+   class(facet_object), intent(in) :: self      !< Facet.
+   integer(I4P),        intent(in) :: file_unit !< File unit.
+
+   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '  facet normal ', self%normal%x, ' ', self%normal%y, ' ', self%normal%z
+   write(file_unit, '(A)')                            '    outer loop'
+   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex(1)%x, ' ', self%vertex(1)%y, ' ',self%vertex(1)%z
+   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex(2)%x, ' ', self%vertex(2)%y, ' ',self%vertex(2)%z
+   write(file_unit, '(A,2('//FR4P//',A),'//FR4P//')') '      vertex ', self%vertex(3)%x, ' ', self%vertex(3)%y, ' ',self%vertex(3)%z
+   write(file_unit, '(A)')                            '    endloop'
+   write(file_unit, '(A)')                            '  endfacet'
+   endsubroutine save_into_file_ascii
+
+   subroutine save_into_file_binary(self, file_unit)
+   !< Save facet into binary file.
+   class(facet_object), intent(in) :: self      !< Facet.
+   integer(I4P),        intent(in) :: file_unit !< File unit.
+   real(R4P)                       :: triplet(3) !< Triplet record of R4P kind real.
+
+   triplet(1) = real(self%normal%x, R4P) ; triplet(2) = real(self%normal%y, R4P) ; triplet(3) = real(self%normal%z, R4P)
+   write(file_unit) triplet
+   triplet(1) = real(self%vertex(1)%x, R4P) ; triplet(2) = real(self%vertex(1)%y, R4P) ; triplet(3) = real(self%vertex(1)%z, R4P)
+   write(file_unit) triplet
+   triplet(1) = real(self%vertex(2)%x, R4P) ; triplet(2) = real(self%vertex(2)%y, R4P) ; triplet(3) = real(self%vertex(2)%z, R4P)
+   write(file_unit) triplet
+   triplet(1) = real(self%vertex(3)%x, R4P) ; triplet(2) = real(self%vertex(3)%y, R4P) ; triplet(3) = real(self%vertex(3)%z, R4P)
+   write(file_unit) triplet
+   write(file_unit) 0_I2P
+   endsubroutine save_into_file_binary
+
    ! `=` operator
    pure subroutine edge_connection_in_other_ref(self, other, edge_dir, edge)
    !< Return the edge of connection in the other reference.
@@ -791,6 +827,8 @@ contains
    lhs%fcon_edge_31 = rhs%fcon_edge_31
    lhs%vertex_occurrence = rhs%vertex_occurrence
    lhs%vertex_nearby = rhs%vertex_nearby
+   lhs%load_from_file => rhs%load_from_file
+   lhs%save_into_file => rhs%save_into_file
    endsubroutine facet_assign_facet
 
    ! non TBP

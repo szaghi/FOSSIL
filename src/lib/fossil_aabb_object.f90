@@ -6,9 +6,8 @@ module fossil_aabb_object
 use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS
-use, intrinsic :: iso_fortran_env, only : stderr => error_unit
-use penf, only : FR8P, I4P, R8P, MaxR8P, str
-use vecfor, only : ex_R8P, ey_R8P, ez_R8P, normL2_R8P, vector_R8P
+use penf, only : FR8P, I4P, R8P, MaxR8P
+use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 
 implicit none
 private
@@ -306,46 +305,39 @@ contains
    enddo
    endsubroutine  save_geometry_tecplot_ascii
 
-   subroutine save_facets_into_file_stl(self, facet, file_name, is_ascii)
+   subroutine save_facets_into_file_stl(self, facet, file_name)
    !< Save facets into file STL.
    class(aabb_object), intent(in) :: self      !< AABB.
    type(facet_object), intent(in) :: facet(:)  !< Facets list.
    character(*),       intent(in) :: file_name !< File name.
-   logical,            intent(in) :: is_ascii  !< Sentinel to check if file is ASCII.
    integer(I4P)                   :: file_unit !< File unit.
    integer(I4P)                   :: f         !< Counter.
 
    if (self%facet_id%ids_number > 0) then
       call open_file
-      if (is_ascii) then
-         do f=1, self%facet_id%ids_number
-            call facet(self%facet_id%id(f))%save_into_file_ascii(file_unit=file_unit)
-         enddo
-      else
-         do f=1, self%facet_id%ids_number
-            call facet(self%facet_id%id(f))%save_into_file_binary(file_unit=file_unit)
-         enddo
-      endif
+      do f=1, self%facet_id%ids_number
+         call facet(self%facet_id%id(f))%save_into_file(file_unit=file_unit)
+      enddo
       call close_file
    endif
    contains
       subroutine open_file()
       !< Open STL file.
 
-      if (is_ascii) then
-         open(newunit=file_unit, file=trim(adjustl(file_name)),                  form='formatted')
-         write(file_unit, '(A)') 'solid '//trim(adjustl(file_name))
-      else
-         open(newunit=file_unit, file=trim(adjustl(file_name)), access='stream', form='unformatted')
-         write(file_unit) repeat('a', 80)
-         write(file_unit) self%facet_id%ids_number
-      endif
+      ! if (is_ascii) then
+      !    open(newunit=file_unit, file=trim(adjustl(file_name)),                  form='formatted')
+      !    write(file_unit, '(A)') 'solid '//trim(adjustl(file_name))
+      ! else
+      !    open(newunit=file_unit, file=trim(adjustl(file_name)), access='stream', form='unformatted')
+      !    write(file_unit) repeat('a', 80)
+      !    write(file_unit) self%facet_id%ids_number
+      ! endif
       endsubroutine open_file
 
       subroutine close_file()
       !< Close STL file.
 
-      if (is_ascii) write(file_unit, '(A)') 'endsolid '//trim(adjustl(file_name))
+      ! if (is_ascii) write(file_unit, '(A)') 'endsolid '//trim(adjustl(file_name))
       close(unit=file_unit)
       endsubroutine close_file
    endsubroutine save_facets_into_file_stl
