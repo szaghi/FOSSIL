@@ -4,9 +4,9 @@ module fossil_aabb_object
 !< FOSSIL, Axis-Aligned Bounding Box (AABB) class definition.
 
 use fossil_facet_object, only : facet_object
+use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS
-use, intrinsic :: iso_fortran_env, only : stderr => error_unit
-use penf, only : FR8P, I4P, R8P, MaxR8P, str
+use penf, only : FR8P, I4P, R8P, MaxR8P
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 
 implicit none
@@ -15,25 +15,28 @@ public :: aabb_object
 
 type :: aabb_object
    !< FOSSIL Axis-Aligned Bounding Box (AABB) class.
-   type(vector_R8P)                :: bmin            !< Minimum point of AABB.
-   type(vector_R8P)                :: bmax            !< Maximum point of AABB.
-   integer(I4P)                    :: facets_number=0 !< Facets number.
-   type(facet_object), allocatable :: facet(:)        !< Facets.
+   type(vector_R8P)     :: bmin     !< Minimum point of AABB.
+   type(vector_R8P)     :: bmax     !< Maximum point of AABB.
+   type(list_id_object) :: facet_id !< List of facets IDs contained into AABB.
    contains
       ! public methods
       procedure, pass(self) :: add_facets                  !< Add facets to AABB.
       procedure, pass(self) :: closest_point               !< Return closest point on AABB from point reference.
       procedure, pass(self) :: compute_octants             !< Compute AABB octants.
+      procedure, pass(self) :: compute_vertices_nearby     !< Compute vertices nearby.
       procedure, pass(self) :: destroy                     !< Destroy AABB.
       procedure, pass(self) :: distance                    !< Return the (square) distance from point to AABB.
       procedure, pass(self) :: distance_from_facets        !< Return the (square) distance from point to AABB's facets.
       procedure, pass(self) :: do_ray_intersect            !< Return true if AABB is intersected by ray.
+      procedure, pass(self) :: get_aabb_facets             !< Get AABB facets list.
       procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
       procedure, pass(self) :: initialize                  !< Initialize AABB.
       procedure, pass(self) :: is_inside                   !< Return the true if point is inside ABB.
       procedure, pass(self) :: ray_intersections_number    !< Return ray intersections number.
       procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB geometry into Tecplot ascii file.
       procedure, pass(self) :: save_facets_into_file_stl   !< Save facets into file STL.
+      procedure, pass(self) :: translate                   !< Translate AABB by delta.
+      procedure, pass(self) :: union                       !< Make AABB the union of other AABBs.
       procedure, pass(self) :: update_extents              !< Update AABB bounding box extents.
       procedure, pass(self) :: vertex                      !< Return AABB vertices.
       ! operators
@@ -43,54 +46,42 @@ endtype aabb_object
 
 contains
    ! public methods
-   subroutine add_facets(self, facet)
+   pure subroutine add_facets(self, facet_id, facet, is_exclusive)
    !< Add facets to AABB.
    !<
-   !< @note Previously stored facets are lost.
+   !< @note Previously stored facets list is lost.
    !<
    !< @note Facets added to AABB are removed to facets list that is also returned.
-   class(aabb_object),              intent(inout) :: self              !< AABB.
-   type(facet_object), allocatable, intent(inout) :: facet(:)          !< Facets list.
-   integer(I4P)                                   :: scratch_unit_add  !< Scratch unit file for added facets.
-   integer(I4P)                                   :: scratch_unit_rem  !< Scratch unit file for remaining facets.
-   integer(I4P)                                   :: rem_facets_number !< Remaining facets number.
-   integer(I4P)                                   :: f                 !< Counter.
+   class(aabb_object),   intent(inout)        :: self          !< AABB.
+   type(list_id_object), intent(inout)        :: facet_id      !< List of facets IDs.
+   type(facet_object),   intent(in)           :: facet(:)      !< Facets list.
+   logical,              intent(in), optional :: is_exclusive  !< Sentinel to enable/disable exclusive addition.
+   logical                                    :: is_exclusive_ !< Sentinel to enable/disable exclusive addition, local variable.
+   type(list_id_object)                       :: facet_id_     !< List of facets IDs, local variable.
+   integer(I4P)                               :: f             !< Counter.
 
-   self%facets_number = 0
-   rem_facets_number = 0
-   if (allocated(self%facet)) deallocate(self%facet)
-   open(newunit=scratch_unit_add, status='scratch', access='stream', form='unformatted')
-   open(newunit=scratch_unit_rem, status='scratch', access='stream', form='unformatted')
-   do f=1, size(facet, dim=1)
-      if (self%is_inside(point=facet(f)%vertex(1)).and.&
-          self%is_inside(point=facet(f)%vertex(2)).and.&
-          self%is_inside(point=facet(f)%vertex(3))) then
-         self%facets_number = self%facets_number + 1
-         call facet(f)%save_into_file_binary(file_unit=scratch_unit_add)
-      else
-         rem_facets_number = rem_facets_number + 1
-         call facet(f)%save_into_file_binary(file_unit=scratch_unit_rem)
-      endif
-   enddo
-   if (self%facets_number > 0) then
-      allocate(self%facet(1:self%facets_number))
-      rewind(unit=scratch_unit_add)
-      do f=1, self%facets_number
-         call self%facet(f)%load_from_file_binary(file_unit=scratch_unit_add)
-         call self%facet(f)%compute_metrix
+   is_exclusive_ = .true. ; if (present(is_exclusive)) is_exclusive_ = is_exclusive
+   facet_id_ = facet_id
+   call self%facet_id%destroy
+   if (is_exclusive_) then
+      do f=1, facet_id%ids_number
+         if (self%is_inside(point=facet(facet_id%id(f))%vertex(1)).and.&
+             self%is_inside(point=facet(facet_id%id(f))%vertex(2)).and.&
+             self%is_inside(point=facet(facet_id%id(f))%vertex(3))) then
+            call self%facet_id%put(id=facet(facet_id%id(f))%id)
+            call     facet_id_%del(id=facet(facet_id%id(f))%id)
+         endif
+      enddo
+   else
+      do f=1, facet_id%ids_number
+         if (self%is_inside(point=facet(facet_id%id(f))%vertex(1)).or.&
+             self%is_inside(point=facet(facet_id%id(f))%vertex(2)).or.&
+             self%is_inside(point=facet(facet_id%id(f))%vertex(3))) then
+            call self%facet_id%put(id=facet(facet_id%id(f))%id)
+         endif
       enddo
    endif
-   close(unit=scratch_unit_add)
-   deallocate(facet)
-   if (rem_facets_number > 0) then
-      allocate(facet(1:rem_facets_number))
-      rewind(unit=scratch_unit_rem)
-      do f=1, rem_facets_number
-         call facet(f)%load_from_file_binary(file_unit=scratch_unit_rem)
-         call facet(f)%compute_metrix
-      enddo
-   endif
-   close(unit=scratch_unit_rem)
+   if (self%facet_id%ids_number > 0) facet_id = facet_id_
    endsubroutine add_facets
 
    pure function closest_point(self, point) result(closest)
@@ -120,6 +111,27 @@ contains
    enddo
    endsubroutine compute_octants
 
+   pure subroutine compute_vertices_nearby(self, facet, tolerance_to_be_identical, tolerance_to_be_nearby)
+   !< Compute vertices nearby.
+   class(aabb_object), intent(in)    :: self                      !< AABB.
+   type(facet_object), intent(inout) :: facet(:)                  !< Facets list.
+   real(R8P),          intent(in)    :: tolerance_to_be_identical !< Tolerance to identify identical vertices.
+   real(R8P),          intent(in)    :: tolerance_to_be_nearby    !< Tolerance to identify nearby vertices.
+   integer(I4P)                      :: f1, f2, ff1, ff2          !< Counter.
+
+   if (self%facet_id%ids_number > 0) then
+      do f1=1, self%facet_id%ids_number - 1
+         ff1 = self%facet_id%id(f1)
+         do f2=f1 + 1, self%facet_id%ids_number
+            ff2 = self%facet_id%id(f2)
+            call facet(ff1)%compute_vertices_nearby(other=facet(ff2),                                    &
+                                                    tolerance_to_be_identical=tolerance_to_be_identical, &
+                                                    tolerance_to_be_nearby=tolerance_to_be_nearby)
+         enddo
+      enddo
+   endif
+   endsubroutine compute_vertices_nearby
+
    elemental subroutine destroy(self)
    !< Destroy AABB.
    class(aabb_object), intent(inout) :: self  !< AABB.
@@ -141,18 +153,19 @@ contains
    distance = dx * dx + dy * dy + dz * dz
    endfunction distance
 
-   pure function distance_from_facets(self, point) result(distance)
+   pure function distance_from_facets(self, facet, point) result(distance)
    !< Return the (square) distance from point to AABB's facets.
    class(aabb_object), intent(in) :: self      !< AABB.
+   type(facet_object), intent(in) :: facet(:)  !< Facets list.
    type(vector_R8P),   intent(in) :: point     !< Point reference.
    real(R8P)                      :: distance  !< Distance from point to AABB's facets.
    real(R8P)                      :: distance_ !< Distance from point to AABB's facets, local variable.
    integer(I4P)                   :: f         !< Counter.
 
    distance = MaxR8P
-   if (self%facets_number > 0) then
-      do f=1, self%facets_number
-         distance_ = self%facet(f)%distance(point=point)
+   if (self%facet_id%ids_number > 0) then
+      do f=1, self%facet_id%ids_number
+         call facet(self%facet_id%id(f))%compute_distance(point=point, distance=distance_)
          if (abs(distance_) <= abs(distance)) distance = distance_
       enddo
    endif
@@ -223,12 +236,27 @@ contains
       endsubroutine check_slab
    endfunction do_ray_intersect
 
+   pure subroutine get_aabb_facets(self, facet, aabb_facet)
+   !< Get AABB facets list.
+   class(aabb_object), intent(in)               :: self          !< AABB.
+   type(facet_object), intent(in)               :: facet(:)      !< Whole facets list.
+   type(facet_object), intent(out), allocatable :: aabb_facet(:) !< AABB facets list.
+   integer(I4P)                                 :: f             !< Counter.
+
+   if (self%facet_id%ids_number > 0) then
+      allocate(aabb_facet(1:self%facet_id%ids_number))
+      do f=1, self%facet_id%ids_number
+         aabb_facet(f) = facet(self%facet_id%id(f))
+      enddo
+   endif
+   endsubroutine get_aabb_facets
+
    pure function has_facets(self)
    !< Return true if AABB has facets.
    class(aabb_object), intent(in) :: self       !< AABB box.
    logical                        :: has_facets !< Check result.
 
-   has_facets = self%facets_number > 0
+   has_facets = self%facet_id%ids_number > 0
    endfunction has_facets
 
    pure subroutine initialize(self, facet, bmin, bmax)
@@ -258,18 +286,19 @@ contains
                 (point%z >= self%bmin%z.and.point%z <= self%bmax%z))
    endfunction is_inside
 
-   pure function ray_intersections_number(self, ray_origin, ray_direction) result(intersections_number)
+   pure function ray_intersections_number(self, facet, ray_origin, ray_direction) result(intersections_number)
    !< Return ray intersections number.
    class(aabb_object), intent(in) :: self                 !< AABB.
+   type(facet_object), intent(in) :: facet(:)             !< Facets list.
    type(vector_R8P),   intent(in) :: ray_origin           !< Ray origin.
    type(vector_R8P),   intent(in) :: ray_direction        !< Ray direction.
    integer(I4P)                   :: intersections_number !< Intersection number.
    integer(I4P)                   :: f                    !< Counter.
 
    intersections_number = 0
-   if (self%facets_number > 0) then
-      do f=1, self%facets_number
-         if (self%facet(f)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) &
+   if (self%facet_id%ids_number > 0) then
+      do f=1, self%facet_id%ids_number
+         if (facet(self%facet_id%id(f))%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) &
             intersections_number = intersections_number + 1
       enddo
    endif
@@ -292,23 +321,24 @@ contains
    enddo
    endsubroutine  save_geometry_tecplot_ascii
 
-   subroutine save_facets_into_file_stl(self, file_name, is_ascii)
+   subroutine save_facets_into_file_stl(self, facet, file_name, is_ascii)
    !< Save facets into file STL.
    class(aabb_object), intent(in) :: self      !< AABB.
+   type(facet_object), intent(in) :: facet(:)  !< Facets list.
    character(*),       intent(in) :: file_name !< File name.
-   logical,            intent(in) :: is_ascii  !< Sentinel to check if file is ASCII.
+   logical,            intent(in) :: is_ascii  !< Sentinel for file format.
    integer(I4P)                   :: file_unit !< File unit.
    integer(I4P)                   :: f         !< Counter.
 
-   if (self%facets_number > 0) then
+   if (self%facet_id%ids_number > 0) then
       call open_file
       if (is_ascii) then
-         do f=1, self%facets_number
-            call self%facet(f)%save_into_file_ascii(file_unit=file_unit)
+         do f=1, self%facet_id%ids_number
+            call facet(self%facet_id%id(f))%save_into_file_ascii(file_unit=file_unit)
          enddo
       else
-         do f=1, self%facets_number
-            call self%facet(f)%save_into_file_binary(file_unit=file_unit)
+         do f=1, self%facet_id%ids_number
+            call facet(self%facet_id%id(f))%save_into_file_binary(file_unit=file_unit)
          enddo
       endif
       call close_file
@@ -317,29 +347,64 @@ contains
       subroutine open_file()
       !< Open STL file.
 
-      if (is_ascii) then
-         open(newunit=file_unit, file=trim(adjustl(file_name)),                  form='formatted')
-         write(file_unit, '(A)') 'solid '//trim(adjustl(file_name))
-      else
-         open(newunit=file_unit, file=trim(adjustl(file_name)), access='stream', form='unformatted')
-         write(file_unit) repeat('a', 80)
-         write(file_unit) self%facets_number
-      endif
+      ! if (is_ascii) then
+      !    open(newunit=file_unit, file=trim(adjustl(file_name)),                  form='formatted')
+      !    write(file_unit, '(A)') 'solid '//trim(adjustl(file_name))
+      ! else
+      !    open(newunit=file_unit, file=trim(adjustl(file_name)), access='stream', form='unformatted')
+      !    write(file_unit) repeat('a', 80)
+      !    write(file_unit) self%facet_id%ids_number
+      ! endif
       endsubroutine open_file
 
       subroutine close_file()
       !< Close STL file.
 
-      if (is_ascii) write(file_unit, '(A)') 'endsolid '//trim(adjustl(file_name))
+      ! if (is_ascii) write(file_unit, '(A)') 'endsolid '//trim(adjustl(file_name))
       close(unit=file_unit)
       endsubroutine close_file
    endsubroutine save_facets_into_file_stl
 
-   pure subroutine update_extents(self)
-   !< Update AABB bounding box extents.
-   class(aabb_object), intent(inout) :: self !< AABB.
+   elemental subroutine translate(self, delta)
+   !< Translate AABB by delta.
+   class(aabb_object), intent(inout) :: self  !< AABB.
+   type(vector_R8P),   intent(in)    :: delta !< Delta of translation.
 
-   if (self%facets_number > 0) call compute_bb_from_facets(facet=self%facet, bmin=self%bmin, bmax=self%bmax)
+   self%bmin = self%bmin + delta
+   self%bmax = self%bmax + delta
+   endsubroutine translate
+
+   pure subroutine union(self, other)
+   !< Make AABB the union of other AABBs.
+   class(aabb_object), intent(inout) :: self  !< AABB.
+   type(aabb_object),  intent(in)    :: other !< Other AABB.
+   integer(I4P)                      :: i     !< Counter.
+
+   self%bmin%x = min(self%bmin%x, other%bmin%x)
+   self%bmin%y = min(self%bmin%y, other%bmin%y)
+   self%bmin%z = min(self%bmin%z, other%bmin%z)
+   self%bmax%x = max(self%bmax%x, other%bmax%x)
+   self%bmax%y = max(self%bmax%y, other%bmax%y)
+   self%bmax%z = max(self%bmax%z, other%bmax%z)
+   do i=1, other%facet_id%ids_number
+      call self%facet_id%put(id=other%facet_id%id(i))
+   enddo
+   endsubroutine union
+
+   pure subroutine update_extents(self, facet)
+   !< Update AABB bounding box extents.
+   class(aabb_object), intent(inout) :: self      !< AABB.
+   type(facet_object), intent(in)    :: facet(:)  !< Facets list.
+   type(facet_object), allocatable   :: facet_(:) !< Facets list, local variable.
+   integer(I4P)                      :: f         !< Counter.
+
+   if (self%facet_id%ids_number > 0) then
+      allocate(facet_(1:self%facet_id%ids_number))
+      do f=1, self%facet_id%ids_number
+         facet_(f) = facet(self%facet_id%id(f))
+      enddo
+      call compute_bb_from_facets(facet=facet_, bmin=self%bmin, bmax=self%bmax)
+   endif
    endsubroutine update_extents
 
    pure function vertex(self)
@@ -366,9 +431,7 @@ contains
 
    lhs%bmin = rhs%bmin
    lhs%bmax = rhs%bmax
-   lhs%facets_number = rhs%facets_number
-   if (allocated(lhs%facet)) deallocate(lhs%facet)
-   if (allocated(rhs%facet)) allocate(lhs%facet(1:lhs%facets_number), source=rhs%facet)
+   lhs%facet_id = rhs%facet_id
    endsubroutine aabb_assign_aabb
 
    ! non TBP

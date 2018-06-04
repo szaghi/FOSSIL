@@ -126,15 +126,18 @@ FOSSIL is an KISS library:
 > effortless load of file (with STL surface analysis)
 ```fortran
 use fossil
-type(file_stl_object) :: file_stl ! STL file handler.
+type(file_stl_object)    :: file_stl    ! STL file handler.
+type(surface_stl_object) :: surface_stl ! STL surface handler.
+
 call file_stl%initialize(file_name='cube.stl')
-call file_stl%load_from_file(guess_format=.true.)
+call file_stl%load_from_file(surface=surface_stl, guess_format=.true.)
 ```
 
 #### print STL statistics
 > print main informations of STL
 ```fortran
 print '(A)', file_stl%statistics()
+print '(A)', surface_stl%statistics()
 ```
 > upon exection will print something like
 ```bash
@@ -145,27 +148,32 @@ X extents: [ 0.000000000000000E+000, +0.100000000000000E+001]
 Y extents: [ 0.000000000000000E+000, +0.100000000000000E+001]
 Z extents: [ 0.000000000000000E+000, +0.100000000000000E+001]
 volume: -0.100000000000000E+001
+centroid: [+0.500000000000000E+000, +0.500000000000000E+000, +0.500000000000000E+000]
 number of facets: +12
+number of facets with 1 edges disconnected: +0
+number of facets with 2 edges disconnected: +0
+number of facets with 3 edges disconnected: +0
+number of AABB refinement levels: +2
 ```
 
 #### sanitiza normals
 > make normals consistent
 ```fortran
-call file_stl%sanitize_normals
+call surface_stl%sanitize_normals
 ```
 
 #### simple manipulations
 > simply manipulate geometry
 ```fortran
-call file_stl%resize(factor=3.4*ex + 2*ey + 0.5*ez) ! ex, ey, ez being axis versors
-call file_stl%resize(x=0.5, z=1.2)                  ! scale only x and z axis
-call file_stl%mirror(normal=ex)                     ! mirror respect yz-plane
-call file_stl%mirror(normal=ex+ey)                  ! mirror respect plane with normal ex+ey
-call file_stl%mirror(matrix=matrix)                 ! mirror by a given mirroring matrix
-call file_stl%rotate(axis=ex, angle=1.57)           ! rotate around x axis by pi/2
-call file_stl%rotate(matrix=matrix)                 ! rotati by a given rotating matrix
-call file_stl%translate(delta=3*ex + 2*ey + 0.5*ez) ! translate by a vectorial delta
-call file_stl%translate(x=0.5, z=1.2)               ! translate by only x and z delta
+call surface_stl%resize(factor=3.4*ex + 2*ey + 0.5*ez) ! ex, ey, ez being axis versors
+call surface_stl%resize(x=0.5, z=1.2)                  ! scale only x and z axis
+call surface_stl%mirror(normal=ex)                     ! mirror respect yz-plane
+call surface_stl%mirror(normal=ex+ey)                  ! mirror respect plane with normal ex+ey
+call surface_stl%mirror(matrix=matrix)                 ! mirror by a given mirroring matrix
+call surface_stl%rotate(axis=ex, angle=1.57)           ! rotate around x axis by pi/2
+call surface_stl%rotate(matrix=matrix)                 ! rotati by a given rotating matrix
+call surface_stl%translate(delta=3*ex + 2*ey + 0.5*ez) ! translate by a vectorial delta
+call surface_stl%translate(x=0.5, z=1.2)               ! translate by only x and z delta
 ```
 
 Go to [Top](#top)

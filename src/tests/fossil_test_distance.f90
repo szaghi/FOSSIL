@@ -4,13 +4,15 @@ program fossil_test_distance
 !< FOSSIL, test distance computation.
 
 use flap, only : command_line_interface
-use fossil, only : file_stl_object
+use fossil, only : file_stl_object, surface_stl_object
 use penf, only : I4P, I8P, R8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
+use fossil_aabb_tree_object, only : aabb_tree_object
 
 implicit none
 
 type(file_stl_object)         :: file_stl                !< STL file.
+type(surface_stl_object)      :: surface_stl             !< STL surface.
 type(vector_R8P), allocatable :: grid(:,:,:)             !< Grid.
 real(R8P),        allocatable :: distance(:,:,:)         !< Distance of grid points to STL surface.
 character(999)                :: file_name_stl           !< Input STL file name.
@@ -29,19 +31,23 @@ logical                       :: are_tests_passed(1)     !< Result of tests chec
 are_tests_passed = .false.
 
 call cli_parse
-call file_stl%initialize(file_name=trim(adjustl(file_name_stl)))
-call file_stl%load_from_file(guess_format=.true.)
-call file_stl%sanitize_normals
-print*, file_stl%statistics()
+call file_stl%load_from_file(facet=surface_stl%facet, file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
+ call surface_stl%analize(aabb_refinement_levels=refinement_levels)
+print '(A)', 'STL statistics before sanitization'
+print '(A)', file_stl%statistics()
+print '(A)', surface_stl%statistics()
+call surface_stl%sanitize
+call surface_stl%analize
+print '(A)', 'STL statistics after sanitization'
+print '(A)', surface_stl%statistics()
 
-call file_stl%create_aabb_tree(refinement_levels=refinement_levels)
+are_tests_passed = int(surface_stl%distance(point=0*ex_R8P), I4P) == 0_I4P
 
-are_tests_passed = int(file_stl%distance(point=0*ex_R8P), I4P) == 0_I4P
+if (save_aabb_tree_geometry) call surface_stl%aabb%save_geometry_tecplot_ascii(file_name='fossil_test_distance_aabb_tree.dat')
+if (save_aabb_tree_stl) call file_stl%save_aabb_into_file(surface=surface_stl, base_file_name='fossil_test_distance_', &
+                                                          is_ascii=.false.)
 
-if (save_aabb_tree_geometry) call file_stl%aabb%save_geometry_tecplot_ascii(file_name='fossil_test_distance_aabb_tree.dat')
-if (save_aabb_tree_stl) call file_stl%aabb%save_into_file_stl(base_file_name='fossil_test_distance_', is_ascii=.true.)
-
-associate(bmin=>file_stl%aabb%node(0)%bmin(), bmax=>file_stl%aabb%node(0)%bmax())
+associate(bmin=>surface_stl%bmin, bmax=>surface_stl%bmax)
    ni = 64
    nj = 64
    nk = 64
@@ -63,20 +69,20 @@ associate(bmin=>file_stl%aabb%node(0)%bmin(), bmax=>file_stl%aabb%node(0)%bmax()
 endassociate
 
 if (test_brute_force) then
-   file_stl%aabb%is_initialized = .false.
-   print*, 'compute distances brute force'
+   surface_stl%aabb%is_initialized = .false.
+   print '(A)', 'compute distances brute force'
    call system_clock(timing(1))
    do k=-4, nk + 5
       do j=-4, nj + 5
          do i=-4, ni + 5
-            distance(i, j, k) = file_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm=trim(sign_algorithm))
+            distance(i, j, k) = surface_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm=trim(sign_algorithm))
          enddo
       enddo
    enddo
    call system_clock(timing(2), timing(0))
-   print*, 'brute force timing: ', real(timing(2) - timing(1))/ timing(0)
+   print '(A, F8.3)', 'brute force timing: ', real(timing(2) - timing(1))/ timing(0)
 
-   print*, 'save output'
+   print '(A)', 'save output'
    open(newunit=file_unit, file='fossil_test_distance-brute.dat')
    write(file_unit, '(A)')'VARIABLES = x y z distance'
    write(file_unit, '(A)')'ZONE T="distance", I='//trim(str(ni+10))//', J='//trim(str(nj+10))//', K='//trim(str(nk+10))//''
@@ -90,20 +96,20 @@ if (test_brute_force) then
    close(file_unit)
 endif
 
-file_stl%aabb%is_initialized = .true.
-print*, 'compute distances AABB'
+surface_stl%aabb%is_initialized = .true.
+print '(A)', 'compute distances AABB'
 call system_clock(timing(3))
 do k=-4, nk + 5
    do j=-4, nj + 5
       do i=-4, ni + 5
-         distance(i, j, k) = file_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm=trim(sign_algorithm))
+         distance(i, j, k) = surface_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm=trim(sign_algorithm))
       enddo
    enddo
 enddo
 call system_clock(timing(4), timing(0))
-print*, 'AABB timing: ', real(timing(4) - timing(3))/ timing(0)
+print '(A, F8.3)', 'AABB timing: ', real(timing(4) - timing(3))/ timing(0)
 
-print*, 'save output'
+print '(A)', 'save output'
 open(newunit=file_unit, file='fossil_test_distance-aabb.dat')
 write(file_unit, '(A)')'VARIABLES = x y z distance'
 write(file_unit, '(A)')'ZONE T="distance", I='//trim(str(ni+10))//', J='//trim(str(nj+10))//', K='//trim(str(nk+10))//''

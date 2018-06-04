@@ -4,28 +4,31 @@ program fossil_test_mirror
 !< FOSSIL, test mirror STL.
 
 use flap, only : command_line_interface
-use fossil, only : file_stl_object
+use fossil, only : file_stl_object, surface_stl_object
 use penf, only : I4P, R8P
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 
 implicit none
 
-type(file_stl_object) :: file_stl            !< STL file.
-character(999)        :: file_name_stl       !< Input STL file name.
-type(vector_R8P)      :: normal              !< Normal of mirroring plane.
-logical               :: are_tests_passed(2) !< Result of tests check.
+type(file_stl_object)    :: file_stl            !< STL file.
+type(surface_stl_object) :: surface             !< STL surface.
+character(999)           :: file_name_stl       !< Input STL file name.
+type(vector_R8P)         :: normal              !< Normal of mirroring plane.
+logical                  :: are_tests_passed(2) !< Result of tests check.
 
 are_tests_passed = .false.
 
 call cli_parse
-call file_stl%initialize(file_name=trim(adjustl(file_name_stl)))
-call file_stl%load_from_file(guess_format=.true.)
+call file_stl%initialize()
+call file_stl%load_from_file(facet=surface%facet, file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
+call surface%analize
 print '(A)', file_stl%statistics()
+print '(A)', surface%statistics()
 
-call file_stl%mirror(normal=normal)
-call file_stl%save_into_file(file_name='fossil_test_mirror.stl')
-are_tests_passed(1) = nint(file_stl%distance(point=0 * ex_R8P - 1 * ey_R8P + 1 * ez_R8P)) == 1
-are_tests_passed(2) = nint(file_stl%distance(point=1 * ex_R8P - 1 * ey_R8P + 0 * ez_R8P)) == 1
+call surface%mirror(normal=normal)
+call file_stl%save_into_file(facet=surface%facet, file_name='fossil_test_mirror.stl')
+are_tests_passed(1) = nint(surface%distance(point=0 * ex_R8P - 1 * ey_R8P + 1 * ez_R8P)) == 1
+are_tests_passed(2) = nint(surface%distance(point=1 * ex_R8P - 1 * ey_R8P + 0 * ez_R8P)) == 1
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 contains

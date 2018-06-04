@@ -5,9 +5,11 @@ module fossil
 
 use fossil_facet_object
 use fossil_file_stl_object
+use fossil_surface_stl_object
 
 implicit none
 private
 public :: facet_object
 public :: file_stl_object
+public :: surface_stl_object
 endmodule fossil

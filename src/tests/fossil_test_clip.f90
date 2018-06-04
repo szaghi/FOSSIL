@@ -4,27 +4,36 @@ program fossil_test_clip
 !< FOSSIL, test clip STL.
 
 use flap, only : command_line_interface
-use fossil, only : file_stl_object
+use fossil, only : file_stl_object, surface_stl_object
 use penf, only : I4P, R8P
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 
 implicit none
 
-type(file_stl_object) :: file_stl            !< STL file.
-character(999)        :: file_name_stl       !< Input STL file name.
-type(file_stl_object) :: remainder_stl       !< STL file remainder after clip.
-type(vector_R8P)      :: bmin, bmax          !< Bounding box extents.
-logical               :: are_tests_passed(1) !< Result of tests check.
+type(file_stl_object)    :: file_stl            !< STL file.
+type(surface_stl_object) :: surface             !< STL surface.
+type(surface_stl_object) :: remainder           !< STL surface remainder after clip.
+character(999)           :: file_name_stl       !< Input STL file name.
+type(vector_R8P)         :: bmin, bmax          !< Bounding box extents.
+logical                  :: are_tests_passed(2) !< Result of tests check.
 
 are_tests_passed = .false.
 
 call cli_parse
-call file_stl%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
+call file_stl%load_from_file(facet=surface%facet, file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
+call surface%analize
 
-call file_stl%clip(bmin=bmin, bmax=bmax, remainder=remainder_stl)
-call file_stl%save_into_file(file_name='fossil_test_clip.stl')
-are_tests_passed(1) = nint(file_stl%bmax%x) <= 0
-call remainder_stl%save_into_file(file_name='fossil_test_clip_remainder.stl')
+call surface%clip(bmin=bmin, bmax=bmax, remainder=remainder)
+call surface%analize
+call remainder%analize
+call file_stl%save_into_file(facet=surface%facet, file_name='fossil_test_clip.stl')
+are_tests_passed(1) = nint(surface%bmax%x) <= 0
+call file_stl%save_into_file(facet=remainder%facet, file_name='fossil_test_clip_remainder.stl')
+
+call file_stl%load_from_file(facet=surface%facet, file_name=trim(adjustl(file_name_stl)), guess_format=.true., &
+                             clip_min=bmin, clip_max=bmax)
+call surface%analize
+are_tests_passed(2) = nint(surface%bmax%x) <= 0
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 contains
