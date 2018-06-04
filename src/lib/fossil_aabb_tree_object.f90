@@ -306,25 +306,24 @@ contains
 
    subroutine save_into_file_stl(self, facet, base_file_name, is_ascii)
    !< Save  AABB tree boxes facets into files STL.
-   class(aabb_tree_object), intent(in)           :: self           !< AABB tree.
-   type(facet_object),      intent(in)           :: facet(:)       !< Facets list.
-   character(*),            intent(in)           :: base_file_name !< File name.
-   logical,                 intent(in), optional :: is_ascii       !< Sentinel to check if file is ASCII.
-   logical                                       :: is_ascii_      !< Sentinel to check if file is ASCII, local variable.
-   integer(I4P)                                  :: level          !< Counter.
-   integer(I4P)                                  :: b, bb, bbb     !< Counter.
+   class(aabb_tree_object), intent(in) :: self           !< AABB tree.
+   type(facet_object),      intent(in) :: facet(:)       !< Facets list.
+   character(*),            intent(in) :: base_file_name !< File name.
+   logical,                 intent(in) :: is_ascii       !< Sentinel to check if file is ASCII.
+   integer(I4P)                        :: level          !< Counter.
+   integer(I4P)                        :: b, bb, bbb     !< Counter.
 
    associate(node=>self%node)
       if (self%is_initialized) then
-         is_ascii_ = .false. ; if (present(is_ascii)) is_ascii_ = is_ascii
          do level=0, self%refinement_levels
             b = first_node(level=level)
             do bb=1, nodes_number_at_level(level=level)
                bbb = b + bb - 1
-               call node(bbb)%save_facets_into_file_stl(facet=facet,                                    &
-                                                        file_name=trim(adjustl(base_file_name))//       &
-                                                                  'aabb-l_'//trim(str(level, .true.))// &
-                                                                      '-b_'//trim(str(bbb, .true.))//'.stl')
+               call node(bbb)%save_facets_into_file_stl(facet=facet,                                         &
+                                                        file_name=trim(adjustl(base_file_name))//            &
+                                                                  'aabb-l_'//trim(str(level, .true.))//      &
+                                                                      '-b_'//trim(str(bbb, .true.))//'.stl', &
+                                                        is_ascii=is_ascii)
             enddo
          enddo
       endif

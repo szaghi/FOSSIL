@@ -203,13 +203,14 @@ contains
    if (allocated(self%aabb)) call self%aabb%save_geometry_tecplot_ascii(file_unit=file_unit, aabb_name=aabb_name)
    endsubroutine  save_geometry_tecplot_ascii
 
-   subroutine save_facets_into_file_stl(self, facet, file_name)
+   subroutine save_facets_into_file_stl(self, facet, file_name, is_ascii)
    !< Save facets into file STL.
    class(aabb_node_object), intent(in) :: self      !< AABB.
    type(facet_object),      intent(in) :: facet(:)  !< Facets list.
    character(*),            intent(in) :: file_name !< File name.
+   logical,                 intent(in) :: is_ascii  !< Sentinel for file format.
 
-   if (allocated(self%aabb)) call self%aabb%save_facets_into_file_stl(facet=facet, file_name=file_name)
+   if (allocated(self%aabb)) call self%aabb%save_facets_into_file_stl(facet=facet, file_name=file_name, is_ascii=is_ascii)
    endsubroutine save_facets_into_file_stl
 
    elemental subroutine translate(self, delta)

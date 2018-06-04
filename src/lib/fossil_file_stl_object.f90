@@ -93,38 +93,68 @@ contains
    call self%load_facets_number_from_file(facets_number=facets_number)
    call self%load_header_from_file
    if (present(clip_min).and.present(clip_max)) then
-      call facet_clip%set_io_methods(is_ascii=self%is_ascii)
-      ! count the facets that are actually inside the clipping bounding box
-      ff = 0
-      do f=1, facets_number
-         call facet_clip%load_from_file(file_unit=self%file_unit)
-         if (is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(1)).and.&
-             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(2)).and.&
-             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(3))) then
-            ff = ff + 1
-         endif
-      enddo
-      call self%load_header_from_file
-      allocate(facet(1:ff))
-      call facet%set_io_methods(is_ascii=self%is_ascii)
-      ff = 0
-      do f=1, facets_number
-         call facet_clip%load_from_file(file_unit=self%file_unit)
-         if (is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(1)).and.&
-             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(2)).and.&
-             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(3))) then
-            ff = ff + 1
-            facet(ff) = facet_clip
-            facet(ff)%id = ff
-         endif
-      enddo
+      if (self%is_ascii) then
+         ! count the facets that are actually inside the clipping bounding box
+         ff = 0
+         do f=1, facets_number
+            call facet_clip%load_from_file_ascii(file_unit=self%file_unit)
+            if (is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(1)).and.&
+                is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(2)).and.&
+                is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(3))) then
+               ff = ff + 1
+            endif
+         enddo
+         call self%load_header_from_file
+         allocate(facet(1:ff))
+         ff = 0
+         do f=1, facets_number
+            call facet_clip%load_from_file_ascii(file_unit=self%file_unit)
+            if (is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(1)).and.&
+                is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(2)).and.&
+                is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(3))) then
+               ff = ff + 1
+               facet(ff) = facet_clip
+               facet(ff)%id = ff
+            endif
+         enddo
+      else
+         ! count the facets that are actually inside the clipping bounding box
+         ff = 0
+         do f=1, facets_number
+            call facet_clip%load_from_file_binary(file_unit=self%file_unit)
+            if (is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(1)).and.&
+                is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(2)).and.&
+                is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(3))) then
+               ff = ff + 1
+            endif
+         enddo
+         call self%load_header_from_file
+         allocate(facet(1:ff))
+         ff = 0
+         do f=1, facets_number
+            call facet_clip%load_from_file_binary(file_unit=self%file_unit)
+            if (is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(1)).and.&
+                is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(2)).and.&
+                is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(3))) then
+               ff = ff + 1
+               facet(ff) = facet_clip
+               facet(ff)%id = ff
+            endif
+         enddo
+      endif
    else
       allocate(facet(1:facets_number))
-      call facet%set_io_methods(is_ascii=self%is_ascii)
-      do f=1, facets_number
-         call facet(f)%load_from_file(file_unit=self%file_unit)
-         facet(f)%id = f
-      enddo
+      if (self%is_ascii) then
+         do f=1, facets_number
+            call facet(f)%load_from_file_ascii(file_unit=self%file_unit)
+            facet(f)%id = f
+         enddo
+      else
+         do f=1, facets_number
+            call facet(f)%load_from_file_binary(file_unit=self%file_unit)
+            facet(f)%id = f
+         enddo
+      endif
    endif
    call self%close_file
    endsubroutine load_from_file
@@ -191,10 +221,15 @@ contains
    call self%initialize(skip_destroy=.true., file_name=file_name, is_ascii=is_ascii)
    call self%open_file(file_action='write')
    call self%save_header_into_file(facets_number=facets_number)
-   call facet%set_io_methods(is_ascii=self%is_ascii)
-   do f=1, facets_number
-      call facet(f)%save_into_file(file_unit=self%file_unit)
-   enddo
+   if (self%is_ascii) then
+      do f=1, facets_number
+         call facet(f)%save_into_file_ascii(file_unit=self%file_unit)
+      enddo
+   else
+      do f=1, facets_number
+         call facet(f)%save_into_file_binary(file_unit=self%file_unit)
+      enddo
+   endif
    call self%save_trailer_into_file
    call self%close_file
    endsubroutine save_into_file

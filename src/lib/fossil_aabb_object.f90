@@ -305,19 +305,26 @@ contains
    enddo
    endsubroutine  save_geometry_tecplot_ascii
 
-   subroutine save_facets_into_file_stl(self, facet, file_name)
+   subroutine save_facets_into_file_stl(self, facet, file_name, is_ascii)
    !< Save facets into file STL.
    class(aabb_object), intent(in) :: self      !< AABB.
    type(facet_object), intent(in) :: facet(:)  !< Facets list.
    character(*),       intent(in) :: file_name !< File name.
+   logical,            intent(in) :: is_ascii  !< Sentinel for file format.
    integer(I4P)                   :: file_unit !< File unit.
    integer(I4P)                   :: f         !< Counter.
 
    if (self%facet_id%ids_number > 0) then
       call open_file
-      do f=1, self%facet_id%ids_number
-         call facet(self%facet_id%id(f))%save_into_file(file_unit=file_unit)
-      enddo
+      if (is_ascii) then
+         do f=1, self%facet_id%ids_number
+            call facet(self%facet_id%id(f))%save_into_file_ascii(file_unit=file_unit)
+         enddo
+      else
+         do f=1, self%facet_id%ids_number
+            call facet(self%facet_id%id(f))%save_into_file_binary(file_unit=file_unit)
+         enddo
+      endif
       call close_file
    endif
    contains
