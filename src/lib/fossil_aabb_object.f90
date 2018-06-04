@@ -165,7 +165,7 @@ contains
    distance = MaxR8P
    if (self%facet_id%ids_number > 0) then
       do f=1, self%facet_id%ids_number
-         distance_ = facet(self%facet_id%id(f))%distance(point=point)
+         call facet(self%facet_id%id(f))%compute_distance(point=point, distance=distance_)
          if (abs(distance_) <= abs(distance)) distance = distance_
       enddo
    endif

@@ -33,12 +33,13 @@ type :: surface_stl_object
       procedure, pass(self) :: build_connectivity              !< Build facets connectivity.
       procedure, pass(self) :: clip                            !< Clip triangulated surface given an AABB.
       procedure, pass(self) :: compute_centroid                !< Compute centroid of STL surface.
+      procedure, pass(self) :: compute_distance                !< Compute the (minimum) distance returning also the closest point.
       procedure, pass(self) :: compute_metrix                  !< Compute facets metrix.
       procedure, pass(self) :: compute_normals                 !< Compute facets normals by means of vertices data.
       procedure, pass(self) :: compute_volume                  !< Compute volume bounded by STL surface.
       procedure, pass(self) :: connect_nearby_vertices         !< Connect nearby vertices of disconnected edges.
       procedure, pass(self) :: destroy                         !< Destroy file.
-      procedure, pass(self) :: distance                        !< Compute the (minimum) distance from point to triangulated surface.
+      procedure, pass(self) :: distance                        !< Return the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: initialize                      !< Initialize file.
       procedure, pass(self) :: is_point_inside_polyhedron_ri   !< Determinate is point is inside or not STL facets by ray intersect.
       procedure, pass(self) :: is_point_inside_polyhedron_sa   !< Determinate is point is inside or not STL facets by solid angle.
@@ -207,6 +208,60 @@ contains
    endif
    endsubroutine compute_centroid
 
+   pure subroutine compute_distance(self, point, distance, is_signed, sign_algorithm, is_square_root, &
+                                    facet_index, edge_index, vertex_index)
+   !< Compute the (minimum) distance returning also the closest point.
+   class(surface_stl_object), intent(in)            :: self            !< File STL.
+   type(vector_R8P),          intent(in)            :: point           !< Point coordinates.
+   real(R8P),                 intent(out)           :: distance        !< Minimum distance.
+   logical,                   intent(in),  optional :: is_signed       !< Sentinel to trigger signed distance.
+   character(*),              intent(in),  optional :: sign_algorithm  !< Algorithm used for "point in polyhedron" test.
+   logical,                   intent(in),  optional :: is_square_root  !< Sentinel to trigger square-root distance.
+   integer(I4P),              intent(out), optional :: facet_index     !< Index of facet containing the closest point.
+   integer(I4P),              intent(out), optional :: edge_index      !< Index of edge on facet containing the closest point.
+   integer(I4P),              intent(out), optional :: vertex_index    !< Index of vertex on facet containing the closest point.
+   real(R8P)                                        :: distance_       !< Minimum distance, temporary buffer.
+   character(len=:), allocatable                    :: sign_algorithm_ !< Algorithm used for "point in polyhedron" test, local var.
+   integer(I4P)                                     :: facet_index_    !< Index of facet containing the closest point, local var.
+   integer(I4P)                                     :: f               !< Counter.
+
+   if (self%facets_number > 0) then
+      if (self%aabb%is_initialized) then
+         ! exploit AABB refinement levels
+         distance = self%aabb%distance(facet=self%facet, point=point)
+      else
+         ! brute-force search over all facets
+         distance = MaxR8P
+         do f=1, self%facets_number
+            call self%facet(f)%compute_distance(point=point, distance=distance_)
+            if (abs(distance_) <= abs(distance)) then
+               facet_index_ = facet_index
+               distance = distance_
+            endif
+         enddo
+      endif
+   endif
+   if (present(facet_index)) facet_index = facet_index_
+
+   if (present(is_square_root)) then
+      if (is_square_root) distance = sqrt(distance)
+   endif
+
+   if (present(is_signed)) then
+      if (is_signed) then
+        sign_algorithm_ = 'ray_intersections' ; if (present(sign_algorithm)) sign_algorithm_ = sign_algorithm
+        select case(sign_algorithm_)
+        case('solid_angle')
+           if (self%is_point_inside_polyhedron_sa(point=point)) distance = -distance
+        case('ray_intersections')
+           if (self%is_point_inside_polyhedron_ri(point=point)) distance = -distance
+        case default
+          ! raise error: "unknown point in polyhedron algorithm"
+        endselect
+      endif
+   endif
+   endsubroutine compute_distance
+
    pure subroutine compute_metrix(self)
    !< Compute facets metrix.
    class(surface_stl_object), intent(inout) :: self !< File STL.
@@ -276,7 +331,7 @@ contains
    endsubroutine destroy
 
    pure function distance(self, point, is_signed, sign_algorithm, is_square_root)
-   !< Compute the (minimum) distance from a point to the triangulated surface.
+   !< Return the (minimum) distance from a point to the triangulated surface.
    !<
    !< @note STL's metrix must be already computed.
    class(surface_stl_object), intent(in)           :: self            !< File STL.
@@ -285,41 +340,9 @@ contains
    character(*),              intent(in), optional :: sign_algorithm  !< Algorithm used for "point in polyhedron" test.
    logical,                   intent(in), optional :: is_square_root  !< Sentinel to trigger square-root distance.
    real(R8P)                                       :: distance        !< Minimum distance from point to the triangulated surface.
-   real(R8P)                                       :: distance_       !< Minimum distance, temporary buffer.
-   character(len=:), allocatable                   :: sign_algorithm_ !< Algorithm used for "point in polyhedron" test, local var.
-   integer(I4P)                                    :: f               !< Counter.
 
-   if (self%facets_number > 0) then
-      if (self%aabb%is_initialized) then
-         ! exploit AABB refinement levels
-         distance = self%aabb%distance(facet=self%facet, point=point)
-      else
-         ! brute-force search over all facets
-         distance = MaxR8P
-         do f=1, self%facets_number
-            distance_ = self%facet(f)%distance(point=point)
-            if (abs(distance_) <= abs(distance)) distance = distance_
-         enddo
-      endif
-   endif
-
-   if (present(is_square_root)) then
-      if (is_square_root) distance = sqrt(distance)
-   endif
-
-   if (present(is_signed)) then
-      if (is_signed) then
-        sign_algorithm_ = 'ray_intersections' ; if (present(sign_algorithm)) sign_algorithm_ = sign_algorithm
-        select case(sign_algorithm_)
-        case('solid_angle')
-           if (self%is_point_inside_polyhedron_sa(point=point)) distance = -distance
-        case('ray_intersections')
-           if (self%is_point_inside_polyhedron_ri(point=point)) distance = -distance
-        case default
-          ! raise error: "unknown point in polyhedron algorithm"
-        endselect
-      endif
-   endif
+   call self%compute_distance(point=point, distance=distance, &
+                              is_signed=is_signed, sign_algorithm=sign_algorithm, is_square_root=is_square_root)
    endfunction distance
 
    pure function is_point_inside_polyhedron_ri(self, point) result(is_inside)

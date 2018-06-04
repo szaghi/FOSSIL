@@ -40,13 +40,13 @@ type :: facet_object
       ! public methods
       procedure, pass(self) :: centroid_part                   !< Return facet's part to build up STL centroid.
       procedure, pass(self) :: check_normal                    !< Check normal consistency.
+      procedure, pass(self) :: compute_distance                !< Compute the (unsigned, squared) distance from a point to facet.
       procedure, pass(self) :: compute_metrix                  !< Compute local (plane) metrix.
       procedure, pass(self) :: compute_normal                  !< Compute normal by means of vertices data.
       procedure, pass(self) :: compute_vertices_nearby         !< Compute vertices nearby comparing to ones of other facet.
       procedure, pass(self) :: connect_nearby_vertices         !< Connect nearby vertices of disconnected edges.
       procedure, pass(self) :: destroy                         !< Destroy facet.
       procedure, pass(self) :: destroy_connectivity            !< Destroy facet connectivity.
-      procedure, pass(self) :: distance                        !< Compute the (unsigned, squared) distance from a point to facet.
       procedure, pass(self) :: do_ray_intersect                !< Return true if facet is intersected by a ray.
       procedure, pass(self) :: initialize                      !< Initialize facet.
       procedure, pass(self) :: load_from_file_ascii            !< Load facet from ASCII file.
@@ -130,139 +130,18 @@ contains
                     (abs(normal%z - self%normal%z)<=2*ZeroR8P))
    endfunction check_normal
 
-   elemental subroutine compute_metrix(self)
-   !< Compute local (plane) metrix.
-   class(facet_object), intent(inout) :: self !< Facet.
-
-   call self%compute_normal
-
-   self%E12 = self%vertex(2) - self%vertex(1)
-   self%E13 = self%vertex(3) - self%vertex(1)
-   self%a   = self%E12.dot.self%E12
-   self%b   = self%E12.dot.self%E13
-   self%c   = self%E13.dot.self%E13
-   self%det = self%a * self%c - self%b * self%b
-
-   self%d = self%normal.dot.self%vertex(1)
-
-   self%bb(1)%x = min(self%vertex(1)%x, self%vertex(2)%x, self%vertex(3)%x)
-   self%bb(1)%y = min(self%vertex(1)%y, self%vertex(2)%y, self%vertex(3)%y)
-   self%bb(1)%z = min(self%vertex(1)%z, self%vertex(2)%z, self%vertex(3)%z)
-   self%bb(2)%x = max(self%vertex(1)%x, self%vertex(2)%x, self%vertex(3)%x)
-   self%bb(2)%y = max(self%vertex(1)%y, self%vertex(2)%y, self%vertex(3)%y)
-   self%bb(2)%z = max(self%vertex(1)%z, self%vertex(2)%z, self%vertex(3)%z)
-   endsubroutine compute_metrix
-
-   elemental subroutine compute_normal(self)
-   !< Compute normal by means of vertices data.
-   !<
-   !<```fortran
-   !< type(facet_object) :: facet
-   !< facet%vertex(1) = -0.231369_R4P * ex_R4P + 0.0226865_R4P * ey_R4P + 1._R4P * ez_R4P
-   !< facet%vertex(2) = -0.227740_R4P * ex_R4P + 0.0245457_R4P * ey_R4P + 0._R4P * ez_R4P
-   !< facet%vertex(2) = -0.235254_R4P * ex_R4P + 0.0201881_R4P * ey_R4P + 0._R4P * ez_R4P
-   !< call facet%sanitize_normal
-   !< print "(3(F3.1,1X))", facet%normal%x, facet%normal%y, facet%normal%z
-   !<```
-   !=> -0.501673222 0.865057290 -2.12257713<<<
-   class(facet_object), intent(inout) :: self !< Facet.
-
-   self%normal = face_normal3_R8P(pt1=self%vertex(1), pt2=self%vertex(2), pt3=self%vertex(3), norm='y')
-   endsubroutine compute_normal
-
-   pure subroutine compute_vertices_nearby(self, other, tolerance_to_be_identical, tolerance_to_be_nearby)
-   !< Compute vertices nearby comparing to ones of other facet.
-   class(facet_object), intent(inout) :: self                      !< Facet.
-   type(facet_object),  intent(inout) :: other                     !< Other facet.
-   real(R8P),           intent(in)    :: tolerance_to_be_identical !< Tolerance to identify identical vertices.
-   real(R8P),           intent(in)    :: tolerance_to_be_nearby    !< Tolerance to identify nearby vertices.
-   integer(I4P)                       :: vs, vo                    !< Counter.
-
-   do vs=1, 3
-      do vo=1, 3
-         if (are_nearby(self%vertex(vs), other%vertex(vo), tolerance_to_be_nearby)) then
-            call  self%vertex_nearby(vs)%put(id=other%vertex_global_id(vo))
-            call other%vertex_nearby(vo)%put(id= self%vertex_global_id(vs))
-            if (are_nearby(self%vertex(vs), other%vertex(vo), tolerance_to_be_identical)) then
-               call  self%vertex_occurrence(vs)%put(id=other%id)
-               call other%vertex_occurrence(vo)%put(id= self%id)
-            endif
-         endif
-      enddo
-   enddo
-   contains
-      pure function are_nearby(a, b, tolerance)
-      !< Check equality of vertices pair.
-      type(vector_R8P), intent(in) :: a, b       !< Vertices pair.
-      real(R8P),        intent(in) :: tolerance  !< Check tolerance.
-      logical                      :: are_nearby !< Check result.
-
-      are_nearby = ((abs(a%x - b%x) <= tolerance).and.&
-                    (abs(a%y - b%y) <= tolerance).and.&
-                    (abs(a%z - b%z) <= tolerance))
-      endfunction are_nearby
-   endsubroutine compute_vertices_nearby
-
-   pure subroutine connect_nearby_vertices(self, facet)
-   !< Connect nearby vertices of disconnected edges.
-   class(facet_object), intent(inout) :: self     !< Facet.
-   type(facet_object),  intent(inout) :: facet(:) !< All facets in STL.
-
-   if     (self%fcon_edge_12==0) then
-      if (self%vertex_nearby(1)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(1), facet=facet, nearby=self%vertex_nearby(1))
-      endif
-      if (self%vertex_nearby(2)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(2), facet=facet, nearby=self%vertex_nearby(2))
-      endif
-   endif
-   if (self%fcon_edge_23==0) then
-      if (self%vertex_nearby(2)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(2), facet=facet, nearby=self%vertex_nearby(2))
-      endif
-      if (self%vertex_nearby(3)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(3), facet=facet, nearby=self%vertex_nearby(3))
-      endif
-   endif
-   if (self%fcon_edge_31==0) then
-      if (self%vertex_nearby(3)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(3), facet=facet, nearby=self%vertex_nearby(3))
-      endif
-      if (self%vertex_nearby(1)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(1), facet=facet, nearby=self%vertex_nearby(1))
-      endif
-   endif
-   endsubroutine connect_nearby_vertices
-
-   elemental subroutine destroy(self)
-   !< Destroy facet.
-   class(facet_object), intent(inout) :: self  !< Facet.
-   type(facet_object)                 :: fresh !< Fresh instance of facet.
-
-   self = fresh
-   endsubroutine destroy
-
-   elemental subroutine destroy_connectivity(self)
-   !< Destroy facet connectivity.
-   class(facet_object), intent(inout) :: self  !< Facet.
-
-   self%fcon_edge_12=0_I4P
-   self%fcon_edge_23=0_I4P
-   self%fcon_edge_31=0_I4P
-   call self%vertex_occurrence%destroy
-   call self%vertex_nearby%destroy
-   endsubroutine destroy_connectivity
-
-   pure function distance(self, point)
+   pure subroutine compute_distance(self, point, distance)
    !< Compute the (unsigned, squared) distance from a point to the facet surface.
    !<
    !< @note Facet's metrix must be already computed.
-   class(facet_object), intent(in) :: self                             !< Facet.
-   type(vector_R8P),    intent(in) :: point                            !< Point.
-   real(R8P)                       :: distance                         !< Closest distance from point to the facet.
-   type(vector_R8P)                :: V1P                              !< `vertex(1)-point`.
-   real(R8P)                       :: d, e, f, s, t, sq, tq            !< Plane equation coefficients.
-   real(R8P)                       :: tmp0, tmp1, numer, denom, invdet !< Temporary.
+   !<
+   !< @note Algorithm by David Eberly, Geometric Tools LLC, http://www.geometrictools.com.
+   class(facet_object), intent(in)  :: self                             !< Facet.
+   type(vector_R8P),    intent(in)  :: point                            !< Point.
+   real(R8P),           intent(out) :: distance                         !< Closest distance from point to the facet.
+   type(vector_R8P)                 :: V1P                              !< `vertex(1)-point`.
+   real(R8P)                        :: d, e, f, s, t, sq, tq            !< Plane equation coefficients.
+   real(R8P)                        :: tmp0, tmp1, numer, denom, invdet !< Temporary.
 
    associate(a=>self%a, b=>self%b, c=>self%c, det=>self%det)
    V1P = self%vertex(1) - point
@@ -391,7 +270,130 @@ contains
    endif
    distance = abs(a * sq * sq + 2._R8P * b * sq * tq + c * tq * tq + 2._R8P * d * sq + 2._R8P * e * tq + f)
    endassociate
-   endfunction distance
+   endsubroutine compute_distance
+
+   elemental subroutine compute_metrix(self)
+   !< Compute local (plane) metrix.
+   class(facet_object), intent(inout) :: self !< Facet.
+
+   call self%compute_normal
+
+   self%E12 = self%vertex(2) - self%vertex(1)
+   self%E13 = self%vertex(3) - self%vertex(1)
+   self%a   = self%E12.dot.self%E12
+   self%b   = self%E12.dot.self%E13
+   self%c   = self%E13.dot.self%E13
+   self%det = self%a * self%c - self%b * self%b
+
+   self%d = self%normal.dot.self%vertex(1)
+
+   self%bb(1)%x = min(self%vertex(1)%x, self%vertex(2)%x, self%vertex(3)%x)
+   self%bb(1)%y = min(self%vertex(1)%y, self%vertex(2)%y, self%vertex(3)%y)
+   self%bb(1)%z = min(self%vertex(1)%z, self%vertex(2)%z, self%vertex(3)%z)
+   self%bb(2)%x = max(self%vertex(1)%x, self%vertex(2)%x, self%vertex(3)%x)
+   self%bb(2)%y = max(self%vertex(1)%y, self%vertex(2)%y, self%vertex(3)%y)
+   self%bb(2)%z = max(self%vertex(1)%z, self%vertex(2)%z, self%vertex(3)%z)
+   endsubroutine compute_metrix
+
+   elemental subroutine compute_normal(self)
+   !< Compute normal by means of vertices data.
+   !<
+   !<```fortran
+   !< type(facet_object) :: facet
+   !< facet%vertex(1) = -0.231369_R4P * ex_R4P + 0.0226865_R4P * ey_R4P + 1._R4P * ez_R4P
+   !< facet%vertex(2) = -0.227740_R4P * ex_R4P + 0.0245457_R4P * ey_R4P + 0._R4P * ez_R4P
+   !< facet%vertex(2) = -0.235254_R4P * ex_R4P + 0.0201881_R4P * ey_R4P + 0._R4P * ez_R4P
+   !< call facet%sanitize_normal
+   !< print "(3(F3.1,1X))", facet%normal%x, facet%normal%y, facet%normal%z
+   !<```
+   !=> -0.501673222 0.865057290 -2.12257713<<<
+   class(facet_object), intent(inout) :: self !< Facet.
+
+   self%normal = face_normal3_R8P(pt1=self%vertex(1), pt2=self%vertex(2), pt3=self%vertex(3), norm='y')
+   endsubroutine compute_normal
+
+   pure subroutine compute_vertices_nearby(self, other, tolerance_to_be_identical, tolerance_to_be_nearby)
+   !< Compute vertices nearby comparing to ones of other facet.
+   class(facet_object), intent(inout) :: self                      !< Facet.
+   type(facet_object),  intent(inout) :: other                     !< Other facet.
+   real(R8P),           intent(in)    :: tolerance_to_be_identical !< Tolerance to identify identical vertices.
+   real(R8P),           intent(in)    :: tolerance_to_be_nearby    !< Tolerance to identify nearby vertices.
+   integer(I4P)                       :: vs, vo                    !< Counter.
+
+   do vs=1, 3
+      do vo=1, 3
+         if (are_nearby(self%vertex(vs), other%vertex(vo), tolerance_to_be_nearby)) then
+            call  self%vertex_nearby(vs)%put(id=other%vertex_global_id(vo))
+            call other%vertex_nearby(vo)%put(id= self%vertex_global_id(vs))
+            if (are_nearby(self%vertex(vs), other%vertex(vo), tolerance_to_be_identical)) then
+               call  self%vertex_occurrence(vs)%put(id=other%id)
+               call other%vertex_occurrence(vo)%put(id= self%id)
+            endif
+         endif
+      enddo
+   enddo
+   contains
+      pure function are_nearby(a, b, tolerance)
+      !< Check equality of vertices pair.
+      type(vector_R8P), intent(in) :: a, b       !< Vertices pair.
+      real(R8P),        intent(in) :: tolerance  !< Check tolerance.
+      logical                      :: are_nearby !< Check result.
+
+      are_nearby = ((abs(a%x - b%x) <= tolerance).and.&
+                    (abs(a%y - b%y) <= tolerance).and.&
+                    (abs(a%z - b%z) <= tolerance))
+      endfunction are_nearby
+   endsubroutine compute_vertices_nearby
+
+   pure subroutine connect_nearby_vertices(self, facet)
+   !< Connect nearby vertices of disconnected edges.
+   class(facet_object), intent(inout) :: self     !< Facet.
+   type(facet_object),  intent(inout) :: facet(:) !< All facets in STL.
+
+   if     (self%fcon_edge_12==0) then
+      if (self%vertex_nearby(1)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(1), facet=facet, nearby=self%vertex_nearby(1))
+      endif
+      if (self%vertex_nearby(2)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(2), facet=facet, nearby=self%vertex_nearby(2))
+      endif
+   endif
+   if (self%fcon_edge_23==0) then
+      if (self%vertex_nearby(2)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(2), facet=facet, nearby=self%vertex_nearby(2))
+      endif
+      if (self%vertex_nearby(3)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(3), facet=facet, nearby=self%vertex_nearby(3))
+      endif
+   endif
+   if (self%fcon_edge_31==0) then
+      if (self%vertex_nearby(3)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(3), facet=facet, nearby=self%vertex_nearby(3))
+      endif
+      if (self%vertex_nearby(1)%ids_number>0) then
+         call merge_vertices(vertex=self%vertex(1), facet=facet, nearby=self%vertex_nearby(1))
+      endif
+   endif
+   endsubroutine connect_nearby_vertices
+
+   elemental subroutine destroy(self)
+   !< Destroy facet.
+   class(facet_object), intent(inout) :: self  !< Facet.
+   type(facet_object)                 :: fresh !< Fresh instance of facet.
+
+   self = fresh
+   endsubroutine destroy
+
+   elemental subroutine destroy_connectivity(self)
+   !< Destroy facet connectivity.
+   class(facet_object), intent(inout) :: self  !< Facet.
+
+   self%fcon_edge_12=0_I4P
+   self%fcon_edge_23=0_I4P
+   self%fcon_edge_31=0_I4P
+   call self%vertex_occurrence%destroy
+   call self%vertex_nearby%destroy
+   endsubroutine destroy_connectivity
 
    pure function do_ray_intersect(self, ray_origin, ray_direction) result(intersect)
    !< Return true if facet is intersected by ray from origin and oriented as ray direction vector.
