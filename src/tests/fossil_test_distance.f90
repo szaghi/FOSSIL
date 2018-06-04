@@ -44,8 +44,8 @@ print '(A)', surface_stl%statistics()
 are_tests_passed = int(surface_stl%distance(point=0*ex_R8P), I4P) == 0_I4P
 
 if (save_aabb_tree_geometry) call surface_stl%aabb%save_geometry_tecplot_ascii(file_name='fossil_test_distance_aabb_tree.dat')
-if (save_aabb_tree_stl) call surface_stl%aabb%save_into_file_stl(facet=surface_stl%facet, base_file_name='fossil_test_distance_', &
-                                                                 is_ascii=.true.)
+if (save_aabb_tree_stl) call file_stl%save_aabb_into_file(surface=surface_stl, base_file_name='fossil_test_distance_', &
+                                                          is_ascii=.false.)
 
 associate(bmin=>surface_stl%bmin, bmax=>surface_stl%bmax)
    ni = 64

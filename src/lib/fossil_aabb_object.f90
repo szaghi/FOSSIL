@@ -28,6 +28,7 @@ type :: aabb_object
       procedure, pass(self) :: distance                    !< Return the (square) distance from point to AABB.
       procedure, pass(self) :: distance_from_facets        !< Return the (square) distance from point to AABB's facets.
       procedure, pass(self) :: do_ray_intersect            !< Return true if AABB is intersected by ray.
+      procedure, pass(self) :: get_aabb_facets             !< Get AABB facets list.
       procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
       procedure, pass(self) :: initialize                  !< Initialize AABB.
       procedure, pass(self) :: is_inside                   !< Return the true if point is inside ABB.
@@ -234,6 +235,21 @@ contains
       endif
       endsubroutine check_slab
    endfunction do_ray_intersect
+
+   pure subroutine get_aabb_facets(self, facet, aabb_facet)
+   !< Get AABB facets list.
+   class(aabb_object), intent(in)               :: self          !< AABB.
+   type(facet_object), intent(in)               :: facet(:)      !< Whole facets list.
+   type(facet_object), intent(out), allocatable :: aabb_facet(:) !< AABB facets list.
+   integer(I4P)                                 :: f             !< Counter.
+
+   if (self%facet_id%ids_number > 0) then
+      allocate(aabb_facet(1:self%facet_id%ids_number))
+      do f=1, self%facet_id%ids_number
+         aabb_facet(f) = facet(self%facet_id%id(f))
+      enddo
+   endif
+   endsubroutine get_aabb_facets
 
    pure function has_facets(self)
    !< Return true if AABB has facets.

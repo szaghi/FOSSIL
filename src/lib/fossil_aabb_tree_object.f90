@@ -78,9 +78,9 @@ type :: aabb_tree_object
       procedure, pass(self) :: distance                    !< Compute the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: distribute_facets           !< Distribute facets into AABB nodes.
       procedure, pass(self) :: initialize                  !< Initialize AABB tree.
+      procedure, pass(self) :: loop_node                   !< Loop over all nodes.
       procedure, pass(self) :: ray_intersections_number    !< Return ray intersections number.
       procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB tree boxes geometry into Tecplot ascii file.
-      procedure, pass(self) :: save_into_file_stl          !< Save  AABB tree boxes facets into files STL.
       procedure, pass(self) :: translate                   !< Translate AABB tree by delta.
       ! operators
       generic :: assignment(=) => aabb_tree_assign_aabb_tree      !< Overload `=`.
@@ -253,6 +253,49 @@ contains
    endif
    endsubroutine initialize
 
+   function loop_node(self, facet, aabb_facet, b, l) result(again)
+   !< Loop over all nodes.
+   !<
+   !< @note Impure function: return data of each allocated node exploiting saved local counter.
+   class(aabb_tree_object),         intent(in)            :: self          !< AABB tree.
+   type(facet_object),              intent(in),  optional :: facet(:)      !< Whole facets list.
+   integer(I4P),                    intent(out), optional :: b             !< Current AABB ID.
+   integer(I4P),                    intent(out), optional :: l             !< Current AABB level.
+   type(facet_object), allocatable, intent(out), optional :: aabb_facet(:) !< AABB facets list.
+   logical                                                :: again         !< Flag continuing the loop.
+   integer(I4P), save                                     :: bb = -1       !< AABB ID counter.
+   integer(I4P)                                           :: bbb           !< Counter.
+
+   again = .false.
+   if (allocated(self%node)) then
+      if (bb==-1) then
+         ! get first allocated node
+         do bbb=0, self%nodes_number - 1
+            if (self%node(bbb)%is_allocated()) then
+               again = .true.
+               if (present(facet).and.present(aabb_facet)) call self%node(bbb)%get_aabb_facets(facet=facet, aabb_facet=aabb_facet)
+               exit
+            endif
+         enddo
+         bb = bbb
+      elseif (bb<self%nodes_number - 1) then
+         do bbb=bb+1, self%nodes_number - 1
+            if (self%node(bbb)%is_allocated()) then
+               again = .true.
+               if (present(facet).and.present(aabb_facet)) call self%node(bbb)%get_aabb_facets(facet=facet, aabb_facet=aabb_facet)
+               exit
+            endif
+         enddo
+         bb = bbb
+      else
+         bb = -1
+         again = .false.
+      endif
+   endif
+   if (present(b)) b = bb
+   if (present(l)) l = level(b)
+   endfunction loop_node
+
    pure function ray_intersections_number(self, facet, ray_origin, ray_direction) result(intersections_number)
    !< Return ray intersections number.
    class(aabb_tree_object), intent(in) :: self                 !< AABB tree.
@@ -303,32 +346,6 @@ contains
       endif
    endassociate
    endsubroutine save_geometry_tecplot_ascii
-
-   subroutine save_into_file_stl(self, facet, base_file_name, is_ascii)
-   !< Save  AABB tree boxes facets into files STL.
-   class(aabb_tree_object), intent(in) :: self           !< AABB tree.
-   type(facet_object),      intent(in) :: facet(:)       !< Facets list.
-   character(*),            intent(in) :: base_file_name !< File name.
-   logical,                 intent(in) :: is_ascii       !< Sentinel to check if file is ASCII.
-   integer(I4P)                        :: level          !< Counter.
-   integer(I4P)                        :: b, bb, bbb     !< Counter.
-
-   associate(node=>self%node)
-      if (self%is_initialized) then
-         do level=0, self%refinement_levels
-            b = first_node(level=level)
-            do bb=1, nodes_number_at_level(level=level)
-               bbb = b + bb - 1
-               call node(bbb)%save_facets_into_file_stl(facet=facet,                                         &
-                                                        file_name=trim(adjustl(base_file_name))//            &
-                                                                  'aabb-l_'//trim(str(level, .true.))//      &
-                                                                      '-b_'//trim(str(bbb, .true.))//'.stl', &
-                                                        is_ascii=is_ascii)
-            enddo
-         enddo
-      endif
-   endassociate
-   endsubroutine save_into_file_stl
 
    elemental subroutine translate(self, delta)
    !< Translate AABB tree by delta.

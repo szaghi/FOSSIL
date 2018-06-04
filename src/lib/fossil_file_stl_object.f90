@@ -5,9 +5,10 @@ module fossil_file_stl_object
 
 ! use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object, only : facet_object
+use fossil_surface_stl_object, only : surface_stl_object
 use fossil_utils, only : FRLEN, is_inside_bb
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
-use penf, only : I4P
+use penf, only : I4P, str
 use vecfor, only : vector_R8P
 
 implicit none
@@ -23,13 +24,14 @@ type :: file_stl_object
    logical                       :: is_open=.false. !< Sentinel to check if file is open.
    contains
       ! public methods
-      procedure, pass(self) :: close_file     !< Close file.
-      procedure, pass(self) :: destroy        !< Destroy file.
-      procedure, pass(self) :: initialize     !< Initialize file.
-      procedure, pass(self) :: load_from_file !< Load from file.
-      procedure, pass(self) :: open_file      !< Open file, once initialized.
-      procedure, pass(self) :: save_into_file !< Save into file.
-      procedure, pass(self) :: statistics     !< Return STL statistics.
+      procedure, pass(self) :: close_file          !< Close file.
+      procedure, pass(self) :: destroy             !< Destroy file.
+      procedure, pass(self) :: initialize          !< Initialize file.
+      procedure, pass(self) :: load_from_file      !< Load from file.
+      procedure, pass(self) :: open_file           !< Open file, once initialized.
+      procedure, pass(self) :: save_aabb_into_file !< Save AABB into file.
+      procedure, pass(self) :: save_into_file      !< Save into file.
+      procedure, pass(self) :: statistics          !< Return STL statistics.
       ! operators
       generic :: assignment(=) => file_stl_assign_file_stl       !< Overload `=`.
       procedure, pass(lhs),  private :: file_stl_assign_file_stl !< Operator `=`.
@@ -208,10 +210,29 @@ contains
    endif
    endsubroutine open_file
 
+   subroutine save_aabb_into_file(self, surface, base_file_name, is_ascii)
+   !< Save AABB into file.
+   class(file_stl_object),    intent(inout)        :: self           !< File STL.
+   type(surface_stl_object),  intent(in)           :: surface        !< Surface STL.
+   character(*),              intent(in), optional :: base_file_name !< Base file name.
+   logical,                   intent(in), optional :: is_ascii       !< Sentinel to check if file is ASCII.
+   character(len=:), allocatable                   :: file_name      !< File name.
+   type(facet_object), allocatable                 :: aabb_facet(:)  !< AABB facets list.
+   integer(I4P)                                    :: b, l           !< Counter.
+
+   ! facets_number = size(facet, dim=1)
+   if (surface%aabb%is_initialized) then
+      do while(surface%aabb%loop_node(facet=surface%facet, aabb_facet=aabb_facet, b=b, l=l))
+         file_name = trim(adjustl(base_file_name))//'aabb-l_'//trim(str(l, .true.))//'-b_'//trim(str(b, .true.))//'.stl'
+         call self%save_into_file(facet=aabb_facet, file_name=file_name, is_ascii=is_ascii)
+      enddo
+   endif
+   endsubroutine save_aabb_into_file
+
    subroutine save_into_file(self, facet, file_name, is_ascii)
    !< Save into file.
    class(file_stl_object),    intent(inout)        :: self          !< File STL.
-   type(facet_object),        intent(inout)        :: facet(:)      !< Surface facets.
+   type(facet_object),        intent(in)           :: facet(:)      !< Surface facets.
    character(*),              intent(in), optional :: file_name     !< File name.
    logical,                   intent(in), optional :: is_ascii      !< Sentinel to check if file is ASCII.
    integer(I4P)                                    :: facets_number !< Facets number.
