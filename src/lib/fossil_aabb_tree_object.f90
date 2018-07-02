@@ -134,7 +134,8 @@ contains
       allocate(aabb_closest(0:self%refinement_levels))
       distance_ = MaxR8P
       aabb_closest = -1
-      do level=0, self%refinement_levels                  ! loop over refinement levels
+      ! do level=0, self%refinement_levels                  ! loop over refinement levels
+         level = self%refinement_levels
          b = first_node(level=level)                      ! first node at finest level
          do bb=1, nodes_number_at_level(level=level)      ! loop over nodes at level
             bbb = b + bb - 1                              ! node numeration in tree
@@ -146,13 +147,13 @@ contains
                endif
             endif
          enddo
-      enddo
+      ! enddo
       distance = MaxR8P
-      do level=0, self%refinement_levels
+      ! do level=0, self%refinement_levels
          if (aabb_closest(level) >= 0) then
             distance = min(distance, node(aabb_closest(level))%distance_from_facets(facet=facet, point=point))
          endif
-      enddo
+      ! enddo
    endassociate
    endfunction distance
 

@@ -96,6 +96,8 @@ if (test_brute_force) then
    close(file_unit)
 endif
 
+! stop
+
 surface_stl%aabb%is_initialized = .true.
 print '(A)', 'compute distances AABB'
 call system_clock(timing(3))

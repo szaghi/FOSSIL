@@ -98,7 +98,9 @@ contains
    if (self%facets_number>0) then
       call self%set_facets_id
       call self%compute_metrix
-      call self%aabb%initialize(refinement_levels=aabb_refinement_levels, facet=self%facet)
+      ! call self%aabb%initialize(refinement_levels=aabb_refinement_levels, facet=self%facet)
+      call self%aabb%initialize(facet=self%facet, refinement_levels=aabb_refinement_levels, do_facets_distribute=.false.)
+      call self%aabb%distribute_facets(facet=self%facet, is_exclusive=.false., do_update_extents=.false.)
       call self%build_connectivity
       call self%compute_facets_disconnected
       call self%compute_volume
@@ -118,9 +120,10 @@ contains
       smallest_edge_len = self%smallest_edge_len() * 0.9_R8P
       if (self%aabb%is_initialized) then
          ! exploit AABB structure
-         call aabb%initialize(facet=self%facet, refinement_levels=self%aabb%refinement_levels, do_facets_distribute=.false.)
-         call aabb%distribute_facets(facet=self%facet, is_exclusive=.false., do_update_extents=.false.)
-         call aabb%compute_vertices_nearby(facet=self%facet,              &
+         ! call aabb%initialize(facet=self%facet, refinement_levels=self%aabb%refinement_levels, do_facets_distribute=.false.)
+         ! call aabb%distribute_facets(facet=self%facet, is_exclusive=.false., do_update_extents=.false.)
+         ! call aabb%compute_vertices_nearby(facet=self%facet,              &
+         call self%aabb%compute_vertices_nearby(facet=self%facet,              &
                                            tolerance_to_be_identical=EPS, &
                                            tolerance_to_be_nearby=smallest_edge_len)
       else
