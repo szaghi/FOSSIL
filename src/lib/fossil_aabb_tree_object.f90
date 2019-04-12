@@ -75,8 +75,11 @@ type :: aabb_tree_object
       ! public methods
       procedure, pass(self) :: compute_vertices_nearby     !< Compute vertices nearby.
       procedure, pass(self) :: destroy                     !< Destroy AABB tree.
-      procedure, pass(self) :: distance                    !< Compute the (minimum) distance from point to triangulated surface.
+      procedure, pass(self) :: distance                    !< Return the (minimum) distance from point to triangulated surface.
+      procedure, pass(self) :: distance_tree               !< Return the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: distribute_facets           !< Distribute facets into AABB nodes.
+      procedure, pass(self) :: distribute_facets_tree      !< Distribute facets into AABB nodes.
+      procedure, pass(self) :: has_children                !< Return true if node has at least one child allocated.
       procedure, pass(self) :: initialize                  !< Initialize AABB tree.
       procedure, pass(self) :: loop_node                   !< Loop over all nodes.
       procedure, pass(self) :: ray_intersections_number    !< Return ray intersections number.
@@ -85,6 +88,9 @@ type :: aabb_tree_object
       ! operators
       generic :: assignment(=) => aabb_tree_assign_aabb_tree      !< Overload `=`.
       procedure, pass(lhs), private :: aabb_tree_assign_aabb_tree !< Operator `=`.
+      ! private methods
+      procedure, pass(self), private :: distance_node                 !< Return the (minimum) distance from point to node AABB tree.
+      procedure, pass(self), private :: ray_intersections_number_node !< Return ray intersections number into a node of AABB tree.
 endtype aabb_tree_object
 
 contains
@@ -156,6 +162,16 @@ contains
    endassociate
    endfunction distance
 
+   function distance_tree(self, facet, point) result(distance)
+   !< Compute the (minimum) distance from a point to the triangulated surface.
+   class(aabb_tree_object), intent(in) :: self         !< AABB tree.
+   type(facet_object),      intent(in) :: facet(:)     !< Facets list.
+   type(vector_R8P),        intent(in) :: point        !< Point coordinates.
+   real(R8P)                           :: distance     !< Minimum distance from point to the triangulated surface.
+
+   distance = self%distance_node(n=0, facet=facet, point=point)
+   endfunction distance_tree
+
    pure subroutine distribute_facets(self, facet, is_exclusive, do_update_extents)
    !< Distribute facets into AABB nodes.
    class(aabb_tree_object), intent(inout)        :: self               !< AABB tree.
@@ -206,11 +222,86 @@ contains
    endassociate
    endsubroutine distribute_facets
 
-   pure subroutine initialize(self, refinement_levels, facet, bmin, bmax, do_facets_distribute, is_exclusive, do_update_extents)
+   pure subroutine distribute_facets_tree(self, facet)
+   !< Distribute facets into AABB nodes.
+   class(aabb_tree_object), intent(inout) :: self       !< AABB tree.
+   type(facet_object),      intent(in)    :: facet(:)   !< Facets list.
+   type(list_id_object)                   :: facet_id   !< List of facets IDs.
+   integer(I4P)                           :: level      !< Counter.
+   integer(I4P)                           :: b, bb, bbb !< Counter.
+   integer(I4P)                           :: parent     !< Parent node index.
+
+   associate(node=>self%node)
+      ! add facets to nodes
+      call facet_id%initialize(id=facet%id)                             ! initialize facets IDs list
+      if (facet_id%ids_number > 0) then                                 ! check if facets list still has facets
+         call node(0)%add_facets(facet_id=facet_id, &
+                                 facet=facet,       &
+                                 is_exclusive=.false.)                  ! add facets to root node
+         do level=1, self%refinement_levels                             ! loop over refinement levels
+            b = first_node(level=level)                                 ! first node at level
+            do bb=1, nodes_number_at_level(level=level), TREE_RATIO     ! loop over nodes at level
+               parent = parent_node(node=b + bb - 1)                    ! parent of the current node
+               if (node(parent)%is_allocated()) then                    ! check if parent exist
+                  facet_id = node(parent)%facet_id()                    ! store parent facets IDs list
+                  if (facet_id%ids_number > 0) then                     ! check if facets list still has facets
+                     do bbb=b + bb - 1, b + bb -1 + TREE_RATIO - 1
+                        call node(bbb)%add_facets(facet_id=facet_id, &
+                                                  facet=facet,       &
+                                                  is_exclusive=.true.) ! add facets to node
+                     enddo
+                  endif
+               endif
+            enddo
+         enddo
+      endif
+
+      ! destroy void nodes
+      do level=self%refinement_levels, 0, -1                        ! loop over refinement levels
+         b = first_node(level=level)                                ! first node at level
+         do bb=1, nodes_number_at_level(level=level)                ! loop over nodes at level
+            bbb = b + bb - 1                                        ! node numeration in tree
+            if (.not.node(bbb)%has_facets()) call node(bbb)%destroy ! destroy void node
+         enddo
+      enddo
+
+      ! update AABB extents
+      do level=self%refinement_levels, 0, -1           ! loop over refinement levels
+         b = first_node(level=level)                   ! first node at level
+         do bb=1, nodes_number_at_level(level=level)   ! loop over nodes at level
+            bbb = b + bb - 1                           ! node numeration in tree
+            call node(bbb)%update_extents(facet=facet) ! update extents
+         enddo
+      enddo
+   endassociate
+   endsubroutine distribute_facets_tree
+
+   pure function has_children(self, node)
+   !< Return true if node has at least one child allocated.
+   class(aabb_tree_object), intent(in) :: self         !< AABB tree.
+   integer(I4P),            intent(in) :: node         !< Node queried.
+   logical                             :: has_children !< Check result.
+   integer                             :: n, nn        !< Counter.
+
+   has_children = .false.
+   n = first_child_node(node=node)
+   if (n<=self%nodes_number - TREE_RATIO + 1) then
+      do nn=n, n + TREE_RATIO - 1
+         if (self%node(nn)%is_allocated()) then
+            has_children = .true.
+            return
+         endif
+      enddo
+   endif
+   endfunction has_children
+
+   pure subroutine initialize(self, refinement_levels, facet, largest_edge_len, bmin, bmax, do_facets_distribute, is_exclusive, &
+                              do_update_extents)
    !< Initialize AABB tree.
    class(aabb_tree_object), intent(inout)        :: self                  !< AABB tree.
    integer(I4P),            intent(in), optional :: refinement_levels     !< AABB refinement levels.
    type(facet_object),      intent(in), optional :: facet(:)              !< Facets list.
+   real(R8P),               intent(in), optional :: largest_edge_len      !< Largest edge lenght.
    type(vector_R8P),        intent(in), optional :: bmin                  !< Minimum point of AABB.
    type(vector_R8P),        intent(in), optional :: bmax                  !< Maximum point of AABB.
    logical,                 intent(in), optional :: do_facets_distribute  !< Sentinel to enable/disable facets distribution.
@@ -228,27 +319,30 @@ contains
    self%refinement_levels = refinement_levels_ ; if (present(refinement_levels)) self%refinement_levels = refinement_levels
    do_facets_distribute_ = .true. ; if (present(do_facets_distribute)) do_facets_distribute_ = do_facets_distribute
 
-   if (self%refinement_levels > 0) then
+   if (self%refinement_levels >= 0) then
       self%nodes_number = nodes_number(refinement_levels=self%refinement_levels)
       allocate(self%node(0:self%nodes_number-1))
       call self%node(0)%initialize(facet=facet, bmin=bmin, bmax=bmax)
-      do level=1, self%refinement_levels                                          ! loop over refinement levels
+      levels_loop: do level=1, self%refinement_levels                             ! loop over refinement levels
          b = first_node(level=level)                                              ! first node at level
          do bb=1, nodes_number_at_level(level=level), TREE_RATIO                  ! loop over nodes at level
             bbb = b + bb - 1                                                      ! node numeration in tree
             parent = parent_node(node=bbb)                                        ! parent of the current node
             if (self%node(parent)%is_allocated()) then                            ! create children nodes
                call self%node(parent)%compute_octants(octant=octant)              ! compute parent AABB octants
+               if (largest_edge_len > octant(1)%median()) then                    ! check if refinement has sense
+                  ! a further refinement does not have sense
+                  self%refinement_levels = level - 1                              ! set rifinement to the previous one
+                  exit levels_loop                                                ! exi loop
+               endif
                do bbbb=0, TREE_RATIO-1                                            ! loop over children
                   call self%node(bbb+bbbb)%initialize(bmin=octant(bbbb+1)%bmin, &
                                                       bmax=octant(bbbb+1)%bmax)   ! initialize node
                enddo
             endif
          enddo
-      enddo
-      if (present(facet).and.(do_facets_distribute_)) call self%distribute_facets(facet=facet,               &
-                                                                                  is_exclusive=is_exclusive, &
-                                                                                  do_update_extents=do_update_extents)
+      enddo levels_loop
+      if (present(facet).and.(do_facets_distribute_)) call self%distribute_facets_tree(facet=facet)
       self%is_initialized = .true.
    endif
    endsubroutine initialize
@@ -296,30 +390,31 @@ contains
    if (present(l)) l = level(b)
    endfunction loop_node
 
-   pure function ray_intersections_number(self, facet, ray_origin, ray_direction) result(intersections_number)
+   function ray_intersections_number(self, facet, ray_origin, ray_direction) result(intersections_number)
    !< Return ray intersections number.
    class(aabb_tree_object), intent(in) :: self                 !< AABB tree.
    type(facet_object),      intent(in) :: facet(:)             !< Facets list.
    type(vector_R8P),        intent(in) :: ray_origin           !< Ray origin.
    type(vector_R8P),        intent(in) :: ray_direction        !< Ray direction.
    integer(I4P)                        :: intersections_number !< Intersection number.
-   integer(I4P)                        :: level                !< Counter.
-   integer(I4P)                        :: b, bb, bbb           !< Counter.
+   ! integer(I4P)                        :: level                !< Counter.
+   ! integer(I4P)                        :: b, bb, bbb           !< Counter.
 
-   intersections_number = 0
-   associate(node=>self%node)
-      do level=0, self%refinement_levels                  ! loop over refinement levels
-         b = first_node(level=level)                      ! first node at finest level
-         do bb=1, nodes_number_at_level(level=level)      ! loop over nodes at level
-            bbb = b + bb - 1                              ! node numeration in tree
-            if (node(bbb)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) then
-               intersections_number = intersections_number + &
-                                      node(bbb)%ray_intersections_number(facet=facet, &
-                                                                         ray_origin=ray_origin, ray_direction=ray_direction)
-            endif
-         enddo
-      enddo
-   endassociate
+   intersections_number = self%ray_intersections_number_node(n=0, facet=facet, ray_origin=ray_origin, ray_direction=ray_direction)
+   ! intersections_number = 0
+   ! associate(node=>self%node)
+   !    do level=0, self%refinement_levels                  ! loop over refinement levels
+   !       b = first_node(level=level)                      ! first node at finest level
+   !       do bb=1, nodes_number_at_level(level=level)      ! loop over nodes at level
+   !          bbb = b + bb - 1                              ! node numeration in tree
+   !          if (node(bbb)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) then
+   !             intersections_number = intersections_number + &
+   !                                    node(bbb)%ray_intersections_number(facet=facet, &
+   !                                                                       ray_origin=ray_origin, ray_direction=ray_direction)
+   !          endif
+   !       enddo
+   !    enddo
+   ! endassociate
    endfunction ray_intersections_number
 
    subroutine save_geometry_tecplot_ascii(self, file_name)
@@ -384,6 +479,71 @@ contains
    endif
    lhs%is_initialized = rhs%is_initialized
    endsubroutine aabb_tree_assign_aabb_tree
+
+   ! private methods
+   recursive function distance_node(self, n, facet, point) result(distance)
+   !< Return the (minimum) distance from a point to a node of AABB tree.
+   class(aabb_tree_object), intent(in) :: self         !< AABB tree.
+   integer(I4P),            intent(in) :: n            !< Current AABB node.
+   type(facet_object),      intent(in) :: facet(:)     !< Facets list.
+   type(vector_R8P),        intent(in) :: point        !< Point coordinates.
+   real(R8P)                           :: distance     !< Minimum distance from point to the triangulated surface.
+   real(R8P)                           :: distance_    !< Minimum distance, temporary buffer.
+   integer(I4P)                        :: aabb_closest !< Closest AABB children node.
+   integer(I4P)                        :: fcn          !< First AABB child node.
+   integer(I4P)                        :: i            !< Counter.
+
+   associate(node=>self%node)
+      if (self%has_children(node=n)) then
+         distance_ = MaxR8P                             ! initialize distance of current level-nodes
+         aabb_closest = -1                              ! initialize closest node index
+         fcn = first_child_node(node=n)                 ! first child node
+         do i=fcn, fcn + TREE_RATIO - 1                 ! loop over all children nodes
+            if (node(i)%is_allocated()) then            ! check if node is allocated
+               distance = node(i)%distance(point=point) ! node distance
+               if (distance <= distance_) then          ! check for the new minimum
+                  distance_ = distance                  ! update minimum distance
+                  aabb_closest = i                      ! store closest node
+               endif
+            endif
+         enddo
+         distance = self%distance_node(n=aabb_closest, facet=facet, point=point) ! return distance from closest AABB child node
+      else
+         distance = node(n)%distance_from_facets(facet=facet, point=point)       ! no children: return distance from current node
+      endif
+   endassociate
+   endfunction distance_node
+
+   recursive function ray_intersections_number_node(self, n, facet, ray_origin, ray_direction) result(intersections_number)
+   !< Return ray intersections number into a node of AABB tree.
+   class(aabb_tree_object), intent(in) :: self                 !< AABB tree.
+   integer(I4P),            intent(in) :: n                    !< Current AABB node.
+   type(facet_object),      intent(in) :: facet(:)             !< Facets list.
+   type(vector_R8P),        intent(in) :: ray_origin           !< Ray origin.
+   type(vector_R8P),        intent(in) :: ray_direction        !< Ray direction.
+   integer(I4P)                        :: intersections_number !< Intersection number.
+   integer(I4P)                        :: fcn                  !< First AABB child node.
+   integer(I4P)                        :: i                    !< Counter.
+
+   intersections_number = 0
+   associate(node=>self%node)
+      if (node(n)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) then      ! check if ray intersect AABB
+         if (self%has_children(node=n)) then                                                      ! check if AABB has children
+            fcn = first_child_node(node=n)                                                        ! first child node
+            do i=fcn, fcn + TREE_RATIO - 1                                                        ! loop over all children nodes
+               intersections_number = intersections_number +                                    & ! sum chidren intersections
+                                      self%ray_intersections_number_node(n=i,                   &
+                                                                         facet=facet,           &
+                                                                         ray_origin=ray_origin, &
+                                                                         ray_direction=ray_direction)
+            enddo
+         else
+            ! there are not children, return intersection of current AABB leaf
+            intersections_number = node(n)%ray_intersections_number(facet=facet, ray_origin=ray_origin, ray_direction=ray_direction)
+         endif
+      endif
+   endassociate
+   endfunction ray_intersections_number_node
 
    ! non TBP
    pure function first_child_node(node)

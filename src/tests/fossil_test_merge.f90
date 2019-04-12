@@ -20,7 +20,7 @@ are_tests_passed = .false.
 call cli_parse
 call file_stl%load_from_file(facet=surface(1)%facet, file_name=trim(adjustl(file_name_stl(1))), guess_format=.true.)
 call file_stl%load_from_file(facet=surface(2)%facet, file_name=trim(adjustl(file_name_stl(2))), guess_format=.true.)
-call surface%analize
+! call surface%analize
 call surface(1)%merge_solids(other=surface(2))
 call file_stl%save_into_file(facet=surface(1)%facet, file_name='fossil_test_merge.stl')
 are_tests_passed(1) = nint(surface(1)%bmax%x) > 0

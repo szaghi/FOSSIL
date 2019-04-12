@@ -16,8 +16,9 @@ public :: facet_object
 type :: facet_object
    !< FOSSIL, facet class.
    type(vector_R8P) :: normal    !< Facet (outward) normal (versor), `(v2-v1).cross.(v3-v1)`.
-   type(vector_R8P) :: vertex(3) !< Facet vertex 1.
+   type(vector_R8P) :: vertex(3) !< Facet vertices.
    ! metrix
+   type(vector_R8P) :: centroid !< Facet's centroid.
    ! triangle plane parametric equation: T(s,t) = B + s*E12 + t*E13
    type(vector_R8P) :: E12        !< Edge 1-2, `V2-V1`.
    type(vector_R8P) :: E13        !< Edge 1-3, `V3-V1`.
@@ -36,6 +37,11 @@ type :: facet_object
    integer(I4P)         :: fcon_edge_31=0_I4P   !< Connected face ID along edge 3-1.
    type(list_id_object) :: vertex_occurrence(3) !< List of vertices "occurrencies", list of facets global ID containing them.
    type(list_id_object) :: vertex_nearby(3)     !< List of vertices "nearby", list of vertices global ID nearby them.
+   ! pseudo normals
+   type(vector_R8P) :: edge_12_pnormal   !< Edge 1-2 pseudo-normal.
+   type(vector_R8P) :: edge_23_pnormal   !< Edge 2-3 pseudo-normal.
+   type(vector_R8P) :: edge_31_pnormal   !< Edge 3-3 pseudo-normal.
+   type(vector_R8P) :: vertex_pnormal(3) !< Vertices pseudo-normals.
    contains
       ! public methods
       procedure, pass(self) :: centroid_part                   !< Return facet's part to build up STL centroid.
@@ -43,12 +49,14 @@ type :: facet_object
       procedure, pass(self) :: compute_distance                !< Compute the (unsigned, squared) distance from a point to facet.
       procedure, pass(self) :: compute_metrix                  !< Compute local (plane) metrix.
       procedure, pass(self) :: compute_normal                  !< Compute normal by means of vertices data.
+      procedure, pass(self) :: compute_pseudo_normals          !< Compute pseudo normals.
       procedure, pass(self) :: compute_vertices_nearby         !< Compute vertices nearby comparing to ones of other facet.
       procedure, pass(self) :: connect_nearby_vertices         !< Connect nearby vertices of disconnected edges.
       procedure, pass(self) :: destroy                         !< Destroy facet.
       procedure, pass(self) :: destroy_connectivity            !< Destroy facet connectivity.
       procedure, pass(self) :: do_ray_intersect                !< Return true if facet is intersected by a ray.
       procedure, pass(self) :: initialize                      !< Initialize facet.
+      procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: load_from_file_ascii            !< Load facet from ASCII file.
       procedure, pass(self) :: load_from_file_binary           !< Load facet from binary file.
       procedure, pass(self) :: make_normal_consistent          !< Make normal of other facet consistent with self.
@@ -65,6 +73,7 @@ type :: facet_object
       procedure, pass(self) :: tetrahedron_volume              !< Return the volume of tetrahedron built by facet and a given apex.
       procedure, pass(self) :: translate                       !< Translate facet given vectorial delta.
       procedure, pass(self) :: update_connectivity             !< Update facet connectivity.
+      procedure, pass(self) :: vertex_angle                    !< Return the subtended angle of given vertex.
       procedure, pass(self) :: vertex_global_id                !< Return the vertex global id given the local one.
       ! operators
       generic :: assignment(=) => facet_assign_facet !< Overload `=`.
@@ -276,6 +285,7 @@ contains
    !< Compute local (plane) metrix.
    class(facet_object), intent(inout) :: self !< Facet.
 
+   self%centroid = (self%vertex(1) + self%vertex(2) + self%vertex(3)) / 3._R8P
    call self%compute_normal
 
    self%E12 = self%vertex(2) - self%vertex(1)
@@ -311,6 +321,42 @@ contains
 
    self%normal = face_normal3_R8P(pt1=self%vertex(1), pt2=self%vertex(2), pt3=self%vertex(3), norm='y')
    endsubroutine compute_normal
+
+   pure subroutine compute_pseudo_normals(self, facet)
+   !< Compute pseudo normals.
+   !<
+   !< @note Connectivity must be already computed.
+   class(facet_object), intent(inout) :: self      !< Facet.
+   type(facet_object),  intent(in)    :: facet(1:) !< Facets list.
+   integer(I4P)                       :: f, o, v   !< Counter.
+
+   if (self%fcon_edge_12 > 0) then
+      self%edge_12_pnormal = self%normal + facet(self%fcon_edge_12)%normal
+      call self%edge_12_pnormal%normalize()
+   else
+      self%edge_12_pnormal = self%normal
+   endif
+   if (self%fcon_edge_23 > 0) then
+      self%edge_23_pnormal = self%normal + facet(self%fcon_edge_23)%normal
+      call self%edge_23_pnormal%normalize()
+   else
+      self%edge_23_pnormal = self%normal
+   endif
+   if (self%fcon_edge_31 > 0) then
+      self%edge_31_pnormal = self%normal + facet(self%fcon_edge_31)%normal
+      call self%edge_31_pnormal%normalize()
+   else
+      self%edge_31_pnormal = self%normal
+   endif
+   do v=1, 3
+      self%vertex_pnormal(v) = self%vertex_angle(v) * self%normal
+      do o=1, self%vertex_occurrence(v)%ids_number
+         f = self%vertex_occurrence(v)%id(o)
+         self%vertex_pnormal(v) = self%vertex_pnormal(v) + facet(f)%normal ! cazzo manca angle
+      enddo
+      call self%vertex_pnormal(v)%normalize()
+   enddo
+   endsubroutine compute_pseudo_normals
 
    pure subroutine compute_vertices_nearby(self, other, tolerance_to_be_identical, tolerance_to_be_nearby)
    !< Compute vertices nearby comparing to ones of other facet.
@@ -430,6 +476,16 @@ contains
 
    self = fresh
    endsubroutine initialize
+
+   pure function largest_edge_len(self) result(largest)
+   !< Return the largest edge length.
+   class(facet_object), intent(in) :: self    !< Facet.
+   real(R8P)                       :: largest !< largest edge length.
+
+   largest = max(normL2_R8P(self%vertex(2)-self%vertex(1)), &
+                 normL2_R8P(self%vertex(3)-self%vertex(2)), &
+                 normL2_R8P(self%vertex(1)-self%vertex(3)))
+   endfunction largest_edge_len
 
    subroutine load_from_file_ascii(self, file_unit)
    !< Load facet from ASCII file.
@@ -649,6 +705,27 @@ contains
       endfunction facet_connected
    endsubroutine update_connectivity
 
+   pure function vertex_angle(self, vertex_id)
+   !< Return the subtened angle of given vertex.
+   class(facet_object), intent(in) :: self         !< Facet.
+   integer(I4P),        intent(in) :: vertex_id    !< Local vertex id.
+   real(R8P)                       :: vertex_angle !< Subtended angle.
+   type(vector_R8P)                :: edge(2)      !< Two edge subtending the vertex.
+
+   select case(vertex_id)
+   case(1_I4P)
+     edge(1) = self%vertex(2) - self%vertex(1)
+     edge(2) = self%vertex(3) - self%vertex(1)
+   case(2_I4P)
+     edge(1) = self%vertex(3) - self%vertex(2)
+     edge(2) = self%vertex(1) - self%vertex(2)
+   case(3_I4P)
+     edge(1) = self%vertex(1) - self%vertex(3)
+     edge(2) = self%vertex(2) - self%vertex(3)
+   endselect
+   vertex_angle = edge(1)%angle(edge(2))
+   endfunction vertex_angle
+
    pure function vertex_global_id(self, vertex_id)
    !< Return the vertex global id given the local one.
    class(facet_object), intent(in) :: self             !< Facet.
@@ -797,6 +874,7 @@ contains
 
    lhs%normal = rhs%normal
    lhs%vertex = rhs%vertex
+   lhs%centroid = rhs%centroid
    lhs%E12 = rhs%E12
    lhs%E13 = rhs%E13
    lhs%a = rhs%a

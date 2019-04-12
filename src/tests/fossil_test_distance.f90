@@ -21,6 +21,7 @@ logical                       :: save_aabb_tree_geometry !< Sentinel to save AAB
 logical                       :: save_aabb_tree_stl      !< Sentinel to save AABB stl.
 logical                       :: test_brute_force        !< Sentinel to test also brute force.
 character(999)                :: sign_algorithm          !< Algorithm used for "point in polyhedron" test.
+logical                       :: unsigned                !< Compute unsigned distance.
 integer(I4P)                  :: ni, nj, nk              !< Grid dimensions.
 integer(I4P)                  :: i, j, k                 !< Counter.
 real(R8P)                     :: Dx, Dy, Dz              !< Space steps.
@@ -36,16 +37,18 @@ call file_stl%load_from_file(facet=surface_stl%facet, file_name=trim(adjustl(fil
 print '(A)', 'STL statistics before sanitization'
 print '(A)', file_stl%statistics()
 print '(A)', surface_stl%statistics()
-call surface_stl%sanitize
-call surface_stl%analize
-print '(A)', 'STL statistics after sanitization'
-print '(A)', surface_stl%statistics()
+! call surface_stl%sanitize
+! call surface_stl%analize(aabb_refinement_levels=refinement_levels)
+! print '(A)', 'STL statistics after sanitization'
+! print '(A)', surface_stl%statistics()
 
 are_tests_passed = int(surface_stl%distance(point=0*ex_R8P), I4P) == 0_I4P
 
 if (save_aabb_tree_geometry) call surface_stl%aabb%save_geometry_tecplot_ascii(file_name='fossil_test_distance_aabb_tree.dat')
 if (save_aabb_tree_stl) call file_stl%save_aabb_into_file(surface=surface_stl, base_file_name='fossil_test_distance_', &
                                                           is_ascii=.false.)
+
+! stop
 
 associate(bmin=>surface_stl%bmin, bmax=>surface_stl%bmax)
    ni = 64
@@ -102,7 +105,7 @@ call system_clock(timing(3))
 do k=-4, nk + 5
    do j=-4, nj + 5
       do i=-4, ni + 5
-         distance(i, j, k) = surface_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm=trim(sign_algorithm))
+         distance(i, j, k) = surface_stl%distance(point=grid(i, j, k), is_signed=.not.unsigned, sign_algorithm=trim(sign_algorithm))
       enddo
    enddo
 enddo
@@ -171,6 +174,12 @@ contains
                def='ray_intersections',                           &
                act='store')
 
+  call cli%add(switch='--unsigned',              &
+               help='compute unsigned distance', &
+               required=.false.,                 &
+               def='.false.',                    &
+               act='store_true')
+
   call cli%parse(error=error) ; if (error/=0) stop
 
   call cli%get(switch='--stl',                     val=file_name_stl,           error=error) ; if (error/=0) stop
@@ -179,5 +188,6 @@ contains
   call cli%get(switch='--save_aabb_tree_stl',      val=save_aabb_tree_stl,      error=error) ; if (error/=0) stop
   call cli%get(switch='--brute_force',             val=test_brute_force,        error=error) ; if (error/=0) stop
   call cli%get(switch='--sign_algorithm',          val=sign_algorithm,          error=error) ; if (error/=0) stop
+  call cli%get(switch='--unsigned',                val=unsigned,                error=error) ; if (error/=0) stop
   endsubroutine cli_parse
 endprogram fossil_test_distance

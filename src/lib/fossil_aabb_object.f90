@@ -7,7 +7,7 @@ use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS
 use penf, only : FR8P, I4P, R8P, MaxR8P
-use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
+use vecfor, only : ex_R8P, ey_R8P, ez_R8P, normL2_R8P, vector_R8P
 
 implicit none
 private
@@ -32,6 +32,7 @@ type :: aabb_object
       procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
       procedure, pass(self) :: initialize                  !< Initialize AABB.
       procedure, pass(self) :: is_inside                   !< Return the true if point is inside ABB.
+      procedure, pass(self) :: median                      !< Return the median of AABB.
       procedure, pass(self) :: ray_intersections_number    !< Return ray intersections number.
       procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB geometry into Tecplot ascii file.
       procedure, pass(self) :: save_facets_into_file_stl   !< Save facets into file STL.
@@ -65,9 +66,10 @@ contains
    call self%facet_id%destroy
    if (is_exclusive_) then
       do f=1, facet_id%ids_number
-         if (self%is_inside(point=facet(facet_id%id(f))%vertex(1)).and.&
-             self%is_inside(point=facet(facet_id%id(f))%vertex(2)).and.&
-             self%is_inside(point=facet(facet_id%id(f))%vertex(3))) then
+         if (self%is_inside(point=facet(facet_id%id(f))%centroid)) then
+         ! if (self%is_inside(point=facet(facet_id%id(f))%vertex(1)).and.&
+         !     self%is_inside(point=facet(facet_id%id(f))%vertex(2)).and.&
+         !     self%is_inside(point=facet(facet_id%id(f))%vertex(3))) then
             call self%facet_id%put(id=facet(facet_id%id(f))%id)
             call     facet_id_%del(id=facet(facet_id%id(f))%id)
          endif
@@ -147,10 +149,17 @@ contains
    real(R8P)                      :: distance !< Distance from point to AABB.
    real(R8P)                      :: dx, dy, dz !< Distance components.
 
-   dx = max(self%bmin%x - point%x, 0._R8P, point%x - self%bmax%x)
-   dy = max(self%bmin%y - point%y, 0._R8P, point%y - self%bmax%y)
-   dz = max(self%bmin%z - point%z, 0._R8P, point%z - self%bmax%z)
-   distance = dx * dx + dy * dy + dz * dz
+   ! dx = max(self%bmin%x - point%x, 0._R8P, point%x - self%bmax%x)
+   ! dy = max(self%bmin%y - point%y, 0._R8P, point%y - self%bmax%y)
+   ! dz = max(self%bmin%z - point%z, 0._R8P, point%z - self%bmax%z)
+   ! distance = dx * dx + dy * dy + dz * dz
+   distance = 0._R8P
+   if (point%x < self%bmin%x) distance = distance + (self%bmin%x - point%x) * (self%bmin%x - point%x)
+   if (point%x > self%bmax%x) distance = distance + (point%x - self%bmax%x) * (point%x - self%bmax%x)
+   if (point%y < self%bmin%y) distance = distance + (self%bmin%y - point%y) * (self%bmin%y - point%y)
+   if (point%y > self%bmax%y) distance = distance + (point%y - self%bmax%y) * (point%y - self%bmax%y)
+   if (point%z < self%bmin%z) distance = distance + (self%bmin%z - point%z) * (self%bmin%z - point%z)
+   if (point%z > self%bmax%z) distance = distance + (point%z - self%bmax%z) * (point%z - self%bmax%z)
    endfunction distance
 
    pure function distance_from_facets(self, facet, point) result(distance)
@@ -285,6 +294,14 @@ contains
                 (point%y >= self%bmin%y.and.point%y <= self%bmax%y).and.&
                 (point%z >= self%bmin%z.and.point%z <= self%bmax%z))
    endfunction is_inside
+
+   pure function median(self)
+   !< Return the median of AABB.
+   class(aabb_object), intent(in) :: self   !< AABB.
+   real(R8P)                      :: median !< Median of AABB.
+
+   median = normL2_R8P(self%bmax - self%bmin)
+   endfunction median
 
    pure function ray_intersections_number(self, facet, ray_origin, ray_direction) result(intersections_number)
    !< Return ray intersections number.

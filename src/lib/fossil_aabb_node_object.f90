@@ -31,6 +31,7 @@ type :: aabb_node_object
       procedure, pass(self) :: distance                    !< Return the (square) distance from point to AABB.
       procedure, pass(self) :: distance_from_facets        !< Return the (square) distance from point to AABB's facets.
       procedure, pass(self) :: do_ray_intersect            !< Return true if AABB is intersected by ray.
+      procedure, pass(self) :: facet_id                    !< Return the facets IDs list.
       procedure, pass(self) :: get_aabb_facets             !< Get AABB facets list.
       procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
       procedure, pass(self) :: initialize                  !< Initialize AABB.
@@ -150,6 +151,14 @@ contains
    do_intersect = .false.
    if (allocated(self%aabb)) do_intersect = self%aabb%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)
    endfunction do_ray_intersect
+
+   pure function facet_id(self)
+   !< Return facets IDs list.
+   class(aabb_node_object), intent(in) :: self     !< AABB box.
+   type(list_id_object)                :: facet_id !< List of facets IDs contained into AABB.
+
+   if (self%is_allocated()) facet_id = self%aabb%facet_id
+   endfunction facet_id
 
    pure subroutine get_aabb_facets(self, facet, aabb_facet)
    !< Get AABB facets list.

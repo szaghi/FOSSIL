@@ -43,6 +43,7 @@ type :: surface_stl_object
       procedure, pass(self) :: initialize                      !< Initialize file.
       procedure, pass(self) :: is_point_inside_polyhedron_ri   !< Determinate is point is inside or not STL facets by ray intersect.
       procedure, pass(self) :: is_point_inside_polyhedron_sa   !< Determinate is point is inside or not STL facets by solid angle.
+      procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
                                          mirror_by_matrix      !< Mirror facets.
@@ -86,7 +87,8 @@ contains
    endif
    endsubroutine allocate_facets
 
-   elemental subroutine analize(self, aabb_refinement_levels)
+   ! elemental subroutine analize(self, aabb_refinement_levels)
+   subroutine analize(self, aabb_refinement_levels)
    !< Analize STL.
    !<
    !< Buil connectivity, compute metrix, compute volume.
@@ -98,15 +100,16 @@ contains
    if (self%facets_number>0) then
       call self%set_facets_id
       call self%compute_metrix
-      call self%aabb%initialize(refinement_levels=aabb_refinement_levels, facet=self%facet)
-      call self%build_connectivity
-      call self%compute_facets_disconnected
-      call self%compute_volume
-      call self%compute_centroid
+      call self%aabb%initialize(refinement_levels=aabb_refinement_levels, facet=self%facet,largest_edge_len=self%largest_edge_len())
+      ! call self%build_connectivity
+      ! call self%compute_facets_disconnected
+      ! call self%compute_volume
+      ! call self%compute_centroid
    endif
    endsubroutine analize
 
-   pure subroutine build_connectivity(self)
+   ! pure subroutine build_connectivity(self)
+   subroutine build_connectivity(self)
    !< Build facets connectivity.
    class(surface_stl_object), intent(inout) :: self              !< File STL.
    real(R8P)                                :: smallest_edge_len !< Smallest edge length.
@@ -208,8 +211,8 @@ contains
    endif
    endsubroutine compute_centroid
 
-   pure subroutine compute_distance(self, point, distance, is_signed, sign_algorithm, is_square_root, &
-                                    facet_index, edge_index, vertex_index)
+   subroutine compute_distance(self, point, distance, is_signed, sign_algorithm, is_square_root, &
+                               facet_index, edge_index, vertex_index)
    !< Compute the (minimum) distance returning also the closest point.
    class(surface_stl_object), intent(in)            :: self            !< File STL.
    type(vector_R8P),          intent(in)            :: point           !< Point coordinates.
@@ -228,14 +231,15 @@ contains
    if (self%facets_number > 0) then
       if (self%aabb%is_initialized) then
          ! exploit AABB refinement levels
-         distance = self%aabb%distance(facet=self%facet, point=point)
+         ! distance = self%aabb%distance(facet=self%facet, point=point)
+         distance = self%aabb%distance_tree(facet=self%facet, point=point)
       else
          ! brute-force search over all facets
          distance = MaxR8P
          do f=1, self%facets_number
             call self%facet(f)%compute_distance(point=point, distance=distance_)
             if (abs(distance_) <= abs(distance)) then
-               facet_index_ = facet_index
+               facet_index_ = self%facet(f)%id
                distance = distance_
             endif
          enddo
@@ -330,7 +334,7 @@ contains
    self = fresh
    endsubroutine destroy
 
-   pure function distance(self, point, is_signed, sign_algorithm, is_square_root)
+   function distance(self, point, is_signed, sign_algorithm, is_square_root)
    !< Return the (minimum) distance from a point to the triangulated surface.
    !<
    !< @note STL's metrix must be already computed.
@@ -345,7 +349,7 @@ contains
                               is_signed=is_signed, sign_algorithm=sign_algorithm, is_square_root=is_square_root)
    endfunction distance
 
-   pure function is_point_inside_polyhedron_ri(self, point) result(is_inside)
+   function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
    !<
    !< @note STL's metrix must be already computed.
@@ -367,7 +371,7 @@ contains
                    (is_inside_by_y.and.is_inside_by_z))
    endif
    contains
-      pure function is_inside_by_ray_intersect(ray_origin, ray_direction) result(is_inside_by)
+      function is_inside_by_ray_intersect(ray_origin, ray_direction) result(is_inside_by)
       !< Generic line intersect test.
       type(vector_R8P), intent(in) :: ray_origin           !< Ray origin.
       type(vector_R8P), intent(in) :: ray_direction        !< Ray direction.
@@ -427,7 +431,22 @@ contains
    if (present(aabb_refinement_levels)) self%aabb%refinement_levels = aabb_refinement_levels
    endsubroutine initialize
 
-   pure subroutine merge_solids(self, other)
+   pure function largest_edge_len(self) result(largest)
+   !< Return the largest edge length.
+   class(surface_stl_object), intent(in) :: self    !< File STL.
+   real(R8P)                             :: largest !< Largest edge length.
+   integer(I4P)                          :: f       !< Counter.
+
+   largest = 0._R8P
+   if (self%facets_number>0) then
+      do f=1, self%facets_number
+         largest = max(largest, self%facet(f)%largest_edge_len())
+      enddo
+   endif
+   endfunction largest_edge_len
+
+   ! pure subroutine merge_solids(self, other)
+   subroutine merge_solids(self, other)
    !< Merge facets with ones of other STL file.
    class(surface_stl_object), intent(inout) :: self     !< File STL.
    type(surface_stl_object),  intent(in)    :: other    !< Other file STL.
@@ -500,7 +519,8 @@ contains
    if (self%facets_number>0) call self%facet%reverse_normal
    endsubroutine reverse_normals
 
-   pure subroutine sanitize(self, do_analysis)
+   ! pure subroutine sanitize(self, do_analysis)
+   subroutine sanitize(self, do_analysis)
    !< Sanitize STL.
    class(surface_stl_object), intent(inout)        :: self        !< File STL.
    logical,                   intent(in), optional :: do_analysis !< Sentil for performing a first analysis.
