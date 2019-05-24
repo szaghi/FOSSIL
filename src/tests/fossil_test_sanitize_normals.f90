@@ -21,7 +21,7 @@ call file_stl%load_from_file(facet=surface%facet, file_name=trim(adjustl(file_na
 call surface%analize
 
 print*, 'volume before sanitize normals: ', surface%volume
-are_tests_passed(1) = surface%volume < 0._R8P
+are_tests_passed(1) = surface%volume <= 0._R8P
 call surface%sanitize_normals
 call surface%compute_volume
 print*, 'volume after sanitize normals:  ', surface%volume
