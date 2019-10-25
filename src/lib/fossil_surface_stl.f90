@@ -101,10 +101,10 @@ contains
       call self%set_facets_id
       call self%compute_metrix
       call self%aabb%initialize(refinement_levels=aabb_refinement_levels, facet=self%facet,largest_edge_len=self%largest_edge_len())
-      ! call self%build_connectivity
-      ! call self%compute_facets_disconnected
-      ! call self%compute_volume
-      ! call self%compute_centroid
+      call self%build_connectivity
+      call self%compute_facets_disconnected
+      call self%compute_volume
+      call self%compute_centroid
    endif
    endsubroutine analize
 

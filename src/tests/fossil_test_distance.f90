@@ -37,10 +37,10 @@ call file_stl%load_from_file(facet=surface_stl%facet, file_name=trim(adjustl(fil
 print '(A)', 'STL statistics before sanitization'
 print '(A)', file_stl%statistics()
 print '(A)', surface_stl%statistics()
-! call surface_stl%sanitize
-! call surface_stl%analize(aabb_refinement_levels=refinement_levels)
-! print '(A)', 'STL statistics after sanitization'
-! print '(A)', surface_stl%statistics()
+call surface_stl%sanitize
+call surface_stl%analize(aabb_refinement_levels=refinement_levels)
+print '(A)', 'STL statistics after sanitization'
+print '(A)', surface_stl%statistics()
 
 are_tests_passed = int(surface_stl%distance(point=0*ex_R8P), I4P) == 0_I4P
 
