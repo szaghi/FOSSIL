@@ -22,7 +22,7 @@ logical                       :: save_aabb_tree_stl      !< Sentinel to save AAB
 logical                       :: test_brute_force        !< Sentinel to test also brute force.
 character(999)                :: sign_algorithm          !< Algorithm used for "point in polyhedron" test.
 logical                       :: unsigned                !< Compute unsigned distance.
-integer(I4P)                  :: ni, nj, nk              !< Grid dimensions.
+integer(I4P)                  :: ni, nj, nk, gi, gj, gk  !< Grid dimensions.
 integer(I4P)                  :: i, j, k                 !< Counter.
 real(R8P)                     :: Dx, Dy, Dz              !< Space steps.
 integer(I4P)                  :: file_unit               !< File unit.
@@ -51,20 +51,16 @@ if (save_aabb_tree_stl) call file_stl%save_aabb_into_file(surface=surface_stl, b
 ! stop
 
 associate(bmin=>surface_stl%bmin, bmax=>surface_stl%bmax)
-   ni = 64
-   nj = 64
-   nk = 64
-
    Dx = (bmax%x - bmin%x) / ni
    Dy = (bmax%y - bmin%y) / nj
    Dz = (bmax%z - bmin%z) / nk
 
-   allocate(grid(-4:ni+5, -4:nj+5, -4:nk+5))
-   allocate(distance(-4:ni+5, -4:nj+5, -4:nk+5))
+   allocate(grid(1-gi:ni+gi, 1-gj:nj+gj, 1-gk:nk+gk))
+   allocate(distance(1-gi:ni+gi, 1-gj:nj+gj, 1-gk:nk+gk))
 
-   do k=-4, nk + 5
-      do j=-4, nj + 5
-         do i=-4, ni + 5
+   do k=1 - gk, nk + gk
+      do j=1 - gj, nj + gj
+         do i=1 - gi, ni + gi
             grid(i, j, k) = bmin + (i * Dx) * ex_R8P + (j * Dy) * ey_R8P + (k * Dz) * ez_R8P
          enddo
       enddo
@@ -75,9 +71,9 @@ if (test_brute_force) then
    surface_stl%aabb%is_initialized = .false.
    print '(A)', 'compute distances brute force'
    call system_clock(timing(1))
-   do k=-4, nk + 5
-      do j=-4, nj + 5
-         do i=-4, ni + 5
+   do k=1 - gk, nk + gk
+      do j=1 - gj, nj + gj
+         do i=1 - gi, ni + gi
             distance(i, j, k) = surface_stl%distance(point=grid(i, j, k), is_signed=.true., sign_algorithm=trim(sign_algorithm))
          enddo
       enddo
@@ -89,9 +85,9 @@ if (test_brute_force) then
    open(newunit=file_unit, file='fossil_test_distance-brute.dat')
    write(file_unit, '(A)')'VARIABLES = x y z distance'
    write(file_unit, '(A)')'ZONE T="distance", I='//trim(str(ni+10))//', J='//trim(str(nj+10))//', K='//trim(str(nk+10))//''
-   do k=-4, nk + 5
-      do j=-4, nj + 5
-         do i=-4, ni + 5
+   do k=1 - gk, nk + gk
+      do j=1 - gj, nj + gj
+         do i=1 - gi, ni + gi
             write(file_unit, '(A)') str(grid(i,j,k)%x)//' '//str(grid(i,j,k)%y)//' '//str(grid(i,j,k)%z)//' '//str(distance(i,j,k))
          enddo
       enddo
@@ -102,9 +98,9 @@ endif
 surface_stl%aabb%is_initialized = .true.
 print '(A)', 'compute distances AABB'
 call system_clock(timing(3))
-do k=-4, nk + 5
-   do j=-4, nj + 5
-      do i=-4, ni + 5
+do k=1 - gk, nk + gk
+   do j=1 - gj, nj + gj
+      do i=1 - gi, ni + gi
          distance(i, j, k) = surface_stl%distance(point=grid(i, j, k), is_signed=.not.unsigned, sign_algorithm=trim(sign_algorithm))
       enddo
    enddo
@@ -116,9 +112,9 @@ print '(A)', 'save output'
 open(newunit=file_unit, file='fossil_test_distance-aabb.dat')
 write(file_unit, '(A)')'VARIABLES = x y z distance'
 write(file_unit, '(A)')'ZONE T="distance", I='//trim(str(ni+10))//', J='//trim(str(nj+10))//', K='//trim(str(nk+10))//''
-do k=-4, nk + 5
-   do j=-4, nj + 5
-      do i=-4, ni + 5
+do k=1 - gk, nk + gk
+   do j=1 - gj, nj + gj
+      do i=1 - gi, ni + gi
          write(file_unit, '(A)') str(grid(i,j,k)%x)//' '//str(grid(i,j,k)%y)//' '//str(grid(i,j,k)%z)//' '//str(distance(i,j,k))
       enddo
    enddo
@@ -142,6 +138,42 @@ contains
                help='STL (input) file name',        &
                required=.false.,                    &
                def='src/tests/naca0012-binary.stl', &
+               act='store')
+
+  call cli%add(switch='--ni',                      &
+               help='cells number in i direction', &
+               required=.false.,                   &
+               def='128',                          &
+               act='store')
+
+  call cli%add(switch='--nj',                      &
+               help='cells number in j direction', &
+               required=.false.,                   &
+               def='128',                          &
+               act='store')
+
+  call cli%add(switch='--nk',                      &
+               help='cells number in k direction', &
+               required=.false.,                   &
+               def='3',                            &
+               act='store')
+
+  call cli%add(switch='--gi',                            &
+               help='ghost cells number in i direction', &
+               required=.false.,                         &
+               def='5',                                  &
+               act='store')
+
+  call cli%add(switch='--gj',                            &
+               help='ghost cells number in j direction', &
+               required=.false.,                         &
+               def='5',                                  &
+               act='store')
+
+  call cli%add(switch='--gk',                            &
+               help='ghost cells number in k direction', &
+               required=.false.,                         &
+               def='5',                                  &
                act='store')
 
   call cli%add(switch='--ref_levels',         &
@@ -183,6 +215,12 @@ contains
   call cli%parse(error=error) ; if (error/=0) stop
 
   call cli%get(switch='--stl',                     val=file_name_stl,           error=error) ; if (error/=0) stop
+  call cli%get(switch='--ni',                      val=ni,                      error=error) ; if (error/=0) stop
+  call cli%get(switch='--nj',                      val=nj,                      error=error) ; if (error/=0) stop
+  call cli%get(switch='--nk',                      val=nk,                      error=error) ; if (error/=0) stop
+  call cli%get(switch='--gi',                      val=gi,                      error=error) ; if (error/=0) stop
+  call cli%get(switch='--gj',                      val=gj,                      error=error) ; if (error/=0) stop
+  call cli%get(switch='--gk',                      val=gk,                      error=error) ; if (error/=0) stop
   call cli%get(switch='--ref_levels',              val=refinement_levels,       error=error) ; if (error/=0) stop
   call cli%get(switch='--save_aabb_tree_geometry', val=save_aabb_tree_geometry, error=error) ; if (error/=0) stop
   call cli%get(switch='--save_aabb_tree_stl',      val=save_aabb_tree_stl,      error=error) ; if (error/=0) stop
