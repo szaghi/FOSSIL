@@ -10,3 +10,15 @@
 [submodule "src/third_party/FACE"]
 	path = src/third_party/FACE
 	url = https://github.com/szaghi/FACE
+[submodule "src/third_party/BeFoR64"]
+	path = src/third_party/BeFoR64
+	url = https://github.com/szaghi/BeFoR64
+[submodule "src/third_party/StringiFor"]
+	path = src/third_party/StringiFor
+	url = https://github.com/szaghi/StringiFor
+[submodule "src/third_party/VTKFortran"]
+	path = src/third_party/VTKFortran
+	url = https://github.com/szaghi/VTKFortran
+[submodule "src/third_party/FoXy"]
+	path = src/third_party/FoXy
+	url = https://github.com/Fortran-FOSS-Programmers/FoXy
