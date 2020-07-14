@@ -53,10 +53,11 @@ contains
    enddo
    endsubroutine compute_cells_centers
 
-   subroutine compute_distances(self, surface_stl, sign_algorithm, invert_sign)
+   subroutine compute_distances(self, surface_stl, is_signed, sign_algorithm, invert_sign)
    !< Compute distances of cells centers from Immersed Boundary.
    class(block_object),      intent(inout)        :: self           !< Block.
    type(surface_stl_object), intent(in)           :: surface_stl    !< STL surface.
+   logical,                  intent(in)           :: is_signed      !< Signed distance or not.
    character(*),             intent(in)           :: sign_algorithm !< Algorithm used for "point in polyhedron" test.
    logical,                  intent(in), optional :: invert_sign    !< Invert sign of distances.
    logical                                        :: invert_sign_   !< Invert sign of distances, local variable.
@@ -69,7 +70,7 @@ contains
       do j=1 - self%gj(1), self%nj + self%gj(2)
          do i=1 - self%gi(1), self%ni + self%gi(2)
             self%distances(i, j, k) = surface_stl%distance(point=self%centers(i, j, k), is_signed=.true., &
-                                                           sign_algorithm=trim(sign_algorithm))
+                                                           is_signed=is_signed, sign_algorithm=trim(sign_algorithm))
          enddo
       enddo
    enddo
@@ -381,6 +382,7 @@ type(vector_R8P)             :: bmin, bmax              !< Bounding box extents.
 character(999)               :: file_name_stl           !< Input STL file name.
 character(999)               :: output_base_name        !< Output base name.
 integer(I4P)                 :: refinement_levels       !< AABB refinement levels used.
+logical                      :: is_signed               !< Signed distance or not.
 character(999)               :: sign_algorithm          !< Algorithm used for "point in polyhedron" test.
 logical                      :: unsigned                !< Compute unsigned distance.
 logical                      :: save_aabb_tree_geometry !< Sentinel to save AABB geometry.
@@ -517,6 +519,12 @@ contains
                def='2',                       &
                act='store')
 
+  call cli%add(switch='--is_signed',          &
+               help='signed distance or not', &
+               required=.false.,              &
+               def='.true.',                  &
+               act='store_true')
+
   call cli%add(switch='--sign_algorithm',                         &
                help='algorithm used to compute sign of distance', &
                required=.false.,                                  &
@@ -551,6 +559,7 @@ contains
   call cli%get(switch='--ej',                      val=ej,                      error=error) ; if (error/=0) stop
   call cli%get(switch='--ek',                      val=ek,                      error=error) ; if (error/=0) stop
   call cli%get(switch='--ref_levels',              val=refinement_levels,       error=error) ; if (error/=0) stop
+  call cli%get(switch='--is_signed',               val=is_signed,               error=error) ; if (error/=0) stop
   call cli%get(switch='--sign_algorithm',          val=sign_algorithm,          error=error) ; if (error/=0) stop
   call cli%get(switch='--save_aabb_tree_geometry', val=save_aabb_tree_geometry, error=error) ; if (error/=0) stop
   call cli%get(switch='--save_aabb_tree_stl',      val=save_aabb_tree_stl,      error=error) ; if (error/=0) stop

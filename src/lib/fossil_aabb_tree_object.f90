@@ -330,10 +330,12 @@ contains
             parent = parent_node(node=bbb)                                        ! parent of the current node
             if (self%node(parent)%is_allocated()) then                            ! create children nodes
                call self%node(parent)%compute_octants(octant=octant)              ! compute parent AABB octants
-               if (largest_edge_len > octant(1)%median()) then                    ! check if refinement has sense
-                  ! a further refinement does not have sense
-                  self%refinement_levels = level - 1                              ! set rifinement to the previous one
-                  exit levels_loop                                                ! exi loop
+               if (present(largest_edge_len)) then
+                  if (largest_edge_len > octant(1)%median()) then                 ! check if refinement has sense
+                     ! a further refinement does not have sense
+                     self%refinement_levels = level - 1                           ! set rifinement to the previous one
+                     exit levels_loop                                             ! exi loop
+                  endif
                endif
                do bbbb=0, TREE_RATIO-1                                            ! loop over children
                   call self%node(bbb+bbbb)%initialize(bmin=octant(bbbb+1)%bmin, &
