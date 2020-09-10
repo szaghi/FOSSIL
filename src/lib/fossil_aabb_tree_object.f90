@@ -266,13 +266,13 @@ contains
       enddo
 
       ! update AABB extents
-      do level=self%refinement_levels, 0, -1           ! loop over refinement levels
-         b = first_node(level=level)                   ! first node at level
-         do bb=1, nodes_number_at_level(level=level)   ! loop over nodes at level
-            bbb = b + bb - 1                           ! node numeration in tree
-            call node(bbb)%update_extents(facet=facet) ! update extents
-         enddo
-      enddo
+      ! do level=self%refinement_levels, 0, -1           ! loop over refinement levels
+      !    b = first_node(level=level)                   ! first node at level
+      !    do bb=1, nodes_number_at_level(level=level)   ! loop over nodes at level
+      !       bbb = b + bb - 1                           ! node numeration in tree
+      !       call node(bbb)%update_extents(facet=facet) ! update extents
+      !    enddo
+      ! enddo
    endassociate
    endsubroutine distribute_facets_tree
 
