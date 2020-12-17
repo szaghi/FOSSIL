@@ -290,12 +290,16 @@ contains
 
    self%E12 = self%vertex(2) - self%vertex(1)
    self%E13 = self%vertex(3) - self%vertex(1)
-   self%a   = self%E12.dot.self%E12
-   self%b   = self%E12.dot.self%E13
-   self%c   = self%E13.dot.self%E13
+   self%a   = self%E12%dotproduct(rhs=self%E12)
+   self%b   = self%E12%dotproduct(rhs=self%E13)
+   self%c   = self%E13%dotproduct(rhs=self%E13)
+   ! self%a   = self%E12.dot.self%E12
+   ! self%b   = self%E12.dot.self%E13
+   ! self%c   = self%E13.dot.self%E13
    self%det = self%a * self%c - self%b * self%b
 
-   self%d = self%normal.dot.self%vertex(1)
+   ! self%d = self%normal.dot.self%vertex(1)
+   self%d = self%normal%dotproduct(rhs=self%vertex(1))
 
    self%bb(1)%x = min(self%vertex(1)%x, self%vertex(2)%x, self%vertex(3)%x)
    self%bb(1)%y = min(self%vertex(1)%y, self%vertex(2)%y, self%vertex(3)%y)
@@ -455,14 +459,18 @@ contains
    real(R8P)                       :: a, f, u, v, t !< Baricentric abscissa.
 
    intersect = .false.
-   h = ray_direction.cross.self%E13
-   a = self%E12.dot.h
+   ! h = ray_direction.cross.self%E13
+   h = ray_direction%crossproduct(rhs=self%E13)
+   ! a = self%E12.dot.h
+   a = self%E12%dotproduct(rhs=h)
    if ((a > -EPS).and.(a < EPS)) return
    f = 1._R8P / a
    s = ray_origin - self%vertex(1)
-   u = f * (s.dot.h)
+   ! u = f * (s.dot.h)
+   u = f * (s%dotproduct(rhs=h))
    if ((u < 0._R8P).or.(u > 1._R8P)) return
-   q = s.cross.self%E12
+   ! q = s.cross.self%E12
+   q = s%crossproduct(rhs=self%E12)
    v = f * ray_direction.dot.q
    if ((v < 0._R8P).or.(u + v > 1._R8P)) return
    t = f * self%E13.dot.q
@@ -636,10 +644,14 @@ contains
    R2 = self%vertex(2) - point ; R2_norm = R2%normL2()
    R3 = self%vertex(3) - point ; R3_norm = R3%normL2()
 
-   numerator = R1.dot.(R2.cross.R3)
-   denominator = R1_norm * R2_norm * R3_norm + (R1.dot.R2) * R3_norm + &
-                                               (R1.dot.R3) * R2_norm + &
-                                               (R2.dot.R3) * R1_norm
+   ! numerator = R1.dot.(R2.cross.R3)
+   numerator = R1%dotproduct(rhs=R2%crossproduct(rhs=R3))
+   ! denominator = R1_norm * R2_norm * R3_norm + (R1.dot.R2) * R3_norm + &
+   !                                             (R1.dot.R3) * R2_norm + &
+   !                                             (R2.dot.R3) * R1_norm
+   denominator = R1_norm * R2_norm * R3_norm + (R1%dotproduct(rhs=R2)) * R3_norm + &
+                                               (R1%dotproduct(rhs=R3)) * R2_norm + &
+                                               (R2%dotproduct(rhs=R3)) * R1_norm
 
    solid_angle = 2._R8P * atan2(numerator, denominator)
    endfunction solid_angle
