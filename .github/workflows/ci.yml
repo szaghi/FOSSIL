@@ -28,28 +28,28 @@ jobs:
         tag=`git tag | tail -n 1`
         echo "RELEASE=$tag" >> $GITHUB_ENV
 
-    # - name: MAKE TAR
-    #   run: |
-    #     echo "release version:" ${{ env.RELEASE }}
-    #     FoBiS.py rule -ex maketar
-    #     ls *.tar.gz
+    - name: MAKE TAR
+      run: |
+        echo "release version:" ${{ env.RELEASE }}
+        FoBiS.py rule -ex maketar
+        ls *.tar.gz
 
-    # - name: DEPLOY ASSET
-    #   if: ${{ !env.ACT }}
-    #   uses: "marvinpinto/action-automatic-releases@latest"
-    #   with:
-    #     repo_token: "${{ secrets.GITHUB_TOKEN }}"
-    #     automatic_release_tag: ${{ env.RELEASE }}
-    #     prerelease: false
-    #     title: ${{ env.RELEASE }}
-    #     files: |
-    #       *.tar.gz
-    #       ./scripts/install.sh
+    - name: DEPLOY ASSET
+      if: ${{ !env.ACT }}
+      uses: "marvinpinto/action-automatic-releases@latest"
+      with:
+        repo_token: "${{ secrets.GITHUB_TOKEN }}"
+        automatic_release_tag: ${{ env.RELEASE }}
+        prerelease: false
+        title: ${{ env.RELEASE }}
+        files: |
+          *.tar.gz
+          ./scripts/install.sh
 
-    # - name: MAKE COVERAGE
-    #   run: |
-    #     FoBiS.py rule -ex makecoverage
+    - name: MAKE COVERAGE
+      run: |
+        FoBiS.py rule -ex makecoverage
 
-    # - name: UPLOAD COVERAGE to CODECOV
-    #   if: ${{ !env.ACT }}
-    #   uses: codecov/codecov-action@v3
+    - name: UPLOAD COVERAGE to CODECOV
+      if: ${{ !env.ACT }}
+      uses: codecov/codecov-action@v3
