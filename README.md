@@ -1,6 +1,6 @@
 <a name="top"></a>
 
-# FOSSIL [![GitHub tag](https://img.shields.io/github/tag/szaghi/FOSSIL.svg)]()
+# FOSSIL [![GitHub tag](https://img.shields.io/github/tag/szaghi/FOSSIL.svg)](https://github.com/szaghi/FOSSIL/releases)
 
 [![License](https://img.shields.io/badge/license-GNU%20GeneraL%20Public%20License%20v3%20,%20GPLv3-blue.svg)]()
 [![License](https://img.shields.io/badge/license-BSD2-red.svg)]()
@@ -8,8 +8,8 @@
 [![License](https://img.shields.io/badge/license-MIT-red.svg)]()
 
 [![Status](https://img.shields.io/badge/status-stable-brightgreen.svg)]()
-[![Build Status](https://travis-ci.org/szaghi/FOSSIL.svg?branch=master)](https://travis-ci.org/szaghi/FOSSIL)
-[![Coverage Status](https://img.shields.io/codecov/c/github/szaghi/FOSSIL.svg)](http://codecov.io/github/szaghi/FOSSIL?branch=master)
+[![CI Status](https://github.com/szaghi/FOSSIL/actions/workflows/ci.yml/badge.svg)](https://github.com/szaghi/FOSSIL/actions)
+[![Coverage Status](https://img.shields.io/codecov/c/github/szaghi/FOSSIL.svg)](https://app.codecov.io/gh/szaghi/FOSSIL)
 
 ### FOSSIL, FOrtran Stereo (si) Litography parser
 
@@ -20,10 +20,8 @@
 + FOSSIL is a Free, Open Source Project.
 
 #### Issues
+
 [![GitHub issues](https://img.shields.io/github/issues/szaghi/FOSSIL.svg)]()
-[![Ready in backlog](https://badge.waffle.io/szaghi/FOSSIL.png?label=ready&title=Ready)](https://waffle.io/szaghi/FOSSIL)
-[![In Progress](https://badge.waffle.io/szaghi/FOSSIL.png?label=in%20progress&title=In%20Progress)](https://waffle.io/szaghi/FOSSIL)
-[![Open bugs](https://badge.waffle.io/szaghi/FOSSIL.png?label=bug&title=Open%20Bugs)](https://waffle.io/szaghi/FOSSIL)
 
 #### Compiler Support
 
