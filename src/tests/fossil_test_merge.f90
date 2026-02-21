@@ -33,21 +33,27 @@ contains
   type(command_line_interface) :: cli   !< Test command line interface.
   integer(I4P)                 :: error !< Error trapping flag.
 
-  call cli%init(progname='fossil_test_merge',                                             &
-                authors='S. Zaghi',                                                       &
-                help='Usage: ',                                                           &
-                examples=["fossil_test_merge --stl dragon_part_1.stl dragon_part_2.stl"], &
+  call cli%init(progname='fossil_test_merge',                                                     &
+                authors='S. Zaghi',                                                               &
+                help='Usage: ',                                                                   &
+                examples=["fossil_test_merge --stl1 dragon_part_1.stl --stl2 dragon_part_2.stl"], &
                 epilog=new_line('a')//"all done")
 
-  call cli%add(switch='--stl',                                                  &
-               help='STL (input) file name',                                    &
-               required=.false.,                                                &
-               nargs='2',                                                       &
-               def='src/tests/dragon_part_1.stl src/tests/dragon_part_2.stl',   &
+  call cli%add(switch='--stl1',                   &
+               help='STL 1 (input) file name',    &
+               required=.false.,                  &
+               def='src/tests/dragon_part_1.stl', &
+               act='store')
+
+  call cli%add(switch='--stl2',                   &
+               help='STL 2 (input) file name',    &
+               required=.false.,                  &
+               def='src/tests/dragon_part_2.stl', &
                act='store')
 
   call cli%parse(error=error) ; if (error/=0) stop
 
-  call cli%get(switch='--stl', val=file_name_stl, error=error) ; if (error/=0) stop
+  call cli%get(switch='--stl1', val=file_name_stl(1), error=error) ; if (error/=0) stop
+  call cli%get(switch='--stl2', val=file_name_stl(2), error=error) ; if (error/=0) stop
   endsubroutine cli_parse
 endprogram fossil_test_merge

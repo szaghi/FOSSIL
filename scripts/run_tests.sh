@@ -14,7 +14,7 @@ all_passed () {
 
 echo "Run all tests"
 declare -a tests_executed
-for e in $( find ./exe/ -type f -executable -print ); do
+for e in $( find ./exe/ -type f -executable -name "*_test*" -print ); do
   is_passed=`$e | grep -i "Are all tests passed? " | awk '{print $5}'`
   tests_executed=("${tests_executed[@]}" "$is_passed")
   echo "  run test $e, is passed? $is_passed"

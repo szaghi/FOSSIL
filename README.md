@@ -1,177 +1,86 @@
-<a name="top"></a>
+# FOSSIL
 
-# FOSSIL [![GitHub tag](https://img.shields.io/github/tag/szaghi/FOSSIL.svg)](https://github.com/szaghi/FOSSIL/releases)
+**FOrtran Stereo Litography parser** — a pure Fortran 2003+ OOP library for reading, writing, and manipulating [STL](https://en.wikipedia.org/wiki/STL_(file_format)) mesh files.
 
-[![License](https://img.shields.io/badge/license-GNU%20GeneraL%20Public%20License%20v3%20,%20GPLv3-blue.svg)]()
-[![License](https://img.shields.io/badge/license-BSD2-red.svg)]()
-[![License](https://img.shields.io/badge/license-BSD3-red.svg)]()
-[![License](https://img.shields.io/badge/license-MIT-red.svg)]()
-
-[![Status](https://img.shields.io/badge/status-stable-brightgreen.svg)]()
-[![CI Status](https://github.com/szaghi/FOSSIL/actions/workflows/ci.yml/badge.svg)](https://github.com/szaghi/FOSSIL/actions)
-[![Coverage Status](https://img.shields.io/codecov/c/github/szaghi/FOSSIL.svg)](https://app.codecov.io/gh/szaghi/FOSSIL)
-
-### FOSSIL, FOrtran Stereo (si) Litography parser
-
-+ FOSSIL is a pure Fortran (KISS) library for IO and manipulation of STL (Stereo Litography) files for modern (2003+) Fortran projects;
-+ FOSSIL is Fortran 2003+ standard compliant;
-- FOSSIL is OOP designed;
-- FOSSIL is TDD designed;
-+ FOSSIL is a Free, Open Source Project.
-
-#### Issues
-
-[![GitHub issues](https://img.shields.io/github/issues/szaghi/FOSSIL.svg)]()
-
-#### Compiler Support
-
-[![Compiler](https://img.shields.io/badge/GNU-v5.3.0+-orange.svg)]()
-[![Compiler](https://img.shields.io/badge/Intel-v16.x+-brightgreen.svg)]()
-[![Compiler](https://img.shields.io/badge/IBM%20XL-not%20tested-yellow.svg)]()
-[![Compiler](https://img.shields.io/badge/g95-not%20tested-yellow.svg)]()
-[![Compiler](https://img.shields.io/badge/NAG-not%20tested-yellow.svg)]()
-[![Compiler](https://img.shields.io/badge/PGI-not%20tested-yellow.svg)]()
+[![CI](https://github.com/szaghi/FOSSIL/actions/workflows/ci.yml/badge.svg)](https://github.com/szaghi/FOSSIL/actions)
+[![Coverage](https://img.shields.io/codecov/c/github/szaghi/FOSSIL.svg)](https://app.codecov.io/gh/szaghi/FOSSIL)
+[![GitHub tag](https://img.shields.io/github/tag/szaghi/FOSSIL.svg)](https://github.com/szaghi/FOSSIL/releases)
+[![License](https://img.shields.io/badge/license-GPLv3%20%7C%20BSD%20%7C%20MIT-blue.svg)](#copyrights)
 
 ---
 
-[What is FOSSIL?](#what-is-fossil?) | [Main features](#main-features) | [Copyrights](#copyrights) | [Documentation](#documentation) | [A Taste of FOSSIL](#a-taste-of-fossil)
+## Features
+
+- Load ASCII or binary STL files — format auto-detected with `guess_format=.true.`
+- Translate, rotate, mirror, resize, clip, and merge STL surfaces
+- Compute volume, centroid, bounding box, connectivity, and disconnected edges
+- Sanitize and reverse facet normals; repair disconnected edges automatically
+- Signed distance and point-in-polyhedron queries (solid angle or ray intersection)
+- AABB octree acceleration — up to 7× faster distance queries over brute force
+- OOP/TDD designed — three types (`file_stl_object`, `surface_stl_object`, `facet_object`), all functionality as type-bound procedures
+- `fossilizer` CLI for interactive STL analysis and manipulation
+
+**[Documentation](https://szaghi.github.io/FOSSIL/)** | **[API Reference](https://szaghi.github.io/FOSSIL/api/)**
 
 ---
 
-## What is FOSSIL?
+## Authors
 
-FOSSIL is a pure Fortran (KISS) library for IO and manipulation of STL (Stereo Litography) files for modern (2003+) Fortran projects.
+- Stefano Zaghi — [@szaghi](https://github.com/szaghi)
 
-FOSSIL provides a simple API to IO STL files and also to manipulate the triangulated surface contained into the STL file.
-
-![dragon](pre_docs/dragon.jpg)
-
-> the dragon STL test (src/tests/dragon.stl) is composed by 6588 triangular facets. The signed distance computation on a uniform
-> grid of `64^3` is accelerated by a factor of 7x using AABB algorithm with respect the simple brute force.
-
-![disconnected-cube](pre_docs/disconnected-cube.png)
-
-> automatic repair of disconnected edges.
-
-Go to [Top](#top)
-
-## Main features
-
-* [X] User-friendly methods for IO STL files:
-    * [x] input:
-        * [x] automatic guessing of file format (ASCII or BINARY);
-        * [x] load STL file effortless;
-    * [x] output:
-        * [x] save STL file effortless;
-* [x] powerful surface analysis and manipulation:
-    * [x] build facets connectivity;
-    * [x] sanitize normals:
-        * [x] reverse normals:
-        * [x] make normals consistent:
-    * [x] compute volume;
-    * [x] clip surface outside a bounding box;
-    * [x] merge STL files;
-    * [x] rotate facets;
-    * [x] translate facets;
-    * [x] mirror facets;
-    * [x] resize (scale) facets;
-    * [x] compute minimal distance:
-        * [x] square distance;
-        * [x] square root distance;
-        * [x] signed distance:
-            * [x] by means of solid angle computation;
-            * [x] by means of rays intersection count;
-        * [x] AABB (Axis-Aligned Bounding Box) tree acceleration with user defined refinement levels;
-    * [x] point-in-polyhedra test:
-        * [x] by means of solid angle computation;
-        * [x] by means of rays intersection count;
-    * [ ] fill holes;
-    * [x] check surface watertight:
-        * [x] identify disconected edges;
-    * [x] connect nearby facets;
-* [ ] errors trapping mechanism.
-
-Any feature request is welcome.
-
-Go to [Top](#top)
+Contributions are welcome — see the [Contributing](https://szaghi.github.io/FOSSIL/guide/contributing) page.
 
 ## Copyrights
 
-FOSSIL is an open source project, it is distributed under a multi-licensing system:
+This project is distributed under a multi-licensing system:
 
-+ for FOSS projects:
-  - [GPL v3](http://www.gnu.org/licenses/gpl-3.0.html);
-+ for closed source/commercial projects:
-  - [BSD 2-Clause](http://opensource.org/licenses/BSD-2-Clause);
-  - [BSD 3-Clause](http://opensource.org/licenses/BSD-3-Clause);
-  - [MIT](http://opensource.org/licenses/MIT).
+- **FOSS projects**: [GPL v3](http://www.gnu.org/licenses/gpl-3.0.html)
+- **Closed source / commercial**: [BSD 2-Clause](http://opensource.org/licenses/BSD-2-Clause), [BSD 3-Clause](http://opensource.org/licenses/BSD-3-Clause), or [MIT](http://opensource.org/licenses/MIT)
 
-Anyone is interest to use, to develop or to contribute to FOSSIL is welcome, feel free to select the license that best matches your soul!
+> Anyone interested in using, developing, or contributing to this project is welcome — pick the license that best fits your needs.
 
-More details can be found on [wiki](https://github.com/szaghi/FOSSIL/wiki/Copyrights).
+---
 
-Go to [Top](#top)
+## Quick start
 
-## Documentation
+Load an STL file, print its statistics, and translate it:
 
-Besides this README file the FOSSIL documentation is contained into its own [wiki](https://github.com/szaghi/FOSSIL/wiki). Detailed documentation of the API is contained into the [GitHub Pages](http://szaghi.github.io/FOSSIL/) that can also be created locally by means of [ford tool](https://github.com/cmacmackin/ford).
-
-### A Taste of FOSSIL
-
-FOSSIL is an KISS library:
-
-#### simple load
-> effortless load of file (with STL surface analysis)
 ```fortran
 use fossil
-type(file_stl_object)    :: file_stl    ! STL file handler.
-type(surface_stl_object) :: surface_stl ! STL surface handler.
+use penf, only: R8P
+use vecfor, only: vector_R8P
+implicit none
+type(file_stl_object)    :: file_stl
+type(surface_stl_object) :: surface
 
-call file_stl%initialize(file_name='cube.stl')
-call file_stl%load_from_file(surface=surface_stl, guess_format=.true.)
+call file_stl%load_from_file(facet=surface%facet, file_name='cube.stl', guess_format=.true.)
+call surface%analize
+print '(A)', surface%statistics()
+
+call surface%translate(x=1.0_R8P, y=2.0_R8P, z=0.5_R8P)
+call file_stl%save_into_file(facet=surface%facet, file_name='cube-moved.stl')
 ```
 
-#### print STL statistics
-> print main informations of STL
+Sanitize normals and compute volume:
+
 ```fortran
-print '(A)', file_stl%statistics()
-print '(A)', surface_stl%statistics()
-```
-> upon exection will print something like
-```bash
-Mesh_1
-file name:   src/tests/cube.stl
-file format: ascii
-X extents: [ 0.000000000000000E+000, +0.100000000000000E+001]
-Y extents: [ 0.000000000000000E+000, +0.100000000000000E+001]
-Z extents: [ 0.000000000000000E+000, +0.100000000000000E+001]
-volume: -0.100000000000000E+001
-centroid: [+0.500000000000000E+000, +0.500000000000000E+000, +0.500000000000000E+000]
-number of facets: +12
-number of facets with 1 edges disconnected: +0
-number of facets with 2 edges disconnected: +0
-number of facets with 3 edges disconnected: +0
-number of AABB refinement levels: +2
+call surface%sanitize_normals
+call surface%compute_volume
+print *, 'volume =', surface%volume
 ```
 
-#### sanitiza normals
-> make normals consistent
-```fortran
-call surface_stl%sanitize_normals
+---
+
+## Install
+
+```sh
+git clone https://github.com/szaghi/FOSSIL --recursive
+cd FOSSIL
 ```
 
-#### simple manipulations
-> simply manipulate geometry
-```fortran
-call surface_stl%resize(factor=3.4*ex + 2*ey + 0.5*ez) ! ex, ey, ez being axis versors
-call surface_stl%resize(x=0.5, z=1.2)                  ! scale only x and z axis
-call surface_stl%mirror(normal=ex)                     ! mirror respect yz-plane
-call surface_stl%mirror(normal=ex+ey)                  ! mirror respect plane with normal ex+ey
-call surface_stl%mirror(matrix=matrix)                 ! mirror by a given mirroring matrix
-call surface_stl%rotate(axis=ex, angle=1.57)           ! rotate around x axis by pi/2
-call surface_stl%rotate(matrix=matrix)                 ! rotati by a given rotating matrix
-call surface_stl%translate(delta=3*ex + 2*ey + 0.5*ez) ! translate by a vectorial delta
-call surface_stl%translate(x=0.5, z=1.2)               ! translate by only x and z delta
-```
-
-Go to [Top](#top)
+| Tool | Command |
+|------|---------|
+| FoBiS.py | `FoBiS.py build -mode static-gnu` |
+| FoBiS.py (tests) | `FoBiS.py build -mode tests-gnu && ./scripts/run_tests.sh` |
+| make | `./scripts/install.sh --build make` |
+| cmake | `./scripts/install.sh --build cmake` |

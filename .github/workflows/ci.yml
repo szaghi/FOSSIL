@@ -1,55 +1,29 @@
 name: CI
 
-on: push
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]   # tags are handled by release.yml
+  pull_request:
 
 jobs:
-  test-deploy:
-
+  test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
-    - name: PREPARE SYSTEM
-      run: |
-        python --version
-        gfortran --version
-        gcov --version
-        pip install --upgrade FoBiS.py && FoBiS.py --version
-    
-    - name: CHECKOUT
-      id: checkout
-      run: |
-        git clone https://github.com/$GITHUB_REPOSITORY ./
-        git submodule init
-        git submodule update
-        ls -l src/third_party/*/src/lib/
-        git log -n 1
-        tag=`git tag | tail -n 1`
-        echo "RELEASE=$tag" >> $GITHUB_ENV
 
-    - name: MAKE TAR
-      run: |
-        echo "release version:" ${{ env.RELEASE }}
-        FoBiS.py rule -ex maketar
-        ls *.tar.gz
-
-    - name: DEPLOY ASSET
-      if: ${{ !env.ACT }}
-      uses: "marvinpinto/action-automatic-releases@latest"
+    - name: Checkout repository
+      uses: actions/checkout@v4
       with:
-        repo_token: "${{ secrets.GITHUB_TOKEN }}"
-        automatic_release_tag: ${{ env.RELEASE }}
-        prerelease: false
-        title: ${{ env.RELEASE }}
-        files: |
-          *.tar.gz
-          ./scripts/install.sh
+        submodules: 'true'
 
-    - name: MAKE COVERAGE
-      run: |
-        FoBiS.py rule -ex makecoverage
+    - name: Setup build environment
+      uses: ./.github/actions/setup-build-env
 
-    - name: UPLOAD COVERAGE to CODECOV
-      if: ${{ !env.ACT }}
-      uses: codecov/codecov-action@v3
+    - name: Run tests with coverage
+      run: FoBiS.py rule -ex makecoverage
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}

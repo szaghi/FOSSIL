@@ -1,1 +1,0 @@
-../../scripts/get_automatic_changelog.sh
