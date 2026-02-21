@@ -1,10 +1,14 @@
 # Changelog
-## [Unreleased]
+## [v1.0.7](https://github.com/szaghi/FLAP/tree/v1.0.7) (2026-02-21)
+[Full Changelog](https://github.com/szaghi/FLAP/compare/v1.0.6...v1.0.7)
 ### Bug fixes
 - Update third party submodules ([`1ae2da2`](https://github.com/szaghi/FLAP/commit/1ae2da20a61ce724549634fcf7a56791ce7577aa))
 
 ### Miscellaneous
 - Correct GHA ci ([`3463adb`](https://github.com/szaghi/FLAP/commit/3463adb783259a5a900c84ef1351b7c1a6e960e5))
+
+### New features
+- Add full VitePress guide and modernise project tooling ([`dbf2628`](https://github.com/szaghi/FLAP/commit/dbf26286947f54071a21208fa8642c15def3d273))
 
 ## [v1.0.6](https://github.com/szaghi/FLAP/tree/v1.0.6) (2022-07-06)
 [Full Changelog](https://github.com/szaghi/FLAP/compare/v1.0.5...v1.0.6)
