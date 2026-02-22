@@ -1,4 +1,9 @@
 # Changelog
+## [v1.0.10](https://github.com/szaghi/FLAP/tree/v1.0.10) (2026-02-22)
+[Full Changelog](https://github.com/szaghi/FLAP/compare/v1.0.9...v1.0.10)
+### Miscellaneous
+- Update StringiFor submodule ([`29aab1a`](https://github.com/szaghi/FLAP/commit/29aab1a29684061e8c01dde2362475977c83aab7))
+
 ## [v1.0.9](https://github.com/szaghi/FLAP/tree/v1.0.9) (2026-02-22)
 [Full Changelog](https://github.com/szaghi/FLAP/compare/v1.0.8...v1.0.9)
 ### Miscellaneous
