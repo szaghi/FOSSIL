@@ -16,6 +16,7 @@ jobs:
 
   deploy:
     needs: [coverage]
+    if: always() # ← deploy even if coverage fails
     runs-on: ubuntu-latest
     permissions:
       contents: write
