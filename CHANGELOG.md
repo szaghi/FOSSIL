@@ -1,4 +1,9 @@
 # Changelog
+## [v1.0.8](https://github.com/szaghi/FLAP/tree/v1.0.8) (2026-02-22)
+[Full Changelog](https://github.com/szaghi/FLAP/compare/v1.0.7...v1.0.8)
+### CI/CD
+- Deploy pages even if coverage analysis fails ([`55553e5`](https://github.com/szaghi/FLAP/commit/55553e50cf1e854594e882600988d344eab3abe8))
+
 ## [v1.0.7](https://github.com/szaghi/FLAP/tree/v1.0.7) (2026-02-21)
 [Full Changelog](https://github.com/szaghi/FLAP/compare/v1.0.6...v1.0.7)
 ### Bug fixes
