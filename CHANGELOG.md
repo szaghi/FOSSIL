@@ -1,4 +1,27 @@
 # Changelog
+## [v1.0.11](https://github.com/szaghi/FLAP/tree/v1.0.11) (2026-03-03)
+[Full Changelog](https://github.com/szaghi/FLAP/compare/v1.0.10...v1.0.11)
+### Miscellaneous
+- Bump rollup from 4.58.0 to 4.59.0 in /docs
+
+Bumps [rollup](https://github.com/rollup/rollup) from 4.58.0 to 4.59.0.
+- [Release notes](https://github.com/rollup/rollup/releases)
+- [Changelog](https://github.com/rollup/rollup/blob/master/CHANGELOG.md)
+- [Commits](https://github.com/rollup/rollup/compare/v4.58.0...v4.59.0)
+
+---
+updated-dependencies:
+- dependency-name: rollup
+  dependency-version: 4.59.0
+  dependency-type: indirect
+...
+
+Signed-off-by: dependabot[bot] <support@github.com> ([`8129578`](https://github.com/szaghi/FLAP/commit/8129578c7467c301492435d8d62f9185dee94745))
+- Merge pull request [#8](https://github.com/szaghi/FLAP/issues/8) from szaghi/dependabot/npm_and_yarn/docs/rollup-4.59.0
+
+Bump rollup from 4.58.0 to 4.59.0 in /docs ([`269a85a`](https://github.com/szaghi/FLAP/commit/269a85a26df9b11aa415126590fe570bb12bf09a))
+- Migrate deps to FoBiS fetch and modernise CI/CD ([`995f2f8`](https://github.com/szaghi/FLAP/commit/995f2f8475d6a81d0b2c1b10857338971c5a063c))
+
 ## [v1.0.10](https://github.com/szaghi/FLAP/tree/v1.0.10) (2026-02-22)
 [Full Changelog](https://github.com/szaghi/FLAP/compare/v1.0.9...v1.0.10)
 ### Miscellaneous
