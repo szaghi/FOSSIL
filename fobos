@@ -1,3 +1,23 @@
+[project]
+name       = FOSSIL
+version    = VERSION
+summary    = FOrtran Stereo (si) Litography parser
+repository = https://github.com/szaghi/FOSSIL
+website    = https://szaghi.github.io/FOSSIL
+email      = stefano.zaghi@gmail.it
+authors    = Stefano Zaghi
+
+[dependencies]
+deps_dir   = src/third_party
+BeFoR64    = https://github.com/szaghi/BeFoR64
+FACE       = https://github.com/szaghi/FACE
+FLAP       = https://github.com/szaghi/FLAP
+FoXy       = https://github.com/Fortran-FOSS-Programmers/FoXy
+PENF       = https://github.com/szaghi/PENF
+StringiFor = https://github.com/szaghi/StringiFor
+VTKFortran = https://github.com/szaghi/VTKFortran
+VecFor     = https://github.com/szaghi/VecFor
+
 [modes]
 modes = shared-gnu static-gnu shared-gnu-debug static-gnu-debug
         shared-intel static-intel shared-intel-debug static-intel-debug
@@ -228,11 +248,11 @@ rule = tar --xform="s%^%FOSSIL/%" -czf FOSSIL.tar.gz *
 
 [rule-makecoverage]
 help   = Perform coverage analysis
-rule_1 = FoBiS.py clean -mode tests-gnu
-rule_2 = FoBiS.py build -mode tests-gnu -coverage
+rule_1 = FoBiS.py rule -ex delexe
+rule_2 = FoBiS.py build -mode tests-gnu-debug -coverage
 rule_3 = ./scripts/run_tests.sh
 rule_4 = rm -f exe/obj/befor64* exe/obj/face* exe/obj/flap* exe/obj/foxy* exe/obj/penf* exe/obj/stringifor* exe/obj/vecfor* exe/obj/vtk*
-rule_5 = gcov -o exe/obj/ src/lib/fossil*
+rule_5 = ./scripts/compute-coverage.sh
 
 [rule-makecoverage-analysis]
 help   = Perform coverage analysis and saving reports in markdown

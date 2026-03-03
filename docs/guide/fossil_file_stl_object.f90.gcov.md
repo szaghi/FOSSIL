@@ -2,16 +2,16 @@
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |158| |
-|Executed lines              |129|82%|
-|Unexecuted lines            |29|18%|
-|Average hits / executed     |2308.4418604651164| |
+|Executable lines            |164| |
+|Executed lines              |132|80%|
+|Unexecuted lines            |32|20%|
+|Average hits / executed     |2256.401515151515| |
 
 ```mermaid
 pie showData
-    title Lines (82% covered)
-    "Executed" : 129
-    "Unexecuted" : 29
+    title Lines (80% covered)
+    "Executed" : 132
+    "Unexecuted" : 32
 ```
 
 |Procedures| | |

@@ -1,19 +1,81 @@
 ### coverage-analysis
 
+#### [[fossil_test_translate.f90.gcov]]
+
+|Lines| | |
+| --- | --- | --- |
+|Executable lines            |40| |
+|Executed lines              |40|100%|
+|Unexecuted lines            |0|0%|
+|Average hits / executed     |1.225| |
+
+```mermaid
+pie showData
+    title Lines (100% covered)
+    "Executed" : 40
+    "Unexecuted" : 0
+```
+
+|Procedures| | |
+| --- | --- | --- |
+|Total procedures            |1| |
+|Executed procedures         |1|100%|
+|Unexecuted procedures       |0|0%|
+|Average hits / executed     |1.0| |
+
+```mermaid
+pie showData
+    title Procedures (100% covered)
+    "Executed" : 1
+    "Unexecuted" : 0
+```
+
+
+#### [[fossil_test_clip.f90.gcov]]
+
+|Lines| | |
+| --- | --- | --- |
+|Executable lines            |37| |
+|Executed lines              |37|100%|
+|Unexecuted lines            |0|0%|
+|Average hits / executed     |711.7027027027027| |
+
+```mermaid
+pie showData
+    title Lines (100% covered)
+    "Executed" : 37
+    "Unexecuted" : 0
+```
+
+|Procedures| | |
+| --- | --- | --- |
+|Total procedures            |1| |
+|Executed procedures         |1|100%|
+|Unexecuted procedures       |0|0%|
+|Average hits / executed     |1.0| |
+
+```mermaid
+pie showData
+    title Procedures (100% covered)
+    "Executed" : 1
+    "Unexecuted" : 0
+```
+
+
 #### [[fossil_facet_object.f90.gcov]]
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |384| |
-|Executed lines              |313|82%|
-|Unexecuted lines            |71|18%|
-|Average hits / executed     |7323580.712460064| |
+|Executable lines            |398| |
+|Executed lines              |324|81%|
+|Unexecuted lines            |74|19%|
+|Average hits / executed     |8086783.009259259| |
 
 ```mermaid
 pie showData
-    title Lines (82% covered)
-    "Executed" : 313
-    "Unexecuted" : 71
+    title Lines (81% covered)
+    "Executed" : 324
+    "Unexecuted" : 74
 ```
 
 |Procedures| | |
@@ -31,20 +93,82 @@ pie showData
 ```
 
 
+#### [[fossil_test_resize.f90.gcov]]
+
+|Lines| | |
+| --- | --- | --- |
+|Executable lines            |45| |
+|Executed lines              |45|100%|
+|Unexecuted lines            |0|0%|
+|Average hits / executed     |3.066666666666667| |
+
+```mermaid
+pie showData
+    title Lines (100% covered)
+    "Executed" : 45
+    "Unexecuted" : 0
+```
+
+|Procedures| | |
+| --- | --- | --- |
+|Total procedures            |1| |
+|Executed procedures         |1|100%|
+|Unexecuted procedures       |0|0%|
+|Average hits / executed     |1.0| |
+
+```mermaid
+pie showData
+    title Procedures (100% covered)
+    "Executed" : 1
+    "Unexecuted" : 0
+```
+
+
+#### [[fossil_test_sanitize_normals.f90.gcov]]
+
+|Lines| | |
+| --- | --- | --- |
+|Executable lines            |22| |
+|Executed lines              |22|100%|
+|Unexecuted lines            |0|0%|
+|Average hits / executed     |1.1818181818181819| |
+
+```mermaid
+pie showData
+    title Lines (100% covered)
+    "Executed" : 22
+    "Unexecuted" : 0
+```
+
+|Procedures| | |
+| --- | --- | --- |
+|Total procedures            |1| |
+|Executed procedures         |1|100%|
+|Unexecuted procedures       |0|0%|
+|Average hits / executed     |1.0| |
+
+```mermaid
+pie showData
+    title Procedures (100% covered)
+    "Executed" : 1
+    "Unexecuted" : 0
+```
+
+
 #### [[fossil_surface_stl.f90.gcov]]
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |337| |
-|Executed lines              |241|72%|
-|Unexecuted lines            |96|28%|
-|Average hits / executed     |44496.78008298755| |
+|Executable lines            |359| |
+|Executed lines              |254|71%|
+|Unexecuted lines            |105|29%|
+|Average hits / executed     |46467.63385826772| |
 
 ```mermaid
 pie showData
-    title Lines (72% covered)
-    "Executed" : 241
-    "Unexecuted" : 96
+    title Lines (71% covered)
+    "Executed" : 254
+    "Unexecuted" : 105
 ```
 
 |Procedures| | |
@@ -52,13 +176,44 @@ pie showData
 |Total procedures            |34| |
 |Executed procedures         |25|74%|
 |Unexecuted procedures       |9|26%|
-|Average hits / executed     |67565.2| |
+|Average hits / executed     |67565.24| |
 
 ```mermaid
 pie showData
     title Procedures (74% covered)
     "Executed" : 25
     "Unexecuted" : 9
+```
+
+
+#### [[fossil_test_distance.f90.gcov]]
+
+|Lines| | |
+| --- | --- | --- |
+|Executable lines            |100| |
+|Executed lines              |81|81%|
+|Unexecuted lines            |19|19%|
+|Average hits / executed     |21619.283950617282| |
+
+```mermaid
+pie showData
+    title Lines (81% covered)
+    "Executed" : 81
+    "Unexecuted" : 19
+```
+
+|Procedures| | |
+| --- | --- | --- |
+|Total procedures            |1| |
+|Executed procedures         |1|100%|
+|Unexecuted procedures       |0|0%|
+|Average hits / executed     |1.0| |
+
+```mermaid
+pie showData
+    title Procedures (100% covered)
+    "Executed" : 1
+    "Unexecuted" : 0
 ```
 
 
@@ -97,30 +252,61 @@ pie showData
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |176| |
-|Executed lines              |109|62%|
-|Unexecuted lines            |67|38%|
-|Average hits / executed     |4420195.651376147| |
+|Executable lines            |197| |
+|Executed lines              |123|62%|
+|Unexecuted lines            |74|38%|
+|Average hits / executed     |4215741.62601626| |
 
 ```mermaid
 pie showData
     title Lines (62% covered)
-    "Executed" : 109
-    "Unexecuted" : 67
+    "Executed" : 123
+    "Unexecuted" : 74
 ```
 
 |Procedures| | |
 | --- | --- | --- |
-|Total procedures            |24| |
-|Executed procedures         |15|62%|
-|Unexecuted procedures       |9|38%|
-|Average hits / executed     |814256.8666666667| |
+|Total procedures            |25| |
+|Executed procedures         |15|60%|
+|Unexecuted procedures       |10|40%|
+|Average hits / executed     |814285.5333333333| |
 
 ```mermaid
 pie showData
-    title Procedures (62% covered)
+    title Procedures (60% covered)
     "Executed" : 15
-    "Unexecuted" : 9
+    "Unexecuted" : 10
+```
+
+
+#### [[fossil_test_mirror.f90.gcov]]
+
+|Lines| | |
+| --- | --- | --- |
+|Executable lines            |29| |
+|Executed lines              |29|100%|
+|Unexecuted lines            |0|0%|
+|Average hits / executed     |1.2413793103448276| |
+
+```mermaid
+pie showData
+    title Lines (100% covered)
+    "Executed" : 29
+    "Unexecuted" : 0
+```
+
+|Procedures| | |
+| --- | --- | --- |
+|Total procedures            |1| |
+|Executed procedures         |1|100%|
+|Unexecuted procedures       |0|0%|
+|Average hits / executed     |1.0| |
+
+```mermaid
+pie showData
+    title Procedures (100% covered)
+    "Executed" : 1
+    "Unexecuted" : 0
 ```
 
 
@@ -128,16 +314,16 @@ pie showData
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |41| |
-|Executed lines              |40|98%|
-|Unexecuted lines            |1|2%|
-|Average hits / executed     |21978862.275| |
+|Executable lines            |42| |
+|Executed lines              |42|100%|
+|Unexecuted lines            |0|0%|
+|Average hits / executed     |21012250.19047619| |
 
 ```mermaid
 pie showData
-    title Lines (98% covered)
-    "Executed" : 40
-    "Unexecuted" : 1
+    title Lines (100% covered)
+    "Executed" : 42
+    "Unexecuted" : 0
 ```
 
 |Procedures| | |
@@ -145,7 +331,7 @@ pie showData
 |Total procedures            |5| |
 |Executed procedures         |5|100%|
 |Unexecuted procedures       |0|0%|
-|Average hits / executed     |459713.8| |
+|Average hits / executed     |459722.2| |
 
 ```mermaid
 pie showData
@@ -159,15 +345,15 @@ pie showData
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |84| |
-|Executed lines              |41|49%|
-|Unexecuted lines            |43|51%|
-|Average hits / executed     |694357.3902439025| |
+|Executable lines            |88| |
+|Executed lines              |45|51%|
+|Unexecuted lines            |43|49%|
+|Average hits / executed     |684746.4| |
 
 ```mermaid
 pie showData
-    title Lines (49% covered)
-    "Executed" : 41
+    title Lines (51% covered)
+    "Executed" : 45
     "Unexecuted" : 43
 ```
 
@@ -176,7 +362,7 @@ pie showData
 |Total procedures            |22| |
 |Executed procedures         |11|50%|
 |Unexecuted procedures       |11|50%|
-|Average hits / executed     |841435.4545454546| |
+|Average hits / executed     |841455.0| |
 
 ```mermaid
 pie showData
@@ -186,34 +372,82 @@ pie showData
 ```
 
 
-#### [[fossil_block_object.f90.gcov]]
+#### [[fossil_test_rotate.f90.gcov]]
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |255| |
-|Executed lines              |0|0%|
-|Unexecuted lines            |255|100%|
-|Average hits / executed     |0| |
+|Executable lines            |29| |
+|Executed lines              |29|100%|
+|Unexecuted lines            |0|0%|
+|Average hits / executed     |1.2413793103448276| |
 
 ```mermaid
 pie showData
-    title Lines (0% covered)
-    "Executed" : 0
-    "Unexecuted" : 255
+    title Lines (100% covered)
+    "Executed" : 29
+    "Unexecuted" : 0
 ```
 
 |Procedures| | |
 | --- | --- | --- |
-|Total procedures            |9| |
-|Executed procedures         |0|0%|
-|Unexecuted procedures       |9|100%|
-|Average hits / executed     |0| |
+|Total procedures            |1| |
+|Executed procedures         |1|100%|
+|Unexecuted procedures       |0|0%|
+|Average hits / executed     |1.0| |
 
 ```mermaid
 pie showData
-    title Procedures (0% covered)
-    "Executed" : 0
-    "Unexecuted" : 9
+    title Procedures (100% covered)
+    "Executed" : 1
+    "Unexecuted" : 0
+```
+
+
+#### [[fossil_test_load_save_binary.f90.gcov]]
+
+|Lines| | |
+| --- | --- | --- |
+|Executable lines            |24| |
+|Executed lines              |24|100%|
+|Unexecuted lines            |0|0%|
+|Average hits / executed     |1.3333333333333333| |
+
+```mermaid
+pie showData
+    title Lines (100% covered)
+    "Executed" : 24
+    "Unexecuted" : 0
+```
+
+
+#### [[fossil_test_merge.f90.gcov]]
+
+|Lines| | |
+| --- | --- | --- |
+|Executable lines            |23| |
+|Executed lines              |23|100%|
+|Unexecuted lines            |0|0%|
+|Average hits / executed     |1.2173913043478262| |
+
+```mermaid
+pie showData
+    title Lines (100% covered)
+    "Executed" : 23
+    "Unexecuted" : 0
+```
+
+|Procedures| | |
+| --- | --- | --- |
+|Total procedures            |1| |
+|Executed procedures         |1|100%|
+|Unexecuted procedures       |0|0%|
+|Average hits / executed     |1.0| |
+
+```mermaid
+pie showData
+    title Procedures (100% covered)
+    "Executed" : 1
+    "Unexecuted" : 0
 ```
 
 
@@ -221,16 +455,16 @@ pie showData
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |202| |
-|Executed lines              |121|60%|
-|Unexecuted lines            |81|40%|
-|Average hits / executed     |249296.173553719| |
+|Executable lines            |226| |
+|Executed lines              |131|58%|
+|Unexecuted lines            |95|42%|
+|Average hits / executed     |257305.4351145038| |
 
 ```mermaid
 pie showData
-    title Lines (60% covered)
-    "Executed" : 121
-    "Unexecuted" : 81
+    title Lines (58% covered)
+    "Executed" : 131
+    "Unexecuted" : 95
 ```
 
 |Procedures| | |
@@ -238,7 +472,7 @@ pie showData
 |Total procedures            |19| |
 |Executed procedures         |14|74%|
 |Unexecuted procedures       |5|26%|
-|Average hits / executed     |202852.64285714287| |
+|Average hits / executed     |202855.64285714287| |
 
 ```mermaid
 pie showData
@@ -248,51 +482,20 @@ pie showData
 ```
 
 
-#### [[fossil_block_aabb_object.f90.gcov]]
-
-|Lines| | |
-| --- | --- | --- |
-|Executable lines            |25| |
-|Executed lines              |0|0%|
-|Unexecuted lines            |25|100%|
-|Average hits / executed     |0| |
-
-```mermaid
-pie showData
-    title Lines (0% covered)
-    "Executed" : 0
-    "Unexecuted" : 25
-```
-
-|Procedures| | |
-| --- | --- | --- |
-|Total procedures            |4| |
-|Executed procedures         |0|0%|
-|Unexecuted procedures       |4|100%|
-|Average hits / executed     |0| |
-
-```mermaid
-pie showData
-    title Procedures (0% covered)
-    "Executed" : 0
-    "Unexecuted" : 4
-```
-
-
 #### [[fossil_file_stl_object.f90.gcov]]
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |158| |
-|Executed lines              |129|82%|
-|Unexecuted lines            |29|18%|
-|Average hits / executed     |2308.4418604651164| |
+|Executable lines            |164| |
+|Executed lines              |132|80%|
+|Unexecuted lines            |32|20%|
+|Average hits / executed     |2256.401515151515| |
 
 ```mermaid
 pie showData
-    title Lines (82% covered)
-    "Executed" : 129
-    "Unexecuted" : 29
+    title Lines (80% covered)
+    "Executed" : 132
+    "Unexecuted" : 32
 ```
 
 |Procedures| | |
@@ -307,5 +510,22 @@ pie showData
     title Procedures (92% covered)
     "Executed" : 12
     "Unexecuted" : 1
+```
+
+
+#### [[fossil_test_load_save_ascii.f90.gcov]]
+
+|Lines| | |
+| --- | --- | --- |
+|Executable lines            |24| |
+|Executed lines              |24|100%|
+|Unexecuted lines            |0|0%|
+|Average hits / executed     |1.3333333333333333| |
+
+```mermaid
+pie showData
+    title Lines (100% covered)
+    "Executed" : 24
+    "Unexecuted" : 0
 ```
 

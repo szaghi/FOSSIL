@@ -2,16 +2,16 @@
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |202| |
-|Executed lines              |121|60%|
-|Unexecuted lines            |81|40%|
-|Average hits / executed     |249296.173553719| |
+|Executable lines            |226| |
+|Executed lines              |131|58%|
+|Unexecuted lines            |95|42%|
+|Average hits / executed     |257305.4351145038| |
 
 ```mermaid
 pie showData
-    title Lines (60% covered)
-    "Executed" : 121
-    "Unexecuted" : 81
+    title Lines (58% covered)
+    "Executed" : 131
+    "Unexecuted" : 95
 ```
 
 |Procedures| | |
@@ -19,7 +19,7 @@ pie showData
 |Total procedures            |19| |
 |Executed procedures         |14|74%|
 |Unexecuted procedures       |5|26%|
-|Average hits / executed     |202852.64285714287| |
+|Average hits / executed     |202855.64285714287| |
 
 ```mermaid
 pie showData
@@ -47,8 +47,8 @@ pie showData
  + *function* **parent_node**: tested **254** times
  + *function* **nodes_number**: tested **245** times
  + *function* **first_node**: tested **203** times
+ + *subroutine* **initialize**: tested **84** times
  + *subroutine* **destroy**: tested **42** times
- + *subroutine* **initialize**: tested **42** times
  + *subroutine* **aabb_tree_assign_aabb_tree**: tested **42** times
  + *subroutine* **compute_vertices_nearby**: tested **21** times
  + *subroutine* **distribute_facets**: tested **21** times

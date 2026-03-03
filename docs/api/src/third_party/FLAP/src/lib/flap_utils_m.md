@@ -32,7 +32,7 @@ graph LR
 
 Overload intrinsic function count for counting substring occurences into strings.
 
-**Module procedures**: [`count_substring`](/api/src/third_party/FLAP/src/lib/flap_utils_m#count-substring)
+**Module procedures**: [`count_substring`](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#count-substring)
 
 ## Subroutines
 

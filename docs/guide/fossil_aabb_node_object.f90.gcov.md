@@ -2,15 +2,15 @@
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |84| |
-|Executed lines              |41|49%|
-|Unexecuted lines            |43|51%|
-|Average hits / executed     |694357.3902439025| |
+|Executable lines            |88| |
+|Executed lines              |45|51%|
+|Unexecuted lines            |43|49%|
+|Average hits / executed     |684746.4| |
 
 ```mermaid
 pie showData
-    title Lines (49% covered)
-    "Executed" : 41
+    title Lines (51% covered)
+    "Executed" : 45
     "Unexecuted" : 43
 ```
 
@@ -19,7 +19,7 @@ pie showData
 |Total procedures            |22| |
 |Executed procedures         |11|50%|
 |Unexecuted procedures       |11|50%|
-|Average hits / executed     |841435.4545454546| |
+|Average hits / executed     |841455.0| |
 
 ```mermaid
 pie showData
@@ -50,10 +50,10 @@ pie showData
  + *function* **ray_intersections_number**: tested **698599** times
  + *function* **distance_from_facets**: tested **247585** times
  + *subroutine* **destroy**: tested **33576** times
- + *subroutine* **compute_octants**: tested **2941** times
+ + *subroutine* **compute_octants**: tested **3114** times
+ + *subroutine* **initialize**: tested **1380** times
  + *subroutine* **add_facets**: tested **1338** times
  + *function* **has_facets**: tested **1338** times
- + *subroutine* **initialize**: tested **1338** times
  + *subroutine* **compute_vertices_nearby**: tested **588** times
  + *function* **facet_id**: tested **81** times
 

@@ -164,12 +164,12 @@ graph LR
 | Name | Type | Attributes | Description |
 |------|------|------------|-------------|
 | `CK` | integer | parameter | Default character kind. |
-| `UPPER_ALPHABET` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=26) | parameter | Upper case alphabet. |
-| `LOWER_ALPHABET` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=26) | parameter | Lower case alphabet. |
-| `SPACE` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=1) | parameter | Space character. |
-| `TAB` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=1) | parameter | Tab character. |
-| `UIX_DIR_SEP` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=1) | parameter | Unix/Linux directories separator (/). |
-| `BACKSLASH` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=1) | parameter | Backslash character. |
+| `UPPER_ALPHABET` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=26) | parameter | Upper case alphabet. |
+| `LOWER_ALPHABET` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=26) | parameter | Lower case alphabet. |
+| `SPACE` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=1) | parameter | Space character. |
+| `TAB` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=1) | parameter | Tab character. |
+| `UIX_DIR_SEP` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=1) | parameter | Unix/Linux directories separator (/). |
+| `BACKSLASH` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=1) | parameter | Backslash character. |
 
 ## Derived Types
 
@@ -181,7 +181,7 @@ OOP designed string class.
 
 | Name | Type | Attributes | Description |
 |------|------|------------|-------------|
-| `raw` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=:) | allocatable | Raw data. |
+| `raw` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=:) | allocatable | Raw data. |
 
 #### Type-Bound Procedures
 
@@ -394,7 +394,7 @@ Builtin adjustr overloading.
 
 Builtin count overloading.
 
-**Module procedures**: [`count_substring`](/api/src/third_party/FLAP/src/lib/flap_utils_m#count-substring)
+**Module procedures**: [`count_substring`](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#count-substring)
 
 ### index
 
@@ -865,7 +865,7 @@ subroutine split(self, tokens, sep, max_tokens)
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
 | `tokens` | type([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | out | allocatable | Tokens substring. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 | `max_tokens` | integer | in | optional | Fix the maximum number of returned tokens. |
 
 **Call graph**
@@ -916,7 +916,7 @@ subroutine split_chunked(self, tokens, chunks, sep)
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
 | `tokens` | type([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | out | allocatable | Tokens substring. |
 | `chunks` | integer | in |  | Number of chunks. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 
 **Call graph**
 
@@ -998,7 +998,7 @@ Write line (record) to a connected unit.
 
  @note If the connected unit is unformatted a `new_line()` character is added at the end (if necessary) to mark the end of line.
 
- @note There is no doctests, this being tested by means of [write_file](/api/src/third_party/StringiFor/src/lib/stringifor#write-file) doctests.
+ @note There is no doctests, this being tested by means of [write_file](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#write-file) doctests.
 
 ```fortran
 subroutine write_line(self, unit, form, iostat, iomsg)
@@ -1034,7 +1034,7 @@ Write lines (records) to a connected unit.
 
  @note If the connected unit is unformatted a `new_line()` character is added at the end (if necessary) to mark the end of line.
 
- @note There is no doctests, this being tested by means of [write_file](/api/src/third_party/StringiFor/src/lib/stringifor#write-file) doctests.
+ @note There is no doctests, this being tested by means of [write_file](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#write-file) doctests.
 
 ```fortran
 subroutine write_lines(self, unit, form, iostat, iomsg)
@@ -1111,7 +1111,7 @@ subroutine string_assign_character(lhs, rhs)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `lhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | inout |  | Left hand side. |
-| `rhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Right hand side. |
+| `rhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Right hand side. |
 
 ### string_assign_integer_I1P
 
@@ -1402,9 +1402,9 @@ subroutine read_delimited(dtv, unit, delim, iostat, iomsg)
 |------|------|--------|------------|-------------|
 | `dtv` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | inout |  | The string. |
 | `unit` | integer | in |  | Logical unit. |
-| `delim` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=1) | in |  | String delimiter. |
+| `delim` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=1) | in |  | String delimiter. |
 | `iostat` | integer | out |  | IO status code. |
-| `iomsg` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | inout |  | IO status message. |
+| `iomsg` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | inout |  | IO status message. |
 
 **Call graph**
 
@@ -1462,7 +1462,7 @@ subroutine read_undelimited(dtv, unit, terminators, iostat, iomsg)
 |------|------|--------|------------|-------------|
 | `dtv` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | inout |  | The string. |
 | `unit` | integer | in |  | Logical unit. |
-| `terminators` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Characters that are considered to terminate the string. |
+| `terminators` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Characters that are considered to terminate the string. |
 | `iostat` | integer | out |  | IO status code. |
 | `iomsg` | character(len=*) | inout |  | IO status message. |
 
@@ -1488,10 +1488,10 @@ subroutine write_formatted(dtv, unit, iotype, v_list, iostat, iomsg)
 |------|------|--------|------------|-------------|
 | `dtv` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
 | `unit` | integer | in |  | Logical unit. |
-| `iotype` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Edit descriptor. |
+| `iotype` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Edit descriptor. |
 | `v_list` | integer | in |  | Edit descriptor list. |
 | `iostat` | integer | out |  | IO status code. |
-| `iomsg` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | inout |  | IO status message. |
+| `iomsg` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | inout |  | IO status message. |
 
 ### read_unformatted
 
@@ -1510,7 +1510,7 @@ subroutine read_unformatted(dtv, unit, iostat, iomsg)
 | `dtv` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | inout |  | The string. |
 | `unit` | integer | in |  | Logical unit. |
 | `iostat` | integer | out |  | IO status code. |
-| `iomsg` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | inout |  | IO status message. |
+| `iomsg` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | inout |  | IO status message. |
 
 ### write_unformatted
 
@@ -1527,7 +1527,7 @@ subroutine write_unformatted(dtv, unit, iostat, iomsg)
 | `dtv` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
 | `unit` | integer | in |  | Logical unit. |
 | `iostat` | integer | out |  | IO status code. |
-| `iomsg` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | inout |  | IO status message. |
+| `iomsg` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | inout |  | IO status message. |
 
 ### get_delimiter_mode
 
@@ -1544,7 +1544,7 @@ subroutine get_delimiter_mode(unit, delim, iostat, iomsg)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `unit` | integer | in |  | The unit for the connection. |
-| `delim` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=1) | out |  | Represents the value of the DELIM mode. |
+| `delim` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=1) | out |  | Represents the value of the DELIM mode. |
 | `iostat` | integer | out |  | IOSTAT error code, non-zero on error. |
 | `iomsg` | character(len=*) | inout |  | IOMSG explanatory message - only defined if iostat is non-zero. |
 
@@ -1561,9 +1561,9 @@ subroutine get_next_non_blank_character_this_record(unit, ch, iostat, iomsg)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `unit` | integer | in |  | Logical unit. |
-| `ch` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=1) | out |  | The non-blank character read. Not valid if IOSTAT is non-zero. |
+| `ch` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=1) | out |  | The non-blank character read. Not valid if IOSTAT is non-zero. |
 | `iostat` | integer | out |  | IO status code. |
-| `iomsg` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | inout |  | IO status message. |
+| `iomsg` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | inout |  | IO status message. |
 
 **Call graph**
 
@@ -1586,9 +1586,9 @@ subroutine get_next_non_blank_character_any_record(unit, ch, iostat, iomsg)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `unit` | integer | in |  | Logical unit. |
-| `ch` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=1) | out |  | The non-blank character read. Not valid if IOSTAT is non-zero. |
+| `ch` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=1) | out |  | The non-blank character read. Not valid if IOSTAT is non-zero. |
 | `iostat` | integer | out |  | IO status code. |
-| `iomsg` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | inout |  | IO status message. |
+| `iomsg` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | inout |  | IO status message. |
 
 **Call graph**
 
@@ -1617,7 +1617,7 @@ subroutine get_decimal_mode(unit, decimal_point, iostat, iomsg)
 | `unit` | integer | in |  | Logical unit. |
 | `decimal_point` | logical | out |  | True if the decimal mode is POINT, false otherwise. |
 | `iostat` | integer | out |  | IO status code. |
-| `iomsg` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | inout |  | IO status message. |
+| `iomsg` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | inout |  | IO status message. |
 
 **Call graph**
 
@@ -1663,7 +1663,7 @@ Left adjust a string by removing leading spaces (character output).
 
 **Attributes**: pure
 
-**Returns**: character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=:)
+**Returns**: character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=:)
 
 ```fortran
 function sadjustl_character(s) result(adjusted)
@@ -1687,7 +1687,7 @@ Right adjust a string by removing leading spaces (character output).
 
 **Attributes**: pure
 
-**Returns**: character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=:)
+**Returns**: character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=:)
 
 ```fortran
 function sadjustr_character(s) result(adjusted)
@@ -1750,7 +1750,7 @@ function sindex_character_string(s, substring, back) result(i)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `s` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | String. |
+| `s` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | String. |
 | `substring` | type([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Searched substring. |
 | `back` | logical | in | optional | Start of the last occurrence rather than the first. |
 
@@ -1780,7 +1780,7 @@ function sscan_character_string(s, set, back) result(i)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `s` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | String. |
+| `s` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | String. |
 | `set` | type([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Searched set. |
 | `back` | logical | in | optional | Start of the last occurrence rather than the first. |
 
@@ -1811,7 +1811,7 @@ function sverify_character_string(s, set, back) result(i)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `s` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | String. |
+| `s` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | String. |
 | `set` | type([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Searched set. |
 | `back` | logical | in | optional | Start of the last occurrence rather than the first. |
 
@@ -1963,7 +1963,7 @@ function sindex_string_character(self, substring, back) result(i)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `substring` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Searched substring. |
+| `substring` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Searched substring. |
 | `back` | logical | in | optional | Start of the last occurrence rather than the first. |
 
 ### slen
@@ -2061,7 +2061,7 @@ function srepeat_character_string(rstring, ncopies) result(repeated)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `rstring` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | String to be repeated. |
+| `rstring` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | String to be repeated. |
 | `ncopies` | integer | in |  | Number of string copies. |
 
 ### sscan_string_string
@@ -2121,7 +2121,7 @@ function sscan_string_character(self, set, back) result(i)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `set` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Searched set. |
+| `set` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Searched set. |
 | `back` | logical | in | optional | Start of the last occurrence rather than the first. |
 
 ### strim
@@ -2207,7 +2207,7 @@ function sverify_string_character(self, set, back) result(i)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `set` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Searched set. |
+| `set` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Searched set. |
 | `back` | logical | in | optional | Start of the last occurrence rather than the first. |
 
 ### basedir
@@ -2241,7 +2241,7 @@ function basedir(self, sep)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Directory separator. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Directory separator. |
 
 ### basename
 
@@ -2276,8 +2276,8 @@ function basename(self, sep, extension, strip_last_extension)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Directory separator. |
-| `extension` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | File extension. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Directory separator. |
+| `extension` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | File extension. |
 | `strip_last_extension` | logical | in | optional | Flag to enable the stripping of last extension. |
 
 **Call graph**
@@ -2313,7 +2313,7 @@ function camelcase(self, sep)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 
 **Call graph**
 
@@ -2371,7 +2371,7 @@ Return the raw characters data.
 
 **Attributes**: pure
 
-**Returns**: character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=:)
+**Returns**: character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=:)
 
 ```fortran
 function chars(self) result(raw)
@@ -2483,7 +2483,7 @@ function decode(self, codec) result(decoded)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `codec` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Encoding codec. |
+| `codec` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Encoding codec. |
 
 **Call graph**
 
@@ -2520,7 +2520,7 @@ function encode(self, codec) result(encoded)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `codec` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Encoding codec. |
+| `codec` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Encoding codec. |
 
 **Call graph**
 
@@ -2557,8 +2557,8 @@ function escape(self, to_escape, esc) result(escaped)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `to_escape` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=1) | in |  | Character to be escaped. |
-| `esc` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Character used to escape. |
+| `to_escape` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=1) | in |  | Character to be escaped. |
+| `esc` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Character used to escape. |
 
 ### extension
 
@@ -2614,7 +2614,7 @@ function fill(self, width, right, filling_char) result(filled)
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
 | `width` | integer | in |  | Final width of filled string. |
 | `right` | logical | in | optional | Fill on the right instead of left. |
-| `filling_char` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=1) | in | optional | Filling character (default "0"). |
+| `filling_char` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=1) | in | optional | Filling character (default "0"). |
 
 **Call graph**
 
@@ -2737,7 +2737,7 @@ function join_strings(self, array, sep) result(join)
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
 | `array` | type([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Array to be joined. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 
 ### join_characters
 
@@ -2788,8 +2788,8 @@ function join_characters(self, array, sep) result(join)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `array` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Array to be joined. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `array` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Array to be joined. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 
 ### strjoin_strings
 
@@ -2833,7 +2833,7 @@ function strjoin_strings(array, sep) result(join)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `array` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Array to be joined. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 
 **Call graph**
 
@@ -2911,8 +2911,8 @@ function strjoin_characters(array, sep, is_trim) result(join)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `array` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Array to be joined. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `array` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Array to be joined. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 | `is_trim` | logical | in | optional | Flag to setup trim character or not |
 
 **Call graph**
@@ -2976,7 +2976,7 @@ function strjoin_strings_array(array, sep, is_col) result(join)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `array` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Array to be joined. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 | `is_col` | logical | in | optional | Direction: 'columns' if .true. or 'rows' if .false. |
 
 **Call graph**
@@ -3063,8 +3063,8 @@ function strjoin_characters_array(array, sep, is_trim, is_col) result(join)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `array` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Array to be joined. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `array` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Array to be joined. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 | `is_trim` | logical | in | optional | Flag to setup trim character or not |
 | `is_col` | logical | in | optional | Direction: 'columns' if .true. or 'rows' if .false. |
 
@@ -3145,7 +3145,7 @@ function partition(self, sep) result(partitions)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 
 **Call graph**
 
@@ -3189,8 +3189,8 @@ function replace(self, old, new, count) result(replaced)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `old` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Old substring. |
-| `new` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | New substring. |
+| `old` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Old substring. |
+| `new` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | New substring. |
 | `count` | integer | in | optional | Number of old occurences to be replaced. |
 
 **Call graph**
@@ -3279,10 +3279,10 @@ function search(self, tag_start, tag_end, in_string, in_character, istart, iend)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `tag_start` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Start tag. |
-| `tag_end` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | End tag. |
+| `tag_start` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Start tag. |
+| `tag_end` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | End tag. |
 | `in_string` | type([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in | optional | Search into this string. |
-| `in_character` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Search into this character string. |
+| `in_character` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Search into this character string. |
 | `istart` | integer | out | optional | Starting index of tag inside the string. |
 | `iend` | integer | out | optional | Ending index of tag inside the string. |
 
@@ -3321,7 +3321,7 @@ Return the raw characters data sliced.
 
 **Attributes**: pure
 
-**Returns**: character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=:)
+**Returns**: character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=:)
 
 ```fortran
 function slice(self, istart, iend) result(raw)
@@ -3370,7 +3370,7 @@ function snakecase(self, sep)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 
 **Call graph**
 
@@ -3409,7 +3409,7 @@ function startcase(self, sep)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `sep` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Separator. |
+| `sep` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Separator. |
 
 **Call graph**
 
@@ -3826,8 +3826,8 @@ function unescape(self, to_unescape, unesc) result(unescaped)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `to_unescape` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=1) | in |  | Character to be unescaped. |
-| `unesc` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Character used to unescape. |
+| `to_unescape` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=1) | in |  | Character to be unescaped. |
+| `unesc` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Character used to unescape. |
 
 ### unique
 
@@ -3857,7 +3857,7 @@ function unique(self, substring) result(uniq)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `substring` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in | optional | Substring which multiple occurences must be reduced to one. |
+| `substring` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in | optional | Substring which multiple occurences must be reduced to one. |
 
 **Call graph**
 
@@ -3948,7 +3948,7 @@ function end_with(self, suffix, start, end, ignore_null_eof)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `suffix` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Searched suffix. |
+| `suffix` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Searched suffix. |
 | `start` | integer | in | optional | Start position into the string. |
 | `end` | integer | in | optional | End position into the string. |
 | `ignore_null_eof` | logical | in | optional | Ignore null character at the end of file. |
@@ -4300,7 +4300,7 @@ function start_with(self, prefix, start, end)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `prefix` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Searched prefix. |
+| `prefix` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Searched prefix. |
 | `start` | integer | in | optional | Start position into the string. |
 | `end` | integer | in | optional | End position into the string. |
 
@@ -4328,7 +4328,7 @@ Concatenation with string.
 
 **Attributes**: pure
 
-**Returns**: character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=:)
+**Returns**: character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=:)
 
 ```fortran
 function string_concat_string(lhs, rhs) result(concat)
@@ -4357,7 +4357,7 @@ Concatenation with character.
 
 **Attributes**: pure
 
-**Returns**: character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=:)
+**Returns**: character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=:)
 
 ```fortran
 function string_concat_character(lhs, rhs) result(concat)
@@ -4368,7 +4368,7 @@ function string_concat_character(lhs, rhs) result(concat)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `lhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Left hand side. |
-| `rhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Right hand side. |
+| `rhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Right hand side. |
 
 ### character_concat_string
 
@@ -4386,7 +4386,7 @@ Concatenation with character (inverted).
 
 **Attributes**: pure
 
-**Returns**: character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=:)
+**Returns**: character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=:)
 
 ```fortran
 function character_concat_string(lhs, rhs) result(concat)
@@ -4396,7 +4396,7 @@ function character_concat_string(lhs, rhs) result(concat)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `lhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Left hand side. |
+| `lhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Left hand side. |
 | `rhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Right hand side. |
 
 ### string_concat_string_string
@@ -4459,7 +4459,7 @@ function string_concat_character_string(lhs, rhs) result(concat)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `lhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Left hand side. |
-| `rhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Right hand side. |
+| `rhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Right hand side. |
 
 ### character_concat_string_string
 
@@ -4489,7 +4489,7 @@ function character_concat_string_string(lhs, rhs) result(concat)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `lhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Left hand side. |
+| `lhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Left hand side. |
 | `rhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Right hand side. |
 
 ### string_eq_string
@@ -4554,7 +4554,7 @@ function string_eq_character(lhs, rhs) result(is_it)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `lhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Left hand side. |
-| `rhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Right hand side. |
+| `rhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Right hand side. |
 
 ### character_eq_string
 
@@ -4585,7 +4585,7 @@ function character_eq_string(lhs, rhs) result(is_it)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `lhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Left hand side. |
+| `lhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Left hand side. |
 | `rhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Right hand side. |
 
 ### string_ne_string
@@ -4650,7 +4650,7 @@ function string_ne_character(lhs, rhs) result(is_it)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `lhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Left hand side. |
-| `rhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Right hand side. |
+| `rhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Right hand side. |
 
 ### character_ne_string
 
@@ -4681,7 +4681,7 @@ function character_ne_string(lhs, rhs) result(is_it)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `lhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Left hand side. |
+| `lhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Left hand side. |
 | `rhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Right hand side. |
 
 ### string_lt_string
@@ -4746,7 +4746,7 @@ function string_lt_character(lhs, rhs) result(is_it)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `lhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Left hand side. |
-| `rhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Right hand side. |
+| `rhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Right hand side. |
 
 ### character_lt_string
 
@@ -4777,7 +4777,7 @@ function character_lt_string(lhs, rhs) result(is_it)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `lhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Left hand side. |
+| `lhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Left hand side. |
 | `rhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Right hand side. |
 
 ### string_le_string
@@ -4848,7 +4848,7 @@ function string_le_character(lhs, rhs) result(is_it)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `lhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Left hand side. |
-| `rhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Right hand side. |
+| `rhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Right hand side. |
 
 ### character_le_string
 
@@ -4882,7 +4882,7 @@ function character_le_string(lhs, rhs) result(is_it)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `lhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Left hand side. |
+| `lhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Left hand side. |
 | `rhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Right hand side. |
 
 ### string_ge_string
@@ -4953,7 +4953,7 @@ function string_ge_character(lhs, rhs) result(is_it)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `lhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Left hand side. |
-| `rhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Right hand side. |
+| `rhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Right hand side. |
 
 ### character_ge_string
 
@@ -4987,7 +4987,7 @@ function character_ge_string(lhs, rhs) result(is_it)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `lhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Left hand side. |
+| `lhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Left hand side. |
 | `rhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Right hand side. |
 
 ### string_gt_string
@@ -5052,7 +5052,7 @@ function string_gt_character(lhs, rhs) result(is_it)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `lhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Left hand side. |
-| `rhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Right hand side. |
+| `rhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Right hand side. |
 
 ### character_gt_string
 
@@ -5083,14 +5083,14 @@ function character_gt_string(lhs, rhs) result(is_it)
 
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
-| `lhs` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Left hand side. |
+| `lhs` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Left hand side. |
 | `rhs` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | Right hand side. |
 
 ### replace_one_occurrence
 
 Return a string with the first occurrence of substring old replaced by new.
 
- @note The doctest is not necessary, this being tested by [replace](/api/src/third_party/FLAP/src/lib/flap_utils_m#replace).
+ @note The doctest is not necessary, this being tested by [replace](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#replace).
 
 **Attributes**: elemental
 
@@ -5105,8 +5105,8 @@ function replace_one_occurrence(self, old, new) result(replaced)
 | Name | Type | Intent | Attributes | Description |
 |------|------|--------|------------|-------------|
 | `self` | class([string](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#string)) | in |  | The string. |
-| `old` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | Old substring. |
-| `new` | character(kind=[CK](/api/src/third_party/PENF/src/lib/penf_global_parameters_variables), len=*) | in |  | New substring. |
+| `old` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | Old substring. |
+| `new` | character(kind=[CK](/api/src/third_party/StringiFor/src/lib/stringifor_string_t), len=*) | in |  | New substring. |
 
 **Call graph**
 

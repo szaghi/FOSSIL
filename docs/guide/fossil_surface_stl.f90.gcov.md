@@ -2,16 +2,16 @@
 
 |Lines| | |
 | --- | --- | --- |
-|Executable lines            |337| |
-|Executed lines              |241|72%|
-|Unexecuted lines            |96|28%|
-|Average hits / executed     |44496.78008298755| |
+|Executable lines            |359| |
+|Executed lines              |254|71%|
+|Unexecuted lines            |105|29%|
+|Average hits / executed     |46467.63385826772| |
 
 ```mermaid
 pie showData
-    title Lines (72% covered)
-    "Executed" : 241
-    "Unexecuted" : 96
+    title Lines (71% covered)
+    "Executed" : 254
+    "Unexecuted" : 105
 ```
 
 |Procedures| | |
@@ -19,7 +19,7 @@ pie showData
 |Total procedures            |34| |
 |Executed procedures         |25|74%|
 |Unexecuted procedures       |9|26%|
-|Average hits / executed     |67565.2| |
+|Average hits / executed     |67565.24| |
 
 ```mermaid
 pie showData
@@ -60,9 +60,9 @@ pie showData
  + *subroutine* **resize**: tested **6** times
  + *subroutine* **translate**: tested **5** times
  + *function* **statistics**: tested **4** times
+ + *subroutine* **clip**: tested **2** times
  + *subroutine* **reverse_normals**: tested **2** times
  + *subroutine* **sanitize_normals**: tested **2** times
- + *subroutine* **clip**: tested **1** times
  + *subroutine* **connect_nearby_vertices**: tested **1** times
  + *subroutine* **merge_solids**: tested **1** times
  + *subroutine* **sanitize**: tested **1** times

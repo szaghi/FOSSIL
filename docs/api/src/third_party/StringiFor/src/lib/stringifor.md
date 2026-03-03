@@ -107,7 +107,7 @@ Read lines (records) from a connected-formatted unit.
 
  @note For unformatted read only `access='stream'` is supported with new_line as line terminator.
 
- @note There is no doctests, this being tested by means of [read_file](/api/src/third_party/StringiFor/src/lib/stringifor#read-file) doctests.
+ @note There is no doctests, this being tested by means of [read_file](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#read-file) doctests.
 
 ```fortran
 subroutine read_lines(unit, lines, form, iostat, iomsg)
@@ -202,7 +202,7 @@ flowchart TD
 
 Write lines (records) to a connected-formatted unit.
 
- @note There is no doctests, this being tested by means of [write_file](/api/src/third_party/StringiFor/src/lib/stringifor#write-file) doctests.
+ @note There is no doctests, this being tested by means of [write_file](/api/src/third_party/StringiFor/src/lib/stringifor_string_t#write-file) doctests.
 
 ```fortran
 subroutine write_lines(unit, lines, form, iostat, iomsg)
