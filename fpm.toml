@@ -1,0 +1,29 @@
+name = "FOSSIL"
+version = "0.1.0"
+license = "GPL-3.0"
+author = "Stefano Zaghi"
+maintainer = "stefano.zaghi@gmail.it"
+copyright = "Copyright 2026 Stefano Zaghi"
+description = "FOrtran Stereo (si) Litography parser"
+
+[dependencies]
+BeFoR64 = { git="https://github.com/szaghi/BeFoR64.git" }
+FACE = { git="https://github.com/szaghi/FACE.git" }
+FLAP = { git="https://github.com/szaghi/FLAP.git" }
+FoXy = { git="https://github.com/Fortran-FOSS-Programmers/FoXy.git" }
+PENF = { git="https://github.com/szaghi/PENF.git" }
+StringiFor = { git="https://github.com/szaghi/StringiFor.git" }
+VTKFortran = { git="https://github.com/szaghi/VTKFortran.git" }
+VecFor = { git="https://github.com/szaghi/VecFor.git" }
+
+[build]
+auto-executables = true
+auto-tests = true
+
+[fortran]
+implicit-typing = false
+implicit-external = false
+source-form = "free"
+
+[install]
+library = true

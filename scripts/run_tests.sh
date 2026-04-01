@@ -1,30 +1,35 @@
-#!/usr/bin/env bash
-# Run the test suite.
-# Each *test* binary exits 0 on success, 1 on failure.
+#!/bin/bash
 
-if [[ -t 1 ]]; then
-  RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
-else
-  RED=''; GREEN=''; BOLD=''; RESET=''
-fi
+all_passed () {
+  local array="$1[@]"
+  local ok=1
+  for element in "${!array}"; do
+    if [ "$element" == 'F' ]; then
+      ok=0
+      break
+    fi
+  done
+  echo $ok
+}
 
-pass=0; fail=0
-tmpout=$(mktemp)
-trap 'rm -f "$tmpout"' EXIT
-
-for exe in exe/*_test*; do
-  [[ -x "$exe" ]] || continue
-  name=$(basename "$exe")
-  if "$exe" > "$tmpout" 2>&1; then
-    printf "  ${GREEN}PASS${RESET}  %s\n" "$name"
-    pass=$((pass + 1))
-  else
-    printf "  ${RED}FAIL${RESET}  %s\n" "$name"
-    sed 's/^/       /' "$tmpout"
-    fail=$((fail + 1))
+echo "Run all tests"
+declare -a tests_executed
+for e in $( find ./exe/ -type f -executable -print ); do
+  is_passed=`$e | grep -i "Are all tests passed? " | awk '{print $5}'`
+  tests_executed=("${tests_executed[@]}" "$is_passed")
+  echo "  run test $e, is passed? $is_passed"
+  if [ "$is_passed" == 'F' ]; then
+    echo
+    echo "Test failed"
+    $e
   fi
 done
-
-total=$((pass + fail))
-printf "\n${BOLD}%d/%d passed${RESET}\n" "$pass" "$total"
-exit $fail
+passed=$(all_passed tests_executed)
+echo "Number of tests executed ${#tests_executed[@]}"
+if [ $passed -eq 1 ]; then
+  echo "All tests passed"
+  exit 0
+else
+  echo "Some tests failed"
+  exit 1
+fi

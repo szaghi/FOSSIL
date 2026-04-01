@@ -1,20 +1,17 @@
 ---
 project: FOSSIL
-src_dir: ../src
-project_github: https://github.com/szaghi/FOSSIL
-summary: FOSSIL, FOrtran Stereo (si) Litography parser
+summary: FOrtran Stereo (si) Litography parser
+project_url: https://szaghi.github.io/FOSSIL
 author: Stefano Zaghi
-github: https://github.com/szaghi
-email: stefano.zaghi@gmail.com
-md_extensions: markdown.extensions.toc(anchorlink=True)
-               markdown.extensions.smarty(smart_quotes=False)
-               markdown.extensions.extra
-               markdown_checklist.extension
-docmark: <
+email: stefano.zaghi@gmail.it
+src_dir: ./src
+output_dir: ./docs/ford
+project_github: https://github.com/szaghi/FOSSIL
 display: public
-         protected
          private
-source: true
-warn: true
-extra_mods: iso_fortran_env:https://gcc.gnu.org/onlinedocs/gfortran/ISO_005fFORTRAN_005fENV.html
+proc_internals: true
+coloured_edges: true
+graph_maxdepth: 6
 ---
+
+FOrtran Stereo (si) Litography parser
