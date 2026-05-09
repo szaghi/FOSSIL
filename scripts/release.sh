@@ -84,9 +84,21 @@ command -v git &>/dev/null || die "git not found."
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-# ── Detect trunk branch from remote HEAD (set automatically by git clone) ────
+# ── Detect trunk branch ───────────────────────────────────────────────────────
+# 1. local symref refs/remotes/origin/HEAD (set automatically by `git clone`)
+# 2. ask the remote directly (works when the local symref is missing)
+# 3. fallback: master if it exists locally, else main
 TRUNK="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')"
-[[ -n "$TRUNK" ]] || TRUNK="main"
+if [[ -z "$TRUNK" ]]; then
+  TRUNK="$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')"
+fi
+if [[ -z "$TRUNK" || "$TRUNK" == "(unknown)" ]]; then
+  if git show-ref --verify --quiet refs/heads/master; then
+    TRUNK="master"
+  else
+    TRUNK="main"
+  fi
+fi
 
 # ── Detect repo slug (owner/name) from remote ────────────────────────────────
 REMOTE_URL="$(git remote get-url origin 2>/dev/null || true)"
