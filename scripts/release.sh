@@ -88,9 +88,9 @@ cd "$REPO_ROOT"
 # 1. local symref refs/remotes/origin/HEAD (set automatically by `git clone`)
 # 2. ask the remote directly (works when the local symref is missing)
 # 3. fallback: master if it exists locally, else main
-TRUNK="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')"
+TRUNK="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || true)"
 if [[ -z "$TRUNK" ]]; then
-  TRUNK="$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')"
+  TRUNK="$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p' || true)"
 fi
 if [[ -z "$TRUNK" || "$TRUNK" == "(unknown)" ]]; then
   if git show-ref --verify --quiet refs/heads/master; then
