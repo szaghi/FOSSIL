@@ -145,7 +145,7 @@ CURRENT_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
 [[ -z "$(git status --porcelain)" ]] \
   || die "working tree is dirty — commit or stash changes before bumping"
 
-git fetch --tags --quiet
+FETCH_ERR="$(git fetch --tags 2>&1)" || die "git fetch --tags failed:\n${FETCH_ERR}\n\nIf a local tag diverges from the remote, inspect with:\n  git ls-remote --tags origin <tagname>\n  git show <tagname>\nThen either delete the local tag (git tag -d <tagname>) or force-update (git fetch --tags --force) once you've confirmed the remote is authoritative."
 [[ -z "$(git tag -l "${NEW_TAG}")" ]] || die "tag ${NEW_TAG} already exists"
 
 BEHIND="$(git rev-list --count HEAD..origin/${TRUNK} 2>/dev/null || echo 0)"
