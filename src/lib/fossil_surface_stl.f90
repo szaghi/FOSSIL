@@ -16,6 +16,7 @@ private
 public :: surface_stl_object
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE
 public :: sign_algorithm_from_string
+public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL
 
 ! Point-in-polyhedron algorithm selector for `is_point_inside`, `compute_distance`,
 ! and `distance` (when `is_signed=.true.`):
@@ -25,6 +26,13 @@ public :: sign_algorithm_from_string
 !                            ~±4π = inside, ~0 = outside.
 integer(I4P), parameter :: SIGN_RAY_INTERSECTIONS = 1_I4P
 integer(I4P), parameter :: SIGN_SOLID_ANGLE       = 2_I4P
+
+! Status codes returned via the optional `status` argument on mutating procedures.
+integer(I4P), parameter :: STATUS_OK               = 0_I4P !< Success.
+integer(I4P), parameter :: STATUS_ALLOC_FAIL       = 1_I4P !< Allocation failure.
+integer(I4P), parameter :: STATUS_AMBIGUOUS_ARGS   = 2_I4P !< Conflicting optional arguments.
+integer(I4P), parameter :: STATUS_FILE_NOT_FOUND   = 3_I4P !< File does not exist.
+integer(I4P), parameter :: STATUS_FILE_OPEN_FAIL   = 4_I4P !< File could not be opened for writing.
 
 type :: surface_stl_object
    !< FOSSIL STL surface class.
@@ -256,7 +264,7 @@ contains
    integer(I4P),              intent(in), optional :: aabb_refinement_levels !< AABB refinement levels.
    integer(I4P),              intent(out), optional :: status                !< 0=success (reserved for future use).
 
-   if (present(status)) status = 0
+   if (present(status)) status = STATUS_OK
    self%facets_number = 0
    if (allocated(self%facet)) self%facets_number = size(self%facet, dim=1)
    if (self%facets_number>0) then
@@ -317,7 +325,7 @@ contains
    integer(I4P)                                     :: istat             !< Allocation status.
    character(len=256)                               :: msg               !< Allocation error message.
 
-   if (present(status)) status = 0
+   if (present(status)) status = STATUS_OK
    if (self%facets_number>0) then
       facets_in_number = 0
       facets_out_number = 0
@@ -333,14 +341,14 @@ contains
       if (facets_in_number>0) then
          allocate(facet(1:facets_in_number), stat=istat, errmsg=msg)
          if (istat /= 0) then
-            if (present(status)) then ; status = 1 ; return ; endif
+            if (present(status)) then ; status = STATUS_ALLOC_FAIL ; return ; endif
             error stop 'surface_stl_object%clip: '//trim(msg)
          endif
          if (present(remainder)) then
             remainder%facets_number = facets_out_number
             allocate(remainder%facet(1:facets_out_number), stat=istat, errmsg=msg)
             if (istat /= 0) then
-               if (present(status)) then ; status = 1 ; return ; endif
+               if (present(status)) then ; status = STATUS_ALLOC_FAIL ; return ; endif
                error stop 'surface_stl_object%clip: '//trim(msg)
             endif
          endif
@@ -745,12 +753,12 @@ contains
    integer(I4P)                                    :: istat    !< Allocation status.
    character(len=256)                              :: msg      !< Allocation error message.
 
-   if (present(status)) status = 0
+   if (present(status)) status = STATUS_OK
    if (other%facets_number > 0) then
       if (self%facets_number > 0) then
          allocate(facet(1:self%facets_number + other%facets_number), stat=istat, errmsg=msg)
          if (istat /= 0) then
-            if (present(status)) then ; status = 1 ; return ; endif
+            if (present(status)) then ; status = STATUS_ALLOC_FAIL ; return ; endif
             error stop 'surface_stl_object%merge_solids: '//trim(msg)
          endif
          do f=1, self%facets_number
@@ -764,7 +772,7 @@ contains
       else
          allocate(self%facet(1:other%facets_number), stat=istat, errmsg=msg)
          if (istat /= 0) then
-            if (present(status)) then ; status = 1 ; return ; endif
+            if (present(status)) then ; status = STATUS_ALLOC_FAIL ; return ; endif
             error stop 'surface_stl_object%merge_solids: '//trim(msg)
          endif
          do f=1, other%facets_number
@@ -793,9 +801,9 @@ contains
    type(vector_R8P)                                :: factor_           !< Vectorial factor, local variable.
    logical                                         :: respect_centroid_ !< Sentinel to activate centroid as resize center, local v.
 
-   if (present(status)) status = 0
+   if (present(status)) status = STATUS_OK
    if (present(factor) .and. (present(x) .or. present(y) .or. present(z))) then
-      if (present(status)) then ; status = 2 ; return ; endif
+      if (present(status)) then ; status = STATUS_AMBIGUOUS_ARGS ; return ; endif
       error stop 'surface_stl_object%resize: specify either factor or x/y/z, not both'
    endif
    respect_centroid_ = .false. ; if (present(respect_centroid)) respect_centroid_ = respect_centroid
@@ -833,7 +841,7 @@ contains
    logical,                   intent(in), optional :: do_analysis !< Sentil for performing a first analysis.
    integer(I4P),              intent(out), optional :: status     !< 0=success (reserved for future use).
 
-   if (present(status)) status = 0
+   if (present(status)) status = STATUS_OK
    if (self%facets_number>0) then
       if (present(do_analysis)) then
          if (do_analysis) call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
@@ -937,9 +945,9 @@ contains
    integer(I4P),              intent(out), optional :: status          !< 0=success, 2=ambiguous arguments.
    type(vector_R8P)                                :: delta_           !< Vectorial increment, local variable.
 
-   if (present(status)) status = 0
+   if (present(status)) status = STATUS_OK
    if (present(delta) .and. (present(x) .or. present(y) .or. present(z))) then
-      if (present(status)) then ; status = 2 ; return ; endif
+      if (present(status)) then ; status = STATUS_AMBIGUOUS_ARGS ; return ; endif
       error stop 'surface_stl_object%translate: specify either delta or x/y/z, not both'
    endif
    if (self%facets_number>0) then
@@ -1124,7 +1132,7 @@ contains
    integer(I4P)                                          :: istat                  !< Allocation status.
    character(len=256)                                    :: msg                    !< Allocation error message.
 
-   if (present(status)) status = 0
+   if (present(status)) status = STATUS_OK
    is_ascii_ = .true. ; if (present(is_ascii)) is_ascii_ = is_ascii
    call stl_open_for_read(file_name=file_name, file_unit=file_unit, is_ascii=is_ascii_, guess_format=guess_format, status=istat)
    if (istat /= 0) then
@@ -1148,7 +1156,7 @@ contains
       call stl_load_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header)
       allocate(facets(1:ff), stat=istat, errmsg=msg)
       if (istat /= 0) then
-         if (present(status)) then ; status = 1 ; close(file_unit) ; return ; endif
+         if (present(status)) then ; status = STATUS_ALLOC_FAIL ; close(file_unit) ; return ; endif
          error stop 'surface_stl_object%load_from_file: '//trim(msg)
       endif
       ff = 0
@@ -1169,7 +1177,7 @@ contains
    else
       allocate(facets(1:facets_number), stat=istat, errmsg=msg)
       if (istat /= 0) then
-         if (present(status)) then ; status = 1 ; close(file_unit) ; return ; endif
+         if (present(status)) then ; status = STATUS_ALLOC_FAIL ; close(file_unit) ; return ; endif
          error stop 'surface_stl_object%load_from_file: '//trim(msg)
       endif
       do f=1, facets_number
@@ -1195,7 +1203,7 @@ contains
    logical                                         :: is_ascii_ !< Effective ASCII flag.
    integer(I4P)                                    :: f, istat  !< Counter and open status.
 
-   if (present(status)) status = 0
+   if (present(status)) status = STATUS_OK
    is_ascii_ = .true. ; if (present(is_ascii)) is_ascii_ = is_ascii
    call stl_open_for_write(file_name=file_name, file_unit=file_unit, is_ascii=is_ascii_, status=istat)
    if (istat /= 0) then
@@ -1252,13 +1260,13 @@ contains
    integer(I4P), parameter                :: BINARY_FACET_BYTES  = 50_I4P
    integer(I4P), parameter                :: BINARY_COUNT_BYTES  =  4_I4P
 
-   if (present(status)) status = 0
+   if (present(status)) status = STATUS_OK
    file_unit = -1
    guess_format_ = .false. ; if (present(guess_format)) guess_format_ = guess_format
    inquire(file=file_name, exist=file_exist, size=file_size)
    if (.not. file_exist) then
       write(stderr, '(A)') 'error: file "'//file_name//'" does not exist, impossible to open file!'
-      if (present(status)) then ; status = 3 ; return ; endif
+      if (present(status)) then ; status = STATUS_FILE_NOT_FOUND ; return ; endif
       error stop 'fossil_surface_stl_object%load_from_file: file not found'
    endif
    if (guess_format_) then
@@ -1290,7 +1298,7 @@ contains
    integer(I4P), intent(out), optional :: status   !< 0=success, 4=open failure.
    integer(I4P)                       :: ios       !< I/O status.
 
-   if (present(status)) status = 0
+   if (present(status)) status = STATUS_OK
    file_unit = -1
    if (is_ascii) then
       open(newunit=file_unit, file=file_name, form='formatted', iostat=ios)
@@ -1299,7 +1307,7 @@ contains
    endif
    if (ios /= 0) then
       write(stderr, '(A)') 'error: cannot open "'//file_name//'" for writing'
-      if (present(status)) then ; status = 4 ; return ; endif
+      if (present(status)) then ; status = STATUS_FILE_OPEN_FAIL ; return ; endif
       error stop 'surface_stl_object%save_into_file: cannot open file for writing'
    endif
    endsubroutine stl_open_for_write
