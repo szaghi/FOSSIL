@@ -70,15 +70,16 @@ if (.not. all_passed) error stop 1
 contains
    subroutine lex_sort(v, n)
    !< In-place insertion sort of columns of v(3,n) by (x,y,z) lexicographic order.
-   real(R8P),    intent(inout) :: v(3, n)
    integer(I4P), intent(in)    :: n
+   real(R8P),    intent(inout) :: v(3, n)
    real(R8P)                   :: tmp(3)
    integer(I4P)                :: i, j
 
    do i = 2, n
       tmp = v(:, i)
       j = i - 1
-      do while (j >= 1 .and. lex_gt(v(:, j), tmp))
+      do while (j >= 1)
+         if (.not. lex_gt(v(:, j), tmp)) exit
          v(:, j + 1) = v(:, j)
          j = j - 1
       enddo
