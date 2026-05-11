@@ -750,7 +750,7 @@ contains
    endif
    endsubroutine merge_solids
 
-   elemental subroutine resize(self, x, y, z, factor, respect_centroid, recompute_metrix)
+   subroutine resize(self, x, y, z, factor, respect_centroid, recompute_metrix)
    !< Resize (scale) facets by x or y or z or vectorial factors.
    !<
    !< @note The name `scale` has not been used, it been a Fortran built-in.
@@ -766,6 +766,8 @@ contains
    type(vector_R8P)                                :: factor_           !< Vectorial factor, local variable.
    logical                                         :: respect_centroid_ !< Sentinel to activate centroid as resize center, local v.
 
+   if (present(factor) .and. (present(x) .or. present(y) .or. present(z))) &
+      error stop 'surface_stl_object%resize: specify either factor or x/y/z, not both'
    respect_centroid_ = .false. ; if (present(respect_centroid)) respect_centroid_ = respect_centroid
    if (self%facets_number>0) then
       factor_ = 1._R8P
@@ -886,7 +888,7 @@ contains
    endif
    endfunction statistics
 
-   elemental subroutine translate(self, x, y, z, delta, recompute_metrix)
+   subroutine translate(self, x, y, z, delta, recompute_metrix)
    !< Translate facets x or y or z or vectorial delta increments.
    class(surface_stl_object), intent(inout)        :: self             !< File STL.
    real(R8P),                 intent(in), optional :: x                !< Increment along x axis.
@@ -896,6 +898,8 @@ contains
    logical,                   intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
    type(vector_R8P)                                :: delta_           !< Vectorial increment, local variable.
 
+   if (present(delta) .and. (present(x) .or. present(y) .or. present(z))) &
+      error stop 'surface_stl_object%translate: specify either delta or x/y/z, not both'
    if (self%facets_number>0) then
       delta_ = 0._R8P
       if (present(delta)) then
