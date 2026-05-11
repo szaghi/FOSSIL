@@ -204,9 +204,11 @@ contains
              nodes=>self%nodes, distances=>self%distances)
       if (ei(1)>=2.or.ei(2)>=2.or.ej(1)>=2.or.ej(2)>=2.or.ek(1)>=2.or.ek(2)>=2) then
          if (ei(1)>=2) then
-            allocate(nodes_ext(    size(nodes,     dim=1)+ei(1), size(nodes,     dim=2), size(nodes,     dim=3)), stat=istat, errmsg=msg)
+            allocate(nodes_ext(size(self%nodes,dim=1)+ei(1), size(self%nodes,dim=2), size(self%nodes,dim=3)), &
+                               stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
-            allocate(distances_ext(size(distances, dim=1)+ei(1), size(distances, dim=2), size(distances, dim=3)), stat=istat, errmsg=msg)
+            allocate(distances_ext(size(self%distances,dim=1)+ei(1), size(self%distances,dim=2), size(self%distances,dim=3)), &
+                                   stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
             nodes_ext(1:size(nodes, dim=1), :, :) = nodes
             Dxyz_ext = Dx
@@ -227,9 +229,11 @@ contains
          endif
 
          if (ei(2)>=2) then
-            allocate(nodes_ext(    size(nodes,     dim=1)+ei(2), size(nodes,     dim=2), size(nodes,     dim=3)), stat=istat, errmsg=msg)
+            allocate(nodes_ext(size(self%nodes,dim=1)+ei(2), size(self%nodes,dim=2), size(self%nodes,dim=3)), &
+                               stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
-            allocate(distances_ext(size(distances, dim=1)+ei(2), size(distances, dim=2), size(distances, dim=3)), stat=istat, errmsg=msg)
+            allocate(distances_ext(size(self%distances,dim=1)+ei(2), size(self%distances,dim=2), size(self%distances,dim=3)), &
+                                   stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
             nodes_ext(ei(2)+1:, :, :) = nodes
             Dxyz_ext = Dx
@@ -250,9 +254,11 @@ contains
          endif
 
          if (ej(1)>=2) then
-            allocate(nodes_ext(    size(nodes,     dim=1), size(nodes,     dim=2)+ej(1), size(nodes,     dim=3)), stat=istat, errmsg=msg)
+            allocate(nodes_ext(size(self%nodes,dim=1), size(self%nodes,dim=2)+ej(1), size(self%nodes,dim=3)), &
+                               stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
-            allocate(distances_ext(size(distances, dim=1), size(distances, dim=2)+ej(1), size(distances, dim=3)), stat=istat, errmsg=msg)
+            allocate(distances_ext(size(self%distances,dim=1), size(self%distances,dim=2)+ej(1), size(self%distances,dim=3)), &
+                                   stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
             nodes_ext(:, 1:size(nodes, dim=2), :) = nodes
             Dxyz_ext = Dy
@@ -273,9 +279,11 @@ contains
          endif
 
          if (ej(2)>=2) then
-            allocate(nodes_ext(    size(nodes,     dim=1), size(nodes,     dim=2)+ej(2), size(nodes,     dim=3)), stat=istat, errmsg=msg)
+            allocate(nodes_ext(size(self%nodes,dim=1), size(self%nodes,dim=2)+ej(2), size(self%nodes,dim=3)), &
+                               stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
-            allocate(distances_ext(size(distances, dim=1), size(distances, dim=2)+ej(2), size(distances, dim=3)), stat=istat, errmsg=msg)
+            allocate(distances_ext(size(self%distances,dim=1), size(self%distances,dim=2)+ej(2), size(self%distances,dim=3)), &
+                                   stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
             nodes_ext(:, ej(2)+1:, :) = nodes
             Dxyz_ext = Dy
@@ -296,9 +304,11 @@ contains
          endif
 
          if (ek(1)>=2) then
-            allocate(nodes_ext(    size(nodes,     dim=1), size(nodes,     dim=2), size(nodes,     dim=3)+ek(1)), stat=istat, errmsg=msg)
+            allocate(nodes_ext(size(self%nodes,dim=1), size(self%nodes,dim=2), size(self%nodes,dim=3)+ek(1)), &
+                               stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
-            allocate(distances_ext(size(distances, dim=1), size(distances, dim=2), size(distances, dim=3)+ek(1)), stat=istat, errmsg=msg)
+            allocate(distances_ext(size(self%distances,dim=1), size(self%distances,dim=2), size(self%distances,dim=3)+ek(1)), &
+                                   stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
             nodes_ext(:, :, 1:size(nodes, dim=3)) = nodes
             Dxyz_ext = Dz
@@ -319,9 +329,11 @@ contains
          endif
 
          if (ek(2)>=2) then
-            allocate(nodes_ext(    size(nodes,     dim=1), size(nodes,     dim=2), size(nodes,     dim=3)+ek(2)), stat=istat, errmsg=msg)
+            allocate(nodes_ext(size(self%nodes,dim=1), size(self%nodes,dim=2), size(self%nodes,dim=3)+ek(2)), &
+                               stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
-            allocate(distances_ext(size(distances, dim=1), size(distances, dim=2), size(distances, dim=3)+ek(2)), stat=istat, errmsg=msg)
+            allocate(distances_ext(size(self%distances,dim=1), size(self%distances,dim=2), size(self%distances,dim=3)+ek(2)), &
+                                   stat=istat, errmsg=msg)
             if (istat /= 0) error stop 'block_object%extrapolate_distances: '//trim(msg)
             nodes_ext(:, :, ek(2)+1:) = nodes
             Dxyz_ext = Dz
