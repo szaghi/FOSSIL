@@ -35,7 +35,7 @@ call cli_parse
 call surface_stl%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true., &
                                 aabb_refinement_levels=refinement_levels)
 call surface_stl%sanitize
-call surface_stl%analize(aabb_refinement_levels=refinement_levels)
+call surface_stl%analyze(aabb_refinement_levels=refinement_levels)
 print '(A)', surface_stl%statistics()
 if (save_aabb_tree_geometry) call surface_stl%aabb%save_geometry_tecplot_ascii(file_name=trim(output_base_name)//'_aabb_tree.dat')
 if (save_aabb_tree_stl) call surface_stl%save_aabb_into_file(base_file_name=trim(output_base_name), is_ascii=.false.)

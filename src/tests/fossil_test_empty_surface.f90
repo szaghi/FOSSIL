@@ -13,7 +13,7 @@ use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 
 implicit none
 
-type(surface_stl_object) :: surface             !< Empty surface (never analized, never loaded).
+type(surface_stl_object) :: surface             !< Empty surface (never analyzed, never loaded).
 real(R8P)                :: distance            !< Distance output.
 integer(I4P)             :: facet_index         !< Facet-index output.
 logical                  :: are_tests_passed(4) !< Result of tests check.

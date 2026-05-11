@@ -39,7 +39,7 @@ type :: surface_stl_object
    !<    callers do not write through these accessors. Mutation goes via the surface's
    !<    own TBPs (`translate`, `rotate`, `mirror`, etc.).
    !<  - ownership transfer: `adopt_facets(arr)` moves an allocatable array into the
-   !<    surface via `move_alloc`, then auto-runs `analize`. Used internally by
+   !<    surface via `move_alloc`, then auto-runs `analyze`. Used internally by
    !<    `load_from_file`.
    !<  - `aabb` is technically public so that callers can invoke its TBPs
    !<    (e.g. `surface%aabb%set_use_index(...)`); its own components are private.
@@ -75,7 +75,7 @@ type :: surface_stl_object
       procedure, pass(self) :: save_aabb_into_file  !< Save the AABB tree leaves as separate STL files.
       ! public methods
       procedure, pass(self) :: allocate_facets                 !< Allocate facets.
-      procedure, pass(self) :: analize                         !< Analize STL.
+      procedure, pass(self) :: analyze                         !< Analize STL.
       procedure, pass(self) :: build_connectivity              !< Build facets connectivity.
       procedure, pass(self) :: clip                            !< Clip triangulated surface given an AABB.
       procedure, pass(self) :: compute_centroid                !< Compute centroid of STL surface.
@@ -210,7 +210,7 @@ contains
    ! ownership transfer
 
    subroutine adopt_facets(self, facets, aabb_refinement_levels)
-   !< Take ownership of an allocatable facet array via `move_alloc`, then `analize`.
+   !< Take ownership of an allocatable facet array via `move_alloc`, then `analyze`.
    !<
    !< The caller's `facets(:)` becomes unallocated on return — this is a zero-copy
    !< handoff. Used internally by `load_from_file` and available to external code that
@@ -226,7 +226,7 @@ contains
    else
       self%facets_number = 0
    endif
-   call self%analize(aabb_refinement_levels=aabb_refinement_levels)
+   call self%analyze(aabb_refinement_levels=aabb_refinement_levels)
    endsubroutine adopt_facets
 
    ! public methods
@@ -247,8 +247,8 @@ contains
    endif
    endsubroutine allocate_facets
 
-   ! elemental subroutine analize(self, aabb_refinement_levels)
-   subroutine analize(self, aabb_refinement_levels)
+   ! elemental subroutine analyze(self, aabb_refinement_levels)
+   subroutine analyze(self, aabb_refinement_levels)
    !< Analize STL.
    !<
    !< Buil connectivity, compute metrix, compute volume.
@@ -266,7 +266,7 @@ contains
       call self%compute_volume
       call self%compute_centroid
    endif
-   endsubroutine analize
+   endsubroutine analyze
 
    ! pure subroutine build_connectivity(self)
    subroutine build_connectivity(self)
@@ -311,6 +311,8 @@ contains
    integer(I4P)                                     :: facets_in_number  !< Number of facets inside bounding box.
    integer(I4P)                                     :: facets_out_number !< Number of facets outside bounding box.
    integer(I4P)                                     :: f, fi, fo         !< Counter.
+   integer(I4P)                                     :: istat             !< Allocation status.
+   character(len=256)                               :: msg               !< Allocation error message.
 
    if (self%facets_number>0) then
       facets_in_number = 0
@@ -325,10 +327,12 @@ contains
          endif
       enddo
       if (facets_in_number>0) then
-         allocate(facet(1:facets_in_number))
+         allocate(facet(1:facets_in_number), stat=istat, errmsg=msg)
+         if (istat /= 0) error stop 'surface_stl_object%clip: '//trim(msg)
          if (present(remainder)) then
             remainder%facets_number = facets_out_number
-            allocate(remainder%facet(1:facets_out_number))
+            allocate(remainder%facet(1:facets_out_number), stat=istat, errmsg=msg)
+            if (istat /= 0) error stop 'surface_stl_object%clip: '//trim(msg)
          endif
          fi = 0
          fo = 0
@@ -349,8 +353,8 @@ contains
          enddo
          call move_alloc(from=facet, to=self%facet)
          self%facets_number = facets_in_number
-         call self%analize(aabb_refinement_levels=self%aabb%get_refinement_levels())
-         if (present(remainder)) call remainder%analize(aabb_refinement_levels=self%aabb%get_refinement_levels())
+         call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
+         if (present(remainder)) call remainder%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
       endif
    endif
    endsubroutine clip
@@ -727,10 +731,13 @@ contains
    type(surface_stl_object),  intent(in)    :: other    !< Other file STL.
    type(facet_object), allocatable          :: facet(:) !< Facets temporary list.
    integer(I4P)                             :: f        !< Counter.
+   integer(I4P)                             :: istat    !< Allocation status.
+   character(len=256)                       :: msg      !< Allocation error message.
 
    if (other%facets_number > 0) then
       if (self%facets_number > 0) then
-         allocate(facet(1:self%facets_number + other%facets_number))
+         allocate(facet(1:self%facets_number + other%facets_number), stat=istat, errmsg=msg)
+         if (istat /= 0) error stop 'surface_stl_object%merge_solids: '//trim(msg)
          do f=1, self%facets_number
             facet(f)  =  self%facet(f)
          enddo
@@ -740,13 +747,14 @@ contains
          call move_alloc(from=facet, to=self%facet)
          self%facets_number = self%facets_number + other%facets_number
       else
-         allocate(self%facet(1:other%facets_number))
+         allocate(self%facet(1:other%facets_number), stat=istat, errmsg=msg)
+         if (istat /= 0) error stop 'surface_stl_object%merge_solids: '//trim(msg)
          do f=1, other%facets_number
             self%facet(f) = other%facet(f)
          enddo
          self%facets_number = other%facets_number
       endif
-      call self%analize(aabb_refinement_levels=self%aabb%get_refinement_levels())
+      call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
    endif
    endsubroutine merge_solids
 
@@ -804,13 +812,19 @@ contains
 
    if (self%facets_number>0) then
       if (present(do_analysis)) then
-         if (do_analysis) call self%analize(aabb_refinement_levels=self%aabb%get_refinement_levels())
+         if (do_analysis) call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
       endif
       if (self%facet_1_de%ids_number>0.or.&
           self%facet_2_de%ids_number>0.or.&
           self%facet_3_de%ids_number>0) call self%connect_nearby_vertices
-      call self%analize(aabb_refinement_levels=self%aabb%get_refinement_levels())
+      call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
       call self%sanitize_normals
+      if (self%facet_1_de%ids_number>0) &
+         write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%facet_1_de%ids_number,' facet(s) with 1 disconnected edge remain'
+      if (self%facet_2_de%ids_number>0) &
+         write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%facet_2_de%ids_number,' facet(s) with 2 disconnected edges remain'
+      if (self%facet_3_de%ids_number>0) &
+         write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%facet_3_de%ids_number,' facet(s) with 3 disconnected edges remain'
    endif
    endsubroutine sanitize
 
@@ -1062,7 +1076,7 @@ contains
    !< Load an STL file into the surface.
    !<
    !< Builds a local facet array, then transfers ownership via `adopt_facets` (which
-   !< runs `analize`). Auto-detects ASCII vs binary when `guess_format=.true.` (size
+   !< runs `analyze`). Auto-detects ASCII vs binary when `guess_format=.true.` (size
    !< identity-check; see the binary-header trap discussion in audit #14 S3).
    !< When `clip_min`/`clip_max` are present, only facets entirely inside the AABB
    !< are loaded.
@@ -1071,13 +1085,15 @@ contains
    logical,                         intent(in), optional :: is_ascii               !< Force ASCII (default .true. if guess_format=.false.).
    logical,                         intent(in), optional :: guess_format           !< Auto-detect format from file size.
    type(vector_R8P),                intent(in), optional :: clip_min, clip_max     !< AABB clip extents (facets inside only).
-   integer(I4P),                    intent(in), optional :: aabb_refinement_levels !< AABB refinement levels passed to analize.
+   integer(I4P),                    intent(in), optional :: aabb_refinement_levels !< AABB refinement levels passed to analyze.
    type(facet_object), allocatable                       :: facets(:)              !< Local buffer for ownership transfer.
    integer(I4P)                                          :: file_unit              !< File unit.
    logical                                               :: is_ascii_              !< Effective ASCII flag.
    integer(I4P)                                          :: facets_number          !< Facet count from header.
    type(facet_object)                                    :: facet_clip             !< Buffer for clipped loading.
    integer(I4P)                                          :: f, ff                  !< Counters.
+   integer(I4P)                                          :: istat                  !< Allocation status.
+   character(len=256)                                    :: msg                    !< Allocation error message.
 
    is_ascii_ = .true. ; if (present(is_ascii)) is_ascii_ = is_ascii
    call stl_open_for_read(file_name=file_name, file_unit=file_unit, is_ascii=is_ascii_, guess_format=guess_format)
@@ -1097,7 +1113,8 @@ contains
              is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(3))) ff = ff + 1
       enddo
       call stl_load_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header)
-      allocate(facets(1:ff))
+      allocate(facets(1:ff), stat=istat, errmsg=msg)
+      if (istat /= 0) error stop 'surface_stl_object%load_from_file: '//trim(msg)
       ff = 0
       do f=1, facets_number
          if (is_ascii_) then
@@ -1114,7 +1131,8 @@ contains
          endif
       enddo
    else
-      allocate(facets(1:facets_number))
+      allocate(facets(1:facets_number), stat=istat, errmsg=msg)
+      if (istat /= 0) error stop 'surface_stl_object%load_from_file: '//trim(msg)
       do f=1, facets_number
          if (is_ascii_) then
             call facets(f)%load_from_file_ascii(file_unit=file_unit)

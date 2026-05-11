@@ -43,7 +43,7 @@ call surface_stl%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_fo
 print '(A)', 'STL statistics before sanitization'
 print '(A)', surface_stl%statistics()
 call surface_stl%sanitize
-call surface_stl%analize(aabb_refinement_levels=refinement_levels)
+call surface_stl%analyze(aabb_refinement_levels=refinement_levels)
 print '(A)', 'STL statistics after sanitization'
 print '(A)', surface_stl%statistics()
 
