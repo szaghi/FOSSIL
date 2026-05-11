@@ -4,12 +4,11 @@ program fossil_test_sanitize_normals
 !< FOSSIL, test normals *sanitization*.
 
 use flap, only : command_line_interface
-use fossil, only : file_stl_object, surface_stl_object
+use fossil, only : surface_stl_object
 use penf, only : I4P, R8P
 
 implicit none
 
-type(file_stl_object)    :: file_stl            !< STL file.
 type(surface_stl_object) :: surface             !< STL surface.
 character(999)           :: file_name_stl       !< Input STL file name.
 logical                  :: are_tests_passed(2) !< Result of tests check.
@@ -17,8 +16,7 @@ logical                  :: are_tests_passed(2) !< Result of tests check.
 are_tests_passed = .false.
 
 call cli_parse
-call file_stl%load_from_file(facet=surface%facet, file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
-call surface%analize
+call surface%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
 
 print*, 'volume before sanitize normals: ', surface%get_volume()
 are_tests_passed(1) = surface%get_volume() <= 0._R8P

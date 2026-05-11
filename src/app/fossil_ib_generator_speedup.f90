@@ -5,7 +5,7 @@ program fossil_ib_generator
 
 use fossil_block_object, only : block_object
 use flap, only : command_line_interface
-use fossil, only : file_stl_object, surface_stl_object, sign_algorithm_from_string
+use fossil, only : surface_stl_object, sign_algorithm_from_string
 use penf, only : I4P, I8P, R8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 use fossil_aabb_tree_object, only : aabb_tree_object
@@ -14,7 +14,6 @@ use vtk_fortran, only : vtk_file
 implicit none
 
 type(command_line_interface) :: cli                     !< Test command line interface.
-type(file_stl_object)        :: file_stl                !< STL file.
 type(surface_stl_object)     :: surface_stl             !< STL surface.
 type(vector_R8P)             :: bmin, bmax              !< Bounding box extents.
 character(999)               :: file_name_stl           !< Input STL file name.
@@ -33,14 +32,13 @@ type(block_object)           :: cblock                  !< Cartesian block.
 
 ! parse command line input e load STL file
 call cli_parse
-call file_stl%load_from_file(facet=surface_stl%facet, file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
-call surface_stl%analize(aabb_refinement_levels=refinement_levels)
+call surface_stl%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true., &
+                                aabb_refinement_levels=refinement_levels)
 call surface_stl%sanitize
 call surface_stl%analize(aabb_refinement_levels=refinement_levels)
 print '(A)', surface_stl%statistics()
 if (save_aabb_tree_geometry) call surface_stl%aabb%save_geometry_tecplot_ascii(file_name=trim(output_base_name)//'_aabb_tree.dat')
-if (save_aabb_tree_stl) call file_stl%save_aabb_into_file(surface=surface_stl, base_file_name=trim(output_base_name), &
-                                                          is_ascii=.false.)
+if (save_aabb_tree_stl) call surface_stl%save_aabb_into_file(base_file_name=trim(output_base_name), is_ascii=.false.)
 
 if (.not.cli%is_passed(switch='--bmin')) then
    bmin = surface_stl%get_bmin()

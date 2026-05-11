@@ -4,7 +4,7 @@ module fossil_block_object
 !< FOSSIL cartesian block class definition.
 
 use fossil_block_aabb_object, only : aabb_object
-use fossil, only : surface_stl_object
+use fossil, only : surface_stl_object, facet_object
 use penf, only : I4P, I8P, R8P, FR8P, MaxR8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 use vtk_fortran, only : vtk_file
@@ -77,18 +77,25 @@ contains
    invert_sign_ = .false. ; if (present(invert_sign)) invert_sign_ = invert_sign
    self%distances = MaxR8P
    call system_clock(timing(1))
-   do f=1, surface_stl%get_facets_number()
-      call self%get_closest_cells_indexes(point=surface_stl%facet(f)%centroid, cindexes=cindexes)
-      do c=1, Nc
-         i = cindexes(1, c)
-         j = cindexes(2, c)
-         k = cindexes(3, c)
-         call surface_stl%facet(f)%compute_distance(point=self%centers(i, j, k), distance=distance)
-         if (distance < self%distances(i,j,k)) self%distances(i,j,k) = distance
-         if (surface_stl%is_point_inside(point=self%centers(i, j, k), sign_algorithm=sign_algorithm)) &
-            self%distances(i, j, k) = - self%distances(i, j, k)
-      enddo
-   enddo
+   ! Bulk loop: one pointer set, then direct array access (zero copy).
+   block
+      type(facet_object), pointer :: facets(:)
+      facets => surface_stl%facets_ref()
+      if (associated(facets)) then
+         do f=1, size(facets, dim=1)
+            call self%get_closest_cells_indexes(point=facets(f)%centroid, cindexes=cindexes)
+            do c=1, Nc
+               i = cindexes(1, c)
+               j = cindexes(2, c)
+               k = cindexes(3, c)
+               call facets(f)%compute_distance(point=self%centers(i, j, k), distance=distance)
+               if (distance < self%distances(i,j,k)) self%distances(i,j,k) = distance
+               if (surface_stl%is_point_inside(point=self%centers(i, j, k), sign_algorithm=sign_algorithm)) &
+                  self%distances(i, j, k) = - self%distances(i, j, k)
+            enddo
+         enddo
+      endif
+   end block
    call system_clock(timing(2), timing(0))
    print '(A, F8.3)', 'compute forces timing: ', real(timing(2) - timing(1)) / timing(0)
    if (invert_sign_) self%distances = -self%distances

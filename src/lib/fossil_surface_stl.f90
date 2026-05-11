@@ -6,7 +6,8 @@ module fossil_surface_stl_object
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
-use fossil_utils, only : EPS, PI, is_inside_bb
+use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb
+use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : I4P, R8P, MaxR8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, mirror_matrix_R8P, rotation_matrix_R8P, vector_R8P
 
@@ -28,26 +29,31 @@ integer(I4P), parameter :: SIGN_SOLID_ANGLE       = 2_I4P
 type :: surface_stl_object
    !< FOSSIL STL surface class.
    !<
-   !< Two components remain externally accessible:
-   !<  - `facet(:)` is passed as an actual argument to `file_stl_object%load_from_file`
-   !<    and `save_into_file`. A future refactor (move load/save onto this type, ownership
-   !<    transfer via `move_alloc`, pointer-returning `facet_at(i)` accessor) will make it
-   !<    private too.
-   !<  - `aabb`'s own components are already `private` — callers can invoke its methods
-   !<    but not mutate its state, so leaving the handle accessible is safe.
-   !<
-   !< All other components are `private`; read them via the accessor methods
-   !< (`get_facets_number`, `get_bmin`, `get_bmax`, `get_volume`, `get_centroid`).
-   integer(I4P),                    private :: facets_number=0 !< Facets number (must equal size(facet)).
-   type(facet_object), allocatable          :: facet(:)        !< Facets.
+   !< All components are `private`. External code interacts via accessors:
+   !<  - scalar/value getters: `get_facets_number`, `get_bmin`, `get_bmax`, `get_volume`,
+   !<    `get_centroid`, `get_header`, `set_header`
+   !<  - facet access: `facet_at(i)` returns a `pointer` to a single facet (or `null()`
+   !<    if `i` is out of range), `facets_ref()` returns a `pointer` to the whole array.
+   !<    Both are intended as read-only views — the library does not enforce this through
+   !<    the pointer (Fortran has no `const`-equivalent on components), so by convention
+   !<    callers do not write through these accessors. Mutation goes via the surface's
+   !<    own TBPs (`translate`, `rotate`, `mirror`, etc.).
+   !<  - ownership transfer: `adopt_facets(arr)` moves an allocatable array into the
+   !<    surface via `move_alloc`, then auto-runs `analize`. Used internally by
+   !<    `load_from_file`.
+   !<  - `aabb` is technically public so that callers can invoke its TBPs
+   !<    (e.g. `surface%aabb%set_use_index(...)`); its own components are private.
+   integer(I4P),                    private :: facets_number=0 !< Facets number (== size(facet)).
+   type(facet_object), allocatable, private :: facet(:)        !< Facets.
    type(list_id_object),            private :: facet_1_de      !< Facets with one disconnected edges.
    type(list_id_object),            private :: facet_2_de      !< Facets with two disconnected edges.
    type(list_id_object),            private :: facet_3_de      !< Facets with three disconnected edges.
-   type(aabb_tree_object)                   :: aabb            !< AABB tree (its own state is private).
+   type(aabb_tree_object)                   :: aabb            !< AABB tree handle (its own state is private).
    type(vector_R8P),                private :: bmin            !< Bounding-box min.
    type(vector_R8P),                private :: bmax            !< Bounding-box max.
    real(R8P),                       private :: volume=0._R8P   !< Volume bounded by STL surface.
    type(vector_R8P),                private :: centroid        !< Centroid of STL surface.
+   character(FRLEN),                private :: header=''       !< STL file header (preserved across load/save).
    contains
       ! read-only accessors (pure, inlined at -O2, zero data copy for scalars)
       procedure, pass(self) :: get_facets_number !< Return facets_number.
@@ -55,6 +61,18 @@ type :: surface_stl_object
       procedure, pass(self) :: get_bmax          !< Return bmax (bounding-box maximum).
       procedure, pass(self) :: get_volume        !< Return volume.
       procedure, pass(self) :: get_centroid      !< Return centroid.
+      procedure, pass(self) :: get_header        !< Return STL header.
+      ! mutator (the only externally-permitted direct writes; aabb has its own mutators)
+      procedure, pass(self) :: set_header        !< Set STL header.
+      ! facet access (pointer-returning; treat as read-only views)
+      procedure, pass(self) :: facet_at          !< Return pointer to facet(i), null() if i is out of range.
+      procedure, pass(self) :: facets_ref        !< Return pointer to the whole facet array.
+      ! ownership transfer
+      procedure, pass(self) :: adopt_facets      !< Take ownership of an allocatable facet array via move_alloc.
+      ! file I/O (moved from file_stl_object)
+      procedure, pass(self) :: load_from_file       !< Load STL from a file path (ASCII or binary, auto-detected).
+      procedure, pass(self) :: save_into_file       !< Save STL to a file path.
+      procedure, pass(self) :: save_aabb_into_file  !< Save the AABB tree leaves as separate STL files.
       ! public methods
       procedure, pass(self) :: allocate_facets                 !< Allocate facets.
       procedure, pass(self) :: analize                         !< Analize STL.
@@ -141,6 +159,78 @@ contains
 
    c = self%centroid
    endfunction get_centroid
+
+   pure function get_header(self) result(h)
+   !< Return STL header (the 80-char "solid <name>" string).
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   character(FRLEN)                      :: h    !< Header.
+
+   h = self%header
+   endfunction get_header
+
+   pure subroutine set_header(self, header)
+   !< Set STL header (truncated/padded to FRLEN).
+   class(surface_stl_object), intent(inout) :: self   !< File STL.
+   character(*),              intent(in)    :: header !< New header text.
+
+   self%header = header
+   endsubroutine set_header
+
+   ! facet access (pointer-returning, zero-copy; treat the returned pointer as a read-only view)
+
+   function facet_at(self, i) result(p)
+   !< Return a pointer to facet `i`, or `null()` if `i` is out of range.
+   !<
+   !< The returned pointer aliases the surface's internal storage — do not write through
+   !< it; use the surface's TBPs (`translate`, `rotate`, etc.) for mutation. Bounds-test
+   !< at the call site: `p => surface%facet_at(i); if (.not. associated(p)) ...`.
+   class(surface_stl_object), intent(in), target :: self !< File STL.
+   integer(I4P),              intent(in)         :: i    !< Facet index (1..facets_number).
+   type(facet_object),        pointer            :: p    !< Pointer to facet, or null() if out of range.
+
+   if (allocated(self%facet) .and. i >= 1 .and. i <= self%facets_number) then
+      p => self%facet(i)
+   else
+      p => null()
+   endif
+   endfunction facet_at
+
+   function facets_ref(self) result(p)
+   !< Return a pointer to the whole facet array (length = facets_number).
+   !<
+   !< Returns `null()` if no facets are allocated. Same read-only-view convention as
+   !< `facet_at`: do not mutate through this pointer.
+   class(surface_stl_object), intent(in), target :: self !< File STL.
+   type(facet_object),        pointer            :: p(:) !< Pointer to facet array, or null() if unallocated.
+
+   if (allocated(self%facet)) then
+      p => self%facet
+   else
+      p => null()
+   endif
+   endfunction facets_ref
+
+   ! ownership transfer
+
+   subroutine adopt_facets(self, facets, aabb_refinement_levels)
+   !< Take ownership of an allocatable facet array via `move_alloc`, then `analize`.
+   !<
+   !< The caller's `facets(:)` becomes unallocated on return — this is a zero-copy
+   !< handoff. Used internally by `load_from_file` and available to external code that
+   !< builds facets procedurally.
+   class(surface_stl_object),       intent(inout)        :: self                   !< File STL.
+   type(facet_object), allocatable, intent(inout)        :: facets(:)              !< Facets to adopt.
+   integer(I4P),                    intent(in), optional :: aabb_refinement_levels !< AABB refinement levels.
+
+   if (allocated(self%facet)) deallocate(self%facet)
+   if (allocated(facets)) then
+      call move_alloc(from=facets, to=self%facet)
+      self%facets_number = size(self%facet, dim=1)
+   else
+      self%facets_number = 0
+   endif
+   call self%analize(aabb_refinement_levels=aabb_refinement_levels)
+   endsubroutine adopt_facets
 
    ! public methods
    elemental subroutine allocate_facets(self, facets_number)
@@ -898,4 +988,237 @@ contains
                  '" (valid: "ray_intersections", "solid_angle")'
    endselect
    endfunction sign_algorithm_from_string
+
+   ! file I/O (migrated from the deleted fossil_file_stl_object module)
+   !
+   ! These TBPs and their internal helpers replace what used to live on `file_stl_object`.
+   ! Callers now do `call surface%load_from_file('foo.stl')` directly — there is no
+   ! intermediate file handle to manage. Internally the routines use a local `file_unit`
+   ! variable; format-mode (ASCII vs binary) is a local flag, not stored state.
+
+   subroutine load_from_file(self, file_name, is_ascii, guess_format, clip_min, clip_max, aabb_refinement_levels)
+   !< Load an STL file into the surface.
+   !<
+   !< Builds a local facet array, then transfers ownership via `adopt_facets` (which
+   !< runs `analize`). Auto-detects ASCII vs binary when `guess_format=.true.` (size
+   !< identity-check; see the binary-header trap discussion in audit #14 S3).
+   !< When `clip_min`/`clip_max` are present, only facets entirely inside the AABB
+   !< are loaded.
+   class(surface_stl_object),       intent(inout)        :: self                   !< Surface STL.
+   character(*),                    intent(in)           :: file_name              !< STL file path.
+   logical,                         intent(in), optional :: is_ascii               !< Force ASCII (default .true. if guess_format=.false.).
+   logical,                         intent(in), optional :: guess_format           !< Auto-detect format from file size.
+   type(vector_R8P),                intent(in), optional :: clip_min, clip_max     !< AABB clip extents (facets inside only).
+   integer(I4P),                    intent(in), optional :: aabb_refinement_levels !< AABB refinement levels passed to analize.
+   type(facet_object), allocatable                       :: facets(:)              !< Local buffer for ownership transfer.
+   integer(I4P)                                          :: file_unit              !< File unit.
+   logical                                               :: is_ascii_              !< Effective ASCII flag.
+   integer(I4P)                                          :: facets_number          !< Facet count from header.
+   type(facet_object)                                    :: facet_clip             !< Buffer for clipped loading.
+   integer(I4P)                                          :: f, ff                  !< Counters.
+
+   is_ascii_ = .true. ; if (present(is_ascii)) is_ascii_ = is_ascii
+   call stl_open_for_read(file_name=file_name, file_unit=file_unit, is_ascii=is_ascii_, guess_format=guess_format)
+   call stl_load_facets_number(file_unit=file_unit, is_ascii=is_ascii_, facets_number=facets_number)
+   call stl_load_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header)
+   if (present(clip_min).and.present(clip_max)) then
+      ! two-pass: count, then re-read and keep facets inside the AABB
+      ff = 0
+      do f=1, facets_number
+         if (is_ascii_) then
+            call facet_clip%load_from_file_ascii(file_unit=file_unit)
+         else
+            call facet_clip%load_from_file_binary(file_unit=file_unit)
+         endif
+         if (is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(1)).and.&
+             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(2)).and.&
+             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(3))) ff = ff + 1
+      enddo
+      call stl_load_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header)
+      allocate(facets(1:ff))
+      ff = 0
+      do f=1, facets_number
+         if (is_ascii_) then
+            call facet_clip%load_from_file_ascii(file_unit=file_unit)
+         else
+            call facet_clip%load_from_file_binary(file_unit=file_unit)
+         endif
+         if (is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(1)).and.&
+             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(2)).and.&
+             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(3))) then
+            ff = ff + 1
+            facets(ff) = facet_clip
+            facets(ff)%id = ff
+         endif
+      enddo
+   else
+      allocate(facets(1:facets_number))
+      do f=1, facets_number
+         if (is_ascii_) then
+            call facets(f)%load_from_file_ascii(file_unit=file_unit)
+         else
+            call facets(f)%load_from_file_binary(file_unit=file_unit)
+         endif
+         facets(f)%id = f
+      enddo
+   endif
+   close(file_unit)
+   call self%adopt_facets(facets=facets, aabb_refinement_levels=aabb_refinement_levels)
+   endsubroutine load_from_file
+
+   subroutine save_into_file(self, file_name, is_ascii)
+   !< Save the surface to an STL file.
+   class(surface_stl_object), intent(in)           :: self      !< Surface STL.
+   character(*),              intent(in)           :: file_name !< STL file path.
+   logical,                   intent(in), optional :: is_ascii  !< Write as ASCII (default .true.).
+   integer(I4P)                                    :: file_unit !< File unit.
+   logical                                         :: is_ascii_ !< Effective ASCII flag.
+   integer(I4P)                                    :: f         !< Counter.
+
+   is_ascii_ = .true. ; if (present(is_ascii)) is_ascii_ = is_ascii
+   call stl_open_for_write(file_name=file_name, file_unit=file_unit, is_ascii=is_ascii_)
+   call stl_save_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header, facets_number=self%facets_number)
+   if (is_ascii_) then
+      do f=1, self%facets_number
+         call self%facet(f)%save_into_file_ascii(file_unit=file_unit)
+      enddo
+   else
+      do f=1, self%facets_number
+         call self%facet(f)%save_into_file_binary(file_unit=file_unit)
+      enddo
+   endif
+   if (is_ascii_) write(file_unit, '(A)') 'endsolid '//trim(self%header)
+   close(file_unit)
+   endsubroutine save_into_file
+
+   subroutine save_aabb_into_file(self, base_file_name, is_ascii)
+   !< Save each AABB tree leaf as a separate STL file.
+   !<
+   !< File name pattern: `<base_file_name>aabb-l_<level>-b_<box>.stl`.
+   class(surface_stl_object), intent(in)           :: self           !< Surface STL.
+   character(*),              intent(in)           :: base_file_name !< Base file-name prefix.
+   logical,                   intent(in), optional :: is_ascii       !< Write as ASCII (default .true.).
+   type(facet_object), allocatable                 :: aabb_facet(:)  !< AABB leaf facets.
+   type(surface_stl_object)                        :: leaf           !< Scratch surface for save.
+   integer(I4P)                                    :: b, l           !< Counters.
+   character(len=:), allocatable                   :: file_name      !< Composed file name.
+
+   if (.not. self%aabb%get_is_initialized()) return
+   do while (self%aabb%loop_node(facet=self%facet, aabb_facet=aabb_facet, b=b, l=l))
+      file_name = trim(adjustl(base_file_name))//'aabb-l_'//trim(str(l, .true.))//'-b_'//trim(str(b, .true.))//'.stl'
+      call leaf%adopt_facets(facets=aabb_facet)
+      call leaf%set_header(self%header)
+      call leaf%save_into_file(file_name=file_name, is_ascii=is_ascii)
+      call leaf%destroy
+   enddo
+   endsubroutine save_aabb_into_file
+
+   ! internal I/O helpers (module-private; not exposed as TBPs)
+
+   subroutine stl_open_for_read(file_name, file_unit, is_ascii, guess_format)
+   !< Open an STL file for reading; auto-detect format via size identity if requested.
+   character(*),  intent(in)              :: file_name    !< File path.
+   integer(I4P),  intent(out)             :: file_unit    !< Newunit-assigned unit.
+   logical,       intent(inout)           :: is_ascii     !< In/out: format flag (rewritten by guess).
+   logical,       intent(in),   optional  :: guess_format !< Auto-detect via file-size identity.
+   logical                                :: guess_format_, file_exist
+   integer(I4P)                           :: file_size, facets_count, ios
+   integer(I4P), parameter                :: BINARY_HEADER_BYTES = 80_I4P
+   integer(I4P), parameter                :: BINARY_FACET_BYTES  = 50_I4P
+   integer(I4P), parameter                :: BINARY_COUNT_BYTES  =  4_I4P
+
+   guess_format_ = .false. ; if (present(guess_format)) guess_format_ = guess_format
+   inquire(file=file_name, exist=file_exist, size=file_size)
+   if (.not. file_exist) then
+      write(stderr, '(A)') 'error: file "'//file_name//'" does not exist, impossible to open file!'
+      error stop 'fossil_surface_stl_object%load_from_file: file not found'
+   endif
+   if (guess_format_) then
+      is_ascii = .true.
+      if (file_size > BINARY_HEADER_BYTES + BINARY_COUNT_BYTES) then
+         open(newunit=file_unit, file=file_name, access='stream', form='unformatted', action='read', iostat=ios)
+         if (ios == 0) then
+            read(file_unit, pos=BINARY_HEADER_BYTES + 1, iostat=ios) facets_count
+            close(file_unit)
+            if (ios == 0 .and. facets_count > 0 .and. &
+                file_size == BINARY_HEADER_BYTES + BINARY_COUNT_BYTES + facets_count * BINARY_FACET_BYTES) then
+               is_ascii = .false.
+            endif
+         endif
+      endif
+   endif
+   if (is_ascii) then
+      open(newunit=file_unit, file=file_name,                  form='formatted',   action='read')
+   else
+      open(newunit=file_unit, file=file_name, access='stream', form='unformatted', action='read')
+   endif
+   endsubroutine stl_open_for_read
+
+   subroutine stl_open_for_write(file_name, file_unit, is_ascii)
+   !< Open an STL file for writing.
+   character(*), intent(in)  :: file_name !< File path.
+   integer(I4P), intent(out) :: file_unit !< Newunit-assigned unit.
+   logical,      intent(in)  :: is_ascii  !< Format flag.
+
+   if (is_ascii) then
+      open(newunit=file_unit, file=file_name,                  form='formatted')
+   else
+      open(newunit=file_unit, file=file_name, access='stream', form='unformatted')
+   endif
+   endsubroutine stl_open_for_write
+
+   subroutine stl_load_facets_number(file_unit, is_ascii, facets_number)
+   !< Count facets in the file (ASCII: count "facet normal" lines; binary: read uint32).
+   !< File is rewound on exit.
+   integer(I4P), intent(in)  :: file_unit     !< Open file unit.
+   logical,      intent(in)  :: is_ascii      !< Format flag.
+   integer(I4P), intent(out) :: facets_number !< Count.
+   character(FRLEN)          :: facet_record  !< Line buffer for ASCII scan.
+
+   facets_number = 0
+   rewind(file_unit)
+   if (is_ascii) then
+      do
+         read(file_unit, '(A)', end=10, err=10) facet_record
+         if (index(string=facet_record, substring='facet normal') > 0) facets_number = facets_number + 1
+      enddo
+   else
+      read(file_unit, end=10, err=10) facet_record
+      read(file_unit, end=10, err=10) facets_number
+   endif
+   10 rewind(file_unit)
+   endsubroutine stl_load_facets_number
+
+   subroutine stl_load_header(file_unit, is_ascii, header)
+   !< Read the STL header into `header`. File is rewound before reading.
+   integer(I4P),     intent(in)    :: file_unit !< Open file unit.
+   logical,          intent(in)    :: is_ascii  !< Format flag.
+   character(FRLEN), intent(out)   :: header    !< Header text.
+   integer(I4P)                    :: facets_number_dummy
+
+   rewind(file_unit)
+   if (is_ascii) then
+      read(file_unit, '(A)') header
+      header = trim(adjustl(header(index(header, 'solid')+6:)))
+   else
+      read(file_unit) header
+      read(file_unit) facets_number_dummy   ! count read elsewhere; consume here to advance the stream
+   endif
+   endsubroutine stl_load_header
+
+   subroutine stl_save_header(file_unit, is_ascii, header, facets_number)
+   !< Write the STL header. File is rewound before writing.
+   integer(I4P),     intent(in) :: file_unit     !< Open file unit.
+   logical,          intent(in) :: is_ascii      !< Format flag.
+   character(FRLEN), intent(in) :: header        !< Header text.
+   integer(I4P),     intent(in) :: facets_number !< Facet count (binary only).
+
+   rewind(file_unit)
+   if (is_ascii) then
+      write(file_unit, '(A)') 'solid '//trim(header)
+   else
+      write(file_unit) header
+      write(file_unit) facets_number
+   endif
+   endsubroutine stl_save_header
 endmodule fossil_surface_stl_object

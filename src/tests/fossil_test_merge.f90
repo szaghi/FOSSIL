@@ -4,13 +4,12 @@ program fossil_test_merge
 !< FOSSIL, test merge STL.
 
 use flap, only : command_line_interface
-use fossil, only : file_stl_object, surface_stl_object
+use fossil, only : surface_stl_object
 use penf, only : I4P, R8P
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 
 implicit none
 
-type(file_stl_object)    :: file_stl            !< STL file handler.
 character(999)           :: file_name_stl(2)    !< Input STL file names.
 type(surface_stl_object) :: surface(2)          !< STL surface.
 logical                  :: are_tests_passed(1) !< Result of tests check.
@@ -18,12 +17,10 @@ logical                  :: are_tests_passed(1) !< Result of tests check.
 are_tests_passed = .false.
 
 call cli_parse
-call file_stl%load_from_file(facet=surface(1)%facet, file_name=trim(adjustl(file_name_stl(1))), guess_format=.true.)
-call file_stl%load_from_file(facet=surface(2)%facet, file_name=trim(adjustl(file_name_stl(2))), guess_format=.true.)
-call surface(1)%analize
-call surface(2)%analize
+call surface(1)%load_from_file(file_name=trim(adjustl(file_name_stl(1))), guess_format=.true.)
+call surface(2)%load_from_file(file_name=trim(adjustl(file_name_stl(2))), guess_format=.true.)
 call surface(1)%merge_solids(other=surface(2))
-call file_stl%save_into_file(facet=surface(1)%facet, file_name='fossil_test_merge.stl')
+call surface(1)%save_into_file(file_name='fossil_test_merge.stl')
 associate (bmin_out => surface(1)%get_bmin())
    are_tests_passed(1) = nint(bmin_out%x) < -2
 end associate

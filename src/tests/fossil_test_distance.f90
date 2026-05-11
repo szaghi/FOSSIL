@@ -4,14 +4,13 @@ program fossil_test_distance
 !< FOSSIL, test distance computation.
 
 use flap, only : command_line_interface
-use fossil, only : file_stl_object, surface_stl_object, sign_algorithm_from_string
+use fossil, only : surface_stl_object, sign_algorithm_from_string
 use penf, only : I4P, I8P, R8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 use fossil_aabb_tree_object, only : aabb_tree_object, AABB_USE_INDEX, AABB_USE_BRUTE_FORCE
 
 implicit none
 
-type(file_stl_object)         :: file_stl                !< STL file.
 type(surface_stl_object)      :: surface_stl             !< STL surface.
 type(vector_R8P), allocatable :: grid(:,:,:)             !< Grid.
 real(R8P),        allocatable :: distance(:,:,:)         !< Distance of grid points to STL surface.
@@ -33,10 +32,9 @@ logical                       :: are_tests_passed(1)     !< Result of tests chec
 are_tests_passed = .false.
 
 call cli_parse
-call file_stl%load_from_file(facet=surface_stl%facet, file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
- call surface_stl%analize(aabb_refinement_levels=refinement_levels)
+call surface_stl%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true., &
+                                aabb_refinement_levels=refinement_levels)
 print '(A)', 'STL statistics before sanitization'
-print '(A)', file_stl%statistics()
 print '(A)', surface_stl%statistics()
 call surface_stl%sanitize
 call surface_stl%analize(aabb_refinement_levels=refinement_levels)
@@ -46,8 +44,7 @@ print '(A)', surface_stl%statistics()
 are_tests_passed = int(surface_stl%distance(point=0*ex_R8P), I4P) == 0_I4P
 
 if (save_aabb_tree_geometry) call surface_stl%aabb%save_geometry_tecplot_ascii(file_name='fossil_test_distance_aabb_tree.dat')
-if (save_aabb_tree_stl) call file_stl%save_aabb_into_file(surface=surface_stl, base_file_name='fossil_test_distance_', &
-                                                          is_ascii=.false.)
+if (save_aabb_tree_stl) call surface_stl%save_aabb_into_file(base_file_name='fossil_test_distance_', is_ascii=.false.)
 
 ! stop
 

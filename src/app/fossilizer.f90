@@ -4,14 +4,13 @@ program fossiler
 !< FOSSILer, analyze, modify and repair STL files.
 
 use flap, only : command_line_interface
-use fossil, only : file_stl_object, surface_stl_object
+use fossil, only : surface_stl_object
 use penf, only : I4P, R8P, str
 use vecfor, only : vector_R8P
 
 implicit none
 
 type(command_line_interface)          :: cli                                   !< Command line interface.
-type(file_stl_object)                 :: file_stl                              !< STL file handler.
 character(999),           allocatable :: file_name_stl(:)                      !< Input STL file name.
 type(surface_stl_object), allocatable :: surface(:)                            !< STL surface.
 character(999)                        :: file_name_stl_merge                   !< Input STL file name of file to be merged.
@@ -32,12 +31,10 @@ real(R8P)                             :: translate_x, translate_y, translate_z !
 
 call cli_parse
 if (cli%is_passed(switch='--merge')) then
-   call file_stl%load_from_file(facet=surface_merge%facet, file_name=trim(adjustl(file_name_stl_merge)), guess_format=.true.)
+   call surface_merge%load_from_file(file_name=trim(adjustl(file_name_stl_merge)), guess_format=.true.)
 endif
 do s=1, stl_numbers
-   call file_stl%load_from_file(facet=surface(s)%facet, file_name=trim(adjustl(file_name_stl(s))), guess_format=.true.)
-   call surface(s)%analize
-   print '(A)', file_stl%statistics()
+   call surface(s)%load_from_file(file_name=trim(adjustl(file_name_stl(s))), guess_format=.true.)
    print '(A)', surface(s)%statistics()
    if (cli%is_passed(switch='--clip')) then
       print '(A)', 'clip surface outside AABB: '//                                                   &
@@ -109,7 +106,7 @@ do s=1, stl_numbers
    endif
    if (cli%is_passed(switch='--output')) then
       print '(A)', 'save output in: '//trim(adjustl(output))
-      call file_stl%save_into_file(facet=surface(s)%facet, file_name=adjustl(output))
+      call surface(s)%save_into_file(file_name=adjustl(output))
    endif
    print*
 enddo

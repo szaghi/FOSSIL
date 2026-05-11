@@ -4,13 +4,12 @@ program fossil_test_resize
 !< FOSSIL, test resize STL.
 
 use flap, only : command_line_interface
-use fossil, only : file_stl_object, surface_stl_object
+use fossil, only : surface_stl_object
 use penf, only : I4P, R8P
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 
 implicit none
 
-type(file_stl_object)    :: file_stl            !< STL file.
 type(surface_stl_object) :: surface             !< STL surface.
 character(999)           :: file_name_stl       !< Input STL file name.
 type(vector_R8P)         :: factor              !< Vectorial factor.
@@ -20,13 +19,11 @@ logical                  :: are_tests_passed(4) !< Result of tests check.
 are_tests_passed = .false.
 
 call cli_parse
-call file_stl%load_from_file(facet=surface%facet, file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
-call surface%analize
-print '(A)', file_stl%statistics()
+call surface%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
 print '(A)', surface%statistics()
 
 call surface%resize(factor=factor)
-call file_stl%save_into_file(facet=surface%facet, file_name='fossil_test_resize-factor.stl')
+call surface%save_into_file(file_name='fossil_test_resize-factor.stl')
 are_tests_passed(1) = nint(surface%distance(point=2 * ex_R8P + 0 * ey_R8P + 0 * ez_R8P)) == 0
 call surface%resize(factor=factor/4._R8P)
 call surface%resize(x=x)
@@ -35,12 +32,12 @@ call surface%resize(y=y)
 are_tests_passed(3) = nint(surface%distance(point=2 * ex_R8P + 2 * ey_R8P + 0 * ez_R8P)) == 0
 call surface%resize(z=z)
 are_tests_passed(4) = nint(surface%distance(point=2 * ex_R8P + 2 * ey_R8P + 2 * ez_R8P)) == 0
-call file_stl%save_into_file(facet=surface%facet, file_name='fossil_test_resize-xyz.stl')
+call surface%save_into_file(file_name='fossil_test_resize-xyz.stl')
 
-call file_stl%load_from_file(facet=surface%facet, file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
+call surface%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
 
 call surface%resize(factor=factor, respect_centroid=.true.)
-call file_stl%save_into_file(facet=surface%facet, file_name='fossil_test_resize-factor-centroid.stl')
+call surface%save_into_file(file_name='fossil_test_resize-factor-centroid.stl')
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 contains
