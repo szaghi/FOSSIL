@@ -215,51 +215,73 @@ contains
 
    subroutine open_file(self, file_action, guess_format)
    !< Open file, once initialized.
-   class(file_stl_object), intent(inout)        :: self          !< File STL.
-   character(*),           intent(in)           :: file_action   !< File action, "read" or "write".
-   logical,                intent(in), optional :: guess_format  !< Sentinel to try to guess format directly from file.
-   logical                                      :: guess_format_ !< Sentinel to try to guess format directly from file, local var.
-   logical                                      :: file_exist    !< Sentinel to check if file exist.
-   character(5)                                 :: ascii_header  !< Ascii header sentinel.
+   !<
+   !< When `guess_format=.true.`, detect ASCII vs binary using the **file size** rather
+   !< than a header byte-pattern check. A valid binary STL has exactly `84 + 50*N` bytes
+   !< (80-byte header + uint32 facet count + N * 50-byte facet records); ASCII files do
+   !< not match this identity. This is robust against the well-known interop trap of
+   !< binary STLs whose 80-byte header happens to start with the word "solid".
+   class(file_stl_object), intent(inout)        :: self           !< File STL.
+   character(*),           intent(in)           :: file_action    !< File action, "read" or "write".
+   logical,                intent(in), optional :: guess_format   !< Sentinel to try to guess format directly from file.
+   logical                                      :: guess_format_  !< Sentinel to try to guess format directly from file, local var.
+   logical                                      :: file_exist     !< Sentinel to check if file exist.
+   integer(I4P)                                 :: file_size      !< Size of the file in bytes.
+   integer(I4P)                                 :: facets_count   !< Binary STL facet count (uint32 at offset 81).
+   integer(I4P)                                 :: ios            !< I/O status.
+   integer(I4P), parameter                      :: BINARY_HEADER_BYTES = 80_I4P  !< STL binary header.
+   integer(I4P), parameter                      :: BINARY_FACET_BYTES  = 50_I4P  !< 12*real32 + uint16 attribute.
+   integer(I4P), parameter                      :: BINARY_COUNT_BYTES  =  4_I4P  !< uint32 facet count.
 
-   if (allocated(self%file_name)) then
-      select case(trim(adjustl(file_action)))
-      case('read')
-         guess_format_ = .false. ; if (present(guess_format)) guess_format_ = guess_format
-         inquire(file=self%file_name, exist=file_exist)
-         if (file_exist) then
-            if (guess_format_) then
-               open(newunit=self%file_unit, file=self%file_name, form='formatted')
-               read(self%file_unit, '(A)') ascii_header
+   if (.not. allocated(self%file_name)) then
+      write(stderr, '(A)') 'error: file name has not be initialized, impossible to open file!'
+      return
+   endif
+
+   select case(trim(adjustl(file_action)))
+   case('read')
+      guess_format_ = .false. ; if (present(guess_format)) guess_format_ = guess_format
+      inquire(file=self%file_name, exist=file_exist, size=file_size)
+      if (.not. file_exist) then
+         write(stderr, '(A)') 'error: file "'//self%file_name//'" does not exist, impossible to open file!'
+         return
+      endif
+
+      if (guess_format_) then
+         ! Size-based detection: read uint32 facet count from the stream, check identity.
+         self%is_ascii = .true.
+         if (file_size > BINARY_HEADER_BYTES + BINARY_COUNT_BYTES) then
+            open(newunit=self%file_unit, file=self%file_name, access='stream', form='unformatted', &
+                 action='read', iostat=ios)
+            if (ios == 0) then
+               read(self%file_unit, pos=BINARY_HEADER_BYTES + 1, iostat=ios) facets_count
                close(self%file_unit)
-               if (ascii_header=='solid') then
-                  self%is_ascii = .true.
-               else
+               if (ios == 0 .and. facets_count > 0 .and. &
+                   file_size == BINARY_HEADER_BYTES + BINARY_COUNT_BYTES + facets_count * BINARY_FACET_BYTES) then
                   self%is_ascii = .false.
                endif
             endif
-            if (self%is_ascii) then
-               open(newunit=self%file_unit, file=self%file_name,                  form='formatted')
-            else
-               open(newunit=self%file_unit, file=self%file_name, access='stream', form='unformatted')
-            endif
-            self%is_open = .true.
-         else
-            write(stderr, '(A)') 'error: file "'//self%file_name//'" does not exist, impossible to open file!'
          endif
-      case('write')
-         if (self%is_ascii) then
-            open(newunit=self%file_unit, file=self%file_name,                  form='formatted')
-         else
-            open(newunit=self%file_unit, file=self%file_name, access='stream', form='unformatted')
-         endif
-         self%is_open = .true.
-      case default
-         write(stderr, '(A)') 'error: file action "'//trim(adjustl(file_action))//'" unknown!'
-      endselect
-   else
-      write(stderr, '(A)') 'error: file name has not be initialized, impossible to open file!'
-   endif
+      endif
+
+      if (self%is_ascii) then
+         open(newunit=self%file_unit, file=self%file_name,                  form='formatted',   action='read')
+      else
+         open(newunit=self%file_unit, file=self%file_name, access='stream', form='unformatted', action='read')
+      endif
+      self%is_open = .true.
+
+   case('write')
+      if (self%is_ascii) then
+         open(newunit=self%file_unit, file=self%file_name,                  form='formatted')
+      else
+         open(newunit=self%file_unit, file=self%file_name, access='stream', form='unformatted')
+      endif
+      self%is_open = .true.
+
+   case default
+      write(stderr, '(A)') 'error: file action "'//trim(adjustl(file_action))//'" unknown!'
+   endselect
    endsubroutine open_file
 
    subroutine save_aabb_into_file(self, surface, base_file_name, is_ascii)

@@ -483,17 +483,38 @@ contains
 
    subroutine load_from_file_ascii(self, file_unit)
    !< Load facet from ASCII file.
+   !<
+   !< `iostat=` traps premature EOF / I/O errors. A corrupted STL (truncated mid-facet,
+   !< header claiming more facets than the body contains, mixed line endings) now
+   !< `error stop`s with the offending unit and operation instead of producing a generic
+   !< runtime error with no context.
    class(facet_object), intent(inout) :: self      !< Facet.
    integer(I4P),        intent(in)    :: file_unit !< File unit.
+   integer(I4P)                       :: ios       !< I/O status.
 
    call load_facet_record(prefix='facet normal', record=self%normal)
-   read(file_unit, *) ! outer loop
+   read(file_unit, *, iostat=ios) ! outer loop
+   call check_ios(ios, 'reading "outer loop" delimiter')
    call load_facet_record(prefix='vertex', record=self%vertex(1))
    call load_facet_record(prefix='vertex', record=self%vertex(2))
    call load_facet_record(prefix='vertex', record=self%vertex(3))
-   read(file_unit, *) ! endloop
-   read(file_unit, *) ! endfacet
+   read(file_unit, *, iostat=ios) ! endloop
+   call check_ios(ios, 'reading "endloop" delimiter')
+   read(file_unit, *, iostat=ios) ! endfacet
+   call check_ios(ios, 'reading "endfacet" delimiter')
    contains
+      subroutine check_ios(stat, op)
+      !< Trap non-zero I/O status. Negative = EOF, positive = error.
+      integer(I4P), intent(in) :: stat !< Status from a read.
+      character(*), intent(in) :: op   !< Description of what was being read.
+      if (stat == 0) return
+      if (stat < 0) then
+         error stop 'fossil_facet_object%load_from_file_ascii: unexpected end of file while '//op
+      else
+         error stop 'fossil_facet_object%load_from_file_ascii: I/O error while '//op
+      endif
+      endsubroutine check_ios
+
       subroutine load_facet_record(prefix, record)
       !< Load a facet *record*, namely normal or vertex data.
       !<
@@ -506,37 +527,72 @@ contains
       character(FRLEN)              :: facet_record   !< Facet record string buffer.
       character(len=:), allocatable :: trimmed        !< Line with leading whitespace removed.
       integer(I4P)                  :: prefix_len     !< Cached prefix length.
+      integer(I4P)                  :: read_ios       !< I/O status for the line read.
+      integer(I4P)                  :: parse_ios      !< I/O status for the coordinate parse.
 
-      read(file_unit, '(A)') facet_record
+      read(file_unit, '(A)', iostat=read_ios) facet_record
+      if (read_ios /= 0) then
+         if (read_ios < 0) then
+            error stop 'fossil_facet_object%load_from_file_ascii: unexpected end of file before "'//prefix//'"'
+         else
+            error stop 'fossil_facet_object%load_from_file_ascii: I/O error reading "'//prefix//'" line'
+         endif
+      endif
       trimmed    = trim(adjustl(facet_record))
       prefix_len = len(prefix)
       if (len(trimmed) >= prefix_len) then
          if (trimmed(1:prefix_len) == prefix) then
-            read(trimmed(prefix_len + 1:), *) record%x, record%y, record%z
+            read(trimmed(prefix_len + 1:), *, iostat=parse_ios) record%x, record%y, record%z
+            if (parse_ios /= 0) &
+               error stop 'fossil_facet_object%load_from_file_ascii: bad coordinates after "'//prefix//'"'
             return
          endif
       endif
       write(stderr, '(A)') 'error: expected line to start with "'//prefix// &
                            '" on unit '//trim(str(file_unit))//', got: "'//trim(facet_record)//'"'
+      error stop 'fossil_facet_object%load_from_file_ascii: malformed STL'
       endsubroutine load_facet_record
    endsubroutine load_from_file_ascii
 
    subroutine load_from_file_binary(self, file_unit)
    !< Load facet from binary file.
+   !<
+   !< `iostat=` traps premature EOF. A corrupted binary STL whose header claims more
+   !< facets than the file actually contains (or that is truncated mid-facet) now
+   !< `error stop`s with a specific message instead of producing a generic Fortran
+   !< stream-read error.
    class(facet_object), intent(inout) :: self       !< Facet.
    integer(I4P),        intent(in)    :: file_unit  !< File unit.
    integer(I2P)                       :: padding    !< Facet padding.
    real(R4P)                          :: triplet(3) !< Triplet record of R4P kind real.
+   integer(I4P)                       :: ios        !< I/O status.
 
-   read(file_unit) triplet
+   read(file_unit, iostat=ios) triplet
+   call check_ios(ios, 'reading facet normal')
    self%normal%x=real(triplet(1), R8P) ; self%normal%y=real(triplet(2), R8P) ; self%normal%z=real(triplet(3), R8P)
-   read(file_unit) triplet
+   read(file_unit, iostat=ios) triplet
+   call check_ios(ios, 'reading vertex 1')
    self%vertex(1)%x=real(triplet(1), R8P) ; self%vertex(1)%y=real(triplet(2), R8P) ; self%vertex(1)%z=real(triplet(3), R8P)
-   read(file_unit) triplet
+   read(file_unit, iostat=ios) triplet
+   call check_ios(ios, 'reading vertex 2')
    self%vertex(2)%x=real(triplet(1), R8P) ; self%vertex(2)%y=real(triplet(2), R8P) ; self%vertex(2)%z=real(triplet(3), R8P)
-   read(file_unit) triplet
+   read(file_unit, iostat=ios) triplet
+   call check_ios(ios, 'reading vertex 3')
    self%vertex(3)%x=real(triplet(1), R8P) ; self%vertex(3)%y=real(triplet(2), R8P) ; self%vertex(3)%z=real(triplet(3), R8P)
-   read(file_unit) padding
+   read(file_unit, iostat=ios) padding
+   call check_ios(ios, 'reading facet attribute padding')
+   contains
+      subroutine check_ios(stat, op)
+      !< Trap non-zero I/O status. Negative = EOF, positive = error.
+      integer(I4P), intent(in) :: stat !< Status from a read.
+      character(*), intent(in) :: op   !< Description of what was being read.
+      if (stat == 0) return
+      if (stat < 0) then
+         error stop 'fossil_facet_object%load_from_file_binary: unexpected end of file while '//op
+      else
+         error stop 'fossil_facet_object%load_from_file_binary: I/O error while '//op
+      endif
+      endsubroutine check_ios
    endsubroutine load_from_file_binary
 
    pure subroutine make_normal_consistent(self, edge, other)
