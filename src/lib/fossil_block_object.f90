@@ -77,7 +77,7 @@ contains
    invert_sign_ = .false. ; if (present(invert_sign)) invert_sign_ = invert_sign
    self%distances = MaxR8P
    call system_clock(timing(1))
-   do f=1, surface_stl%facets_number
+   do f=1, surface_stl%get_facets_number()
       call self%get_closest_cells_indexes(point=surface_stl%facet(f)%centroid, cindexes=cindexes)
       do c=1, Nc
          i = cindexes(1, c)

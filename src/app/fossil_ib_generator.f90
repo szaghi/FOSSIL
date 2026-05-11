@@ -49,10 +49,10 @@ print '(A)', 'STL statistics after sanitization'
 print '(A)', surface_stl%statistics()
 
 if (.not.cli%is_passed(switch='--bmin')) then
-   bmin = surface_stl%bmin
+   bmin = surface_stl%get_bmin()
 endif
 if (.not.cli%is_passed(switch='--bmax')) then
-   bmax = surface_stl%bmax
+   bmax = surface_stl%get_bmax()
 endif
 
 ! create body-close mesh

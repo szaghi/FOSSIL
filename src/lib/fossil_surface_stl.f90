@@ -16,17 +16,34 @@ public :: surface_stl_object
 
 type :: surface_stl_object
    !< FOSSIL STL surface class.
-   integer(I4P)                    :: facets_number=0 !< Facets number.
-   type(facet_object), allocatable :: facet(:)        !< Facets.
-   type(list_id_object)            :: facet_1_de      !< Facets with one disconnected edges.
-   type(list_id_object)            :: facet_2_de      !< Facets with two disconnected edges.
-   type(list_id_object)            :: facet_3_de      !< Facets with three disconnected edges.
-   type(aabb_tree_object)          :: aabb            !< AABB tree.
-   type(vector_R8P)                :: bmin            !< Minimum point of STL.
-   type(vector_R8P)                :: bmax            !< Maximum point of STL.
-   real(R8P)                       :: volume=0._R8P   !< Volume bounded by STL surface.
-   type(vector_R8P)                :: centroid        !< Centroid of STL surface.
+   !<
+   !< Two components remain externally accessible:
+   !<  - `facet(:)` is passed as an actual argument to `file_stl_object%load_from_file`
+   !<    and `save_into_file`. A future refactor (move load/save onto this type, ownership
+   !<    transfer via `move_alloc`, pointer-returning `facet_at(i)` accessor) will make it
+   !<    private too.
+   !<  - `aabb`'s own components are already `private` — callers can invoke its methods
+   !<    but not mutate its state, so leaving the handle accessible is safe.
+   !<
+   !< All other components are `private`; read them via the accessor methods
+   !< (`get_facets_number`, `get_bmin`, `get_bmax`, `get_volume`, `get_centroid`).
+   integer(I4P),                    private :: facets_number=0 !< Facets number (must equal size(facet)).
+   type(facet_object), allocatable          :: facet(:)        !< Facets.
+   type(list_id_object),            private :: facet_1_de      !< Facets with one disconnected edges.
+   type(list_id_object),            private :: facet_2_de      !< Facets with two disconnected edges.
+   type(list_id_object),            private :: facet_3_de      !< Facets with three disconnected edges.
+   type(aabb_tree_object)                   :: aabb            !< AABB tree (its own state is private).
+   type(vector_R8P),                private :: bmin            !< Bounding-box min.
+   type(vector_R8P),                private :: bmax            !< Bounding-box max.
+   real(R8P),                       private :: volume=0._R8P   !< Volume bounded by STL surface.
+   type(vector_R8P),                private :: centroid        !< Centroid of STL surface.
    contains
+      ! read-only accessors (pure, inlined at -O2, zero data copy for scalars)
+      procedure, pass(self) :: get_facets_number !< Return facets_number.
+      procedure, pass(self) :: get_bmin          !< Return bmin (bounding-box minimum).
+      procedure, pass(self) :: get_bmax          !< Return bmax (bounding-box maximum).
+      procedure, pass(self) :: get_volume        !< Return volume.
+      procedure, pass(self) :: get_centroid      !< Return centroid.
       ! public methods
       procedure, pass(self) :: allocate_facets                 !< Allocate facets.
       procedure, pass(self) :: analize                         !< Analize STL.
@@ -71,6 +88,47 @@ type :: surface_stl_object
 endtype surface_stl_object
 
 contains
+   ! accessors (pure, scalar/vector return — inlined by gfortran/ifort at -O2, no data copy)
+   pure function get_facets_number(self) result(n)
+   !< Return facets_number.
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   integer(I4P)                          :: n    !< Facets number.
+
+   n = self%facets_number
+   endfunction get_facets_number
+
+   pure function get_bmin(self) result(b)
+   !< Return bmin (bounding-box minimum).
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   type(vector_R8P)                      :: b    !< Bounding-box minimum.
+
+   b = self%bmin
+   endfunction get_bmin
+
+   pure function get_bmax(self) result(b)
+   !< Return bmax (bounding-box maximum).
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   type(vector_R8P)                      :: b    !< Bounding-box maximum.
+
+   b = self%bmax
+   endfunction get_bmax
+
+   pure function get_volume(self) result(v)
+   !< Return volume bounded by STL surface.
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   real(R8P)                             :: v    !< Volume.
+
+   v = self%volume
+   endfunction get_volume
+
+   pure function get_centroid(self) result(c)
+   !< Return centroid of STL surface.
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   type(vector_R8P)                      :: c    !< Centroid.
+
+   c = self%centroid
+   endfunction get_centroid
+
    ! public methods
    elemental subroutine allocate_facets(self, facets_number)
    !< Allocate facets.

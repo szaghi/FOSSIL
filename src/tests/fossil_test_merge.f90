@@ -24,7 +24,9 @@ call surface(1)%analize
 call surface(2)%analize
 call surface(1)%merge_solids(other=surface(2))
 call file_stl%save_into_file(facet=surface(1)%facet, file_name='fossil_test_merge.stl')
-are_tests_passed(1) = nint(surface(1)%bmin%x) < -2
+associate (bmin_out => surface(1)%get_bmin())
+   are_tests_passed(1) = nint(bmin_out%x) < -2
+end associate
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 contains

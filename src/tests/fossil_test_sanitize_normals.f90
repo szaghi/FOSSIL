@@ -20,12 +20,12 @@ call cli_parse
 call file_stl%load_from_file(facet=surface%facet, file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
 call surface%analize
 
-print*, 'volume before sanitize normals: ', surface%volume
-are_tests_passed(1) = surface%volume <= 0._R8P
+print*, 'volume before sanitize normals: ', surface%get_volume()
+are_tests_passed(1) = surface%get_volume() <= 0._R8P
 call surface%sanitize_normals
 call surface%compute_volume
-print*, 'volume after sanitize normals:  ', surface%volume
-are_tests_passed(2) = nint(surface%volume) == 1
+print*, 'volume after sanitize normals:  ', surface%get_volume()
+are_tests_passed(2) = nint(surface%get_volume()) == 1
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 contains

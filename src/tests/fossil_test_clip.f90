@@ -27,13 +27,17 @@ call surface%clip(bmin=bmin, bmax=bmax, remainder=remainder)
 call surface%analize
 call remainder%analize
 call file_stl%save_into_file(facet=surface%facet, file_name='fossil_test_clip.stl')
-are_tests_passed(1) = nint(surface%bmax%x) <= 0
+associate (bmax_out => surface%get_bmax())
+   are_tests_passed(1) = nint(bmax_out%x) <= 0
+end associate
 call file_stl%save_into_file(facet=remainder%facet, file_name='fossil_test_clip_remainder.stl')
 
 call file_stl%load_from_file(facet=surface%facet, file_name=trim(adjustl(file_name_stl)), guess_format=.true., &
                              clip_min=bmin, clip_max=bmax)
 call surface%analize
-are_tests_passed(2) = nint(surface%bmax%x) <= 0
+associate (bmax_out => surface%get_bmax())
+   are_tests_passed(2) = nint(bmax_out%x) <= 0
+end associate
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 contains

@@ -50,7 +50,7 @@ if (save_aabb_tree_stl) call file_stl%save_aabb_into_file(surface=surface_stl, b
 
 ! stop
 
-associate(bmin=>surface_stl%bmin, bmax=>surface_stl%bmax)
+associate(bmin=>surface_stl%get_bmin(), bmax=>surface_stl%get_bmax())
    Dx = (bmax%x - bmin%x) / ni
    Dy = (bmax%y - bmin%y) / nj
    Dz = (bmax%z - bmin%z) / nk

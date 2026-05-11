@@ -42,10 +42,10 @@ if (save_aabb_tree_stl) call file_stl%save_aabb_into_file(surface=surface_stl, b
                                                           is_ascii=.false.)
 
 if (.not.cli%is_passed(switch='--bmin')) then
-   bmin = surface_stl%bmin
+   bmin = surface_stl%get_bmin()
 endif
 if (.not.cli%is_passed(switch='--bmax')) then
-   bmax = surface_stl%bmax
+   bmax = surface_stl%get_bmax()
 endif
 
 call cblock%initialize(bmin=bmin, bmax=bmax, ni=ni, nj=nj, nk=nk, gi=gi, gj=gj, gk=gk, ei=ei, ej=ej, ek=ek, &

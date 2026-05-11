@@ -17,12 +17,19 @@ public :: file_stl_object
 
 type :: file_stl_object
    !< FOSSIL STL file class.
+   private
    character(len=:), allocatable :: file_name       !< File name
    integer(I4P)                  :: file_unit=0     !< File unit.
    character(FRLEN)              :: header=''       !< File header.
    logical                       :: is_ascii=.true. !< Sentinel to check if file is ASCII.
    logical                       :: is_open=.false. !< Sentinel to check if file is open.
    contains
+      ! read-only accessors (pure, inlined at -O2)
+      procedure, pass(self) :: get_file_name !< Return file_name (empty string if unset).
+      procedure, pass(self) :: get_file_unit !< Return file_unit.
+      procedure, pass(self) :: get_header    !< Return header.
+      procedure, pass(self) :: get_is_ascii  !< Return is_ascii.
+      procedure, pass(self) :: get_is_open   !< Return is_open.
       ! public methods
       procedure, pass(self) :: close_file          !< Close file.
       procedure, pass(self) :: destroy             !< Destroy file.
@@ -43,6 +50,51 @@ type :: file_stl_object
 endtype file_stl_object
 
 contains
+   ! accessors (pure, scalar/string return — inlined by gfortran/ifort at -O2)
+   pure function get_file_name(self) result(name)
+   !< Return file_name (empty string if unset).
+   class(file_stl_object), intent(in) :: self !< File STL.
+   character(len=:), allocatable      :: name !< File name.
+
+   if (allocated(self%file_name)) then
+      name = self%file_name
+   else
+      name = ''
+   endif
+   endfunction get_file_name
+
+   pure function get_file_unit(self) result(unit)
+   !< Return file_unit.
+   class(file_stl_object), intent(in) :: self !< File STL.
+   integer(I4P)                       :: unit !< File unit.
+
+   unit = self%file_unit
+   endfunction get_file_unit
+
+   pure function get_header(self) result(h)
+   !< Return header.
+   class(file_stl_object), intent(in) :: self !< File STL.
+   character(FRLEN)                   :: h    !< Header.
+
+   h = self%header
+   endfunction get_header
+
+   pure function get_is_ascii(self) result(yes)
+   !< Return is_ascii.
+   class(file_stl_object), intent(in) :: self !< File STL.
+   logical                            :: yes  !< ASCII format flag.
+
+   yes = self%is_ascii
+   endfunction get_is_ascii
+
+   pure function get_is_open(self) result(yes)
+   !< Return is_open.
+   class(file_stl_object), intent(in) :: self !< File STL.
+   logical                            :: yes  !< Open status.
+
+   yes = self%is_open
+   endfunction get_is_open
+
    ! public methods
    subroutine close_file(self)
    !< Close file.
@@ -279,12 +331,13 @@ contains
    !< Operator `=`.
    class(file_stl_object), intent(inout) :: lhs !< Left hand side.
    type(file_stl_object),  intent(in)    :: rhs !< Right hand side.
-   integer(I4P)                          :: f   !< Counter.
 
    if (allocated(lhs%file_name)) deallocate(lhs%file_name)
    if (allocated(rhs%file_name)) lhs%file_name = rhs%file_name
    lhs%file_unit = rhs%file_unit
-   lhs%header = rhs%header
+   lhs%header    = rhs%header
+   lhs%is_ascii  = rhs%is_ascii
+   lhs%is_open   = rhs%is_open
    endsubroutine file_stl_assign_file_stl
 
    ! private methods
