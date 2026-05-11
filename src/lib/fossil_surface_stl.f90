@@ -248,13 +248,15 @@ contains
    endsubroutine allocate_facets
 
    ! elemental subroutine analyze(self, aabb_refinement_levels)
-   subroutine analyze(self, aabb_refinement_levels)
+   subroutine analyze(self, aabb_refinement_levels, status)
    !< Analize STL.
    !<
    !< Buil connectivity, compute metrix, compute volume.
    class(surface_stl_object), intent(inout)        :: self                   !< File STL.
    integer(I4P),              intent(in), optional :: aabb_refinement_levels !< AABB refinement levels.
+   integer(I4P),              intent(out), optional :: status                !< 0=success (reserved for future use).
 
+   if (present(status)) status = 0
    self%facets_number = 0
    if (allocated(self%facet)) self%facets_number = size(self%facet, dim=1)
    if (self%facets_number>0) then
@@ -302,11 +304,12 @@ contains
    endif
    endsubroutine build_connectivity
 
-   subroutine clip(self, bmin, bmax, remainder)
+   subroutine clip(self, bmin, bmax, remainder, status)
    !< Clip triangulated surface given an AABB.
    class(surface_stl_object), intent(inout)         :: self              !< File STL.
    type(vector_R8P),          intent(in)            :: bmin, bmax        !< Bounding box extents.
    type(surface_stl_object),  intent(out), optional :: remainder         !< Remainder part of the triangulated surface.
+   integer(I4P),              intent(out), optional :: status            !< 0=success, 1=allocation failure.
    type(facet_object), allocatable                  :: facet(:)          !< Clipped facets.
    integer(I4P)                                     :: facets_in_number  !< Number of facets inside bounding box.
    integer(I4P)                                     :: facets_out_number !< Number of facets outside bounding box.
@@ -314,6 +317,7 @@ contains
    integer(I4P)                                     :: istat             !< Allocation status.
    character(len=256)                               :: msg               !< Allocation error message.
 
+   if (present(status)) status = 0
    if (self%facets_number>0) then
       facets_in_number = 0
       facets_out_number = 0
@@ -328,11 +332,17 @@ contains
       enddo
       if (facets_in_number>0) then
          allocate(facet(1:facets_in_number), stat=istat, errmsg=msg)
-         if (istat /= 0) error stop 'surface_stl_object%clip: '//trim(msg)
+         if (istat /= 0) then
+            if (present(status)) then ; status = 1 ; return ; endif
+            error stop 'surface_stl_object%clip: '//trim(msg)
+         endif
          if (present(remainder)) then
             remainder%facets_number = facets_out_number
             allocate(remainder%facet(1:facets_out_number), stat=istat, errmsg=msg)
-            if (istat /= 0) error stop 'surface_stl_object%clip: '//trim(msg)
+            if (istat /= 0) then
+               if (present(status)) then ; status = 1 ; return ; endif
+               error stop 'surface_stl_object%clip: '//trim(msg)
+            endif
          endif
          fi = 0
          fo = 0
@@ -725,19 +735,24 @@ contains
    endfunction largest_edge_len
 
    ! pure subroutine merge_solids(self, other)
-   subroutine merge_solids(self, other)
+   subroutine merge_solids(self, other, status)
    !< Merge facets with ones of other STL file.
-   class(surface_stl_object), intent(inout) :: self     !< File STL.
-   type(surface_stl_object),  intent(in)    :: other    !< Other file STL.
-   type(facet_object), allocatable          :: facet(:) !< Facets temporary list.
-   integer(I4P)                             :: f        !< Counter.
-   integer(I4P)                             :: istat    !< Allocation status.
-   character(len=256)                       :: msg      !< Allocation error message.
+   class(surface_stl_object), intent(inout)        :: self     !< File STL.
+   type(surface_stl_object),  intent(in)           :: other    !< Other file STL.
+   integer(I4P),              intent(out), optional :: status  !< 0=success, 1=allocation failure.
+   type(facet_object), allocatable                 :: facet(:) !< Facets temporary list.
+   integer(I4P)                                    :: f        !< Counter.
+   integer(I4P)                                    :: istat    !< Allocation status.
+   character(len=256)                              :: msg      !< Allocation error message.
 
+   if (present(status)) status = 0
    if (other%facets_number > 0) then
       if (self%facets_number > 0) then
          allocate(facet(1:self%facets_number + other%facets_number), stat=istat, errmsg=msg)
-         if (istat /= 0) error stop 'surface_stl_object%merge_solids: '//trim(msg)
+         if (istat /= 0) then
+            if (present(status)) then ; status = 1 ; return ; endif
+            error stop 'surface_stl_object%merge_solids: '//trim(msg)
+         endif
          do f=1, self%facets_number
             facet(f)  =  self%facet(f)
          enddo
@@ -748,7 +763,10 @@ contains
          self%facets_number = self%facets_number + other%facets_number
       else
          allocate(self%facet(1:other%facets_number), stat=istat, errmsg=msg)
-         if (istat /= 0) error stop 'surface_stl_object%merge_solids: '//trim(msg)
+         if (istat /= 0) then
+            if (present(status)) then ; status = 1 ; return ; endif
+            error stop 'surface_stl_object%merge_solids: '//trim(msg)
+         endif
          do f=1, other%facets_number
             self%facet(f) = other%facet(f)
          enddo
@@ -758,7 +776,7 @@ contains
    endif
    endsubroutine merge_solids
 
-   subroutine resize(self, x, y, z, factor, respect_centroid, recompute_metrix)
+   subroutine resize(self, x, y, z, factor, respect_centroid, recompute_metrix, status)
    !< Resize (scale) facets by x or y or z or vectorial factors.
    !<
    !< @note The name `scale` has not been used, it been a Fortran built-in.
@@ -771,11 +789,15 @@ contains
    type(vector_R8P),          intent(in), optional :: factor            !< Vectorial factor.
    logical,                   intent(in), optional :: respect_centroid  !< Sentinel to activate centroid as resize center.
    logical,                   intent(in), optional :: recompute_metrix  !< Sentinel to activate metrix recomputation.
+   integer(I4P),              intent(out), optional :: status           !< 0=success, 2=ambiguous arguments.
    type(vector_R8P)                                :: factor_           !< Vectorial factor, local variable.
    logical                                         :: respect_centroid_ !< Sentinel to activate centroid as resize center, local v.
 
-   if (present(factor) .and. (present(x) .or. present(y) .or. present(z))) &
+   if (present(status)) status = 0
+   if (present(factor) .and. (present(x) .or. present(y) .or. present(z))) then
+      if (present(status)) then ; status = 2 ; return ; endif
       error stop 'surface_stl_object%resize: specify either factor or x/y/z, not both'
+   endif
    respect_centroid_ = .false. ; if (present(respect_centroid)) respect_centroid_ = respect_centroid
    if (self%facets_number>0) then
       factor_ = 1._R8P
@@ -805,11 +827,13 @@ contains
    endsubroutine reverse_normals
 
    ! pure subroutine sanitize(self, do_analysis)
-   subroutine sanitize(self, do_analysis)
+   subroutine sanitize(self, do_analysis, status)
    !< Sanitize STL.
    class(surface_stl_object), intent(inout)        :: self        !< File STL.
    logical,                   intent(in), optional :: do_analysis !< Sentil for performing a first analysis.
+   integer(I4P),              intent(out), optional :: status     !< 0=success (reserved for future use).
 
+   if (present(status)) status = 0
    if (self%facets_number>0) then
       if (present(do_analysis)) then
          if (do_analysis) call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
@@ -902,7 +926,7 @@ contains
    endif
    endfunction statistics
 
-   subroutine translate(self, x, y, z, delta, recompute_metrix)
+   subroutine translate(self, x, y, z, delta, recompute_metrix, status)
    !< Translate facets x or y or z or vectorial delta increments.
    class(surface_stl_object), intent(inout)        :: self             !< File STL.
    real(R8P),                 intent(in), optional :: x                !< Increment along x axis.
@@ -910,10 +934,14 @@ contains
    real(R8P),                 intent(in), optional :: z                !< Increment along z axis.
    type(vector_R8P),          intent(in), optional :: delta            !< Vectorial increment.
    logical,                   intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+   integer(I4P),              intent(out), optional :: status          !< 0=success, 2=ambiguous arguments.
    type(vector_R8P)                                :: delta_           !< Vectorial increment, local variable.
 
-   if (present(delta) .and. (present(x) .or. present(y) .or. present(z))) &
+   if (present(status)) status = 0
+   if (present(delta) .and. (present(x) .or. present(y) .or. present(z))) then
+      if (present(status)) then ; status = 2 ; return ; endif
       error stop 'surface_stl_object%translate: specify either delta or x/y/z, not both'
+   endif
    if (self%facets_number>0) then
       delta_ = 0._R8P
       if (present(delta)) then
@@ -1072,7 +1100,7 @@ contains
    ! intermediate file handle to manage. Internally the routines use a local `file_unit`
    ! variable; format-mode (ASCII vs binary) is a local flag, not stored state.
 
-   subroutine load_from_file(self, file_name, is_ascii, guess_format, clip_min, clip_max, aabb_refinement_levels)
+   subroutine load_from_file(self, file_name, is_ascii, guess_format, clip_min, clip_max, aabb_refinement_levels, status)
    !< Load an STL file into the surface.
    !<
    !< Builds a local facet array, then transfers ownership via `adopt_facets` (which
@@ -1086,6 +1114,7 @@ contains
    logical,                         intent(in), optional :: guess_format           !< Auto-detect format from file size.
    type(vector_R8P),                intent(in), optional :: clip_min, clip_max     !< AABB clip extents (facets inside only).
    integer(I4P),                    intent(in), optional :: aabb_refinement_levels !< AABB refinement levels passed to analyze.
+   integer(I4P),                    intent(out), optional :: status                !< 0=success, 1=alloc failure, 3=file not found.
    type(facet_object), allocatable                       :: facets(:)              !< Local buffer for ownership transfer.
    integer(I4P)                                          :: file_unit              !< File unit.
    logical                                               :: is_ascii_              !< Effective ASCII flag.
@@ -1095,8 +1124,12 @@ contains
    integer(I4P)                                          :: istat                  !< Allocation status.
    character(len=256)                                    :: msg                    !< Allocation error message.
 
+   if (present(status)) status = 0
    is_ascii_ = .true. ; if (present(is_ascii)) is_ascii_ = is_ascii
-   call stl_open_for_read(file_name=file_name, file_unit=file_unit, is_ascii=is_ascii_, guess_format=guess_format)
+   call stl_open_for_read(file_name=file_name, file_unit=file_unit, is_ascii=is_ascii_, guess_format=guess_format, status=istat)
+   if (istat /= 0) then
+      if (present(status)) then ; status = istat ; return ; endif
+   endif
    call stl_load_facets_number(file_unit=file_unit, is_ascii=is_ascii_, facets_number=facets_number)
    call stl_load_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header)
    if (present(clip_min).and.present(clip_max)) then
@@ -1114,7 +1147,10 @@ contains
       enddo
       call stl_load_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header)
       allocate(facets(1:ff), stat=istat, errmsg=msg)
-      if (istat /= 0) error stop 'surface_stl_object%load_from_file: '//trim(msg)
+      if (istat /= 0) then
+         if (present(status)) then ; status = 1 ; close(file_unit) ; return ; endif
+         error stop 'surface_stl_object%load_from_file: '//trim(msg)
+      endif
       ff = 0
       do f=1, facets_number
          if (is_ascii_) then
@@ -1132,7 +1168,10 @@ contains
       enddo
    else
       allocate(facets(1:facets_number), stat=istat, errmsg=msg)
-      if (istat /= 0) error stop 'surface_stl_object%load_from_file: '//trim(msg)
+      if (istat /= 0) then
+         if (present(status)) then ; status = 1 ; close(file_unit) ; return ; endif
+         error stop 'surface_stl_object%load_from_file: '//trim(msg)
+      endif
       do f=1, facets_number
          if (is_ascii_) then
             call facets(f)%load_from_file_ascii(file_unit=file_unit)
@@ -1146,17 +1185,22 @@ contains
    call self%adopt_facets(facets=facets, aabb_refinement_levels=aabb_refinement_levels)
    endsubroutine load_from_file
 
-   subroutine save_into_file(self, file_name, is_ascii)
+   subroutine save_into_file(self, file_name, is_ascii, status)
    !< Save the surface to an STL file.
    class(surface_stl_object), intent(in)           :: self      !< Surface STL.
    character(*),              intent(in)           :: file_name !< STL file path.
    logical,                   intent(in), optional :: is_ascii  !< Write as ASCII (default .true.).
+   integer(I4P),              intent(out), optional :: status   !< 0=success, 4=open failure.
    integer(I4P)                                    :: file_unit !< File unit.
    logical                                         :: is_ascii_ !< Effective ASCII flag.
-   integer(I4P)                                    :: f         !< Counter.
+   integer(I4P)                                    :: f, istat  !< Counter and open status.
 
+   if (present(status)) status = 0
    is_ascii_ = .true. ; if (present(is_ascii)) is_ascii_ = is_ascii
-   call stl_open_for_write(file_name=file_name, file_unit=file_unit, is_ascii=is_ascii_)
+   call stl_open_for_write(file_name=file_name, file_unit=file_unit, is_ascii=is_ascii_, status=istat)
+   if (istat /= 0) then
+      if (present(status)) then ; status = istat ; return ; endif
+   endif
    call stl_save_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header, facets_number=self%facets_number)
    if (is_ascii_) then
       do f=1, self%facets_number
@@ -1195,22 +1239,26 @@ contains
 
    ! internal I/O helpers (module-private; not exposed as TBPs)
 
-   subroutine stl_open_for_read(file_name, file_unit, is_ascii, guess_format)
+   subroutine stl_open_for_read(file_name, file_unit, is_ascii, guess_format, status)
    !< Open an STL file for reading; auto-detect format via size identity if requested.
    character(*),  intent(in)              :: file_name    !< File path.
    integer(I4P),  intent(out)             :: file_unit    !< Newunit-assigned unit.
    logical,       intent(inout)           :: is_ascii     !< In/out: format flag (rewritten by guess).
    logical,       intent(in),   optional  :: guess_format !< Auto-detect via file-size identity.
+   integer(I4P),  intent(out),  optional  :: status       !< 0=success, 3=file not found.
    logical                                :: guess_format_, file_exist
    integer(I4P)                           :: file_size, facets_count, ios
    integer(I4P), parameter                :: BINARY_HEADER_BYTES = 80_I4P
    integer(I4P), parameter                :: BINARY_FACET_BYTES  = 50_I4P
    integer(I4P), parameter                :: BINARY_COUNT_BYTES  =  4_I4P
 
+   if (present(status)) status = 0
+   file_unit = -1
    guess_format_ = .false. ; if (present(guess_format)) guess_format_ = guess_format
    inquire(file=file_name, exist=file_exist, size=file_size)
    if (.not. file_exist) then
       write(stderr, '(A)') 'error: file "'//file_name//'" does not exist, impossible to open file!'
+      if (present(status)) then ; status = 3 ; return ; endif
       error stop 'fossil_surface_stl_object%load_from_file: file not found'
    endif
    if (guess_format_) then
@@ -1234,16 +1282,25 @@ contains
    endif
    endsubroutine stl_open_for_read
 
-   subroutine stl_open_for_write(file_name, file_unit, is_ascii)
+   subroutine stl_open_for_write(file_name, file_unit, is_ascii, status)
    !< Open an STL file for writing.
-   character(*), intent(in)  :: file_name !< File path.
-   integer(I4P), intent(out) :: file_unit !< Newunit-assigned unit.
-   logical,      intent(in)  :: is_ascii  !< Format flag.
+   character(*), intent(in)           :: file_name !< File path.
+   integer(I4P), intent(out)          :: file_unit !< Newunit-assigned unit.
+   logical,      intent(in)           :: is_ascii  !< Format flag.
+   integer(I4P), intent(out), optional :: status   !< 0=success, 4=open failure.
+   integer(I4P)                       :: ios       !< I/O status.
 
+   if (present(status)) status = 0
+   file_unit = -1
    if (is_ascii) then
-      open(newunit=file_unit, file=file_name,                  form='formatted')
+      open(newunit=file_unit, file=file_name, form='formatted', iostat=ios)
    else
-      open(newunit=file_unit, file=file_name, access='stream', form='unformatted')
+      open(newunit=file_unit, file=file_name, access='stream', form='unformatted', iostat=ios)
+   endif
+   if (ios /= 0) then
+      write(stderr, '(A)') 'error: cannot open "'//file_name//'" for writing'
+      if (present(status)) then ; status = 4 ; return ; endif
+      error stop 'surface_stl_object%save_into_file: cannot open file for writing'
    endif
    endsubroutine stl_open_for_write
 
