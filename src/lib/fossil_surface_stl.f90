@@ -32,10 +32,11 @@ public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_F
 !                            decides inside/outside without a separate inside
 !                            query. Fused with the distance traversal — ~3x
 !                            faster than SIGN_RAY_INTERSECTIONS on the same
-!                            path. Requires consistently-oriented outward facet
-!                            normals; `sanitize_normals` does not currently
-!                            guarantee this on all meshes, so this algorithm is
-!                            opt-in. SIGN_RAY_INTERSECTIONS remains the default.
+!                            path. This is the default. Requires
+!                            consistently-oriented outward facet normals, which
+!                            `sanitize_normals` produces; for open shells where
+!                            outward is ill-defined, pass SIGN_RAY_INTERSECTIONS
+!                            or SIGN_SOLID_ANGLE explicitly.
 integer(I4P), parameter :: SIGN_RAY_INTERSECTIONS = 1_I4P
 integer(I4P), parameter :: SIGN_SOLID_ANGLE       = 2_I4P
 integer(I4P), parameter :: SIGN_PSEUDO_NORMAL     = 3_I4P
@@ -288,6 +289,16 @@ contains
       call self%compute_facets_disconnected
       call self%compute_volume
       call self%compute_centroid
+      ! Pseudo-normals require self%normal, fcon_edge, and vertex_occurrence —
+      ! all set above. Used by SIGN_PSEUDO_NORMAL distance queries; deferring
+      ! until requested would require analyze to be called twice in practice,
+      ! so compute up-front. Cost is one pass over the facet array.
+      block
+         integer(I4P) :: ff
+         do ff = 1, self%facets_number
+            call self%facet(ff)%compute_pseudo_normals(facet=self%facet)
+         enddo
+      end block
    endif
    endsubroutine analyze
 
@@ -406,7 +417,11 @@ contains
       self%centroid = 0._R8P
       if (abs(self%volume) > tiny(0._R8P)) then
          do f=1, self%facets_number
-            self%centroid = self%centroid - self%facet(f)%centroid_part()
+            ! Sign: tetrahedron_volume now follows the standard divergence-theorem
+            ! convention (outward normals -> positive volume). centroid_part scales
+            ! with self%normal, so the accumulator picks up `+centroid_part` (the
+            ! historical `-` came from FOSSIL's previously-inverted volume sign).
+            self%centroid = self%centroid + self%facet(f)%centroid_part()
          enddo
          self%centroid = self%centroid / (48 * self%volume)
       endif
@@ -443,12 +458,12 @@ contains
    integer(I4P)                                     :: f               !< Counter.
 
    is_signed_ = .false. ; if (present(is_signed)) is_signed_ = is_signed
-   ! Default remains SIGN_RAY_INTERSECTIONS for backwards-compatibility:
-   ! SIGN_PSEUDO_NORMAL is faster but requires the mesh to have consistently-oriented
-   ! outward normals — `sanitize_normals` does not currently guarantee this for all
-   ! input meshes (see audit), so users must opt in explicitly when they know their
-   ! mesh is clean.
-   algo = SIGN_RAY_INTERSECTIONS ; if (present(sign_algorithm)) algo = sign_algorithm
+   ! Pseudo-normal is the new default: fused with the distance traversal (single
+   ! pass), faster, and robust now that sanitize_normals produces consistently
+   ! outward-pointing normals. Users may still pass SIGN_RAY_INTERSECTIONS or
+   ! SIGN_SOLID_ANGLE explicitly for benchmarking or for meshes whose orientation
+   ! cannot be sanitized (e.g. open shells where outward is ill-defined).
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
 
    distance        = MaxR8P
    facet_index_    = 0
@@ -736,7 +751,7 @@ contains
    integer(I4P)                                    :: algo            !< Effective algorithm code.
    real(R8P)                                       :: signed_d        !< Signed distance (pseudo-normal path).
 
-   algo = SIGN_RAY_INTERSECTIONS ; if (present(sign_algorithm)) algo = sign_algorithm
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
    select case(algo)
    case(SIGN_PSEUDO_NORMAL)
       call self%compute_distance(point=point, distance=signed_d, is_signed=.true., &
@@ -967,37 +982,74 @@ contains
    endsubroutine sanitize
 
    pure subroutine sanitize_normals(self)
-   !< Sanitize facets normals, make them consistent.
+   !< Sanitize facets normals — make windings consistent across the connectivity graph
+   !< and oriented outward.
+   !<
+   !< Algorithm:
+   !<   1. BFS over the connectivity graph. From each unvisited seed facet, walk its
+   !<      neighbors through `make_normal_consistent`, which flips a neighbor's winding
+   !<      iff that neighbor's edge direction matches the seed's edge direction (i.e.
+   !<      same winding sense across the shared edge — wrong for an oriented manifold).
+   !<      After the queue empties, restart from any remaining unvisited facet to cover
+   !<      disconnected components.
+   !<
+   !<   2. Outward-orientation check. With the standard divergence-theorem convention
+   !<      (see `tetrahedron_volume`), the closed-surface volume is positive iff
+   !<      windings point outward. So if `volume < 0`, flip every facet's winding.
+   !<
+   !< Why the previous greedy walk was wrong: it did `f = ff` (the last neighbor it
+   !< visited) and exited at the first dead end, never backtracking. On non-trivial
+   !< meshes this leaves whole subgraphs unvisited, producing mixed orientations the
+   !< volume-sign flip cannot resolve (cancellation in the sum).
    !<
    !< @note Facets connectivity and normals must be already computed.
    class(surface_stl_object), intent(inout) :: self             !< File STL.
-   logical, allocatable                     :: facet_checked(:) !< List of facets checked.
-   integer(I4P)                             :: f, ff, e, neighbour !< Counters.
+   logical,      allocatable                :: facet_checked(:) !< Visited flag per facet.
+   integer(I4P), allocatable                :: queue(:)         !< BFS work queue (facet ids).
+   integer(I4P)                             :: head, tail       !< Queue head/tail indices.
+   integer(I4P)                             :: seed, f, e       !< Counters.
+   integer(I4P)                             :: neighbour        !< Neighbour facet id along an edge.
 
-   if (self%facets_number>0) then
+   if (self%facets_number > 0) then
       allocate(facet_checked(1:self%facets_number))
+      allocate(queue(1:self%facets_number))
       facet_checked = .false.
-      f = 1
-      facet_checked(f) = .true.
-      do
-         ff = 0
-         do e=1, 3
-            neighbour = self%facet(f)%fcon_edge(e)
-            if (neighbour <= 0) cycle
-            if (facet_checked(neighbour)) cycle
-            call self%facet(f)%make_normal_consistent(edge=e, other=self%facet(neighbour))
-            facet_checked(neighbour) = .true.
-            ff = neighbour
+
+      ! Outer loop covers disconnected components: pick any unvisited facet as a new
+      ! seed and BFS from it. For a single connected mesh, the inner BFS visits
+      ! everything and the outer loop exits after one iteration.
+      do seed = 1, self%facets_number
+         if (facet_checked(seed)) cycle
+         head = 1
+         tail = 1
+         queue(tail) = seed
+         facet_checked(seed) = .true.
+         do while (head <= tail)
+            f = queue(head)
+            head = head + 1
+            do e = 1, 3
+               neighbour = self%facet(f)%fcon_edge(e)
+               if (neighbour <= 0) cycle
+               if (facet_checked(neighbour)) cycle
+               ! Skip asymmetric connections: connect_nearby_vertices can produce
+               ! cases where facet A's fcon_edge(e) points to B but no edge of B
+               ! points back to A. make_normal_consistent requires symmetry; without
+               ! this guard it would error_stop on real-world (slightly non-manifold)
+               ! meshes such as dragon.stl.
+               if (.not. back_link_exists(self%facet(neighbour), self%facet(f)%id)) cycle
+               call self%facet(f)%make_normal_consistent(edge=e, other=self%facet(neighbour))
+               facet_checked(neighbour) = .true.
+               tail = tail + 1
+               queue(tail) = neighbour
+            enddo
          enddo
-         if (ff==0) then
-            exit
-         else
-            f = ff
-         endif
       enddo
    endif
    call self%compute_volume
    if (self%volume < 0) call self%reverse_normals
+   ! Refresh cached volume after the (possible) global flip, so get_volume() returns
+   ! the post-sanitize value without callers needing to invoke compute_volume themselves.
+   if (self%volume < 0) call self%compute_volume
    endsubroutine sanitize_normals
 
    pure function smallest_edge_len(self) result(smallest)
@@ -1474,4 +1526,21 @@ contains
       write(file_unit) facets_number
    endif
    endsubroutine stl_save_header
+
+   pure function back_link_exists(other, id) result(yes)
+   !< Test whether `other%fcon_edge(:)` contains `id` (symmetric-connectivity check
+   !< used by sanitize_normals to skip asymmetric edges on non-manifold meshes).
+   type(facet_object), intent(in) :: other  !< Candidate neighbour facet.
+   integer(I4P),       intent(in) :: id     !< Facet id whose back-link we look for.
+   logical                        :: yes    !< True iff some edge of `other` references `id`.
+   integer(I4P)                   :: k
+
+   yes = .false.
+   do k = 1, 3
+      if (other%fcon_edge(k) == id) then
+         yes = .true.
+         return
+      endif
+   enddo
+   endfunction back_link_exists
 endmodule fossil_surface_stl_object

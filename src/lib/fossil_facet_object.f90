@@ -808,16 +808,26 @@ contains
    endfunction solid_angle
 
    pure function tetrahedron_volume(self, apex) result(volume)
-   !< Return the volume of tetrahedron built by facet and a given apex.
+   !< Return the signed volume of the tetrahedron (apex, v1, v2, v3) using the
+   !< standard divergence-theorem convention: positive when the facet winding is
+   !< outward-pointing relative to the apex.
+   !<
+   !< Derivation: the textbook signed tetrahedron volume is
+   !<   V = (1/6) * (v1-apex) . ((v2-apex) x (v3-apex))
+   !<     = (1/6) * ((v2-v1) x (v3-v1)) . (v1-apex)
+   !<     = -(1/3) * area * (n . (apex - v1))      [n = unit winding normal]
+   !< so summing over a closed surface with apex on (or inside) the surface gives
+   !< a positive total iff windings are outward — the convention every other piece
+   !< of mesh-processing code uses.
    class(facet_object), intent(in) :: self   !< Facet.
    type(vector_R8P),    intent(in) :: apex   !< Tetrahedron apex.
-   real(R8P)                       :: volume !< Tetrahedron volume.
+   real(R8P)                       :: volume !< Tetrahedron signed volume.
    type(vector_R8P)                :: e12    !< Edge 1-2.
    type(vector_R8P)                :: e13    !< Edge 1-3.
 
    e12 = self%vertex(2) - self%vertex(1)
    e13 = self%vertex(3) - self%vertex(1)
-   volume = 0.5_R8P * normL2_R8P(e12) * normL2_R8P(e13) * sin(angle_R8P(e12, e13)) * &
+   volume = -0.5_R8P * normL2_R8P(e12) * normL2_R8P(e13) * sin(angle_R8P(e12, e13)) * &
             apex%distance_to_plane(pt1=self%vertex(1), pt2=self%vertex(2), pt3=self%vertex(3)) / 3._R8P
    endfunction tetrahedron_volume
 
