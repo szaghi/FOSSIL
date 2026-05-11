@@ -27,6 +27,7 @@ type :: aabb_object
       procedure, pass(self) :: destroy                     !< Destroy AABB.
       procedure, pass(self) :: distance                    !< Return the (square) distance from point to AABB.
       procedure, pass(self) :: distance_from_facets        !< Return the (square) distance from point to AABB's facets.
+      procedure, pass(self) :: update_best_from_facets     !< Update (best d^2, best facet id, best region) over AABB's facets.
       procedure, pass(self) :: do_ray_intersect            !< Return true if AABB is intersected by ray.
       procedure, pass(self) :: get_aabb_facets             !< Get AABB facets list.
       procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
@@ -179,6 +180,36 @@ contains
       enddo
    endif
    endfunction distance_from_facets
+
+   pure subroutine update_best_from_facets(self, facet, point, best, best_facet, best_region)
+   !< Scan this AABB's facets and update the running best squared distance, along with the
+   !< facet id and Voronoi region of the closest point — needed for pseudo-normal sign.
+   !<
+   !< `best`, `best_facet`, `best_region` are intent(inout): callers seed `best` with a
+   !< running best (often MaxR8P at first invocation) and the routine refines it.
+   class(aabb_object), intent(in)    :: self        !< AABB.
+   type(facet_object), intent(in)    :: facet(:)    !< Facets list.
+   type(vector_R8P),   intent(in)    :: point       !< Point reference.
+   real(R8P),          intent(inout) :: best        !< Running best squared distance.
+   integer(I4P),       intent(inout) :: best_facet  !< Running best facet id.
+   integer(I4P),       intent(inout) :: best_region !< Running best Voronoi region tag.
+   real(R8P)                         :: d2          !< Candidate squared distance.
+   type(vector_R8P)                  :: closest     !< Candidate closest point (discarded once region is captured).
+   integer(I4P)                      :: region      !< Candidate region tag.
+   integer(I4P)                      :: f, fid      !< Counter and facet id.
+
+   if (self%facet_id%ids_number > 0) then
+      do f = 1, self%facet_id%ids_number
+         fid = self%facet_id%id(f)
+         call facet(fid)%compute_distance_with_region(point=point, distance=d2, closest=closest, region=region)
+         if (d2 < best) then
+            best        = d2
+            best_facet  = fid
+            best_region = region
+         endif
+      enddo
+   endif
+   endsubroutine update_best_from_facets
 
    pure function do_ray_intersect(self, ray_origin, ray_direction) result(do_intersect)
    !< Return true if AABB is intersected by ray from origin and oriented as ray direction vector.

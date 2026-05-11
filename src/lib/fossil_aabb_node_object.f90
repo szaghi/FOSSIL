@@ -30,6 +30,7 @@ type :: aabb_node_object
       procedure, pass(self) :: destroy                     !< Destroy AABB.
       procedure, pass(self) :: distance                    !< Return the (square) distance from point to AABB.
       procedure, pass(self) :: distance_from_facets        !< Return the (square) distance from point to AABB's facets.
+      procedure, pass(self) :: update_best_from_facets     !< Update (best d^2, best facet id, best region) over node's facets.
       procedure, pass(self) :: do_ray_intersect            !< Return true if AABB is intersected by ray.
       procedure, pass(self) :: facet_id                    !< Return the facets IDs list.
       procedure, pass(self) :: get_aabb_facets             !< Get AABB facets list.
@@ -140,6 +141,19 @@ contains
    distance = MaxR8P
    if (allocated(self%aabb)) distance = self%aabb%distance_from_facets(facet=facet, point=point)
    endfunction distance_from_facets
+
+   pure subroutine update_best_from_facets(self, facet, point, best, best_facet, best_region)
+   !< Pass-through to the underlying AABB's update_best_from_facets — no-op when the node is unallocated.
+   class(aabb_node_object), intent(in)    :: self        !< AABB node.
+   type(facet_object),      intent(in)    :: facet(:)    !< Facets list.
+   type(vector_R8P),        intent(in)    :: point       !< Point reference.
+   real(R8P),               intent(inout) :: best        !< Running best squared distance.
+   integer(I4P),            intent(inout) :: best_facet  !< Running best facet id.
+   integer(I4P),            intent(inout) :: best_region !< Running best Voronoi region tag.
+
+   if (allocated(self%aabb)) call self%aabb%update_best_from_facets(facet=facet, point=point, &
+                                                                    best=best, best_facet=best_facet, best_region=best_region)
+   endsubroutine update_best_from_facets
 
    pure function do_ray_intersect(self, ray_origin, ray_direction) result(do_intersect)
    !< Return true if AABB is intersected by ray from origin and oriented as ray direction vector.

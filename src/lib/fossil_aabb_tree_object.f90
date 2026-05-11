@@ -93,6 +93,7 @@ type :: aabb_tree_object
       procedure, pass(self) :: destroy                     !< Destroy AABB tree.
       procedure, pass(self) :: distance                    !< Return the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: distance_tree               !< Return the (minimum) distance from point to triangulated surface.
+      procedure, pass(self) :: distance_tree_with_region   !< Return distance + closest facet id + Voronoi region (for signed distance).
       procedure, pass(self) :: distribute_facets           !< Distribute facets into AABB nodes.
       procedure, pass(self) :: distribute_facets_tree      !< Distribute facets into AABB nodes.
       procedure, pass(self) :: has_children                !< Return true if node has at least one child allocated.
@@ -107,7 +108,8 @@ type :: aabb_tree_object
       ! finaliser (releases node array even when wrapped in arrays-of-trees)
       final :: aabb_tree_finalize
       ! private methods
-      procedure, pass(self), private :: distance_node                 !< Return the (minimum) distance from point to node AABB tree.
+      procedure, pass(self), private :: distance_node                 !< Update best squared distance by recursing into a node.
+      procedure, pass(self), private :: distance_node_with_region     !< Update (best d^2, best facet id, best region) by recursing into a node.
       procedure, pass(self), private :: ray_intersections_number_node !< Return ray intersections number into a node of AABB tree.
 endtype aabb_tree_object
 
@@ -249,13 +251,40 @@ contains
 
    function distance_tree(self, facet, point) result(distance)
    !< Compute the (minimum) distance from a point to the triangulated surface.
+   !<
+   !< Best-first descent: maintain a running best squared distance and recurse only
+   !< into children whose box squared distance is below the current best. All
+   !< arithmetic is in squared distance — `aabb%distance` and `facet%compute_distance`
+   !< both return d^2, so the comparison is unit-consistent.
    class(aabb_tree_object), intent(in) :: self         !< AABB tree.
    type(facet_object),      intent(in) :: facet(:)     !< Facets list.
    type(vector_R8P),        intent(in) :: point        !< Point coordinates.
-   real(R8P)                           :: distance     !< Minimum distance from point to the triangulated surface.
+   real(R8P)                           :: distance     !< Minimum squared distance.
 
-   distance = self%distance_node(n=0, facet=facet, point=point)
+   distance = MaxR8P
+   call self%distance_node(n=0, facet=facet, point=point, best=distance)
    endfunction distance_tree
+
+   subroutine distance_tree_with_region(self, facet, point, distance, closest_facet, closest_region)
+   !< Best-first traversal that also reports the closest facet id and Voronoi region.
+   !<
+   !< Used by the pseudo-normal signed-distance path: caller forms
+   !< `sign( (point - closest_point) . pseudo_normal_of(closest_facet, closest_region) )`.
+   !< Same pruning logic as `distance_tree`, but each leaf update also records which
+   !< facet and which region of that facet were the new best.
+   class(aabb_tree_object), intent(in)  :: self            !< AABB tree.
+   type(facet_object),      intent(in)  :: facet(:)        !< Facets list.
+   type(vector_R8P),        intent(in)  :: point           !< Point coordinates.
+   real(R8P),               intent(out) :: distance        !< Minimum squared distance.
+   integer(I4P),            intent(out) :: closest_facet   !< Facet id holding the closest point (0 if none found).
+   integer(I4P),            intent(out) :: closest_region  !< Voronoi region tag of the closest point.
+
+   distance       = MaxR8P
+   closest_facet  = 0_I4P
+   closest_region = 0_I4P
+   call self%distance_node_with_region(n=0, facet=facet, point=point, &
+                                       best=distance, best_facet=closest_facet, best_region=closest_region)
+   endsubroutine distance_tree_with_region
 
    pure subroutine distribute_facets(self, facet, is_exclusive, do_update_extents)
    !< Distribute facets into AABB nodes.
@@ -569,38 +598,128 @@ contains
    endsubroutine aabb_tree_assign_aabb_tree
 
    ! private methods
-   recursive function distance_node(self, n, facet, point) result(distance)
-   !< Return the (minimum) distance from a point to a node of AABB tree.
-   class(aabb_tree_object), intent(in) :: self         !< AABB tree.
-   integer(I4P),            intent(in) :: n            !< Current AABB node.
-   type(facet_object),      intent(in) :: facet(:)     !< Facets list.
-   type(vector_R8P),        intent(in) :: point        !< Point coordinates.
-   real(R8P)                           :: distance     !< Minimum distance from point to the triangulated surface.
-   real(R8P)                           :: distance_    !< Minimum distance, temporary buffer.
-   integer(I4P)                        :: aabb_closest !< Closest AABB children node.
-   integer(I4P)                        :: fcn          !< First AABB child node.
-   integer(I4P)                        :: i            !< Counter.
+   recursive subroutine distance_node(self, n, facet, point, best)
+   !< Update `best` squared distance by visiting node `n` and pruning descendants.
+   !<
+   !< Algorithm (best-first BVH traversal with d^2 pruning):
+   !<  1. Test the node's own facets against `best` (every node may carry facets;
+   !<     a non-leaf can still hold facets that did not fit deeper levels).
+   !<  2. Gather allocated children with their AABB squared distance, sort
+   !<     ascending so the most promising subtree is visited first — this makes
+   !<     `best` tighten quickly and prune siblings.
+   !<  3. Recurse only into children whose box d^2 is < current `best`.
+   !<
+   !< Correctness depends on the fact that an AABB's squared distance to a point
+   !< is a lower bound on the squared distance to any facet inside that AABB.
+   !< This is why a child whose box d^2 already exceeds the best can be skipped:
+   !< its facets cannot improve the answer.
+   class(aabb_tree_object), intent(in)    :: self                       !< AABB tree.
+   integer(I4P),            intent(in)    :: n                          !< Current AABB node.
+   type(facet_object),      intent(in)    :: facet(:)                   !< Facets list.
+   type(vector_R8P),        intent(in)    :: point                      !< Point coordinates.
+   real(R8P),               intent(inout) :: best                       !< Running best squared distance.
+   real(R8P)                              :: facet_d2                   !< Distance from this node's facets.
+   real(R8P)                              :: child_d2(TREE_RATIO)       !< Per-child box d^2.
+   integer(I4P)                           :: child_idx(TREE_RATIO)      !< Per-child node index.
+   integer(I4P)                           :: nchild                     !< Number of allocated children.
+   integer(I4P)                           :: fcn                        !< First child node index.
+   integer(I4P)                           :: i, j, swap_i               !< Counter.
+   real(R8P)                              :: swap_d                     !< Sort helper.
 
-   associate(node=>self%node)
-      if (self%has_children(node=n)) then
-         distance_ = MaxR8P                             ! initialize distance of current level-nodes
-         aabb_closest = -1                              ! initialize closest node index
-         fcn = first_child_node(node=n)                 ! first child node
-         do i=fcn, fcn + TREE_RATIO - 1                 ! loop over all children nodes
-            if (node(i)%is_allocated()) then            ! check if node is allocated
-               distance = node(i)%distance(point=point) ! node distance
-               if (distance <= distance_) then          ! check for the new minimum
-                  distance_ = distance                  ! update minimum distance
-                  aabb_closest = i                      ! store closest node
-               endif
-            endif
+   associate(node => self%node)
+      ! 1. node's own facets — internal nodes can still carry facets.
+      facet_d2 = node(n)%distance_from_facets(facet=facet, point=point)
+      if (facet_d2 < best) best = facet_d2
+
+      ! 2. gather allocated children with their box distance.
+      if (.not. self%has_children(node=n)) return
+      fcn = first_child_node(node=n)
+      nchild = 0
+      do i = fcn, fcn + TREE_RATIO - 1
+         if (node(i)%is_allocated()) then
+            nchild = nchild + 1
+            child_idx(nchild) = i
+            child_d2(nchild)  = node(i)%distance(point=point)
+         endif
+      enddo
+
+      ! 3. insertion sort by ascending box d^2 (tiny array, branch-predictable).
+      do i = 2, nchild
+         swap_d  = child_d2(i)
+         swap_i  = child_idx(i)
+         j = i - 1
+         do while (j >= 1)
+            if (child_d2(j) <= swap_d) exit
+            child_d2(j + 1)  = child_d2(j)
+            child_idx(j + 1) = child_idx(j)
+            j = j - 1
          enddo
-         distance = self%distance_node(n=aabb_closest, facet=facet, point=point) ! return distance from closest AABB child node
-      else
-         distance = node(n)%distance_from_facets(facet=facet, point=point)       ! no children: return distance from current node
-      endif
-   endassociate
-   endfunction distance_node
+         child_d2(j + 1)  = swap_d
+         child_idx(j + 1) = swap_i
+      enddo
+
+      ! 4. recurse with pruning — once a child's box d^2 >= best, all remaining
+      !    (sorted) children are at least as far, so we can stop early.
+      do i = 1, nchild
+         if (child_d2(i) >= best) exit
+         call self%distance_node(n=child_idx(i), facet=facet, point=point, best=best)
+      enddo
+   end associate
+   endsubroutine distance_node
+
+   recursive subroutine distance_node_with_region(self, n, facet, point, best, best_facet, best_region)
+   !< Same best-first descent as `distance_node`, but tracks the facet id and Voronoi region
+   !< of the closest point (needed for pseudo-normal sign determination).
+   class(aabb_tree_object), intent(in)    :: self                       !< AABB tree.
+   integer(I4P),            intent(in)    :: n                          !< Current AABB node.
+   type(facet_object),      intent(in)    :: facet(:)                   !< Facets list.
+   type(vector_R8P),        intent(in)    :: point                      !< Point coordinates.
+   real(R8P),               intent(inout) :: best                       !< Running best squared distance.
+   integer(I4P),            intent(inout) :: best_facet                 !< Running best facet id.
+   integer(I4P),            intent(inout) :: best_region                !< Running best Voronoi region tag.
+   real(R8P)                              :: child_d2(TREE_RATIO)       !< Per-child box d^2.
+   integer(I4P)                           :: child_idx(TREE_RATIO)      !< Per-child node index.
+   integer(I4P)                           :: nchild                     !< Number of allocated children.
+   integer(I4P)                           :: fcn                        !< First child node index.
+   integer(I4P)                           :: i, j, swap_i               !< Counter.
+   real(R8P)                              :: swap_d                     !< Sort helper.
+
+   associate(node => self%node)
+      call node(n)%update_best_from_facets(facet=facet, point=point, &
+                                           best=best, best_facet=best_facet, best_region=best_region)
+
+      if (.not. self%has_children(node=n)) return
+      fcn = first_child_node(node=n)
+      nchild = 0
+      do i = fcn, fcn + TREE_RATIO - 1
+         if (node(i)%is_allocated()) then
+            nchild = nchild + 1
+            child_idx(nchild) = i
+            child_d2(nchild)  = node(i)%distance(point=point)
+         endif
+      enddo
+
+      do i = 2, nchild
+         swap_d = child_d2(i)
+         swap_i = child_idx(i)
+         j = i - 1
+         do while (j >= 1)
+            if (child_d2(j) <= swap_d) exit
+            child_d2(j + 1)  = child_d2(j)
+            child_idx(j + 1) = child_idx(j)
+            j = j - 1
+         enddo
+         child_d2(j + 1)  = swap_d
+         child_idx(j + 1) = swap_i
+      enddo
+
+      do i = 1, nchild
+         if (child_d2(i) >= best) exit
+         call self%distance_node_with_region(n=child_idx(i), facet=facet, point=point, &
+                                             best=best, best_facet=best_facet, best_region=best_region)
+      enddo
+   end associate
+   endsubroutine distance_node_with_region
 
    recursive function ray_intersections_number_node(self, n, facet, ray_origin, ray_direction) result(intersections_number)
    !< Return ray intersections number into a node of AABB tree.

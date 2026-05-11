@@ -57,6 +57,8 @@ type :: facet_object
       procedure, pass(self) :: centroid_part                   !< Return facet's part to build up STL centroid.
       procedure, pass(self) :: check_normal                    !< Check normal consistency.
       procedure, pass(self) :: compute_distance                !< Compute the (unsigned, squared) distance from a point to facet.
+      procedure, pass(self) :: compute_distance_with_region    !< Same as compute_distance, plus closest point and Voronoi region.
+      procedure, pass(self) :: pseudo_normal_for_region        !< Return the pseudo-normal for a given closest-point region.
       procedure, pass(self) :: compute_metrix                  !< Compute local (plane) metrix.
       procedure, pass(self) :: compute_normal                  !< Compute normal by means of vertices data.
       procedure, pass(self) :: compute_pseudo_normals          !< Compute pseudo normals.
@@ -148,15 +150,43 @@ contains
    pure subroutine compute_distance(self, point, distance)
    !< Compute the (unsigned, squared) distance from a point to the facet surface.
    !<
+   !< Thin wrapper around `compute_distance_with_region` that discards the
+   !< closest-point and region outputs — kept for callers that only want d^2.
+   class(facet_object), intent(in)  :: self      !< Facet.
+   type(vector_R8P),    intent(in)  :: point     !< Point.
+   real(R8P),           intent(out) :: distance  !< Closest squared distance from point to the facet.
+   type(vector_R8P)                 :: closest   !< Discarded.
+   integer(I4P)                     :: region    !< Discarded.
+
+   call self%compute_distance_with_region(point=point, distance=distance, closest=closest, region=region)
+   endsubroutine compute_distance
+
+   pure subroutine compute_distance_with_region(self, point, distance, closest, region)
+   !< Compute squared distance from a point to the facet, the closest point on the
+   !< facet, and a tag identifying which Voronoi region of the triangle contains
+   !< the closest point (face / one of three edges / one of three vertices).
+   !<
+   !< The closest point and region are needed by the signed-distance pseudo-normal
+   !< sign test: the correct pseudo-normal at the closest point depends on whether
+   !< it lies on the interior of a face, an edge, or a vertex.
+   !<
+   !< Region encoding:
+   !<    0          : interior (face region) — use `self%normal`
+   !<    1, 2, 3    : edge EDGE_12, EDGE_23, EDGE_31 respectively — use `self%edge_pnormal(k)`
+   !<   -1, -2, -3  : vertex 1, 2, 3 respectively — use `self%vertex_pnormal(|k|)`
+   !<
    !< @note Facet's metrix must be already computed.
    !<
    !< @note Algorithm by David Eberly, Geometric Tools LLC, http://www.geometrictools.com.
    class(facet_object), intent(in)  :: self                             !< Facet.
    type(vector_R8P),    intent(in)  :: point                            !< Point.
-   real(R8P),           intent(out) :: distance                         !< Closest distance from point to the facet.
+   real(R8P),           intent(out) :: distance                         !< Closest squared distance from point to the facet.
+   type(vector_R8P),    intent(out) :: closest                          !< Closest point on the facet.
+   integer(I4P),        intent(out) :: region                           !< Voronoi region tag (see encoding above).
    type(vector_R8P)                 :: V1P                              !< `vertex(1)-point`.
    real(R8P)                        :: d, e, f, s, t, sq, tq            !< Plane equation coefficients.
    real(R8P)                        :: tmp0, tmp1, numer, denom, invdet !< Temporary.
+   real(R8P), parameter             :: BARY_TOL = 1.0e-12_R8P           !< Tolerance for classifying barycentric coords as 0/1.
 
    associate(a=>self%a, b=>self%b, c=>self%c, det=>self%det)
    V1P = self%vertex(1) - point
@@ -284,8 +314,46 @@ contains
       endif
    endif
    distance = abs(a * sq * sq + 2._R8P * b * sq * tq + c * tq * tq + 2._R8P * d * sq + 2._R8P * e * tq + f)
+   closest = self%vertex(1) + sq * self%E12 + tq * self%E13
+   ! Region classification from (sq, tq) barycentric-style coordinates.
+   ! Vertex correspondence: V1 ↔ (0,0), V2 ↔ (1,0), V3 ↔ (0,1).
+   ! Edge correspondence:   EDGE_12 (V1→V2) ↔ tq=0; EDGE_23 (V2→V3) ↔ sq+tq=1; EDGE_31 (V3→V1) ↔ sq=0.
+   if (sq < BARY_TOL .and. tq < BARY_TOL) then
+      region = -1_I4P                            ! vertex 1
+   elseif (sq > 1._R8P - BARY_TOL .and. tq < BARY_TOL) then
+      region = -2_I4P                            ! vertex 2
+   elseif (tq > 1._R8P - BARY_TOL .and. sq < BARY_TOL) then
+      region = -3_I4P                            ! vertex 3
+   elseif (tq < BARY_TOL) then
+      region = EDGE_12                           ! edge V1-V2
+   elseif (sq < BARY_TOL) then
+      region = EDGE_31                           ! edge V3-V1
+   elseif (sq + tq > 1._R8P - BARY_TOL) then
+      region = EDGE_23                           ! edge V2-V3
+   else
+      region = 0_I4P                             ! face interior
+   endif
    endassociate
-   endsubroutine compute_distance
+   endsubroutine compute_distance_with_region
+
+   pure function pseudo_normal_for_region(self, region) result(n)
+   !< Return the pseudo-normal of `self` corresponding to a closest-point region tag
+   !< produced by `compute_distance_with_region`. See that routine for the encoding.
+   class(facet_object), intent(in) :: self    !< Facet.
+   integer(I4P),        intent(in) :: region  !< Region tag.
+   type(vector_R8P)                :: n       !< Pseudo-normal at the closest point.
+
+   select case (region)
+   case (0_I4P)         ; n = self%normal
+   case (1_I4P)         ; n = self%edge_pnormal(1)   ! EDGE_12
+   case (2_I4P)         ; n = self%edge_pnormal(2)   ! EDGE_23
+   case (3_I4P)         ; n = self%edge_pnormal(3)   ! EDGE_31
+   case (-1_I4P)        ; n = self%vertex_pnormal(1)
+   case (-2_I4P)        ; n = self%vertex_pnormal(2)
+   case (-3_I4P)        ; n = self%vertex_pnormal(3)
+   case default         ; n = self%normal             ! safety fallback
+   end select
+   endfunction pseudo_normal_for_region
 
    elemental subroutine compute_metrix(self)
    !< Compute local (plane) metrix.
@@ -333,18 +401,35 @@ contains
    endsubroutine compute_normal
 
    pure subroutine compute_pseudo_normals(self, facet)
-   !< Compute pseudo normals.
+   !< Compute pseudo normals (Baerentzen & Aanaes, 2005).
+   !<
+   !< For a closed manifold mesh these pseudo-normals make the sign test
+   !< `sign(dot(point - closest, N))` correct independent of which Voronoi region
+   !< (face/edge/vertex) of the triangle contains the closest point:
+   !<   - face region : N = facet normal.
+   !<   - edge region : N = sum of the two adjacent facet normals (no weighting
+   !<                       needed; each normal contributes pi at the edge),
+   !<                       then normalized.
+   !<   - vertex region: N = sum over incident facets of (incident_angle * normal),
+   !<                       then normalized. Angle weighting is essential — without
+   !<                       it the sign flips erratically near vertices shared by
+   !<                       many facets of unequal angular contribution.
    !<
    !< @note Connectivity must be already computed.
-   class(facet_object), intent(inout) :: self       !< Facet.
-   type(facet_object),  intent(in)    :: facet(1:)  !< Facets list.
-   integer(I4P)                       :: e, f, o, v !< Counter.
+   class(facet_object), intent(inout) :: self         !< Facet.
+   type(facet_object),  intent(in)    :: facet(1:)    !< Facets list.
+   integer(I4P)                       :: e, f, o, v   !< Counter.
+   integer(I4P)                       :: vn           !< Neighbor's local vertex id matching self's vertex.
+   real(R8P)                          :: ang          !< Incident angle of a neighbor facet at the shared vertex.
 
    do e=1, 3
       if (self%fcon_edge(e) > 0) then
          self%edge_pnormal(e) = self%normal + facet(self%fcon_edge(e))%normal
          call self%edge_pnormal(e)%normalize()
       else
+         ! Boundary edge — no neighbor. Fall back to the face normal so the sign
+         ! test degrades gracefully on open meshes (sign may be ill-defined there
+         ! anyway, but at least it stays consistent with the face region).
          self%edge_pnormal(e) = self%normal
       endif
    enddo
@@ -352,10 +437,35 @@ contains
       self%vertex_pnormal(v) = self%vertex_angle(v) * self%normal
       do o=1, self%vertex_occurrence(v)%ids_number
          f = self%vertex_occurrence(v)%id(o)
-         self%vertex_pnormal(v) = self%vertex_pnormal(v) + facet(f)%normal ! cazzo manca angle
+         vn = neighbor_local_vertex(facet(f), self%vertex(v))
+         if (vn > 0) then
+            ang = facet(f)%vertex_angle(vn)
+            self%vertex_pnormal(v) = self%vertex_pnormal(v) + ang * facet(f)%normal
+         endif
       enddo
       call self%vertex_pnormal(v)%normalize()
    enddo
+   contains
+      pure function neighbor_local_vertex(other, p) result(idx)
+      !< Return the local vertex id (1..3) of `other` that coincides with `p`, or 0.
+      !< Vertex coincidence is exact here because vertex_occurrence is populated only
+      !< for vertices that compare equal under the sanitize tolerance — by that point
+      !< coincident vertices have been snapped to identical coordinates.
+      type(facet_object), intent(in) :: other !< Neighbor facet.
+      type(vector_R8P),   intent(in) :: p     !< Vertex coordinate to match.
+      integer(I4P)                   :: idx   !< Matching local vertex id, 0 if none.
+      integer(I4P)                   :: k
+
+      idx = 0
+      do k = 1, 3
+         if (other%vertex(k)%x == p%x .and. &
+             other%vertex(k)%y == p%y .and. &
+             other%vertex(k)%z == p%z) then
+            idx = k
+            return
+         endif
+      enddo
+      endfunction neighbor_local_vertex
    endsubroutine compute_pseudo_normals
 
    pure subroutine compute_vertices_nearby(self, other, tolerance_to_be_identical, tolerance_to_be_nearby)
