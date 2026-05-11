@@ -4,6 +4,43 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.0] — 2026-05-11
+### Added
+- **api**: Add optional status argument to mutating procedures (audit #14 S1)
+
+- **api**: Add optional status argument to mutating procedures (audit #14 S1)
+
+
+### Changed
+- **aabb-tree**: Encapsulate aabb_tree_object state via accessors
+
+- **surface,file**: Encapsulate components and remove stale API docs ⚠ BREAKING CHANGE
+
+- **facet**: Collapse edge fields and replace edge_dir with integer ⚠ BREAKING CHANGE
+
+- **surface**: Remove unimplemented compute_mesh_distance ⚠ BREAKING CHANGE
+
+- **api**: Replace sign_algorithm string with integer enum ⚠ BREAKING CHANGE
+
+- **surface**: Encapsulate surface fully, delete file_stl_object ⚠ BREAKING CHANGE
+
+
+### Fixed
+- **api**: Define intent(out) and stop on invalid enums ⚠ BREAKING CHANGE
+
+- **api**: Guard centroid, strict ascii prefix, add finalisers
+
+- **io**: Size-based STL probe and EOF/iostat guards on facet reads
+
+- **surface**: Replace order-dependent vertex merge with union-find
+
+- Drop custom assignment overloads, rely on intrinsic assignment
+
+- **surface**: Error stop on ambiguous translate/resize arguments
+
+- **api,surface**: Rename analize, warn on residual disconnected facets after sanitize ⚠ BREAKING CHANGE
+
+
 ## [1.0.12] — 2026-05-09
 ### Documentation
 - Fix src_dir path and update package dependencies
