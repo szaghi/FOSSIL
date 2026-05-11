@@ -17,8 +17,14 @@ use vecfor, only : vector_R8P
 implicit none
 private
 public :: aabb_tree_object
+public :: AABB_USE_INDEX, AABB_USE_BRUTE_FORCE
 
 integer(I4P), parameter :: TREE_RATIO=8 !< Tree refinement ratio, it is assumed to be an **octree**.
+
+! dispatch knob exposed through `use_index`/`set_use_index`: lets callers force the brute-force
+! distance/ray-intersection path for benchmarking without lying about `is_initialized`.
+logical, parameter :: AABB_USE_INDEX       = .true.  !< Use the AABB octree for queries.
+logical, parameter :: AABB_USE_BRUTE_FORCE = .false. !< Force brute-force scan over all facets.
 
 type :: ofsm
    !< Octree Finite State Machine class for efficient searching of neiighbors.
@@ -67,11 +73,21 @@ type :: aabb_tree_object
    !>  |/ 1 |/ 2 |/            |/
    !>  +----+----+             +------->x(i)
    !<```
+   private
    integer(I4P)                        :: refinement_levels=2    !< Total number of refinement levels used.
    integer(I4P)                        :: nodes_number=0         !< Total number of tree nodes.
    type(aabb_node_object), allocatable :: node(:)                !< AABB tree nodes [0:nodes_number-1].
    logical                             :: is_initialized=.false. !< Sentinel to check is AABB tree is initialized.
+   logical                             :: use_index=.true.       !< Dispatch knob: .true.=use octree, .false.=brute-force scan.
    contains
+      ! read-only accessors (pure, inlined at -O2, zero data copy)
+      procedure, pass(self) :: get_refinement_levels !< Return refinement_levels.
+      procedure, pass(self) :: get_nodes_number      !< Return nodes_number.
+      procedure, pass(self) :: get_is_initialized    !< Return is_initialized.
+      procedure, pass(self) :: get_use_index         !< Return use_index dispatch knob.
+      ! mutators
+      procedure, pass(self) :: set_refinement_levels !< Set refinement_levels (resets initialization).
+      procedure, pass(self) :: set_use_index         !< Set use_index dispatch knob.
       ! public methods
       procedure, pass(self) :: compute_vertices_nearby     !< Compute vertices nearby.
       procedure, pass(self) :: destroy                     !< Destroy AABB tree.
@@ -88,12 +104,81 @@ type :: aabb_tree_object
       ! operators
       generic :: assignment(=) => aabb_tree_assign_aabb_tree      !< Overload `=`.
       procedure, pass(lhs), private :: aabb_tree_assign_aabb_tree !< Operator `=`.
+      ! finaliser (releases node array even when wrapped in arrays-of-trees)
+      final :: aabb_tree_finalize
       ! private methods
       procedure, pass(self), private :: distance_node                 !< Return the (minimum) distance from point to node AABB tree.
       procedure, pass(self), private :: ray_intersections_number_node !< Return ray intersections number into a node of AABB tree.
 endtype aabb_tree_object
 
 contains
+   ! accessors (pure, scalar return — inlined by gfortran/ifort at -O2, no data copy)
+   pure function get_refinement_levels(self) result(n)
+   !< Return refinement_levels.
+   class(aabb_tree_object), intent(in) :: self !< AABB tree.
+   integer(I4P)                        :: n    !< Refinement levels.
+
+   n = self%refinement_levels
+   endfunction get_refinement_levels
+
+   pure function get_nodes_number(self) result(n)
+   !< Return nodes_number.
+   class(aabb_tree_object), intent(in) :: self !< AABB tree.
+   integer(I4P)                        :: n    !< Nodes number.
+
+   n = self%nodes_number
+   endfunction get_nodes_number
+
+   pure function get_is_initialized(self) result(yes)
+   !< Return is_initialized.
+   class(aabb_tree_object), intent(in) :: self !< AABB tree.
+   logical                             :: yes  !< Initialization status.
+
+   yes = self%is_initialized
+   endfunction get_is_initialized
+
+   pure function get_use_index(self) result(yes)
+   !< Return use_index dispatch knob.
+   class(aabb_tree_object), intent(in) :: self !< AABB tree.
+   logical                             :: yes  !< .true. if octree dispatch is enabled.
+
+   yes = self%use_index
+   endfunction get_use_index
+
+   ! mutators (the only externally-permitted writes)
+   elemental subroutine set_refinement_levels(self, refinement_levels)
+   !< Set refinement_levels.
+   !<
+   !< @note This does not (re)build the tree. The caller must call `initialize` afterwards if a
+   !< rebuild is desired. We mark the tree as not-initialized to keep the invariant honest.
+   class(aabb_tree_object), intent(inout) :: self              !< AABB tree.
+   integer(I4P),            intent(in)    :: refinement_levels !< Refinement levels.
+
+   self%refinement_levels = refinement_levels
+   self%is_initialized    = .false.
+   endsubroutine set_refinement_levels
+
+   elemental subroutine set_use_index(self, use_index)
+   !< Set use_index dispatch knob.
+   !<
+   !< Use `AABB_USE_INDEX` / `AABB_USE_BRUTE_FORCE` for readability. This does not change the
+   !< tree's allocation state — it only affects which dispatch path distance/ray queries take.
+   class(aabb_tree_object), intent(inout) :: self      !< AABB tree.
+   logical,                 intent(in)    :: use_index !< .true.=octree, .false.=brute-force.
+
+   self%use_index = use_index
+   endsubroutine set_use_index
+
+   ! finaliser
+   subroutine aabb_tree_finalize(self)
+   !< Release node storage and reset state.
+   type(aabb_tree_object), intent(inout) :: self !< AABB tree.
+
+   if (allocated(self%node)) deallocate(self%node)
+   self%nodes_number   = 0
+   self%is_initialized = .false.
+   endsubroutine aabb_tree_finalize
+
    ! public methods
    pure subroutine compute_vertices_nearby(self, facet, tolerance_to_be_identical, tolerance_to_be_nearby)
    !< Compute vertices nearby.
@@ -480,6 +565,7 @@ contains
       enddo
    endif
    lhs%is_initialized = rhs%is_initialized
+   lhs%use_index      = rhs%use_index
    endsubroutine aabb_tree_assign_aabb_tree
 
    ! private methods

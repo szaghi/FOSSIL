@@ -221,7 +221,7 @@ contains
    integer(I4P)                                    :: b, l           !< Counter.
 
    ! facets_number = size(facet, dim=1)
-   if (surface%aabb%is_initialized) then
+   if (surface%aabb%get_is_initialized()) then
       do while(surface%aabb%loop_node(facet=surface%facet, aabb_facet=aabb_facet, b=b, l=l))
          file_name = trim(adjustl(base_file_name))//'aabb-l_'//trim(str(l, .true.))//'-b_'//trim(str(b, .true.))//'.stl'
          call self%save_into_file(facet=aabb_facet, file_name=file_name, is_ascii=is_ascii)

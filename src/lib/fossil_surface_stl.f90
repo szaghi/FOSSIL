@@ -121,9 +121,9 @@ contains
    if (self%facets_number>0) then
       call self%facet%destroy_connectivity
       smallest_edge_len = self%smallest_edge_len() * 0.9_R8P
-      if (self%aabb%is_initialized) then
+      if (self%aabb%get_is_initialized()) then
          ! exploit AABB structure
-         call aabb%initialize(facet=self%facet, refinement_levels=self%aabb%refinement_levels, do_facets_distribute=.false.)
+         call aabb%initialize(facet=self%facet, refinement_levels=self%aabb%get_refinement_levels(), do_facets_distribute=.false.)
          call aabb%distribute_facets(facet=self%facet, is_exclusive=.false., do_update_extents=.false.)
          call aabb%compute_vertices_nearby(facet=self%facet,              &
                                            tolerance_to_be_identical=EPS, &
@@ -191,8 +191,8 @@ contains
          enddo
          call move_alloc(from=facet, to=self%facet)
          self%facets_number = facets_in_number
-         call self%analize(aabb_refinement_levels=self%aabb%refinement_levels)
-         if (present(remainder)) call remainder%analize(aabb_refinement_levels=self%aabb%refinement_levels)
+         call self%analize(aabb_refinement_levels=self%aabb%get_refinement_levels())
+         if (present(remainder)) call remainder%analize(aabb_refinement_levels=self%aabb%get_refinement_levels())
       endif
    endif
    endsubroutine clip
@@ -230,7 +230,7 @@ contains
    integer(I4P)                                     :: f               !< Counter.
 
    if (self%facets_number > 0) then
-      if (self%aabb%is_initialized) then
+      if (self%aabb%get_is_initialized() .and. self%aabb%get_use_index()) then
          ! exploit AABB refinement levels
          ! distance = self%aabb%distance(facet=self%facet, point=point)
          distance = self%aabb%distance_tree(facet=self%facet, point=point)
@@ -436,7 +436,7 @@ contains
 
       intersections_number = 0
 
-      if (self%aabb%is_initialized) then
+      if (self%aabb%get_is_initialized() .and. self%aabb%get_use_index()) then
          ! exploit AABB refinement levels
          intersections_number = self%aabb%ray_intersections_number(facet=self%facet, &
                                                                    ray_origin=ray_origin, ray_direction=ray_direction)
@@ -483,7 +483,7 @@ contains
    integer(I4P),              intent(in), optional :: aabb_refinement_levels !< AABB refinement levels.
 
    call self%destroy
-   if (present(aabb_refinement_levels)) self%aabb%refinement_levels = aabb_refinement_levels
+   if (present(aabb_refinement_levels)) call self%aabb%set_refinement_levels(aabb_refinement_levels)
    endsubroutine initialize
 
    pure function largest_edge_len(self) result(largest)
@@ -526,7 +526,7 @@ contains
          enddo
          self%facets_number = other%facets_number
       endif
-      call self%analize(aabb_refinement_levels=self%aabb%refinement_levels)
+      call self%analize(aabb_refinement_levels=self%aabb%get_refinement_levels())
    endif
    endsubroutine merge_solids
 
@@ -582,12 +582,12 @@ contains
 
    if (self%facets_number>0) then
       if (present(do_analysis)) then
-         if (do_analysis) call self%analize(aabb_refinement_levels=self%aabb%refinement_levels)
+         if (do_analysis) call self%analize(aabb_refinement_levels=self%aabb%get_refinement_levels())
       endif
       if (self%facet_1_de%ids_number>0.or.&
           self%facet_2_de%ids_number>0.or.&
           self%facet_3_de%ids_number>0) call self%connect_nearby_vertices
-      call self%analize(aabb_refinement_levels=self%aabb%refinement_levels)
+      call self%analize(aabb_refinement_levels=self%aabb%get_refinement_levels())
       call self%sanitize_normals
    endif
    endsubroutine sanitize
@@ -675,7 +675,7 @@ contains
       stats=stats//prefix_//'number of facets with 1 edges disconnected: '//trim(str(self%facet_1_de%ids_number))//NL
       stats=stats//prefix_//'number of facets with 2 edges disconnected: '//trim(str(self%facet_2_de%ids_number))//NL
       stats=stats//prefix_//'number of facets with 3 edges disconnected: '//trim(str(self%facet_3_de%ids_number))//NL
-      stats=stats//prefix_//'number of AABB refinement levels: '//trim(str(self%aabb%refinement_levels))!//NL
+      stats=stats//prefix_//'number of AABB refinement levels: '//trim(str(self%aabb%get_refinement_levels()))!//NL
    endif
    endfunction statistics
 

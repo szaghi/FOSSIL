@@ -7,7 +7,7 @@ use flap, only : command_line_interface
 use fossil, only : file_stl_object, surface_stl_object
 use penf, only : I4P, I8P, R8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
-use fossil_aabb_tree_object, only : aabb_tree_object
+use fossil_aabb_tree_object, only : aabb_tree_object, AABB_USE_INDEX
 use vtk_fortran, only : vtk_file
 
 implicit none
@@ -82,7 +82,7 @@ do k=1 - gk, nk + gk
 enddo
 
 ! compute signed distance field in the body-close mesh
-surface_stl%aabb%is_initialized = .true.
+call surface_stl%aabb%set_use_index(AABB_USE_INDEX)
 print '(A)', 'compute distances AABB'
 call system_clock(timing(3))
 do k=1 - gk, nk + gk
