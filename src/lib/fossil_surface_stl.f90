@@ -469,26 +469,107 @@ contains
 
    pure subroutine connect_nearby_vertices(self)
    !< Connect nearby vertices of disconnected edges.
-   class(surface_stl_object), intent(inout) :: self !< File STL.
-   integer(I4P)                             :: f    !< Counter.
+   !<
+   !< Uses union-find (path compression + union-by-rank) over global vertex IDs to group
+   !< all mutually-nearby vertices into connected components. Each component is replaced
+   !< by a single centroid computed from the *original* positions, so the result is
+   !< independent of facet iteration order (fixes audit #14 S8).
+   !<
+   !< Global vertex ID: gid = (facet_id - 1)*3 + local_vertex_index  (1-based, range 1..3*N).
+   class(surface_stl_object), intent(inout) :: self !< Surface STL.
+   integer(I4P)                             :: nv_total !< Total global vertex count.
+   integer(I4P), allocatable                :: parent(:), rank_(:) !< Union-find arrays.
+   type(vector_R8P), allocatable            :: centroid(:) !< Centroid accumulator per root.
+   integer(I4P), allocatable                :: count_(:)   !< Member count per root.
+   integer(I4P)                             :: f, v, gid, nbr, r, root_a, root_b
 
-   if (self%facets_number>0) then
-      if (self%facet_1_de%ids_number>0) then
-         do f=1, self%facet_1_de%ids_number
-            call self%facet(self%facet_1_de%id(f))%connect_nearby_vertices(facet=self%facet)
+   if (self%facets_number <= 0) return
+
+   nv_total = 3 * self%facets_number
+   allocate(parent(nv_total), rank_(nv_total), centroid(nv_total), count_(nv_total))
+
+   ! Initialise: every vertex is its own root.
+   do gid = 1, nv_total
+      parent(gid) = gid
+      rank_(gid)  = 0
+      f = (gid - 1) / 3 + 1
+      v = gid - (f - 1) * 3
+      centroid(gid) = self%facet(f)%vertex(v)
+      count_(gid)   = 1
+   enddo
+
+   ! Union step: for every nearby pair recorded in vertex_nearby, union their roots.
+   do f = 1, self%facets_number
+      do v = 1, 3
+         if (self%facet(f)%vertex_nearby(v)%ids_number == 0) cycle
+         gid = (f - 1) * 3 + v
+         do r = 1, self%facet(f)%vertex_nearby(v)%ids_number
+            nbr = self%facet(f)%vertex_nearby(v)%id(r)
+            call uf_union(gid, nbr, parent, rank_)
          enddo
+      enddo
+   enddo
+
+   ! Accumulate original positions into the root's centroid slot.
+   ! Reset first so each root accumulates only once.
+   do gid = 1, nv_total
+      centroid(gid)%x = 0._R8P
+      centroid(gid)%y = 0._R8P
+      centroid(gid)%z = 0._R8P
+      count_(gid) = 0
+   enddo
+   do f = 1, self%facets_number
+      do v = 1, 3
+         gid  = (f - 1) * 3 + v
+         root_a = uf_find(gid, parent)
+         centroid(root_a) = centroid(root_a) + self%facet(f)%vertex(v)
+         count_(root_a)   = count_(root_a) + 1
+      enddo
+   enddo
+   do gid = 1, nv_total
+      if (count_(gid) > 0) centroid(gid) = centroid(gid) / real(count_(gid), R8P)
+   enddo
+
+   ! Write-back: replace every vertex with its component centroid; clear nearby lists.
+   do f = 1, self%facets_number
+      do v = 1, 3
+         gid  = (f - 1) * 3 + v
+         root_a = uf_find(gid, parent)
+         if (count_(root_a) > 1) self%facet(f)%vertex(v) = centroid(root_a)
+         call self%facet(f)%vertex_nearby(v)%destroy
+      enddo
+   enddo
+
+   deallocate(parent, rank_, centroid, count_)
+   contains
+      pure function uf_find(x, parent) result(root)
+      !< Iterative find without path compression (safe in pure context).
+      integer(I4P), intent(in) :: x
+      integer(I4P), intent(in) :: parent(:)
+      integer(I4P)             :: root
+      root = x
+      do while (parent(root) /= root)
+         root = parent(root)
+      enddo
+      endfunction uf_find
+
+      pure subroutine uf_union(a, b, parent, rank_)
+      !< Union-by-rank.
+      integer(I4P), intent(in)    :: a, b
+      integer(I4P), intent(inout) :: parent(:), rank_(:)
+      integer(I4P)                :: ra, rb
+      ra = uf_find(a, parent)
+      rb = uf_find(b, parent)
+      if (ra == rb) return
+      if (rank_(ra) < rank_(rb)) then
+         parent(ra) = rb
+      elseif (rank_(ra) > rank_(rb)) then
+         parent(rb) = ra
+      else
+         parent(rb) = ra
+         rank_(ra)  = rank_(ra) + 1
       endif
-      if (self%facet_2_de%ids_number>0) then
-         do f=1, self%facet_2_de%ids_number
-            call self%facet(self%facet_2_de%id(f))%connect_nearby_vertices(facet=self%facet)
-         enddo
-      endif
-      if (self%facet_3_de%ids_number>0) then
-         do f=1, self%facet_3_de%ids_number
-            call self%facet(self%facet_3_de%id(f))%connect_nearby_vertices(facet=self%facet)
-         enddo
-      endif
-   endif
+      endsubroutine uf_union
    endsubroutine connect_nearby_vertices
 
    elemental subroutine destroy(self)

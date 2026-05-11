@@ -61,7 +61,6 @@ type :: facet_object
       procedure, pass(self) :: compute_normal                  !< Compute normal by means of vertices data.
       procedure, pass(self) :: compute_pseudo_normals          !< Compute pseudo normals.
       procedure, pass(self) :: compute_vertices_nearby         !< Compute vertices nearby comparing to ones of other facet.
-      procedure, pass(self) :: connect_nearby_vertices         !< Connect nearby vertices of disconnected edges.
       procedure, pass(self) :: destroy                         !< Destroy facet.
       procedure, pass(self) :: destroy_connectivity            !< Destroy facet connectivity.
       procedure, pass(self) :: do_ray_intersect                !< Return true if facet is intersected by a ray.
@@ -394,25 +393,6 @@ contains
                     (abs(a%z - b%z) <= tolerance))
       endfunction are_nearby
    endsubroutine compute_vertices_nearby
-
-   pure subroutine connect_nearby_vertices(self, facet)
-   !< Connect nearby vertices of disconnected edges.
-   class(facet_object), intent(inout) :: self     !< Facet.
-   type(facet_object),  intent(inout) :: facet(:) !< All facets in STL.
-   integer(I4P)                       :: e, v1, v2 !< Edge index and its two endpoint vertex indices.
-
-   ! For each disconnected edge, merge both of its endpoint vertices with their nearby set.
-   ! Edge e touches vertices (e, mod(e, 3) + 1).
-   do e=1, 3
-      if (self%fcon_edge(e) /= 0) cycle
-      v1 = e
-      v2 = mod(e, 3) + 1
-      if (self%vertex_nearby(v1)%ids_number > 0) &
-         call merge_vertices(vertex=self%vertex(v1), facet=facet, nearby=self%vertex_nearby(v1))
-      if (self%vertex_nearby(v2)%ids_number > 0) &
-         call merge_vertices(vertex=self%vertex(v2), facet=facet, nearby=self%vertex_nearby(v2))
-   enddo
-   endsubroutine connect_nearby_vertices
 
    elemental subroutine destroy(self)
    !< Destroy facet.
@@ -961,80 +941,4 @@ contains
    lhs%vertex_pnormal   = rhs%vertex_pnormal
    endsubroutine facet_assign_facet
 
-   ! non TBP
-   pure function face_id(vertex_global_id)
-   !< Return the face id containing the given vertex global id.
-   integer(I4P), intent(in) :: vertex_global_id !< Global vertex id.
-   integer(I4P)             :: face_id          !< Face id containing the given vertex global id.
-
-   face_id = (vertex_global_id - 1) / 3 + 1
-   endfunction face_id
-
-   pure subroutine merge_vertices(vertex, facet, nearby)
-   !< Merge nearby vertices.
-   type(vector_R8P),     intent(inout) :: vertex     !< Reference vertex.
-   type(facet_object),   intent(inout) :: facet(:)   !< All facets in STL.
-   type(list_id_object), intent(inout) :: nearby     !< List of nearby vertices global ID.
-   integer(I4P)                        :: v_local_id !< Vertex local ID.
-   integer(I4P)                        :: f_id       !< Face ID.
-   integer(I4P)                        :: n, nn      !< Counter.
-
-   do n=1, nearby%ids_number
-      f_id = face_id(vertex_global_id=nearby%id(n))
-      v_local_id = vertex_local_id(face_id=f_id, vertex_global_id=nearby%id(n))
-      select case(v_local_id)
-      case(1)
-         vertex = vertex + facet(f_id)%vertex(1)
-      case(2)
-         vertex = vertex + facet(f_id)%vertex(2)
-      case(3)
-         vertex = vertex + facet(f_id)%vertex(3)
-      endselect
-   enddo
-   vertex = vertex / (nearby%ids_number + 1)
-   do n=1, nearby%ids_number
-      f_id = face_id(vertex_global_id=nearby%id(n))
-      v_local_id = vertex_local_id(face_id=f_id, vertex_global_id=nearby%id(n))
-      select case(v_local_id)
-      case(1)
-         facet(f_id)%vertex(1) = vertex
-         call facet(f_id)%vertex_nearby(1)%destroy
-      case(2)
-         facet(f_id)%vertex(2) = vertex
-         call facet(f_id)%vertex_nearby(2)%destroy
-      case(3)
-         facet(f_id)%vertex(3) = vertex
-         call facet(f_id)%vertex_nearby(3)%destroy
-      endselect
-   enddo
-   call nearby%destroy
-   endsubroutine merge_vertices
-
-   pure subroutine put_in_list(id, list)
-   !< Put ID into a list.
-   integer(I4P),              intent(in)    :: id          !< ID to insert.
-   integer(I4P), allocatable, intent(inout) :: list(:)     !< List.
-   integer(I4P), allocatable                :: list_tmp(:) !< Temporary list.
-   integer(I4P)                             :: n           !< List size.
-
-   if (allocated(list)) then
-      n = size(list, dim=1)
-      allocate(list_tmp(1:n+1))
-      list_tmp(1:n) = list
-      list_tmp(n+1) = id
-      call move_alloc(from=list_tmp, to=list)
-   else
-      allocate(list(1))
-      list(1) = id
-   endif
-   endsubroutine put_in_list
-
-   pure function vertex_local_id(face_id, vertex_global_id)
-   !< Return the vertex global id given the local one.
-   integer(I4P), intent(in) :: face_id          !< Face id.
-   integer(I4P), intent(in) :: vertex_global_id !< Global vertex id.
-   integer(I4P)             :: vertex_local_id  !< Local vertex id, 1, 2 or 3.
-
-   vertex_local_id = vertex_global_id - (face_id - 1) * 3
-   endfunction vertex_local_id
 endmodule fossil_facet_object

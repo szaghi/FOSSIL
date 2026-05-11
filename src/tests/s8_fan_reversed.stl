@@ -1,0 +1,30 @@
+solid s8_fan
+  facet normal 0.0 0.0 1.0
+    outer loop
+      vertex  0.011    0.013    0.0
+      vertex   2.0      0.0     0.0
+      vertex   2.0      2.0     0.0
+    endloop
+  endfacet
+  facet normal 0.0 0.0 1.0
+    outer loop
+      vertex -0.012    0.010    0.0
+      vertex  -2.0      2.0     0.0
+      vertex  -2.0      0.0     0.0
+    endloop
+  endfacet
+  facet normal 0.0 0.0 1.0
+    outer loop
+      vertex  0.009   -0.014    0.0
+      vertex   2.0     -2.0     0.0
+      vertex   2.0      0.0     0.0
+    endloop
+  endfacet
+  facet normal 0.0 0.0 1.0
+    outer loop
+      vertex -0.013   -0.011    0.0
+      vertex  -2.0      0.0     0.0
+      vertex  -2.0     -2.0     0.0
+    endloop
+  endfacet
+endsolid s8_fan
