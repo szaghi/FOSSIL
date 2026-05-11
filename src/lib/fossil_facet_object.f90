@@ -561,6 +561,9 @@ contains
       edge = self%vertex(3) - self%vertex(2)
    case('edge_31')
       edge = self%vertex(1) - self%vertex(3)
+   case default
+      error stop 'fossil_facet_object%make_normal_consistent: unknown edge_dir &
+                 &(valid: "edge_12", "edge_23", "edge_31")'
    endselect
    if (edge%dotproduct(edge_other)>0) then
       ! other numeration is consistent, normal has wrong orientation
@@ -767,6 +770,9 @@ contains
       call flip_vertices(a=self%vertex(3), b=self%vertex(1),                   &
                          fcon_bc=self%fcon_edge_12, fcon_ca=self%fcon_edge_23, &
                          vertex_a_occurrence=self%vertex_occurrence(3)%id, vertex_b_occurrence=self%vertex_occurrence(1)%id)
+   case default
+      error stop 'fossil_facet_object%flip_edge: unknown edge_dir &
+                 &(valid: "edge_12", "edge_23", "edge_31")'
    endselect
    call self%compute_metrix
    contains
@@ -876,6 +882,9 @@ contains
    elseif (other%fcon_edge_31 == self%id) then
       edge_dir = 'edge_31'
       edge = other%vertex(1) - other%vertex(3)
+   else
+      ! self is not connected to other along any edge — caller invariant broken
+      error stop 'fossil_facet_object%edge_connection_in_other_ref: facets are not connected'
    endif
    endsubroutine edge_connection_in_other_ref
 
@@ -901,6 +910,10 @@ contains
    lhs%fcon_edge_31 = rhs%fcon_edge_31
    lhs%vertex_occurrence = rhs%vertex_occurrence
    lhs%vertex_nearby = rhs%vertex_nearby
+   lhs%edge_12_pnormal = rhs%edge_12_pnormal
+   lhs%edge_23_pnormal = rhs%edge_23_pnormal
+   lhs%edge_31_pnormal = rhs%edge_31_pnormal
+   lhs%vertex_pnormal = rhs%vertex_pnormal
    endsubroutine facet_assign_facet
 
    ! non TBP

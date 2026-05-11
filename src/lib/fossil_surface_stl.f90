@@ -287,6 +287,11 @@ contains
    integer(I4P)                                     :: facet_index_    !< Index of facet containing the closest point, local var.
    integer(I4P)                                     :: f               !< Counter.
 
+   ! initialize intent(out) outputs so they are defined on every path:
+   ! - empty surface (facets_number == 0) — distance stays MaxR8P, facet_index_ stays 0
+   ! - AABB path — facet_index_ is not (yet) populated by distance_tree; keep 0 as sentinel
+   distance     = MaxR8P
+   facet_index_ = 0
    if (self%facets_number > 0) then
       if (self%aabb%get_is_initialized() .and. self%aabb%get_use_index()) then
          ! exploit AABB refinement levels
@@ -294,7 +299,6 @@ contains
          distance = self%aabb%distance_tree(facet=self%facet, point=point)
       else
          ! brute-force search over all facets
-         distance = MaxR8P
          do f=1, self%facets_number
             call self%facet(f)%compute_distance(point=point, distance=distance_)
             if (abs(distance_) <= abs(distance)) then
@@ -319,45 +323,22 @@ contains
 
    subroutine compute_mesh_distance(self, mesh, distance, is_signed, sign_algorithm, is_square_root)
    !< Compute the (minimum) distance in a given mesh.
+   !<
+   !< @warning **This routine is not yet implemented.** The inner facet loop is a stub.
+   !< For now it initializes `distance` to `MaxR8P` so `intent(out)` is defined, then
+   !< returns. Calling it raises `error stop` to prevent silent garbage results. See
+   !< issue #14 (audit item H) for the deletion-vs-finish decision.
    class(surface_stl_object), intent(in)            :: self                 !< File STL.
    type(vector_R8P),          intent(in)            :: mesh(1:, 1:, 1:)     !< Mesh coordinates [1:ni,1:nj,1:nk].
    real(R8P),                 intent(out)           :: distance(1:, 1:, 1:) !< Minimum distance.
    logical,                   intent(in),  optional :: is_signed            !< Sentinel to trigger signed distance.
    character(*),              intent(in),  optional :: sign_algorithm       !< Algorithm used for "point in polyhedron" test.
    logical,                   intent(in),  optional :: is_square_root       !< Sentinel to trigger square-root distance.
-   character(len=:), allocatable                    :: sign_algorithm_      !< Algorithm used for "point in polyhedron" test.
-   type(vector_R8P)                                 :: mesh_bb(2)           !< Mesh bounding box extents [min,max].
-   integer(I4P)                                     :: aabb_ref_level       !< AABB mesh refinement level.
-   type(vector_R8P)                                 :: closest_points(10)   !< Closest points to the current facet.
-   integer(I4P)                                     :: cpi                  !< Closest point index.
-   integer(I4P)                                     :: f                    !< Counter.
 
-   if (self%facets_number > 0) then
-      aabb_ref_level = 3
-      mesh_bb(1)%x = minval(mesh%x) ; mesh_bb(1)%y = minval(mesh%y) ; mesh_bb(1)%z = minval(mesh%z)
-      mesh_bb(2)%x = maxval(mesh%x) ; mesh_bb(2)%y = maxval(mesh%y) ; mesh_bb(2)%z = maxval(mesh%z)
-      do f=1, self%facets_number
-         ! call self%facet(f)%get_closest_points(mesh=mesh, closest_points=closest_points)
-      enddo
-   endif
+   ! intent(out): always define before exiting
+   distance = MaxR8P
 
-   if (present(is_square_root)) then
-      if (is_square_root) distance = sqrt(distance)
-   endif
-
-   if (present(is_signed)) then
-      if (is_signed) then
-        sign_algorithm_ = 'ray_intersections' ; if (present(sign_algorithm)) sign_algorithm_ = sign_algorithm
-        select case(sign_algorithm_)
-        case('solid_angle')
-           if (self%is_point_inside_polyhedron_sa(point=closest_points(cpi))) distance = -distance
-        case('ray_intersections')
-           if (self%is_point_inside_polyhedron_ri(point=closest_points(cpi))) distance = -distance
-        case default
-          ! raise error: "unknown point in polyhedron algorithm"
-        endselect
-      endif
-   endif
+   error stop 'fossil_surface_stl_object%compute_mesh_distance: not implemented'
    endsubroutine compute_mesh_distance
 
    pure subroutine compute_metrix(self)
@@ -458,7 +439,8 @@ contains
    case('ray_intersections')
       is_inside = self%is_point_inside_polyhedron_ri(point=point)
    case default
-     ! raise error: "unknown point in polyhedron algorithm"
+      error stop 'fossil_surface_stl_object%is_point_inside: unknown sign_algorithm "'//sign_algorithm_// &
+                 '" (valid: "ray_intersections", "solid_angle")'
    endselect
    endfunction is_point_inside
 
