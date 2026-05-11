@@ -65,7 +65,7 @@ contains
    class(block_object),      intent(inout)        :: self           !< Block.
    type(surface_stl_object), intent(in)           :: surface_stl    !< STL surface.
    logical,                  intent(in)           :: is_signed      !< Signed distance or not.
-   character(*),             intent(in)           :: sign_algorithm !< Algorithm used for "point in polyhedron" test.
+   integer(I4P),             intent(in)           :: sign_algorithm !< Algorithm code (SIGN_RAY_INTERSECTIONS or SIGN_SOLID_ANGLE).
    logical,                  intent(in), optional :: invert_sign    !< Invert sign of distances.
    logical                                        :: invert_sign_   !< Invert sign of distances, local variable.
    integer(I4P)                                   :: i, j, k, c, f  !< Counter.
@@ -85,7 +85,7 @@ contains
          k = cindexes(3, c)
          call surface_stl%facet(f)%compute_distance(point=self%centers(i, j, k), distance=distance)
          if (distance < self%distances(i,j,k)) self%distances(i,j,k) = distance
-         if (surface_stl%is_point_inside(point=self%centers(i, j, k), sign_algorithm=trim(sign_algorithm))) &
+         if (surface_stl%is_point_inside(point=self%centers(i, j, k), sign_algorithm=sign_algorithm)) &
             self%distances(i, j, k) = - self%distances(i, j, k)
       enddo
    enddo

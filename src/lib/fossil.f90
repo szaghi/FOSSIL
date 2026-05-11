@@ -12,4 +12,6 @@ private
 public :: facet_object
 public :: file_stl_object
 public :: surface_stl_object
+public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE
+public :: sign_algorithm_from_string
 endmodule fossil

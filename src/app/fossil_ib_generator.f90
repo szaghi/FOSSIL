@@ -4,7 +4,7 @@ program fossil_ib_generator
 !< FOSSIL, generate Immersed Boundary distance function.
 
 use flap, only : command_line_interface
-use fossil, only : file_stl_object, surface_stl_object
+use fossil, only : file_stl_object, surface_stl_object, sign_algorithm_from_string
 use penf, only : I4P, I8P, R8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 use fossil_aabb_tree_object, only : aabb_tree_object, AABB_USE_INDEX
@@ -24,7 +24,8 @@ type(vector_R8P)               :: bmin, bmax           !< Bounding box extents.
 character(999)                 :: file_name_stl        !< Input STL file name.
 character(999)                 :: output_base_name     !< Output base name.
 integer(I4P)                   :: refinement_levels    !< AABB refinement levels used.
-character(999)                 :: sign_algorithm       !< Algorithm used for "point in polyhedron" test.
+character(999)                 :: sign_algorithm       !< Algorithm name as typed on the CLI.
+integer(I4P)                   :: sign_algorithm_code  !< Algorithm code derived from sign_algorithm.
 logical                        :: unsigned             !< Compute unsigned distance.
 integer(I4P)                   :: ni, nj, nk           !< Grid dimensions, close to STL: where distance is computed exactly.
 integer(I4P)                   :: gi, gj(2), gk        !< Frame dimensions around the grid: where distance is computed exactly.
@@ -89,7 +90,7 @@ do k=1 - gk, nk + gk
    do j=1 - gj(1), nj + gj(2)
       do i=1 - gi, ni + gi
          distance(i, j, k) = surface_stl%distance(point=centers(i, j, k), is_signed=.not.unsigned, &
-                                                  sign_algorithm=trim(sign_algorithm))
+                                                  sign_algorithm=sign_algorithm_code)
       enddo
    enddo
 enddo
@@ -349,6 +350,7 @@ contains
   call cli%get(switch='--ek',                      val=ek,                error=error) ; if (error/=0) stop
   call cli%get(switch='--ref_levels',              val=refinement_levels, error=error) ; if (error/=0) stop
   call cli%get(switch='--sign_algorithm',          val=sign_algorithm,    error=error) ; if (error/=0) stop
+  sign_algorithm_code = sign_algorithm_from_string(trim(adjustl(sign_algorithm)))
   call cli%get(switch='--unsigned',                val=unsigned,          error=error) ; if (error/=0) stop
   endsubroutine cli_parse
 

@@ -13,6 +13,17 @@ use vecfor, only : ex_R8P, ey_R8P, ez_R8P, mirror_matrix_R8P, rotation_matrix_R8
 implicit none
 private
 public :: surface_stl_object
+public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE
+public :: sign_algorithm_from_string
+
+! Point-in-polyhedron algorithm selector for `is_point_inside`, `compute_distance`,
+! and `distance` (when `is_signed=.true.`):
+!   SIGN_RAY_INTERSECTIONS — count intersections of an axis-aligned ray with the
+!                            polyhedron; odd = inside, even = outside.
+!   SIGN_SOLID_ANGLE       — sum the projected solid angles of all facets;
+!                            ~±4π = inside, ~0 = outside.
+integer(I4P), parameter :: SIGN_RAY_INTERSECTIONS = 1_I4P
+integer(I4P), parameter :: SIGN_SOLID_ANGLE       = 2_I4P
 
 type :: surface_stl_object
    !< FOSSIL STL surface class.
@@ -287,7 +298,7 @@ contains
    type(vector_R8P),          intent(in)            :: point           !< Point coordinates.
    real(R8P),                 intent(out)           :: distance        !< Minimum distance.
    logical,                   intent(in),  optional :: is_signed       !< Sentinel to trigger signed distance.
-   character(*),              intent(in),  optional :: sign_algorithm  !< Algorithm used for "point in polyhedron" test.
+   integer(I4P),              intent(in),  optional :: sign_algorithm  !< Algorithm code (SIGN_RAY_INTERSECTIONS or SIGN_SOLID_ANGLE).
    logical,                   intent(in),  optional :: is_square_root  !< Sentinel to trigger square-root distance.
    integer(I4P),              intent(out), optional :: facet_index     !< Index of facet containing the closest point.
    integer(I4P),              intent(out), optional :: edge_index      !< Index of edge on facet containing the closest point.
@@ -405,7 +416,7 @@ contains
    class(surface_stl_object), intent(in)           :: self            !< File STL.
    type(vector_R8P),          intent(in)           :: point           !< Point coordinates.
    logical,                   intent(in), optional :: is_signed       !< Sentinel to trigger signed distance.
-   character(*),              intent(in), optional :: sign_algorithm  !< Algorithm used for "point in polyhedron" test.
+   integer(I4P),              intent(in), optional :: sign_algorithm  !< Algorithm code (SIGN_RAY_INTERSECTIONS or SIGN_SOLID_ANGLE).
    logical,                   intent(in), optional :: is_square_root  !< Sentinel to trigger square-root distance.
    real(R8P)                                       :: distance        !< Minimum distance from point to the triangulated surface.
 
@@ -415,21 +426,24 @@ contains
 
    function is_point_inside(self, point, sign_algorithm) result(is_inside)
    !< Compute sign.
+   !<
+   !< `sign_algorithm` selects the point-in-polyhedron test; pass `SIGN_RAY_INTERSECTIONS`
+   !< (default) or `SIGN_SOLID_ANGLE`. Out-of-range values raise `error stop`.
    class(surface_stl_object), intent(in)           :: self            !< File STL.
    type(vector_R8P),          intent(in)           :: point           !< Point coordinates.
    logical                                         :: is_inside       !< Return true if point is inside surface.
-   character(*),              intent(in), optional :: sign_algorithm  !< Algorithm used for "point in polyhedron" test.
-   character(len=:), allocatable                   :: sign_algorithm_ !< Algorithm used for "point in polyhedron" test, local var.
+   integer(I4P),              intent(in), optional :: sign_algorithm  !< Algorithm code (SIGN_RAY_INTERSECTIONS or SIGN_SOLID_ANGLE).
+   integer(I4P)                                    :: algo            !< Effective algorithm code.
 
-   sign_algorithm_ = 'ray_intersections' ; if (present(sign_algorithm)) sign_algorithm_ = sign_algorithm
-   select case(sign_algorithm_)
-   case('solid_angle')
+   algo = SIGN_RAY_INTERSECTIONS ; if (present(sign_algorithm)) algo = sign_algorithm
+   select case(algo)
+   case(SIGN_SOLID_ANGLE)
       is_inside = self%is_point_inside_polyhedron_sa(point=point)
-   case('ray_intersections')
+   case(SIGN_RAY_INTERSECTIONS)
       is_inside = self%is_point_inside_polyhedron_ri(point=point)
    case default
-      error stop 'fossil_surface_stl_object%is_point_inside: unknown sign_algorithm "'//sign_algorithm_// &
-                 '" (valid: "ray_intersections", "solid_angle")'
+      error stop 'fossil_surface_stl_object%is_point_inside: unknown sign_algorithm code &
+                 &(valid: SIGN_RAY_INTERSECTIONS=1, SIGN_SOLID_ANGLE=2)'
    endselect
    endfunction is_point_inside
 
@@ -861,4 +875,27 @@ contains
       enddo
    endif
    endsubroutine set_facets_id
+
+   ! non-TBP helpers
+
+   pure function sign_algorithm_from_string(name) result(code)
+   !< Translate a human-readable algorithm name into a `SIGN_*` code.
+   !<
+   !< Intended for CLI / config-file boundaries where users type a string and the library
+   !< wants the integer dispatch code. Unknown names raise `error stop` with the valid set.
+   !< Comparison is case-sensitive — keep names in canonical form (`'ray_intersections'`,
+   !< `'solid_angle'`) at call sites.
+   character(*), intent(in) :: name !< Algorithm name string.
+   integer(I4P)             :: code !< Corresponding SIGN_* code.
+
+   select case(trim(adjustl(name)))
+   case('ray_intersections')
+      code = SIGN_RAY_INTERSECTIONS
+   case('solid_angle')
+      code = SIGN_SOLID_ANGLE
+   case default
+      error stop 'fossil_surface_stl_object%sign_algorithm_from_string: unknown name "'//trim(adjustl(name))// &
+                 '" (valid: "ray_intersections", "solid_angle")'
+   endselect
+   endfunction sign_algorithm_from_string
 endmodule fossil_surface_stl_object

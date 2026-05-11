@@ -5,7 +5,7 @@ program fossil_ib_generator
 
 use fossil_block_object, only : block_object
 use flap, only : command_line_interface
-use fossil, only : file_stl_object, surface_stl_object
+use fossil, only : file_stl_object, surface_stl_object, sign_algorithm_from_string
 use penf, only : I4P, I8P, R8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 use fossil_aabb_tree_object, only : aabb_tree_object
@@ -21,7 +21,8 @@ character(999)               :: file_name_stl           !< Input STL file name.
 character(999)               :: output_base_name        !< Output base name.
 integer(I4P)                 :: refinement_levels       !< AABB refinement levels used.
 logical                      :: is_signed               !< Signed distance or not.
-character(999)               :: sign_algorithm          !< Algorithm used for "point in polyhedron" test.
+character(999)               :: sign_algorithm          !< Algorithm name as typed on the CLI.
+integer(I4P)                 :: sign_algorithm_code     !< Algorithm code derived from sign_algorithm.
 logical                      :: unsigned                !< Compute unsigned distance.
 logical                      :: save_aabb_tree_geometry !< Sentinel to save AABB geometry.
 logical                      :: save_aabb_tree_stl      !< Sentinel to save AABB stl.
@@ -51,7 +52,7 @@ endif
 call cblock%initialize(bmin=bmin, bmax=bmax, ni=ni, nj=nj, nk=nk, gi=gi, gj=gj, gk=gk, ei=ei, ej=ej, ek=ek, &
                        refinement_levels=refinement_levels)
 call cblock%export_aabb_tecplot_ascii(file_name='ib-cart-block-aabb.dat')
-! call cblock%compute_distances(surface_stl=surface_stl, is_signed=is_signed, sign_algorithm=sign_algorithm, invert_sign=.true.)
+! call cblock%compute_distances(surface_stl=surface_stl, is_signed=is_signed, sign_algorithm=sign_algorithm_code, invert_sign=.true.)
 call cblock%export_vtk_file(file_name=trim(output_base_name)//'.vts')
 ! call cblock%export_xall_files(basename=trim(output_base_name))
 
@@ -201,6 +202,7 @@ contains
   call cli%get(switch='--ref_levels',              val=refinement_levels,       error=error) ; if (error/=0) stop
   call cli%get(switch='--is_signed',               val=is_signed,               error=error) ; if (error/=0) stop
   call cli%get(switch='--sign_algorithm',          val=sign_algorithm,          error=error) ; if (error/=0) stop
+  sign_algorithm_code = sign_algorithm_from_string(trim(adjustl(sign_algorithm)))
   call cli%get(switch='--save_aabb_tree_geometry', val=save_aabb_tree_geometry, error=error) ; if (error/=0) stop
   call cli%get(switch='--save_aabb_tree_stl',      val=save_aabb_tree_stl,      error=error) ; if (error/=0) stop
   bmin%x = bbmin(1) ; bmin%y = bbmin(2) ; bmin%z = bbmin(3)
