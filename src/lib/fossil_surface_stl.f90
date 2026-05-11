@@ -103,9 +103,6 @@ type :: surface_stl_object
       procedure, pass(self) :: smallest_edge_len               !< Return the smallest edge length.
       procedure, pass(self) :: statistics                      !< Return STL statistics.
       procedure, pass(self) :: translate                       !< Translate facet given vectorial delta.
-      ! operators
-      generic :: assignment(=) => surface_stl_assign_surface_stl       !< Overload `=`.
-      procedure, pass(lhs),  private :: surface_stl_assign_surface_stl !< Operator `=`.
       ! finaliser — releases facet(:) and nested allocatables (aabb%node, facet_*_de%id)
       ! when the instance goes out of scope or is wrapped in an array container.
       final :: surface_stl_finalize
@@ -575,9 +572,18 @@ contains
    elemental subroutine destroy(self)
    !< Destroy file.
    class(surface_stl_object), intent(inout) :: self  !< File STL.
-   type(surface_stl_object)                 :: fresh !< Fresh instance of file STL.
 
-   self = fresh
+   if (allocated(self%facet)) deallocate(self%facet)
+   self%facets_number = 0
+   call self%facet_1_de%destroy
+   call self%facet_2_de%destroy
+   call self%facet_3_de%destroy
+   call self%aabb%destroy
+   self%bmin    = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   self%bmax    = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   self%volume  = 0._R8P
+   self%centroid = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   self%header  = ''
    endsubroutine destroy
 
    function distance(self, point, is_signed, sign_algorithm, is_square_root)
@@ -905,35 +911,6 @@ contains
       endif
    endif
    endsubroutine translate
-
-   ! operators
-   ! =
-   pure subroutine surface_stl_assign_surface_stl(lhs, rhs)
-   !< Operator `=`.
-   class(surface_stl_object), intent(inout) :: lhs !< Left hand side.
-   type(surface_stl_object),  intent(in)    :: rhs !< Right hand side.
-   integer(I4P)                             :: f   !< Counter.
-
-   lhs%facets_number = rhs%facets_number
-   if (allocated(lhs%facet)) then
-      call lhs%facet%destroy
-      deallocate(lhs%facet)
-   endif
-   if (allocated(rhs%facet)) then
-      allocate(lhs%facet(1:lhs%facets_number))
-      do f=1, lhs%facets_number
-         lhs%facet(f) = rhs%facet(f)
-      enddo
-   endif
-   lhs%facet_1_de = rhs%facet_1_de
-   lhs%facet_2_de = rhs%facet_2_de
-   lhs%facet_3_de = rhs%facet_3_de
-   lhs%aabb = rhs%aabb
-   lhs%bmin = rhs%bmin
-   lhs%bmax = rhs%bmax
-   lhs%volume = rhs%volume
-   lhs%centroid = rhs%centroid
-   endsubroutine surface_stl_assign_surface_stl
 
    ! finaliser
    subroutine surface_stl_finalize(self)

@@ -84,11 +84,8 @@ type :: facet_object
       procedure, pass(self) :: update_connectivity             !< Update facet connectivity.
       procedure, pass(self) :: vertex_angle                    !< Return the subtended angle of given vertex.
       procedure, pass(self) :: vertex_global_id                !< Return the vertex global id given the local one.
-      ! operators
-      generic :: assignment(=) => facet_assign_facet !< Overload `=`.
       ! private methods
       procedure, pass(self), private :: edge_connection_in_other_ref !< Return the edge of connection in the other reference.
-      procedure, pass(lhs),  private :: facet_assign_facet           !< Operator `=`.
       procedure, pass(self), private :: flip_edge                    !< Flip facet edge.
       procedure, pass(self), private :: mirror_by_normal             !< Mirror facet given normal of mirroring plane.
       procedure, pass(self), private :: mirror_by_matrix             !< Mirror facet given matrix.
@@ -397,9 +394,24 @@ contains
    elemental subroutine destroy(self)
    !< Destroy facet.
    class(facet_object), intent(inout) :: self  !< Facet.
-   type(facet_object)                 :: fresh !< Fresh instance of facet.
 
-   self = fresh
+   self%normal         = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   self%vertex         = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   self%centroid       = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   self%E12            = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   self%E13            = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   self%a              = 0._R8P
+   self%b              = 0._R8P
+   self%c              = 0._R8P
+   self%d              = 0._R8P
+   self%det            = 0._R8P
+   self%bb             = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   self%id             = 0_I4P
+   self%fcon_edge      = 0_I4P
+   self%edge_pnormal   = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   self%vertex_pnormal = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   call self%vertex_occurrence%destroy
+   call self%vertex_nearby%destroy
    endsubroutine destroy
 
    elemental subroutine destroy_connectivity(self)
@@ -446,9 +458,8 @@ contains
    elemental subroutine initialize(self)
    !< Initialize facet.
    class(facet_object), intent(inout) :: self  !< Facet.
-   type(facet_object)                 :: fresh !< Fresh instance of facet.
 
-   self = fresh
+   call self%destroy
    endsubroutine initialize
 
    pure function largest_edge_len(self) result(largest)
@@ -916,29 +927,5 @@ contains
    ! self is not connected to other along any edge — caller invariant broken
    error stop 'fossil_facet_object%edge_connection_in_other_ref: facets are not connected'
    endsubroutine edge_connection_in_other_ref
-
-   pure subroutine facet_assign_facet(lhs, rhs)
-   !< Operator `=`.
-   class(facet_object), intent(inout) :: lhs !< Left hand side.
-   type(facet_object),  intent(in)    :: rhs !< Right hand side.
-
-   lhs%normal = rhs%normal
-   lhs%vertex = rhs%vertex
-   lhs%centroid = rhs%centroid
-   lhs%E12 = rhs%E12
-   lhs%E13 = rhs%E13
-   lhs%a = rhs%a
-   lhs%b = rhs%b
-   lhs%c = rhs%c
-   lhs%d = rhs%d
-   lhs%det = rhs%det
-   lhs%bb = rhs%bb
-   lhs%id = rhs%id
-   lhs%fcon_edge        = rhs%fcon_edge
-   lhs%vertex_occurrence = rhs%vertex_occurrence
-   lhs%vertex_nearby    = rhs%vertex_nearby
-   lhs%edge_pnormal     = rhs%edge_pnormal
-   lhs%vertex_pnormal   = rhs%vertex_pnormal
-   endsubroutine facet_assign_facet
 
 endmodule fossil_facet_object
