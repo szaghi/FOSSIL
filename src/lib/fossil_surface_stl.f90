@@ -51,7 +51,6 @@ type :: surface_stl_object
       procedure, pass(self) :: clip                            !< Clip triangulated surface given an AABB.
       procedure, pass(self) :: compute_centroid                !< Compute centroid of STL surface.
       procedure, pass(self) :: compute_distance                !< Compute the (minimum) distance returning also the closest point.
-      procedure, pass(self) :: compute_mesh_distance           !< Compute the (minimum) distance in a given mesh.
       procedure, pass(self) :: compute_metrix                  !< Compute facets metrix.
       procedure, pass(self) :: compute_normals                 !< Compute facets normals by means of vertices data.
       procedure, pass(self) :: compute_volume                  !< Compute volume bounded by STL surface.
@@ -330,26 +329,6 @@ contains
       endif
    endif
    endsubroutine compute_distance
-
-   subroutine compute_mesh_distance(self, mesh, distance, is_signed, sign_algorithm, is_square_root)
-   !< Compute the (minimum) distance in a given mesh.
-   !<
-   !< @warning **This routine is not yet implemented.** The inner facet loop is a stub.
-   !< For now it initializes `distance` to `MaxR8P` so `intent(out)` is defined, then
-   !< returns. Calling it raises `error stop` to prevent silent garbage results. See
-   !< issue #14 (audit item H) for the deletion-vs-finish decision.
-   class(surface_stl_object), intent(in)            :: self                 !< File STL.
-   type(vector_R8P),          intent(in)            :: mesh(1:, 1:, 1:)     !< Mesh coordinates [1:ni,1:nj,1:nk].
-   real(R8P),                 intent(out)           :: distance(1:, 1:, 1:) !< Minimum distance.
-   logical,                   intent(in),  optional :: is_signed            !< Sentinel to trigger signed distance.
-   character(*),              intent(in),  optional :: sign_algorithm       !< Algorithm used for "point in polyhedron" test.
-   logical,                   intent(in),  optional :: is_square_root       !< Sentinel to trigger square-root distance.
-
-   ! intent(out): always define before exiting
-   distance = MaxR8P
-
-   error stop 'fossil_surface_stl_object%compute_mesh_distance: not implemented'
-   endsubroutine compute_mesh_distance
 
    pure subroutine compute_metrix(self)
    !< Compute facets metrix.
