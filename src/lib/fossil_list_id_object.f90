@@ -23,6 +23,11 @@ type :: list_id_object
       generic :: assignment(=) => list_id_assign_list_id !< Overload `=`.
       ! private methods
       procedure, pass(lhs),  private :: list_id_assign_list_id !< Operator `=`.
+      ! finaliser — releases id(:) when the instance goes out of scope or is wrapped
+      ! in an array container that gets deallocated. Compilers like gfortran auto-clean
+      ! allocatable components for stand-alone scalars; the explicit final is defence
+      ! against arrays-of-types on compilers that do not (ifort historically).
+      final :: list_id_finalize
 endtype list_id_object
 
 contains
@@ -103,4 +108,13 @@ contains
    if (allocated(lhs%id)) deallocate(lhs%id)
    if (allocated(rhs%id)) lhs%id = rhs%id
    endsubroutine list_id_assign_list_id
+
+   ! finaliser
+   subroutine list_id_finalize(self)
+   !< Release id(:) and reset counters.
+   type(list_id_object), intent(inout) :: self !< List.
+
+   if (allocated(self%id)) deallocate(self%id)
+   self%ids_number = 0
+   endsubroutine list_id_finalize
 endmodule fossil_list_id_object

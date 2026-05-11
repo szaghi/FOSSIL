@@ -496,18 +496,28 @@ contains
    contains
       subroutine load_facet_record(prefix, record)
       !< Load a facet *record*, namely normal or vertex data.
-      character(*),     intent(in)  :: prefix       !< Record prefix string.
-      type(vector_R8P), intent(out) :: record       !< Record data.
-      character(FRLEN)              :: facet_record !< Facet record string buffer.
-      integer(I4P)                  :: i            !< Counter.
+      !<
+      !< Strict prefix check: the line must, after leading whitespace, *start with* the
+      !< prefix. A previous substring-`index` check would accept any line containing the
+      !< keyword anywhere (e.g. a stray "vertex count: 12" comment would be parsed as a
+      !< coordinate triple), producing silent garbage.
+      character(*),     intent(in)  :: prefix         !< Record prefix string.
+      type(vector_R8P), intent(out) :: record         !< Record data.
+      character(FRLEN)              :: facet_record   !< Facet record string buffer.
+      character(len=:), allocatable :: trimmed        !< Line with leading whitespace removed.
+      integer(I4P)                  :: prefix_len     !< Cached prefix length.
 
       read(file_unit, '(A)') facet_record
-      i = index(string=facet_record, substring=prefix)
-      if (i>0) then
-         read(facet_record(i+len(prefix):), *) record%x, record%y, record%z
-      else
-         write(stderr, '(A)') 'error: impossible to read "'//prefix//'" from file unit "'//trim(str(file_unit))//'"!'
+      trimmed    = trim(adjustl(facet_record))
+      prefix_len = len(prefix)
+      if (len(trimmed) >= prefix_len) then
+         if (trimmed(1:prefix_len) == prefix) then
+            read(trimmed(prefix_len + 1:), *) record%x, record%y, record%z
+            return
+         endif
       endif
+      write(stderr, '(A)') 'error: expected line to start with "'//prefix// &
+                           '" on unit '//trim(str(file_unit))//', got: "'//trim(facet_record)//'"'
       endsubroutine load_facet_record
    endsubroutine load_from_file_ascii
 

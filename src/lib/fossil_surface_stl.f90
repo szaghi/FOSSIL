@@ -78,6 +78,9 @@ type :: surface_stl_object
       ! operators
       generic :: assignment(=) => surface_stl_assign_surface_stl       !< Overload `=`.
       procedure, pass(lhs),  private :: surface_stl_assign_surface_stl !< Operator `=`.
+      ! finaliser — releases facet(:) and nested allocatables (aabb%node, facet_*_de%id)
+      ! when the instance goes out of scope or is wrapped in an array container.
+      final :: surface_stl_finalize
       ! private methods
       procedure, pass(self), private :: compute_facets_disconnected !< Compute facets with disconnected edges.
       procedure, pass(self), private :: mirror_by_normal            !< Mirror facets given normal of mirroring plane.
@@ -259,15 +262,22 @@ contains
    !< Compute centroid of STL surface.
    !<
    !< @note Metrix and volume must be already computed.
+   !<
+   !< Degenerate / non-watertight surfaces can have `volume == 0`; the centroid
+   !< formula divides by `48 * volume`, so we guard against producing NaN/Inf.
+   !< In the degenerate case we fall back to the origin — a defined value the
+   !< caller can detect via `volume == 0` if needed.
    class(surface_stl_object), intent(inout) :: self !< File STL.
    integer(I4P)                             :: f    !< Counter.
 
    if (self%facets_number>0) then
       self%centroid = 0._R8P
-      do f=1, self%facets_number
-         self%centroid = self%centroid - self%facet(f)%centroid_part()
-      enddo
-      self%centroid = self%centroid / (48 * self%volume)
+      if (abs(self%volume) > tiny(0._R8P)) then
+         do f=1, self%facets_number
+            self%centroid = self%centroid - self%facet(f)%centroid_part()
+         enddo
+         self%centroid = self%centroid / (48 * self%volume)
+      endif
    endif
    endsubroutine compute_centroid
 
@@ -760,6 +770,18 @@ contains
    lhs%volume = rhs%volume
    lhs%centroid = rhs%centroid
    endsubroutine surface_stl_assign_surface_stl
+
+   ! finaliser
+   subroutine surface_stl_finalize(self)
+   !< Release facet(:) and reset state.
+   !<
+   !< Nested components (aabb%node, facet_*_de%id, per-facet allocatables) have their
+   !< own finalisers / `=` semantics; releasing facet(:) here cascades correctly.
+   type(surface_stl_object), intent(inout) :: self !< Surface.
+
+   if (allocated(self%facet)) deallocate(self%facet)
+   self%facets_number = 0
+   endsubroutine surface_stl_finalize
 
    ! private methods
    pure subroutine compute_facets_disconnected(self)
