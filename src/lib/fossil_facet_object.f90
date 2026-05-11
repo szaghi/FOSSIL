@@ -12,6 +12,16 @@ use vecfor, only : angle_R8P, face_normal3_R8P, mirror_matrix_R8P, normL2_R8P, r
 implicit none
 private
 public :: facet_object
+public :: EDGE_12, EDGE_23, EDGE_31
+
+! Edge indices for the connectivity API (fcon_edge, edge_pnormal, make_normal_consistent,
+! flip_edge, edge_connection_in_other_ref). Convention:
+!   EDGE_12 → vertex(1) → vertex(2)
+!   EDGE_23 → vertex(2) → vertex(3)
+!   EDGE_31 → vertex(3) → vertex(1)
+integer(I4P), parameter :: EDGE_12 = 1_I4P
+integer(I4P), parameter :: EDGE_23 = 2_I4P
+integer(I4P), parameter :: EDGE_31 = 3_I4P
 
 type :: facet_object
    !< FOSSIL, facet class.
@@ -30,17 +40,17 @@ type :: facet_object
    real(R8P) :: d=0._R8P !< `normal.dot.vertex(1)`
    ! auxiliary
    type(vector_R8P) :: bb(2) !< Axis-aligned bounding box (AABB), bb(1)=min, bb(2)=max.
-   ! connectivity
+   ! connectivity — edges are indexed 1..3 with the convention:
+   !   edge 1 = vertex(1)→vertex(2)
+   !   edge 2 = vertex(2)→vertex(3)
+   !   edge 3 = vertex(3)→vertex(1)
+   ! Named parameters EDGE_12, EDGE_23, EDGE_31 are exported for readability.
    integer(I4P)         :: id                   !< Facet global ID.
-   integer(I4P)         :: fcon_edge_12=0_I4P   !< Connected face ID along edge 1-2.
-   integer(I4P)         :: fcon_edge_23=0_I4P   !< Connected face ID along edge 2-3.
-   integer(I4P)         :: fcon_edge_31=0_I4P   !< Connected face ID along edge 3-1.
+   integer(I4P)         :: fcon_edge(3)=0_I4P   !< Connected face ID along each edge (0 = disconnected).
    type(list_id_object) :: vertex_occurrence(3) !< List of vertices "occurrencies", list of facets global ID containing them.
    type(list_id_object) :: vertex_nearby(3)     !< List of vertices "nearby", list of vertices global ID nearby them.
    ! pseudo normals
-   type(vector_R8P) :: edge_12_pnormal   !< Edge 1-2 pseudo-normal.
-   type(vector_R8P) :: edge_23_pnormal   !< Edge 2-3 pseudo-normal.
-   type(vector_R8P) :: edge_31_pnormal   !< Edge 3-3 pseudo-normal.
+   type(vector_R8P) :: edge_pnormal(3)   !< Edge pseudo-normals, indexed as fcon_edge.
    type(vector_R8P) :: vertex_pnormal(3) !< Vertices pseudo-normals.
    contains
       ! public methods
@@ -330,28 +340,18 @@ contains
    !< Compute pseudo normals.
    !<
    !< @note Connectivity must be already computed.
-   class(facet_object), intent(inout) :: self      !< Facet.
-   type(facet_object),  intent(in)    :: facet(1:) !< Facets list.
-   integer(I4P)                       :: f, o, v   !< Counter.
+   class(facet_object), intent(inout) :: self       !< Facet.
+   type(facet_object),  intent(in)    :: facet(1:)  !< Facets list.
+   integer(I4P)                       :: e, f, o, v !< Counter.
 
-   if (self%fcon_edge_12 > 0) then
-      self%edge_12_pnormal = self%normal + facet(self%fcon_edge_12)%normal
-      call self%edge_12_pnormal%normalize()
-   else
-      self%edge_12_pnormal = self%normal
-   endif
-   if (self%fcon_edge_23 > 0) then
-      self%edge_23_pnormal = self%normal + facet(self%fcon_edge_23)%normal
-      call self%edge_23_pnormal%normalize()
-   else
-      self%edge_23_pnormal = self%normal
-   endif
-   if (self%fcon_edge_31 > 0) then
-      self%edge_31_pnormal = self%normal + facet(self%fcon_edge_31)%normal
-      call self%edge_31_pnormal%normalize()
-   else
-      self%edge_31_pnormal = self%normal
-   endif
+   do e=1, 3
+      if (self%fcon_edge(e) > 0) then
+         self%edge_pnormal(e) = self%normal + facet(self%fcon_edge(e))%normal
+         call self%edge_pnormal(e)%normalize()
+      else
+         self%edge_pnormal(e) = self%normal
+      endif
+   enddo
    do v=1, 3
       self%vertex_pnormal(v) = self%vertex_angle(v) * self%normal
       do o=1, self%vertex_occurrence(v)%ids_number
@@ -399,31 +399,19 @@ contains
    !< Connect nearby vertices of disconnected edges.
    class(facet_object), intent(inout) :: self     !< Facet.
    type(facet_object),  intent(inout) :: facet(:) !< All facets in STL.
+   integer(I4P)                       :: e, v1, v2 !< Edge index and its two endpoint vertex indices.
 
-   if     (self%fcon_edge_12==0) then
-      if (self%vertex_nearby(1)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(1), facet=facet, nearby=self%vertex_nearby(1))
-      endif
-      if (self%vertex_nearby(2)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(2), facet=facet, nearby=self%vertex_nearby(2))
-      endif
-   endif
-   if (self%fcon_edge_23==0) then
-      if (self%vertex_nearby(2)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(2), facet=facet, nearby=self%vertex_nearby(2))
-      endif
-      if (self%vertex_nearby(3)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(3), facet=facet, nearby=self%vertex_nearby(3))
-      endif
-   endif
-   if (self%fcon_edge_31==0) then
-      if (self%vertex_nearby(3)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(3), facet=facet, nearby=self%vertex_nearby(3))
-      endif
-      if (self%vertex_nearby(1)%ids_number>0) then
-         call merge_vertices(vertex=self%vertex(1), facet=facet, nearby=self%vertex_nearby(1))
-      endif
-   endif
+   ! For each disconnected edge, merge both of its endpoint vertices with their nearby set.
+   ! Edge e touches vertices (e, mod(e, 3) + 1).
+   do e=1, 3
+      if (self%fcon_edge(e) /= 0) cycle
+      v1 = e
+      v2 = mod(e, 3) + 1
+      if (self%vertex_nearby(v1)%ids_number > 0) &
+         call merge_vertices(vertex=self%vertex(v1), facet=facet, nearby=self%vertex_nearby(v1))
+      if (self%vertex_nearby(v2)%ids_number > 0) &
+         call merge_vertices(vertex=self%vertex(v2), facet=facet, nearby=self%vertex_nearby(v2))
+   enddo
    endsubroutine connect_nearby_vertices
 
    elemental subroutine destroy(self)
@@ -438,9 +426,7 @@ contains
    !< Destroy facet connectivity.
    class(facet_object), intent(inout) :: self  !< Facet.
 
-   self%fcon_edge_12=0_I4P
-   self%fcon_edge_23=0_I4P
-   self%fcon_edge_31=0_I4P
+   self%fcon_edge = 0_I4P
    call self%vertex_occurrence%destroy
    call self%vertex_nearby%destroy
    endsubroutine destroy_connectivity
@@ -543,31 +529,26 @@ contains
    read(file_unit) padding
    endsubroutine load_from_file_binary
 
-   pure subroutine make_normal_consistent(self, edge_dir, other)
+   pure subroutine make_normal_consistent(self, edge, other)
    !< Make normal of other facet consistent with self.
-   class(facet_object), intent(in)    :: self           !< Facet.
-   character(*),        intent(in)    :: edge_dir       !< Edge (in self numeration) along which other is connected.
-   type(facet_object),  intent(inout) :: other          !< Other facet to make consistent with self.
-   character(len(edge_dir))           :: edge_dir_other !< Edge (in self numeration) along which other is connected.
-   type(vector_R8P)                   :: edge           !< Edge of connection in the self reference.
-   type(vector_R8P)                   :: edge_other     !< Edge of connection in the other reference.
+   !<
+   !< `edge` is the edge index in self numeration (use EDGE_12/EDGE_23/EDGE_31, values 1..3).
+   class(facet_object), intent(in)    :: self        !< Facet.
+   integer(I4P),        intent(in)    :: edge        !< Edge in self numeration (1..3).
+   type(facet_object),  intent(inout) :: other       !< Other facet to make consistent with self.
+   integer(I4P)                       :: edge_other  !< Edge in other numeration (1..3).
+   type(vector_R8P)                   :: e_self      !< Edge vector in self reference.
+   type(vector_R8P)                   :: e_other     !< Edge vector in other reference.
 
-   call self%edge_connection_in_other_ref(other=other, edge_dir=edge_dir_other, edge=edge_other)
-   ! get self edge
-   select case(edge_dir)
-   case('edge_12')
-      edge = self%vertex(2) - self%vertex(1)
-   case('edge_23')
-      edge = self%vertex(3) - self%vertex(2)
-   case('edge_31')
-      edge = self%vertex(1) - self%vertex(3)
-   case default
-      error stop 'fossil_facet_object%make_normal_consistent: unknown edge_dir &
-                 &(valid: "edge_12", "edge_23", "edge_31")'
-   endselect
-   if (edge%dotproduct(edge_other)>0) then
+   if (edge < 1 .or. edge > 3) &
+      error stop 'fossil_facet_object%make_normal_consistent: edge must be 1..3 (EDGE_12, EDGE_23, EDGE_31)'
+
+   call self%edge_connection_in_other_ref(other=other, edge=edge_other, edge_vector=e_other)
+   ! self edge vector: vertex(next) - vertex(edge), with next = mod(edge,3)+1
+   e_self = self%vertex(mod(edge, 3) + 1) - self%vertex(edge)
+   if (e_self%dotproduct(e_other) > 0) then
       ! other numeration is consistent, normal has wrong orientation
-      call other%flip_edge(edge_dir=edge_dir_other)
+      call other%flip_edge(edge=edge_other)
    endif
    endsubroutine make_normal_consistent
 
@@ -589,7 +570,7 @@ contains
    class(facet_object), intent(inout) :: self   !< Facet.
    type(vector_R8P)                   :: vertex !< Temporary vertex variable.
 
-   call self%flip_edge(edge_dir='edge_23')
+   call self%flip_edge(edge=EDGE_23)
    endsubroutine reverse_normal
 
    subroutine save_into_file_ascii(self, file_unit)
@@ -692,10 +673,13 @@ contains
    !<
    !< @note Vertices occurrencies list must be already computed.
    class(facet_object), intent(inout) :: self !< Facet.
+   integer(I4P)                       :: e    !< Edge counter.
 
-   self%fcon_edge_12 = facet_connected(occurrence_1=self%vertex_occurrence(1)%id, occurrence_2=self%vertex_occurrence(2)%id)
-   self%fcon_edge_23 = facet_connected(occurrence_1=self%vertex_occurrence(2)%id, occurrence_2=self%vertex_occurrence(3)%id)
-   self%fcon_edge_31 = facet_connected(occurrence_1=self%vertex_occurrence(3)%id, occurrence_2=self%vertex_occurrence(1)%id)
+   ! Edge e connects vertices e and mod(e,3)+1: (1,2), (2,3), (3,1).
+   do e=1, 3
+      self%fcon_edge(e) = facet_connected(occurrence_1=self%vertex_occurrence(e)%id,                &
+                                          occurrence_2=self%vertex_occurrence(mod(e, 3) + 1)%id)
+   enddo
    contains
       pure function facet_connected(occurrence_1, occurrence_2)
       !< Return the facet ID connected by the edge. If no facet is found 0 is returned.
@@ -751,29 +735,29 @@ contains
    endfunction vertex_global_id
 
    ! private methods
-   pure subroutine flip_edge(self, edge_dir)
+   pure subroutine flip_edge(self, edge)
    !< Flip facet edge.
-   class(facet_object), intent(inout) :: self     !< Facet.
-   character(*),        intent(in)    :: edge_dir !< Edge to be flipped.
-   integer(I4P)                       :: fcon     !< Temporary facet connectiviy variable.
+   !<
+   !< Flipping edge `e` (1..3) swaps its two endpoint vertices and swaps the connectivity
+   !< of the two other edges. The table BC_OF/CA_OF gives the indices of those two other
+   !< edges (the two values in {1,2,3}\{e}, in ascending order).
+   class(facet_object), intent(inout) :: self  !< Facet.
+   integer(I4P),        intent(in)    :: edge  !< Edge to be flipped (1..3).
+   integer(I4P)                       :: v1, v2, bc, ca !< Vertex indices and the two non-flipped edge indices.
+   integer(I4P), parameter            :: BC_OF(3) = [2_I4P, 1_I4P, 1_I4P]
+   integer(I4P), parameter            :: CA_OF(3) = [3_I4P, 3_I4P, 2_I4P]
 
-   select case(edge_dir)
-   case('edge_12')
-      call flip_vertices(a=self%vertex(1), b=self%vertex(2),                   &
-                         fcon_bc=self%fcon_edge_23, fcon_ca=self%fcon_edge_31, &
-                         vertex_a_occurrence=self%vertex_occurrence(1)%id, vertex_b_occurrence=self%vertex_occurrence(2)%id)
-   case('edge_23')
-      call flip_vertices(a=self%vertex(2), b=self%vertex(3),                   &
-                         fcon_bc=self%fcon_edge_12, fcon_ca=self%fcon_edge_31, &
-                         vertex_a_occurrence=self%vertex_occurrence(2)%id, vertex_b_occurrence=self%vertex_occurrence(3)%id)
-   case('edge_31')
-      call flip_vertices(a=self%vertex(3), b=self%vertex(1),                   &
-                         fcon_bc=self%fcon_edge_12, fcon_ca=self%fcon_edge_23, &
-                         vertex_a_occurrence=self%vertex_occurrence(3)%id, vertex_b_occurrence=self%vertex_occurrence(1)%id)
-   case default
-      error stop 'fossil_facet_object%flip_edge: unknown edge_dir &
-                 &(valid: "edge_12", "edge_23", "edge_31")'
-   endselect
+   if (edge < 1 .or. edge > 3) &
+      error stop 'fossil_facet_object%flip_edge: edge must be 1..3 (EDGE_12, EDGE_23, EDGE_31)'
+
+   v1 = edge
+   v2 = mod(edge, 3) + 1
+   bc = BC_OF(edge)
+   ca = CA_OF(edge)
+   call flip_vertices(a=self%vertex(v1), b=self%vertex(v2),                   &
+                      fcon_bc=self%fcon_edge(bc), fcon_ca=self%fcon_edge(ca), &
+                      vertex_a_occurrence=self%vertex_occurrence(v1)%id,      &
+                      vertex_b_occurrence=self%vertex_occurrence(v2)%id)
    call self%compute_metrix
    contains
       pure subroutine flip_vertices(a, b, fcon_bc, fcon_ca, vertex_a_occurrence, vertex_b_occurrence)
@@ -865,27 +849,26 @@ contains
    endif
    endsubroutine rotate_by_matrix
 
-   ! `=` operator
-   pure subroutine edge_connection_in_other_ref(self, other, edge_dir, edge)
+   pure subroutine edge_connection_in_other_ref(self, other, edge, edge_vector)
    !< Return the edge of connection in the other reference.
-   class(facet_object), intent(in)  :: self     !< Facet.
-   type(facet_object),  intent(in)  :: other    !< Other facet.
-   character(*),        intent(out) :: edge_dir !< Edge (in other numeration) along which self is connected.
-   type(vector_R8P),    intent(out) :: edge     !< Edge (in other numeration) along which self is connected.
+   !<
+   !< Searches `other%fcon_edge(:)` for the edge that points back to `self%id` and
+   !< returns its index (1..3) and the corresponding edge vector in `other`'s frame.
+   class(facet_object), intent(in)  :: self        !< Facet.
+   type(facet_object),  intent(in)  :: other       !< Other facet.
+   integer(I4P),        intent(out) :: edge        !< Edge index in other numeration (1..3).
+   type(vector_R8P),    intent(out) :: edge_vector !< Edge vector in other numeration.
+   integer(I4P)                     :: e           !< Counter.
 
-   if     (other%fcon_edge_12 == self%id) then
-      edge_dir = 'edge_12'
-      edge = other%vertex(2) - other%vertex(1)
-   elseif (other%fcon_edge_23 == self%id) then
-      edge_dir = 'edge_23'
-      edge = other%vertex(3) - other%vertex(2)
-   elseif (other%fcon_edge_31 == self%id) then
-      edge_dir = 'edge_31'
-      edge = other%vertex(1) - other%vertex(3)
-   else
-      ! self is not connected to other along any edge — caller invariant broken
-      error stop 'fossil_facet_object%edge_connection_in_other_ref: facets are not connected'
-   endif
+   do e=1, 3
+      if (other%fcon_edge(e) == self%id) then
+         edge = e
+         edge_vector = other%vertex(mod(e, 3) + 1) - other%vertex(e)
+         return
+      endif
+   enddo
+   ! self is not connected to other along any edge — caller invariant broken
+   error stop 'fossil_facet_object%edge_connection_in_other_ref: facets are not connected'
    endsubroutine edge_connection_in_other_ref
 
    pure subroutine facet_assign_facet(lhs, rhs)
@@ -905,15 +888,11 @@ contains
    lhs%det = rhs%det
    lhs%bb = rhs%bb
    lhs%id = rhs%id
-   lhs%fcon_edge_12 = rhs%fcon_edge_12
-   lhs%fcon_edge_23 = rhs%fcon_edge_23
-   lhs%fcon_edge_31 = rhs%fcon_edge_31
+   lhs%fcon_edge        = rhs%fcon_edge
    lhs%vertex_occurrence = rhs%vertex_occurrence
-   lhs%vertex_nearby = rhs%vertex_nearby
-   lhs%edge_12_pnormal = rhs%edge_12_pnormal
-   lhs%edge_23_pnormal = rhs%edge_23_pnormal
-   lhs%edge_31_pnormal = rhs%edge_31_pnormal
-   lhs%vertex_pnormal = rhs%vertex_pnormal
+   lhs%vertex_nearby    = rhs%vertex_nearby
+   lhs%edge_pnormal     = rhs%edge_pnormal
+   lhs%vertex_pnormal   = rhs%vertex_pnormal
    endsubroutine facet_assign_facet
 
    ! non TBP

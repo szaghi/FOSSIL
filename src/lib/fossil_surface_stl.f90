@@ -638,7 +638,7 @@ contains
    !< @note Facets connectivity and normals must be already computed.
    class(surface_stl_object), intent(inout) :: self             !< File STL.
    logical, allocatable                     :: facet_checked(:) !< List of facets checked.
-   integer(I4P)                             :: f, ff            !< Counter.
+   integer(I4P)                             :: f, ff, e, neighbour !< Counters.
 
    if (self%facets_number>0) then
       allocate(facet_checked(1:self%facets_number))
@@ -647,27 +647,14 @@ contains
       facet_checked(f) = .true.
       do
          ff = 0
-         if (self%facet(f)%fcon_edge_12>0) then
-            if (.not.facet_checked(self%facet(f)%fcon_edge_12)) then
-               call self%facet(f)%make_normal_consistent(edge_dir='edge_12', other=self%facet(self%facet(f)%fcon_edge_12))
-               facet_checked(self%facet(f)%fcon_edge_12) = .true.
-               ff = self%facet(f)%fcon_edge_12
-            endif
-         endif
-         if (self%facet(f)%fcon_edge_23>0) then
-            if (.not.facet_checked(self%facet(f)%fcon_edge_23)) then
-               call self%facet(f)%make_normal_consistent(edge_dir='edge_23', other=self%facet(self%facet(f)%fcon_edge_23))
-               facet_checked(self%facet(f)%fcon_edge_23) = .true.
-               ff = self%facet(f)%fcon_edge_23
-            endif
-         endif
-         if (self%facet(f)%fcon_edge_31>0) then
-            if (.not.facet_checked(self%facet(f)%fcon_edge_31)) then
-               call self%facet(f)%make_normal_consistent(edge_dir='edge_31', other=self%facet(self%facet(f)%fcon_edge_31))
-               facet_checked(self%facet(f)%fcon_edge_31) = .true.
-               ff = self%facet(f)%fcon_edge_31
-            endif
-         endif
+         do e=1, 3
+            neighbour = self%facet(f)%fcon_edge(e)
+            if (neighbour <= 0) cycle
+            if (facet_checked(neighbour)) cycle
+            call self%facet(f)%make_normal_consistent(edge=e, other=self%facet(neighbour))
+            facet_checked(neighbour) = .true.
+            ff = neighbour
+         enddo
          if (ff==0) then
             exit
          else
@@ -786,10 +773,7 @@ contains
    call self%facet_3_de%destroy
    if (self%facets_number>0) then
       do f=1, self%facets_number
-         de = .false.
-         if (self%facet(f)%fcon_edge_12==0_I4P) de(1) = .true.
-         if (self%facet(f)%fcon_edge_23==0_I4P) de(2) = .true.
-         if (self%facet(f)%fcon_edge_31==0_I4P) de(3) = .true.
+         de = (self%facet(f)%fcon_edge == 0_I4P)
          select case(count(de))
          case(1_I4P)
             call self%facet_1_de%put(id=self%facet(f)%id)
