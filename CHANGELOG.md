@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.4] — 2026-05-12
+### Added
+- **surface**: Add generalized / fast winding number (issue #18 §1.4)
+
+
+### Documentation
+- **guide**: Add API companion guide with CI-verified snippets
+
+
 ## [1.2.3] — 2026-05-12
 ### Added
 - **facet,surface**: Expose facet%area() and surface%get_area() (#7)
