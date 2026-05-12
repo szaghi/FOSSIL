@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.2] — 2026-05-12
+### Added
+- **rotate**: Add optional `center` argument for body-frame rotation (#6)
+
+
 ## [1.2.1] — 2026-05-12
 ### Added
 - **lib**: Implement vertex pool object for fossil surface handling
