@@ -36,3 +36,4 @@ get_automatic_changelog.sh
 docs/node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+docs/api/

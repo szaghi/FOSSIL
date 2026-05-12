@@ -26,7 +26,7 @@ export default withMermaid({
           { text: 'Features',          link: '/guide/features' },
           { text: 'Installation',      link: '/guide/installation' },
           { text: 'Usage',             link: '/guide/usage' },
-          { text: 'API Reference',     link: '/guide/api-reference' },
+          { text: 'API Companion Guide', link: '/guide/api/' },
           { text: 'Contributing',      link: '/guide/contributing' },
           { text: 'Coverage Analysis', link: '/guide/coverage-analysis' },
           { text: 'Changelog',         link: '/guide/changelog' },
@@ -49,7 +49,16 @@ export default withMermaid({
           items: [
             { text: 'Installation',  link: '/guide/installation' },
             { text: 'Usage',         link: '/guide/usage' },
-            { text: 'API Reference', link: '/guide/api-reference' },
+          ],
+        },
+        {
+          text: 'API Companion Guide',
+          items: [
+            { text: 'Overview',             link: '/guide/api/' },
+            { text: 'Constants',            link: '/guide/api/constants' },
+            { text: 'surface_stl_object',   link: '/guide/api/surface-stl-object' },
+            { text: 'facet_object',         link: '/guide/api/facet-object' },
+            { text: 'aabb_tree_object',     link: '/guide/api/aabb-tree-object' },
           ],
         },
         {

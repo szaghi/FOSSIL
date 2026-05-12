@@ -1,0 +1,36 @@
+name: Doc snippets
+
+# Verify that every ```fortran code block in docs/guide/api/*.md compiles
+# against the current FOSSIL public surface. Catches signature drift between
+# the library sources and the hand-written companion guide.
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  snippets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup build environment
+      uses: ./.github/actions/setup-build-env
+
+    - name: Fetch dependencies
+      if: hashFiles('**/.deps_config.ini') != ''
+      run: FoBiS.py fetch
+
+    - name: Build static library (gnu)
+      run: FoBiS.py build -mode static-gnu
+
+    - name: Compile every doc snippet
+      run: ./scripts/check_doc_snippets.sh
