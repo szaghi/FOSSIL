@@ -8,7 +8,7 @@ use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
-use penf, only : I4P, R8P, MaxR8P, str
+use penf, only : I4P, I8P, R8P, MaxR8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, mirror_matrix_R8P, rotation_matrix_R8P, vector_R8P
 
 implicit none
@@ -65,11 +65,12 @@ type :: surface_stl_object
    !<    `load_from_file`.
    !<  - `aabb` is technically public so that callers can invoke its TBPs
    !<    (e.g. `surface%aabb%set_use_index(...)`); its own components are private.
-   integer(I4P),                    private :: facets_number=0 !< Facets number (== size(facet)).
-   type(facet_object), allocatable, private :: facet(:)        !< Facets.
-   type(list_id_object),            private :: facet_1_de      !< Facets with one disconnected edges.
-   type(list_id_object),            private :: facet_2_de      !< Facets with two disconnected edges.
-   type(list_id_object),            private :: facet_3_de      !< Facets with three disconnected edges.
+   integer(I4P),                    private :: facets_number=0           !< Facets number (== size(facet)).
+   type(facet_object), allocatable, private :: facet(:)                  !< Facets.
+   type(list_id_object),            private :: facet_1_de                !< Facets with one disconnected edges.
+   type(list_id_object),            private :: facet_2_de                !< Facets with two disconnected edges.
+   type(list_id_object),            private :: facet_3_de                !< Facets with three disconnected edges.
+   integer(I4P),                    private :: non_manifold_edges_number=0 !< Number of edges with 3+ incident facets.
    type(aabb_tree_object)                   :: aabb            !< AABB tree handle (its own state is private).
    type(vector_R8P),                private :: bmin            !< Bounding-box min.
    type(vector_R8P),                private :: bmax            !< Bounding-box max.
@@ -84,6 +85,7 @@ type :: surface_stl_object
       procedure, pass(self) :: get_volume        !< Return volume.
       procedure, pass(self) :: get_centroid      !< Return centroid.
       procedure, pass(self) :: get_header        !< Return STL header.
+      procedure, pass(self) :: get_non_manifold_edges_number !< Return count of edges with 3+ incident facets.
       ! mutator (the only externally-permitted direct writes; aabb has its own mutators)
       procedure, pass(self) :: set_header        !< Set STL header.
       ! facet access (pointer-returning; treat as read-only views)
@@ -186,6 +188,20 @@ contains
 
    h = self%header
    endfunction get_header
+
+   pure function get_non_manifold_edges_number(self) result(n)
+   !< Return the count of mesh edges with 3 or more incident facets.
+   !<
+   !< A manifold surface has exactly 2 facets per interior edge and 1 facet per
+   !< boundary edge. Edges with 3+ incidences indicate T-junctions, self-
+   !< intersections, or stitch seams. `build_connectivity` populates this count
+   !< and explicitly does NOT link such edges (fcon_edge stays 0 across them),
+   !< following the Open3D/libigl convention.
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   integer(I4P)                          :: n    !< Non-manifold edge count.
+
+   n = self%non_manifold_edges_number
+   endfunction get_non_manifold_edges_number
 
    pure subroutine set_header(self, header)
    !< Set STL header (truncated/padded to FRLEN).
@@ -302,39 +318,209 @@ contains
    endif
    endsubroutine analyze
 
-   ! pure subroutine build_connectivity(self)
    subroutine build_connectivity(self)
-   !< Build facets connectivity.
-   class(surface_stl_object), intent(inout) :: self              !< File STL.
-   real(R8P)                                :: smallest_edge_len !< Smallest edge length.
-   integer(I4P)                             :: f1, f2            !< Counter.
-   type(aabb_tree_object)                   :: aabb              !< Temporary AABB tree.
+   !< Build facets connectivity via the sort-and-pair algorithm used by trimesh,
+   !< Open3D, and libigl.
+   !<
+   !< Outline:
+   !<   1. `compute_vertices_nearby` populates each facet's `vertex_nearby` (loose
+   !<      tolerance, used by `connect_nearby_vertices`) and `vertex_occurrence`
+   !<      (strict EPS tolerance, used by `compute_pseudo_normals`).
+   !<   2. Build canonical integer vertex IDs by union-find: for every facet pair
+   !<      (f1, v1)/(f2, v2) reported as strictly-coincident via vertex_occurrence,
+   !<      union their global vertex IDs (gid = (f-1)*3 + v). The union-find root
+   !<      becomes the canonical vertex id, equal for every coincident occurrence.
+   !<   3. Build a half-edge list `(vmin, vmax, facet, local_edge)` with one entry
+   !<      per (facet, edge); sort by (vmin, vmax) packed into a single I8P key.
+   !<   4. Linear scan: groups of identical (vmin, vmax) classify each edge:
+   !<        k = 1   -> boundary (no link).
+   !<        k = 2   -> interior manifold; cross-link both facets symmetrically.
+   !<        k >= 3  -> non-manifold; mark, do NOT link (follows Open3D / libigl).
+   !<
+   !< Properties guaranteed by this construction:
+   !<   - Symmetry: `f1.fcon_edge(e) = f2` iff some edge of f2 references f1.
+   !<     (Both writes happen in the same step on the same pair.)
+   !<   - Explicit non-manifold detection: `get_non_manifold_edges_number()` reports
+   !<     the count; downstream code can warn or repair without re-deriving it.
+   class(surface_stl_object), intent(inout) :: self                       !< Surface STL.
+   real(R8P)                                :: smallest_edge_len          !< Smallest edge length.
+   type(aabb_tree_object)                   :: aabb                       !< Temporary AABB tree.
+   integer(I4P), allocatable                :: parent(:), rank_(:)        !< Union-find arrays over global vertex IDs.
+   integer(I4P), allocatable                :: canon(:)                   !< Canonical vertex ID per (facet, local_v).
+   integer(I8P), allocatable                :: edge_key(:)                !< Packed (vmin, vmax) sort key per half-edge.
+   integer(I4P), allocatable                :: edge_facet(:), edge_local(:) !< Half-edge owners.
+   integer(I4P), allocatable                :: edge_order(:)              !< Sort permutation.
+   integer(I4P)                             :: nv_total                   !< Global vertex count = 3 * facets_number.
+   integer(I4P)                             :: ne_total                   !< Half-edge count = 3 * facets_number.
+   integer(I4P)                             :: f1, f2                     !< Facet counters.
+   integer(I4P)                             :: v1, v2                     !< Local vertex indices.
+   integer(I4P)                             :: gid                        !< Global vertex id.
+   integer(I4P)                             :: e, k, j, run_start, run_end !< Counters.
+   integer(I4P)                             :: f_a, e_a, f_b, e_b         !< Pair facet/edge endpoints.
+   integer(I4P)                             :: o                          !< Occurrence index in vertex_occurrence list.
 
-   if (self%facets_number>0) then
-      call self%facet%destroy_connectivity
-      smallest_edge_len = self%smallest_edge_len() * 0.9_R8P
-      if (self%aabb%get_is_initialized()) then
-         ! exploit AABB structure
-         call aabb%initialize(facet=self%facet, refinement_levels=self%aabb%get_refinement_levels(), do_facets_distribute=.false.)
-         call aabb%distribute_facets(facet=self%facet, is_exclusive=.false., do_update_extents=.false.)
-         call aabb%compute_vertices_nearby(facet=self%facet,              &
-                                           tolerance_to_be_identical=EPS, &
-                                           tolerance_to_be_nearby=smallest_edge_len)
-      else
-         ! brute-force search over all facets
-         do f1=1, self%facets_number - 1
-            do f2=f1 + 1, self%facets_number
-               call self%facet(f1)%compute_vertices_nearby(other=self%facet(f2),          &
-                                                           tolerance_to_be_identical=EPS, &
-                                                           tolerance_to_be_nearby=smallest_edge_len)
-            enddo
+   self%non_manifold_edges_number = 0
+   if (self%facets_number <= 0) return
+
+   call self%facet%destroy_connectivity
+   smallest_edge_len = self%smallest_edge_len() * 0.9_R8P
+
+   ! Step 1: populate vertex_nearby / vertex_occurrence. Same machinery as before.
+   if (self%aabb%get_is_initialized()) then
+      call aabb%initialize(facet=self%facet, refinement_levels=self%aabb%get_refinement_levels(), do_facets_distribute=.false.)
+      call aabb%distribute_facets(facet=self%facet, is_exclusive=.false., do_update_extents=.false.)
+      call aabb%compute_vertices_nearby(facet=self%facet,              &
+                                        tolerance_to_be_identical=EPS, &
+                                        tolerance_to_be_nearby=smallest_edge_len)
+   else
+      do f1 = 1, self%facets_number - 1
+         do f2 = f1 + 1, self%facets_number
+            call self%facet(f1)%compute_vertices_nearby(other=self%facet(f2),          &
+                                                        tolerance_to_be_identical=EPS, &
+                                                        tolerance_to_be_nearby=smallest_edge_len)
          enddo
-      endif
-      do f1=1, self%facets_number
-         call self%facet(f1)%update_connectivity
       enddo
    endif
+
+   ! Step 2: canonical vertex IDs via union-find.
+   nv_total = 3 * self%facets_number
+   allocate(parent(nv_total), rank_(nv_total), canon(nv_total))
+   do gid = 1, nv_total
+      parent(gid) = gid
+      rank_(gid)  = 0
+   enddo
+   ! For each (f1, v1), its vertex_occurrence holds facet IDs of strictly-coincident
+   ! occurrences. Find the matching local vertex on each by EPS comparison, then union.
+   do f1 = 1, self%facets_number
+      do v1 = 1, 3
+         do o = 1, self%facet(f1)%vertex_occurrence(v1)%ids_number
+            f2 = self%facet(f1)%vertex_occurrence(v1)%id(o)
+            if (f2 <= 0 .or. f2 > self%facets_number) cycle
+            do v2 = 1, 3
+               if (vertices_match(self%facet(f1)%vertex(v1), self%facet(f2)%vertex(v2), EPS)) then
+                  call uf_union((f1 - 1) * 3 + v1, (f2 - 1) * 3 + v2, parent, rank_)
+                  exit  ! one matching local vertex per (f2)
+               endif
+            enddo
+         enddo
+      enddo
+   enddo
+   ! Collapse each (facet, local_v) to its component root — the canonical vertex id.
+   do gid = 1, nv_total
+      canon(gid) = uf_find(gid, parent)
+   enddo
+
+   ! Step 3: build the half-edge list. Edge e of facet f connects local vertices
+   ! e and mod(e,3)+1: (1,2), (2,3), (3,1). Pack canonical (vmin, vmax) into an I8P
+   ! key so the sort can be a single radix/quicksort on integers.
+   ne_total = 3 * self%facets_number
+   allocate(edge_key(ne_total), edge_facet(ne_total), edge_local(ne_total), edge_order(ne_total))
+   k = 0
+   do f1 = 1, self%facets_number
+      do e = 1, 3
+         k = k + 1
+         edge_facet(k) = f1
+         edge_local(k) = e
+         edge_key(k)   = pack_edge_key(canon((f1 - 1) * 3 + e),                 &
+                                       canon((f1 - 1) * 3 + mod(e, 3) + 1),     &
+                                       nv_total)
+         edge_order(k) = k
+      enddo
+   enddo
+   call sort_edges_by_key(edge_key, edge_order)
+
+   ! Step 4: linear scan over runs of identical keys.
+   j = 1
+   do while (j <= ne_total)
+      run_start = j
+      do while (j <= ne_total)
+         if (edge_key(edge_order(j)) /= edge_key(edge_order(run_start))) exit
+         j = j + 1
+      enddo
+      run_end = j - 1
+      k = run_end - run_start + 1     ! multiplicity
+      select case (k)
+      case (1)
+         ! boundary edge — leave fcon_edge = 0 (destroy_connectivity already set it)
+      case (2)
+         f_a = edge_facet(edge_order(run_start))
+         e_a = edge_local(edge_order(run_start))
+         f_b = edge_facet(edge_order(run_start + 1))
+         e_b = edge_local(edge_order(run_start + 1))
+         self%facet(f_a)%fcon_edge(e_a) = f_b
+         self%facet(f_b)%fcon_edge(e_b) = f_a
+      case default
+         ! non-manifold edge (k >= 3) — count, do not link any of the incidences
+         self%non_manifold_edges_number = self%non_manifold_edges_number + 1
+      end select
+   enddo
+
+   deallocate(parent, rank_, canon, edge_key, edge_facet, edge_local, edge_order)
+   contains
+
+      pure function vertices_match(a, b, tol) result(yes)
+      !< EPS-coincidence test on two vertex coordinates (replicates the strict-equality
+      !< condition used by compute_vertices_nearby when populating vertex_occurrence).
+      type(vector_R8P), intent(in) :: a, b
+      real(R8P),        intent(in) :: tol
+      logical                      :: yes
+      yes = (abs(a%x - b%x) <= tol) .and. (abs(a%y - b%y) <= tol) .and. (abs(a%z - b%z) <= tol)
+      endfunction vertices_match
+
+      pure function pack_edge_key(va, vb, n) result(key)
+      !< Pack (min, max) of two canonical vertex IDs into a single 64-bit key so the
+      !< sort below is a stable integer sort on a single column.
+      integer(I4P), intent(in) :: va, vb
+      integer(I4P), intent(in) :: n
+      integer(I8P)             :: key
+      integer(I4P)             :: lo, hi
+      lo = min(va, vb)
+      hi = max(va, vb)
+      key = int(lo, I8P) * int(n + 1, I8P) + int(hi, I8P)
+      endfunction pack_edge_key
+
    endsubroutine build_connectivity
+
+   pure subroutine heap_sift_down(keys, order, start, end_)
+   !< Standard max-heap sift-down on `order(:)` keyed by `keys(order(:))`.
+   integer(I8P), intent(in)    :: keys(:)
+   integer(I4P), intent(inout) :: order(:)
+   integer(I4P), intent(in)    :: start, end_
+   integer(I4P)                :: r, c, t
+
+   r = start
+   do
+      c = 2 * r
+      if (c > end_) exit
+      if (c + 1 <= end_) then
+         if (keys(order(c + 1)) > keys(order(c))) c = c + 1
+      endif
+      if (keys(order(r)) >= keys(order(c))) exit
+      t        = order(r)
+      order(r) = order(c)
+      order(c) = t
+      r = c
+   enddo
+   endsubroutine heap_sift_down
+
+   pure subroutine sort_edges_by_key(keys, order)
+   !< In-place heapsort of `order` so that `keys(order(:))` is non-decreasing.
+   !< O(N log N), in-place, non-recursive.
+   integer(I8P), intent(in)    :: keys(:)
+   integer(I4P), intent(inout) :: order(:)
+   integer(I4P)                :: n, i, tmp
+
+   n = size(order)
+   do i = n / 2, 1, -1
+      call heap_sift_down(keys, order, i, n)
+   enddo
+   do i = n, 2, -1
+      tmp      = order(1)
+      order(1) = order(i)
+      order(i) = tmp
+      call heap_sift_down(keys, order, 1, i - 1)
+   enddo
+   endsubroutine sort_edges_by_key
 
    subroutine clip(self, bmin, bmax, remainder, status)
    !< Clip triangulated surface given an AABB.
@@ -672,36 +858,39 @@ contains
    enddo
 
    deallocate(parent, rank_, centroid, count_)
-   contains
-      pure function uf_find(x, parent) result(root)
-      !< Iterative find without path compression (safe in pure context).
-      integer(I4P), intent(in) :: x
-      integer(I4P), intent(in) :: parent(:)
-      integer(I4P)             :: root
-      root = x
-      do while (parent(root) /= root)
-         root = parent(root)
-      enddo
-      endfunction uf_find
-
-      pure subroutine uf_union(a, b, parent, rank_)
-      !< Union-by-rank.
-      integer(I4P), intent(in)    :: a, b
-      integer(I4P), intent(inout) :: parent(:), rank_(:)
-      integer(I4P)                :: ra, rb
-      ra = uf_find(a, parent)
-      rb = uf_find(b, parent)
-      if (ra == rb) return
-      if (rank_(ra) < rank_(rb)) then
-         parent(ra) = rb
-      elseif (rank_(ra) > rank_(rb)) then
-         parent(rb) = ra
-      else
-         parent(rb) = ra
-         rank_(ra)  = rank_(ra) + 1
-      endif
-      endsubroutine uf_union
    endsubroutine connect_nearby_vertices
+
+   pure function uf_find(x, parent) result(root)
+   !< Iterative union-find root lookup without path compression (safe in pure context).
+   !< Module-private helper shared by `connect_nearby_vertices` and `build_connectivity`.
+   integer(I4P), intent(in) :: x
+   integer(I4P), intent(in) :: parent(:)
+   integer(I4P)             :: root
+
+   root = x
+   do while (parent(root) /= root)
+      root = parent(root)
+   enddo
+   endfunction uf_find
+
+   pure subroutine uf_union(a, b, parent, rank_)
+   !< Union-by-rank merge of the components containing `a` and `b`.
+   integer(I4P), intent(in)    :: a, b
+   integer(I4P), intent(inout) :: parent(:), rank_(:)
+   integer(I4P)                :: ra, rb
+
+   ra = uf_find(a, parent)
+   rb = uf_find(b, parent)
+   if (ra == rb) return
+   if (rank_(ra) < rank_(rb)) then
+      parent(ra) = rb
+   elseif (rank_(ra) > rank_(rb)) then
+      parent(rb) = ra
+   else
+      parent(rb) = ra
+      rank_(ra)  = rank_(ra) + 1
+   endif
+   endsubroutine uf_union
 
    elemental subroutine destroy(self)
    !< Destroy file.
@@ -709,6 +898,7 @@ contains
 
    if (allocated(self%facet)) deallocate(self%facet)
    self%facets_number = 0
+   self%non_manifold_edges_number = 0
    call self%facet_1_de%destroy
    call self%facet_2_de%destroy
    call self%facet_3_de%destroy
@@ -978,6 +1168,9 @@ contains
          write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%facet_2_de%ids_number,' facet(s) with 2 disconnected edges remain'
       if (self%facet_3_de%ids_number>0) &
          write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%facet_3_de%ids_number,' facet(s) with 3 disconnected edges remain'
+      if (self%non_manifold_edges_number > 0) &
+         write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%non_manifold_edges_number, &
+                                  ' non-manifold edge(s) (3+ incident facets) detected'
    endif
    endsubroutine sanitize
 
@@ -1031,12 +1224,6 @@ contains
                neighbour = self%facet(f)%fcon_edge(e)
                if (neighbour <= 0) cycle
                if (facet_checked(neighbour)) cycle
-               ! Skip asymmetric connections: connect_nearby_vertices can produce
-               ! cases where facet A's fcon_edge(e) points to B but no edge of B
-               ! points back to A. make_normal_consistent requires symmetry; without
-               ! this guard it would error_stop on real-world (slightly non-manifold)
-               ! meshes such as dragon.stl.
-               if (.not. back_link_exists(self%facet(neighbour), self%facet(f)%id)) cycle
                call self%facet(f)%make_normal_consistent(edge=e, other=self%facet(neighbour))
                facet_checked(neighbour) = .true.
                tail = tail + 1
@@ -1088,6 +1275,8 @@ contains
       stats=stats//prefix_//'number of facets with 1 edges disconnected: '//trim(str(self%facet_1_de%ids_number))//NL
       stats=stats//prefix_//'number of facets with 2 edges disconnected: '//trim(str(self%facet_2_de%ids_number))//NL
       stats=stats//prefix_//'number of facets with 3 edges disconnected: '//trim(str(self%facet_3_de%ids_number))//NL
+      stats=stats//prefix_//'number of non-manifold edges (3+ incident facets): '// &
+                              trim(str(self%non_manifold_edges_number))//NL
       stats=stats//prefix_//'number of AABB refinement levels: '//trim(str(self%aabb%get_refinement_levels()))!//NL
    endif
    endfunction statistics
@@ -1527,20 +1716,4 @@ contains
    endif
    endsubroutine stl_save_header
 
-   pure function back_link_exists(other, id) result(yes)
-   !< Test whether `other%fcon_edge(:)` contains `id` (symmetric-connectivity check
-   !< used by sanitize_normals to skip asymmetric edges on non-manifold meshes).
-   type(facet_object), intent(in) :: other  !< Candidate neighbour facet.
-   integer(I4P),       intent(in) :: id     !< Facet id whose back-link we look for.
-   logical                        :: yes    !< True iff some edge of `other` references `id`.
-   integer(I4P)                   :: k
-
-   yes = .false.
-   do k = 1, 3
-      if (other%fcon_edge(k) == id) then
-         yes = .true.
-         return
-      endif
-   enddo
-   endfunction back_link_exists
 endmodule fossil_surface_stl_object
