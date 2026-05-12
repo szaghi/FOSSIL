@@ -33,6 +33,7 @@ type :: aabb_node_object
       procedure, pass(self) :: get_left_child              !< Return left_child (BVH); 0 if leaf or octree.
       procedure, pass(self) :: get_right_child             !< Return right_child (BVH); 0 if leaf or octree.
       procedure, pass(self) :: set_children                !< Set (left_child, right_child) — BVH builder.
+      procedure, pass(self) :: set_facet_ids               !< Bulk-load the leaf's facet_id list (BVH builder).
       procedure, pass(self) :: bmin                        !< Return AABB bmin.
       procedure, pass(self) :: bmax                        !< Return AABB bmax.
       procedure, pass(self) :: closest_point               !< Return closest point on AABB from point reference.
@@ -108,6 +109,18 @@ contains
    self%left_child  = left_child
    self%right_child = right_child
    endsubroutine set_children
+
+   pure subroutine set_facet_ids(self, ids)
+   !< Bulk-load this node's facet_id list with the given ids array, replacing any
+   !< previous contents. Used by the BVH builder to populate a leaf without going
+   !< through `add_facets`'s centroid-inside-bbox filter (the partition step in the
+   !< builder has already done that work). No-op if the underlying aabb has not
+   !< been initialized (e.g. an empty node).
+   class(aabb_node_object), intent(inout) :: self   !< AABB node.
+   integer(I4P),            intent(in)    :: ids(:) !< Facet ids to store.
+
+   if (allocated(self%aabb)) call self%aabb%facet_id%initialize(id=ids)
+   endsubroutine set_facet_ids
 
    pure function bmax(self)
    !< Return AABB bmax.

@@ -107,6 +107,7 @@ type :: aabb_tree_object
       procedure, pass(self) :: get_refinement_levels !< Return refinement_levels.
       procedure, pass(self) :: get_tree_kind         !< Return tree_kind (octree vs SAH BVH).
       procedure, pass(self) :: get_nodes_number      !< Return nodes_number.
+      procedure, pass(self) :: node_at               !< Return pointer to node(i); null() if out of range.
       procedure, pass(self) :: get_is_initialized    !< Return is_initialized.
       procedure, pass(self) :: get_use_index         !< Return use_index dispatch knob.
       ! mutators
@@ -133,6 +134,7 @@ type :: aabb_tree_object
       ! finaliser (releases node array even when wrapped in arrays-of-trees)
       final :: aabb_tree_finalize
       ! private methods
+      procedure, pass(self), private :: build_bvh_sah                 !< Build a SAH BVH over the given facet list.
       procedure, pass(self), private :: distance_node                 !< Update best squared distance by recursing into a node.
       procedure, pass(self), private :: distance_node_with_region     !< Update (best d^2, best facet id, best region) by recursing into a node.
       procedure, pass(self), private :: ray_intersections_number_node !< Return ray intersections number into a node of AABB tree.
@@ -192,6 +194,20 @@ contains
 
    n = self%nodes_number
    endfunction get_nodes_number
+
+   function node_at(self, i) result(p)
+   !< Return a pointer to `node(i)` (range `[0, nodes_number-1]`), or `null()` if `i`
+   !< is out of range. Intended as a read-only view: external code should treat the
+   !< pointer as const. Used by tests and diagnostic code that walks the tree.
+   class(aabb_tree_object), target, intent(in) :: self !< AABB tree.
+   integer(I4P),                    intent(in) :: i    !< Node index.
+   type(aabb_node_object), pointer             :: p    !< Pointer to node(i), or null().
+
+   p => null()
+   if (.not. allocated(self%node)) return
+   if (i < 0 .or. i > self%nodes_number - 1) return
+   p => self%node(i)
+   endfunction node_at
 
    pure function get_is_initialized(self) result(yes)
    !< Return is_initialized.
@@ -526,35 +542,385 @@ contains
       endif
    endif
 
-   if (self%refinement_levels >= 0) then
-      self%nodes_number = nodes_number(refinement_levels=self%refinement_levels)
-      allocate(self%node(0:self%nodes_number-1))
-      call self%node(0)%initialize(facet=facet, bmin=bmin, bmax=bmax)
-      levels_loop: do level=1, self%refinement_levels                             ! loop over refinement levels
-         b = first_node(level=level)                                              ! first node at level
-         do bb=1, nodes_number_at_level(level=level), TREE_RATIO                  ! loop over nodes at level
-            bbb = b + bb - 1                                                      ! node numeration in tree
-            parent = parent_node(node=bbb)                                        ! parent of the current node
-            if (self%node(parent)%is_allocated()) then                            ! create children nodes
-               call self%node(parent)%compute_octants(octant=octant)              ! compute parent AABB octants
-               if (present(largest_edge_len)) then
-                  if (largest_edge_len > octant(1)%median()) then                 ! check if refinement has sense
-                     ! a further refinement does not have sense
-                     self%refinement_levels = level - 1                           ! set rifinement to the previous one
-                     exit levels_loop                                             ! exi loop
+   select case (self%tree_kind)
+   case (AABB_TREE_SAH_BVH)
+      ! Binary BVH with bucketed surface-area heuristic. Self-tunes its depth;
+      ! `refinement_levels` is ignored. Requires `facet` to be present (no
+      ! triangles -> nothing to partition); `bmin`/`bmax` and `largest_edge_len`
+      ! are not used.
+      if (present(facet)) then
+         call self%build_bvh_sah(facet=facet)
+      else
+         self%is_initialized = .true.   ! degenerate: empty tree
+      endif
+
+   case default  ! AABB_TREE_OCTREE — the original 8-way space-partitioning path.
+      if (self%refinement_levels >= 0) then
+         self%nodes_number = nodes_number(refinement_levels=self%refinement_levels)
+         allocate(self%node(0:self%nodes_number-1))
+         call self%node(0)%initialize(facet=facet, bmin=bmin, bmax=bmax)
+         levels_loop: do level=1, self%refinement_levels                             ! loop over refinement levels
+            b = first_node(level=level)                                              ! first node at level
+            do bb=1, nodes_number_at_level(level=level), TREE_RATIO                  ! loop over nodes at level
+               bbb = b + bb - 1                                                      ! node numeration in tree
+               parent = parent_node(node=bbb)                                        ! parent of the current node
+               if (self%node(parent)%is_allocated()) then                            ! create children nodes
+                  call self%node(parent)%compute_octants(octant=octant)              ! compute parent AABB octants
+                  if (present(largest_edge_len)) then
+                     if (largest_edge_len > octant(1)%median()) then                 ! check if refinement has sense
+                        ! a further refinement does not have sense
+                        self%refinement_levels = level - 1                           ! set rifinement to the previous one
+                        exit levels_loop                                             ! exi loop
+                     endif
                   endif
+                  do bbbb=0, TREE_RATIO-1                                            ! loop over children
+                     call self%node(bbb+bbbb)%initialize(bmin=octant(bbbb+1)%bmin, &
+                                                         bmax=octant(bbbb+1)%bmax)   ! initialize node
+                  enddo
                endif
-               do bbbb=0, TREE_RATIO-1                                            ! loop over children
-                  call self%node(bbb+bbbb)%initialize(bmin=octant(bbbb+1)%bmin, &
-                                                      bmax=octant(bbbb+1)%bmax)   ! initialize node
-               enddo
-            endif
-         enddo
-      enddo levels_loop
-      if (present(facet).and.(do_facets_distribute_)) call self%distribute_facets_tree(facet=facet)
-      self%is_initialized = .true.
-   endif
+            enddo
+         enddo levels_loop
+         if (present(facet).and.(do_facets_distribute_)) call self%distribute_facets_tree(facet=facet)
+         self%is_initialized = .true.
+      endif
+   end select
    endsubroutine initialize
+
+   pure subroutine build_bvh_sah(self, facet)
+   !< Build a binary BVH over the given facet list using bucketed surface-area heuristic.
+   !<
+   !< Algorithm — top-down, recursive:
+   !<   1. Compute the union of triangle bboxes (the "node bbox") and the bbox of
+   !<      triangle centroids (the "centroid bbox", which guides binning).
+   !<   2. If N <= LEAF_TARGET, write a leaf: store all facet ids in the node's
+   !<      facet_id list, mark left_child = right_child = 0, return.
+   !<   3. Else, on the longest axis of the centroid bbox, bin centroids into
+   !<      `BVH_BUCKETS` buckets. For each of `BVH_BUCKETS - 1` candidate splits,
+   !<      compute SAH cost:
+   !<          cost(split) = T_TRAV
+   !<                      + (SA_L / SA_parent) * N_L
+   !<                      + (SA_R / SA_parent) * N_R
+   !<      Pick the minimum. If best split cost > N (the leaf cost with T_INT=1),
+   !<      write a leaf anyway — recursing would not help.
+   !<   4. Partition indices by which side of the split each centroid falls on
+   !<      (two-pass: count, then fill).
+   !<   5. Allocate two child nodes by incrementing `next_idx` (a shared counter
+   !<      threaded through the recursion via a module-private state object), and
+   !<      recurse into each.
+   !<
+   !< Storage: builds into a temporary `nodes_tmp` array sized for the worst case
+   !< (4 nodes per leaf-target's worth of facets, well above the 2N/T-1 maximum for
+   !< a balanced tree). After the build, `move_alloc`s into `self%node(:)` with the
+   !< exact final size.
+   class(aabb_tree_object), intent(inout) :: self                 !< AABB tree.
+   type(facet_object),      intent(in)    :: facet(:)             !< Facets list.
+   type(aabb_node_object), allocatable    :: nodes_tmp(:)         !< Working buffer for the build.
+   integer(I4P),           allocatable    :: indices(:)           !< Facet indices owned by each pending build call.
+   integer(I4P)                           :: n_facets, n_max, n_used, f
+
+   call self%destroy
+   self%tree_kind = AABB_TREE_SAH_BVH
+
+   n_facets = size(facet)
+   if (n_facets <= 0) then
+      self%is_initialized = .true.
+      return
+   endif
+
+   ! Worst-case node count: a perfectly-unbalanced tree splitting one triangle at
+   ! a time would need 2*N - 1 nodes. SAH never produces that, but pick a safe
+   ! upper bound and shrink after the build via move_alloc.
+   n_max = max(2 * n_facets, 8_I4P)
+   allocate(nodes_tmp(0:n_max - 1))
+
+   ! Seed the recursion with all facet indices [1..n_facets].
+   allocate(indices(n_facets))
+   do f = 1, n_facets
+      indices(f) = f
+   enddo
+
+   n_used = 1   ! node 0 is the root, already accounted for
+   call build_node(nodes=nodes_tmp, idx=indices, lo=1_I4P, hi=n_facets,                                 &
+                   facet=facet, this_node=0_I4P, next_idx=n_used, n_max=n_max)
+
+   ! Compact to exact size and hand off to self.
+   allocate(self%node(0:n_used - 1))
+   do f = 0, n_used - 1
+      self%node(f) = nodes_tmp(f)
+   enddo
+   self%nodes_number   = n_used
+   self%is_initialized = .true.
+   deallocate(nodes_tmp, indices)
+   endsubroutine build_bvh_sah
+
+   pure recursive subroutine build_node(nodes, idx, lo, hi, facet, this_node, next_idx, n_max)
+   !< One recursive build step. Operates on the slice `idx(lo:hi)` of facet ids:
+   !< chooses to write `this_node` as a leaf or to split and recurse.
+   !<
+   !< `idx` is permuted in place during partitioning — on entry `idx(lo:hi)` lists
+   !< the facets to be handled, on exit those slots have been rearranged so that
+   !< the left subtree owns `idx(lo:mid)` and the right owns `idx(mid+1:hi)`.
+   type(aabb_node_object), intent(inout) :: nodes(0:)        !< Working node buffer.
+   integer(I4P),           intent(inout) :: idx(:)           !< Facet-id permutation.
+   integer(I4P),           intent(in)    :: lo, hi           !< Inclusive range of `idx` owned by this call.
+   type(facet_object),     intent(in)    :: facet(:)         !< Facets list (read-only).
+   integer(I4P),           intent(in)    :: this_node        !< Index of the node we are writing into `nodes(:)`.
+   integer(I4P),           intent(inout) :: next_idx         !< Next free slot in `nodes(:)` (incremented as children are allocated).
+   integer(I4P),           intent(in)    :: n_max            !< Upper bound on nodes_tmp size; safety guard.
+   integer(I4P), parameter :: BVH_LEAF_TARGET = 64_I4P       !< Below this, write a leaf without trying to split.
+   integer(I4P), parameter :: BVH_BUCKETS     = 16_I4P       !< SAH bucket count per axis.
+   real(R8P),    parameter :: BVH_T_TRAV      = 0.125_R8P    !< Traversal cost relative to one triangle test (PBRT-typical).
+   type(vector_R8P)   :: node_bmin, node_bmax       !< Union of triangle bboxes for this node.
+   type(vector_R8P)   :: centroid_bmin, centroid_bmax !< Bbox of triangle centroids (used for binning).
+   real(R8P)          :: extent(3), axis_max, sa_parent, best_cost, leaf_cost, c, split_pos
+   real(R8P)          :: bucket_bmin(3, BVH_BUCKETS), bucket_bmax(3, BVH_BUCKETS)
+   integer(I4P)       :: bucket_count(BVH_BUCKETS)
+   real(R8P)          :: left_bmin(3), left_bmax(3), right_bmin(3), right_bmax(3)
+   real(R8P)          :: pre_bmin(3, BVH_BUCKETS), pre_bmax(3, BVH_BUCKETS)
+   integer(I4P)       :: pre_count(BVH_BUCKETS)
+   integer(I4P)       :: n, b, split_axis, best_axis, best_split, k, left_count
+   integer(I4P)       :: i, j, tmp, mid
+   real(R8P)          :: bucket_size, axis_bmin, axis_bmax
+   integer(I4P), allocatable :: leaf_ids(:)
+
+   n = hi - lo + 1
+
+   ! Step 1: compute node bbox and centroid bbox.
+   call compute_node_bboxes(facet, idx, lo, hi, node_bmin, node_bmax, centroid_bmin, centroid_bmax)
+   call write_node_bbox(nodes(this_node), node_bmin, node_bmax)
+
+   ! Step 2: small enough -> leaf.
+   if (n <= BVH_LEAF_TARGET) then
+      call write_leaf(nodes(this_node), idx(lo:hi), n)
+      return
+   endif
+
+   ! If the centroid bbox is degenerate (all centroids coincide), no split can
+   ! improve the cost. Write a leaf even if N is large.
+   extent(1) = centroid_bmax%x - centroid_bmin%x
+   extent(2) = centroid_bmax%y - centroid_bmin%y
+   extent(3) = centroid_bmax%z - centroid_bmin%z
+   axis_max = max(extent(1), extent(2), extent(3))
+   if (axis_max <= 0._R8P) then
+      call write_leaf(nodes(this_node), idx(lo:hi), n)
+      return
+   endif
+
+   ! Step 3: bucketed SAH. Try each of the three axes; pick the best split overall.
+   best_cost  = real(n, R8P) ! leaf cost = N * T_INT (T_INT = 1)
+   leaf_cost  = best_cost
+   best_axis  = 0
+   best_split = 0
+   sa_parent  = surface_area(node_bmin, node_bmax)
+   if (sa_parent <= 0._R8P) sa_parent = 1._R8P   ! degenerate; avoid division by zero
+
+   do split_axis = 1, 3
+      if (extent(split_axis) <= 0._R8P) cycle    ! skip flat axes (binning is undefined)
+
+      axis_bmin = component(centroid_bmin, split_axis)
+      axis_bmax = component(centroid_bmax, split_axis)
+      bucket_size = (axis_bmax - axis_bmin) / real(BVH_BUCKETS, R8P)
+
+      ! Bin centroids into BVH_BUCKETS buckets.
+      bucket_count = 0
+      do b = 1, BVH_BUCKETS
+         bucket_bmin(:, b) =  huge(0._R8P)
+         bucket_bmax(:, b) = -huge(0._R8P)
+      enddo
+      do k = lo, hi
+         c = component(facet(idx(k))%centroid, split_axis) - axis_bmin
+         b = min(BVH_BUCKETS, max(1_I4P, int(c / bucket_size, I4P) + 1_I4P))
+         bucket_count(b) = bucket_count(b) + 1
+         call expand_bbox(bucket_bmin(:, b), bucket_bmax(:, b), facet(idx(k))%bb(1), facet(idx(k))%bb(2))
+      enddo
+
+      ! Sweep left -> right prefix: pre_count(b) = sum of counts in buckets 1..b,
+      ! pre_bmin/bmax(b) = bbox union of buckets 1..b. Used to evaluate left side
+      ! at each of the BVH_BUCKETS - 1 candidate split positions.
+      pre_count(1) = bucket_count(1)
+      pre_bmin(:, 1) = bucket_bmin(:, 1)
+      pre_bmax(:, 1) = bucket_bmax(:, 1)
+      do b = 2, BVH_BUCKETS
+         pre_count(b)   = pre_count(b - 1) + bucket_count(b)
+         pre_bmin(:, b) = min(pre_bmin(:, b - 1), bucket_bmin(:, b))
+         pre_bmax(:, b) = max(pre_bmax(:, b - 1), bucket_bmax(:, b))
+      enddo
+
+      ! Sweep right -> left, evaluating split between bucket b and bucket b+1.
+      right_bmin =  huge(0._R8P)
+      right_bmax = -huge(0._R8P)
+      do b = BVH_BUCKETS, 2, -1
+         right_bmin = min(right_bmin, bucket_bmin(:, b))
+         right_bmax = max(right_bmax, bucket_bmax(:, b))
+         left_count = pre_count(b - 1)
+         left_bmin  = pre_bmin(:, b - 1)
+         left_bmax  = pre_bmax(:, b - 1)
+         if (left_count == 0 .or. left_count == n) cycle  ! degenerate split
+         c = BVH_T_TRAV                                                     &
+           + (surface_area_arr(left_bmin,  left_bmax)  / sa_parent) * real(left_count, R8P) &
+           + (surface_area_arr(right_bmin, right_bmax) / sa_parent) * real(n - left_count, R8P)
+         if (c < best_cost) then
+            best_cost  = c
+            best_axis  = split_axis
+            best_split = b - 1   ! split between bucket (b-1) and bucket b
+         endif
+      enddo
+   enddo
+
+   ! Step 4: if no split beats the leaf cost, give up and write a leaf.
+   if (best_axis == 0 .or. best_cost >= leaf_cost) then
+      call write_leaf(nodes(this_node), idx(lo:hi), n)
+      return
+   endif
+
+   ! Step 4b: partition idx(lo:hi) by which side of the split each centroid falls on.
+   axis_bmin = component(centroid_bmin, best_axis)
+   axis_bmax = component(centroid_bmax, best_axis)
+   bucket_size = (axis_bmax - axis_bmin) / real(BVH_BUCKETS, R8P)
+   split_pos = axis_bmin + bucket_size * real(best_split, R8P)
+   ! Two-pointer Hoare-style partition: move left-belongers below `j`, right-belongers above.
+   i = lo
+   j = hi
+   do
+      do while (i <= j)
+         if (component(facet(idx(i))%centroid, best_axis) >= split_pos) exit
+         i = i + 1
+      enddo
+      do while (i <= j)
+         if (component(facet(idx(j))%centroid, best_axis) <  split_pos) exit
+         j = j - 1
+      enddo
+      if (i >= j) exit
+      tmp    = idx(i)
+      idx(i) = idx(j)
+      idx(j) = tmp
+      i = i + 1
+      j = j - 1
+   enddo
+   mid = i - 1
+   ! Defensive: if the partition came out degenerate (can happen with ties on the
+   ! split plane), fall back to a count-balanced split. Should be vanishingly rare
+   ! because we already rejected `left_count == 0 || == n` above, but the bin->plane
+   ! conversion can re-introduce a tie.
+   if (mid < lo .or. mid >= hi) mid = lo + n / 2 - 1
+
+   ! Step 5: allocate two children and recurse.
+   if (next_idx + 1 >= n_max) error stop 'aabb_tree%build_node: node buffer exhausted (raise n_max)'
+   call nodes(this_node)%set_children(left_child=next_idx, right_child=next_idx + 1_I4P)
+   block
+      integer(I4P) :: left_idx, right_idx
+      left_idx  = next_idx
+      right_idx = next_idx + 1_I4P
+      next_idx  = next_idx + 2_I4P
+      call build_node(nodes=nodes, idx=idx, lo=lo,    hi=mid, facet=facet, &
+                      this_node=left_idx,  next_idx=next_idx, n_max=n_max)
+      call build_node(nodes=nodes, idx=idx, lo=mid+1, hi=hi,  facet=facet, &
+                      this_node=right_idx, next_idx=next_idx, n_max=n_max)
+   end block
+   contains
+      pure function component(v, axis) result(c)
+      !< Return v%x / v%y / v%z by integer axis index (1, 2, 3).
+      type(vector_R8P), intent(in) :: v
+      integer(I4P),     intent(in) :: axis
+      real(R8P)                    :: c
+      select case (axis)
+      case (1) ; c = v%x
+      case (2) ; c = v%y
+      case (3) ; c = v%z
+      end select
+      endfunction component
+   endsubroutine build_node
+
+   pure subroutine compute_node_bboxes(facet, idx, lo, hi, node_bmin, node_bmax, centroid_bmin, centroid_bmax)
+   !< Compute the union of triangle bboxes (for SAH surface areas) and the
+   !< bbox of triangle centroids (for binning) over `idx(lo:hi)`.
+   type(facet_object), intent(in)  :: facet(:)
+   integer(I4P),       intent(in)  :: idx(:)
+   integer(I4P),       intent(in)  :: lo, hi
+   type(vector_R8P),   intent(out) :: node_bmin, node_bmax
+   type(vector_R8P),   intent(out) :: centroid_bmin, centroid_bmax
+   integer(I4P)                    :: k, f
+
+   node_bmin     = vector_R8P( huge(0._R8P),  huge(0._R8P),  huge(0._R8P))
+   node_bmax     = vector_R8P(-huge(0._R8P), -huge(0._R8P), -huge(0._R8P))
+   centroid_bmin = node_bmin
+   centroid_bmax = node_bmax
+   do k = lo, hi
+      f = idx(k)
+      node_bmin%x = min(node_bmin%x, facet(f)%bb(1)%x)
+      node_bmin%y = min(node_bmin%y, facet(f)%bb(1)%y)
+      node_bmin%z = min(node_bmin%z, facet(f)%bb(1)%z)
+      node_bmax%x = max(node_bmax%x, facet(f)%bb(2)%x)
+      node_bmax%y = max(node_bmax%y, facet(f)%bb(2)%y)
+      node_bmax%z = max(node_bmax%z, facet(f)%bb(2)%z)
+      centroid_bmin%x = min(centroid_bmin%x, facet(f)%centroid%x)
+      centroid_bmin%y = min(centroid_bmin%y, facet(f)%centroid%y)
+      centroid_bmin%z = min(centroid_bmin%z, facet(f)%centroid%z)
+      centroid_bmax%x = max(centroid_bmax%x, facet(f)%centroid%x)
+      centroid_bmax%y = max(centroid_bmax%y, facet(f)%centroid%y)
+      centroid_bmax%z = max(centroid_bmax%z, facet(f)%centroid%z)
+   enddo
+   endsubroutine compute_node_bboxes
+
+   pure subroutine write_node_bbox(node, bmin, bmax)
+   !< Initialize this node's underlying aabb_object with the given bbox.
+   !< Reuses aabb_object%initialize so the allocatable component is allocated
+   !< consistently with octree-built nodes.
+   type(aabb_node_object), intent(inout) :: node
+   type(vector_R8P),       intent(in)    :: bmin, bmax
+
+   call node%initialize(bmin=bmin, bmax=bmax)
+   endsubroutine write_node_bbox
+
+   pure subroutine write_leaf(node, ids, n)
+   !< Write a leaf node: bbox already set by `write_node_bbox`; populate facet_id
+   !< list with the given facet ids and zero the child links. Uses the dedicated
+   !< `set_facet_ids` method on aabb_node_object — `add_facets` would re-filter
+   !< by centroid-inside-bbox, which is unnecessary here (the partition already
+   !< did that work) and slow.
+   type(aabb_node_object), intent(inout) :: node
+   integer(I4P),           intent(in)    :: ids(:)
+   integer(I4P),           intent(in)    :: n
+
+   call node%set_facet_ids(ids=ids(1:n))
+   call node%set_children(left_child=0_I4P, right_child=0_I4P)
+   endsubroutine write_leaf
+
+   pure subroutine expand_bbox(bmin, bmax, addmin, addmax)
+   !< Grow [bmin, bmax] (passed as length-3 arrays for tight inlining inside the
+   !< SAH bucket loops) to include the bbox [addmin, addmax].
+   real(R8P),        intent(inout) :: bmin(3), bmax(3)
+   type(vector_R8P), intent(in)    :: addmin, addmax
+
+   bmin(1) = min(bmin(1), addmin%x); bmax(1) = max(bmax(1), addmax%x)
+   bmin(2) = min(bmin(2), addmin%y); bmax(2) = max(bmax(2), addmax%y)
+   bmin(3) = min(bmin(3), addmin%z); bmax(3) = max(bmax(3), addmax%z)
+   endsubroutine expand_bbox
+
+   pure function surface_area(bmin, bmax) result(sa)
+   !< Surface area of an axis-aligned bbox: 2 * (dx*dy + dy*dz + dz*dx).
+   type(vector_R8P), intent(in) :: bmin, bmax
+   real(R8P)                    :: sa
+   real(R8P)                    :: dx, dy, dz
+
+   dx = max(bmax%x - bmin%x, 0._R8P)
+   dy = max(bmax%y - bmin%y, 0._R8P)
+   dz = max(bmax%z - bmin%z, 0._R8P)
+   sa = 2._R8P * (dx * dy + dy * dz + dz * dx)
+   endfunction surface_area
+
+   pure function surface_area_arr(bmin, bmax) result(sa)
+   !< Surface area variant taking length-3 arrays (used inside the SAH bucket loop
+   !< where bboxes are accumulated component-wise).
+   real(R8P), intent(in) :: bmin(3), bmax(3)
+   real(R8P)             :: sa
+   real(R8P)             :: dx, dy, dz
+
+   dx = max(bmax(1) - bmin(1), 0._R8P)
+   dy = max(bmax(2) - bmin(2), 0._R8P)
+   dz = max(bmax(3) - bmin(3), 0._R8P)
+   sa = 2._R8P * (dx * dy + dy * dz + dz * dx)
+   endfunction surface_area_arr
 
    function loop_node(self, facet, aabb_facet, b, l) result(again)
    !< Loop over all nodes.
