@@ -8,6 +8,7 @@ use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
+use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 use penf, only : I4P, I8P, R8P, MaxR8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, mirror_matrix_R8P, rotation_matrix_R8P, vector_R8P
 
@@ -17,6 +18,7 @@ public :: surface_stl_object
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL
 public :: sign_algorithm_from_string
 public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL
+public :: STATUS_INVALID_INPUT
 
 ! Point-in-polyhedron algorithm selector for `is_point_inside`, `compute_distance`,
 ! and `distance` (when `is_signed=.true.`):
@@ -47,6 +49,7 @@ integer(I4P), parameter :: STATUS_ALLOC_FAIL       = 1_I4P !< Allocation failure
 integer(I4P), parameter :: STATUS_AMBIGUOUS_ARGS   = 2_I4P !< Conflicting optional arguments.
 integer(I4P), parameter :: STATUS_FILE_NOT_FOUND   = 3_I4P !< File does not exist.
 integer(I4P), parameter :: STATUS_FILE_OPEN_FAIL   = 4_I4P !< File could not be opened for writing.
+integer(I4P), parameter :: STATUS_INVALID_INPUT    = 5_I4P !< Loaded data contains NaN/Inf vertex coordinates.
 
 type :: surface_stl_object
    !< FOSSIL STL surface class.
@@ -71,6 +74,8 @@ type :: surface_stl_object
    type(list_id_object),            private :: facet_2_de                !< Facets with two disconnected edges.
    type(list_id_object),            private :: facet_3_de                !< Facets with three disconnected edges.
    integer(I4P),                    private :: non_manifold_edges_number=0 !< Number of edges with 3+ incident facets.
+   integer(I4P),                    private :: degenerate_facets_removed=0 !< Number of facets removed by the last degenerate-removal pass.
+   integer(I4P),                    private :: duplicate_facets_removed=0  !< Number of facets removed by the last duplicate-removal pass.
    type(aabb_tree_object)                   :: aabb            !< AABB tree handle (its own state is private).
    type(vector_R8P),                private :: bmin            !< Bounding-box min.
    type(vector_R8P),                private :: bmax            !< Bounding-box max.
@@ -85,7 +90,12 @@ type :: surface_stl_object
       procedure, pass(self) :: get_volume        !< Return volume.
       procedure, pass(self) :: get_centroid      !< Return centroid.
       procedure, pass(self) :: get_header        !< Return STL header.
-      procedure, pass(self) :: get_non_manifold_edges_number !< Return count of edges with 3+ incident facets.
+      procedure, pass(self) :: get_non_manifold_edges_number  !< Return count of edges with 3+ incident facets.
+      procedure, pass(self) :: get_degenerate_facets_removed  !< Return count of facets dropped by the last degenerate-facet pass.
+      procedure, pass(self) :: get_duplicate_facets_removed   !< Return count of facets dropped by the last duplicate-facet pass.
+      procedure, pass(self) :: is_watertight                  !< True if every edge has exactly 2 incident facets.
+      procedure, pass(self) :: is_manifold                    !< True if watertight AND no non-manifold edges.
+      procedure, pass(self) :: is_volume                      !< True if manifold AND positive signed volume AND finite centroid.
       ! mutator (the only externally-permitted direct writes; aabb has its own mutators)
       procedure, pass(self) :: set_header        !< Set STL header.
       ! facet access (pointer-returning; treat as read-only views)
@@ -108,6 +118,8 @@ type :: surface_stl_object
       procedure, pass(self) :: compute_normals                 !< Compute facets normals by means of vertices data.
       procedure, pass(self) :: compute_volume                  !< Compute volume bounded by STL surface.
       procedure, pass(self) :: connect_nearby_vertices         !< Connect nearby vertices of disconnected edges.
+      procedure, pass(self) :: remove_degenerate_facets        !< Drop facets whose area is below tolerance relative to bbox.
+      procedure, pass(self) :: remove_duplicate_facets         !< Drop facets that duplicate another facet (up to vertex permutation).
       procedure, pass(self) :: destroy                         !< Destroy file.
       procedure, pass(self) :: distance                        !< Return the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: initialize                      !< Initialize file.
@@ -202,6 +214,72 @@ contains
 
    n = self%non_manifold_edges_number
    endfunction get_non_manifold_edges_number
+
+   pure function get_degenerate_facets_removed(self) result(n)
+   !< Return the count of facets dropped by the most recent `remove_degenerate_facets` pass.
+   !<
+   !< Zero on a clean mesh; non-zero means the input contained slivers or zero-area
+   !< triangles. Stored as a counter (not a list) because removed facets are no
+   !< longer addressable. Use the sanitize warning to flag this proactively.
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   integer(I4P)                          :: n    !< Number of degenerate facets removed.
+
+   n = self%degenerate_facets_removed
+   endfunction get_degenerate_facets_removed
+
+   pure function get_duplicate_facets_removed(self) result(n)
+   !< Return the count of facets dropped by the most recent `remove_duplicate_facets` pass.
+   !<
+   !< Zero on a clean mesh; non-zero means the input contained literal duplicate
+   !< triangles (same three vertices, any winding). Common artefact of CAD-export
+   !< pipelines that emit overlapping shells.
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   integer(I4P)                          :: n    !< Number of duplicate facets removed.
+
+   n = self%duplicate_facets_removed
+   endfunction get_duplicate_facets_removed
+
+   pure function is_watertight(self) result(yes)
+   !< True iff every edge of the mesh has exactly 2 incident facets — no boundary
+   !< edges (`facet_*_de` counts zero) and no non-manifold edges. Equivalent to
+   !< Open3D's `IsWatertight` and trimesh's `is_watertight`.
+   !<
+   !< Requires `analyze` and `build_connectivity` to have populated the disconnected-
+   !< edge counters and `non_manifold_edges_number`. After a clean `sanitize`, the
+   !< latter is stable; the former may still be non-zero on inputs with genuine holes.
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   logical                               :: yes  !< Watertightness flag.
+
+   yes = (self%facets_number > 0)               .and. &
+         (self%facet_1_de%ids_number == 0)      .and. &
+         (self%facet_2_de%ids_number == 0)      .and. &
+         (self%facet_3_de%ids_number == 0)      .and. &
+         (self%non_manifold_edges_number == 0)
+   endfunction is_watertight
+
+   pure function is_manifold(self) result(yes)
+   !< True iff the mesh is a manifold surface: no non-manifold edges, every edge has
+   !< at most 2 incident facets. Permits boundary edges (open shells can still be
+   !< manifold). Distinct from `is_watertight`, which forbids boundary edges too.
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   logical                               :: yes  !< Manifoldness flag.
+
+   yes = (self%facets_number > 0) .and. (self%non_manifold_edges_number == 0)
+   endfunction is_manifold
+
+   pure function is_volume(self) result(yes)
+   !< True iff the mesh bounds a well-defined volume: watertight AND positive signed
+   !< volume AND finite centroid. Equivalent to trimesh's `is_volume`. Pass this check
+   !< before relying on `get_volume` / `get_centroid` as physically meaningful.
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   logical                               :: yes  !< Volume-validity flag.
+
+   yes = self%is_watertight()                    .and. &
+         (self%volume > 0._R8P)                  .and. &
+         ieee_is_finite(self%centroid%x)         .and. &
+         ieee_is_finite(self%centroid%y)         .and. &
+         ieee_is_finite(self%centroid%z)
+   endfunction is_volume
 
    pure subroutine set_header(self, header)
    !< Set STL header (truncated/padded to FRLEN).
@@ -860,6 +938,204 @@ contains
    deallocate(parent, rank_, centroid, count_)
    endsubroutine connect_nearby_vertices
 
+   subroutine remove_degenerate_facets(self)
+   !< Drop facets whose 2*area = |E12 x E13| is below tolerance relative to the
+   !< mesh bounding-box diagonal.
+   !<
+   !< Why this matters: compute_normal divides by the cross-product magnitude to
+   !< produce a unit normal. For a zero-area or near-zero-area triangle this yields
+   !< NaN/Inf, which then propagates into pseudo-normal sign and silently corrupts
+   !< every signed-distance query touching the affected vertex or edge.
+   !<
+   !< Tolerance: `|E12 x E13|^2 < AREA_TOL_REL * bbox_diag^2`. The squared form
+   !< avoids a sqrt. The default constant catches slivers libigl would also catch
+   !< (its `collapse_small_triangles` uses `area < eps * bbox_diag^2`).
+   !<
+   !< This pass mutates `self%facet` via `move_alloc`. Caller is responsible for
+   !< re-running `analyze` afterwards if connectivity / metrix must be refreshed —
+   !< `sanitize` does this implicitly.
+   class(surface_stl_object), intent(inout) :: self        !< File STL.
+   real(R8P), parameter                     :: AREA_TOL_REL = 1.0e-20_R8P  !< |cross|^2 / bbox_diag^2 cutoff.
+   type(facet_object), allocatable          :: kept(:)     !< Compacted facet array.
+   real(R8P)                                :: bbox_diag_sq, area_tol_sq, cross_sq
+   type(vector_R8P)                         :: e12, e13, cross_
+   integer(I4P)                             :: f, kept_n, removed
+
+   self%degenerate_facets_removed = 0
+   if (self%facets_number <= 0) return
+
+   ! bbox_diag^2 = sum of squared side lengths of the bbox. Use whatever extents
+   ! analyze last computed; if zero (uninitialized surface), fall back to 1 so the
+   ! threshold becomes an absolute tolerance rather than collapsing to zero.
+   bbox_diag_sq = (self%bmax%x - self%bmin%x)**2 + &
+                  (self%bmax%y - self%bmin%y)**2 + &
+                  (self%bmax%z - self%bmin%z)**2
+   if (bbox_diag_sq <= 0._R8P) bbox_diag_sq = 1._R8P
+   area_tol_sq = AREA_TOL_REL * bbox_diag_sq
+
+   ! First pass: count survivors so we can size the new array exactly.
+   kept_n = 0
+   do f = 1, self%facets_number
+      e12 = self%facet(f)%vertex(2) - self%facet(f)%vertex(1)
+      e13 = self%facet(f)%vertex(3) - self%facet(f)%vertex(1)
+      cross_ = e12 .cross. e13
+      cross_sq = cross_%x * cross_%x + cross_%y * cross_%y + cross_%z * cross_%z
+      if (cross_sq > area_tol_sq) kept_n = kept_n + 1
+   enddo
+   removed = self%facets_number - kept_n
+   if (removed == 0) return  ! clean mesh — nothing to do
+
+   ! Second pass: copy survivors into a new array, re-id sequentially.
+   allocate(kept(kept_n))
+   kept_n = 0
+   do f = 1, self%facets_number
+      e12 = self%facet(f)%vertex(2) - self%facet(f)%vertex(1)
+      e13 = self%facet(f)%vertex(3) - self%facet(f)%vertex(1)
+      cross_ = e12 .cross. e13
+      cross_sq = cross_%x * cross_%x + cross_%y * cross_%y + cross_%z * cross_%z
+      if (cross_sq > area_tol_sq) then
+         kept_n = kept_n + 1
+         kept(kept_n) = self%facet(f)
+         kept(kept_n)%id = kept_n
+      endif
+   enddo
+
+   call move_alloc(from=kept, to=self%facet)
+   self%facets_number = kept_n
+   self%degenerate_facets_removed = removed
+
+   ! Stale state on survivors: their vertex_nearby / vertex_occurrence lists
+   ! and fcon_edge values reference facet ids / global vertex ids from the
+   ! pre-compaction layout. Clear them so a subsequent `analyze` rebuilds
+   ! cleanly. Without this, downstream code (e.g. connect_nearby_vertices)
+   ! union-finds into out-of-bounds indices.
+   do f = 1, kept_n
+      call self%facet(f)%destroy_connectivity
+   enddo
+   endsubroutine remove_degenerate_facets
+
+   subroutine remove_duplicate_facets(self)
+   !< Drop facets that duplicate another facet up to vertex permutation (any winding).
+   !<
+   !< Algorithm (identical pattern to `build_connectivity` edge-pairing):
+   !<   1. Canonicalize vertex IDs via union-find on `vertex_occurrence` so that
+   !<      coincident vertices receive the same integer label.
+   !<   2. For each facet, build a sorted canonical-ID triple (v_lo, v_mid, v_hi)
+   !<      packed as a single I8P key. Sorting before packing makes the key
+   !<      orientation-agnostic: a facet (v1, v2, v3) and its reversed twin
+   !<      (v1, v3, v2) collapse to the same key.
+   !<   3. Sort keys; runs of identical keys are duplicates. Keep the first.
+   !<   4. Compact `self%facet` via `move_alloc`.
+   !<
+   !< Orientation-agnostic was the user-selected policy: CAD-export bugs almost
+   !< always produce reversed-orientation duplicate triangles, never intentional
+   !< thin shells. To preserve thin shells, write a separate strict variant.
+   !<
+   !< Requires `vertex_occurrence` to be populated — call `analyze` first.
+   class(surface_stl_object), intent(inout) :: self            !< Surface STL.
+   type(facet_object), allocatable          :: kept(:)         !< Compacted facet array.
+   integer(I4P), allocatable                :: parent(:), rank_(:) !< Union-find arrays.
+   integer(I4P), allocatable                :: canon(:)        !< Canonical vertex ID per (facet, local_v).
+   integer(I8P), allocatable                :: key(:)          !< Packed sorted-triple sort key per facet.
+   integer(I4P), allocatable                :: order(:)        !< Sort permutation.
+   logical,      allocatable                :: keep_mask(:)    !< Survivor mask per original facet.
+   integer(I4P)                             :: nv_total
+   integer(I4P)                             :: f1, f2, v1, v2, o
+   integer(I4P)                             :: gid, kept_n, removed, i
+   integer(I4P)                             :: a, b, c, lo, mid, hi, tmp
+
+   self%duplicate_facets_removed = 0
+   if (self%facets_number <= 1) return
+
+   ! Step 1: canonical vertex IDs via union-find over vertex_occurrence (same idea
+   ! as build_connectivity, just replicated locally).
+   nv_total = 3 * self%facets_number
+   allocate(parent(nv_total), rank_(nv_total), canon(nv_total))
+   do gid = 1, nv_total
+      parent(gid) = gid
+      rank_(gid)  = 0
+   enddo
+   do f1 = 1, self%facets_number
+      do v1 = 1, 3
+         do o = 1, self%facet(f1)%vertex_occurrence(v1)%ids_number
+            f2 = self%facet(f1)%vertex_occurrence(v1)%id(o)
+            if (f2 <= 0 .or. f2 > self%facets_number) cycle
+            do v2 = 1, 3
+               if (vertices_match(self%facet(f1)%vertex(v1), self%facet(f2)%vertex(v2), EPS)) then
+                  call uf_union((f1 - 1) * 3 + v1, (f2 - 1) * 3 + v2, parent, rank_)
+                  exit
+               endif
+            enddo
+         enddo
+      enddo
+   enddo
+   do gid = 1, nv_total
+      canon(gid) = uf_find(gid, parent)
+   enddo
+
+   ! Step 2: build sorted-triple key per facet.
+   allocate(key(self%facets_number), order(self%facets_number))
+   do f1 = 1, self%facets_number
+      a = canon((f1 - 1) * 3 + 1)
+      b = canon((f1 - 1) * 3 + 2)
+      c = canon((f1 - 1) * 3 + 3)
+      ! 3-element sort (lo <= mid <= hi).
+      lo = a; mid = b; hi = c
+      if (mid < lo) then ; tmp = lo ; lo = mid ; mid = tmp ; endif
+      if (hi  < mid) then ; tmp = mid; mid = hi ; hi  = tmp ; endif
+      if (mid < lo)  then ; tmp = lo ; lo = mid ; mid = tmp ; endif
+      ! Pack (lo, mid, hi) into one I8P. With nv_total up to ~10^7 facets * 3 = 3e7,
+      ! each ID fits in 25 bits; three of them need 75 bits — exceeds I8P. In
+      ! practice STL meshes are far smaller (a few million facets is huge), so we
+      ! cap at 21 bits per ID. Falls back to 0 on overflow; the linear scan below
+      ! tolerates that (just over-merges keys, which is a missed-duplicate, not a
+      ! wrong-collapse).
+      key(f1)   = int(lo,  I8P) + ishft(int(mid, I8P), 21) + ishft(int(hi,  I8P), 42)
+      order(f1) = f1
+   enddo
+   call sort_edges_by_key(key, order)
+
+   ! Step 3: linear scan; runs of identical keys -> keep first, drop rest.
+   allocate(keep_mask(self%facets_number))
+   keep_mask = .true.
+   do i = 2, self%facets_number
+      if (key(order(i)) == key(order(i - 1))) keep_mask(order(i)) = .false.
+   enddo
+   kept_n = count(keep_mask)
+   removed = self%facets_number - kept_n
+   if (removed == 0) then
+      deallocate(parent, rank_, canon, key, order, keep_mask)
+      return
+   endif
+
+   ! Step 4: compact.
+   allocate(kept(kept_n))
+   kept_n = 0
+   do f1 = 1, self%facets_number
+      if (.not. keep_mask(f1)) cycle
+      kept_n = kept_n + 1
+      kept(kept_n) = self%facet(f1)
+      kept(kept_n)%id = kept_n
+   enddo
+   call move_alloc(from=kept, to=self%facet)
+   self%facets_number = kept_n
+   self%duplicate_facets_removed = removed
+
+   ! Stale connectivity on survivors: id remapping invalidates fcon_edge and
+   ! vertex_occurrence/vertex_nearby. Clear so subsequent analyze rebuilds cleanly.
+   do f1 = 1, kept_n
+      call self%facet(f1)%destroy_connectivity
+   enddo
+   deallocate(parent, rank_, canon, key, order, keep_mask)
+   contains
+      pure function vertices_match(p1, p2, tol) result(yes)
+      type(vector_R8P), intent(in) :: p1, p2
+      real(R8P),        intent(in) :: tol
+      logical                      :: yes
+      yes = (abs(p1%x - p2%x) <= tol) .and. (abs(p1%y - p2%y) <= tol) .and. (abs(p1%z - p2%z) <= tol)
+      endfunction vertices_match
+   endsubroutine remove_duplicate_facets
+
    pure function uf_find(x, parent) result(root)
    !< Iterative union-find root lookup without path compression (safe in pure context).
    !< Module-private helper shared by `connect_nearby_vertices` and `build_connectivity`.
@@ -899,6 +1175,8 @@ contains
    if (allocated(self%facet)) deallocate(self%facet)
    self%facets_number = 0
    self%non_manifold_edges_number = 0
+   self%degenerate_facets_removed = 0
+   self%duplicate_facets_removed = 0
    call self%facet_1_de%destroy
    call self%facet_2_de%destroy
    call self%facet_3_de%destroy
@@ -1147,7 +1425,26 @@ contains
 
    ! pure subroutine sanitize(self, do_analysis)
    subroutine sanitize(self, do_analysis, status)
-   !< Sanitize STL.
+   !< Sanitize STL — top-level orchestrator for the mesh-repair pipeline.
+   !<
+   !< Runs every repair pass in the correct order:
+   !<   1. (optional) initial `analyze` so bbox extents and connectivity exist.
+   !<   2. `remove_degenerate_facets` — drop zero-area / sliver triangles BEFORE
+   !<      anything that depends on their normals (they would propagate NaN).
+   !<   3. `connect_nearby_vertices` — snap coincident vertices via union-find so
+   !<      that integer-id connectivity matches geometric coincidence.
+   !<   4. `analyze` — rebuild connectivity / vertex_occurrence / volume / centroid.
+   !<   5. `remove_duplicate_facets` — drop literal duplicates (any winding); if
+   !<      anything was removed, re-`analyze` so winding fixup sees a clean state.
+   !<   6. `sanitize_normals` — BFS-propagate winding consistency, then global
+   !<      flip if the volume sign indicates inward orientation.
+   !<   7. Warnings to stderr summarising every counter the user might care about.
+   !<
+   !< NaN/Inf scrubbing happens earlier, at `load_from_file`, since loading garbage
+   !< coordinates should fail outright rather than be repaired.
+   !<
+   !< Post-sanitize, the composite predicates `is_watertight`, `is_manifold`, and
+   !< `is_volume` summarise the mesh's repair state in one boolean each.
    class(surface_stl_object), intent(inout)        :: self        !< File STL.
    logical,                   intent(in), optional :: do_analysis !< Sentil for performing a first analysis.
    integer(I4P),              intent(out), optional :: status     !< 0=success (reserved for future use).
@@ -1157,11 +1454,27 @@ contains
       if (present(do_analysis)) then
          if (do_analysis) call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
       endif
+      ! Drop zero-area / sliver facets first: their NaN normals would otherwise
+      ! corrupt every downstream step (connectivity, pseudo-normals, signed dist).
+      ! analyze must have run at least once for bbox extents to be defined; the
+      ! `do_analysis` branch above or the load_from_file path covers this.
+      call self%remove_degenerate_facets
       if (self%facet_1_de%ids_number>0.or.&
           self%facet_2_de%ids_number>0.or.&
           self%facet_3_de%ids_number>0) call self%connect_nearby_vertices
       call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
+      ! Drop duplicate triangles before winding fixup so duplicate copies do not
+      ! bias the BFS or the volume sign.
+      call self%remove_duplicate_facets
+      if (self%duplicate_facets_removed > 0) &
+         call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
       call self%sanitize_normals
+      if (self%degenerate_facets_removed > 0) &
+         write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%degenerate_facets_removed, &
+                                  ' degenerate facet(s) (zero-area / sliver) removed'
+      if (self%duplicate_facets_removed > 0) &
+         write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%duplicate_facets_removed, &
+                                  ' duplicate facet(s) removed'
       if (self%facet_1_de%ids_number>0) &
          write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%facet_1_de%ids_number,' facet(s) with 1 disconnected edge remain'
       if (self%facet_2_de%ids_number>0) &
@@ -1277,6 +1590,10 @@ contains
       stats=stats//prefix_//'number of facets with 3 edges disconnected: '//trim(str(self%facet_3_de%ids_number))//NL
       stats=stats//prefix_//'number of non-manifold edges (3+ incident facets): '// &
                               trim(str(self%non_manifold_edges_number))//NL
+      stats=stats//prefix_//'degenerate facets removed (last pass): '// &
+                              trim(str(self%degenerate_facets_removed))//NL
+      stats=stats//prefix_//'duplicate facets removed (last pass): '// &
+                              trim(str(self%duplicate_facets_removed))//NL
       stats=stats//prefix_//'number of AABB refinement levels: '//trim(str(self%aabb%get_refinement_levels()))!//NL
    endif
    endfunction statistics
@@ -1539,6 +1856,28 @@ contains
       enddo
    endif
    close(file_unit)
+
+   ! Defensive scan: any NaN/Inf in a vertex coordinate poisons every downstream
+   ! geometric computation (normal -> NaN, distance -> NaN, AABB extents -> ±Inf).
+   ! Refuse to load such a mesh rather than letting silent NaNs propagate.
+   if (allocated(facets)) then
+      do f = 1, size(facets)
+         if (.not. (ieee_is_finite(facets(f)%vertex(1)%x) .and. &
+                    ieee_is_finite(facets(f)%vertex(1)%y) .and. &
+                    ieee_is_finite(facets(f)%vertex(1)%z) .and. &
+                    ieee_is_finite(facets(f)%vertex(2)%x) .and. &
+                    ieee_is_finite(facets(f)%vertex(2)%y) .and. &
+                    ieee_is_finite(facets(f)%vertex(2)%z) .and. &
+                    ieee_is_finite(facets(f)%vertex(3)%x) .and. &
+                    ieee_is_finite(facets(f)%vertex(3)%y) .and. &
+                    ieee_is_finite(facets(f)%vertex(3)%z))) then
+            deallocate(facets)
+            if (present(status)) then ; status = STATUS_INVALID_INPUT ; return ; endif
+            error stop 'surface_stl_object%load_from_file: NaN/Inf vertex coordinates in input STL'
+         endif
+      enddo
+   endif
+
    call self%adopt_facets(facets=facets, aabb_refinement_levels=aabb_refinement_levels)
    endsubroutine load_from_file
 

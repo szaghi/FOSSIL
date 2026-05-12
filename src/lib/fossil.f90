@@ -13,4 +13,5 @@ public :: surface_stl_object
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL
 public :: sign_algorithm_from_string
 public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL
+public :: STATUS_INVALID_INPUT
 endmodule fossil
