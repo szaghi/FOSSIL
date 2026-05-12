@@ -15,7 +15,7 @@
 
 program fossil_test_auto_refinement
 
-use fossil, only : surface_stl_object, AABB_AUTO_REFINEMENT
+use fossil, only : surface_stl_object, AABB_AUTO_REFINEMENT, AABB_TREE_OCTREE
 use fossil_aabb_tree_object, only : AABB_USE_INDEX, AABB_USE_BRUTE_FORCE
 use penf, only : I4P, R8P
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
@@ -49,8 +49,12 @@ contains
    integer(I4P)                :: levels
    logical                     :: this_ok
 
-   call surface%load_from_file(file_name=file_name, guess_format=.true., &
-                               aabb_refinement_levels=AABB_AUTO_REFINEMENT)
+   ! Explicitly request the octree tree kind — this test exercises the octree's
+   ! auto-tune heuristic. Since the library default is now AABB_TREE_SAH_BVH,
+   ! refinement_levels is meaningless unless we opt back into the octree.
+   call surface%load_from_file(file_name=file_name, guess_format=.true.,    &
+                               aabb_refinement_levels=AABB_AUTO_REFINEMENT, &
+                               aabb_tree_kind=AABB_TREE_OCTREE)
    call surface%sanitize
 
    levels = surface%aabb%get_refinement_levels()

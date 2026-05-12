@@ -28,12 +28,13 @@ integer(I4P), parameter :: TREE_RATIO=8 !< Tree refinement ratio, it is assumed 
 logical, parameter :: AABB_USE_INDEX       = .true.  !< Use the AABB octree for queries.
 logical, parameter :: AABB_USE_BRUTE_FORCE = .false. !< Force brute-force scan over all facets.
 
-! Tree-kind selector. The default `AABB_TREE_OCTREE` preserves the historical
-! behaviour: an 8-way space-partitioning octree built to a uniform depth (auto-
-! tuned via `refinement_levels` / `AABB_AUTO_REFINEMENT`). `AABB_TREE_SAH_BVH`
-! selects a binary BVH built by triangle-partition with the surface-area
-! heuristic — adapts to triangle density rather than spatial uniformity, which
-! the empirical sweep showed is the actual ceiling on FOSSIL distance queries.
+! Tree-kind selector. The default `AABB_TREE_SAH_BVH` is a binary BVH built by
+! triangle-partition with the surface-area heuristic — adapts to triangle density
+! rather than spatial uniformity. Empirical benchmark (commit "switch default to
+! SAH BVH"): on dragon-fine (24k facets) at a 32^3 query grid, the BVH was ~110x
+! faster than the octree at the same query, with ~40% faster build time too.
+! `AABB_TREE_OCTREE` selects the original 8-way space-partitioning octree, kept
+! for benchmarking and as a fallback for any user who needs the legacy behaviour.
 integer(I4P), parameter :: AABB_TREE_OCTREE  = 0_I4P
 integer(I4P), parameter :: AABB_TREE_SAH_BVH = 1_I4P
 
@@ -96,7 +97,7 @@ type :: aabb_tree_object
    !>  +----+----+             +------->x(i)
    !<```
    private
-   integer(I4P)                        :: tree_kind=AABB_TREE_OCTREE             !< Selects between the historical octree and the SAH BVH.
+   integer(I4P)                        :: tree_kind=AABB_TREE_SAH_BVH            !< Selects between the SAH BVH (default) and the legacy octree.
    integer(I4P)                        :: refinement_levels=AABB_AUTO_REFINEMENT !< Octree depth (AABB_AUTO_REFINEMENT = auto-tune); unused by SAH BVH.
    integer(I4P)                        :: nodes_number=0         !< Total number of tree nodes.
    type(aabb_node_object), allocatable :: node(:)                !< AABB tree nodes [0:nodes_number-1].

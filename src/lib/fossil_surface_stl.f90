@@ -3,7 +3,7 @@
 module fossil_surface_stl_object
 !< FOSSIL, STL surface class definition.
 
-use fossil_aabb_tree_object, only : aabb_tree_object
+use fossil_aabb_tree_object, only : aabb_tree_object, AABB_TREE_OCTREE
 use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb
@@ -447,8 +447,13 @@ contains
    smallest_edge_len = self%smallest_edge_len() * 0.9_R8P
 
    ! Step 1: populate vertex_nearby / vertex_occurrence. Same machinery as before.
+   ! The temporary `aabb` is used purely to accelerate the all-pairs vertex-nearby
+   ! search via `compute_vertices_nearby`, which is octree-specific (it relies on
+   ! `distribute_facets` and the level-based traversal in compute_vertices_nearby).
+   ! Force the octree kind here regardless of what the parent surface uses.
    if (self%aabb%get_is_initialized()) then
-      call aabb%initialize(facet=self%facet, refinement_levels=self%aabb%get_refinement_levels(), do_facets_distribute=.false.)
+      call aabb%initialize(facet=self%facet, refinement_levels=self%aabb%get_refinement_levels(), &
+                           tree_kind=AABB_TREE_OCTREE, do_facets_distribute=.false.)
       call aabb%distribute_facets(facet=self%facet, is_exclusive=.false., do_update_extents=.false.)
       call aabb%compute_vertices_nearby(facet=self%facet,              &
                                         tolerance_to_be_identical=EPS, &

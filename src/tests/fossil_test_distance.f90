@@ -4,7 +4,7 @@ program fossil_test_distance
 !< FOSSIL, test distance computation.
 
 use flap, only : command_line_interface
-use fossil, only : surface_stl_object, sign_algorithm_from_string
+use fossil, only : surface_stl_object, sign_algorithm_from_string, AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 use penf, only : I4P, I8P, R8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
 use fossil_aabb_tree_object, only : aabb_tree_object, AABB_USE_INDEX, AABB_USE_BRUTE_FORCE
@@ -21,6 +21,8 @@ logical                       :: save_aabb_tree_stl      !< Sentinel to save AAB
 logical                       :: test_brute_force        !< Sentinel to test also brute force.
 character(999)                :: sign_algorithm          !< Algorithm name as typed on the CLI.
 integer(I4P)                  :: sign_algorithm_code     !< Algorithm code derived from sign_algorithm.
+character(999)                :: tree_kind_name          !< Tree-kind name as typed on the CLI.
+integer(I4P)                  :: tree_kind_code          !< Tree-kind code derived from tree_kind_name.
 logical                       :: unsigned                !< Compute unsigned distance.
 integer(I4P)                  :: ni, nj, nk, gi, gj, gk  !< Grid dimensions.
 integer(I4P)                  :: i, j, k                 !< Counter.
@@ -33,11 +35,16 @@ are_tests_passed = .false.
 
 call cli_parse
 call surface_stl%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true., &
-                                aabb_refinement_levels=refinement_levels)
+                                aabb_refinement_levels=refinement_levels,                    &
+                                aabb_tree_kind=tree_kind_code)
 print '(A)', 'STL statistics before sanitization'
 print '(A)', surface_stl%statistics()
 call surface_stl%sanitize
-call surface_stl%analyze(aabb_refinement_levels=refinement_levels)
+! Time the tree build so users can see the trade-off vs query time.
+call system_clock(timing(1))
+call surface_stl%analyze(aabb_refinement_levels=refinement_levels, aabb_tree_kind=tree_kind_code)
+call system_clock(timing(2), timing(0))
+print '(A, F8.3)', 'tree build timing: ', real(timing(2) - timing(1)) / timing(0)
 print '(A)', 'STL statistics after sanitization'
 print '(A)', surface_stl%statistics()
 
@@ -210,6 +217,12 @@ contains
                def='.false.',                    &
                act='store_true')
 
+  call cli%add(switch='--tree_kind',                                    &
+               help='AABB tree kind: sah_bvh (default) or octree',     &
+               required=.false.,                                        &
+               def='sah_bvh',                                           &
+               act='store')
+
   call cli%parse(error=error) ; if (error/=0) stop
 
   call cli%get(switch='--stl',                     val=file_name_stl,           error=error) ; if (error/=0) stop
@@ -226,5 +239,13 @@ contains
   call cli%get(switch='--sign_algorithm',          val=sign_algorithm,          error=error) ; if (error/=0) stop
   sign_algorithm_code = sign_algorithm_from_string(trim(adjustl(sign_algorithm)))
   call cli%get(switch='--unsigned',                val=unsigned,                error=error) ; if (error/=0) stop
+  call cli%get(switch='--tree_kind',               val=tree_kind_name,          error=error) ; if (error/=0) stop
+  select case (trim(adjustl(tree_kind_name)))
+  case ('octree')  ; tree_kind_code = AABB_TREE_OCTREE
+  case ('sah_bvh') ; tree_kind_code = AABB_TREE_SAH_BVH
+  case default
+     write(*,'(A)') 'unknown --tree_kind value (valid: octree, sah_bvh)'
+     stop
+  end select
   endsubroutine cli_parse
 endprogram fossil_test_distance
