@@ -7,6 +7,7 @@ use fossil_aabb_tree_object, only : aabb_tree_object, AABB_TREE_OCTREE
 use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
+use fossil_vertex_pool_object, only : vertex_pool_object
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 use penf, only : I4P, I8P, R8P, MaxR8P, str
@@ -82,6 +83,7 @@ type :: surface_stl_object
    real(R8P),                       private :: volume=0._R8P   !< Volume bounded by STL surface.
    type(vector_R8P),                private :: centroid        !< Centroid of STL surface.
    character(FRLEN),                private :: header=''       !< STL file header (preserved across load/save).
+   type(vertex_pool_object),        private :: vertex_pool     !< Unique-vertex pool (issue #5 stage 1: derived artifact).
    contains
       ! read-only accessors (pure, inlined at -O2, zero data copy for scalars)
       procedure, pass(self) :: get_facets_number !< Return facets_number.
@@ -93,6 +95,7 @@ type :: surface_stl_object
       procedure, pass(self) :: get_non_manifold_edges_number  !< Return count of edges with 3+ incident facets.
       procedure, pass(self) :: get_degenerate_facets_removed  !< Return count of facets dropped by the last degenerate-facet pass.
       procedure, pass(self) :: get_duplicate_facets_removed   !< Return count of facets dropped by the last duplicate-facet pass.
+      procedure, pass(self) :: get_vertex_pool                !< Return read-only pointer to the unique-vertex pool.
       procedure, pass(self) :: is_watertight                  !< True if every edge has exactly 2 incident facets.
       procedure, pass(self) :: is_manifold                    !< True if watertight AND no non-manifold edges.
       procedure, pass(self) :: is_volume                      !< True if manifold AND positive signed volume AND finite centroid.
@@ -239,6 +242,19 @@ contains
    n = self%duplicate_facets_removed
    endfunction get_duplicate_facets_removed
 
+   function get_vertex_pool(self) result(pool)
+   !< Return a read-only pointer to the unique-vertex pool (issue #5 stage 1).
+   !<
+   !< The pool is rebuilt by `analyze` whenever facets change. It is a derived
+   !< artifact in stage 1 -- facets still own their inline `vertex(3)`
+   !< coordinates. Callers must treat the returned pointer as read-only;
+   !< mutation goes through surface TBPs that re-run `analyze`.
+   class(surface_stl_object), intent(in), target :: self !< File STL.
+   type(vertex_pool_object),  pointer            :: pool !< Read-only handle to the pool.
+
+   pool => self%vertex_pool
+   endfunction get_vertex_pool
+
    pure function is_watertight(self) result(yes)
    !< True iff every edge of the mesh has exactly 2 incident facets — no boundary
    !< edges (`facet_*_de` counts zero) and no non-manifold edges. Equivalent to
@@ -383,6 +399,7 @@ contains
       call self%compute_metrix
       call self%aabb%initialize(refinement_levels=aabb_refinement_levels, facet=self%facet,largest_edge_len=self%largest_edge_len())
       call self%build_connectivity
+      call self%vertex_pool%initialize_from_facets(facet=self%facet)
       call self%compute_facets_disconnected
       call self%compute_volume
       call self%compute_centroid
@@ -1193,6 +1210,7 @@ contains
    call self%facet_2_de%destroy
    call self%facet_3_de%destroy
    call self%aabb%destroy
+   call self%vertex_pool%destroy
    self%bmin    = vector_R8P(0._R8P, 0._R8P, 0._R8P)
    self%bmax    = vector_R8P(0._R8P, 0._R8P, 0._R8P)
    self%volume  = 0._R8P
