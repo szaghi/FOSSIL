@@ -8,6 +8,7 @@ use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
+use fossil_winding_number, only : compute_winding_number => winding_number
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 use penf, only : I4P, I8P, R8P, MaxR8P, str
@@ -132,6 +133,7 @@ type :: surface_stl_object
       procedure, pass(self) :: is_point_inside                 !< Determinate if point is inside or not STL.
       procedure, pass(self) :: is_point_inside_polyhedron_ri   !< Determinate if point is inside or not STL facets by ray intersect.
       procedure, pass(self) :: is_point_inside_polyhedron_sa   !< Determinate if point is inside or not STL facets by solid angle.
+      procedure, pass(self) :: winding_number                  !< Generalized / fast winding number at a query point (issue #18 §1.4).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1246,6 +1248,30 @@ contains
                  &(valid: SIGN_RAY_INTERSECTIONS=1, SIGN_SOLID_ANGLE=2, SIGN_PSEUDO_NORMAL=3)'
    endselect
    endfunction is_point_inside
+
+   function winding_number(self, point, beta) result(w)
+   !< Generalized / fast winding number at `point` (issue #18 §1.4).
+   !<
+   !< Returns the continuous scalar w(q):
+   !<   - ~ 1.0 strictly inside a closed, outward-oriented surface
+   !<   - ~ 0.0 strictly outside
+   !<   - intermediate on the boundary or for open / non-watertight meshes
+   !<
+   !< Uses the hierarchical Barnes-Hut traversal when the AABB tree is
+   !< initialized; falls back to the exact O(n_facets) per-facet sum otherwise.
+   !< Set `beta <= 0` to force the exact sum regardless (useful for ground-truth
+   !< tests). Default `beta = 2.0`.
+   class(surface_stl_object), intent(in)           :: self  !< Surface.
+   type(vector_R8P),          intent(in)           :: point !< Query point.
+   real(R8P),                 intent(in), optional :: beta  !< Multipole admissibility ratio (default 2.0).
+   real(R8P)                                       :: w     !< Winding number.
+
+   if (self%facets_number <= 0) then
+      w = 0._R8P
+      return
+   endif
+   w = compute_winding_number(facet=self%facet, tree=self%aabb, point=point, beta=beta)
+   endfunction winding_number
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
