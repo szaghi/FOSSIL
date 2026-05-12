@@ -36,7 +36,7 @@ type :: facet_object
    real(R8P)        :: a=0._R8P   !< `E12.dot.E12`.
    real(R8P)        :: b=0._R8P   !< `E12.dot.E13`.
    real(R8P)        :: c=0._R8P   !< `E13.dot.E13`.
-   real(R8P)        :: det=0._R8P !< `a*c - b*b`.
+   real(R8P)        :: det=0._R8P !< Gram det of (E12, E13): `a*c - b*b` = |E12 x E13|^2 = (2*area)^2. Use `area()` for the facet area.
    ! triangle plane equation: nx*x + ny*y + nz*z - d = 0, normal == [nx, ny, nz]
    real(R8P) :: d=0._R8P !< `normal.dot.vertex(1)`
    ! auxiliary
@@ -82,6 +82,7 @@ type :: facet_object
       procedure, pass(self) :: solid_angle                     !< Return the (projected) solid angle of the facet with respect point.
       procedure, pass(self) :: tetrahedron_volume              !< Return the volume of tetrahedron built by facet and a given apex.
       procedure, pass(self) :: translate                       !< Translate facet given vectorial delta.
+      procedure, pass(self) :: area                            !< Return the facet area (issue #7).
       procedure, pass(self) :: vertex_angle                    !< Return the subtended angle of given vertex.
       procedure, pass(self) :: vertex_global_id                !< Return the vertex global id given the local one.
       procedure, pass(self) :: set_vertex_ids                  !< Assign the three pool ids for this facet (issue #5 stage 3a).
@@ -755,6 +756,18 @@ contains
       if (recompute_metrix) call self%compute_metrix
    endif
    endsubroutine translate
+
+   pure function area(self) result(a)
+   !< Return the facet area (issue #7).
+   !<
+   !< Area = (1/2) * |E12 x E13| = sqrt(self%det) / 2. Cheap closed form using
+   !< the Gram-determinant cache already populated by `compute_metrix`. Returns
+   !< zero if metrix has not been computed (`det` is zero-initialized).
+   class(facet_object), intent(in) :: self !< Facet.
+   real(R8P)                       :: a    !< Facet area.
+
+   a = 0.5_R8P * sqrt(self%det)
+   endfunction area
 
    pure function vertex_angle(self, vertex_id)
    !< Return the subtened angle of given vertex.

@@ -81,6 +81,7 @@ type :: surface_stl_object
    type(vector_R8P),                private :: bmin            !< Bounding-box min.
    type(vector_R8P),                private :: bmax            !< Bounding-box max.
    real(R8P),                       private :: volume=0._R8P   !< Volume bounded by STL surface.
+   real(R8P),                       private :: area=0._R8P     !< Total surface area (sum of facet areas; issue #7).
    type(vector_R8P),                private :: centroid        !< Centroid of STL surface.
    character(FRLEN),                private :: header=''       !< STL file header (preserved across load/save).
    type(vertex_pool_object),        private :: vertex_pool     !< Unique-vertex pool (issue #5 stage 1: derived artifact).
@@ -90,6 +91,7 @@ type :: surface_stl_object
       procedure, pass(self) :: get_bmin          !< Return bmin (bounding-box minimum).
       procedure, pass(self) :: get_bmax          !< Return bmax (bounding-box maximum).
       procedure, pass(self) :: get_volume        !< Return volume.
+      procedure, pass(self) :: get_area          !< Return total surface area (issue #7).
       procedure, pass(self) :: get_centroid      !< Return centroid.
       procedure, pass(self) :: get_header        !< Return STL header.
       procedure, pass(self) :: get_non_manifold_edges_number  !< Return count of edges with 3+ incident facets.
@@ -119,6 +121,7 @@ type :: surface_stl_object
       procedure, pass(self) :: compute_distance                !< Compute the (minimum) distance returning also the closest point.
       procedure, pass(self) :: compute_metrix                  !< Compute facets metrix.
       procedure, pass(self) :: compute_normals                 !< Compute facets normals by means of vertices data.
+      procedure, pass(self) :: compute_area                    !< Compute total surface area (issue #7).
       procedure, pass(self) :: compute_volume                  !< Compute volume bounded by STL surface.
       procedure, pass(self) :: connect_nearby_vertices         !< Connect nearby vertices of disconnected edges.
       procedure, pass(self) :: remove_degenerate_facets        !< Drop facets whose area is below tolerance relative to bbox.
@@ -187,6 +190,18 @@ contains
 
    v = self%volume
    endfunction get_volume
+
+   pure function get_area(self) result(a)
+   !< Return total surface area (issue #7).
+   !<
+   !< Cached at the end of `analyze`. For a closed manifold this is the
+   !< standard surface area; for an open mesh it is the sum of facet areas
+   !< (still well-defined).
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   real(R8P)                             :: a    !< Total area.
+
+   a = self%area
+   endfunction get_area
 
    pure function get_centroid(self) result(c)
    !< Return centroid of STL surface.
@@ -409,6 +424,7 @@ contains
       end block
       call self%build_connectivity
       call self%compute_facets_disconnected
+      call self%compute_area
       call self%compute_volume
       call self%compute_centroid
       ! Pseudo-normals require self%normal, fcon_edge, and the pool's inverted
@@ -865,6 +881,23 @@ contains
    endif
    endsubroutine compute_volume
 
+   elemental subroutine compute_area(self)
+   !< Compute total surface area as the sum of facet areas (issue #7).
+   !<
+   !< Each facet's area comes from `facet%area()`, which reads the Gram-determinant
+   !< cache already populated by `compute_metrix`. Cost is O(N) with one sqrt
+   !< per facet -- comparable to compute_volume.
+   class(surface_stl_object), intent(inout) :: self !< File STL.
+   integer(I4P)                             :: f    !< Counter.
+
+   self%area = 0._R8P
+   if (self%facets_number > 0) then
+      do f = 1, self%facets_number
+         self%area = self%area + self%facet(f)%area()
+      enddo
+   endif
+   endsubroutine compute_area
+
    pure subroutine connect_nearby_vertices(self)
    !< Connect nearby vertices of disconnected edges.
    !<
@@ -1162,6 +1195,7 @@ contains
    self%bmin    = vector_R8P(0._R8P, 0._R8P, 0._R8P)
    self%bmax    = vector_R8P(0._R8P, 0._R8P, 0._R8P)
    self%volume  = 0._R8P
+   self%area    = 0._R8P
    self%centroid = vector_R8P(0._R8P, 0._R8P, 0._R8P)
    self%header  = ''
    endsubroutine destroy
