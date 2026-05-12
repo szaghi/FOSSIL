@@ -1675,13 +1675,17 @@ contains
    endif
    endsubroutine mirror_by_matrix
 
-   elemental subroutine rotate_by_axis_angle(self, axis, angle, recompute_metrix)
+   subroutine rotate_by_axis_angle(self, axis, angle, center, recompute_metrix)
    !< Rotate facets given axis and angle.
    !<
-   !< Angle must be in radiants.
+   !< Angle must be in radians. When `center` is supplied, the rotation pivots
+   !< about that point (`v -> R*(v - center) + center`); otherwise it pivots
+   !< about the world origin. Issue #6 -- pass `center=self%get_centroid()` for
+   !< body-frame rotation around the surface centroid.
    class(surface_stl_object), intent(inout)        :: self             !< File STL.
    type(vector_R8P),          intent(in)           :: axis             !< Axis of rotation.
    real(R8P),                 intent(in)           :: angle            !< Angle of rotation.
+   type(vector_R8P),          intent(in), optional :: center           !< Rotation centre (default: world origin).
    logical,                   intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
    real(R8P)                                       :: matrix(3,3)      !< Rotation matrix.
    integer(I4P)                                    :: f                !< Counter.
@@ -1689,21 +1693,27 @@ contains
    if (self%facets_number>0) then
       matrix = rotation_matrix_R8P(axis=axis, angle=angle)
       do f=1, self%facets_number
-         call self%facet(f)%rotate(matrix=matrix, recompute_metrix=recompute_metrix)
+         call self%facet(f)%rotate(matrix=matrix, center=center, recompute_metrix=recompute_metrix)
       enddo
    endif
    endsubroutine rotate_by_axis_angle
 
-   pure subroutine rotate_by_matrix(self, matrix, recompute_metrix)
-   !< Rotate facet given matrix (of ratation).
+   pure subroutine rotate_by_matrix(self, matrix, center, recompute_metrix)
+   !< Rotate facets given matrix (of rotation).
+   !<
+   !< When `center` is supplied, the rotation pivots about that point
+   !< (`v -> matrix*(v - center) + center`); otherwise it pivots about the
+   !< world origin. Issue #6 -- pass `center=self%get_centroid()` for
+   !< body-frame rotation around the surface centroid.
    class(surface_stl_object), intent(inout)        :: self             !< File STL.
    real(R8P),                 intent(in)           :: matrix(3,3)      !< Rotation matrix.
+   type(vector_R8P),          intent(in), optional :: center           !< Rotation centre (default: world origin).
    logical,                   intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
    integer(I4P)                                    :: f                !< Counter.
 
    if (self%facets_number>0) then
       do f=1, self%facets_number
-         call self%facet(f)%rotate(matrix=matrix, recompute_metrix=recompute_metrix)
+         call self%facet(f)%rotate(matrix=matrix, center=center, recompute_metrix=recompute_metrix)
       enddo
    endif
    endsubroutine rotate_by_matrix

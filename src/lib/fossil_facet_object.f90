@@ -867,30 +867,47 @@ contains
    endif
    endsubroutine mirror_by_matrix
 
-   pure subroutine rotate_by_axis_angle(self, axis, angle, recompute_metrix)
+   pure subroutine rotate_by_axis_angle(self, axis, angle, center, recompute_metrix)
    !< Rotate facet given axis and angle.
    !<
-   !< Angle must be in radiants.
+   !< Angle must be in radians. When `center` is supplied, the rotation pivots
+   !< about that point (`v -> R*(v - center) + center`); otherwise it pivots
+   !< about the world origin.
    class(facet_object), intent(inout)        :: self             !< Facet.
    type(vector_R8P),    intent(in)           :: axis             !< Axis of rotation.
    real(R8P),           intent(in)           :: angle            !< Angle of rotation.
+   type(vector_R8P),    intent(in), optional :: center           !< Rotation centre (default: world origin).
    logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
 
-   call self%rotate_by_matrix(matrix=rotation_matrix_R8P(axis=axis, angle=angle))
+   call self%rotate_by_matrix(matrix=rotation_matrix_R8P(axis=axis, angle=angle), center=center)
    if (present(recompute_metrix)) then
       if (recompute_metrix) call self%compute_metrix
    endif
    endsubroutine rotate_by_axis_angle
 
-   pure subroutine rotate_by_matrix(self, matrix, recompute_metrix)
-   !< Rotate facet given matrix (of ratation).
+   pure subroutine rotate_by_matrix(self, matrix, center, recompute_metrix)
+   !< Rotate facet given matrix (of rotation).
+   !<
+   !< When `center` is supplied, the rotation pivots about that point
+   !< (`v -> matrix*(v - center) + center`); otherwise it pivots about the
+   !< world origin (`v -> matrix*v`).
    class(facet_object), intent(inout)        :: self             !< Facet.
    real(R8P),           intent(in)           :: matrix(3,3)      !< Rotation matrix.
+   type(vector_R8P),    intent(in), optional :: center           !< Rotation centre (default: world origin).
    logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+   integer(I4P)                              :: v                !< Local vertex counter.
 
-   call self%vertex(1)%rotate(matrix=matrix)
-   call self%vertex(2)%rotate(matrix=matrix)
-   call self%vertex(3)%rotate(matrix=matrix)
+   if (present(center)) then
+      do v = 1, 3
+         self%vertex(v) = self%vertex(v) - center
+         call self%vertex(v)%rotate(matrix=matrix)
+         self%vertex(v) = self%vertex(v) + center
+      enddo
+   else
+      call self%vertex(1)%rotate(matrix=matrix)
+      call self%vertex(2)%rotate(matrix=matrix)
+      call self%vertex(3)%rotate(matrix=matrix)
+   endif
    if (present(recompute_metrix)) then
       if (recompute_metrix) call self%compute_metrix
    endif
