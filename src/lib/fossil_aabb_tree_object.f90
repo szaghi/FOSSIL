@@ -135,6 +135,7 @@ type :: aabb_tree_object
       final :: aabb_tree_finalize
       ! private methods
       procedure, pass(self), private :: build_bvh_sah                 !< Build a SAH BVH over the given facet list.
+      procedure, pass(self), private :: enumerate_children            !< List the allocated children of a node (octree or BVH).
       procedure, pass(self), private :: distance_node                 !< Update best squared distance by recursing into a node.
       procedure, pass(self), private :: distance_node_with_region     !< Update (best d^2, best facet id, best region) by recursing into a node.
       procedure, pass(self), private :: ray_intersections_number_node !< Return ray intersections number into a node of AABB tree.
@@ -1058,6 +1059,45 @@ contains
    endsubroutine aabb_tree_assign_aabb_tree
 
    ! private methods
+   pure subroutine enumerate_children(self, n, out_idx, nchild)
+   !< List the allocated children of node `n` into `out_idx(1:nchild)`, in no
+   !< particular order. Dispatches on `self%tree_kind`:
+   !<
+   !<  - AABB_TREE_OCTREE: children are the up-to-8 consecutive nodes starting at
+   !<    `first_child_node(n)`. Empty slots are silently skipped via the
+   !<    `is_allocated()` test; the original `has_children` predicate is implicit
+   !<    in `nchild == 0` on return.
+   !<
+   !<  - AABB_TREE_SAH_BVH: children are the up-to-2 explicit indices stored in
+   !<    `left_child` / `right_child`. A leaf has both at 0 -> `nchild = 0`.
+   !<
+   !< Sized for the octree (8 slots) so traversal callers can use a single fixed
+   !< buffer regardless of tree kind. The BVH path uses only the first 2.
+   class(aabb_tree_object), intent(in)  :: self        !< AABB tree.
+   integer(I4P),            intent(in)  :: n           !< Node index.
+   integer(I4P),            intent(out) :: out_idx(:)  !< Output: child indices (caller-supplied buffer, >= TREE_RATIO slots).
+   integer(I4P),            intent(out) :: nchild      !< Number of allocated children found.
+   integer(I4P)                         :: fcn, i, lc, rc
+
+   nchild = 0
+   if (self%tree_kind == AABB_TREE_SAH_BVH) then
+      lc = self%node(n)%get_left_child()
+      rc = self%node(n)%get_right_child()
+      if (lc > 0) then ; nchild = nchild + 1 ; out_idx(nchild) = lc ; endif
+      if (rc > 0) then ; nchild = nchild + 1 ; out_idx(nchild) = rc ; endif
+   else
+      ! Octree: implicit indexing.
+      fcn = first_child_node(node=n)
+      if (fcn > self%nodes_number - TREE_RATIO) return    ! out of range -> leaf
+      do i = fcn, fcn + TREE_RATIO - 1
+         if (self%node(i)%is_allocated()) then
+            nchild = nchild + 1
+            out_idx(nchild) = i
+         endif
+      enddo
+   endif
+   endsubroutine enumerate_children
+
    recursive subroutine distance_node(self, n, facet, point, best)
    !< Update `best` squared distance by visiting node `n` and pruning descendants.
    !<
@@ -1079,28 +1119,23 @@ contains
    type(vector_R8P),        intent(in)    :: point                      !< Point coordinates.
    real(R8P),               intent(inout) :: best                       !< Running best squared distance.
    real(R8P)                              :: facet_d2                   !< Distance from this node's facets.
-   real(R8P)                              :: child_d2(TREE_RATIO)       !< Per-child box d^2.
-   integer(I4P)                           :: child_idx(TREE_RATIO)      !< Per-child node index.
+   real(R8P)                              :: child_d2(TREE_RATIO)       !< Per-child box d^2 (sized for octree).
+   integer(I4P)                           :: child_idx(TREE_RATIO)      !< Per-child node index (sized for octree).
    integer(I4P)                           :: nchild                     !< Number of allocated children.
-   integer(I4P)                           :: fcn                        !< First child node index.
    integer(I4P)                           :: i, j, swap_i               !< Counter.
    real(R8P)                              :: swap_d                     !< Sort helper.
 
    associate(node => self%node)
-      ! 1. node's own facets — internal nodes can still carry facets.
+      ! 1. node's own facets — internal nodes can still carry facets (octree).
+      !    For the BVH this is a no-op on internal nodes (their facet_id list is empty).
       facet_d2 = node(n)%distance_from_facets(facet=facet, point=point)
       if (facet_d2 < best) best = facet_d2
 
-      ! 2. gather allocated children with their box distance.
-      if (.not. self%has_children(node=n)) return
-      fcn = first_child_node(node=n)
-      nchild = 0
-      do i = fcn, fcn + TREE_RATIO - 1
-         if (node(i)%is_allocated()) then
-            nchild = nchild + 1
-            child_idx(nchild) = i
-            child_d2(nchild)  = node(i)%distance(point=point)
-         endif
+      ! 2. enumerate allocated children. Tree-kind-agnostic via the helper.
+      call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
+      if (nchild == 0) return
+      do i = 1, nchild
+         child_d2(i) = node(child_idx(i))%distance(point=point)
       enddo
 
       ! 3. insertion sort by ascending box d^2 (tiny array, branch-predictable).
@@ -1137,10 +1172,9 @@ contains
    real(R8P),               intent(inout) :: best                       !< Running best squared distance.
    integer(I4P),            intent(inout) :: best_facet                 !< Running best facet id.
    integer(I4P),            intent(inout) :: best_region                !< Running best Voronoi region tag.
-   real(R8P)                              :: child_d2(TREE_RATIO)       !< Per-child box d^2.
-   integer(I4P)                           :: child_idx(TREE_RATIO)      !< Per-child node index.
+   real(R8P)                              :: child_d2(TREE_RATIO)       !< Per-child box d^2 (sized for octree).
+   integer(I4P)                           :: child_idx(TREE_RATIO)      !< Per-child node index (sized for octree).
    integer(I4P)                           :: nchild                     !< Number of allocated children.
-   integer(I4P)                           :: fcn                        !< First child node index.
    integer(I4P)                           :: i, j, swap_i               !< Counter.
    real(R8P)                              :: swap_d                     !< Sort helper.
 
@@ -1148,15 +1182,10 @@ contains
       call node(n)%update_best_from_facets(facet=facet, point=point, &
                                            best=best, best_facet=best_facet, best_region=best_region)
 
-      if (.not. self%has_children(node=n)) return
-      fcn = first_child_node(node=n)
-      nchild = 0
-      do i = fcn, fcn + TREE_RATIO - 1
-         if (node(i)%is_allocated()) then
-            nchild = nchild + 1
-            child_idx(nchild) = i
-            child_d2(nchild)  = node(i)%distance(point=point)
-         endif
+      call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
+      if (nchild == 0) return
+      do i = 1, nchild
+         child_d2(i) = node(child_idx(i))%distance(point=point)
       enddo
 
       do i = 2, nchild
@@ -1182,32 +1211,36 @@ contains
    endsubroutine distance_node_with_region
 
    recursive function ray_intersections_number_node(self, n, facet, ray_origin, ray_direction) result(intersections_number)
-   !< Return ray intersections number into a node of AABB tree.
-   class(aabb_tree_object), intent(in) :: self                 !< AABB tree.
-   integer(I4P),            intent(in) :: n                    !< Current AABB node.
-   type(facet_object),      intent(in) :: facet(:)             !< Facets list.
-   type(vector_R8P),        intent(in) :: ray_origin           !< Ray origin.
-   type(vector_R8P),        intent(in) :: ray_direction        !< Ray direction.
-   integer(I4P)                        :: intersections_number !< Intersection number.
-   integer(I4P)                        :: fcn                  !< First AABB child node.
-   integer(I4P)                        :: i                    !< Counter.
+   !< Return ray intersections number into a node of the AABB tree.
+   !<
+   !< Tree-kind-agnostic: child enumeration goes through `enumerate_children`, so
+   !< both the octree (up to 8 children) and the BVH (up to 2 children) traverse
+   !< through the same code path.
+   class(aabb_tree_object), intent(in) :: self                       !< AABB tree.
+   integer(I4P),            intent(in) :: n                          !< Current AABB node.
+   type(facet_object),      intent(in) :: facet(:)                   !< Facets list.
+   type(vector_R8P),        intent(in) :: ray_origin                 !< Ray origin.
+   type(vector_R8P),        intent(in) :: ray_direction              !< Ray direction.
+   integer(I4P)                        :: intersections_number       !< Intersection number.
+   integer(I4P)                        :: child_idx(TREE_RATIO)      !< Child indices buffer (sized for octree).
+   integer(I4P)                        :: nchild                     !< Number of allocated children.
+   integer(I4P)                        :: i                          !< Counter.
 
    intersections_number = 0
    associate(node=>self%node)
-      if (node(n)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) then      ! check if ray intersect AABB
-         if (self%has_children(node=n)) then                                                      ! check if AABB has children
-            fcn = first_child_node(node=n)                                                        ! first child node
-            do i=fcn, fcn + TREE_RATIO - 1                                                        ! loop over all children nodes
-               intersections_number = intersections_number +                                    & ! sum chidren intersections
-                                      self%ray_intersections_number_node(n=i,                   &
-                                                                         facet=facet,           &
-                                                                         ray_origin=ray_origin, &
-                                                                         ray_direction=ray_direction)
-            enddo
-         else
-            ! there are not children, return intersection of current AABB leaf
-            intersections_number = node(n)%ray_intersections_number(facet=facet, ray_origin=ray_origin, ray_direction=ray_direction)
-         endif
+      if (.not. node(n)%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)) return
+      call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
+      if (nchild == 0) then
+         ! Leaf: return intersection count of this node's own facets.
+         intersections_number = node(n)%ray_intersections_number(facet=facet, ray_origin=ray_origin, ray_direction=ray_direction)
+      else
+         do i = 1, nchild
+            intersections_number = intersections_number +                                    &
+                                   self%ray_intersections_number_node(n=child_idx(i),        &
+                                                                      facet=facet,           &
+                                                                      ray_origin=ray_origin, &
+                                                                      ray_direction=ray_direction)
+         enddo
       endif
    endassociate
    endfunction ray_intersections_number_node

@@ -11,7 +11,7 @@
 
 program fossil_test_distance_ground_truth
 
-use fossil, only : surface_stl_object
+use fossil, only : surface_stl_object, AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 use fossil_aabb_tree_object, only : AABB_USE_INDEX, AABB_USE_BRUTE_FORCE
 use penf, only : I4P, R8P, str
 use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
@@ -44,9 +44,17 @@ type(vector_R8P), allocatable :: points(:)
 real(R8P),        allocatable :: d_brute(:), d_tree(:)
 real(R8P)                     :: max_abs_err, abs_err
 integer(I4P)                  :: sign_mismatches
-integer(I4P)                  :: n_points, p, worst_p, m
+integer(I4P)                  :: n_points, p, worst_p, m, kk
+integer(I4P)                  :: tree_kinds(2)
+character(8)                  :: kind_label
 logical                       :: tests_passed
 logical                       :: overall_passed
+
+! Run the bit-exact tree-vs-brute comparison against both tree kinds. Both must
+! return the closest facet identically; any divergence indicates the kind-specific
+! traversal pruned the true closest facet (the same bug class that step 1
+! revealed in the original greedy octree descent).
+tree_kinds = [AABB_TREE_OCTREE, AABB_TREE_SAH_BVH]
 
 overall_passed = .true.
 
@@ -54,62 +62,69 @@ do m = 1, size(STL_FILES)
    call surface%destroy
    call surface%load_from_file(file_name=trim(STL_FILES(m)), guess_format=.true., aabb_refinement_levels=REF_LEVELS)
    call surface%sanitize
-   call surface%analyze(aabb_refinement_levels=REF_LEVELS)
 
    call build_query_points(points, n_points)
    if (allocated(d_brute)) deallocate(d_brute)
    if (allocated(d_tree))  deallocate(d_tree)
    allocate(d_brute(n_points), d_tree(n_points))
 
-   ! Pass 1 — brute force (ground truth)
-   call surface%aabb%set_use_index(AABB_USE_BRUTE_FORCE)
-   do p = 1, n_points
-      d_brute(p) = surface%distance(point=points(p), is_signed=.true.)
-   enddo
+   print '(A,A)', 'mesh: ', trim(STL_FILES(m))
 
-   ! Pass 2 — AABB tree
-   call surface%aabb%set_use_index(AABB_USE_INDEX)
-   do p = 1, n_points
-      d_tree(p) = surface%distance(point=points(p), is_signed=.true.)
-   enddo
+   do kk = 1, size(tree_kinds)
+      ! Rebuild the tree with the current kind. analyze() is sufficient — it
+      ! reuses the already-loaded facets and just re-initialises the aabb.
+      call surface%analyze(aabb_refinement_levels=REF_LEVELS, aabb_tree_kind=tree_kinds(kk))
 
-   ! Compare
-   max_abs_err = 0._R8P
-   sign_mismatches = 0
-   worst_p = 0
-   do p = 1, n_points
-      abs_err = abs(abs(d_tree(p)) - abs(d_brute(p)))
-      if (abs_err > max_abs_err) then
-         max_abs_err = abs_err
-         worst_p = p
-      endif
-      if (sign(1._R8P, d_tree(p)) /= sign(1._R8P, d_brute(p))) sign_mismatches = sign_mismatches + 1
-   enddo
+      select case (tree_kinds(kk))
+      case (AABB_TREE_OCTREE)  ; kind_label = 'octree'
+      case (AABB_TREE_SAH_BVH) ; kind_label = 'sah_bvh'
+      end select
 
-   tests_passed = (max_abs_err < DIST_TOL) .and. (sign_mismatches == 0)
-   overall_passed = overall_passed .and. tests_passed
+      ! Pass 1 — brute force (ground truth, identical for both tree kinds).
+      call surface%aabb%set_use_index(AABB_USE_BRUTE_FORCE)
+      do p = 1, n_points
+         d_brute(p) = surface%distance(point=points(p), is_signed=.true.)
+      enddo
 
-   print '(A,A)',      'mesh:                   ', trim(STL_FILES(m))
-   print '(A,I0)',     '  query points:           ', n_points
-   print '(A,ES12.5)', '  max |d_tree - d_brute|: ', max_abs_err
-   print '(A,I0)',     '  sign mismatches:        ', sign_mismatches
-   if (worst_p > 0 .and. max_abs_err >= DIST_TOL) then
-      print '(A,3(ES12.5,1X))', '  worst point (x,y,z):    ', &
-         points(worst_p)%x, points(worst_p)%y, points(worst_p)%z
-      print '(A,ES12.5,A,ES12.5)', '    d_brute=', d_brute(worst_p), '  d_tree=', d_tree(worst_p)
-   endif
-   print '(A,L1)', '  tree==brute (d^2):      ', tests_passed
+      ! Pass 2 — the tree.
+      call surface%aabb%set_use_index(AABB_USE_INDEX)
+      do p = 1, n_points
+         d_tree(p) = surface%distance(point=points(p), is_signed=.true.)
+      enddo
 
-   ! Analytical SDF check — applicable only to the unit cube [0,1]^3, which has a
-   ! closed-form signed distance. This validates pseudo-normal sign decisions
-   ! against an oracle independent of the mesh data structure. Requires
-   ! sanitize_normals to produce consistently outward normals — that is what
-   ! gives the pseudo-normal sign convention "inside = negative" meaning.
-   if (trim(STL_FILES(m)) == 'src/tests/cube.stl') then
-      call check_cube_analytical(surface, points, n_points, tests_passed)
+      max_abs_err     = 0._R8P
+      sign_mismatches = 0
+      worst_p         = 0
+      do p = 1, n_points
+         abs_err = abs(abs(d_tree(p)) - abs(d_brute(p)))
+         if (abs_err > max_abs_err) then
+            max_abs_err = abs_err
+            worst_p = p
+         endif
+         if (sign(1._R8P, d_tree(p)) /= sign(1._R8P, d_brute(p))) sign_mismatches = sign_mismatches + 1
+      enddo
+
+      tests_passed = (max_abs_err < DIST_TOL) .and. (sign_mismatches == 0)
       overall_passed = overall_passed .and. tests_passed
-      print '(A,L1)', '  cube SDF (analytical):  ', tests_passed
-   endif
+
+      print '(A,A,A,I0,A,ES12.5,A,I0,A,L1)',                              &
+          '  ', trim(kind_label), ': pts=', n_points,                     &
+          ' max|d|=', max_abs_err, ' sign_mismatches=', sign_mismatches,  &
+          ' passed=', tests_passed
+      if (worst_p > 0 .and. max_abs_err >= DIST_TOL) then
+         print '(A,3(ES12.5,1X))', '    worst point (x,y,z):    ', &
+            points(worst_p)%x, points(worst_p)%y, points(worst_p)%z
+         print '(A,ES12.5,A,ES12.5)', '    d_brute=', d_brute(worst_p), '  d_tree=', d_tree(worst_p)
+      endif
+
+      ! Analytical SDF check on the cube — only run once per mesh (use the BVH
+      ! pass since pseudo-normal sign is independent of tree kind anyway).
+      if (trim(STL_FILES(m)) == 'src/tests/cube.stl' .and. tree_kinds(kk) == AABB_TREE_SAH_BVH) then
+         call check_cube_analytical(surface, points, n_points, tests_passed)
+         overall_passed = overall_passed .and. tests_passed
+         print '(A,L1)', '    cube SDF (analytical):  ', tests_passed
+      endif
+   enddo
 enddo
 
 print '(A,L1)', 'Are all tests passed? ', overall_passed
