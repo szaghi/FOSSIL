@@ -19,19 +19,22 @@ hero:
 features:
   - icon: 📂
     title: STL I/O
-    details: Load and save ASCII or binary STL files. Format is auto-detected — no flags required.
+    details: Load and save ASCII or binary STL files. Format is auto-detected; bad input (NaN/Inf coordinates) is rejected via a status code.
   - icon: 🔧
     title: Surface Manipulation
     details: Translate, rotate, mirror, resize, clip, and merge STL surfaces with a clean type-bound API.
   - icon: 🩺
-    title: Surface Analysis
-    details: Compute volume, centroid, connectivity, bounding box, watertightness, and disconnected edges.
+    title: Surface Analysis & Repair
+    details: Sanitize pipeline detects and fixes degenerate slivers, literal duplicates, disconnected edges, non-manifold edges, and inward-pointing normals. Predicates is_watertight / is_manifold / is_volume summarise the result.
+  - icon: 📏
+    title: Signed Distance
+    details: Bit-exact closest-facet lookup via best-first traversal with d² pruning. Sign via Bærentzen–Aanæs pseudo-normal (default), ray intersection, or solid angle.
   - icon: ⚡
-    title: AABB Acceleration
-    details: Octree Axis-Aligned Bounding Box tree speeds up distance and point-in-polyhedron queries by up to 7×.
+    title: SAH BVH Acceleration
+    details: Binary BVH built with the surface-area heuristic — adapts to triangle density. ~100× faster distance queries than the legacy octree on dragon-scale meshes. Octree remains selectable.
   - icon: 🧪
     title: OOP / TDD Designed
-    details: Three clean types — file_stl_object, surface_stl_object, facet_object — each tested individually.
+    details: Two public types — surface_stl_object and facet_object — every public operation exercised by the regression suite.
   - icon: 🆓
     title: Free & Open Source
     details: Multi-licensed — GPLv3 for FOSS projects, BSD 2/3-Clause or MIT for commercial use. Fortran 2003+ standard compliant.
@@ -44,22 +47,23 @@ Load an STL file, print its statistics, and translate it:
 ```fortran
 use fossil
 use penf, only: R8P
-use vecfor, only: vector_R8P
+use vecfor, only: ex_R8P
 
-type(file_stl_object)    :: file_stl
 type(surface_stl_object) :: surface
+real(R8P)                :: d
 
-! Load (ASCII or binary, auto-detected)
-call file_stl%load_from_file(facet=surface%facet, file_name='cube.stl', guess_format=.true.)
-call surface%analize
-
-! Print statistics
-print '(A)', file_stl%statistics()
+! Load (ASCII or binary, auto-detected) and run the full repair pipeline.
+call surface%load_from_file(file_name='cube.stl', guess_format=.true.)
+call surface%sanitize
 print '(A)', surface%statistics()
 
-! Translate and save
+! Signed distance — SAH BVH + pseudo-normal sign by default.
+d = surface%distance(point=2.0_R8P * ex_R8P, is_signed=.true., is_square_root=.true.)
+print '(A,ES12.5)', 'signed distance = ', d
+
+! Translate and save.
 call surface%translate(x=1.0_R8P, y=2.0_R8P, z=0.5_R8P)
-call file_stl%save_into_file(facet=surface%facet, file_name='cube-moved.stl')
+call surface%save_into_file(file_name='cube-moved.stl')
 ```
 
 ## Authors

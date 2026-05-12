@@ -47,7 +47,7 @@ The submodules live under `src/third_party/`:
 
 ## Build with FoBiS.py
 
-[FoBiS.py](https://github.com/szaghi/FoBiS) is the primary build system. Install it once with pip:
+[FoBiS.py](https://github.com/szaghi/FoBiS) is the primary build system. Install once with pip — the PyPI package name is `FoBiS.py`; the installed CLI binary is `fobis`:
 
 ```bash
 pip install FoBiS.py
@@ -56,7 +56,7 @@ pip install FoBiS.py
 ### List all build modes
 
 ```bash
-FoBiS.py build -lmodes
+fobis build --lmodes
 ```
 
 Available modes:
@@ -78,13 +78,13 @@ Available modes:
 
 ```bash
 # Static library (GNU gfortran)
-FoBiS.py build -mode static-gnu
+fobis build --mode static-gnu
 
 # Shared library (GNU gfortran)
-FoBiS.py build -mode shared-gnu
+fobis build --mode shared-gnu
 
 # Static library (Intel Fortran)
-FoBiS.py build -mode static-intel
+fobis build --mode static-intel
 ```
 
 The library is placed in `./static/` or `./shared/` respectively. Module files go to `./mod/`.
@@ -92,7 +92,7 @@ The library is placed in `./static/` or `./shared/` respectively. Module files g
 ### Build and run tests
 
 ```bash
-FoBiS.py build -mode tests-gnu
+fobis build --mode tests-gnu
 ./scripts/run_tests.sh
 ```
 
@@ -107,8 +107,8 @@ To run a single test:
 ### Coverage and documentation
 
 ```bash
-FoBiS.py rule -ex makecoverage   # build + run tests + gcov report
-FoBiS.py rule -ex makedoc        # build ford API docs + VitePress site
+fobis rule --ex makecoverage   # build + run tests + gcov report
+fobis rule --ex makedoc        # build ford API docs + VitePress site
 ```
 
 ## Alternative builds

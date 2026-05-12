@@ -8,25 +8,25 @@ FOSSIL (FOrtran Stereo Litography parser) is a pure Fortran 2003+ library for re
 
 ## Build System
 
-The project uses **FoBiS.py** (Fortran Build System) with a `fobos` configuration file. FoBiS.py must be installed (`pip install FoBiS.py`).
+The project uses **FoBiS.py** (Fortran Build System) with a `fobos` configuration file. Install once via pip (`pip install FoBiS.py` — the PyPI package name is unchanged), then invoke as `fobis` (the modern CLI binary).
 
 ### Common build commands
 
 ```bash
 # Build static library (GNU compiler)
-FoBiS.py build -mode static-gnu
+fobis build --mode static-gnu
 
 # Build shared library (GNU compiler)
-FoBiS.py build -mode shared-gnu
+fobis build --mode shared-gnu
 
 # Build all tests (GNU compiler)
-FoBiS.py build -mode tests-gnu
+fobis build --mode tests-gnu
 
 # Build with debug flags (GNU compiler)
-FoBiS.py build -mode tests-gnu-debug
+fobis build --mode tests-gnu-debug
 
 # Clean build artifacts
-FoBiS.py rule -ex clean
+fobis rule --ex clean
 ```
 
 Intel compiler variants are available by replacing `-gnu` with `-intel`.
@@ -35,14 +35,14 @@ Intel compiler variants are available by replacing `-gnu` with `-intel`.
 
 ```bash
 # Build tests first, then run all
-FoBiS.py build -mode tests-gnu
+fobis build --mode tests-gnu
 ./scripts/run_tests.sh
 
 # Run a single test executable
 ./exe/fossil_test_clip
 
 # Full coverage analysis (build debug + run tests + gcov)
-FoBiS.py rule -ex makecoverage
+fobis rule --ex makecoverage
 ```
 
 Test programs output `Are all tests passed? T` on success or `Are all tests passed? F` on failure.
@@ -50,8 +50,8 @@ Test programs output `Are all tests passed? T` on success or `Are all tests pass
 ### Documentation
 
 ```bash
-FoBiS.py rule -ex makedoc   # Requires 'formal' and npm/VitePress
-FoBiS.py rule -ex deldoc    # Delete doc build artifacts
+fobis rule --ex makedoc   # Requires 'formal' and npm/VitePress
+fobis rule --ex deldoc    # Delete doc build artifacts
 ```
 
 ### Alternative builds (via install.sh)
@@ -73,25 +73,59 @@ src/
 
 ### Core object hierarchy
 
-The public API is accessed via `use fossil`, which re-exports three types:
+The public API is accessed via `use fossil`, which re-exports two types plus the named constants:
 
 | Type | Module file | Purpose |
 |------|-------------|---------|
-| `file_stl_object` | `fossil_file_stl_object.f90` | File I/O (open, load, save, close) |
-| `surface_stl_object` | `fossil_surface_stl.f90` | Surface geometry: analysis, manipulation, distance queries |
-| `facet_object` | `fossil_facet_object.f90` | Individual triangular facet with vertices, normal, connectivity |
+| `surface_stl_object` | `fossil_surface_stl.f90` | Surface geometry: I/O, analysis, sanitization, manipulation, distance queries |
+| `facet_object` | `fossil_facet_object.f90` | Individual triangular facet — vertices, normal, connectivity, pseudo-normals |
+
+`fossil.f90` also re-exports:
+
+- `SIGN_PSEUDO_NORMAL` (default), `SIGN_RAY_INTERSECTIONS`, `SIGN_SOLID_ANGLE` — sign algorithms for signed-distance queries.
+- `AABB_TREE_SAH_BVH` (default), `AABB_TREE_OCTREE` — AABB tree kinds.
+- `AABB_AUTO_REFINEMENT` — sentinel for octree depth auto-tuning.
+- `STATUS_OK`, `STATUS_ALLOC_FAIL`, `STATUS_AMBIGUOUS_ARGS`, `STATUS_FILE_NOT_FOUND`, `STATUS_FILE_OPEN_FAIL`, `STATUS_INVALID_INPUT`.
+
+`file_stl_object` was deleted in commit `7ffe7f8` — all I/O is now type-bound on `surface_stl_object` (`load_from_file`, `save_into_file`).
 
 ### Typical usage flow
 
-1. `file_stl%load_from_file(facet=surface%facet, ...)` — reads STL (ASCII or binary, auto-detected)
-2. `surface%analize` — computes bounding box, volume, centroid, connectivity, AABB octree
-3. Manipulate: `surface%clip`, `surface%rotate`, `surface%translate`, `surface%mirror`, `surface%resize`, `surface%merge_solids`, `surface%sanitize_normals`, `surface%connect_nearby_vertices`
-4. Query: `surface%distance`, `surface%is_point_inside`, `surface%compute_mesh_distance`
-5. `file_stl%save_into_file(facet=surface%facet, ...)` — writes result
+```fortran
+type(surface_stl_object) :: surface
+
+call surface%load_from_file(file_name='cube.stl', guess_format=.true.)  ! runs analyze internally
+call surface%sanitize                                                    ! full repair pipeline
+d = surface%distance(point=p, is_signed=.true., is_square_root=.true.)   ! SAH BVH + pseudo-normal
+call surface%save_into_file(file_name='out.stl')
+```
+
+1. `surface%load_from_file(file_name=, guess_format=, ..., aabb_tree_kind=, status=)` — reads STL, runs `analyze` (bounding box, volume, centroid, connectivity, AABB tree, pseudo-normals). Returns `STATUS_INVALID_INPUT` for NaN/Inf coords.
+2. `surface%sanitize` — orchestrator: `remove_degenerate_facets` → (`connect_nearby_vertices` if needed) → `analyze` → `remove_duplicate_facets` → `analyze` → `sanitize_normals`. Emits one stderr warning per defect class.
+3. `surface%analyze(aabb_refinement_levels=, aabb_tree_kind=)` — invoked automatically by load/sanitize/clip. Rebuilds connectivity and the AABB tree. The optional args are passed through to `aabb%initialize`.
+4. Manipulation: `clip`, `rotate`, `translate`, `mirror`, `resize`, `merge_solids`.
+5. Queries: `distance`, `is_point_inside`, plus `compute_distance` (richer form with closest facet/edge/vertex outputs).
+6. Validity predicates: `is_watertight()`, `is_manifold()`, `is_volume()`.
+7. `surface%save_into_file(file_name=, is_ascii=, status=)` — writes result.
+
+The components of `surface_stl_object` are **private**. All reads go through `get_facets_number()`, `get_bmin()`, `get_bmax()`, `get_volume()`, `get_centroid()`, `get_non_manifold_edges_number()`, `get_degenerate_facets_removed()`, `get_duplicate_facets_removed()`, and `facet_at(i)` (pointer-returning, may be `null()` for out-of-range).
 
 ### AABB acceleration
 
-`fossil_aabb_tree_object.f90` implements an **octree** (8-child refinement). It is embedded in `surface_stl_object%aabb` and built during `analize`. Distance and point-in-polyhedron queries use AABB traversal before brute-force per-facet computation.
+`fossil_aabb_tree_object.f90` provides **two tree kinds** behind the same traversal code:
+
+- **`AABB_TREE_SAH_BVH` (default)** — binary BVH built top-down by partitioning *triangles* with the bucketed surface-area heuristic (16 buckets per axis). Adapts to triangle density. On dragon-fine (24k facets, 32³ query grid): ~110× faster than the octree.
+- **`AABB_TREE_OCTREE`** — legacy 8-way space-partitioning octree, kept for benchmarking and as a fallback. Depth is set by `refinement_levels` (or auto-tuned via `AABB_AUTO_REFINEMENT`).
+
+Selection is per-surface via the optional `aabb_tree_kind` argument on `load_from_file`, `adopt_facets`, or `analyze`. Both kinds produce **bit-exact** distance results — best-first traversal with d² pruning never prunes the true closest facet.
+
+### Signed-distance sign algorithm
+
+Set via the optional `sign_algorithm` argument on `distance` / `compute_distance` / `is_point_inside`:
+
+- **`SIGN_PSEUDO_NORMAL` (default)** — Bærentzen–Aanæs angle-weighted pseudo-normal at the closest point. Fused with the distance traversal (no second pass). Requires outward-oriented normals (produced by `sanitize`).
+- `SIGN_RAY_INTERSECTIONS` — axis-aligned ray casts; odd intersections = inside.
+- `SIGN_SOLID_ANGLE` — sum of projected solid angles ≈ ±4π.
 
 ### Third-party submodules (`src/third_party/`)
 

@@ -8,16 +8,16 @@
 [![GitHub tag](https://img.shields.io/github/tag/szaghi/FOSSIL.svg)](https://github.com/szaghi/FOSSIL/releases)
 [![License](https://img.shields.io/badge/license-GPLv3%20%7C%20BSD%20%7C%20MIT-blue.svg)](#copyrights)
 
-| 📂 **ASCII & binary STL**<br>Auto-detect format with `guess_format=.true.` — no manual selection needed | 🔧 **Surface manipulation**<br>Translate, rotate, mirror, resize, clip, and merge STL surfaces | 📐 **Geometry analysis**<br>Volume, centroid, bounding box, connectivity, and disconnected edges | 🔨 **Mesh repair**<br>Sanitize and reverse facet normals; reconnect nearby vertices automatically |
+| 📂 **ASCII & binary STL**<br>Auto-detect format with `guess_format=.true.`; load with on-the-fly clipping; refuse NaN/Inf coordinates via a status code | 🔧 **Surface manipulation**<br>Translate, rotate, mirror, resize, clip, and merge STL surfaces | 📐 **Geometry analysis**<br>Volume, centroid, bounding box, connectivity (symmetric edge-adjacency), and watertight / manifold / volume predicates | 🔨 **Mesh repair**<br>Sanitize normals (outward orientation), drop degenerate slivers and literal duplicates, reconnect nearby vertices, detect non-manifold edges |
 |:---:|:---:|:---:|:---:|
-| 📏 **Distance & inside queries**<br>Signed distance and point-in-polyhedron via solid angle or ray intersection | ⚡ **AABB octree**<br>Up to 7× faster distance queries over brute force using an 8-child octree | 🏗️ **OOP/TDD designed**<br>Three types (`file_stl_object`, `surface_stl_object`, `facet_object`), all functionality as type-bound procedures | 🖥️ **fossilizer CLI**<br>Companion command-line app for interactive STL analysis and manipulation |
+| 📏 **Signed-distance queries**<br>Bit-exact closest facet via best-first AABB traversal with d² pruning. Sign via Bærentzen–Aanæs pseudo-normal (default), ray intersection, or solid angle | ⚡ **SAH BVH (default)**<br>Binary BVH partitioning triangles with the surface-area heuristic — ~100× faster than the legacy octree on dragon-scale meshes; both kinds remain selectable | 🏗️ **OOP/TDD designed**<br>Two public types (`surface_stl_object`, `facet_object`), all functionality as type-bound procedures, every public operation under test | 🖥️ **fossilizer CLI**<br>Companion command-line app for interactive STL analysis and manipulation |
 
 >#### [Documentation](https://szaghi.github.io/FOSSIL/)
 > For full documentation (guide, API reference, examples, etc...) see the [FOSSIL website](https://szaghi.github.io/FOSSIL/).
 
 | ![dragon](docs/pictures/dragon.jpg) | ![cube](docs/pictures/disconnected-cube.png) |
 |:---:|:---:|
-| *the dragon STL test (`src/tests/dragon.stl`) is composed by 6588 triangular facets. The signed distance computation on a uniform grid of 64³ is accelerated by a factor of 7× using AABB algorithm with respect the simple brute force.* | *automatic repair of disconnected edges.* |
+| *the dragon STL test (`src/tests/dragon.stl`) has 6588 triangular facets. With the default SAH BVH and the pseudo-normal sign algorithm, signed-distance queries on a 16³ grid run in ~0.022 s vs ~0.987 s on the legacy octree — about a 45× speedup at this size, growing past 100× on larger meshes. Bit-exact correctness vs brute force is asserted by the regression suite.* | *automatic repair of disconnected edges.* |
 
 ---
 
@@ -43,20 +43,25 @@ This project is distributed under a multi-licensing system:
 ```fortran
 use fossil
 use penf, only: R8P
+use vecfor, only: ex_R8P
 implicit none
-type(file_stl_object)    :: file_stl
 type(surface_stl_object) :: surface
+real(R8P)                :: d
 
-call file_stl%load_from_file(facet=surface%facet, file_name='cube.stl', guess_format=.true.)
-call surface%analize
+! Load (ASCII or binary, auto-detected) and run the full repair pipeline.
+call surface%load_from_file(file_name='cube.stl', guess_format=.true.)
+call surface%sanitize           ! degenerate / duplicate / non-manifold / winding
 print '(A)', surface%statistics()
 
-call surface%sanitize_normals
+! Signed distance from a point — uses SAH BVH + pseudo-normal sign by default.
+d = surface%distance(point=2.0_R8P * ex_R8P, is_signed=.true., is_square_root=.true.)
+print '(A,ES12.5)', 'signed distance = ', d
+
 call surface%translate(x=1.0_R8P, y=2.0_R8P, z=0.5_R8P)
-call file_stl%save_into_file(facet=surface%facet, file_name='cube-moved.stl')
+call surface%save_into_file(file_name='cube-moved.stl')
 ```
 
-See [`src/tests/`](src/tests/) for more examples including clipping, distance queries, and point-in-polyhedron tests.
+See [`src/tests/`](src/tests/) for more examples including clipping, distance queries, and validity predicates (`is_watertight`, `is_manifold`, `is_volume`).
 
 ---
 
@@ -68,8 +73,8 @@ See [`src/tests/`](src/tests/) for more examples including clipping, distance qu
 
 ```bash
 git clone https://github.com/szaghi/FOSSIL --recursive && cd FOSSIL
-FoBiS.py build -mode static-gnu   # build static library
-FoBiS.py build -mode tests-gnu && ./scripts/run_tests.sh  # build and run tests
+fobis build --mode static-gnu   # build static library
+fobis build --mode tests-gnu && ./scripts/run_tests.sh  # build and run tests
 ```
 
 **As a project dependency** — declare FOSSIL in your `fobos` and run `fetch`:
@@ -81,8 +86,8 @@ FOSSIL = https://github.com/szaghi/FOSSIL
 ```
 
 ```bash
-FoBiS.py fetch           # fetch and build
-FoBiS.py fetch --update  # re-fetch and rebuild
+fobis fetch              # fetch and build
+fobis fetch --update     # re-fetch and rebuild
 ```
 
 ### CMake
