@@ -17,11 +17,22 @@ public :: aabb_node_object
 
 type :: aabb_node_object
    !< FOSSIL Axis-Aligned Bounding Box (AABB) tree-node class.
+   !<
+   !< Stores both the AABB payload and the child links used by the SAH BVH path.
+   !< The octree path leaves the child links at zero and instead uses implicit
+   !< parent/child indexing (`first_child_node = TREE_RATIO * parent + 1`), so the
+   !< two trees share the same node type without conflict. A BVH leaf has
+   !< `left_child = right_child = 0`; an internal node has both non-zero.
    private
-   type(aabb_object), allocatable :: aabb !< AABB data.
+   type(aabb_object), allocatable :: aabb           !< AABB data.
+   integer(I4P)                   :: left_child=0   !< BVH left child node index into the tree's node array; 0 = leaf.
+   integer(I4P)                   :: right_child=0  !< BVH right child node index into the tree's node array; 0 = leaf.
    contains
       ! public methods
       procedure, pass(self) :: add_facets                  !< Add facets to AABB.
+      procedure, pass(self) :: get_left_child              !< Return left_child (BVH); 0 if leaf or octree.
+      procedure, pass(self) :: get_right_child             !< Return right_child (BVH); 0 if leaf or octree.
+      procedure, pass(self) :: set_children                !< Set (left_child, right_child) — BVH builder.
       procedure, pass(self) :: bmin                        !< Return AABB bmin.
       procedure, pass(self) :: bmax                        !< Return AABB bmax.
       procedure, pass(self) :: closest_point               !< Return closest point on AABB from point reference.
@@ -70,6 +81,34 @@ contains
    if (allocated(self%aabb)) bmin = self%aabb%bmin
    endfunction bmin
 
+   pure function get_left_child(self) result(idx)
+   !< Return the BVH left-child node index. 0 means leaf (or octree node, which
+   !< ignores these fields entirely and uses implicit indexing).
+   class(aabb_node_object), intent(in) :: self !< AABB node.
+   integer(I4P)                        :: idx  !< Left-child index into the tree's node array.
+
+   idx = self%left_child
+   endfunction get_left_child
+
+   pure function get_right_child(self) result(idx)
+   !< Return the BVH right-child node index. 0 means leaf (or octree node).
+   class(aabb_node_object), intent(in) :: self !< AABB node.
+   integer(I4P)                        :: idx  !< Right-child index into the tree's node array.
+
+   idx = self%right_child
+   endfunction get_right_child
+
+   pure subroutine set_children(self, left_child, right_child)
+   !< Set both child links in one call. Used by the BVH builder; the octree
+   !< path never invokes this.
+   class(aabb_node_object), intent(inout) :: self        !< AABB node.
+   integer(I4P),            intent(in)    :: left_child  !< Left-child node index (0 = leaf).
+   integer(I4P),            intent(in)    :: right_child !< Right-child node index (0 = leaf).
+
+   self%left_child  = left_child
+   self%right_child = right_child
+   endsubroutine set_children
+
    pure function bmax(self)
    !< Return AABB bmax.
    class(aabb_node_object), intent(in) :: self !< AABB box.
@@ -113,12 +152,13 @@ contains
    elemental subroutine destroy(self)
    !< Destroy AABB.
    class(aabb_node_object), intent(inout) :: self  !< AABB.
-   type(aabb_node_object)                 :: fresh !< Fresh instance of AABB.
 
    if (allocated(self%aabb)) then
       call self%aabb%destroy
       deallocate(self%aabb)
    endif
+   self%left_child  = 0_I4P
+   self%right_child = 0_I4P
    endsubroutine destroy
 
    pure function distance(self, point)
@@ -291,5 +331,7 @@ contains
       allocate(lhs%aabb)
       lhs%aabb = rhs%aabb
    endif
+   lhs%left_child  = rhs%left_child
+   lhs%right_child = rhs%right_child
    endsubroutine aabb_node_assign_aabb_node
 endmodule fossil_aabb_node_object

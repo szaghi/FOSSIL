@@ -19,6 +19,7 @@ private
 public :: aabb_tree_object
 public :: AABB_USE_INDEX, AABB_USE_BRUTE_FORCE
 public :: AABB_AUTO_REFINEMENT
+public :: AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 
 integer(I4P), parameter :: TREE_RATIO=8 !< Tree refinement ratio, it is assumed to be an **octree**.
 
@@ -27,8 +28,18 @@ integer(I4P), parameter :: TREE_RATIO=8 !< Tree refinement ratio, it is assumed 
 logical, parameter :: AABB_USE_INDEX       = .true.  !< Use the AABB octree for queries.
 logical, parameter :: AABB_USE_BRUTE_FORCE = .false. !< Force brute-force scan over all facets.
 
+! Tree-kind selector. The default `AABB_TREE_OCTREE` preserves the historical
+! behaviour: an 8-way space-partitioning octree built to a uniform depth (auto-
+! tuned via `refinement_levels` / `AABB_AUTO_REFINEMENT`). `AABB_TREE_SAH_BVH`
+! selects a binary BVH built by triangle-partition with the surface-area
+! heuristic — adapts to triangle density rather than spatial uniformity, which
+! the empirical sweep showed is the actual ceiling on FOSSIL distance queries.
+integer(I4P), parameter :: AABB_TREE_OCTREE  = 0_I4P
+integer(I4P), parameter :: AABB_TREE_SAH_BVH = 1_I4P
+
 ! Sentinel for auto-tuned refinement: pass this where an explicit depth would go,
 ! and `initialize` picks the depth from the facet count via `auto_refinement_levels`.
+! Only meaningful for the octree path; the SAH BVH self-tunes depth from cost.
 integer(I4P), parameter :: AABB_AUTO_REFINEMENT = -1_I4P
 ! Heuristic parameters (private; the literature suggests 16-32 facets per leaf is
 ! a broad sweet spot for triangle-mesh BVHs, and FOSSIL's flat empirical curve
@@ -85,19 +96,22 @@ type :: aabb_tree_object
    !>  +----+----+             +------->x(i)
    !<```
    private
-   integer(I4P)                        :: refinement_levels=AABB_AUTO_REFINEMENT !< Total number of refinement levels used (AABB_AUTO_REFINEMENT = auto-tune).
+   integer(I4P)                        :: tree_kind=AABB_TREE_OCTREE             !< Selects between the historical octree and the SAH BVH.
+   integer(I4P)                        :: refinement_levels=AABB_AUTO_REFINEMENT !< Octree depth (AABB_AUTO_REFINEMENT = auto-tune); unused by SAH BVH.
    integer(I4P)                        :: nodes_number=0         !< Total number of tree nodes.
    type(aabb_node_object), allocatable :: node(:)                !< AABB tree nodes [0:nodes_number-1].
    logical                             :: is_initialized=.false. !< Sentinel to check is AABB tree is initialized.
-   logical                             :: use_index=.true.       !< Dispatch knob: .true.=use octree, .false.=brute-force scan.
+   logical                             :: use_index=.true.       !< Dispatch knob: .true.=use index tree, .false.=brute-force scan.
    contains
       ! read-only accessors (pure, inlined at -O2, zero data copy)
       procedure, pass(self) :: get_refinement_levels !< Return refinement_levels.
+      procedure, pass(self) :: get_tree_kind         !< Return tree_kind (octree vs SAH BVH).
       procedure, pass(self) :: get_nodes_number      !< Return nodes_number.
       procedure, pass(self) :: get_is_initialized    !< Return is_initialized.
       procedure, pass(self) :: get_use_index         !< Return use_index dispatch knob.
       ! mutators
       procedure, pass(self) :: set_refinement_levels !< Set refinement_levels (resets initialization).
+      procedure, pass(self) :: set_tree_kind         !< Set tree_kind (resets initialization).
       procedure, pass(self) :: set_use_index         !< Set use_index dispatch knob.
       ! public methods
       procedure, pass(self) :: compute_vertices_nearby     !< Compute vertices nearby.
@@ -163,6 +177,14 @@ contains
    n = self%refinement_levels
    endfunction get_refinement_levels
 
+   pure function get_tree_kind(self) result(kind)
+   !< Return tree_kind (`AABB_TREE_OCTREE` or `AABB_TREE_SAH_BVH`).
+   class(aabb_tree_object), intent(in) :: self !< AABB tree.
+   integer(I4P)                        :: kind !< Tree-kind selector.
+
+   kind = self%tree_kind
+   endfunction get_tree_kind
+
    pure function get_nodes_number(self) result(n)
    !< Return nodes_number.
    class(aabb_tree_object), intent(in) :: self !< AABB tree.
@@ -199,6 +221,21 @@ contains
    self%refinement_levels = refinement_levels
    self%is_initialized    = .false.
    endsubroutine set_refinement_levels
+
+   elemental subroutine set_tree_kind(self, tree_kind)
+   !< Set the tree_kind selector. Like `set_refinement_levels`, this invalidates any existing
+   !< build state; the caller must `initialize` afterwards. Out-of-range values raise `error stop`.
+   class(aabb_tree_object), intent(inout) :: self      !< AABB tree.
+   integer(I4P),            intent(in)    :: tree_kind !< `AABB_TREE_OCTREE` or `AABB_TREE_SAH_BVH`.
+
+   select case (tree_kind)
+   case (AABB_TREE_OCTREE, AABB_TREE_SAH_BVH)
+      self%tree_kind = tree_kind
+   case default
+      error stop 'aabb_tree_object%set_tree_kind: unknown tree_kind (valid: AABB_TREE_OCTREE=0, AABB_TREE_SAH_BVH=1)'
+   end select
+   self%is_initialized = .false.
+   endsubroutine set_tree_kind
 
    elemental subroutine set_use_index(self, use_index)
    !< Set use_index dispatch knob.
@@ -449,11 +486,12 @@ contains
    endif
    endfunction has_children
 
-   pure subroutine initialize(self, refinement_levels, facet, largest_edge_len, bmin, bmax, do_facets_distribute, is_exclusive, &
-                              do_update_extents)
+   pure subroutine initialize(self, refinement_levels, tree_kind, facet, largest_edge_len, bmin, bmax, do_facets_distribute, &
+                              is_exclusive, do_update_extents)
    !< Initialize AABB tree.
    class(aabb_tree_object), intent(inout)        :: self                  !< AABB tree.
    integer(I4P),            intent(in), optional :: refinement_levels     !< AABB refinement levels.
+   integer(I4P),            intent(in), optional :: tree_kind             !< AABB_TREE_OCTREE (default) or AABB_TREE_SAH_BVH.
    type(facet_object),      intent(in), optional :: facet(:)              !< Facets list.
    real(R8P),               intent(in), optional :: largest_edge_len      !< Largest edge lenght.
    type(vector_R8P),        intent(in), optional :: bmin                  !< Minimum point of AABB.
@@ -462,6 +500,7 @@ contains
    logical,                 intent(in), optional :: is_exclusive          !< Sentinel to enable/disable exclusive addition.
    logical,                 intent(in), optional :: do_update_extents     !< Sentinel to enable/disable AABB extents update.
    integer(I4P)                                  :: refinement_levels_    !< AABB refinement levels, local variable.
+   integer(I4P)                                  :: tree_kind_            !< AABB tree kind, local variable.
    logical                                       :: do_facets_distribute_ !< Sentinel to enable/dis. facets distribution, local var.
    integer(I4P)                                  :: level                 !< Counter.
    integer(I4P)                                  :: b, bb, bbb, bbbb      !< Counter.
@@ -469,8 +508,10 @@ contains
    type(aabb_object)                             :: octant(8)             !< AABB octants.
 
    refinement_levels_ = self%refinement_levels
+   tree_kind_         = self%tree_kind
    call self%destroy
    self%refinement_levels = refinement_levels_ ; if (present(refinement_levels)) self%refinement_levels = refinement_levels
+   self%tree_kind         = tree_kind_         ; if (present(tree_kind))         self%tree_kind         = tree_kind
    do_facets_distribute_ = .true. ; if (present(do_facets_distribute)) do_facets_distribute_ = do_facets_distribute
 
    ! Resolve the AABB_AUTO_REFINEMENT sentinel into a concrete depth. Auto-tune
@@ -637,8 +678,9 @@ contains
       enddo
       deallocate(lhs%node)
    endif
+   lhs%tree_kind         = rhs%tree_kind
    lhs%refinement_levels = rhs%refinement_levels
-   lhs%nodes_number = rhs%nodes_number
+   lhs%nodes_number      = rhs%nodes_number
    if (allocated(rhs%node)) then
       allocate(lhs%node(0:lhs%nodes_number-1))
       do b=0, lhs%nodes_number-1

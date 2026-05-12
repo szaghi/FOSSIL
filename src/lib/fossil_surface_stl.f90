@@ -325,7 +325,7 @@ contains
 
    ! ownership transfer
 
-   subroutine adopt_facets(self, facets, aabb_refinement_levels)
+   subroutine adopt_facets(self, facets, aabb_refinement_levels, aabb_tree_kind)
    !< Take ownership of an allocatable facet array via `move_alloc`, then `analyze`.
    !<
    !< The caller's `facets(:)` becomes unallocated on return — this is a zero-copy
@@ -334,6 +334,7 @@ contains
    class(surface_stl_object),       intent(inout)        :: self                   !< File STL.
    type(facet_object), allocatable, intent(inout)        :: facets(:)              !< Facets to adopt.
    integer(I4P),                    intent(in), optional :: aabb_refinement_levels !< AABB refinement levels.
+   integer(I4P),                    intent(in), optional :: aabb_tree_kind         !< AABB_TREE_OCTREE or AABB_TREE_SAH_BVH.
 
    if (allocated(self%facet)) deallocate(self%facet)
    if (allocated(facets)) then
@@ -342,7 +343,7 @@ contains
    else
       self%facets_number = 0
    endif
-   call self%analyze(aabb_refinement_levels=aabb_refinement_levels)
+   call self%analyze(aabb_refinement_levels=aabb_refinement_levels, aabb_tree_kind=aabb_tree_kind)
    endsubroutine adopt_facets
 
    ! public methods
@@ -364,15 +365,17 @@ contains
    endsubroutine allocate_facets
 
    ! elemental subroutine analyze(self, aabb_refinement_levels)
-   subroutine analyze(self, aabb_refinement_levels, status)
+   subroutine analyze(self, aabb_refinement_levels, aabb_tree_kind, status)
    !< Analize STL.
    !<
    !< Buil connectivity, compute metrix, compute volume.
    class(surface_stl_object), intent(inout)        :: self                   !< File STL.
    integer(I4P),              intent(in), optional :: aabb_refinement_levels !< AABB refinement levels.
+   integer(I4P),              intent(in), optional :: aabb_tree_kind         !< AABB_TREE_OCTREE or AABB_TREE_SAH_BVH.
    integer(I4P),              intent(out), optional :: status                !< 0=success (reserved for future use).
 
    if (present(status)) status = STATUS_OK
+   if (present(aabb_tree_kind)) call self%aabb%set_tree_kind(aabb_tree_kind)
    self%facets_number = 0
    if (allocated(self%facet)) self%facets_number = size(self%facet, dim=1)
    if (self%facets_number>0) then
@@ -659,8 +662,10 @@ contains
          enddo
          call move_alloc(from=facet, to=self%facet)
          self%facets_number = facets_in_number
-         call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
-         if (present(remainder)) call remainder%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
+         call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels(), &
+                           aabb_tree_kind=self%aabb%get_tree_kind())
+         if (present(remainder)) call remainder%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels(), &
+                                                        aabb_tree_kind=self%aabb%get_tree_kind())
       endif
    endif
    endsubroutine clip
@@ -1774,7 +1779,8 @@ contains
    ! intermediate file handle to manage. Internally the routines use a local `file_unit`
    ! variable; format-mode (ASCII vs binary) is a local flag, not stored state.
 
-   subroutine load_from_file(self, file_name, is_ascii, guess_format, clip_min, clip_max, aabb_refinement_levels, status)
+   subroutine load_from_file(self, file_name, is_ascii, guess_format, clip_min, clip_max, &
+                             aabb_refinement_levels, aabb_tree_kind, status)
    !< Load an STL file into the surface.
    !<
    !< Builds a local facet array, then transfers ownership via `adopt_facets` (which
@@ -1788,6 +1794,7 @@ contains
    logical,                         intent(in), optional :: guess_format           !< Auto-detect format from file size.
    type(vector_R8P),                intent(in), optional :: clip_min, clip_max     !< AABB clip extents (facets inside only).
    integer(I4P),                    intent(in), optional :: aabb_refinement_levels !< AABB refinement levels passed to analyze.
+   integer(I4P),                    intent(in), optional :: aabb_tree_kind         !< AABB_TREE_OCTREE or AABB_TREE_SAH_BVH.
    integer(I4P),                    intent(out), optional :: status                !< 0=success, 1=alloc failure, 3=file not found.
    type(facet_object), allocatable                       :: facets(:)              !< Local buffer for ownership transfer.
    integer(I4P)                                          :: file_unit              !< File unit.
@@ -1878,7 +1885,7 @@ contains
       enddo
    endif
 
-   call self%adopt_facets(facets=facets, aabb_refinement_levels=aabb_refinement_levels)
+   call self%adopt_facets(facets=facets, aabb_refinement_levels=aabb_refinement_levels, aabb_tree_kind=aabb_tree_kind)
    endsubroutine load_from_file
 
    subroutine save_into_file(self, file_name, is_ascii, status)

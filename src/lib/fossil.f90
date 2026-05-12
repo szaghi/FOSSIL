@@ -3,7 +3,7 @@
 module fossil
 !< FOSSIL, FOrtran Stereo (si) Litography parser.
 
-use fossil_aabb_tree_object, only : AABB_AUTO_REFINEMENT
+use fossil_aabb_tree_object, only : AABB_AUTO_REFINEMENT, AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 use fossil_facet_object
 use fossil_surface_stl_object
 
@@ -16,4 +16,5 @@ public :: sign_algorithm_from_string
 public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL
 public :: STATUS_INVALID_INPUT
 public :: AABB_AUTO_REFINEMENT
+public :: AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 endmodule fossil
