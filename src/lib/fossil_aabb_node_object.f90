@@ -150,16 +150,13 @@ contains
    call self%aabb%compute_octants(octant=octant)
    endsubroutine compute_octants
 
-   pure subroutine compute_vertices_nearby(self, facet, tolerance_to_be_identical, tolerance_to_be_nearby)
-   !< Compute vertices nearby.
-   class(aabb_node_object), intent(in)    :: self                      !< AABB.
-   type(facet_object),      intent(inout) :: facet(:)                  !< Facets list.
-   real(R8P),               intent(in)    :: tolerance_to_be_identical !< Tolerance to identify identical vertices.
-   real(R8P),               intent(in)    :: tolerance_to_be_nearby    !< Tolerance to identify nearby vertices.
+   pure subroutine compute_vertices_nearby(self, facet, tolerance_to_be_nearby)
+   !< Compute vertices nearby (loose tolerance only; see facet variant).
+   class(aabb_node_object), intent(in)    :: self                   !< AABB.
+   type(facet_object),      intent(inout) :: facet(:)               !< Facets list.
+   real(R8P),               intent(in)    :: tolerance_to_be_nearby !< Tolerance to identify nearby vertices.
 
-   if (allocated(self%aabb)) call self%aabb%compute_vertices_nearby(facet=facet,                                         &
-                                                                    tolerance_to_be_identical=tolerance_to_be_identical, &
-                                                                    tolerance_to_be_nearby=tolerance_to_be_nearby)
+   if (allocated(self%aabb)) call self%aabb%compute_vertices_nearby(facet=facet, tolerance_to_be_nearby=tolerance_to_be_nearby)
    endsubroutine compute_vertices_nearby
 
    elemental subroutine destroy(self)

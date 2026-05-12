@@ -398,19 +398,27 @@ contains
       call self%set_facets_id
       call self%compute_metrix
       call self%aabb%initialize(refinement_levels=aabb_refinement_levels, facet=self%facet,largest_edge_len=self%largest_edge_len())
-      call self%build_connectivity
       call self%vertex_pool%initialize_from_facets(facet=self%facet)
-      call self%compute_facets_disconnected
-      call self%compute_volume
-      call self%compute_centroid
-      ! Pseudo-normals require self%normal, fcon_edge, and vertex_occurrence —
-      ! all set above. Used by SIGN_PSEUDO_NORMAL distance queries; deferring
-      ! until requested would require analyze to be called twice in practice,
-      ! so compute up-front. Cost is one pass over the facet array.
       block
          integer(I4P) :: ff
          do ff = 1, self%facets_number
-            call self%facet(ff)%compute_pseudo_normals(facet=self%facet)
+            call self%facet(ff)%set_vertex_ids(vid1=self%vertex_pool%facet_vid(ff, 1_I4P), &
+                                               vid2=self%vertex_pool%facet_vid(ff, 2_I4P), &
+                                               vid3=self%vertex_pool%facet_vid(ff, 3_I4P))
+         enddo
+      end block
+      call self%build_connectivity
+      call self%compute_facets_disconnected
+      call self%compute_volume
+      call self%compute_centroid
+      ! Pseudo-normals require self%normal, fcon_edge, and the pool's inverted
+      ! index for incident-facet enumeration. Used by SIGN_PSEUDO_NORMAL distance
+      ! queries; deferring until requested would require analyze to be called twice
+      ! in practice, so compute up-front. Cost is one pass over the facet array.
+      block
+         integer(I4P) :: ff
+         do ff = 1, self%facets_number
+            call compute_pseudo_normals_via_pool(self%facet(ff), self%facet, self%vertex_pool)
          enddo
       end block
    endif
@@ -422,12 +430,11 @@ contains
    !<
    !< Outline:
    !<   1. `compute_vertices_nearby` populates each facet's `vertex_nearby` (loose
-   !<      tolerance, used by `connect_nearby_vertices`) and `vertex_occurrence`
-   !<      (strict EPS tolerance, used by `compute_pseudo_normals`).
-   !<   2. Build canonical integer vertex IDs by union-find: for every facet pair
-   !<      (f1, v1)/(f2, v2) reported as strictly-coincident via vertex_occurrence,
-   !<      union their global vertex IDs (gid = (f-1)*3 + v). The union-find root
-   !<      becomes the canonical vertex id, equal for every coincident occurrence.
+   !<      tolerance, used by `connect_nearby_vertices`). Strict-EPS coincidence is
+   !<      now owned by `vertex_pool_object` (issue #5 stage 3c).
+   !<   2. Read canonical vertex IDs from `self%vertex_pool` (issue #5 stage 2).
+   !<      The pool was built earlier in `analyze` and assigns the same integer id
+   !<      to every (facet, local_v) whose coordinates are EPS-coincident.
    !<   3. Build a half-edge list `(vmin, vmax, facet, local_edge)` with one entry
    !<      per (facet, edge); sort by (vmin, vmax) packed into a single I8P key.
    !<   4. Linear scan: groups of identical (vmin, vmax) classify each edge:
@@ -443,19 +450,16 @@ contains
    class(surface_stl_object), intent(inout) :: self                       !< Surface STL.
    real(R8P)                                :: smallest_edge_len          !< Smallest edge length.
    type(aabb_tree_object)                   :: aabb                       !< Temporary AABB tree.
-   integer(I4P), allocatable                :: parent(:), rank_(:)        !< Union-find arrays over global vertex IDs.
-   integer(I4P), allocatable                :: canon(:)                   !< Canonical vertex ID per (facet, local_v).
+   integer(I4P), allocatable                :: canon(:)                   !< Canonical vertex ID per (facet, local_v), from the pool.
    integer(I8P), allocatable                :: edge_key(:)                !< Packed (vmin, vmax) sort key per half-edge.
    integer(I4P), allocatable                :: edge_facet(:), edge_local(:) !< Half-edge owners.
    integer(I4P), allocatable                :: edge_order(:)              !< Sort permutation.
-   integer(I4P)                             :: nv_total                   !< Global vertex count = 3 * facets_number.
+   integer(I4P)                             :: nv_total                   !< Pool size (number of unique vertices).
    integer(I4P)                             :: ne_total                   !< Half-edge count = 3 * facets_number.
    integer(I4P)                             :: f1, f2                     !< Facet counters.
-   integer(I4P)                             :: v1, v2                     !< Local vertex indices.
-   integer(I4P)                             :: gid                        !< Global vertex id.
+   integer(I4P)                             :: v1                         !< Local vertex index.
    integer(I4P)                             :: e, k, j, run_start, run_end !< Counters.
    integer(I4P)                             :: f_a, e_a, f_b, e_b         !< Pair facet/edge endpoints.
-   integer(I4P)                             :: o                          !< Occurrence index in vertex_occurrence list.
 
    self%non_manifold_edges_number = 0
    if (self%facets_number <= 0) return
@@ -463,7 +467,7 @@ contains
    call self%facet%destroy_connectivity
    smallest_edge_len = self%smallest_edge_len() * 0.9_R8P
 
-   ! Step 1: populate vertex_nearby / vertex_occurrence. Same machinery as before.
+   ! Step 1: populate vertex_nearby (loose tolerance). Strict-EPS coincidence now lives in vertex_pool_object.
    ! The temporary `aabb` is used purely to accelerate the all-pairs vertex-nearby
    ! search via `compute_vertices_nearby`, which is octree-specific (it relies on
    ! `distribute_facets` and the level-based traversal in compute_vertices_nearby).
@@ -472,45 +476,24 @@ contains
       call aabb%initialize(facet=self%facet, refinement_levels=self%aabb%get_refinement_levels(), &
                            tree_kind=AABB_TREE_OCTREE, do_facets_distribute=.false.)
       call aabb%distribute_facets(facet=self%facet, is_exclusive=.false., do_update_extents=.false.)
-      call aabb%compute_vertices_nearby(facet=self%facet,              &
-                                        tolerance_to_be_identical=EPS, &
-                                        tolerance_to_be_nearby=smallest_edge_len)
+      call aabb%compute_vertices_nearby(facet=self%facet, tolerance_to_be_nearby=smallest_edge_len)
    else
       do f1 = 1, self%facets_number - 1
          do f2 = f1 + 1, self%facets_number
-            call self%facet(f1)%compute_vertices_nearby(other=self%facet(f2),          &
-                                                        tolerance_to_be_identical=EPS, &
-                                                        tolerance_to_be_nearby=smallest_edge_len)
+            call self%facet(f1)%compute_vertices_nearby(other=self%facet(f2), tolerance_to_be_nearby=smallest_edge_len)
          enddo
       enddo
    endif
 
-   ! Step 2: canonical vertex IDs via union-find.
-   nv_total = 3 * self%facets_number
-   allocate(parent(nv_total), rank_(nv_total), canon(nv_total))
-   do gid = 1, nv_total
-      parent(gid) = gid
-      rank_(gid)  = 0
-   enddo
-   ! For each (f1, v1), its vertex_occurrence holds facet IDs of strictly-coincident
-   ! occurrences. Find the matching local vertex on each by EPS comparison, then union.
+   ! Step 2: canonical vertex IDs from the pool (issue #5 stage 2). The pool is
+   ! built earlier in `analyze` and already encodes EPS coincidence; reading it
+   ! replaces the per-call union-find pass.
+   nv_total = self%vertex_pool%vertex_count()
+   allocate(canon(3 * self%facets_number))
    do f1 = 1, self%facets_number
       do v1 = 1, 3
-         do o = 1, self%facet(f1)%vertex_occurrence(v1)%ids_number
-            f2 = self%facet(f1)%vertex_occurrence(v1)%id(o)
-            if (f2 <= 0 .or. f2 > self%facets_number) cycle
-            do v2 = 1, 3
-               if (vertices_match(self%facet(f1)%vertex(v1), self%facet(f2)%vertex(v2), EPS)) then
-                  call uf_union((f1 - 1) * 3 + v1, (f2 - 1) * 3 + v2, parent, rank_)
-                  exit  ! one matching local vertex per (f2)
-               endif
-            enddo
-         enddo
+         canon((f1 - 1) * 3 + v1) = self%vertex_pool%facet_vid(f1, v1)
       enddo
-   enddo
-   ! Collapse each (facet, local_v) to its component root — the canonical vertex id.
-   do gid = 1, nv_total
-      canon(gid) = uf_find(gid, parent)
    enddo
 
    ! Step 3: build the half-edge list. Edge e of facet f connects local vertices
@@ -558,17 +541,8 @@ contains
       end select
    enddo
 
-   deallocate(parent, rank_, canon, edge_key, edge_facet, edge_local, edge_order)
+   deallocate(canon, edge_key, edge_facet, edge_local, edge_order)
    contains
-
-      pure function vertices_match(a, b, tol) result(yes)
-      !< EPS-coincidence test on two vertex coordinates (replicates the strict-equality
-      !< condition used by compute_vertices_nearby when populating vertex_occurrence).
-      type(vector_R8P), intent(in) :: a, b
-      real(R8P),        intent(in) :: tol
-      logical                      :: yes
-      yes = (abs(a%x - b%x) <= tol) .and. (abs(a%y - b%y) <= tol) .and. (abs(a%z - b%z) <= tol)
-      endfunction vertices_match
 
       pure function pack_edge_key(va, vb, n) result(key)
       !< Pack (min, max) of two canonical vertex IDs into a single 64-bit key so the
@@ -1033,7 +1007,7 @@ contains
    self%facets_number = kept_n
    self%degenerate_facets_removed = removed
 
-   ! Stale state on survivors: their vertex_nearby / vertex_occurrence lists
+   ! Stale state on survivors: their vertex_nearby lists
    ! and fcon_edge values reference facet ids / global vertex ids from the
    ! pre-compaction layout. Clear them so a subsequent `analyze` rebuilds
    ! cleanly. Without this, downstream code (e.g. connect_nearby_vertices)
@@ -1047,7 +1021,7 @@ contains
    !< Drop facets that duplicate another facet up to vertex permutation (any winding).
    !<
    !< Algorithm (identical pattern to `build_connectivity` edge-pairing):
-   !<   1. Canonicalize vertex IDs via union-find on `vertex_occurrence` so that
+   !<   1. Canonicalize vertex IDs via the surface vertex pool so that
    !<      coincident vertices receive the same integer label.
    !<   2. For each facet, build a sorted canonical-ID triple (v_lo, v_mid, v_hi)
    !<      packed as a single I8P key. Sorting before packing makes the key
@@ -1060,46 +1034,27 @@ contains
    !< always produce reversed-orientation duplicate triangles, never intentional
    !< thin shells. To preserve thin shells, write a separate strict variant.
    !<
-   !< Requires `vertex_occurrence` to be populated — call `analyze` first.
+   !< Requires the vertex pool to be populated — call `analyze` first.
    class(surface_stl_object), intent(inout) :: self            !< Surface STL.
    type(facet_object), allocatable          :: kept(:)         !< Compacted facet array.
-   integer(I4P), allocatable                :: parent(:), rank_(:) !< Union-find arrays.
-   integer(I4P), allocatable                :: canon(:)        !< Canonical vertex ID per (facet, local_v).
+   integer(I4P), allocatable                :: canon(:)        !< Canonical vertex ID per (facet, local_v), from the pool.
    integer(I8P), allocatable                :: key(:)          !< Packed sorted-triple sort key per facet.
    integer(I4P), allocatable                :: order(:)        !< Sort permutation.
    logical,      allocatable                :: keep_mask(:)    !< Survivor mask per original facet.
-   integer(I4P)                             :: nv_total
-   integer(I4P)                             :: f1, f2, v1, v2, o
-   integer(I4P)                             :: gid, kept_n, removed, i
+   integer(I4P)                             :: f1, v1
+   integer(I4P)                             :: kept_n, removed, i
    integer(I4P)                             :: a, b, c, lo, mid, hi, tmp
 
    self%duplicate_facets_removed = 0
    if (self%facets_number <= 1) return
 
-   ! Step 1: canonical vertex IDs via union-find over vertex_occurrence (same idea
-   ! as build_connectivity, just replicated locally).
-   nv_total = 3 * self%facets_number
-   allocate(parent(nv_total), rank_(nv_total), canon(nv_total))
-   do gid = 1, nv_total
-      parent(gid) = gid
-      rank_(gid)  = 0
-   enddo
+   ! Step 1: canonical vertex IDs from the pool (issue #5 stage 2). The pool is
+   ! built by analyze() and assigns the same id to every EPS-coincident vertex.
+   allocate(canon(3 * self%facets_number))
    do f1 = 1, self%facets_number
       do v1 = 1, 3
-         do o = 1, self%facet(f1)%vertex_occurrence(v1)%ids_number
-            f2 = self%facet(f1)%vertex_occurrence(v1)%id(o)
-            if (f2 <= 0 .or. f2 > self%facets_number) cycle
-            do v2 = 1, 3
-               if (vertices_match(self%facet(f1)%vertex(v1), self%facet(f2)%vertex(v2), EPS)) then
-                  call uf_union((f1 - 1) * 3 + v1, (f2 - 1) * 3 + v2, parent, rank_)
-                  exit
-               endif
-            enddo
-         enddo
+         canon((f1 - 1) * 3 + v1) = self%vertex_pool%facet_vid(f1, v1)
       enddo
-   enddo
-   do gid = 1, nv_total
-      canon(gid) = uf_find(gid, parent)
    enddo
 
    ! Step 2: build sorted-triple key per facet.
@@ -1133,7 +1088,7 @@ contains
    kept_n = count(keep_mask)
    removed = self%facets_number - kept_n
    if (removed == 0) then
-      deallocate(parent, rank_, canon, key, order, keep_mask)
+      deallocate(canon, key, order, keep_mask)
       return
    endif
 
@@ -1151,18 +1106,11 @@ contains
    self%duplicate_facets_removed = removed
 
    ! Stale connectivity on survivors: id remapping invalidates fcon_edge and
-   ! vertex_occurrence/vertex_nearby. Clear so subsequent analyze rebuilds cleanly.
+   ! vertex_nearby. Clear so subsequent analyze rebuilds cleanly.
    do f1 = 1, kept_n
       call self%facet(f1)%destroy_connectivity
    enddo
-   deallocate(parent, rank_, canon, key, order, keep_mask)
-   contains
-      pure function vertices_match(p1, p2, tol) result(yes)
-      type(vector_R8P), intent(in) :: p1, p2
-      real(R8P),        intent(in) :: tol
-      logical                      :: yes
-      yes = (abs(p1%x - p2%x) <= tol) .and. (abs(p1%y - p2%y) <= tol) .and. (abs(p1%z - p2%z) <= tol)
-      endfunction vertices_match
+   deallocate(canon, key, order, keep_mask)
    endsubroutine remove_duplicate_facets
 
    pure function uf_find(x, parent) result(root)
@@ -1463,7 +1411,7 @@ contains
    !<      anything that depends on their normals (they would propagate NaN).
    !<   3. `connect_nearby_vertices` — snap coincident vertices via union-find so
    !<      that integer-id connectivity matches geometric coincidence.
-   !<   4. `analyze` — rebuild connectivity / vertex_occurrence / volume / centroid.
+   !<   4. `analyze` — rebuild connectivity / vertex pool / volume / centroid.
    !<   5. `remove_duplicate_facets` — drop literal duplicates (any winding); if
    !<      anything was removed, re-`analyze` so winding fixup sees a clean state.
    !<   6. `sanitize_normals` — BFS-propagate winding consistency, then global
@@ -2088,5 +2036,45 @@ contains
       write(file_unit) facets_number
    endif
    endsubroutine stl_save_header
+
+   subroutine compute_pseudo_normals_via_pool(self, facet, pool)
+   !< Compute edge and vertex pseudo-normals for one facet, using the pool's
+   !< inverted index instead of the legacy per-facet `vertex_occurrence` list
+   !< (issue #5 stage 3b).
+   !<
+   !< Edge pseudo-normals are unchanged from the legacy code: sum of own normal
+   !< and neighbour's normal (or the facet normal alone if boundary).
+   !<
+   !< Vertex pseudo-normals use the Bærentzen-Aanæs angle-weighted formula:
+   !<   N_v = sum over incident facets f of (incident_angle_at_v(f) * f%normal),
+   !< summed across all (facet, local_v) pairs in pool%facets_at(self%vertex_id(v)),
+   !< including (self, v) itself.
+   type(facet_object),       intent(inout) :: self
+   type(facet_object),       intent(in)    :: facet(1:)
+   type(vertex_pool_object), intent(in)    :: pool
+   integer(I4P)                            :: e, v, k, kn, f_n, v_n
+   real(R8P)                               :: ang
+
+   do e = 1, 3
+      if (self%fcon_edge(e) > 0) then
+         self%edge_pnormal(e) = self%normal + facet(self%fcon_edge(e))%normal
+         call self%edge_pnormal(e)%normalize()
+      else
+         self%edge_pnormal(e) = self%normal
+      endif
+   enddo
+
+   do v = 1, 3
+      self%vertex_pnormal(v) = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+      kn = pool%facets_at_count(self%vertex_id(v))
+      do k = 1, kn
+         call pool%facets_at(self%vertex_id(v), k, f_n, v_n)
+         if (f_n < 1 .or. f_n > size(facet)) cycle
+         ang = facet(f_n)%vertex_angle(v_n)
+         self%vertex_pnormal(v) = self%vertex_pnormal(v) + ang * facet(f_n)%normal
+      enddo
+      call self%vertex_pnormal(v)%normalize()
+   enddo
+   endsubroutine compute_pseudo_normals_via_pool
 
 endmodule fossil_surface_stl_object

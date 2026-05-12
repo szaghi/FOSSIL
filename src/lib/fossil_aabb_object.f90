@@ -114,22 +114,19 @@ contains
    enddo
    endsubroutine compute_octants
 
-   pure subroutine compute_vertices_nearby(self, facet, tolerance_to_be_identical, tolerance_to_be_nearby)
-   !< Compute vertices nearby.
-   class(aabb_object), intent(in)    :: self                      !< AABB.
-   type(facet_object), intent(inout) :: facet(:)                  !< Facets list.
-   real(R8P),          intent(in)    :: tolerance_to_be_identical !< Tolerance to identify identical vertices.
-   real(R8P),          intent(in)    :: tolerance_to_be_nearby    !< Tolerance to identify nearby vertices.
-   integer(I4P)                      :: f1, f2, ff1, ff2          !< Counter.
+   pure subroutine compute_vertices_nearby(self, facet, tolerance_to_be_nearby)
+   !< Compute vertices nearby (loose tolerance only; see facet variant).
+   class(aabb_object), intent(in)    :: self                   !< AABB.
+   type(facet_object), intent(inout) :: facet(:)               !< Facets list.
+   real(R8P),          intent(in)    :: tolerance_to_be_nearby !< Tolerance to identify nearby vertices.
+   integer(I4P)                      :: f1, f2, ff1, ff2       !< Counter.
 
    if (self%facet_id%ids_number > 0) then
       do f1=1, self%facet_id%ids_number - 1
          ff1 = self%facet_id%id(f1)
          do f2=f1 + 1, self%facet_id%ids_number
             ff2 = self%facet_id%id(f2)
-            call facet(ff1)%compute_vertices_nearby(other=facet(ff2),                                    &
-                                                    tolerance_to_be_identical=tolerance_to_be_identical, &
-                                                    tolerance_to_be_nearby=tolerance_to_be_nearby)
+            call facet(ff1)%compute_vertices_nearby(other=facet(ff2), tolerance_to_be_nearby=tolerance_to_be_nearby)
          enddo
       enddo
    endif

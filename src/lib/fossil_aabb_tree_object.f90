@@ -277,23 +277,20 @@ contains
    endsubroutine aabb_tree_finalize
 
    ! public methods
-   pure subroutine compute_vertices_nearby(self, facet, tolerance_to_be_identical, tolerance_to_be_nearby)
-   !< Compute vertices nearby.
-   class(aabb_tree_object), intent(in)    :: self                      !< AABB tree.
-   type(facet_object),      intent(inout) :: facet(:)                  !< Facets list.
-   real(R8P),               intent(in)    :: tolerance_to_be_identical !< Tolerance to identify identical vertices.
-   real(R8P),               intent(in)    :: tolerance_to_be_nearby    !< Tolerance to identify nearby vertices.
-   integer(I4P)                           :: level                     !< Counter.
-   integer(I4P)                           :: b, bb, bbb                !< Counter.
+   pure subroutine compute_vertices_nearby(self, facet, tolerance_to_be_nearby)
+   !< Compute vertices nearby (loose tolerance only; see facet variant).
+   class(aabb_tree_object), intent(in)    :: self                   !< AABB tree.
+   type(facet_object),      intent(inout) :: facet(:)               !< Facets list.
+   real(R8P),               intent(in)    :: tolerance_to_be_nearby !< Tolerance to identify nearby vertices.
+   integer(I4P)                           :: level                  !< Counter.
+   integer(I4P)                           :: b, bb, bbb             !< Counter.
 
    if (self%nodes_number > 0) then
       level=self%refinement_levels                                      ! check only max refinement level
       b = first_node(level=level)                                       ! first node at level
       do bb=1, nodes_number_at_level(level=level)                       ! loop over nodes at level
          bbb = b + bb - 1                                               ! node numeration in tree
-         call self%node(bbb)%compute_vertices_nearby(facet=facet,                                         &
-                                                     tolerance_to_be_identical=tolerance_to_be_identical, &
-                                                     tolerance_to_be_nearby=tolerance_to_be_nearby)
+         call self%node(bbb)%compute_vertices_nearby(facet=facet, tolerance_to_be_nearby=tolerance_to_be_nearby)
       enddo
    endif
    endsubroutine compute_vertices_nearby

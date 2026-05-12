@@ -28,7 +28,7 @@ integer(I4P)                      :: n_facets, n_vertices
 integer(I4P)                      :: f, v, vid
 integer(I4P)                      :: f1, f2, v1, v2
 real(R8P)                         :: max_coord_error
-logical                           :: are_tests_passed(5)
+logical                           :: are_tests_passed(7)
 real(R8P), parameter              :: eps_strict = 1.0e-12_R8P
 
 are_tests_passed = .false.
@@ -117,9 +117,39 @@ if (are_tests_passed(5) .and. n_facets >= 2) then
    end block
 endif
 
+! 6. Stage 3a: every facet's vertex_id(v) matches pool%facet_vid(facet_id, v).
+are_tests_passed(6) = .true.
+do f = 1, n_facets
+   associate (facet_ptr => surface%facet_at(f))
+      do v = 1, 3
+         if (facet_ptr%vertex_id(v) /= pool%facet_vid(f, v)) then
+            are_tests_passed(6) = .false.
+            exit
+         endif
+      enddo
+   end associate
+   if (.not. are_tests_passed(6)) exit
+enddo
+
+! 7. Stage 3a: pool%coord(facet%vertex_id(v)) bit-equals facet%vertex(v).
+are_tests_passed(7) = .true.
+do f = 1, n_facets
+   associate (facet_ptr => surface%facet_at(f))
+      do v = 1, 3
+         a = pool%coord(facet_ptr%vertex_id(v))
+         b = facet_ptr%vertex(v)
+         if (a%x /= b%x .or. a%y /= b%y .or. a%z /= b%z) then
+            are_tests_passed(7) = .false.
+            exit
+         endif
+      enddo
+   end associate
+   if (.not. are_tests_passed(7)) exit
+enddo
+
 print '(A,I0,A,I0,A,F8.4)', 'facets=', n_facets, '  unique_vertices=', n_vertices, &
                             '  V/F=', real(n_vertices, R8P) / real(max(n_facets, 1), R8P)
-print '(A,5L2)', 'per-case results: ', are_tests_passed
+print '(A,7L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)',  'Are all tests passed? ', all(are_tests_passed)
 if (.not. all(are_tests_passed)) error stop 1
 

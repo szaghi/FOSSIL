@@ -26,7 +26,8 @@ integer(I4P), parameter :: EDGE_31 = 3_I4P
 type :: facet_object
    !< FOSSIL, facet class.
    type(vector_R8P) :: normal    !< Facet (outward) normal (versor), `(v2-v1).cross.(v3-v1)`.
-   type(vector_R8P) :: vertex(3) !< Facet vertices.
+   type(vector_R8P) :: vertex(3) !< Facet vertices (cache of pool%coord(vertex_id) when pool is in use).
+   integer(I4P)     :: vertex_id(3) = 0_I4P !< Pool ids for the three vertices (issue #5 stage 3a). 0 = unassigned.
    ! metrix
    type(vector_R8P) :: centroid !< Facet's centroid.
    ! triangle plane parametric equation: T(s,t) = B + s*E12 + t*E13
@@ -47,7 +48,6 @@ type :: facet_object
    ! Named parameters EDGE_12, EDGE_23, EDGE_31 are exported for readability.
    integer(I4P)         :: id                   !< Facet global ID.
    integer(I4P)         :: fcon_edge(3)=0_I4P   !< Connected face ID along each edge (0 = disconnected).
-   type(list_id_object) :: vertex_occurrence(3) !< List of vertices "occurrencies", list of facets global ID containing them.
    type(list_id_object) :: vertex_nearby(3)     !< List of vertices "nearby", list of vertices global ID nearby them.
    ! pseudo normals
    type(vector_R8P) :: edge_pnormal(3)   !< Edge pseudo-normals, indexed as fcon_edge.
@@ -61,7 +61,6 @@ type :: facet_object
       procedure, pass(self) :: pseudo_normal_for_region        !< Return the pseudo-normal for a given closest-point region.
       procedure, pass(self) :: compute_metrix                  !< Compute local (plane) metrix.
       procedure, pass(self) :: compute_normal                  !< Compute normal by means of vertices data.
-      procedure, pass(self) :: compute_pseudo_normals          !< Compute pseudo normals.
       procedure, pass(self) :: compute_vertices_nearby         !< Compute vertices nearby comparing to ones of other facet.
       procedure, pass(self) :: destroy                         !< Destroy facet.
       procedure, pass(self) :: destroy_connectivity            !< Destroy facet connectivity.
@@ -83,9 +82,9 @@ type :: facet_object
       procedure, pass(self) :: solid_angle                     !< Return the (projected) solid angle of the facet with respect point.
       procedure, pass(self) :: tetrahedron_volume              !< Return the volume of tetrahedron built by facet and a given apex.
       procedure, pass(self) :: translate                       !< Translate facet given vectorial delta.
-      procedure, pass(self) :: update_connectivity             !< Update facet connectivity.
       procedure, pass(self) :: vertex_angle                    !< Return the subtended angle of given vertex.
       procedure, pass(self) :: vertex_global_id                !< Return the vertex global id given the local one.
+      procedure, pass(self) :: set_vertex_ids                  !< Assign the three pool ids for this facet (issue #5 stage 3a).
       ! private methods
       procedure, pass(self), private :: edge_connection_in_other_ref !< Return the edge of connection in the other reference.
       procedure, pass(self), private :: flip_edge                    !< Flip facet edge.
@@ -94,24 +93,6 @@ type :: facet_object
       procedure, pass(self), private :: rotate_by_axis_angle         !< Rotate facet given axis and angle.
       procedure, pass(self), private :: rotate_by_matrix             !< Rotate facet given matrix.
 endtype facet_object
-
-interface load_from_file_interface
-   subroutine load_from_file_interface(self, file_unit)
-   !< Load facet from file, generic interface.
-   import :: facet_object, I4P
-   class(facet_object), intent(inout) :: self      !< Facet.
-   integer(I4P),        intent(in)    :: file_unit !< File unit.
-   endsubroutine load_from_file_interface
-endinterface load_from_file_interface
-
-interface save_into_file_interface
-   subroutine save_into_file_interface(self, file_unit)
-   !< Save facet into file, generic interface.
-   import :: facet_object, I4P
-   class(facet_object), intent(in) :: self      !< Facet.
-   integer(I4P),        intent(in) :: file_unit !< File unit.
-   endsubroutine save_into_file_interface
-endinterface save_into_file_interface
 
 contains
    ! public methods
@@ -400,91 +381,22 @@ contains
    self%normal = face_normal3_R8P(pt1=self%vertex(1), pt2=self%vertex(2), pt3=self%vertex(3), norm='y')
    endsubroutine compute_normal
 
-   pure subroutine compute_pseudo_normals(self, facet)
-   !< Compute pseudo normals (Baerentzen & Aanaes, 2005).
+   pure subroutine compute_vertices_nearby(self, other, tolerance_to_be_nearby)
+   !< Populate `vertex_nearby` (loose-tolerance) for each vertex of `self` and `other`.
    !<
-   !< For a closed manifold mesh these pseudo-normals make the sign test
-   !< `sign(dot(point - closest, N))` correct independent of which Voronoi region
-   !< (face/edge/vertex) of the triangle contains the closest point:
-   !<   - face region : N = facet normal.
-   !<   - edge region : N = sum of the two adjacent facet normals (no weighting
-   !<                       needed; each normal contributes pi at the edge),
-   !<                       then normalized.
-   !<   - vertex region: N = sum over incident facets of (incident_angle * normal),
-   !<                       then normalized. Angle weighting is essential — without
-   !<                       it the sign flips erratically near vertices shared by
-   !<                       many facets of unequal angular contribution.
-   !<
-   !< @note Connectivity must be already computed.
-   class(facet_object), intent(inout) :: self         !< Facet.
-   type(facet_object),  intent(in)    :: facet(1:)    !< Facets list.
-   integer(I4P)                       :: e, f, o, v   !< Counter.
-   integer(I4P)                       :: vn           !< Neighbor's local vertex id matching self's vertex.
-   real(R8P)                          :: ang          !< Incident angle of a neighbor facet at the shared vertex.
-
-   do e=1, 3
-      if (self%fcon_edge(e) > 0) then
-         self%edge_pnormal(e) = self%normal + facet(self%fcon_edge(e))%normal
-         call self%edge_pnormal(e)%normalize()
-      else
-         ! Boundary edge — no neighbor. Fall back to the face normal so the sign
-         ! test degrades gracefully on open meshes (sign may be ill-defined there
-         ! anyway, but at least it stays consistent with the face region).
-         self%edge_pnormal(e) = self%normal
-      endif
-   enddo
-   do v=1, 3
-      self%vertex_pnormal(v) = self%vertex_angle(v) * self%normal
-      do o=1, self%vertex_occurrence(v)%ids_number
-         f = self%vertex_occurrence(v)%id(o)
-         vn = neighbor_local_vertex(facet(f), self%vertex(v))
-         if (vn > 0) then
-            ang = facet(f)%vertex_angle(vn)
-            self%vertex_pnormal(v) = self%vertex_pnormal(v) + ang * facet(f)%normal
-         endif
-      enddo
-      call self%vertex_pnormal(v)%normalize()
-   enddo
-   contains
-      pure function neighbor_local_vertex(other, p) result(idx)
-      !< Return the local vertex id (1..3) of `other` that coincides with `p`, or 0.
-      !< Vertex coincidence is exact here because vertex_occurrence is populated only
-      !< for vertices that compare equal under the sanitize tolerance — by that point
-      !< coincident vertices have been snapped to identical coordinates.
-      type(facet_object), intent(in) :: other !< Neighbor facet.
-      type(vector_R8P),   intent(in) :: p     !< Vertex coordinate to match.
-      integer(I4P)                   :: idx   !< Matching local vertex id, 0 if none.
-      integer(I4P)                   :: k
-
-      idx = 0
-      do k = 1, 3
-         if (other%vertex(k)%x == p%x .and. &
-             other%vertex(k)%y == p%y .and. &
-             other%vertex(k)%z == p%z) then
-            idx = k
-            return
-         endif
-      enddo
-      endfunction neighbor_local_vertex
-   endsubroutine compute_pseudo_normals
-
-   pure subroutine compute_vertices_nearby(self, other, tolerance_to_be_identical, tolerance_to_be_nearby)
-   !< Compute vertices nearby comparing to ones of other facet.
-   class(facet_object), intent(inout) :: self                      !< Facet.
-   type(facet_object),  intent(inout) :: other                     !< Other facet.
-   real(R8P),           intent(in)    :: tolerance_to_be_identical !< Tolerance to identify identical vertices.
-   real(R8P),           intent(in)    :: tolerance_to_be_nearby    !< Tolerance to identify nearby vertices.
-   integer(I4P)                       :: vs, vo                    !< Counter.
+   !< Strict-EPS coincidence is owned by `vertex_pool_object` (issue #5 stage 3c).
+   !< This routine only records vertices within the looser sanitize tolerance, used
+   !< downstream by `connect_nearby_vertices` to snap nearby vertices together.
+   class(facet_object), intent(inout) :: self                   !< Facet.
+   type(facet_object),  intent(inout) :: other                  !< Other facet.
+   real(R8P),           intent(in)    :: tolerance_to_be_nearby !< Tolerance to identify nearby vertices.
+   integer(I4P)                       :: vs, vo                 !< Counter.
 
    do vs=1, 3
       do vo=1, 3
          if (are_nearby(self%vertex(vs), other%vertex(vo), tolerance_to_be_nearby)) then
             call  self%vertex_nearby(vs)%put(id=other%vertex_global_id(vo))
             call other%vertex_nearby(vo)%put(id= self%vertex_global_id(vs))
-            if (are_nearby(self%vertex(vs), other%vertex(vo), tolerance_to_be_identical)) then
-               call  self%vertex_occurrence(vs)%put(id=other%id)
-               call other%vertex_occurrence(vo)%put(id= self%id)
-            endif
          endif
       enddo
    enddo
@@ -520,7 +432,7 @@ contains
    self%fcon_edge      = 0_I4P
    self%edge_pnormal   = vector_R8P(0._R8P, 0._R8P, 0._R8P)
    self%vertex_pnormal = vector_R8P(0._R8P, 0._R8P, 0._R8P)
-   call self%vertex_occurrence%destroy
+   self%vertex_id      = 0_I4P
    call self%vertex_nearby%destroy
    endsubroutine destroy
 
@@ -529,7 +441,6 @@ contains
    class(facet_object), intent(inout) :: self  !< Facet.
 
    self%fcon_edge = 0_I4P
-   call self%vertex_occurrence%destroy
    call self%vertex_nearby%destroy
    endsubroutine destroy_connectivity
 
@@ -845,42 +756,6 @@ contains
    endif
    endsubroutine translate
 
-   pure subroutine update_connectivity(self)
-   !< Update facet connectivity.
-   !<
-   !< @note Vertices occurrencies list must be already computed.
-   class(facet_object), intent(inout) :: self !< Facet.
-   integer(I4P)                       :: e    !< Edge counter.
-
-   ! Edge e connects vertices e and mod(e,3)+1: (1,2), (2,3), (3,1).
-   do e=1, 3
-      self%fcon_edge(e) = facet_connected(occurrence_1=self%vertex_occurrence(e)%id,                &
-                                          occurrence_2=self%vertex_occurrence(mod(e, 3) + 1)%id)
-   enddo
-   contains
-      pure function facet_connected(occurrence_1, occurrence_2)
-      !< Return the facet ID connected by the edge. If no facet is found 0 is returned.
-      !<
-      !< @note Within two vertices occurrencies, namely one edge, there could be only two connected facets.
-      integer(I4P), allocatable, intent(in) :: occurrence_1(:) !< Occurrences list of vertex 1.
-      integer(I4P), allocatable, intent(in) :: occurrence_2(:) !< Occurrences list of vertex 2.
-      integer(I4P)                          :: facet_connected !< ID of connected connected.
-      integer(I4P)                          :: i1, i2          !< Counter.
-
-      facet_connected = 0
-      if (allocated(occurrence_1).and.allocated(occurrence_2)) then
-         loop_1: do i1=1, size(occurrence_1, dim=1)
-            do i2=1, size(occurrence_2, dim=1)
-               if (occurrence_1(i1) == occurrence_2(i2)) then
-                  facet_connected = occurrence_1(i1)
-                  exit loop_1
-               endif
-            enddo
-         enddo loop_1
-      endif
-      endfunction facet_connected
-   endsubroutine update_connectivity
-
    pure function vertex_angle(self, vertex_id)
    !< Return the subtened angle of given vertex.
    class(facet_object), intent(in) :: self         !< Facet.
@@ -911,6 +786,20 @@ contains
    vertex_global_id = (self%id - 1) * 3 + vertex_id
    endfunction vertex_global_id
 
+   pure subroutine set_vertex_ids(self, vid1, vid2, vid3)
+   !< Assign the three pool ids for this facet (issue #5 stage 3a).
+   !<
+   !< Called by surface_stl_object after vertex_pool%initialize_from_facets has
+   !< assigned ids. The id slots are the structural source of truth from stage 3b
+   !< onward; `self%vertex(:)` remains as a coordinate cache for hot kernels.
+   class(facet_object), intent(inout) :: self
+   integer(I4P),        intent(in)    :: vid1, vid2, vid3
+
+   self%vertex_id(1) = vid1
+   self%vertex_id(2) = vid2
+   self%vertex_id(3) = vid3
+   endsubroutine set_vertex_ids
+
    ! private methods
    pure subroutine flip_edge(self, edge)
    !< Flip facet edge.
@@ -921,6 +810,7 @@ contains
    class(facet_object), intent(inout) :: self  !< Facet.
    integer(I4P),        intent(in)    :: edge  !< Edge to be flipped (1..3).
    integer(I4P)                       :: v1, v2, bc, ca !< Vertex indices and the two non-flipped edge indices.
+   integer(I4P)                       :: tmp_vid        !< Temporary for pool id swap.
    integer(I4P), parameter            :: BC_OF(3) = [2_I4P, 1_I4P, 1_I4P]
    integer(I4P), parameter            :: CA_OF(3) = [3_I4P, 3_I4P, 2_I4P]
 
@@ -931,44 +821,24 @@ contains
    v2 = mod(edge, 3) + 1
    bc = BC_OF(edge)
    ca = CA_OF(edge)
-   call flip_vertices(a=self%vertex(v1), b=self%vertex(v2),                   &
-                      fcon_bc=self%fcon_edge(bc), fcon_ca=self%fcon_edge(ca), &
-                      vertex_a_occurrence=self%vertex_occurrence(v1)%id,      &
-                      vertex_b_occurrence=self%vertex_occurrence(v2)%id)
-   call self%compute_metrix
-   contains
-      pure subroutine flip_vertices(a, b, fcon_bc, fcon_ca, vertex_a_occurrence, vertex_b_occurrence)
-      !< Flip two vertices of facet.
-      type(vector_R8P),          intent(inout) :: a, b                   !< Vertices to be flipped.
-      integer(I4P),              intent(inout) :: fcon_bc                !< Connected face ID along edge b-c.
-      integer(I4P),              intent(inout) :: fcon_ca                !< Connected face ID along edge c-a.
-      integer(I4P), allocatable, intent(inout) :: vertex_a_occurrence(:) !< List of vertex a "occurrencies".
-      integer(I4P), allocatable, intent(inout) :: vertex_b_occurrence(:) !< List of vertex b "occurrencies".
-      type(vector_R8P)                         :: vertex                 !< Temporary vertex variable.
-      integer(I4P)                             :: fcon                   !< Temporary connected face ID.
-      integer(I4P), allocatable                :: vertex_occurrence(:)   !< Temporary list of vertex "occurrencies".
 
-      ! flip vertex
-      vertex = a
-      a = b
-      b = vertex
-      ! flip facet connectivity
-      fcon = fcon_bc
-      fcon_bc = fcon_ca
-      fcon_ca = fcon
-      ! flip vertex occurrences
-      if (allocated(vertex_a_occurrence).and.allocated(vertex_a_occurrence)) then
-         vertex_occurrence = vertex_a_occurrence
-         vertex_a_occurrence = vertex_b_occurrence
-         vertex_b_occurrence = vertex_occurrence
-      elseif (allocated(vertex_a_occurrence)) then
-         vertex_b_occurrence = vertex_a_occurrence
-         deallocate(vertex_a_occurrence)
-      elseif (allocated(vertex_b_occurrence)) then
-         vertex_a_occurrence = vertex_b_occurrence
-         deallocate(vertex_b_occurrence)
-      endif
-      endsubroutine flip_vertices
+   ! Swap the two endpoint vertices: coordinates AND pool ids in lockstep so the
+   ! cache stays consistent with the pool's facet_vid mapping (issue #5 stage 3a).
+   block
+      type(vector_R8P) :: tmp_v
+      integer(I4P)     :: tmp_fcon
+      tmp_v             = self%vertex(v1)
+      self%vertex(v1)   = self%vertex(v2)
+      self%vertex(v2)   = tmp_v
+      tmp_vid           = self%vertex_id(v1)
+      self%vertex_id(v1) = self%vertex_id(v2)
+      self%vertex_id(v2) = tmp_vid
+      ! Swap connectivity of the two non-flipped edges so neighbour links remain valid.
+      tmp_fcon            = self%fcon_edge(bc)
+      self%fcon_edge(bc)  = self%fcon_edge(ca)
+      self%fcon_edge(ca)  = tmp_fcon
+   end block
+   call self%compute_metrix
    endsubroutine flip_edge
 
    pure subroutine mirror_by_normal(self, normal, recompute_metrix)
