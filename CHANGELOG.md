@@ -4,6 +4,37 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.0] — 2026-05-12
+### Added
+- **distance**: Correct AABB traversal and add pseudo-normal sign
+
+- **surface**: Implement connectivity symmetry checks for fossil surfaces
+
+- **surface**: Expand sanitization pipeline and add validity predicates
+
+- **aabb**: Auto-tune octree refinement depth from facet count
+
+- **aabb**: Scaffold tree-kind selector for upcoming SAH BVH
+
+- **aabb**: Implement SAH BVH builder
+
+- **aabb**: Make SAH BVH queryable via tree-kind dispatch
+
+
+### Documentation
+- Refresh user-facing docs after the signed-distance arc
+
+
+### Fixed
+- **block**: Avoid associate alias as allocate bound; wrap long lines
+
+- **surface**: Orient sanitize_normals outward, populate pseudo-normals ⚠ BREAKING CHANGE
+
+
+### Performance
+- **aabb**: Switch default tree to SAH BVH
+
+
 ## [1.1.0] — 2026-05-11
 ### Added
 - **api**: Add optional status argument to mutating procedures (audit #14 S1)
