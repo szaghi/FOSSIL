@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.1] — 2026-05-12
+### Added
+- **lib**: Implement vertex pool object for fossil surface handling
+
+
+### Changed
+- **surface**: Make vertex pool the source of truth for coincidence (#5)
+
+
+### Fixed
+- **clip**: Use full SAT for triangle-AABB overlap (#1)
+
+
 ## [1.2.0] — 2026-05-12
 ### Added
 - **distance**: Correct AABB traversal and add pseudo-normal sign
