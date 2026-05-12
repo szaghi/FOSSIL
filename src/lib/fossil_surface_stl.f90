@@ -6,7 +6,7 @@ module fossil_surface_stl_object
 use fossil_aabb_tree_object, only : aabb_tree_object, AABB_TREE_OCTREE
 use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
-use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb
+use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 use penf, only : I4P, I8P, R8P, MaxR8P, str
@@ -626,9 +626,10 @@ contains
       facets_in_number = 0
       facets_out_number = 0
       do f=1, self%facets_number
-         if (is_inside_bb(bmin=bmin, bmax=bmax, point=self%facet(f)%vertex(1)).and.&
-             is_inside_bb(bmin=bmin, bmax=bmax, point=self%facet(f)%vertex(2)).and.&
-             is_inside_bb(bmin=bmin, bmax=bmax, point=self%facet(f)%vertex(3))) then
+         if (triangle_overlaps_aabb(bmin=bmin, bmax=bmax,           &
+                                    v1=self%facet(f)%vertex(1),     &
+                                    v2=self%facet(f)%vertex(2),     &
+                                    v3=self%facet(f)%vertex(3))) then
             facets_in_number = facets_in_number + 1
          else
             facets_out_number = facets_out_number + 1
@@ -651,9 +652,10 @@ contains
          fi = 0
          fo = 0
          do f=1, self%facets_number
-            if (is_inside_bb(bmin=bmin, bmax=bmax, point=self%facet(f)%vertex(1)).and.&
-                is_inside_bb(bmin=bmin, bmax=bmax, point=self%facet(f)%vertex(2)).and.&
-                is_inside_bb(bmin=bmin, bmax=bmax, point=self%facet(f)%vertex(3))) then
+            if (triangle_overlaps_aabb(bmin=bmin, bmax=bmax,           &
+                                       v1=self%facet(f)%vertex(1),     &
+                                       v2=self%facet(f)%vertex(2),     &
+                                       v3=self%facet(f)%vertex(3))) then
                fi = fi + 1
                facet(fi) = self%facet(f)
                facet(fi)%id = fi
@@ -1827,9 +1829,10 @@ contains
          else
             call facet_clip%load_from_file_binary(file_unit=file_unit)
          endif
-         if (is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(1)).and.&
-             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(2)).and.&
-             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(3))) ff = ff + 1
+         if (triangle_overlaps_aabb(bmin=clip_min, bmax=clip_max,  &
+                                    v1=facet_clip%vertex(1),       &
+                                    v2=facet_clip%vertex(2),       &
+                                    v3=facet_clip%vertex(3))) ff = ff + 1
       enddo
       call stl_load_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header)
       allocate(facets(1:ff), stat=istat, errmsg=msg)
@@ -1844,9 +1847,10 @@ contains
          else
             call facet_clip%load_from_file_binary(file_unit=file_unit)
          endif
-         if (is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(1)).and.&
-             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(2)).and.&
-             is_inside_bb(bmin=clip_min, bmax=clip_max, point=facet_clip%vertex(3))) then
+         if (triangle_overlaps_aabb(bmin=clip_min, bmax=clip_max,  &
+                                    v1=facet_clip%vertex(1),       &
+                                    v2=facet_clip%vertex(2),       &
+                                    v3=facet_clip%vertex(3))) then
             ff = ff + 1
             facets(ff) = facet_clip
             facets(ff)%id = ff
