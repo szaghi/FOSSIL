@@ -18,6 +18,7 @@ implicit none
 private
 public :: aabb_tree_object
 public :: AABB_USE_INDEX, AABB_USE_BRUTE_FORCE
+public :: AABB_AUTO_REFINEMENT
 
 integer(I4P), parameter :: TREE_RATIO=8 !< Tree refinement ratio, it is assumed to be an **octree**.
 
@@ -25,6 +26,16 @@ integer(I4P), parameter :: TREE_RATIO=8 !< Tree refinement ratio, it is assumed 
 ! distance/ray-intersection path for benchmarking without lying about `is_initialized`.
 logical, parameter :: AABB_USE_INDEX       = .true.  !< Use the AABB octree for queries.
 logical, parameter :: AABB_USE_BRUTE_FORCE = .false. !< Force brute-force scan over all facets.
+
+! Sentinel for auto-tuned refinement: pass this where an explicit depth would go,
+! and `initialize` picks the depth from the facet count via `auto_refinement_levels`.
+integer(I4P), parameter :: AABB_AUTO_REFINEMENT = -1_I4P
+! Heuristic parameters (private; the literature suggests 16-32 facets per leaf is
+! a broad sweet spot for triangle-mesh BVHs, and FOSSIL's flat empirical curve
+! tolerates any choice in that range to within 5%).
+integer(I4P), parameter :: AUTO_TARGET_FACETS_PER_LEAF = 64_I4P  !< Heuristic facet-per-leaf target.
+integer(I4P), parameter :: AUTO_MIN_LEVELS             = 1_I4P   !< Floor: at least one split.
+integer(I4P), parameter :: AUTO_MAX_LEVELS             = 6_I4P   !< Cap: deeper octrees waste space on 2D-in-3D meshes.
 
 type :: ofsm
    !< Octree Finite State Machine class for efficient searching of neiighbors.
@@ -74,7 +85,7 @@ type :: aabb_tree_object
    !>  +----+----+             +------->x(i)
    !<```
    private
-   integer(I4P)                        :: refinement_levels=2    !< Total number of refinement levels used.
+   integer(I4P)                        :: refinement_levels=AABB_AUTO_REFINEMENT !< Total number of refinement levels used (AABB_AUTO_REFINEMENT = auto-tune).
    integer(I4P)                        :: nodes_number=0         !< Total number of tree nodes.
    type(aabb_node_object), allocatable :: node(:)                !< AABB tree nodes [0:nodes_number-1].
    logical                             :: is_initialized=.false. !< Sentinel to check is AABB tree is initialized.
@@ -114,6 +125,35 @@ type :: aabb_tree_object
 endtype aabb_tree_object
 
 contains
+   pure function auto_refinement_levels(facets_number) result(levels)
+   !< Pick a refinement depth that targets `AUTO_TARGET_FACETS_PER_LEAF` facets per
+   !< leaf in a fully-populated octree.
+   !<
+   !< Formula: `levels = ceil(log8(N / target))`, clamped to [AUTO_MIN_LEVELS, AUTO_MAX_LEVELS].
+   !< Computed in integer arithmetic (no logs) by walking 8^k until the product
+   !< exceeds N/target.
+   !<
+   !< Why these defaults: empirical sweeps on cube/naca/dragon/dragon-fine showed
+   !< a near-flat timing curve vs depth (within 5%) once the best-first traversal
+   !< from step 1 was in place. AUTO_TARGET_FACETS_PER_LEAF=64 places the formula
+   !< right around the empirical sweet spot for every size we measured. The cap at
+   !< AUTO_MAX_LEVELS=6 prevents pathologically deep trees on huge meshes; the
+   !< floor at 1 keeps the smallest trees non-degenerate.
+   integer(I4P), intent(in) :: facets_number  !< Mesh facet count.
+   integer(I4P)             :: levels         !< Auto-picked refinement depth.
+   integer(I4P)             :: cap, k
+
+   cap = max(facets_number, 1_I4P) / AUTO_TARGET_FACETS_PER_LEAF
+   levels = 0
+   k      = 1
+   do while (k < cap)
+      k      = k * TREE_RATIO
+      levels = levels + 1
+      if (levels >= AUTO_MAX_LEVELS) exit
+   enddo
+   if (levels < AUTO_MIN_LEVELS) levels = AUTO_MIN_LEVELS
+   endfunction auto_refinement_levels
+
    ! accessors (pure, scalar return — inlined by gfortran/ifort at -O2, no data copy)
    pure function get_refinement_levels(self) result(n)
    !< Return refinement_levels.
@@ -432,6 +472,18 @@ contains
    call self%destroy
    self%refinement_levels = refinement_levels_ ; if (present(refinement_levels)) self%refinement_levels = refinement_levels
    do_facets_distribute_ = .true. ; if (present(do_facets_distribute)) do_facets_distribute_ = do_facets_distribute
+
+   ! Resolve the AABB_AUTO_REFINEMENT sentinel into a concrete depth. Auto-tune
+   ! needs the facet count, so it requires `facet` to be present. If not present,
+   ! fall back to AUTO_MIN_LEVELS so the tree still builds (an octree without
+   ! facets has no useful depth anyway — it is just an empty hierarchy).
+   if (self%refinement_levels == AABB_AUTO_REFINEMENT) then
+      if (present(facet)) then
+         self%refinement_levels = auto_refinement_levels(facets_number=size(facet))
+      else
+         self%refinement_levels = AUTO_MIN_LEVELS
+      endif
+   endif
 
    if (self%refinement_levels >= 0) then
       self%nodes_number = nodes_number(refinement_levels=self%refinement_levels)

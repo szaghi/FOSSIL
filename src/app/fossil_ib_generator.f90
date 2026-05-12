@@ -311,10 +311,10 @@ contains
                def='0 0',                                                      &
                act='store')
 
-  call cli%add(switch='--ref_levels',         &
-               help='AABB refinement levels', &
-               required=.false.,              &
-               def='2',                       &
+  call cli%add(switch='--ref_levels',                                                     &
+               help='AABB refinement levels (-1 = auto-tune from facet count)',           &
+               required=.false.,                                                          &
+               def='-1',                                                                  &
                act='store')
 
   call cli%add(switch='--sign_algorithm',                         &
