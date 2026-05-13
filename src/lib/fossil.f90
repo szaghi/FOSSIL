@@ -11,6 +11,10 @@ use fossil_sdf, only : SDF_STATUS_OK, SDF_STATUS_BAD_INPUT, &
                        SDF_LABEL_UNASSIGNED, SDF_SENTINEL
 use fossil_alpha_wrap, only : AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, &
                               AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
+use fossil_csr_matrix, only : csr_matrix_t, &
+                              CSR_STATUS_OK, CSR_STATUS_BAD_INPUT, CSR_STATUS_OUT_OF_RANGE
+use fossil_laplacian, only : LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
+                             LAPL_STATUS_DEGENERATE_TRIANGLE
 use fossil_facet_object
 use fossil_marching_cubes, only : extract_isosurface, MC_STATUS_OK, MC_STATUS_BAD_DIMENSIONS
 use fossil_surface_stl_object
@@ -38,4 +42,7 @@ public :: SDF_STATUS_OK, SDF_STATUS_BAD_INPUT
 public :: SDF_LABEL_UNASSIGNED, SDF_SENTINEL
 public :: AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT
 public :: AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
+public :: csr_matrix_t
+public :: CSR_STATUS_OK, CSR_STATUS_BAD_INPUT, CSR_STATUS_OUT_OF_RANGE
+public :: LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, LAPL_STATUS_DEGENERATE_TRIANGLE
 endmodule fossil

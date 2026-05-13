@@ -21,6 +21,10 @@ use fossil_sdf, only : compute_segment_sdf => segment_sdf, &
 use fossil_alpha_wrap, only : awrap_run, &
                               AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, &
                               AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
+use fossil_csr_matrix, only : csr_matrix_t
+use fossil_laplacian, only : build_cotangent_laplacian, &
+                             LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
+                             LAPL_STATUS_DEGENERATE_TRIANGLE
 use fossil_remesh, only : compute_remesh => isotropic_remesh, &
                           REM_STATUS_OK, REM_STATUS_BAD_INPUT
 use fossil_boolean, only : compute_boolean => boolean_compute, &
@@ -166,6 +170,7 @@ type :: surface_stl_object
       procedure, pass(self) :: intersect_ray_any                !< Any-hit early-exit ray query for shadow / occlusion (issue #18 §2.5).
       procedure, pass(self) :: segment_sdf                      !< Per-facet labels via SDF + GMM (issue #18 §1.9).
       procedure, pass(self) :: alpha_wrap                       !< Watertight surrogate from broken triangle soup (issue #18 §1.6).
+      procedure, pass(self) :: cotangent_laplacian              !< Cotangent Laplacian + barycentric mass (issue #18 §2.1).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1871,6 +1876,47 @@ contains
    if (.not. allocated(wrap_facets)) allocate(wrap_facets(0))
    call wrapped%adopt_facets(facets=wrap_facets)
    endsubroutine alpha_wrap
+
+   subroutine cotangent_laplacian(self, L, M, status)
+   !< Build the cotangent Laplacian `L` and the barycentric mass matrix `M`
+   !< over the surface's unique-vertex pool (issue #18 §2.1).
+   !<
+   !< Both matrices are returned as `csr_matrix_t`. `L` is symmetric and
+   !< positive-semidefinite with `L * 1 = 0` (constant kernel). `M` is
+   !< diagonal (stored as CSR with one nonzero per row for API
+   !< uniformity).
+   !<
+   !< Common downstream uses:
+   !<   - Implicit Laplacian smoothing: `(M - tau L) V_new = M V`. Requires
+   !<     a sparse symmetric-positive-definite solver (SuiteSparse,
+   !<     MUMPS, PETSc, ...) — FOSSIL provides the matrices, you bring
+   !<     the solver.
+   !<   - Heat-method geodesics: `(M + t L) u = delta_source` followed by
+   !<     a Poisson solve `L phi = div(X)`.
+   !<   - Mean-curvature normal: `H n = (1/2) M^{-1} L V`. Free once the
+   !<     matrices exist.
+   !<
+   !< Pre-condition: the surface's vertex pool must be initialized — true
+   !< after `load_from_file`, `analyze`, or `adopt_facets`.
+   !<
+   !< Documented limitations:
+   !<   - Mass matrix is BARYCENTRIC. The Voronoi-area variant
+   !<     (Meyer 2003) is more accurate on obtuse triangles; deferred.
+   !<   - Boundary edges: the cotangent of the single opposite angle is
+   !<     used, halved (so `L * 1 = 0` still holds). This is the standard
+   !<     convention and is fine for closed solids and open shells alike.
+   class(surface_stl_object), intent(in)            :: self
+   type(csr_matrix_t),        intent(out)           :: L
+   type(csr_matrix_t),        intent(out)           :: M
+   integer(I4P),              intent(out), optional :: status
+
+   if (self%facets_number == 0_I4P) then
+      if (present(status)) status = LAPL_STATUS_BAD_INPUT
+      return
+   endif
+   call build_cotangent_laplacian(facet=self%facet, pool=self%vertex_pool, &
+                                   L=L, M=M, status=status)
+   endsubroutine cotangent_laplacian
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
