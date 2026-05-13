@@ -29,6 +29,7 @@ type :: aabb_object
       procedure, pass(self) :: distance_from_facets        !< Return the (square) distance from point to AABB's facets.
       procedure, pass(self) :: update_best_from_facets     !< Update (best d^2, best facet id, best region) over AABB's facets.
       procedure, pass(self) :: do_ray_intersect            !< Return true if AABB is intersected by ray.
+      procedure, pass(self) :: ray_slab_interval           !< Return slab-intersection interval [t_near, t_far] (issue #18 §2.5).
       procedure, pass(self) :: get_aabb_facets             !< Get AABB facets list.
       procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
       procedure, pass(self) :: initialize                  !< Initialize AABB.
@@ -209,14 +210,52 @@ contains
    endsubroutine update_best_from_facets
 
    pure function do_ray_intersect(self, ray_origin, ray_direction) result(do_intersect)
-   !< Return true if AABB is intersected by ray from origin and oriented as ray direction vector.
+   !< Return true if AABB is intersected by the forward half of the ray (`t >= 0`).
+   !<
+   !< Wrapper over `ray_slab_interval`; kept as a TBP for callers that don't need
+   !< the interval bounds (existing inside-test sign algorithm).
    class(aabb_object), intent(in) :: self          !< AABB box.
    type(vector_R8P),   intent(in) :: ray_origin    !< Ray origin.
    type(vector_R8P),   intent(in) :: ray_direction !< Ray direction.
    logical                        :: do_intersect  !< Test result.
-   logical                        :: must_return   !< Flag to check when to return from procedure.
-   real(R8P)                      :: tmin, tmax    !< Minimum maximum ray intersections with box slabs.
+   real(R8P)                      :: t_near, t_far !< Slab-interval extremes (unused here).
 
+   call self%ray_slab_interval(ray_origin=ray_origin, ray_direction=ray_direction, &
+                               t_near=t_near, t_far=t_far, do_intersect=do_intersect)
+   endfunction do_ray_intersect
+
+   pure subroutine ray_slab_interval(self, ray_origin, ray_direction, t_near, t_far, do_intersect)
+   !< Slab test (Smits / Williams 2005): return the parametric interval over which the
+   !< ray lies inside the AABB, plus a hit flag. Used by both the bare `do_ray_intersect`
+   !< query and the §2.5 tree traversals (`t_near` keys the best-first priority among
+   !< child boxes; `t_near >= t_best` allows the traversal to prune a subtree).
+   !<
+   !< Convention: the half-line `t >= 0` is considered. If the ray's slab interval is
+   !< entirely behind the origin (`t_far < 0`), `do_intersect = .false.`. Otherwise
+   !< `do_intersect = .true.` and the returned interval is `[max(t_near, 0), t_far]`.
+   !<
+   !< Two historical bugs fixed alongside the §2.5 rollout (the previous bare
+   !< `do_ray_intersect` carried both):
+   !<   - Parallel-ray guard `if (d < EPS)` was effectively `if (d < 0)` because
+   !<     `fossil_utils%EPS == 0.0`. Negative-direction rays were misclassified as
+   !<     parallel and reported as hits whenever the origin lay in the slab. Fixed
+   !<     to `abs(d) < PARALLEL_TOL`.
+   !<   - Slab-interval accumulator wrote `if (t2 > tmax) tmax = t2`, taking the
+   !<     maximum of far-plane intersections. The correct slab intersection takes
+   !<     the *minimum* — the box exit is the first far plane the ray reaches.
+   !<     This silently inflated AABB-hit counts; e.g. the existing ray-cast
+   !<     inside-test sign algorithm has been reading more facets than necessary.
+   class(aabb_object), intent(in)  :: self          !< AABB box.
+   type(vector_R8P),   intent(in)  :: ray_origin    !< Ray origin.
+   type(vector_R8P),   intent(in)  :: ray_direction !< Ray direction (need not be unit).
+   real(R8P),          intent(out) :: t_near        !< Slab-interval near (entry) parameter, clamped >= 0.
+   real(R8P),          intent(out) :: t_far         !< Slab-interval far (exit) parameter.
+   logical,            intent(out) :: do_intersect  !< True if the half-ray hits the box.
+   logical                         :: must_return   !< Helper-driven early-out flag.
+   real(R8P)                       :: tmin, tmax    !< Running slab-interval bounds.
+
+   t_near = 0._R8P
+   t_far  = 0._R8P
    do_intersect = .false.
    must_return = .false.
    tmin = 0._R8P
@@ -230,48 +269,41 @@ contains
    call check_slab(aabb_min=self%bmin%z, aabb_max=self%bmax%z, &
                    o=ray_origin%z, d=ray_direction%z, must_return=must_return, tmin=tmin, tmax=tmax)
    if (must_return) return
-   ! ray intersects all 3 slabs
+   t_near = tmin
+   t_far  = tmax
    do_intersect = .true.
    contains
       pure subroutine check_slab(aabb_min, aabb_max, o, d, must_return, tmin, tmax)
-      !< Perform ray intersection check in a direction-split fashion over slabs.
-      real(R8P), intent(in)    :: aabb_min     !< Box minimum bound in the current direction.
-      real(R8P), intent(in)    :: aabb_max     !< Box maximum bound in the current direction.
-      real(R8P), intent(in)    :: o            !< Ray origin in the current direction.
-      real(R8P), intent(in)    :: d            !< Ray slope in the current direction.
-      logical,   intent(inout) :: must_return  !< Flag to check when to return from procedure.
-      real(R8P), intent(inout) :: tmin, tmax   !< Minimum maximum ray intersections with box slabs.
-      real(R8P)                :: ood, t1, t2  !< Intersection coefficients.
-      real(R8P)                :: tmp          !< Temporary buffer.
+      real(R8P), intent(in)    :: aabb_min, aabb_max
+      real(R8P), intent(in)    :: o, d
+      logical,   intent(inout) :: must_return
+      real(R8P), intent(inout) :: tmin, tmax
+      real(R8P)                :: ood, t1, t2, tmp
+      real(R8P), parameter     :: PARALLEL_TOL = 1.0e-12_R8P
 
-      if ((d) < EPS) then
-         ! ray is parallel to slab, no hit if origin not within slab
+      if (abs(d) < PARALLEL_TOL) then
          if ((o < aabb_min).or.(o > aabb_max)) then
             must_return = .true.
             return
          endif
       else
-         ! compute intersection t value of ray with near and far plane of slab
          ood = 1._R8P / d
          t1 = (aabb_min - o) * ood
          t2 = (aabb_max - o) * ood
-         ! make t1 be intersection with near plane, t2 with far plane
          if (t1 > t2) then
             tmp = t1
             t1 = t2
             t2 = tmp
          endif
-         ! compute the intersection of slab intersection intervals
          if (t1 > tmin) tmin = t1
-         if (t2 > tmax) tmax = t2
-         ! exit with no collision as soon as slab intersection becomes empty
+         if (t2 < tmax) tmax = t2
          if (tmin > tmax) then
             must_return = .true.
             return
          endif
       endif
       endsubroutine check_slab
-   endfunction do_ray_intersect
+   endsubroutine ray_slab_interval
 
    pure subroutine get_aabb_facets(self, facet, aabb_facet)
    !< Get AABB facets list.

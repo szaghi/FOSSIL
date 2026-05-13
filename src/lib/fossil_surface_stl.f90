@@ -157,6 +157,7 @@ type :: surface_stl_object
       procedure, pass(self) :: decimate                         !< QEM edge-collapse mesh decimation (issue #18 §1.3).
       procedure, pass(self) :: isotropic_remesh                 !< Botsch-Kobbelt isotropic remeshing (issue #18 §1.7).
       procedure, pass(self) :: intersect_ray_all                !< All ray-facet hits, sorted by t (issue #18 §2.5).
+      procedure, pass(self) :: intersect_ray_first              !< Closest ray-facet hit, with AABB pruning (issue #18 §2.5).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1608,26 +1609,84 @@ contains
    endsubroutine isotropic_remesh
 
    subroutine intersect_ray_all(self, ray_origin, ray_direction, hits, status)
-   !< Return every ray-facet intersection on this surface, sorted by `t` ascending.
+   !< Return every ray-facet intersection on this surface, sorted by `t` ascending
+   !< (issue #18 §2.5).
    !<
-   !< Issue #18 §2.5 — step 1 implementation: flat O(n) facet loop. Step 2 swaps
-   !< the body for an AABB-tree-accelerated traversal; the public contract here
-   !< (sorted ascending by `t`, only `t >= 0` hits, status semantics) is the
-   !< invariant that survives the swap.
+   !< Tree-accelerated: prunes whole subtrees whose AABB the ray misses. Falls
+   !< back to `ray_intersect_all_flat` (the step-1 reference oracle) when the
+   !< AABB tree is not available, and the test suite exercises both paths to
+   !< guarantee bit-identical hit lists. Empty surface ⇒ status BAD_INPUT.
    class(surface_stl_object),    intent(in)            :: self           !< Surface.
    type(vector_R8P),             intent(in)            :: ray_origin     !< Ray origin.
-   type(vector_R8P),             intent(in)            :: ray_direction  !< Ray direction (need not be unit; t is in ray-parameter units).
+   type(vector_R8P),             intent(in)            :: ray_direction  !< Ray direction (need not be unit).
    type(ray_hit_t), allocatable, intent(out)           :: hits(:)        !< Sorted hit records.
    integer(I4P),                 intent(out), optional :: status         !< Status code.
+   real(R8P)                                           :: dir_norm2      !< |dir|^2 for the BAD_INPUT guard.
 
+   if (present(status)) status = RAY_STATUS_OK
    if (self%facets_number == 0_I4P) then
       allocate(hits(0))
       if (present(status)) status = RAY_STATUS_BAD_INPUT
       return
    endif
-   call ray_intersect_all_flat(facet=self%facet, ray_origin=ray_origin, ray_direction=ray_direction, &
-                               hits=hits, status=status)
+   dir_norm2 = ray_direction%dotproduct(rhs=ray_direction)
+   if (dir_norm2 < 1.0e-30_R8P) then
+      allocate(hits(0))
+      if (present(status)) status = RAY_STATUS_BAD_INPUT
+      return
+   endif
+   if (self%aabb%get_nodes_number() > 0_I4P) then
+      call self%aabb%intersect_ray_all_tree(facet=self%facet, ray_origin=ray_origin, &
+                                            ray_direction=ray_direction, hits=hits)
+   else
+      call ray_intersect_all_flat(facet=self%facet, ray_origin=ray_origin, ray_direction=ray_direction, &
+                                  hits=hits, status=status)
+   endif
    endsubroutine intersect_ray_all
+
+   subroutine intersect_ray_first(self, ray_origin, ray_direction, hit, has_hit, status)
+   !< Return the closest ray-facet intersection (issue #18 §2.5).
+   !<
+   !< Tree-accelerated best-first traversal with `t_best` pruning of sibling
+   !< subtrees. Output `hit` is meaningful only when `has_hit = .true.`; the
+   !< caller must check that flag before consuming `hit%t / hit%facet_id /
+   !< hit%point`. Empty surface or zero-magnitude direction ⇒ status BAD_INPUT
+   !< and `has_hit = .false.`.
+   class(surface_stl_object), intent(in)            :: self           !< Surface.
+   type(vector_R8P),          intent(in)            :: ray_origin     !< Ray origin.
+   type(vector_R8P),          intent(in)            :: ray_direction  !< Ray direction.
+   type(ray_hit_t),           intent(out)           :: hit            !< Closest hit (if has_hit).
+   logical,                   intent(out)           :: has_hit        !< True if any facet was hit.
+   integer(I4P),              intent(out), optional :: status         !< Status code.
+   real(R8P)                                        :: dir_norm2      !< |dir|^2 for BAD_INPUT guard.
+   type(ray_hit_t), allocatable                     :: fallback_hits(:) !< Used only when AABB is absent.
+
+   has_hit = .false.
+   if (present(status)) status = RAY_STATUS_OK
+   if (self%facets_number == 0_I4P) then
+      if (present(status)) status = RAY_STATUS_BAD_INPUT
+      return
+   endif
+   dir_norm2 = ray_direction%dotproduct(rhs=ray_direction)
+   if (dir_norm2 < 1.0e-30_R8P) then
+      if (present(status)) status = RAY_STATUS_BAD_INPUT
+      return
+   endif
+   if (self%aabb%get_nodes_number() > 0_I4P) then
+      call self%aabb%intersect_ray_first_tree(facet=self%facet, ray_origin=ray_origin, &
+                                              ray_direction=ray_direction, hit=hit, has_hit=has_hit)
+   else
+      ! Fallback: build the all-hits list and pick the first by t.
+      call ray_intersect_all_flat(facet=self%facet, ray_origin=ray_origin, ray_direction=ray_direction, &
+                                  hits=fallback_hits, status=status)
+      if (allocated(fallback_hits)) then
+         if (size(fallback_hits, kind=I4P) > 0_I4P) then
+            hit = fallback_hits(1)
+            has_hit = .true.
+         endif
+      endif
+   endif
+   endsubroutine intersect_ray_first
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
