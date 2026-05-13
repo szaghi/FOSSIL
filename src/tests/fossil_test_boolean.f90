@@ -16,16 +16,18 @@
 !<      BOOL_STATUS_NOT_IMPLEMENTED. Confirms the API surface is stable
 !<      while only DIFFERENCE is wired this PR.
 !<   4. Single-axis offset structural check — B offset by (0.5, 0, 0) only,
-!<      which makes 4 face pairs coplanar. With the new tri-tri segment clip
-!<      and tolerance-aware cut-endpoint dedup, the pipeline now runs to
-!<      completion (status = OK) instead of failing at retriangulation as
-!<      it did before the clip. The volume of the result, however, is NOT
-!<      yet correct in this configuration: the WN tagging is ambiguous on
-!<      sub-triangles whose centroids lie on faces shared between A and B
-!<      (WN ≈ 0.5 from both, neither cleanly inside nor outside), which the
-!<      current 0.5-threshold selection misclassifies. This invariant
-!<      asserts only "no crash" — full coplanar-aware boolean correctness
-!<      is the next chunk of §1.1 work.
+!<      which makes 4 face pairs coplanar. With the tri-tri segment clip,
+!<      tolerance-aware cut-endpoint dedup, AND coplanar-aware shared-boundary
+!<      tagging in `boolean_select`, the pipeline runs to completion
+!<      (status = OK). Volume of the result is, however, still NOT yet
+!<      correct in this configuration: tri-tri intersection still under-
+!<      detects cuts on some coplanar / edge-aligned face pairs (notably
+!<      the z=0 / z=1 faces in this test do not get split at x=0.5),
+!<      producing a sub-triangulation that the selection rule cannot
+!<      recover from. Closing this gap requires either an exact-arithmetic
+!<      tri-tri or coplanar-aware cut handling in the arrangement step.
+!<      This invariant asserts only "no crash" — full coplanar-correct
+!<      boolean is the next chunk of §1.1 work.
 
 program fossil_test_boolean
 

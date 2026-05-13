@@ -36,7 +36,7 @@ use fossil_arrangement,    only : arrangement_t, arrangement_initialize, &
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object,   only : facet_object
 use fossil_winding_number, only : winding_number
-use penf,                  only : I4P, R8P
+use penf,                  only : I4P, R8P, MaxR8P
 use vecfor,                only : vector_R8P
 
 implicit none
@@ -57,8 +57,17 @@ integer(I4P), parameter :: BOOL_STATUS_CDT_FAILED      = 1_I4P  !< Retriangulati
 integer(I4P), parameter :: BOOL_STATUS_NOT_IMPLEMENTED = 2_I4P  !< Op other than DIFFERENCE in this PR.
 integer(I4P), parameter :: BOOL_STATUS_EMPTY_INPUT     = 3_I4P  !< One of the input surfaces has zero facets.
 
-! WN threshold for in/out classification: WN ~ 1 inside, ~ 0 outside.
+! Three-state classification thresholds for the WN test:
+!   wn > 0.5 + WN_BOUNDARY_TOL  → strictly inside
+!   wn < 0.5 - WN_BOUNDARY_TOL  → strictly outside
+!   |wn - 0.5| <= WN_BOUNDARY_TOL  → on the boundary (centroid lies on the surface)
+!
+! WN_BOUNDARY_TOL is the slack to declare "near-0.5" as boundary. The hierarchical
+! WN with default beta=2 has typical absolute error around 0.05 for points near the
+! surface (Barill et al. 2018), so 0.1 is a comfortable cutoff that handles the
+! per-facet-centroid-on-boundary case without false positives in the interior.
 real(R8P), parameter :: WN_INSIDE_THRESHOLD = 0.5_R8P
+real(R8P), parameter :: WN_BOUNDARY_TOL     = 0.1_R8P
 
 contains
 
@@ -149,10 +158,36 @@ contains
       c    = sub_facet(k)%centroid
       wn_a = winding_number(facet=facet_a, tree=tree_a, point=c)
       wn_b = winding_number(facet=facet_b, tree=tree_b, point=c)
-      in_a = (wn_a > WN_INSIDE_THRESHOLD)
-      in_b = (wn_b > WN_INSIDE_THRESHOLD)
-      call apply_selection(op=op, owner=sub_owner(k), in_a=in_a, in_b=in_b, &
-                           keep=keep, flip=flip, status=status)
+
+      ! Detect "shared boundary" sub-triangles: those whose centroid lies on
+      ! a coplanar facet of the OTHER surface.
+      !
+      ! Detection rule: distance to the closest other-surface facet is below
+      ! tolerance AND the normals are (anti-)parallel. The WN-based detection
+      ! that would naively work in symbolic geometry (WN ≈ 0.5 on the boundary)
+      ! does not work in our hierarchical implementation: WN at a point exactly
+      ! on the boundary surface evaluates to ~1 (treated as interior) rather
+      ! than 0.5, because Bærentzen's solid-angle convention plus hierarchical
+      ! summation produce a 4π total at boundary points rather than 2π. So we
+      ! use the geometric test directly.
+      block
+         logical   :: shared
+         real(R8P) :: orient_dot
+         if (sub_owner(k) == 1_I4P) then
+            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_b, &
+                                          other_tree=tree_b, orient_dot=orient_dot)
+         else
+            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_a, &
+                                          other_tree=tree_a, orient_dot=orient_dot)
+         endif
+         in_a = (wn_a > WN_INSIDE_THRESHOLD)
+         in_b = (wn_b > WN_INSIDE_THRESHOLD)
+
+         call apply_selection(op=op, owner=sub_owner(k), in_a=in_a, in_b=in_b, &
+                              shared=shared, orient_dot=orient_dot, &
+                              keep=keep, flip=flip, status=status)
+      endblock
+
       if (present(status)) then
          if (status /= BOOL_STATUS_OK) then
             allocate(kept_facet(0))
@@ -178,23 +213,33 @@ contains
    kept_facet(1:used) = buf(1:used)
    endsubroutine tag_and_select
 
-   pure subroutine apply_selection(op, owner, in_a, in_b, keep, flip, status)
-   !< Per-op selection truth table — given a sub-triangle's owner (1=A, 2=B)
-   !< and inside-flags, decide whether to keep it and whether to flip its
-   !< normal. See module docstring for the full table.
+   pure subroutine apply_selection(op, owner, in_a, in_b, shared, orient_dot, &
+                                   keep, flip, status)
+   !< Per-op selection truth table.
    !<
-   !< Sub-triangles whose owner-side WN is "inside" (e.g. an A-owned sub-tri
-   !< with in_a=true) are sub-triangles of A's surface that lie *inside* A.
-   !< Those are the sub-triangles that are interior to the source body and
-   !< therefore not on the result's boundary — by construction A's surface
-   !< doesn't have facets inside A. But the **WN test** can return the wrong
-   !< answer for a sub-triangle whose centroid lies on A's boundary (WN ~= 0.5);
-   !< those edge cases are why production implementations use exact predicates
-   !< on the boundary. For the §1.1 MVP the WN_INSIDE_THRESHOLD = 0.5 cutoff
-   !< handles the common case; pathological cases would manifest as missing
-   !< or duplicated boundary facets in the output.
+   !< For **non-shared** sub-triangles (the common case — sub-triangle's
+   !< centroid is strictly inside or outside the other surface):
+   !<   the standard mesh-arrangement table applies, indexed by (owner, in_other).
+   !<
+   !< For **shared boundary** sub-triangles (centroid on BOTH surfaces — i.e.
+   !< the two surfaces have coplanar facets that overlap in this region):
+   !<   the answer depends on whether the two surfaces' outward normals point
+   !<   the same way at this point.
+   !<     - same orientation (orient_dot > 0): both surfaces locally bound the
+   !<       same volume. For DIFFERENCE the shared face does NOT bound the
+   !<       result (just below: inside both → outside A\B; just above: outside
+   !<       both → outside A\B), so drop both copies. By convention we drop
+   !<       both A and B copies (rather than keeping one) to avoid downstream
+   !<       deduplication.
+   !<     - opposite orientation (orient_dot < 0): one surface's interior
+   !<       coincides with the other's exterior. For DIFFERENCE the shared
+   !<       face IS a boundary of the result; keep A's copy (B's would be
+   !<       inverted-orientation, which `reverse_normal` could fix but for
+   !<       the simpler symmetric case we let A own it).
    integer(I4P), intent(in)            :: op, owner
    logical,      intent(in)            :: in_a, in_b
+   logical,      intent(in)            :: shared      !< True if centroid is on the OTHER surface (shared boundary).
+   real(R8P),    intent(in)            :: orient_dot  !< Dot product of sub-tri normal with closest other-surface normal.
    logical,      intent(out)           :: keep, flip
    integer(I4P), intent(out), optional :: status
 
@@ -203,14 +248,28 @@ contains
 
    select case (op)
    case (BOOL_DIFFERENCE)
-      ! A \ B = A's outer surface (the parts not inside B) ∪ B's surface
-      ! flipped (the parts that lie inside A become the cavity walls).
-      if (owner == 1_I4P) then
-         keep = .not. in_b   ! A-facets outside B
-         flip = .false.
-      else  ! owner == 2 (B)
-         keep = in_a         ! B-facets inside A
-         flip = .true.       ! flip to point outward (into A's exterior)
+      if (shared) then
+         ! Shared boundary: opposite-orientation faces ARE boundaries of A\B
+         ! (kept by A's copy; B's copy would be opposite, drop). Same-orientation
+         ! faces are NOT boundaries of A\B (both surfaces enclose the same side
+         ! locally, so the shared face is interior of both A and B); drop both.
+         if (owner == 1_I4P) then
+            keep = (orient_dot < 0._R8P)
+            flip = .false.
+         else  ! owner == 2 (B): always drop on shared boundary
+            keep = .false.
+         endif
+      else
+         ! Non-shared: standard truth table.
+         ! A \ B = A's outer surface (the parts not inside B) ∪ B's surface
+         ! flipped (the parts that lie inside A become the cavity walls).
+         if (owner == 1_I4P) then
+            keep = .not. in_b   ! A-facets outside B
+            flip = .false.
+         else  ! owner == 2 (B)
+            keep = in_a         ! B-facets inside A
+            flip = .true.       ! flip to point outward (into A's exterior)
+         endif
       endif
 
    case (BOOL_UNION, BOOL_INTERSECT, BOOL_SYMDIFF)
@@ -220,5 +279,42 @@ contains
       if (present(status)) status = BOOL_STATUS_NOT_IMPLEMENTED
    endselect
    endsubroutine apply_selection
+
+   function is_on_other_surface(sub, other_facet, other_tree, orient_dot) result(yes)
+   !< True iff `sub`'s centroid lies on the OTHER surface (within tolerance)
+   !< AND the closest other-surface facet's normal is (anti-)parallel to `sub`'s
+   !< normal. Returns the dot product of normals via `orient_dot` for
+   !< `apply_selection` to disambiguate same-vs-opposite orientation.
+   !<
+   !< Distance and normal-parallelism tolerances:
+   !<   - Distance: `SHARED_DIST_TOL` ≈ 1e-9 in the surface's coordinate units.
+   !<     Any sub-triangle centroid this close to another surface's facet is
+   !<     treated as coincident. Note that `distance_tree_with_region` returns
+   !<     SQUARED distance, so we compare against `SHARED_DIST_TOL**2`.
+   !<   - Normal parallelism: `|orient_dot| > SHARED_NORM_TOL` ≈ 0.99 (i.e.,
+   !<     angles within ~8° of parallel/antiparallel). Looser than 1.0 to
+   !<     accommodate per-facet normal jitter on retriangulated cuts.
+   type(facet_object),     intent(in)         :: sub
+   type(facet_object),     intent(in)         :: other_facet(:)
+   type(aabb_tree_object), intent(in), target :: other_tree
+   real(R8P),              intent(out)        :: orient_dot
+   logical                                    :: yes
+   real(R8P)                                  :: distance_sq
+   integer(I4P)                               :: closest_id, region_id
+   real(R8P), parameter :: SHARED_DIST_TOL = 1.0e-9_R8P
+   real(R8P), parameter :: SHARED_NORM_TOL = 0.99_R8P
+
+   yes = .false. ; orient_dot = 0._R8P
+   distance_sq = MaxR8P
+   closest_id  = 0_I4P
+   region_id   = 0_I4P
+   call other_tree%distance_tree_with_region(facet=other_facet, point=sub%centroid, &
+                                              distance=distance_sq, closest_facet=closest_id, &
+                                              closest_region=region_id)
+   if (closest_id <= 0_I4P .or. closest_id > size(other_facet, dim=1)) return
+   if (distance_sq > SHARED_DIST_TOL * SHARED_DIST_TOL) return
+   orient_dot = sub%normal%dotproduct(rhs=other_facet(closest_id)%normal)
+   yes = (abs(orient_dot) > SHARED_NORM_TOL)
+   endfunction is_on_other_surface
 
 endmodule fossil_boolean
