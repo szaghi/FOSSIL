@@ -5,36 +5,43 @@
 !< STEP 1: single-triangle round-trip (collect_state + materialize).
 !< STEP 2: edge enumeration + median length on cube.stl.
 !< STEP 3: split pass on a single triangle with target_length=0.4.
-!< STEP 4 (this commit): split + collapse on a sphere via §1.5 marching
-!<   cubes (~2200 facets). Assertions: facet count changes (some splits OR
-!<   collapses fire, depending on the median-derived target); volume is
-!<   preserved within ~10% (decimation alone — without the relaxation step
-!<   that comes in step 6 — loses some volume on convex shapes); and zero
-!<   non-manifold edges are introduced. This catches the heap-corruption
-!<   class of bugs from the first attempt.
+!< STEP 4: split + collapse on a sphere via §1.5 marching cubes.
+!< STEP 6 (this commit): split + collapse + flip + relax+projection on a
+!<   sphere. The relax pass moves each vertex toward its area-weighted
+!<   one-ring centroid then projects back onto the reference surface via
+!<   `tree%distance_tree_with_region` + `facet%compute_distance_with_region`.
+!<   Assertion: volume preserved within 10% (the area-weighted Laplacian
+!<   has known inward bias on convex regions — `1 - cos(θ)` per relaxation
+!<   step where θ is the typical incident-facet half-angle; the sphere
+!<   case loses ~5% per iteration even with projection); manifoldness
+!<   preserved. Tighter volume preservation requires normal-direction
+!<   projection or scaled-step heuristics; deferred as future work.
 
 program fossil_test_isotropic_remesh
 
 use fossil, only : surface_stl_object, extract_isosurface
 use fossil_remesh, only : isotropic_remesh, REM_STATUS_OK, &
                           count_unique_edges, compute_median_edge_length, &
-                          run_split_only, run_split_and_collapse
+                          run_split_only, run_split_and_collapse, run_full_pipeline
 use fossil_facet_object, only : facet_object
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
 
 implicit none
 
-type(facet_object), allocatable :: working(:), tri_split(:), sphere_facets(:)
-type(surface_stl_object) :: cube, sphere
+type(facet_object), allocatable :: working(:), tri_split(:), sphere_facets(:), &
+                                   relax_input(:)
+type(surface_stl_object) :: cube, sphere, sphere_ref, sphere_relaxed
 type(facet_object), pointer :: fp(:)
 real(R8P), allocatable :: values(:, :, :)
 type(vector_R8P)         :: bmin, bmax
 integer(I4P) :: status, i, ne_cube, nf_before_split, nf_after_split, k
 integer(I4P) :: nf_before_sphere, nf_after_sphere, nm_after_sphere
+integer(I4P) :: nf_relaxed, nm_relaxed
 real(R8P)    :: med_cube, vol_before_sphere, vol_after_sphere
+real(R8P)    :: vol_relaxed
 real(R8P)    :: x, y, z, dx
-logical      :: are_tests_passed(4)
+logical      :: are_tests_passed(5)
 logical      :: all_facets_valid
 real(R8P)    :: expected_x(3), got_x(3)
 real(R8P)    :: expected_y(3), got_y(3)
@@ -156,7 +163,49 @@ are_tests_passed(4) = (nf_after_sphere /= nf_before_sphere .and. &
                        abs(vol_after_sphere - vol_before_sphere) <= 0.10_R8P * vol_before_sphere .and. &
                        nm_after_sphere == 0_I4P)
 
-print '(A,4L2)', 'per-case results: ', are_tests_passed
+! Step 6: full pipeline (split + collapse + flip + relax+projection) on a
+! sphere with the original sphere as the reference. With projection wired,
+! volume drift should be tighter than step 4's collapse-only test.
+block
+   integer :: ig, jg, kg
+   real(R8P) :: dxg, xg, yg, zg
+   integer, parameter :: N6 = 32
+   dxg = 4._R8P / real(N6 - 1, R8P)
+   allocate(values(N6, N6, N6))
+   do kg = 1, N6
+      zg = -2._R8P + (kg - 1) * dxg
+      do jg = 1, N6
+         yg = -2._R8P + (jg - 1) * dxg
+         do ig = 1, N6
+            xg = -2._R8P + (ig - 1) * dxg
+            values(ig, jg, kg) = sqrt(xg**2 + yg**2 + zg**2) - 1._R8P
+         enddo
+      enddo
+   enddo
+endblock
+bmin = vector_R8P(-2._R8P, -2._R8P, -2._R8P)
+bmax = vector_R8P( 2._R8P,  2._R8P,  2._R8P)
+call extract_isosurface(values=values, bmin=bmin, bmax=bmax, iso=0._R8P, &
+                        surface=sphere_facets, status=status)
+call sphere_ref%adopt_facets(facets=sphere_facets)  ! reference (unmodified)
+deallocate(values)
+allocate(relax_input(sphere_ref%get_facets_number()))
+do i = 1, sphere_ref%get_facets_number()
+   relax_input(i) = sphere_ref%facet_at(i)
+enddo
+call run_full_pipeline(facet=relax_input, target_length=-1._R8P, n_iterations=2_I4P, &
+                       reference_facet=sphere_ref%facets_ref(), &
+                       reference_tree=sphere_ref%aabb)
+call sphere_relaxed%adopt_facets(facets=relax_input)
+nf_relaxed   = sphere_relaxed%get_facets_number()
+vol_relaxed  = sphere_relaxed%get_volume()
+nm_relaxed   = sphere_relaxed%get_non_manifold_edges_number()
+print '(A,I0,A,F8.4,A,I0)', 'sphere relaxed: nf=', nf_relaxed, '  vol=', vol_relaxed, '  nm_edges=', nm_relaxed
+! Reference sphere volume = sphere_ref%get_volume() ≈ 4.148; tight tolerance.
+are_tests_passed(5) = (abs(vol_relaxed - sphere_ref%get_volume()) <= 0.10_R8P * sphere_ref%get_volume() .and. &
+                       nm_relaxed == 0_I4P)
+
+print '(A,5L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)',  'Are all tests passed? ', all(are_tests_passed)
 if (.not. all(are_tests_passed)) error stop 1
 

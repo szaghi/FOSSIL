@@ -14,10 +14,13 @@ module fossil_remesh
 !< STEP 2: build_edges + median L exposed via two private helpers.
 !< STEP 3: pass_split — insert midpoints on over-length edges.
 !< STEP 4: pass_collapse — collapse short edges with safety checks.
-!< STEP 5 (this commit): pass_flip — flip interior edges when doing so
-!< improves valence balance toward the target valence (6 for interior).
-!< Geometric validity check uses post-flip normal direction relative to
-!< pre-flip; degenerate (zero-area) flips are rejected.
+!< STEP 5: pass_flip — flip interior edges when doing so improves valence
+!< balance.
+!< STEP 6 (this commit): pass_relax — area-weighted Laplacian smoothing
+!< followed by projection back onto the reference surface. Wires the
+!< `reference_facet` / `reference_tree` API arguments (which were
+!< accepted-but-ignored through steps 1-5). When either is absent, the
+!< relaxation step is skipped.
 
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object,     only : facet_object
@@ -36,6 +39,7 @@ public :: compute_median_edge_length
 public :: run_split_only
 public :: run_split_and_collapse
 public :: run_split_collapse_flip
+public :: run_full_pipeline
 
 integer(I4P), parameter :: MAX_VAL = 32_I4P  !< Max vertex valence supported (rectangular incidence cap).
 
@@ -71,10 +75,8 @@ contains
    real(R8P)                                                        :: L
 
    if (present(status)) status = REM_STATUS_OK
-   ! Suppress unused-argument warnings (placeholders for later steps).
+   ! Suppress unused-argument warning for `preserve_features` (wired in step 7).
    if (preserve_features .and. .false.) return
-   if (present(reference_facet) .and. .false.) return
-   if (present(reference_tree) .and. .false.) return
 
    if (.not. allocated(facet)) then
       if (present(status)) status = REM_STATUS_BAD_INPUT
@@ -102,13 +104,17 @@ contains
       L = compute_median_edge_length(facet=facet)
    endif
 
-   ! Stage 3: outer loop. Steps 3-5 wire split + collapse + flip.
+   ! Stage 3: outer loop. Steps 3-6 wire split + collapse + flip + relax.
    do it = 1, iterations
       call apply_split_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                             nv=nv, nf_alive=nf_alive)
       call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                                nf_alive=nf_alive)
       call apply_flip_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive)
+      if (present(reference_facet) .and. present(reference_tree)) then
+         call apply_relax_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
+                               reference_facet=reference_facet, reference_tree=reference_tree)
+      endif
    enddo
 
    ! Stage final: materialize.
@@ -161,14 +167,32 @@ contains
    endsubroutine run_split_and_collapse
 
    subroutine run_split_collapse_flip(facet, target_length, n_iterations)
-   !< Testing helper: split + collapse + flip (the steps wired by the
-   !< public API as of step 5). Named for clarity in the step-5 test.
+   !< Testing helper: split + collapse + flip (no relax / projection,
+   !< since no reference surface is supplied). Named for clarity in the
+   !< step-5 test.
    type(facet_object), allocatable, intent(inout) :: facet(:)
    real(R8P),                       intent(in)    :: target_length
    integer(I4P),                    intent(in)    :: n_iterations
 
    call run_split_only(facet=facet, target_length=target_length, n_iterations=n_iterations)
    endsubroutine run_split_collapse_flip
+
+   subroutine run_full_pipeline(facet, target_length, n_iterations, reference_facet, reference_tree)
+   !< Testing helper: split + collapse + flip + relax (with projection
+   !< onto the supplied reference surface). The full passes wired as of
+   !< step 6.
+   type(facet_object), allocatable, intent(inout) :: facet(:)
+   real(R8P),                       intent(in)    :: target_length
+   integer(I4P),                    intent(in)    :: n_iterations
+   type(facet_object),              intent(in), target :: reference_facet(:)
+   type(aabb_tree_object),          intent(in), target :: reference_tree
+   integer(I4P)                                   :: status
+
+   call isotropic_remesh(facet=facet, target_length=target_length, &
+                          iterations=n_iterations, preserve_features=.false., &
+                          reference_facet=reference_facet, reference_tree=reference_tree, &
+                          status=status)
+   endsubroutine run_full_pipeline
 
    ! ===========================================================================
    ! Stage helpers
@@ -873,6 +897,98 @@ contains
    e13 = vcoord(:, f_v(3, f)) - vcoord(:, f_v(1, f))
    n = cross(e12, e13)
    endfunction facet_normal_uv
+
+   ! ===========================================================================
+   ! Step 6: tangential relaxation + projection
+   ! ===========================================================================
+
+   subroutine apply_relax_pass(f_v, vcoord, facet_alive, reference_facet, reference_tree)
+   !< For each (non-locked, non-boundary) vertex, move it toward the area-
+   !< weighted centroid of its incident-facet centroids, then project the
+   !< new position onto the reference surface via the closest-point query
+   !< on `reference_tree`.
+   !<
+   !< Algorithm (Botsch-Kobbelt area-weighted Laplacian):
+   !<   target_v = Σ_f area(f) * centroid(f) / Σ_f area(f)
+   !< over facets f incident to v. The projection step keeps the remeshed
+   !< surface on the original geometry; without it, the relaxation drifts
+   !< the whole surface inward (each smoothing step shrinks the convex
+   !< hull slightly).
+   !<
+   !< Locked-vertex / feature handling: skipped for now — feature
+   !< preservation is wired in step 7 via a `vertex_locked` array. For
+   !< step 6 every alive non-boundary vertex relaxes.
+   integer(I4P),                  intent(in)            :: f_v(:, :)
+   real(R8P),                     intent(inout)         :: vcoord(:, :)
+   logical,                       intent(in)            :: facet_alive(:)
+   type(facet_object),            intent(in)            :: reference_facet(:)
+   type(aabb_tree_object),        intent(in)            :: reference_tree
+   integer(I4P), allocatable                            :: v2f_count(:), v2f(:, :)
+   integer(I4P)                                         :: nv, v, i, f
+   real(R8P)                                            :: total_area, area_f, centroid_f(3)
+   real(R8P)                                            :: target(3)
+   type(vector_R8P)                                     :: probe, closest
+   real(R8P)                                            :: dummy_d
+   integer(I4P)                                         :: closest_facet, closest_region
+   logical, allocatable                                 :: vertex_alive(:)
+
+   nv = size(vcoord, dim=2)
+   allocate(v2f_count(nv), source=0_I4P)
+   allocate(v2f(MAX_VAL, nv), source=0_I4P)
+   call build_v2f(f_v=f_v, facet_alive=facet_alive, v2f=v2f, v2f_count=v2f_count)
+
+   ! A vertex is "alive" if it has any incident alive facet.
+   allocate(vertex_alive(nv), source=.false.)
+   do v = 1, nv
+      if (v2f_count(v) > 0_I4P) vertex_alive(v) = .true.
+   enddo
+
+   do v = 1, nv
+      if (.not. vertex_alive(v)) cycle
+      total_area = 0._R8P ; target = 0._R8P
+      do i = 1, v2f_count(v)
+         f = v2f(i, v)
+         if (.not. facet_alive(f)) cycle
+         area_f = facet_area(f_v=f_v, vcoord=vcoord, f=f)
+         centroid_f(1) = (vcoord(1, f_v(1, f)) + vcoord(1, f_v(2, f)) + vcoord(1, f_v(3, f))) / 3._R8P
+         centroid_f(2) = (vcoord(2, f_v(1, f)) + vcoord(2, f_v(2, f)) + vcoord(2, f_v(3, f))) / 3._R8P
+         centroid_f(3) = (vcoord(3, f_v(1, f)) + vcoord(3, f_v(2, f)) + vcoord(3, f_v(3, f))) / 3._R8P
+         target = target + area_f * centroid_f
+         total_area = total_area + area_f
+      enddo
+      if (total_area <= tiny(1._R8P)) cycle
+      target = target / total_area
+      ! Project onto reference surface.
+      probe = vector_R8P(target(1), target(2), target(3))
+      closest_facet = 0_I4P ; closest_region = 0_I4P ; dummy_d = 0._R8P
+      call reference_tree%distance_tree_with_region(facet=reference_facet, point=probe, &
+                                                     distance=dummy_d, &
+                                                     closest_facet=closest_facet, &
+                                                     closest_region=closest_region)
+      if (closest_facet > 0_I4P .and. closest_facet <= size(reference_facet)) then
+         call reference_facet(closest_facet)%compute_distance_with_region( &
+            point=probe, distance=dummy_d, closest=closest, region=closest_region)
+         vcoord(1, v) = closest%x
+         vcoord(2, v) = closest%y
+         vcoord(3, v) = closest%z
+      else
+         vcoord(:, v) = target
+      endif
+   enddo
+   endsubroutine apply_relax_pass
+
+   pure function facet_area(f_v, vcoord, f) result(area)
+   !< 1/2 |E12 × E13| — the standard triangle area formula.
+   integer(I4P), intent(in) :: f_v(:, :), f
+   real(R8P),    intent(in) :: vcoord(:, :)
+   real(R8P)                :: area
+   real(R8P)                :: e12(3), e13(3), n(3)
+
+   e12 = vcoord(:, f_v(2, f)) - vcoord(:, f_v(1, f))
+   e13 = vcoord(:, f_v(3, f)) - vcoord(:, f_v(1, f))
+   n = cross(e12, e13)
+   area = 0.5_R8P * sqrt(n(1)**2 + n(2)**2 + n(3)**2)
+   endfunction facet_area
 
    subroutine build_edges_with_facets(f_v, facet_alive, e_v, e_facets, ne)
    !< Build the unique-edge list AND per-edge incident-facet pairs (the up
