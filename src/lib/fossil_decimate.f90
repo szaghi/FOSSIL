@@ -689,8 +689,15 @@ contains
       left  = 2 * cur
       right = 2 * cur + 1
       smallest = cur
-      if (left  <= heap_size .and. e_cost(heap(left )) < e_cost(heap(smallest))) smallest = left
-      if (right <= heap_size .and. e_cost(heap(right)) < e_cost(heap(smallest))) smallest = right
+      ! Nested guards (not compound `.and.`) — Fortran's `.and.` is not
+      ! short-circuit, so a compound test would read heap(left/right)
+      ! even when the index is out of range. -fcheck=bounds catches it.
+      if (left  <= heap_size) then
+         if (e_cost(heap(left )) < e_cost(heap(smallest))) smallest = left
+      endif
+      if (right <= heap_size) then
+         if (e_cost(heap(right)) < e_cost(heap(smallest))) smallest = right
+      endif
       if (smallest == cur) exit
       tmp = heap(cur) ; heap(cur) = heap(smallest) ; heap(smallest) = tmp
       e_heappos(heap(cur))      = cur
