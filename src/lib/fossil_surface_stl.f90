@@ -12,6 +12,8 @@ use fossil_winding_number, only : compute_winding_number => winding_number
 use fossil_self_intersection, only : intersection_pair_t, &
                                      compute_self_intersections => find_self_intersections
 use fossil_marching_cubes, only : compute_isosurface => extract_isosurface, MC_STATUS_OK
+use fossil_decimate, only : compute_decimate => decimate, &
+                            DEC_STATUS_OK, DEC_STATUS_BAD_INPUT, DEC_STATUS_NO_PROGRESS
 use fossil_boolean, only : compute_boolean => boolean_compute, &
                            BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF, &
                            BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, &
@@ -148,6 +150,7 @@ type :: surface_stl_object
       procedure, pass(self) :: boolean                          !< Boolean op against another surface (issue #18 §1.1).
       procedure, pass(self) :: resolve_self_intersections       !< Self-boolean union, closes §1.2's deferred resolution path.
       procedure, pass(self) :: resample_via_distance_field      !< SDF-based remesh via Marching Cubes (issue #18 §1.5).
+      procedure, pass(self) :: decimate                         !< QEM edge-collapse mesh decimation (issue #18 §1.3).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1482,6 +1485,48 @@ contains
    if (mc_status /= MC_STATUS_OK) return
    call surface_out%adopt_facets(facets=facets)
    endsubroutine resample_via_distance_field
+
+   subroutine decimate(self, target_facets, status)
+   !< Reduce `self`'s triangle count to ≤ `target_facets` via QEM edge
+   !< collapse (issue #18 §1.3, Garland & Heckbert 1997).
+   !<
+   !< On success, `self` is replaced by the decimated mesh — adopt_facets
+   !< runs analyze, rebuilding the AABB tree, vertex pool, connectivity,
+   !< and pseudo-normals so all downstream queries (distance, winding number,
+   !< boolean, ...) work without further user action.
+   !<
+   !< If the algorithm cannot reach `target_facets` (every remaining edge
+   !< collapse would violate a safety check — normal-flip, non-manifold edge,
+   !< duplicate facet), it returns DEC_STATUS_NO_PROGRESS and leaves `self`
+   !< at the smallest count it could safely reach.
+   !<
+   !< Pre-condition: `self` must have been analyzed (i.e. `vertex_id` and
+   !< `fcon_edge` populated). All public construction paths
+   !< (`load_from_file`, `adopt_facets`, `analyze`) ensure this.
+   class(surface_stl_object),     intent(inout)        :: self
+   integer(I4P),                  intent(in)           :: target_facets
+   integer(I4P),                  intent(out), optional :: status
+   type(facet_object), allocatable                     :: working(:)
+   integer(I4P)                                        :: dec_status
+
+   if (present(status)) status = DEC_STATUS_OK
+   if (self%facets_number == 0_I4P) then
+      if (present(status)) status = DEC_STATUS_BAD_INPUT
+      return
+   endif
+   if (self%facets_number <= target_facets) return  ! nothing to do
+
+   ! Work on a deep copy so the input stays valid until we adopt the output.
+   allocate(working(self%facets_number))
+   working(1:self%facets_number) = self%facet(1:self%facets_number)
+
+   call compute_decimate(facet=working, target_facets=target_facets, status=dec_status)
+   if (present(status)) status = dec_status
+   if (dec_status == DEC_STATUS_BAD_INPUT) return
+   ! Adopt regardless of NO_PROGRESS — the output is still a valid mesh,
+   ! just larger than requested.
+   call self%adopt_facets(facets=working)
+   endsubroutine decimate
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
