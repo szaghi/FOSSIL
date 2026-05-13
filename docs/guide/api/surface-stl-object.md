@@ -755,6 +755,208 @@ end program ex_is_point_inside
 
 ---
 
+### `winding_number`
+
+```fortran
+w = surface%winding_number(point=p, beta=2._R8P)
+```
+
+**Purpose.** Generalized / fast winding number (Jacobson 2013 + Barill 2018).
+Returns a continuous scalar `w(q)` that measures how many times the surface
+wraps around `q`: ≈ 1.0 strictly inside a closed outward-oriented surface,
+≈ 0.0 strictly outside, intermediate on the boundary or on **non-watertight
+inputs** — the headline "graceful degradation on dirty STL" property that
+the legacy sign algorithms cannot deliver. Conceptual narrative and algorithm
+overview on the [§1.4 feature page](/guide/advanced/winding-number).
+
+**Arguments.**
+
+| Argument | Intent     | Type               | Notes                                                                                                                                                                |
+| -------- | ---------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `point`  | `in`       | `type(vector_R8P)` | (required) Query point.                                                                                                                                              |
+| `beta`   | `in`, opt. | `real(R8P)`        | Barnes-Hut admissibility ratio. Default `2.0`. `beta ≤ 0` forces the exact O(N) per-facet sum (useful for ground truth). Larger β means stricter admissibility, more accuracy, slower. |
+
+**Returns.** `real(R8P)` — the unrounded scalar `w(q)`. Threshold at `0.5`
+to use as a binary inside/outside classifier on dirty input.
+
+**Example.**
+
+```fortran
+program ex_winding_number_api
+use fossil
+use penf,   only : I4P, R8P
+use vecfor, only : vector_R8P
+implicit none
+type(surface_stl_object) :: surface
+real(R8P)                :: w_inside, w_outside
+
+call surface%load_from_file(file_name='cube.stl', guess_format=.true.)
+w_inside  = surface%winding_number(point=vector_R8P(0.5_R8P, 0.5_R8P, 0.5_R8P))
+w_outside = surface%winding_number(point=vector_R8P(2._R8P, 2._R8P, 2._R8P))
+print '(A,F8.4,A,F8.4)', 'inside w = ', w_inside, '   outside w = ', w_outside
+endprogram ex_winding_number_api
+```
+
+**Notes.**
+
+- Hierarchical traversal uses the existing AABB tree (SAH BVH or octree) —
+  no separate data structure built. Per-node dipole moments are computed
+  lazily on first query.
+- At surface vertices and edges, `w` returns the local solid-angle
+  fraction (e.g. `0.125` at a cube corner) — this is the correct
+  mathematical answer, not a bug. Threshold at 0.5 for a clean classifier
+  or query a small offset away from the surface.
+- For typical CAD STL with dirty topology, prefer `winding_number > 0.5`
+  over `is_point_inside` — the latter uses sign algorithms that can fail
+  silently on non-watertight inputs.
+
+**See also.** [`distance`](#distance), [`is_point_inside`](#is_point_inside),
+[§1.4 feature page](/guide/advanced/winding-number).
+
+---
+
+### `intersect_ray_first`
+
+```fortran
+call surface%intersect_ray_first(ray_origin, ray_direction, hit, has_hit, status)
+```
+
+**Purpose.** AABB-tree-accelerated **closest hit** ray query (Möller-
+Trumbore + best-first traversal with `t_best` pruning). For picking
+and "what facet did this ray hit first?" queries. Conceptual overview
+plus all three variants on the [§2.5 feature page](/guide/advanced/ray-queries).
+
+**Arguments.**
+
+| Argument        | Intent       | Type               | Notes                                                                                          |
+| --------------- | ------------ | ------------------ | ---------------------------------------------------------------------------------------------- |
+| `ray_origin`    | `in`         | `type(vector_R8P)` | (required) Ray origin.                                                                         |
+| `ray_direction` | `in`         | `type(vector_R8P)` | (required) Ray direction. Need not be unit; `t` is parametric.                                 |
+| `hit`           | `out`        | `type(ray_hit_t)`  | (required) Hit record (`%facet_id`, `%t`, `%point`). **Valid only when `has_hit = .true.`**.   |
+| `has_hit`       | `out`        | `logical`          | (required) `.true.` if any facet was hit.                                                      |
+| `status`        | `out`, opt.  | `integer(I4P)`     | `RAY_STATUS_OK` or `RAY_STATUS_BAD_INPUT`.                                                     |
+
+**Example.**
+
+```fortran
+program ex_intersect_ray_first_api
+use fossil
+use penf,   only : I4P, R8P
+use vecfor, only : vector_R8P, ex_R8P
+implicit none
+type(surface_stl_object) :: cube
+type(ray_hit_t)          :: hit
+logical                  :: has_hit
+integer(I4P)             :: status
+
+call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call cube%intersect_ray_first(ray_origin=vector_R8P(-1._R8P, 0.3_R8P, 0.6_R8P), &
+                              ray_direction=ex_R8P, hit=hit, has_hit=has_hit, &
+                              status=status)
+if (has_hit) print '(A,I0,A,F8.4)', 'hit facet ', hit%facet_id, ' at t=', hit%t
+endprogram ex_intersect_ray_first_api
+```
+
+**See also.**
+[§2.5 feature page](/guide/advanced/ray-queries),
+[`intersect_ray_all`](#intersect_ray_all),
+[`intersect_ray_any`](#intersect_ray_any),
+[`facet%intersect_ray`](/guide/api/facet-object).
+
+---
+
+### `intersect_ray_all`
+
+```fortran
+call surface%intersect_ray_all(ray_origin, ray_direction, hits, status)
+```
+
+**Purpose.** Return **every** ray-facet intersection, sorted ascending
+by `t`. For visibility / volume-counting queries (e.g. ray-cast inside
+test = odd number of hits).
+
+**Arguments.**
+
+| Argument        | Intent       | Type                          | Notes                                                                                  |
+| --------------- | ------------ | ----------------------------- | -------------------------------------------------------------------------------------- |
+| `ray_origin`    | `in`         | `type(vector_R8P)`            | (required) Ray origin.                                                                 |
+| `ray_direction` | `in`         | `type(vector_R8P)`            | (required) Ray direction.                                                              |
+| `hits`          | `out`        | `type(ray_hit_t), allocatable`| (required) Always allocated (zero-length if no hits). Sorted ascending by `t`.         |
+| `status`        | `out`, opt.  | `integer(I4P)`                | `RAY_STATUS_OK` or `RAY_STATUS_BAD_INPUT`.                                             |
+
+**Example.**
+
+```fortran
+program ex_intersect_ray_all_api
+use fossil
+use penf,   only : I4P, R8P
+use vecfor, only : vector_R8P, ex_R8P
+implicit none
+type(surface_stl_object)     :: cube
+type(ray_hit_t), allocatable :: hits(:)
+integer(I4P)                 :: status
+
+call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call cube%intersect_ray_all(ray_origin=vector_R8P(-1._R8P, 0.3_R8P, 0.6_R8P), &
+                            ray_direction=ex_R8P, hits=hits, status=status)
+print '(A,I0)', 'n_hits = ', size(hits)
+endprogram ex_intersect_ray_all_api
+```
+
+**See also.**
+[§2.5 feature page](/guide/advanced/ray-queries),
+[`intersect_ray_first`](#intersect_ray_first),
+[`intersect_ray_any`](#intersect_ray_any).
+
+---
+
+### `intersect_ray_any`
+
+```fortran
+call surface%intersect_ray_any(ray_origin, ray_direction, max_t, found, status)
+```
+
+**Purpose.** Early-exit "is there *any* hit within distance `max_t`?".
+For shadow rays, occlusion tests, and conservative inside-test
+rejection.
+
+**Arguments.**
+
+| Argument        | Intent       | Type               | Notes                                                                                          |
+| --------------- | ------------ | ------------------ | ---------------------------------------------------------------------------------------------- |
+| `ray_origin`    | `in`         | `type(vector_R8P)` | (required) Ray origin.                                                                         |
+| `ray_direction` | `in`         | `type(vector_R8P)` | (required) Ray direction.                                                                      |
+| `max_t`         | `in`, opt.   | `real(R8P)`        | Upper t bound. Default `MaxR8P` (any forward hit). Pass Euclidean distance when direction unit.|
+| `found`         | `out`        | `logical`          | (required) `.true.` if at least one hit in `[0, max_t]`.                                       |
+| `status`        | `out`, opt.  | `integer(I4P)`     | `RAY_STATUS_OK` or `RAY_STATUS_BAD_INPUT`.                                                     |
+
+**Example.**
+
+```fortran
+program ex_intersect_ray_any_api
+use fossil
+use penf,   only : I4P, R8P
+use vecfor, only : vector_R8P, ex_R8P
+implicit none
+type(surface_stl_object) :: cube
+logical                  :: blocked
+integer(I4P)             :: status
+
+call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call cube%intersect_ray_any(ray_origin=vector_R8P(-1._R8P, 0.3_R8P, 0.6_R8P), &
+                            ray_direction=ex_R8P, max_t=1.5_R8P, &
+                            found=blocked, status=status)
+print '(A,L1)', 'blocked? ', blocked
+endprogram ex_intersect_ray_any_api
+```
+
+**See also.**
+[§2.5 feature page](/guide/advanced/ray-queries),
+[`intersect_ray_first`](#intersect_ray_first),
+[`intersect_ray_all`](#intersect_ray_all).
+
+---
+
 ## Manipulation
 
 ### `translate`
@@ -1053,6 +1255,489 @@ end program ex_merge_solids
 
 **See also.** [`clip`](#clip),
 [`sanitize`](#sanitize).
+
+---
+
+### `boolean`
+
+```fortran
+call surface%boolean(other=other_surface, op=BOOL_DIFFERENCE, status=status)
+```
+
+**Purpose.** Mesh boolean (Zhou et al. 2016). Replaces `self` in-place
+with the result of `op(self, other)`, where `op` is one of `BOOL_UNION`,
+`BOOL_INTERSECT`, `BOOL_DIFFERENCE`, `BOOL_SYMDIFF`. Conceptual overview
+and full pipeline on the [§1.1 feature page](/guide/advanced/booleans).
+
+**Arguments.**
+
+| Argument | Intent       | Type                        | Notes                                                                                                       |
+| -------- | ------------ | --------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `other`  | `in`         | `class(surface_stl_object)` | (required) The right-hand-side solid. Unchanged on return.                                                  |
+| `op`     | `in`         | `integer(I4P)`              | (required) `BOOL_UNION`, `BOOL_INTERSECT`, `BOOL_DIFFERENCE`, or `BOOL_SYMDIFF`.                            |
+| `status` | `out`, opt.  | `integer(I4P)`              | `BOOL_STATUS_OK`, `BOOL_STATUS_CDT_FAILED`, `BOOL_STATUS_NOT_IMPLEMENTED`, or `BOOL_STATUS_EMPTY_INPUT`.    |
+
+Pre-conditions for clean output: both inputs must be watertight
+manifold solids with outward-oriented normals (run `sanitize_normals`
+if you're not sure). Both must have their AABB tree built (true after
+`load_from_file` / `analyze` / `adopt_facets`).
+
+**Example.**
+
+```fortran
+program ex_boolean_api
+use fossil
+use penf,   only : I4P, R8P
+use vecfor, only : vector_R8P
+implicit none
+type(surface_stl_object) :: a, b
+integer(I4P)             :: status
+
+call a%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call b%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call b%translate(delta=vector_R8P(0.5_R8P, 0.5_R8P, 0.5_R8P))
+call b%analyze
+
+call a%boolean(other=b, op=BOOL_DIFFERENCE, status=status)
+print '(A,I0,A,F8.4)', 'A \ B status=', status, '  vol=', a%get_volume()
+endprogram ex_boolean_api
+```
+
+**Notes.**
+
+- **Axis-aligned coplanar face overlaps silently produce wrong volumes**
+  even with `status == BOOL_STATUS_OK`. Workaround: perturb one input
+  by `~1e-6 * bbox_diagonal` along each axis before the boolean. Full
+  discussion + the underlying failure modes in the
+  [§1.1 known limitations](/guide/advanced/booleans#known-limitations).
+- The result replaces `self` in place — if you need the original, copy
+  it first (`saved = self`) before calling.
+- `BOOL_SYMDIFF` is implemented as
+  `(A ∪ B) \ (A ∩ B)` per the standard truth table; performance is
+  comparable to UNION + INTERSECT.
+
+**See also.**
+[§1.1 feature page](/guide/advanced/booleans),
+[`resolve_self_intersections`](#resolve_self_intersections),
+[Constants](/guide/api/constants) (BOOL_*, BOOL_STATUS_*).
+
+---
+
+### `find_self_intersections`
+
+```fortran
+call surface%find_self_intersections(pairs=pairs, status=status)
+```
+
+**Purpose.** Locate every facet pair whose triangles geometrically
+cross (Möller tri-tri intersection in the narrow phase, AABB tree-vs-
+tree broad phase). Adjacent facets sharing a vertex or edge are
+filtered out — only **real geometric crossings** remain. Conceptual
+overview on the [§1.2 feature page](/guide/advanced/self-intersection).
+
+**Arguments.**
+
+| Argument | Intent       | Type                                     | Notes                                                                                       |
+| -------- | ------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `pairs`  | `out`        | `type(intersection_pair_t), allocatable` | (required) Returned list of intersection records. Always allocated (zero-length if none).   |
+| `status` | `out`, opt.  | `integer(I4P)`                           | `STATUS_OK` on success.                                                                     |
+
+Each `pairs(i)` record has fields `%a` and `%b` (facet IDs with
+`a < b`), and `%p` and `%q` (segment endpoints in world coordinates).
+
+**Example.**
+
+```fortran
+program ex_find_self_intersections_api
+use fossil
+use penf, only : I4P
+implicit none
+type(surface_stl_object)               :: dragon
+type(intersection_pair_t), allocatable :: pairs(:)
+integer(I4P)                           :: status
+
+call dragon%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+call dragon%find_self_intersections(pairs=pairs, status=status)
+print '(A,I0)', 'self-intersections: ', size(pairs)
+endprogram ex_find_self_intersections_api
+```
+
+**Notes.**
+
+- Run `sanitize` **first** to filter degenerate-facet noise out of the
+  intersection list.
+- On clean closed meshes (`cube.stl`, `bunny.stl`), `size(pairs) == 0`.
+
+**See also.**
+[§1.2 feature page](/guide/advanced/self-intersection),
+[`resolve_self_intersections`](#resolve_self_intersections).
+
+---
+
+### `resolve_self_intersections`
+
+```fortran
+call surface%resolve_self_intersections(status=status)
+```
+
+**Purpose.** Clean up every self-intersection in-place by running
+`boolean(self, self, BOOL_UNION)`. The §1.1 arrangement engine
+collects every self-crossing, retriangulates the affected facets, and
+the union selection rule keeps only the outer manifold. Result is a
+self-intersection-free version of the input.
+
+**Arguments.**
+
+| Argument | Intent       | Type           | Notes                                                              |
+| -------- | ------------ | -------------- | ------------------------------------------------------------------ |
+| `status` | `out`, opt.  | `integer(I4P)` | `BOOL_STATUS_*` (inherits status codes from the boolean engine).   |
+
+Mutates `self` in place.
+
+**Example.**
+
+```fortran
+program ex_resolve_self_intersections_api
+use fossil
+use penf, only : I4P
+implicit none
+type(surface_stl_object) :: dragon
+integer(I4P)             :: status
+
+call dragon%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+call dragon%resolve_self_intersections(status=status)
+print '(A,I0)', 'resolve status = ', status
+endprogram ex_resolve_self_intersections_api
+```
+
+**Notes.**
+
+- **Inherits the §1.1 coplanar limitation.** Self-intersections that
+  involve coplanar facet pairs may produce a result with silently
+  wrong volume; perturb by `~1e-6 * bbox_diag` if you suspect
+  coplanar self-overlaps.
+- Interior cavities formed by self-intersections are **dropped**, not
+  re-meshed. If the input had meaningful interior structure, it's
+  gone after resolve.
+- For inputs too dirty for resolve to handle (large holes, missing
+  facets), reach for [`alpha_wrap`](#alpha_wrap) instead.
+
+**See also.**
+[§1.2 feature page](/guide/advanced/self-intersection),
+[`find_self_intersections`](#find_self_intersections),
+[`boolean`](#boolean),
+[`alpha_wrap`](#alpha_wrap).
+
+---
+
+### `alpha_wrap`
+
+```fortran
+call surface%alpha_wrap(alpha=0.1_R8P, offset=0.033_R8P, wrapped=wrapped, status=status)
+```
+
+**Purpose.** Alpha wrapping (Portaneri 2022) — produce a guaranteed
+**watertight, 2-manifold** surface within Hausdorff offset `ε` of the
+input, regardless of how broken the input is (holes, self-intersections,
+non-manifold patches, missing facets). The standard "make any CAD junk
+usable for CFD" primitive. Conceptual overview, 5-stage pipeline, and
+the documented MVP gap (single-pass; no adaptive refinement) on the
+[§1.6 feature page](/guide/advanced/alpha-wrap).
+
+**Arguments.**
+
+| Argument         | Intent       | Type                       | Notes                                                                                                                                  |
+| ---------------- | ------------ | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `alpha`          | `in`, opt.   | `real(R8P)`                | Octree leaf-size target. Default `bbox_diag / 50` (CGAL's recommendation). Smaller = more detail and bigger output mesh.               |
+| `offset`         | `in`, opt.   | `real(R8P)`                | Hausdorff bound for vertex projection. Default `alpha / 30`. Vertices farther than this from the input stay put; status reports if any did. |
+| `max_iterations` | `in`, opt.   | `integer(I4P)`             | Reserved for future §1.6b adaptive-refinement loop. Currently ignored; MVP is single-pass.                                             |
+| `wrapped`        | `out`        | `type(surface_stl_object)` | (required) Fresh output surface. `self` is unchanged.                                                                                  |
+| `status`         | `out`, opt.  | `integer(I4P)`             | `AWRAP_STATUS_OK / _NOT_CONVERGED / _BAD_INPUT / _DEGENERATE`.                                                                         |
+
+**Example.**
+
+```fortran
+program ex_alpha_wrap_api
+use fossil
+use penf, only : I4P, R8P
+implicit none
+type(surface_stl_object) :: source, wrapped
+integer(I4P)             :: status
+
+call source%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call source%alpha_wrap(wrapped=wrapped, status=status)
+print '(A,I0,A,L1)', 'wrap status=', status, '  watertight? ', wrapped%is_watertight()
+endprogram ex_alpha_wrap_api
+```
+
+**Notes.**
+
+- **`AWRAP_STATUS_NOT_CONVERGED` is normal at default α / offset** —
+  some vertices are at the α-thick boundary band rather than snapped to
+  the input. Wrap topology is still correct (watertight + manifold);
+  only the Hausdorff bound was missed for those vertices. Tighten α
+  for closer geometric snap at the cost of a larger output.
+- **For dirty-input use cases** (the whole point of the algorithm),
+  prefer `alpha_wrap` over running `sanitize` followed by `boolean`
+  — the latter assumes a watertight input which `sanitize` cannot
+  guarantee on truly broken topology.
+- The output is a **fresh surface**. `self` is unchanged; copy the
+  result into `self` if needed (`self = wrapped`).
+- See the [§1.6 known limitations](/guide/advanced/alpha-wrap#known-limitations)
+  before using this on inputs with large defects or microscale features.
+
+**See also.**
+[§1.6 feature page](/guide/advanced/alpha-wrap),
+[`sanitize`](#sanitize) (cheaper local-defect repair),
+[Constants](/guide/api/constants) (AWRAP_STATUS_*).
+
+---
+
+### `decimate`
+
+```fortran
+call surface%decimate(target_facets=n0/4_I4P, status=status)
+```
+
+**Purpose.** Reduce facet count to ≤ `target_facets` via QEM
+(Garland & Heckbert 1997) edge-collapse decimation. Quadric error
+metric per vertex; min-heap of edge collapse costs; three safety
+checks (normal-flip, duplicate-vertex, non-manifold-edge).
+Conceptual overview on the [§1.3 feature page](/guide/advanced/decimate).
+
+**Arguments.**
+
+| Argument        | Intent       | Type           | Notes                                                                                            |
+| --------------- | ------------ | -------------- | ------------------------------------------------------------------------------------------------ |
+| `target_facets` | `in`         | `integer(I4P)` | (required) Upper bound on the output facet count.                                                |
+| `status`        | `out`, opt.  | `integer(I4P)` | `DEC_STATUS_OK` (reached target), `_NO_PROGRESS` (couldn't reach), or `_BAD_INPUT`.              |
+
+Mutates `self` in place. After return, the AABB tree, vertex pool,
+connectivity, and pseudo-normals are all rebuilt — no further user
+action needed before downstream queries.
+
+**Example.**
+
+```fortran
+program ex_decimate_api
+use fossil
+use penf, only : I4P
+implicit none
+type(surface_stl_object) :: bunny
+integer(I4P)             :: n0, status
+
+call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
+n0 = bunny%get_facets_number()
+call bunny%decimate(target_facets=n0 / 4_I4P, status=status)
+print '(A,I0,A,I0)', 'after 25%: n_facets = ', bunny%get_facets_number(), &
+                     '  status=', status
+endprogram ex_decimate_api
+```
+
+**Notes.**
+
+- **Volume drifts inward** — see the
+  [§1.3 known limitations](/guide/advanced/decimate#known-limitations)
+  for the missing volume-preservation term and per-percentage drift
+  numbers on a sphere fixture. For volume-critical use cases, run a
+  post-decimate volume sanity check via `get_volume()`.
+- On perfectly-flat inputs (cube), the no-tie-breaking limitation can
+  cause unexpectedly small effective decimation; for general meshes
+  this isn't an issue.
+- For tessellation-regularity rather than count reduction, reach for
+  [`isotropic_remesh`](#isotropic_remesh) instead.
+
+**See also.**
+[§1.3 feature page](/guide/advanced/decimate),
+[`isotropic_remesh`](#isotropic_remesh),
+[Constants](/guide/api/constants) (DEC_STATUS_*).
+
+---
+
+### `resample_via_distance_field`
+
+```fortran
+call surface%resample_via_distance_field(resolution=64_I4P, &
+                                          surface_out=remeshed, status=status)
+```
+
+**Purpose.** "Repair via level set" — sample `self`'s signed distance
+field on a regular grid, then extract the iso=0 surface via
+[Marching Cubes](/guide/advanced/marching-cubes). Output is a watertight
+re-tessellation whose triangle distribution is determined by the grid
+spacing rather than by the input's tessellation.
+
+**Arguments.**
+
+| Argument      | Intent       | Type                       | Notes                                                                        |
+| ------------- | ------------ | -------------------------- | ---------------------------------------------------------------------------- |
+| `resolution`  | `in`         | `integer(I4P)`             | (required) Grid corners along the **longest** bbox axis; cells are cubic.    |
+| `surface_out` | `out`        | `type(surface_stl_object)` | (required) Result. Must be **distinct from `self`** — aliasing breaks it.    |
+| `status`      | `out`, opt.  | `integer(I4P)`             | `MC_STATUS_*`.                                                               |
+
+`self` is unchanged; the result lives in `surface_out`.
+
+**Example.**
+
+```fortran
+program ex_resample_via_distance_field_api
+use fossil
+use penf, only : I4P, R8P
+implicit none
+type(surface_stl_object) :: cube_in, cube_out
+integer(I4P)             :: status
+
+call cube_in%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call cube_in%resample_via_distance_field(resolution=64_I4P, &
+                                          surface_out=cube_out, status=status)
+print '(A,F8.4)', 'resampled cube vol = ', cube_out%get_volume()  ! ≈ 1.0
+endprogram ex_resample_via_distance_field_api
+```
+
+**Notes.**
+
+- **Output triangle count grows as `resolution²`** — 32³ ≈ thousands,
+  128³ ≈ hundreds of thousands. Pair with [`decimate`](#decimate) if
+  count matters downstream.
+- **`surface_out` cannot alias `self`** (the routine consumes
+  `self%facet` mid-loop on alias). Always use a distinct destination.
+- A 5 % bbox-diagonal margin is added around the source to prevent
+  geometry from touching the grid boundary.
+- See the [§1.5 limitations](/guide/advanced/marching-cubes#known-limitations)
+  for the Lorensen-Cline ambiguity (cases 105 / 150).
+
+**See also.**
+[§1.5 feature page](/guide/advanced/marching-cubes),
+[`distance`](#distance) (the signed-distance query sampled internally),
+[`decimate`](#decimate) (count reduction follow-up).
+
+---
+
+### `segment_sdf`
+
+```fortran
+call surface%segment_sdf(facet_labels=labels, sdf=sdf, &
+                         num_clusters=4_I4P, status=status)
+```
+
+**Purpose.** Per-facet semantic labels via the Shape Diameter Function
+(Shapira, Shamir & Cohen-Or 2008). Three-stage pipeline: cone-of-rays
+SDF → dual-graph Laplacian smoothing → 1D Gaussian-mixture clustering
+(k-means++ init + EM). Conceptual overview on the
+[§1.9 feature page](/guide/advanced/sdf-segmentation).
+
+**Arguments.**
+
+| Argument                | Intent       | Type                       | Notes                                                                            |
+| ----------------------- | ------------ | -------------------------- | -------------------------------------------------------------------------------- |
+| `facet_labels`          | `out`        | `integer(I4P), allocatable`| (required) Per-facet labels in `[0, num_clusters]`; `0` = `SDF_LABEL_UNASSIGNED`.|
+| `sdf`                   | `out`, opt.  | `real(R8P), allocatable`   | Smoothed per-facet SDF for inspection.                                           |
+| `num_clusters`          | `in`, opt.   | `integer(I4P)`             | Default `4`. Mechanical-CAD-friendly; CGAL uses 5.                               |
+| `smoothing_lambda`      | `in`, opt.   | `real(R8P)`                | Default `0.5`. Laplacian blend weight ∈ `[0, 1]`.                                |
+| `smoothing_iterations`  | `in`, opt.   | `integer(I4P)`             | Default `2` (Shapira's value).                                                   |
+| `num_rays`              | `in`, opt.   | `integer(I4P)`             | Default `30`. Cone rays per facet.                                               |
+| `cone_angle_deg`        | `in`, opt.   | `real(R8P)`                | Default `120.0`. Full cone aperture, degrees.                                    |
+| `status`                | `out`, opt.  | `integer(I4P)`             | `SDF_STATUS_OK` or `SDF_STATUS_BAD_INPUT`.                                       |
+
+**Example.**
+
+```fortran
+program ex_segment_sdf_api
+use fossil
+use penf, only : I4P
+implicit none
+type(surface_stl_object)  :: bunny
+integer(I4P), allocatable :: labels(:)
+integer(I4P)              :: status, k
+
+call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
+call bunny%segment_sdf(facet_labels=labels, num_clusters=4_I4P, status=status)
+print '(A,I0,A,I0,A,I0)', 'labels nf=', size(labels), &
+      '  range=[', minval(labels), ',', maxval(labels)
+do k = 1_I4P, 4_I4P
+   print '(A,I0,A,I0)', '  cluster ', k, ': nf = ', count(labels == k)
+enddo
+endprogram ex_segment_sdf_api
+```
+
+**Notes.**
+
+- Cluster ordering is **ascending by SDF mean** — label 1 = thinnest
+  features, label `num_clusters` = thickest. Stable across runs
+  (k-means++ init is deterministic) for reproducible downstream
+  pipelines.
+- **GMM is a mode-finder, not a mode-merger** — see the
+  [§1.9 known limitations](/guide/advanced/sdf-segmentation#known-limitations)
+  for why uniform inputs with `k > 1` may split into near-identical
+  clusters. The cube + `k = 2` case is a misleading fixture; use
+  sphere + `k = 1` to test trivial cluster behaviour.
+- **No graph-cut post-pass** in MVP — labels can flip across
+  low-dihedral edges. Deferred to §1.9b.
+
+**See also.**
+[§1.9 feature page](/guide/advanced/sdf-segmentation),
+[Constants](/guide/api/constants) (SDF_STATUS_*, SDF_LABEL_UNASSIGNED, SDF_SENTINEL).
+
+---
+
+### `isotropic_remesh`
+
+```fortran
+call surface%isotropic_remesh(target_length=0.05_R8P, iterations=3_I4P, &
+                               preserve_features=.true., status=status)
+```
+
+**Purpose.** Botsch & Kobbelt 2004 isotropic remeshing — equalizes edge
+length across the surface while preserving its geometry. Each outer
+iteration runs four passes: split (edges > 4L/3), collapse (< 4L/5),
+flip (valence balancing), tangential relaxation + projection onto the
+original surface. Optional sharp-feature preservation via dihedral-angle
+vertex lock. Conceptual overview on the
+[§1.7 feature page](/guide/advanced/isotropic-remesh).
+
+**Arguments.**
+
+| Argument             | Intent       | Type           | Notes                                                                                                                                  |
+| -------------------- | ------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `target_length`      | `in`, opt.   | `real(R8P)`    | Target uniform edge length. `≤ 0` (default) → use the median input edge length.                                                        |
+| `iterations`         | `in`, opt.   | `integer(I4P)` | Outer-loop count. Default `5`. Convergence is typical at 3-5; more iterations smooth distribution further but also accumulate volume drift. |
+| `preserve_features`  | `in`, opt.   | `logical`      | Lock vertices on edges with dihedral > 30°. Default `.false.`. Set to `.true.` for mechanical CAD inputs.                              |
+| `status`             | `out`, opt.  | `integer(I4P)` | `REM_STATUS_OK` or `REM_STATUS_BAD_INPUT`.                                                                                             |
+
+Mutates `self` in place.
+
+**Example.**
+
+```fortran
+program ex_isotropic_remesh_api
+use fossil
+use penf, only : I4P, R8P
+implicit none
+type(surface_stl_object) :: cube
+integer(I4P)             :: status
+
+call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call cube%isotropic_remesh(target_length=0.2_R8P, iterations=3_I4P, &
+                            preserve_features=.true., status=status)
+print '(A,I0)', 'after remesh: n_facets = ', cube%get_facets_number()
+endprogram ex_isotropic_remesh_api
+```
+
+**Notes.**
+
+- **Set `preserve_features=.true.`** for mechanical CAD inputs with
+  sharp edges (cubes, prisms, brackets). Without it, the 12 edges of a
+  cube round out into a ball after a few iterations.
+- **Volume drifts inward on convex surfaces** — see the
+  [§1.7 known limitations](/guide/advanced/isotropic-remesh#known-limitations)
+  for the inward Laplacian bias and the ~5% / iteration sphere drift.
+  Use 2-3 iterations on convex inputs where volume preservation matters.
+- A subsequent [`sanitize`](#sanitize) is rarely needed — remeshing
+  produces clean topology by construction.
+
+**See also.**
+[§1.7 feature page](/guide/advanced/isotropic-remesh),
+[`statistics`](#statistics) (verify edge-length distribution before/after).
 
 ---
 

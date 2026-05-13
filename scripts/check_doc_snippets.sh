@@ -12,7 +12,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DOCS_DIR="$ROOT/docs/guide/api"
+# Scan both API companion guide and Tier-1 feature pages — every fortran
+# block tagged ```fortran in either tree must compile against the library.
+DOCS_DIRS=("$ROOT/docs/guide/api" "$ROOT/docs/guide/advanced")
 WORK="$(mktemp -d)"
 FAILLOG="$WORK/.failures"
 : > "$FAILLOG"
@@ -31,7 +33,9 @@ while IFS= read -r d; do MOD_DIRS+=("-I" "$d"); done < <(
   find "$ROOT" -maxdepth 4 -type d -name 'mod*' 2>/dev/null
 )
 
-for md in "$DOCS_DIR"/*.md; do
+for dir in "${DOCS_DIRS[@]}"; do
+  [[ -d "$dir" ]] || continue
+for md in "$dir"/*.md; do
   [[ -e "$md" ]] || continue
   # Split the file into snippets; awk emits one .f90 path per program block.
   snippets=$(
@@ -70,6 +74,7 @@ for md in "$DOCS_DIR"/*.md; do
       echo "x" >> "$FAILLOG"
     fi
   done
+done
 done
 
 failed=$(wc -l < "$FAILLOG" | tr -d ' ')

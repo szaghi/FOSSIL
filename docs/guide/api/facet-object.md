@@ -307,7 +307,7 @@ end program ex_solid_angle
   square roots and one `atan2` per facet — hence `SIGN_SOLID_ANGLE` is O(N)
   per query without acceleration.
 - The fast *hierarchical* generalized winding number (Barill et al., 2018)
-  is on the roadmap (see issue #18 tier 1).
+  is shipped — see [`surface%winding_number`](/guide/advanced/winding-number).
 
 **See also.** [`SIGN_SOLID_ANGLE`](/guide/api/constants#sign_solid_angle).
 

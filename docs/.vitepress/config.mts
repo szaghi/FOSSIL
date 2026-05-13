@@ -62,6 +62,21 @@ export default withMermaid({
           ],
         },
         {
+          text: 'Advanced Features',
+          items: [
+            { text: 'Overview',                  link: '/guide/advanced/' },
+            { text: 'Boolean operations',        link: '/guide/advanced/booleans' },
+            { text: 'Self-intersection',         link: '/guide/advanced/self-intersection' },
+            { text: 'Mesh decimation',           link: '/guide/advanced/decimate' },
+            { text: 'Generalized winding number', link: '/guide/advanced/winding-number' },
+            { text: 'Marching cubes',            link: '/guide/advanced/marching-cubes' },
+            { text: 'Alpha wrapping',            link: '/guide/advanced/alpha-wrap' },
+            { text: 'Isotropic remeshing',       link: '/guide/advanced/isotropic-remesh' },
+            { text: 'SDF segmentation',          link: '/guide/advanced/sdf-segmentation' },
+            { text: 'Ray queries',               link: '/guide/advanced/ray-queries' },
+          ],
+        },
+        {
           text: 'Project',
           items: [
             { text: 'Contributing',      link: '/guide/contributing' },

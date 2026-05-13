@@ -83,6 +83,31 @@ Selection is per-surface via the optional `aabb_tree_kind` argument on `load_fro
 | Octree | 0.53 s | 27.32 s |
 | SAH BVH | 0.32 s | **0.25 s** |
 
+## Advanced features
+
+Beyond the core load / sanitize / distance API above, FOSSIL ships nine
+algorithmic primitives drawn from the libigl / CGAL geometry-processing
+toolkit. Each is a single TBP on `surface_stl_object`. Conceptual pages
+(what the algorithm is, when to use it, when not to, code examples,
+known limitations) live under [Advanced Features](/guide/advanced/).
+
+| Feature | API entry point | Page |
+|---|---|---|
+| Boolean operations (∪ ∩ ∖ △) | `surface%boolean(other, op, status)` | [Booleans](/guide/advanced/booleans) |
+| Self-intersection detection | `surface%find_self_intersections(pairs, status)` | [Self-intersection](/guide/advanced/self-intersection) |
+| Self-intersection resolution | `surface%resolve_self_intersections(status)` | [Self-intersection](/guide/advanced/self-intersection) |
+| Mesh decimation (QEM) | `surface%decimate(target_facets, status)` | [Decimation](/guide/advanced/decimate) |
+| Generalized winding number | `surface%winding_number(point, beta)` | [Winding number](/guide/advanced/winding-number) |
+| Marching cubes | `extract_isosurface(values, bmin, bmax, iso, ...)` | [Marching cubes](/guide/advanced/marching-cubes) |
+| Alpha wrapping | `surface%alpha_wrap(alpha, offset, ...)` | [Alpha wrap](/guide/advanced/alpha-wrap) |
+| Isotropic remeshing | `surface%isotropic_remesh(target_length, ...)` | [Isotropic remesh](/guide/advanced/isotropic-remesh) |
+| SDF segmentation | `surface%segment_sdf(facet_labels, ...)` | [SDF segmentation](/guide/advanced/sdf-segmentation) |
+| Ray-mesh queries | `surface%intersect_ray_first/_all/_any(...)` | [Ray queries](/guide/advanced/ray-queries) |
+
+RANSAC shape detection was deliberately dropped from the roadmap —
+see the [implementation issue](https://github.com/szaghi/FOSSIL/issues/18)
+for the rationale.
+
 ## `fossilizer` CLI
 
 A command-line utility (`src/app/fossilizer.f90`) wraps the library for interactive STL processing:

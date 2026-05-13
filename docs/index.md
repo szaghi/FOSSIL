@@ -35,10 +35,45 @@ features:
   - icon: 🧪
     title: OOP / TDD Designed
     details: Two public types — surface_stl_object and facet_object — every public operation exercised by the regression suite.
+  - icon: 🚀
+    title: Advanced Geometry Processing
+    details: Boolean operations, generalized winding number, alpha wrapping, isotropic remeshing, mesh decimation, marching cubes, SDF segmentation, ray queries — nine libigl/CGAL-class primitives, every one a single TBP. See the Advanced Features guide.
   - icon: 🆓
     title: Free & Open Source
     details: Multi-licensed — GPLv3 for FOSS projects, BSD 2/3-Clause or MIT for commercial use. Fortran 2003+ standard compliant.
 ---
+
+## Advanced features
+
+FOSSIL ships a focused subset of the libigl / CGAL geometry-processing
+toolkit, drawn directly from the standard references in the field:
+
+- **[Boolean operations](/guide/advanced/booleans)** — union, intersection,
+  difference, symmetric difference. Zhou et al. 2016.
+- **[Self-intersection detection / resolution](/guide/advanced/self-intersection)** —
+  Möller tri-tri broad-and-narrow phase, with one-line resolution via the
+  boolean engine.
+- **[Mesh decimation](/guide/advanced/decimate)** — quadric edge collapse
+  with normal-flip / non-manifold safety. Garland & Heckbert 1997.
+- **[Generalized winding number](/guide/advanced/winding-number)** — robust
+  inside/outside on dirty STL, hierarchical Barnes-Hut traversal.
+  Jacobson 2013 + Barill 2018.
+- **[Marching cubes](/guide/advanced/marching-cubes)** — isosurface
+  extraction from a regular scalar field, with the SDF→STL roundtrip
+  TBP. Lorensen-Cline 1987 + Bourke tables.
+- **[Alpha wrapping](/guide/advanced/alpha-wrap)** — guaranteed watertight
+  2-manifold surrogate from any triangle soup. Portaneri et al. 2022.
+- **[Isotropic remeshing](/guide/advanced/isotropic-remesh)** — uniform-edge
+  re-tessellation with optional sharp-feature preservation.
+  Botsch & Kobbelt 2004.
+- **[SDF segmentation](/guide/advanced/sdf-segmentation)** — per-facet
+  semantic labels via Shape Diameter Function + Gaussian-mixture
+  clustering. Shapira, Shamir & Cohen-Or 2008.
+- **[Ray-mesh intersection queries](/guide/advanced/ray-queries)** — closest
+  hit, all hits, any-hit early-exit. Möller-Trumbore + AABB tree.
+
+Each algorithm has a dedicated page with a CFD-relevant motivation, a
+worked Fortran example, and an honest list of known limitations.
 
 ## Quick start
 
