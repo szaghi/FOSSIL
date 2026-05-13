@@ -6,16 +6,16 @@
 !< STEP 2: edge enumeration + median length on cube.stl.
 !< STEP 3: split pass on a single triangle with target_length=0.4.
 !< STEP 4: split + collapse on a sphere via §1.5 marching cubes.
-!< STEP 6 (this commit): split + collapse + flip + relax+projection on a
-!<   sphere. The relax pass moves each vertex toward its area-weighted
-!<   one-ring centroid then projects back onto the reference surface via
-!<   `tree%distance_tree_with_region` + `facet%compute_distance_with_region`.
-!<   Assertion: volume preserved within 10% (the area-weighted Laplacian
-!<   has known inward bias on convex regions — `1 - cos(θ)` per relaxation
-!<   step where θ is the typical incident-facet half-angle; the sphere
-!<   case loses ~5% per iteration even with projection); manifoldness
-!<   preserved. Tighter volume preservation requires normal-direction
-!<   projection or scaled-step heuristics; deferred as future work.
+!< STEP 6: split + collapse + flip + relax+projection on a sphere.
+!< STEP 7 (this commit): feature preservation + the user-visible TBP
+!<   `surface%isotropic_remesh`. Two new invariants:
+!<     6. Cube + preserve_features=.true.: remesh cube.stl, assert all
+!<        12 sharp edges (dihedral 90° > threshold) survive in the output.
+!<        Without feature lock the algorithm rounds them off; with lock
+!<        it preserves them.
+!<     7. End-to-end TBP: surface%isotropic_remesh on a sphere → output
+!<        is manifold. Same as step 6's assertion but exercises the public
+!<        TBP path rather than the bare module.
 
 program fossil_test_isotropic_remesh
 
@@ -31,17 +31,20 @@ implicit none
 
 type(facet_object), allocatable :: working(:), tri_split(:), sphere_facets(:), &
                                    relax_input(:)
-type(surface_stl_object) :: cube, sphere, sphere_ref, sphere_relaxed
+type(surface_stl_object) :: cube, sphere, sphere_ref, sphere_relaxed, &
+                            cube_features, sphere_tbp
 type(facet_object), pointer :: fp(:)
 real(R8P), allocatable :: values(:, :, :)
 type(vector_R8P)         :: bmin, bmax
 integer(I4P) :: status, i, ne_cube, nf_before_split, nf_after_split, k
 integer(I4P) :: nf_before_sphere, nf_after_sphere, nm_after_sphere
 integer(I4P) :: nf_relaxed, nm_relaxed
+integer(I4P) :: n_sharp_after_cube, nm_after_tbp
 real(R8P)    :: med_cube, vol_before_sphere, vol_after_sphere
-real(R8P)    :: vol_relaxed
+real(R8P)    :: vol_relaxed, dot_n
 real(R8P)    :: x, y, z, dx
-logical      :: are_tests_passed(5)
+logical      :: are_tests_passed(7)
+real(R8P), parameter :: SHARP_DIHEDRAL_DEG = 60._R8P  ! cube edges (90°) above this threshold; smooth regions below
 logical      :: all_facets_valid
 real(R8P)    :: expected_x(3), got_x(3)
 real(R8P)    :: expected_y(3), got_y(3)
@@ -205,8 +208,61 @@ print '(A,I0,A,F8.4,A,I0)', 'sphere relaxed: nf=', nf_relaxed, '  vol=', vol_rel
 are_tests_passed(5) = (abs(vol_relaxed - sphere_ref%get_volume()) <= 0.10_R8P * sphere_ref%get_volume() .and. &
                        nm_relaxed == 0_I4P)
 
-print '(A,5L2)', 'per-case results: ', are_tests_passed
+! Step 7a: cube + feature preservation. Remesh cube.stl with
+! preserve_features=.true. and verify all 12 sharp edges still present
+! (count edges with dihedral > 60°; cube edges are 90°). Without lock,
+! the algorithm rounds them off and the count drops.
+call cube_features%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call cube_features%isotropic_remesh(iterations=3_I4P, preserve_features=.true., status=status)
+n_sharp_after_cube = count_sharp_edges(cube_features, threshold_deg=SHARP_DIHEDRAL_DEG)
+print '(A,I0,A,I0,A,I0)', 'cube features: status=', status, ' nf=', cube_features%get_facets_number(), &
+      ' n_sharp=', n_sharp_after_cube
+are_tests_passed(6) = (status == REM_STATUS_OK .and. n_sharp_after_cube >= 12_I4P)
+
+! Step 7b: end-to-end TBP — remesh sphere via the public surface API.
+allocate(sphere_facets(sphere_ref%get_facets_number()))
+do i = 1, sphere_ref%get_facets_number()
+   sphere_facets(i) = sphere_ref%facet_at(i)
+enddo
+call sphere_tbp%adopt_facets(facets=sphere_facets)
+call sphere_tbp%isotropic_remesh(iterations=2_I4P, preserve_features=.false., status=status)
+nm_after_tbp = sphere_tbp%get_non_manifold_edges_number()
+print '(A,I0,A,I0,A,F8.4,A,I0)', 'sphere TBP: status=', status, ' nf=', sphere_tbp%get_facets_number(), &
+      ' vol=', sphere_tbp%get_volume(), ' nm=', nm_after_tbp
+are_tests_passed(7) = (status == REM_STATUS_OK .and. nm_after_tbp == 0_I4P)
+
+print '(A,7L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)',  'Are all tests passed? ', all(are_tests_passed)
 if (.not. all(are_tests_passed)) error stop 1
+
+contains
+
+   function count_sharp_edges(surf, threshold_deg) result(n_sharp)
+   !< Count edges whose dihedral angle exceeds `threshold_deg` (using the
+   !< surface's `fcon_edge` connectivity). Each edge is counted once via
+   !< `fcon_edge(e) > f` ordering.
+   class(surface_stl_object), intent(in) :: surf
+   real(R8P),                 intent(in) :: threshold_deg
+   integer(I4P)                          :: n_sharp
+   integer(I4P)                          :: f, e_idx, nbr
+   class(facet_object), pointer          :: fp_local, np
+   real(R8P)                             :: cos_thr, c_dot
+   real(R8P), parameter                  :: PI_LOC = 3.141592653589793_R8P
+
+   cos_thr = cos(threshold_deg * PI_LOC / 180._R8P)
+   n_sharp = 0_I4P
+   do f = 1, surf%get_facets_number()
+      fp_local => surf%facet_at(f)
+      do e_idx = 1, 3
+         nbr = fp_local%fcon_edge(e_idx)
+         if (nbr <= 0_I4P .or. nbr <= f) cycle  ! count each shared edge once
+         np => surf%facet_at(nbr)
+         c_dot = fp_local%normal%x * np%normal%x + &
+                 fp_local%normal%y * np%normal%y + &
+                 fp_local%normal%z * np%normal%z
+         if (c_dot < cos_thr) n_sharp = n_sharp + 1
+      enddo
+   enddo
+   endfunction count_sharp_edges
 
 endprogram fossil_test_isotropic_remesh

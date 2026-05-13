@@ -16,11 +16,13 @@ module fossil_remesh
 !< STEP 4: pass_collapse — collapse short edges with safety checks.
 !< STEP 5: pass_flip — flip interior edges when doing so improves valence
 !< balance.
-!< STEP 6 (this commit): pass_relax — area-weighted Laplacian smoothing
-!< followed by projection back onto the reference surface. Wires the
-!< `reference_facet` / `reference_tree` API arguments (which were
-!< accepted-but-ignored through steps 1-5). When either is absent, the
-!< relaxation step is skipped.
+!< STEP 6: pass_relax — area-weighted Laplacian smoothing + projection.
+!< STEP 7 (this commit): feature preservation via dihedral-angle vertex
+!< lock + the public TBP `surface_stl_object%isotropic_remesh`. Vertices
+!< incident to any edge whose dihedral angle exceeds the threshold
+!< (default 30°) are marked locked: collapse, flip, and relax all skip
+!< them. Sharp corners and crease edges (cube edges, mechanical CAD
+!< features) are preserved through remeshing.
 
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object,     only : facet_object
@@ -42,6 +44,7 @@ public :: run_split_collapse_flip
 public :: run_full_pipeline
 
 integer(I4P), parameter :: MAX_VAL = 32_I4P  !< Max vertex valence supported (rectangular incidence cap).
+real(R8P),    parameter :: FEATURE_DIHEDRAL_DEG = 30._R8P  !< Sharp-edge threshold for feature detection (cos > cos(30°)).
 
 integer(I4P), parameter :: REM_STATUS_OK        = 0_I4P
 integer(I4P), parameter :: REM_STATUS_BAD_INPUT = 1_I4P  !< Empty input or vertex_id unset.
@@ -72,11 +75,10 @@ contains
    integer(I4P), allocatable                                        :: f_v(:, :)
    real(R8P),    allocatable                                        :: vcoord(:, :)
    logical,      allocatable                                        :: facet_alive(:)
+   logical,      allocatable                                        :: vertex_locked(:)
    real(R8P)                                                        :: L
 
    if (present(status)) status = REM_STATUS_OK
-   ! Suppress unused-argument warning for `preserve_features` (wired in step 7).
-   if (preserve_features .and. .false.) return
 
    if (.not. allocated(facet)) then
       if (present(status)) status = REM_STATUS_BAD_INPUT
@@ -104,16 +106,32 @@ contains
       L = compute_median_edge_length(facet=facet)
    endif
 
-   ! Stage 3: outer loop. Steps 3-6 wire split + collapse + flip + relax.
+   ! Stage 2b: feature lock — mark vertices on sharp edges as immovable.
+   ! The lock array starts with capacity = current vertex count; the split
+   ! pass appends new midpoint vertices that get appended-as-unlocked
+   ! automatically (they're in vcoord but not in vertex_locked, so the
+   ! collapse / flip / relax checks treat them as unlocked).
+   call build_vertex_lock(f_v=f_v, vcoord=vcoord, nv=nv, &
+                          preserve_features=preserve_features, &
+                          vertex_locked=vertex_locked)
+
+   ! Stage 3: outer loop. Steps 3-6 wire split + collapse + flip + relax;
+   ! step 7 threads vertex_locked into collapse / flip / relax.
    do it = 1, iterations
       call apply_split_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                             nv=nv, nf_alive=nf_alive)
+      ! Grow vertex_locked to match the new nv (new midpoint vertices are
+      ! always unlocked). Skipping is harmless (collapse/flip/relax check
+      ! `i <= size(vertex_locked)` before reading).
+      call grow_lock(vertex_locked=vertex_locked, new_size=nv)
       call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
-                               nf_alive=nf_alive)
-      call apply_flip_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive)
+                               nf_alive=nf_alive, vertex_locked=vertex_locked)
+      call apply_flip_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
+                           vertex_locked=vertex_locked)
       if (present(reference_facet) .and. present(reference_tree)) then
          call apply_relax_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
-                               reference_facet=reference_facet, reference_tree=reference_tree)
+                               reference_facet=reference_facet, reference_tree=reference_tree, &
+                               vertex_locked=vertex_locked)
       endif
    enddo
 
@@ -144,6 +162,7 @@ contains
    integer(I4P), allocatable :: f_v(:, :)
    real(R8P),    allocatable :: vcoord(:, :)
    logical,      allocatable :: facet_alive(:)
+   logical,      allocatable :: vertex_locked(:)
    integer(I4P) :: nv, nf_alive, st, it
    real(R8P) :: L
 
@@ -157,11 +176,14 @@ contains
    else
       L = compute_median_edge_length(facet=facet)
    endif
+   ! No feature lock — testing helper.
+   allocate(vertex_locked(nv), source=.false.)
    do it = 1, n_iterations
       call apply_split_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                             nv=nv, nf_alive=nf_alive)
+      call grow_lock(vertex_locked=vertex_locked, new_size=nv)
       call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
-                               nf_alive=nf_alive)
+                               nf_alive=nf_alive, vertex_locked=vertex_locked)
    enddo
    call materialize(facet=facet, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive)
    endsubroutine run_split_and_collapse
@@ -451,6 +473,77 @@ contains
    call move_alloc(from=new_alive, to=facet_alive)
    endsubroutine ensure_facet_capacity
 
+   ! ===========================================================================
+   ! Step 7: feature lock helpers
+   ! ===========================================================================
+
+   subroutine build_vertex_lock(f_v, vcoord, nv, preserve_features, vertex_locked)
+   !< Allocate `vertex_locked(nv)` and populate it. When `preserve_features
+   !< = .false.`, every entry stays `.false.` (no locks; the lock-aware
+   !< checks downstream are no-ops). When `.true.`, walk every interior
+   !< edge: if the dihedral angle between its two incident facets exceeds
+   !< `FEATURE_DIHEDRAL_DEG`, mark both endpoints as locked. Boundary
+   !< edges (only one incident facet) and non-manifold edges (3+ incidents)
+   !< have their endpoints locked unconditionally — those are degenerate
+   !< topology cases that the algorithm shouldn't try to smooth over.
+   integer(I4P),              intent(in)  :: f_v(:, :)
+   real(R8P),                 intent(in)  :: vcoord(:, :)
+   integer(I4P),              intent(in)  :: nv
+   logical,                   intent(in)  :: preserve_features
+   logical,      allocatable, intent(out) :: vertex_locked(:)
+   integer(I4P), allocatable              :: e_v(:, :), e_facets(:, :)
+   integer(I4P)                           :: ne, e
+   real(R8P)                              :: cos_thr, dot_n
+   real(R8P)                              :: n1(3), n2(3), len1, len2
+   logical, allocatable                   :: facet_alive(:)
+
+   allocate(vertex_locked(nv), source=.false.)
+   if (.not. preserve_features) return
+
+   ! All input facets are alive at this point (no passes have run yet).
+   allocate(facet_alive(size(f_v, dim=2)), source=.true.)
+   call build_edges_with_facets(f_v=f_v, facet_alive=facet_alive, &
+                                 e_v=e_v, e_facets=e_facets, ne=ne)
+
+   cos_thr = cos(FEATURE_DIHEDRAL_DEG * 3.141592653589793_R8P / 180._R8P)
+
+   do e = 1, ne
+      if (e_facets(1, e) == 0_I4P .or. e_facets(2, e) == 0_I4P) then
+         ! Boundary edge — lock both endpoints.
+         vertex_locked(e_v(1, e)) = .true.
+         vertex_locked(e_v(2, e)) = .true.
+         cycle
+      endif
+      n1 = facet_normal_uv(f_v=f_v, vcoord=vcoord, f=e_facets(1, e))
+      n2 = facet_normal_uv(f_v=f_v, vcoord=vcoord, f=e_facets(2, e))
+      len1 = sqrt(n1(1)**2 + n1(2)**2 + n1(3)**2)
+      len2 = sqrt(n2(1)**2 + n2(2)**2 + n2(3)**2)
+      if (len1 < tiny(1._R8P) .or. len2 < tiny(1._R8P)) cycle
+      n1 = n1 / len1 ; n2 = n2 / len2
+      dot_n = n1(1)*n2(1) + n1(2)*n2(2) + n1(3)*n2(3)
+      if (dot_n < cos_thr) then
+         ! Sharp edge.
+         vertex_locked(e_v(1, e)) = .true.
+         vertex_locked(e_v(2, e)) = .true.
+      endif
+   enddo
+   endsubroutine build_vertex_lock
+
+   subroutine grow_lock(vertex_locked, new_size)
+   !< Grow `vertex_locked` to length `new_size`, padding with `.false.`
+   !< entries (newly-inserted midpoint vertices are always unlocked).
+   logical, allocatable, intent(inout) :: vertex_locked(:)
+   integer(I4P),         intent(in)    :: new_size
+   logical, allocatable                :: new_lock(:)
+   integer(I4P)                        :: old_size
+
+   old_size = size(vertex_locked)
+   if (new_size <= old_size) return
+   allocate(new_lock(new_size), source=.false.)
+   new_lock(1:old_size) = vertex_locked(1:old_size)
+   call move_alloc(from=new_lock, to=vertex_locked)
+   endsubroutine grow_lock
+
    subroutine apply_split_pass(L, f_v, vcoord, facet_alive, nv, nf_alive)
    !< Walk every alive facet's edges; for each edge longer than 4*L/3, split
    !< by inserting a midpoint vertex and replacing the (up to 2) incident
@@ -522,27 +615,31 @@ contains
    ! Step 4: collapse pass
    ! ===========================================================================
 
-   subroutine apply_collapse_pass(L, f_v, vcoord, facet_alive, nf_alive)
+   subroutine apply_collapse_pass(L, f_v, vcoord, facet_alive, nf_alive, vertex_locked)
    !< Walk every alive edge; for each edge shorter than 4*L/5, attempt the
    !< collapse with normal-flip / duplicate-vertex / non-manifold safety
-   !< checks. Vertex `va` (lower id) is kept and moved to the edge midpoint;
-   !< `vb` is removed. Locked-vertex handling and the collapse-target
-   !< choice (midpoint vs locked-endpoint position) come in step 7 with
-   !< feature preservation.
+   !< checks. Vertex `va` (lower id) is kept and moved to the collapse
+   !< target; `vb` is removed.
+   !<
+   !< Locked-vertex handling: if BOTH endpoints are locked, skip (can't
+   !< merge two distinct features). If ONE endpoint is locked, the target
+   !< becomes the locked endpoint's position (so the feature stays put).
+   !< Otherwise, target is the edge midpoint.
    real(R8P),                 intent(in)    :: L
    integer(I4P), allocatable, intent(inout) :: f_v(:, :)
    real(R8P),    allocatable, intent(inout) :: vcoord(:, :)
    logical,      allocatable, intent(inout) :: facet_alive(:)
    integer(I4P),              intent(inout) :: nf_alive
+   logical,                   intent(in)    :: vertex_locked(:)
    integer(I4P), allocatable                :: e_v(:, :), e_facets(:, :)
    integer(I4P), allocatable                :: v2f_count(:), v2f(:, :)
    integer(I4P)                             :: ne, e, va, vb, f1, f2, nv
    real(R8P)                                :: thr, dx, dy, dz, len_e
    real(R8P)                                :: target(3)
+   logical                                  :: lock_va, lock_vb
 
    thr = (4._R8P / 5._R8P) * L
 
-   ! Build per-vertex facet incidence (rectangular, MAX_VAL × NV).
    nv = size(vcoord, dim=2)
    allocate(v2f_count(nv), source=0_I4P)
    allocate(v2f(MAX_VAL, nv), source=0_I4P)
@@ -562,11 +659,21 @@ contains
       dz = vcoord(3, va) - vcoord(3, vb)
       len_e = sqrt(dx*dx + dy*dy + dz*dz)
       if (len_e >= thr) cycle
-      ! Collapse target: edge midpoint.
-      target(1) = 0.5_R8P * (vcoord(1, va) + vcoord(1, vb))
-      target(2) = 0.5_R8P * (vcoord(2, va) + vcoord(2, vb))
-      target(3) = 0.5_R8P * (vcoord(3, va) + vcoord(3, vb))
-      ! Try collapse; safety checks inside.
+      ! Lock-aware target choice.
+      lock_va = (va <= size(vertex_locked))
+      if (lock_va) lock_va = vertex_locked(va)
+      lock_vb = (vb <= size(vertex_locked))
+      if (lock_vb) lock_vb = vertex_locked(vb)
+      if (lock_va .and. lock_vb) cycle  ! can't merge two distinct features
+      if (lock_va) then
+         target = vcoord(:, va)
+      else if (lock_vb) then
+         target = vcoord(:, vb)
+      else
+         target(1) = 0.5_R8P * (vcoord(1, va) + vcoord(1, vb))
+         target(2) = 0.5_R8P * (vcoord(2, va) + vcoord(2, vb))
+         target(3) = 0.5_R8P * (vcoord(3, va) + vcoord(3, vb))
+      endif
       call try_collapse_edge(va=va, vb=vb, f1=f1, f2=f2, target=target, &
                               f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                               v2f=v2f, v2f_count=v2f_count, nf_alive=nf_alive)
@@ -755,12 +862,14 @@ contains
    ! Step 5: edge flip pass
    ! ===========================================================================
 
-   subroutine apply_flip_pass(f_v, vcoord, facet_alive)
+   subroutine apply_flip_pass(f_v, vcoord, facet_alive, vertex_locked)
    !< Walk every interior edge (one shared by exactly 2 facets); flip the
    !< diagonal of the resulting quad if doing so reduces the total deviation
    !< from the target valence (6 for interior vertices) AND the post-flip
    !< triangles are geometrically valid (no normal flip, no degenerate area)
-   !< AND the new diagonal doesn't duplicate an existing edge.
+   !< AND the new diagonal doesn't duplicate an existing edge AND none of
+   !< the four involved vertices is locked (locked vertices anchor sharp
+   !< features; flipping an edge incident to one risks moving a feature).
    !<
    !< Convention for the flip: edge `(va, vb)` shared by facets `f1` and
    !< `f2` with apexes `w1` and `w2` becomes edge `(w1, w2)`; the new facets
@@ -778,11 +887,13 @@ contains
    integer(I4P), intent(inout) :: f_v(:, :)
    real(R8P),    intent(in)    :: vcoord(:, :)
    logical,      intent(inout) :: facet_alive(:)
+   logical,      intent(in)    :: vertex_locked(:)
    integer(I4P), allocatable   :: e_v(:, :), e_facets(:, :), valence(:)
    integer(I4P), allocatable   :: new_edges(:, :)
    integer(I4P)                :: n_new
    integer(I4P)                :: ne, e, va, vb, f1, f2, w1, w2, nv
    integer(I4P)                :: dev_before, dev_after
+   logical                     :: any_locked
 
    nv = size(vcoord, dim=2)
    call build_edges_with_facets(f_v=f_v, facet_alive=facet_alive, &
@@ -806,6 +917,13 @@ contains
       w1 = facet_apex(f_v=f_v, f=f1, va=va, vb=vb)
       w2 = facet_apex(f_v=f_v, f=f2, va=va, vb=vb)
       if (w1 == 0_I4P .or. w2 == 0_I4P .or. w1 == w2) cycle
+      ! Lock check: any of the 4 quad vertices locked → skip.
+      any_locked = .false.
+      if (va <= size(vertex_locked)) any_locked = any_locked .or. vertex_locked(va)
+      if (vb <= size(vertex_locked)) any_locked = any_locked .or. vertex_locked(vb)
+      if (w1 <= size(vertex_locked)) any_locked = any_locked .or. vertex_locked(w1)
+      if (w2 <= size(vertex_locked)) any_locked = any_locked .or. vertex_locked(w2)
+      if (any_locked) cycle
       if (edge_exists(e_v=e_v, ne=ne, va=w1, vb=w2)) cycle
       if (edge_exists(e_v=new_edges, ne=n_new, va=w1, vb=w2)) cycle
 
@@ -902,7 +1020,7 @@ contains
    ! Step 6: tangential relaxation + projection
    ! ===========================================================================
 
-   subroutine apply_relax_pass(f_v, vcoord, facet_alive, reference_facet, reference_tree)
+   subroutine apply_relax_pass(f_v, vcoord, facet_alive, reference_facet, reference_tree, vertex_locked)
    !< For each (non-locked, non-boundary) vertex, move it toward the area-
    !< weighted centroid of its incident-facet centroids, then project the
    !< new position onto the reference surface via the closest-point query
@@ -923,6 +1041,7 @@ contains
    logical,                       intent(in)            :: facet_alive(:)
    type(facet_object),            intent(in)            :: reference_facet(:)
    type(aabb_tree_object),        intent(in)            :: reference_tree
+   logical,                       intent(in)            :: vertex_locked(:)
    integer(I4P), allocatable                            :: v2f_count(:), v2f(:, :)
    integer(I4P)                                         :: nv, v, i, f
    real(R8P)                                            :: total_area, area_f, centroid_f(3)
@@ -945,6 +1064,9 @@ contains
 
    do v = 1, nv
       if (.not. vertex_alive(v)) cycle
+      if (v <= size(vertex_locked)) then
+         if (vertex_locked(v)) cycle
+      endif
       total_area = 0._R8P ; target = 0._R8P
       do i = 1, v2f_count(v)
          f = v2f(i, v)

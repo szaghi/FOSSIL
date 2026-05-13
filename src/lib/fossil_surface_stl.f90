@@ -14,6 +14,8 @@ use fossil_self_intersection, only : intersection_pair_t, &
 use fossil_marching_cubes, only : compute_isosurface => extract_isosurface, MC_STATUS_OK
 use fossil_decimate, only : compute_decimate => decimate, &
                             DEC_STATUS_OK, DEC_STATUS_BAD_INPUT, DEC_STATUS_NO_PROGRESS
+use fossil_remesh, only : compute_remesh => isotropic_remesh, &
+                          REM_STATUS_OK, REM_STATUS_BAD_INPUT
 use fossil_boolean, only : compute_boolean => boolean_compute, &
                            BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF, &
                            BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, &
@@ -151,6 +153,7 @@ type :: surface_stl_object
       procedure, pass(self) :: resolve_self_intersections       !< Self-boolean union, closes §1.2's deferred resolution path.
       procedure, pass(self) :: resample_via_distance_field      !< SDF-based remesh via Marching Cubes (issue #18 §1.5).
       procedure, pass(self) :: decimate                         !< QEM edge-collapse mesh decimation (issue #18 §1.3).
+      procedure, pass(self) :: isotropic_remesh                 !< Botsch-Kobbelt isotropic remeshing (issue #18 §1.7).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1527,6 +1530,79 @@ contains
    ! just larger than requested.
    call self%adopt_facets(facets=working)
    endsubroutine decimate
+
+   subroutine isotropic_remesh(self, target_length, iterations, preserve_features, status)
+   !< Botsch-Kobbelt 2004 isotropic remeshing (issue #18 §1.7).
+   !<
+   !< Equalizes edge lengths across the surface while preserving its
+   !< geometry. Each outer iteration runs four passes:
+   !<   1. Split edges longer than 4 L / 3.
+   !<   2. Collapse edges shorter than 4 L / 5.
+   !<   3. Flip interior edges to balance vertex valences toward 6.
+   !<   4. Tangential relaxation (area-weighted Laplacian) + projection
+   !<      onto the original surface.
+   !<
+   !< Arguments:
+   !<   - `target_length`: desired edge length. If <= 0 (default), uses
+   !<     the median of the input's edge lengths.
+   !<   - `iterations`: outer-loop count. Default 5; typical convergence
+   !<     at 3-5.
+   !<   - `preserve_features`: if .true., vertices on edges with dihedral
+   !<     angle > 30° are locked from being moved or collapsed away.
+   !<     Essential for inputs with sharp features (cube edges, mechanical
+   !<     CAD).
+   !<
+   !< Implementation: deep-copies `self` to use as the projection reference
+   !< (the relaxation step queries `reference%aabb` for closest points),
+   !< runs `fossil_remesh%isotropic_remesh` on a working facet array, then
+   !< adopts the result back via `adopt_facets` (which rebuilds AABB tree,
+   !< vertex pool, connectivity, pseudo-normals).
+   !<
+   !< Documented limitations (see `fossil_remesh` module header for the
+   !< full discussion):
+   !<   - Area-weighted Laplacian has known inward bias on convex regions.
+   !<     Volume drift on a sphere is ~5% per iteration even with projection.
+   !<     Tighter preservation needs normal-direction projection (deferred).
+   class(surface_stl_object),     intent(inout)        :: self
+   real(R8P),                     intent(in), optional :: target_length     !< Target edge length; <= 0 → median.
+   integer(I4P),                  intent(in), optional :: iterations        !< Outer-loop count; default 5.
+   logical,                       intent(in), optional :: preserve_features !< Lock sharp-edge vertices; default .false.
+   integer(I4P),                  intent(out), optional :: status
+   type(facet_object), allocatable                     :: working(:)
+   type(surface_stl_object)                            :: reference
+   real(R8P)                                           :: L
+   integer(I4P)                                        :: iters
+   logical                                             :: preserve
+   integer(I4P)                                        :: rem_status
+
+   if (present(status)) status = REM_STATUS_OK
+   if (self%facets_number == 0_I4P) then
+      if (present(status)) status = REM_STATUS_BAD_INPUT
+      return
+   endif
+
+   L        = -1._R8P  ; if (present(target_length))     L        = target_length
+   iters    = 5_I4P    ; if (present(iterations))        iters    = iterations
+   preserve = .false.  ; if (present(preserve_features)) preserve = preserve_features
+
+   ! Reference = current state (deep copy via adopt_facets, which also
+   ! rebuilds the AABB tree the projection step needs).
+   allocate(working(self%facets_number))
+   working(1:self%facets_number) = self%facet(1:self%facets_number)
+   call reference%adopt_facets(facets=working)
+
+   ! Working = another deep copy (the reference adopted the first one).
+   allocate(working(self%facets_number))
+   working(1:self%facets_number) = self%facet(1:self%facets_number)
+
+   call compute_remesh(facet=working, target_length=L, iterations=iters, &
+                       preserve_features=preserve, &
+                       reference_facet=reference%facet, reference_tree=reference%aabb, &
+                       status=rem_status)
+   if (present(status)) status = rem_status
+   if (rem_status /= REM_STATUS_OK) return
+   call self%adopt_facets(facets=working)
+   endsubroutine isotropic_remesh
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
