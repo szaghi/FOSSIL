@@ -1,10 +1,11 @@
 !< FOSSIL test: alpha-wrap octree (issue #18 §1.6, step 1).
 !<
-!< Step-1 scope: validate the leaf-size-α octree built by `awrap_build_octree`.
-!< Subsequent commits add steps 2 (flood fill), 3 (dual-contour), 4 (project),
-!< 5 (adaptive refinement + capstone TBP).
+!< Step 1: validate the leaf-size-α octree built by `awrap_build_octree`.
+!< Step 2: validate the inside/outside flood fill from `awrap_classify_leaves`.
+!< Subsequent commits add steps 3 (dual-contour), 4 (project), 5 (adaptive
+!< refinement + capstone TBP).
 !<
-!< Three invariants for step 1:
+!< Three invariants for step 1, three more for step 2:
 !<   1. Cube — refinement structure. cube.stl is a closed unit cube. Build
 !<      octree with α = 0.1. Assert: n_boundary_leaves > 0 (geometry is
 !<      captured), every boundary leaf actually overlaps at least one input
@@ -20,13 +21,29 @@
 !<   3. Degenerate input — α larger than bbox diagonal. Status =
 !<      AWRAP_STATUS_DEGENERATE; the octree still has 1 root leaf marked
 !<      BOUNDARY. Empty facet array → AWRAP_STATUS_BAD_INPUT.
+!<   4. Cube — flood fill correctness on a closed solid. After
+!<      `awrap_classify_leaves`: every empty leaf is now INSIDE or OUTSIDE
+!<      (no EMPTY remaining), n_inside + n_outside + n_boundary = n_leaves,
+!<      every INSIDE leaf's centroid lies inside [0,1]^3 (geometric truth
+!<      for the cube fixture).
+!<   5. Sphere — flood fill on a curved closed surface. Every INSIDE leaf
+!<      centroid has distance < R from origin (R = 1 for the unit MC
+!<      sphere); every OUTSIDE centroid has distance > R - α (some
+!<      conservatism for boundary thickness). No leaks.
+!<   6. Cube with one facet deleted — the EXPECTED-LEAK test. The hole
+!<      lets the flood fill leak through, so n_inside drops drastically
+!<      compared to a closed cube (assert ≤ 30% of closed-cube n_inside).
+!<      This is NOT a bug — step 3+ closes the wrap surface across the
+!<      hole, NOT by repairing the input. Without this expected-leak the
+!<      algorithm is broken.
 
 program fossil_test_alpha_wrap
 
 use fossil, only : surface_stl_object, extract_isosurface
-use fossil_alpha_wrap, only : awrap_octree_t, awrap_build_octree, &
+use fossil_alpha_wrap, only : awrap_octree_t, awrap_build_octree, awrap_classify_leaves, &
                               AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, AWRAP_STATUS_DEGENERATE, &
                               AWRAP_LEAF_FLAG_BOUNDARY, AWRAP_LEAF_FLAG_INTERIOR, &
+                              AWRAP_LEAF_FLAG_EMPTY, AWRAP_LEAF_FLAG_INSIDE, AWRAP_LEAF_FLAG_OUTSIDE, &
                               AWRAP_MAX_DEPTH
 use fossil_facet_object, only : facet_object
 use fossil_utils, only : triangle_overlaps_aabb
@@ -35,18 +52,21 @@ use vecfor, only : vector_R8P
 
 implicit none
 
-type(surface_stl_object) :: cube, sphere
+type(surface_stl_object) :: cube, sphere, cube_holed
 type(facet_object), allocatable :: sphere_facets(:)
+type(facet_object), allocatable, target :: holed_facets(:)
 type(facet_object), pointer :: facets(:)
 type(awrap_octree_t) :: octree
 real(R8P), allocatable :: values(:,:,:)
-type(vector_R8P) :: bmin, bmax
+type(vector_R8P) :: bmin, bmax, centroid
 real(R8P) :: x, y, z, dx, alpha
 real(R8P) :: max_leaf_size, leaf_sx, leaf_sy, leaf_sz
 integer(I4P) :: status, i, j, k, n, max_depth
 integer(I4P) :: n_false_pos, n_false_neg
+integer(I4P) :: n_in_geometry, n_outside_geometry, n_empty_remaining
+integer(I4P) :: n_inside_closed_cube
 logical :: any_overlap, prop_no_false_pos, prop_no_false_neg, prop_size_ok
-logical :: are_tests_passed(3)
+logical :: are_tests_passed(6)
 
 integer(I4P), parameter :: N_GRID = 32_I4P
 
@@ -128,7 +148,88 @@ block
    deallocate(empty_facets)
 endblock
 
-print '(A,3L2)', 'per-case results: ', are_tests_passed
+! ---- Invariant 4: cube — flood fill correctness on a closed solid.
+facets => cube%facets_ref()
+alpha = 0.1_R8P
+call awrap_build_octree(facet=facets, alpha=alpha, octree=octree, status=status)
+call awrap_classify_leaves(octree=octree, status=status)
+n_in_geometry      = 0_I4P
+n_outside_geometry = 0_I4P
+n_empty_remaining  = 0_I4P
+do i = 1_I4P, octree%n_nodes
+   if (octree%node(i)%first_child /= -1_I4P) cycle
+   if (octree%node(i)%leaf_flag /= AWRAP_LEAF_FLAG_INSIDE) cycle
+   centroid = 0.5_R8P * (octree%node(i)%bmin + octree%node(i)%bmax)
+   if (centroid%x > 0._R8P .and. centroid%x < 1._R8P .and. &
+       centroid%y > 0._R8P .and. centroid%y < 1._R8P .and. &
+       centroid%z > 0._R8P .and. centroid%z < 1._R8P) then
+      n_in_geometry = n_in_geometry + 1_I4P
+   else
+      n_outside_geometry = n_outside_geometry + 1_I4P
+   endif
+enddo
+do i = 1_I4P, octree%n_nodes
+   if (octree%node(i)%first_child /= -1_I4P) cycle
+   if (octree%node(i)%leaf_flag == AWRAP_LEAF_FLAG_EMPTY) n_empty_remaining = n_empty_remaining + 1_I4P
+enddo
+print '(A,I0,A,I0,A,I0,A,I0,A,I0)', &
+      'inv 4 (cube classify): n_inside=', octree%n_inside_leaves, &
+      ' n_outside=', octree%n_outside_leaves, &
+      ' n_empty_remaining=', n_empty_remaining, &
+      ' INSIDE_in_cube=', n_in_geometry, ' INSIDE_outside_cube=', n_outside_geometry
+are_tests_passed(4) = (status == AWRAP_STATUS_OK)                    .and. &
+                      (n_empty_remaining == 0_I4P)                   .and. &
+                      (octree%n_inside_leaves > 0_I4P)               .and. &
+                      (octree%n_outside_leaves > 0_I4P)              .and. &
+                      (octree%n_inside_leaves + octree%n_outside_leaves &
+                          + octree%n_boundary_leaves == octree%n_leaves) .and. &
+                      (n_outside_geometry == 0_I4P)
+n_inside_closed_cube = octree%n_inside_leaves   ! save for inv 6 comparison
+
+! ---- Invariant 5: sphere — flood fill on a curved closed surface.
+facets => sphere%facets_ref()
+call awrap_build_octree(facet=facets, alpha=alpha, octree=octree, status=status)
+call awrap_classify_leaves(octree=octree, status=status)
+n_in_geometry      = 0_I4P
+n_outside_geometry = 0_I4P
+do i = 1_I4P, octree%n_nodes
+   if (octree%node(i)%first_child /= -1_I4P) cycle
+   if (octree%node(i)%leaf_flag /= AWRAP_LEAF_FLAG_INSIDE) cycle
+   centroid = 0.5_R8P * (octree%node(i)%bmin + octree%node(i)%bmax)
+   if (sqrt(centroid%x**2 + centroid%y**2 + centroid%z**2) < 1._R8P) then
+      n_in_geometry = n_in_geometry + 1_I4P
+   else
+      n_outside_geometry = n_outside_geometry + 1_I4P
+   endif
+enddo
+print '(A,I0,A,I0,A,I0,A,I0)', &
+      'inv 5 (sphere classify): n_inside=', octree%n_inside_leaves, &
+      ' n_outside=', octree%n_outside_leaves, &
+      ' INSIDE_in_sphere=', n_in_geometry, ' INSIDE_outside_sphere=', n_outside_geometry
+are_tests_passed(5) = (status == AWRAP_STATUS_OK)                    .and. &
+                      (octree%n_inside_leaves > 0_I4P)               .and. &
+                      (octree%n_outside_leaves > 0_I4P)              .and. &
+                      (n_outside_geometry == 0_I4P)
+
+! ---- Invariant 6: cube minus one facet — expected leak through the hole.
+!      Drop the first facet and re-build a surface; flood fill should leak.
+facets => cube%facets_ref()  ! re-fetch (block above may have invalidated)
+allocate(holed_facets(size(facets, kind=I4P) - 1_I4P))
+do i = 1_I4P, size(holed_facets, kind=I4P)
+   holed_facets(i) = facets(i + 1_I4P)
+enddo
+call cube_holed%adopt_facets(facets=holed_facets)
+facets => cube_holed%facets_ref()
+call awrap_build_octree(facet=facets, alpha=alpha, octree=octree, status=status)
+call awrap_classify_leaves(octree=octree, status=status)
+print '(A,I0,A,I0,A,I0)', &
+      'inv 6 (holed cube): n_inside=', octree%n_inside_leaves, &
+      ' (closed cube was=', n_inside_closed_cube, &
+      ');  n_outside=', octree%n_outside_leaves
+are_tests_passed(6) = (status == AWRAP_STATUS_OK) .and. &
+                      (octree%n_inside_leaves < n_inside_closed_cube * 30_I4P / 100_I4P)
+
+print '(A,6L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 
 contains

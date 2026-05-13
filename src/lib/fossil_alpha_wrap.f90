@@ -36,16 +36,25 @@ private
 
 public :: awrap_octree_t
 public :: awrap_build_octree
+public :: awrap_classify_leaves
 public :: AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, AWRAP_STATUS_DEGENERATE
 public :: AWRAP_LEAF_FLAG_BOUNDARY, AWRAP_LEAF_FLAG_INTERIOR
+public :: AWRAP_LEAF_FLAG_EMPTY, AWRAP_LEAF_FLAG_INSIDE, AWRAP_LEAF_FLAG_OUTSIDE
 public :: AWRAP_MAX_DEPTH
 
 integer(I4P), parameter :: AWRAP_STATUS_OK         = 0_I4P
 integer(I4P), parameter :: AWRAP_STATUS_BAD_INPUT  = 1_I4P  !< Empty facet list, or alpha <= 0.
 integer(I4P), parameter :: AWRAP_STATUS_DEGENERATE = 2_I4P  !< Alpha > bbox diagonal: octree won't refine, output empty.
 
-integer(I4P), parameter :: AWRAP_LEAF_FLAG_INTERIOR = 0_I4P  !< Leaf has no overlapping input facets.
-integer(I4P), parameter :: AWRAP_LEAF_FLAG_BOUNDARY = 1_I4P  !< Leaf overlaps at least one input facet.
+integer(I4P), parameter :: AWRAP_LEAF_FLAG_INTERIOR = 0_I4P  !< Step 1 only: leaf has no overlapping input facets (kept for back-compat in tests).
+integer(I4P), parameter :: AWRAP_LEAF_FLAG_BOUNDARY = 1_I4P  !< Leaf overlaps at least one input facet (barrier for step 2 flood fill).
+! Step 2 classification — replaces the step-1 INTERIOR flag on leaves the
+! flood fill has visited. BOUNDARY leaves keep their flag (they ARE the
+! barriers). EMPTY = step 2 hasn't visited yet (initial state for empty
+! leaves, transitions to INSIDE or OUTSIDE during flood fill).
+integer(I4P), parameter :: AWRAP_LEAF_FLAG_EMPTY    = 0_I4P  !< Alias of INTERIOR — leaf has no overlap, classification still pending.
+integer(I4P), parameter :: AWRAP_LEAF_FLAG_OUTSIDE  = 2_I4P  !< Reachable from the corner seed via 6-connectivity through EMPTY leaves.
+integer(I4P), parameter :: AWRAP_LEAF_FLAG_INSIDE   = 3_I4P  !< Empty leaf NOT reachable from outside seed — interior of the input solid.
 
 integer(I4P), parameter :: AWRAP_MAX_DEPTH      = 12_I4P     !< Cap on octree recursion depth (8^12 ≈ 7e10 nodes worst case; in practice trees stay << 1e5 leaves).
 integer(I4P), parameter :: AWRAP_INITIAL_CAPACITY = 1024_I4P !< Initial node-array capacity; doubles on demand.
@@ -70,6 +79,8 @@ type :: awrap_octree_t
    integer(I4P)                           :: n_nodes = 0_I4P !< Number of populated nodes.
    integer(I4P)                           :: n_leaves = 0_I4P !< Number of leaves (sum at end of build).
    integer(I4P)                           :: n_boundary_leaves = 0_I4P  !< Leaves with leaf_flag == BOUNDARY.
+   integer(I4P)                           :: n_inside_leaves   = 0_I4P  !< Filled by step 2 (awrap_classify_leaves).
+   integer(I4P)                           :: n_outside_leaves  = 0_I4P  !< Filled by step 2 (awrap_classify_leaves).
    real(R8P)                              :: alpha   = 0._R8P  !< Geometric leaf-size target.
 endtype awrap_octree_t
 
@@ -321,5 +332,228 @@ contains
       endif
    enddo
    endsubroutine recount
+
+   subroutine awrap_classify_leaves(octree, status)
+   !< Step 2: classify every EMPTY leaf as INSIDE or OUTSIDE via 6-connectivity
+   !< flood fill from a known-outside corner seed (issue #18 §1.6 step 2).
+   !<
+   !< Algorithm:
+   !<   1. Locate the leaf containing the corner of the padded root bbox
+   !<      (always EMPTY by construction — step 1 padded the root by 2α).
+   !<   2. BFS outward, only crossing EMPTY ↔ EMPTY edges. BOUNDARY leaves are
+   !<      barriers (the "wrap" surface separates outside from inside).
+   !<   3. Every EMPTY leaf reached by the BFS becomes OUTSIDE.
+   !<   4. Every EMPTY leaf NOT reached is INSIDE (interior of the input).
+   !<
+   !< For triangle-soup input with holes, the flood fill correctly leaks
+   !< through the holes — that's the EXPECTED behaviour at this step.
+   !< Step 3+ closes those holes in the WRAP surface, not by repairing the
+   !< input topology. So a cube with one facet deleted will show most of the
+   !< "interior" as OUTSIDE after step 2; that's the algorithmic ground
+   !< truth, and the wrap mesh will still be watertight after step 5.
+   !<
+   !< Updates `octree%n_inside_leaves` and `octree%n_outside_leaves`.
+   type(awrap_octree_t), intent(inout)           :: octree
+   integer(I4P),         intent(out),   optional :: status
+   integer(I4P), allocatable                     :: queue(:)        !< BFS queue (leaf node indices).
+   integer(I4P)                                  :: head, tail, cap !< Queue cursors.
+   integer(I4P)                                  :: i, seed_id, current_id, neighbour_id, axis, side
+   type(vector_R8P)                              :: probe
+   real(R8P)                                     :: half_alpha
+
+   if (present(status)) status = AWRAP_STATUS_OK
+   if (octree%n_nodes == 0_I4P) then
+      if (present(status)) status = AWRAP_STATUS_BAD_INPUT
+      return
+   endif
+
+   ! Reset prior step-2 state (idempotency for adaptive-refinement re-runs in step 5).
+   do i = 1_I4P, octree%n_nodes
+      if (octree%node(i)%first_child /= -1_I4P) cycle
+      if (octree%node(i)%leaf_flag /= AWRAP_LEAF_FLAG_BOUNDARY) &
+         octree%node(i)%leaf_flag = AWRAP_LEAF_FLAG_EMPTY
+   enddo
+
+   ! Locate the seed leaf at the (-x, -y, -z) corner of the padded root.
+   ! Step 1's padding guarantees this corner sits in an EMPTY leaf.
+   seed_id = find_leaf_at_point(octree=octree, point=octree%node(1)%bmin)
+   if (seed_id <= 0_I4P) then
+      ! Defensive: if the corner happens to be on a BOUNDARY leaf (shouldn't
+      ! happen with 2α padding) or location fails, scan all leaves for one
+      ! that's empty AND on the root bbox boundary. Rare edge case.
+      do i = 1_I4P, octree%n_nodes
+         if (octree%node(i)%first_child /= -1_I4P) cycle
+         if (octree%node(i)%leaf_flag /= AWRAP_LEAF_FLAG_EMPTY) cycle
+         if (leaf_touches_root_min(octree=octree, leaf_id=i)) then
+            seed_id = i
+            exit
+         endif
+      enddo
+   endif
+   if (seed_id <= 0_I4P) then
+      ! No seed found — geometry fills the entire padded bbox. Mark all empty
+      ! leaves INSIDE and return.
+      do i = 1_I4P, octree%n_nodes
+         if (octree%node(i)%first_child /= -1_I4P) cycle
+         if (octree%node(i)%leaf_flag == AWRAP_LEAF_FLAG_EMPTY) &
+            octree%node(i)%leaf_flag = AWRAP_LEAF_FLAG_INSIDE
+      enddo
+      call count_classifications(octree)
+      return
+   endif
+
+   ! BFS from the seed, only crossing EMPTY ↔ EMPTY edges.
+   cap = max(octree%n_leaves, 64_I4P)
+   allocate(queue(cap))
+   head = 1_I4P
+   tail = 1_I4P
+   queue(1) = seed_id
+   octree%node(seed_id)%leaf_flag = AWRAP_LEAF_FLAG_OUTSIDE
+
+   half_alpha = 0.5_R8P * octree%alpha
+   do while (head <= tail)
+      current_id = queue(head)
+      head = head + 1_I4P
+      ! For each of the 6 face neighbours, find the leaf on the other side.
+      ! Probe at the face midpoint, offset outward by a small fraction of α.
+      do axis = 1_I4P, 3_I4P
+         do side = -1_I4P, 1_I4P, 2_I4P
+            call face_probe_point(node=octree%node(current_id), axis=axis, side=side, &
+                                  half_alpha=half_alpha, probe=probe)
+            ! If probe lies outside the padded root, no neighbour exists.
+            if (probe%x < octree%node(1)%bmin%x .or. probe%x > octree%node(1)%bmax%x .or. &
+                probe%y < octree%node(1)%bmin%y .or. probe%y > octree%node(1)%bmax%y .or. &
+                probe%z < octree%node(1)%bmin%z .or. probe%z > octree%node(1)%bmax%z) cycle
+            neighbour_id = find_leaf_at_point(octree=octree, point=probe)
+            if (neighbour_id <= 0_I4P) cycle
+            ! Fan-out across larger neighbours: a single probe may land in a
+            ! leaf that abuts other not-yet-visited leaves on the SAME face.
+            ! For MVP we accept this — flood fill will reach them via the
+            ! transitive face traversal (their own face probes find this leaf).
+            if (octree%node(neighbour_id)%leaf_flag /= AWRAP_LEAF_FLAG_EMPTY) cycle
+            octree%node(neighbour_id)%leaf_flag = AWRAP_LEAF_FLAG_OUTSIDE
+            tail = tail + 1_I4P
+            if (tail > cap) call grow_queue(queue=queue, cap=cap)
+            queue(tail) = neighbour_id
+         enddo
+      enddo
+   enddo
+   deallocate(queue)
+
+   ! Mark every still-EMPTY leaf as INSIDE.
+   do i = 1_I4P, octree%n_nodes
+      if (octree%node(i)%first_child /= -1_I4P) cycle
+      if (octree%node(i)%leaf_flag == AWRAP_LEAF_FLAG_EMPTY) &
+         octree%node(i)%leaf_flag = AWRAP_LEAF_FLAG_INSIDE
+   enddo
+
+   call count_classifications(octree)
+   endsubroutine awrap_classify_leaves
+
+   pure function find_leaf_at_point(octree, point) result(leaf_id)
+   !< Locate the leaf containing `point` by descending from the root, picking
+   !< the child whose bbox contains the point at each level. Returns 0 if the
+   !< point is outside the root bbox (caller's responsibility to clamp).
+   type(awrap_octree_t), intent(in) :: octree
+   type(vector_R8P),     intent(in) :: point
+   integer(I4P)                     :: leaf_id
+   integer(I4P)                     :: cur, c, child_id
+
+   leaf_id = 0_I4P
+   if (octree%n_nodes == 0_I4P) return
+   if (.not. point_in_node(octree%node(1), point)) return
+   cur = 1_I4P
+   do while (octree%node(cur)%first_child /= -1_I4P)
+      ! Descend to the child whose bbox contains the point.
+      do c = 0_I4P, 7_I4P
+         child_id = octree%node(cur)%first_child + c
+         if (point_in_node(octree%node(child_id), point)) then
+            cur = child_id
+            exit
+         endif
+      enddo
+      ! Defensive: if no child contained the point (FP edge case at a split
+      ! plane), give up and return the current cur — it's still a valid node
+      ! containing the point.
+      if (cur /= child_id .and. octree%node(cur)%first_child /= -1_I4P) exit
+   enddo
+   leaf_id = cur
+   endfunction find_leaf_at_point
+
+   pure function point_in_node(node, point) result(yes)
+   type(awrap_octree_node_t), intent(in) :: node
+   type(vector_R8P),          intent(in) :: point
+   logical                               :: yes
+   yes = (point%x >= node%bmin%x .and. point%x <= node%bmax%x) .and. &
+         (point%y >= node%bmin%y .and. point%y <= node%bmax%y) .and. &
+         (point%z >= node%bmin%z .and. point%z <= node%bmax%z)
+   endfunction point_in_node
+
+   pure subroutine face_probe_point(node, axis, side, half_alpha, probe)
+   !< Generate a probe point just past the (axis, side) face of `node`. Used
+   !< by the BFS to locate the face-neighbour leaf via point location. The
+   !< offset (half α) is large enough to leave the source leaf even at
+   !< depth-cap leaves where the leaf size is < α.
+   type(awrap_octree_node_t), intent(in)  :: node
+   integer(I4P),              intent(in)  :: axis      !< 1 = x, 2 = y, 3 = z.
+   integer(I4P),              intent(in)  :: side      !< -1 = bmin face, +1 = bmax face.
+   real(R8P),                 intent(in)  :: half_alpha
+   type(vector_R8P),          intent(out) :: probe
+   real(R8P)                              :: epsilon_offset
+
+   ! Use min(half_alpha, half_leaf_size) to ensure we cross to a neighbour
+   ! without overshooting more than one leaf width.
+   epsilon_offset = min(half_alpha, &
+                        0.25_R8P * min(node%bmax%x - node%bmin%x, &
+                                       node%bmax%y - node%bmin%y, &
+                                       node%bmax%z - node%bmin%z))
+   ! Centre of the requested face, then push outward by epsilon_offset.
+   probe = 0.5_R8P * (node%bmin + node%bmax)
+   if (axis == 1_I4P) probe%x = merge(node%bmax%x + epsilon_offset, node%bmin%x - epsilon_offset, side > 0_I4P)
+   if (axis == 2_I4P) probe%y = merge(node%bmax%y + epsilon_offset, node%bmin%y - epsilon_offset, side > 0_I4P)
+   if (axis == 3_I4P) probe%z = merge(node%bmax%z + epsilon_offset, node%bmin%z - epsilon_offset, side > 0_I4P)
+   endsubroutine face_probe_point
+
+   pure function leaf_touches_root_min(octree, leaf_id) result(yes)
+   !< Does the leaf bbox touch the root's (-x, -y, -z) corner? Used as a
+   !< fallback seed test when point-location at the corner fails.
+   type(awrap_octree_t), intent(in) :: octree
+   integer(I4P),         intent(in) :: leaf_id
+   logical                          :: yes
+
+   yes = abs(octree%node(leaf_id)%bmin%x - octree%node(1)%bmin%x) < 1.0e-12_R8P .and. &
+         abs(octree%node(leaf_id)%bmin%y - octree%node(1)%bmin%y) < 1.0e-12_R8P .and. &
+         abs(octree%node(leaf_id)%bmin%z - octree%node(1)%bmin%z) < 1.0e-12_R8P
+   endfunction leaf_touches_root_min
+
+   subroutine grow_queue(queue, cap)
+   !< Geometric (2x) growth of the BFS queue.
+   integer(I4P), allocatable, intent(inout) :: queue(:)
+   integer(I4P),              intent(inout) :: cap
+   integer(I4P), allocatable                :: bigger(:)
+
+   allocate(bigger(2_I4P * cap))
+   bigger(1:cap) = queue(1:cap)
+   call move_alloc(from=bigger, to=queue)
+   cap = 2_I4P * cap
+   endsubroutine grow_queue
+
+   subroutine count_classifications(octree)
+   !< Walk the leaves and update per-class counts. O(n_nodes); cheap.
+   type(awrap_octree_t), intent(inout) :: octree
+   integer(I4P)                        :: i
+
+   octree%n_inside_leaves = 0_I4P
+   octree%n_outside_leaves = 0_I4P
+   do i = 1_I4P, octree%n_nodes
+      if (octree%node(i)%first_child /= -1_I4P) cycle
+      select case (octree%node(i)%leaf_flag)
+      case (AWRAP_LEAF_FLAG_INSIDE)
+         octree%n_inside_leaves = octree%n_inside_leaves + 1_I4P
+      case (AWRAP_LEAF_FLAG_OUTSIDE)
+         octree%n_outside_leaves = octree%n_outside_leaves + 1_I4P
+      endselect
+   enddo
+   endsubroutine count_classifications
 
 endmodule fossil_alpha_wrap
