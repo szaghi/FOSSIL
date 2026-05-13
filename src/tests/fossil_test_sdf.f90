@@ -5,7 +5,8 @@
 !<   - facets with too few cone-ray hits get `SDF_SENTINEL = -1`,
 !<   - status = SDF_STATUS_OK on valid input, SDF_STATUS_BAD_INPUT otherwise.
 !<
-!< Three invariants:
+!< Step 1 covers invariants 1..3 (per-facet SDF). Step 2 adds invariant 4
+!< for the dual-graph Laplacian smoothing pass:
 !<   1. Cube SDF is roughly constant. cube.stl spans [0,1]^3, so every
 !<      interior cone ray hits the opposite face at distance ~1.0 (with some
 !<      spread from cone aperture and triangulation discretization). Assert:
@@ -19,26 +20,34 @@
 !<      bimodal SDF distribution: small-cube facets cluster near 0.3, big-cube
 !<      facets cluster near 1.0. Assert: at least 80% of facets are within
 !<      ±20% of one of the two expected values.
+!<   4. Smoothing reduces variance. On the bunny.stl SDF, two passes of
+!<      Laplacian smoothing (lambda = 0.5, the default) must strictly reduce
+!<      the per-facet variance — the whole point of the pass is to attenuate
+!<      cone-ray Monte-Carlo noise without erasing real geometric structure.
+!<      Assert: stddev(smoothed) < stddev(raw), with mean approximately
+!<      preserved (mass-conservation property of symmetric Laplacian
+!<      averaging on a closed mesh).
 
 program fossil_test_sdf
 
 use fossil, only : surface_stl_object, extract_isosurface
 use fossil_facet_object, only : facet_object
-use fossil_sdf, only : compute_sdf, SDF_STATUS_OK, SDF_SENTINEL
+use fossil_sdf, only : compute_sdf, smooth_sdf, SDF_STATUS_OK, SDF_SENTINEL
 use penf, only : I4P, R8P
 use vecfor, only : vector_R8P
 
 implicit none
 
-type(surface_stl_object) :: cube, sphere, composite, small_cube
+type(surface_stl_object) :: cube, sphere, composite, small_cube, bunny
 type(facet_object), allocatable :: sphere_facets(:)
-real(R8P), allocatable :: sdf(:), values(:,:,:)
+real(R8P), allocatable :: sdf(:), sdf_smoothed(:), values(:,:,:)
 type(vector_R8P) :: bmin, bmax
 real(R8P) :: x, y, z, dx
 real(R8P) :: mean_sdf, stddev_sdf, frac_sentinel
+real(R8P) :: mean_raw, stddev_raw, mean_smooth, stddev_smooth
 real(R8P) :: frac_in_cluster_a, frac_in_cluster_b, target_a, target_b
-integer(I4P) :: status, i, j, k, f, nf, n_sentinel, n_a, n_b
-logical :: are_tests_passed(3)
+integer(I4P) :: status, i, j, k, f, nf, n_sentinel, n_a, n_b, n_dummy
+logical :: are_tests_passed(4)
 
 integer(I4P), parameter :: N_GRID = 32_I4P
 real(R8P),    parameter :: TOL_BIMODAL = 0.20_R8P  ! ±20% of expected SDF value
@@ -125,7 +134,25 @@ are_tests_passed(3) = (status == SDF_STATUS_OK) .and. &
                       (frac_in_cluster_a > 0._R8P) .and. &
                       (frac_in_cluster_b > 0._R8P)
 
-print '(A,3L2)', 'per-case results: ', are_tests_passed
+! ---- Invariant 4: smoothing strictly reduces variance on bunny.
+call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
+call compute_sdf(facet=ref_facets(bunny), tree=bunny%aabb, &
+                 bmin=bunny%get_bmin(), bmax=bunny%get_bmax(), &
+                 sdf=sdf, status=status)
+allocate(sdf_smoothed(size(sdf, kind=I4P)))
+sdf_smoothed = sdf
+call smooth_sdf(facet=ref_facets(bunny), sdf=sdf_smoothed, status=status)
+call summary(sdf=sdf,          mean=mean_raw,    stddev=stddev_raw,    n_sentinel=n_dummy)
+call summary(sdf=sdf_smoothed, mean=mean_smooth, stddev=stddev_smooth, n_sentinel=n_dummy)
+print '(A,F8.4,A,F8.4,A,F8.4,A,F8.4)', &
+      'inv 4 (smoothing): raw mean=', mean_raw, ' stddev=', stddev_raw, &
+      '  smooth mean=', mean_smooth, ' stddev=', stddev_smooth
+are_tests_passed(4) = (status == SDF_STATUS_OK)                         .and. &
+                      (stddev_smooth < stddev_raw)                      .and. &
+                      (abs(mean_smooth - mean_raw) < 0.05_R8P * mean_raw)
+deallocate(sdf_smoothed)
+
+print '(A,4L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 
 contains

@@ -25,9 +25,11 @@ implicit none
 private
 
 public :: compute_sdf
+public :: smooth_sdf
 public :: SDF_STATUS_OK, SDF_STATUS_BAD_INPUT
 public :: SDF_SENTINEL
 public :: SDF_DEFAULT_NUM_RAYS, SDF_DEFAULT_CONE_DEG
+public :: SDF_DEFAULT_SMOOTHING_LAMBDA, SDF_DEFAULT_SMOOTHING_ITERATIONS
 public :: SDF_MIN_HIT_FRACTION
 
 integer(I4P), parameter :: SDF_STATUS_OK         = 0_I4P
@@ -37,6 +39,9 @@ real(R8P),    parameter :: SDF_SENTINEL          = -1._R8P  !< SDF for facets wi
 
 integer(I4P), parameter :: SDF_DEFAULT_NUM_RAYS  = 30_I4P   !< Shapira's default.
 real(R8P),    parameter :: SDF_DEFAULT_CONE_DEG  = 120._R8P !< Shapira's default cone half-aperture is 60°, full angle 120°.
+
+real(R8P),    parameter :: SDF_DEFAULT_SMOOTHING_LAMBDA     = 0.5_R8P  !< Per-iteration blend weight toward neighbour mean.
+integer(I4P), parameter :: SDF_DEFAULT_SMOOTHING_ITERATIONS = 2_I4P    !< Shapira's default smoothing pass count.
 
 real(R8P),    parameter :: SDF_MIN_HIT_FRACTION  = 0.5_R8P  !< Below this hit-rate, the SDF for that facet is the sentinel.
 
@@ -128,6 +133,74 @@ contains
    deallocate(hits_t)
    if (allocated(dirs)) deallocate(dirs)
    endsubroutine compute_sdf
+
+   subroutine smooth_sdf(facet, sdf, lambda, iterations, status)
+   !< Laplacian smoothing of a per-facet SDF over the dual graph (issue #18 §1.9 step 2).
+   !<
+   !< Update rule per pass: `sdf_new[f] = (1 - lambda) * sdf[f] + lambda * mean(sdf[neighbours])`.
+   !< Adjacency is read from `facet%fcon_edge` (0 = boundary). Sentinel facets
+   !< are passed through unchanged AND excluded from neighbour averages — a
+   !< sentinel neighbour does not contaminate the mean. Facets whose only
+   !< neighbours are all sentinels (or boundary) keep their pre-pass SDF.
+   !<
+   !< Two passes (the default) are sufficient for the canonical Shapira pipeline.
+   !< With `lambda = 0.5` (default) and 2 passes, a feature spans ~3 facets in
+   !< its support — the typical fillet width. Larger `lambda` or more passes
+   !< washes out genuine SDF discontinuities; smaller values leave per-facet
+   !< noise from the cone-ray Monte Carlo. The defaults are not knobs the user
+   !< usually wants to tune.
+   type(facet_object),     intent(in)              :: facet(:)    !< Facet array (only `fcon_edge` is read).
+   real(R8P),              intent(inout)           :: sdf(:)      !< Per-facet SDF; mutated in place.
+   real(R8P),              intent(in),    optional :: lambda      !< Blend weight in [0, 1] (default SDF_DEFAULT_SMOOTHING_LAMBDA).
+   integer(I4P),           intent(in),    optional :: iterations  !< Pass count (default SDF_DEFAULT_SMOOTHING_ITERATIONS).
+   integer(I4P),           intent(out),   optional :: status      !< Status code.
+   real(R8P), allocatable                          :: sdf_new(:)  !< Double-buffer output of one pass.
+   real(R8P)                                       :: lam, sum_nb !< Resolved lambda + per-facet neighbour sum.
+   integer(I4P)                                    :: it, f, e, n_nb, n_iter, nf
+   integer(I4P)                                    :: nb_id
+
+   if (present(status)) status = SDF_STATUS_OK
+   nf = size(sdf, kind=I4P)
+   if (nf == 0_I4P) return
+   if (size(facet, kind=I4P) /= nf) then
+      if (present(status)) status = SDF_STATUS_BAD_INPUT
+      return
+   endif
+   lam = SDF_DEFAULT_SMOOTHING_LAMBDA;     if (present(lambda))     lam = lambda
+   n_iter = SDF_DEFAULT_SMOOTHING_ITERATIONS; if (present(iterations)) n_iter = iterations
+   if (lam < 0._R8P .or. lam > 1._R8P .or. n_iter < 0_I4P) then
+      if (present(status)) status = SDF_STATUS_BAD_INPUT
+      return
+   endif
+   if (n_iter == 0_I4P) return  ! caller asked for no smoothing — no-op
+
+   allocate(sdf_new(nf))
+   do it = 1_I4P, n_iter
+      do f = 1_I4P, nf
+         if (sdf(f) == SDF_SENTINEL) then
+            sdf_new(f) = SDF_SENTINEL
+            cycle
+         endif
+         sum_nb = 0._R8P
+         n_nb = 0_I4P
+         do e = 1_I4P, 3_I4P
+            nb_id = facet(f)%fcon_edge(e)
+            if (nb_id <= 0_I4P)      cycle  ! boundary edge
+            if (nb_id > nf)          cycle  ! defensive: shouldn't happen with valid connectivity
+            if (sdf(nb_id) == SDF_SENTINEL) cycle
+            sum_nb = sum_nb + sdf(nb_id)
+            n_nb = n_nb + 1_I4P
+         enddo
+         if (n_nb == 0_I4P) then
+            sdf_new(f) = sdf(f)  ! isolated valid facet: no smoothing source
+         else
+            sdf_new(f) = (1._R8P - lam) * sdf(f) + lam * (sum_nb / real(n_nb, R8P))
+         endif
+      enddo
+      sdf = sdf_new
+   enddo
+   deallocate(sdf_new)
+   endsubroutine smooth_sdf
 
    pure subroutine cone_directions(axis, cone_deg, n, dirs)
    !< Generate `n` directions uniformly distributed in a cone of full aperture
