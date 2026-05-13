@@ -16,6 +16,8 @@ use fossil_decimate, only : compute_decimate => decimate, &
                             DEC_STATUS_OK, DEC_STATUS_BAD_INPUT, DEC_STATUS_NO_PROGRESS
 use fossil_ray_query, only : ray_hit_t, ray_intersect_all_flat, &
                              RAY_STATUS_OK, RAY_STATUS_BAD_INPUT
+use fossil_sdf, only : compute_segment_sdf => segment_sdf, &
+                       SDF_STATUS_OK, SDF_STATUS_BAD_INPUT, SDF_LABEL_UNASSIGNED
 use fossil_remesh, only : compute_remesh => isotropic_remesh, &
                           REM_STATUS_OK, REM_STATUS_BAD_INPUT
 use fossil_boolean, only : compute_boolean => boolean_compute, &
@@ -159,6 +161,7 @@ type :: surface_stl_object
       procedure, pass(self) :: intersect_ray_all                !< All ray-facet hits, sorted by t (issue #18 §2.5).
       procedure, pass(self) :: intersect_ray_first              !< Closest ray-facet hit, with AABB pruning (issue #18 §2.5).
       procedure, pass(self) :: intersect_ray_any                !< Any-hit early-exit ray query for shadow / occlusion (issue #18 §2.5).
+      procedure, pass(self) :: segment_sdf                      !< Per-facet labels via SDF + GMM (issue #18 §1.9).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1743,6 +1746,58 @@ contains
       enddo
    endif
    endsubroutine intersect_ray_any
+
+   subroutine segment_sdf(self, facet_labels, sdf, num_clusters, smoothing_lambda, &
+                          smoothing_iterations, num_rays, cone_angle_deg, status)
+   !< Per-facet semantic labelling via Shape Diameter Function (issue #18 §1.9).
+   !<
+   !< Pipeline: per-facet SDF (cone-of-rays + median) → dual-graph Laplacian
+   !< smoothing → 1D Gaussian-mixture clustering → argmax-posterior labels,
+   !< re-ordered so cluster 1 = thinnest-feature region, cluster k = thickest.
+   !<
+   !< Output `facet_labels(1:nf)`:
+   !<   - `0` (== `SDF_LABEL_UNASSIGNED`) when the facet's SDF was undefined
+   !<     (degenerate shell, near-hole, isolated patch — too few cone rays hit
+   !<     the opposite surface). These facets are excluded from clustering and
+   !<     left unassigned by design; downstream code should treat them as their
+   !<     own implicit "unknown" group.
+   !<   - `1..num_clusters` for valid facets.
+   !<
+   !< Optional `sdf(:)` returns the smoothed per-facet SDF for inspection.
+   !<
+   !< Defaults follow Shapira (2008): `num_clusters=4`, `num_rays=30`,
+   !< `cone_angle_deg=120`, `smoothing_lambda=0.5`, `smoothing_iterations=2`.
+   !< The clustering MVP does not run the post-clustering alpha-expansion
+   !< graph cut from Shapira §5; that is a documented follow-up. Without it,
+   !< segmentation labels can flip across edges that the smoothing didn't
+   !< already align — for typical AMR-CFD STL the cone-ray + smoothing signal
+   !< is dominant and the labels are usable as-is.
+   class(surface_stl_object),  intent(in)            :: self                 !< Surface.
+   integer(I4P), allocatable,  intent(out)           :: facet_labels(:)      !< Per-facet labels ∈ [0, num_clusters].
+   real(R8P),    allocatable,  intent(out), optional :: sdf(:)               !< Smoothed SDF (optional output).
+   integer(I4P),               intent(in),  optional :: num_clusters         !< Default 4.
+   real(R8P),                  intent(in),  optional :: smoothing_lambda     !< Default 0.5.
+   integer(I4P),               intent(in),  optional :: smoothing_iterations !< Default 2.
+   integer(I4P),               intent(in),  optional :: num_rays             !< Default 30.
+   real(R8P),                  intent(in),  optional :: cone_angle_deg       !< Default 120.
+   integer(I4P),               intent(out), optional :: status               !< Status code.
+
+   if (present(status)) status = SDF_STATUS_OK
+   if (self%facets_number == 0_I4P) then
+      allocate(facet_labels(0))
+      if (present(sdf)) allocate(sdf(0))
+      if (present(status)) status = SDF_STATUS_BAD_INPUT
+      return
+   endif
+   call compute_segment_sdf(facet=self%facet, tree=self%aabb, &
+                            bmin=self%bmin, bmax=self%bmax, &
+                            facet_labels=facet_labels, sdf=sdf, &
+                            num_clusters=num_clusters, &
+                            smoothing_lambda=smoothing_lambda, &
+                            smoothing_iterations=smoothing_iterations, &
+                            num_rays=num_rays, cone_angle_deg=cone_angle_deg, &
+                            status=status)
+   endsubroutine segment_sdf
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.

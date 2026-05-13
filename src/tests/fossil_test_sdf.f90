@@ -6,7 +6,8 @@
 !<   - status = SDF_STATUS_OK on valid input, SDF_STATUS_BAD_INPUT otherwise.
 !<
 !< Step 1 covers invariants 1..3 (per-facet SDF). Step 2 adds invariant 4
-!< for the dual-graph Laplacian smoothing pass:
+!< for the dual-graph Laplacian smoothing pass. Step 3 adds invariants 5..6
+!< for the GMM clustering and `surface%segment_sdf` capstone TBP:
 !<   1. Cube SDF is roughly constant. cube.stl spans [0,1]^3, so every
 !<      interior cone ray hits the opposite face at distance ~1.0 (with some
 !<      spread from cone aperture and triangulation discretization). Assert:
@@ -27,12 +28,26 @@
 !<      Assert: stddev(smoothed) < stddev(raw), with mean approximately
 !<      preserved (mass-conservation property of symmetric Laplacian
 !<      averaging on a closed mesh).
+!<   5. Sphere + k=1 → all facets get label 1. Trivial cluster-path test:
+!<      with one cluster GMM degenerates to "every valid facet to label 1"
+!<      regardless of SDF distribution. (We avoid the obvious "uniform-input
+!<      collapses to one cluster with k=2" assertion: GMM is a mode-finder,
+!<      not a mode-merger, so it WILL split a tightly-clustered distribution
+!<      into two near-identical components if asked. That's intended GMM
+!<      behaviour, not a bug, and a graph-cut post-pass would be needed to
+!<      enforce true cluster collapse — see the deferred §1.9b follow-up.)
+!<   6. Bunny + k=4 capstone via `surface%segment_sdf`. Asserts: status OK,
+!<      all labels in [0, 4], no surprise sentinels (bunny is closed so the
+!<      cone-ray hit rate should be ~100%; a high sentinel fraction would
+!<      indicate something broken in the ray cast). Verifies the public TBP
+!<      end-to-end (compute_sdf → smooth_sdf → GMM → labels).
 
 program fossil_test_sdf
 
-use fossil, only : surface_stl_object, extract_isosurface
+use fossil, only : surface_stl_object, extract_isosurface, &
+                   SDF_STATUS_OK, SDF_LABEL_UNASSIGNED
 use fossil_facet_object, only : facet_object
-use fossil_sdf, only : compute_sdf, smooth_sdf, SDF_STATUS_OK, SDF_SENTINEL
+use fossil_sdf, only : compute_sdf, smooth_sdf, SDF_SENTINEL
 use penf, only : I4P, R8P
 use vecfor, only : vector_R8P
 
@@ -41,13 +56,15 @@ implicit none
 type(surface_stl_object) :: cube, sphere, composite, small_cube, bunny
 type(facet_object), allocatable :: sphere_facets(:)
 real(R8P), allocatable :: sdf(:), sdf_smoothed(:), values(:,:,:)
+integer(I4P), allocatable :: labels(:)
 type(vector_R8P) :: bmin, bmax
 real(R8P) :: x, y, z, dx
 real(R8P) :: mean_sdf, stddev_sdf, frac_sentinel
 real(R8P) :: mean_raw, stddev_raw, mean_smooth, stddev_smooth
 real(R8P) :: frac_in_cluster_a, frac_in_cluster_b, target_a, target_b
 integer(I4P) :: status, i, j, k, f, nf, n_sentinel, n_a, n_b, n_dummy
-logical :: are_tests_passed(4)
+integer(I4P) :: cube_first_label, n_label_diff, lab_min, lab_max, n_unassigned
+logical :: are_tests_passed(6)
 
 integer(I4P), parameter :: N_GRID = 32_I4P
 real(R8P),    parameter :: TOL_BIMODAL = 0.20_R8P  ! ±20% of expected SDF value
@@ -152,7 +169,32 @@ are_tests_passed(4) = (status == SDF_STATUS_OK)                         .and. &
                       (abs(mean_smooth - mean_raw) < 0.05_R8P * mean_raw)
 deallocate(sdf_smoothed)
 
-print '(A,4L2)', 'per-case results: ', are_tests_passed
+! ---- Invariant 5: sphere + k=1 → every valid facet gets label 1.
+!      Trivial cluster-path test (with k=1, GMM degenerates to one label).
+call sphere%segment_sdf(facet_labels=labels, num_clusters=1_I4P, status=status)
+nf = size(labels, kind=I4P)
+n_a = count(labels == 1_I4P)
+n_unassigned = count(labels == SDF_LABEL_UNASSIGNED)
+print '(A,I0,A,I0,A,I0)', 'inv 5 (sphere k=1): nf=', nf, ' n_label_1=', n_a, &
+      ' n_unassigned=', n_unassigned
+are_tests_passed(5) = (status == SDF_STATUS_OK) .and. &
+                      (n_a + n_unassigned == nf) .and. &
+                      (n_a > 0_I4P)
+
+! ---- Invariant 6: bunny + k=4 capstone via TBP, all labels in [0, 4].
+call bunny%segment_sdf(facet_labels=labels, num_clusters=4_I4P, status=status)
+nf = size(labels, kind=I4P)
+lab_min = minval(labels)
+lab_max = maxval(labels)
+n_unassigned = count(labels == SDF_LABEL_UNASSIGNED)
+print '(A,I0,A,I0,A,I0,A,I0)', 'inv 6 (bunny k=4): nf=', nf, ' lab_min=', lab_min, &
+      ' lab_max=', lab_max, ' n_unassigned=', n_unassigned
+are_tests_passed(6) = (status == SDF_STATUS_OK)             .and. &
+                      (lab_min >= 0_I4P)                    .and. &
+                      (lab_max <= 4_I4P)                    .and. &
+                      (real(n_unassigned, R8P) / real(nf, R8P) < 0.05_R8P)
+
+print '(A,6L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 
 contains

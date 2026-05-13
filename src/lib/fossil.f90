@@ -7,6 +7,8 @@ use fossil_aabb_tree_object, only : AABB_AUTO_REFINEMENT, AABB_TREE_OCTREE, AABB
 use fossil_decimate, only : DEC_STATUS_OK, DEC_STATUS_BAD_INPUT, DEC_STATUS_NO_PROGRESS
 use fossil_ray_query, only : ray_hit_t, RAY_STATUS_OK, RAY_STATUS_BAD_INPUT
 use fossil_remesh, only : REM_STATUS_OK, REM_STATUS_BAD_INPUT
+use fossil_sdf, only : SDF_STATUS_OK, SDF_STATUS_BAD_INPUT, &
+                       SDF_LABEL_UNASSIGNED, SDF_SENTINEL
 use fossil_facet_object
 use fossil_marching_cubes, only : extract_isosurface, MC_STATUS_OK, MC_STATUS_BAD_DIMENSIONS
 use fossil_surface_stl_object
@@ -30,4 +32,6 @@ public :: DEC_STATUS_OK, DEC_STATUS_BAD_INPUT, DEC_STATUS_NO_PROGRESS
 public :: REM_STATUS_OK, REM_STATUS_BAD_INPUT
 public :: ray_hit_t
 public :: RAY_STATUS_OK, RAY_STATUS_BAD_INPUT
+public :: SDF_STATUS_OK, SDF_STATUS_BAD_INPUT
+public :: SDF_LABEL_UNASSIGNED, SDF_SENTINEL
 endmodule fossil

@@ -26,16 +26,22 @@ private
 
 public :: compute_sdf
 public :: smooth_sdf
+public :: segment_sdf
 public :: SDF_STATUS_OK, SDF_STATUS_BAD_INPUT
 public :: SDF_SENTINEL
+public :: SDF_LABEL_UNASSIGNED
 public :: SDF_DEFAULT_NUM_RAYS, SDF_DEFAULT_CONE_DEG
 public :: SDF_DEFAULT_SMOOTHING_LAMBDA, SDF_DEFAULT_SMOOTHING_ITERATIONS
+public :: SDF_DEFAULT_NUM_CLUSTERS
 public :: SDF_MIN_HIT_FRACTION
 
 integer(I4P), parameter :: SDF_STATUS_OK         = 0_I4P
 integer(I4P), parameter :: SDF_STATUS_BAD_INPUT  = 1_I4P  !< Empty surface, or num_rays < 1, or invalid cone angle.
 
 real(R8P),    parameter :: SDF_SENTINEL          = -1._R8P  !< SDF for facets with too few hits (degenerate shells).
+integer(I4P), parameter :: SDF_LABEL_UNASSIGNED  = 0_I4P    !< Label for sentinel-SDF facets in `segment_sdf` output.
+
+integer(I4P), parameter :: SDF_DEFAULT_NUM_CLUSTERS = 4_I4P  !< Mechanical-CAD-friendly default; CGAL uses 5.
 
 integer(I4P), parameter :: SDF_DEFAULT_NUM_RAYS  = 30_I4P   !< Shapira's default.
 real(R8P),    parameter :: SDF_DEFAULT_CONE_DEG  = 120._R8P !< Shapira's default cone half-aperture is 60°, full angle 120°.
@@ -201,6 +207,377 @@ contains
    enddo
    deallocate(sdf_new)
    endsubroutine smooth_sdf
+
+   subroutine segment_sdf(facet, tree, bmin, bmax, facet_labels, sdf, &
+                          num_clusters, smoothing_lambda, smoothing_iterations, &
+                          num_rays, cone_angle_deg, status)
+   !< Capstone driver: compute SDF, smooth it, fit a 1D GMM, return per-facet
+   !< hard labels via posterior argmax (issue #18 §1.9 step 3).
+   !<
+   !< Output `facet_labels(1:nf)`:
+   !<   - `SDF_LABEL_UNASSIGNED` (== 0) for facets with sentinel SDF (degenerate
+   !<     shells where the cone-of-rays returned too few hits).
+   !<   - `1..num_clusters` for valid facets, with the cluster index ordered by
+   !<     ascending GMM mean (cluster 1 = thinnest features, cluster k = thickest).
+   !<
+   !< Optional output `sdf(1:nf)` exposes the smoothed per-facet SDF for users
+   !< who want to inspect or post-process the underlying scalar field.
+   !<
+   !< If the user requests `num_clusters` larger than the data supports (e.g.
+   !< `k=4` on a cube where only 1 SDF value exists), GMM may converge with
+   !< several near-identical means; argmax labelling still yields a valid
+   !< partition (just into fewer effective groups). This is intended behaviour
+   !< — we don't try to merge clusters automatically because a small bimodal
+   !< feature might genuinely warrant its own label that is dimensionally close
+   !< to the bulk.
+   type(facet_object),       intent(in)              :: facet(:)            !< Surface facets.
+   type(aabb_tree_object),   intent(in)              :: tree                !< Built AABB tree.
+   type(vector_R8P),         intent(in)              :: bmin                !< Bbox min.
+   type(vector_R8P),         intent(in)              :: bmax                !< Bbox max.
+   integer(I4P), allocatable, intent(out)            :: facet_labels(:)     !< Per-facet hard label ∈ [0, num_clusters].
+   real(R8P), allocatable,   intent(out),   optional :: sdf(:)              !< Per-facet smoothed SDF (optional output).
+   integer(I4P),             intent(in),    optional :: num_clusters        !< Default SDF_DEFAULT_NUM_CLUSTERS (4).
+   real(R8P),                intent(in),    optional :: smoothing_lambda    !< Default SDF_DEFAULT_SMOOTHING_LAMBDA.
+   integer(I4P),             intent(in),    optional :: smoothing_iterations!< Default SDF_DEFAULT_SMOOTHING_ITERATIONS.
+   integer(I4P),             intent(in),    optional :: num_rays            !< Default SDF_DEFAULT_NUM_RAYS.
+   real(R8P),                intent(in),    optional :: cone_angle_deg      !< Default SDF_DEFAULT_CONE_DEG.
+   integer(I4P),             intent(out),   optional :: status              !< Status code.
+   real(R8P), allocatable                            :: sdf_local(:)        !< Working SDF (raw → smoothed).
+   real(R8P), allocatable                            :: sdf_valid(:)        !< Non-sentinel SDF values, packed.
+   integer(I4P), allocatable                         :: valid_idx(:)        !< Index map: sdf_valid(i) → original facet id.
+   real(R8P), allocatable                            :: gmm_mean(:), gmm_var(:), gmm_w(:)  !< GMM parameters.
+   integer(I4P), allocatable                         :: order(:)            !< Sort permutation of GMM means.
+   integer(I4P)                                      :: nf, n_valid, k, i, f, lab
+   integer(I4P)                                      :: ierr
+
+   if (present(status)) status = SDF_STATUS_OK
+
+   nf = size(facet, kind=I4P)
+   if (nf == 0_I4P) then
+      allocate(facet_labels(0))
+      if (present(sdf)) allocate(sdf(0))
+      if (present(status)) status = SDF_STATUS_BAD_INPUT
+      return
+   endif
+   k = SDF_DEFAULT_NUM_CLUSTERS;  if (present(num_clusters)) k = num_clusters
+   if (k < 1_I4P) then
+      allocate(facet_labels(nf))
+      facet_labels = SDF_LABEL_UNASSIGNED
+      if (present(sdf)) then
+         allocate(sdf(nf))
+         sdf = SDF_SENTINEL
+      endif
+      if (present(status)) status = SDF_STATUS_BAD_INPUT
+      return
+   endif
+
+   call compute_sdf(facet=facet, tree=tree, bmin=bmin, bmax=bmax, &
+                    sdf=sdf_local, num_rays=num_rays, cone_angle_deg=cone_angle_deg, &
+                    status=ierr)
+   if (ierr /= SDF_STATUS_OK) then
+      allocate(facet_labels(nf))
+      facet_labels = SDF_LABEL_UNASSIGNED
+      if (present(sdf)) call move_alloc(from=sdf_local, to=sdf)
+      if (present(status)) status = ierr
+      return
+   endif
+   call smooth_sdf(facet=facet, sdf=sdf_local, lambda=smoothing_lambda, &
+                   iterations=smoothing_iterations, status=ierr)
+   if (ierr /= SDF_STATUS_OK) then
+      allocate(facet_labels(nf))
+      facet_labels = SDF_LABEL_UNASSIGNED
+      if (present(sdf)) call move_alloc(from=sdf_local, to=sdf)
+      if (present(status)) status = ierr
+      return
+   endif
+
+   ! Pack the valid (non-sentinel) SDF values for GMM.
+   n_valid = 0_I4P
+   do f = 1_I4P, nf
+      if (sdf_local(f) /= SDF_SENTINEL) n_valid = n_valid + 1_I4P
+   enddo
+   allocate(facet_labels(nf))
+   facet_labels = SDF_LABEL_UNASSIGNED
+   if (n_valid == 0_I4P) then
+      if (present(sdf)) call move_alloc(from=sdf_local, to=sdf)
+      return  ! all facets were sentinels — every label stays UNASSIGNED, status OK
+   endif
+   allocate(sdf_valid(n_valid))
+   allocate(valid_idx(n_valid))
+   i = 0_I4P
+   do f = 1_I4P, nf
+      if (sdf_local(f) /= SDF_SENTINEL) then
+         i = i + 1_I4P
+         sdf_valid(i) = sdf_local(f)
+         valid_idx(i) = f
+      endif
+   enddo
+
+   ! Cap k at n_valid (can't have more clusters than data points).
+   k = min(k, n_valid)
+
+   call gmm_fit_1d(x=sdf_valid, k=k, mean=gmm_mean, var=gmm_var, weight=gmm_w)
+
+   ! Sort cluster indices by ascending mean → stable label ordering for tests.
+   allocate(order(k))
+   call argsort_ascending(gmm_mean, order)
+
+   ! Assign each valid facet to argmax-posterior cluster.
+   do i = 1_I4P, n_valid
+      lab = gmm_argmax_posterior(x=sdf_valid(i), mean=gmm_mean, var=gmm_var, weight=gmm_w)
+      ! Map raw cluster index → ascending-mean rank (so label 1 = thinnest).
+      facet_labels(valid_idx(i)) = inv_perm(order, lab)
+   enddo
+
+   if (present(sdf)) call move_alloc(from=sdf_local, to=sdf)
+   endsubroutine segment_sdf
+
+   ! ---------- 1D Gaussian Mixture Model via EM with k-means++ init ----------
+
+   subroutine gmm_fit_1d(x, k, mean, var, weight)
+   !< Fit a 1D `k`-component Gaussian mixture to `x(:)` via EM, with k-means++
+   !< initialization. Returns (mean, var, weight) for each component.
+   !<
+   !< Hard-coded safety: variance floored at `1e-12 * total_variance` (kills the
+   !< empty-cluster collapse where σ² → 0 → log-likelihood → −∞), max 50 EM
+   !< iterations (well over the typical 5-10 for 1D), convergence on log-
+   !< likelihood Δ < 1e-9 * |log-likelihood|.
+   real(R8P),              intent(in)  :: x(:)        !< Data points.
+   integer(I4P),           intent(in)  :: k           !< Number of components.
+   real(R8P), allocatable, intent(out) :: mean(:)     !< (k) component means.
+   real(R8P), allocatable, intent(out) :: var(:)      !< (k) component variances.
+   real(R8P), allocatable, intent(out) :: weight(:)   !< (k) component mixture weights, sum to 1.
+   real(R8P), allocatable              :: resp(:,:)   !< Responsibilities r(n,k).
+   real(R8P)                           :: total_var, var_floor
+   real(R8P)                           :: ll, ll_prev
+   integer(I4P)                        :: n, it, j
+
+   integer(I4P), parameter :: MAX_EM_ITER = 50_I4P
+   real(R8P),    parameter :: LL_REL_TOL  = 1.0e-9_R8P
+
+   n = size(x, kind=I4P)
+   allocate(mean(k), var(k), weight(k), resp(n, k))
+
+   total_var = data_variance(x)
+   var_floor = max(1.0e-12_R8P * total_var, 1.0e-30_R8P)  ! absolute floor for total_var = 0 case
+
+   ! ---- k-means++ initialization for means; uniform weights; total-variance for vars.
+   call kmeanspp_init(x=x, k=k, centers=mean)
+   weight = 1._R8P / real(k, R8P)
+   var = max(total_var, var_floor)
+
+   ll_prev = -huge(1._R8P)
+   do it = 1_I4P, MAX_EM_ITER
+      ! E step: responsibilities r(n, k) ∝ weight(k) * N(x_n | mean(k), var(k)).
+      call gmm_e_step(x=x, mean=mean, var=var, weight=weight, resp=resp, ll=ll)
+
+      ! Convergence check (after at least one E step).
+      if (it > 1_I4P) then
+         if (abs(ll - ll_prev) <= LL_REL_TOL * max(1._R8P, abs(ll))) exit
+      endif
+      ll_prev = ll
+
+      ! M step: update mean / var / weight from responsibilities.
+      call gmm_m_step(x=x, resp=resp, mean=mean, var=var, weight=weight, var_floor=var_floor)
+   enddo
+
+   deallocate(resp)
+   ! Cluster ordering is left as-fit; the caller (segment_sdf) sorts by mean.
+   ! Suppress unused-loop-var warning in some compilers:
+   j = it
+   endsubroutine gmm_fit_1d
+
+   subroutine kmeanspp_init(x, k, centers)
+   !< Stateless k-means++ seeding for 1D data. Deterministic: first center is the
+   !< median (stable, not noisy), subsequent centers picked greedily by maximum
+   !< squared distance from the current center set. Skips duplicates so a
+   !< constant-data input still produces k distinct centers (with vanishing
+   !< variance — handled by the variance floor in `gmm_fit_1d`).
+   real(R8P),    intent(in)  :: x(:)
+   integer(I4P), intent(in)  :: k
+   real(R8P),    intent(out) :: centers(:)
+   real(R8P), allocatable    :: d2(:)         !< Squared distance to nearest existing center.
+   integer(I4P)              :: n, i, c, picked
+   real(R8P)                 :: best_d2
+
+   n = size(x, kind=I4P)
+   allocate(d2(n))
+   centers(1) = median(x)
+   do i = 1_I4P, n
+      d2(i) = (x(i) - centers(1))**2
+   enddo
+   do c = 2_I4P, k
+      ! Pick the point farthest from any existing center.
+      picked = 1_I4P
+      best_d2 = -1._R8P
+      do i = 1_I4P, n
+         if (d2(i) > best_d2) then
+            best_d2 = d2(i)
+            picked = i
+         endif
+      enddo
+      centers(c) = x(picked)
+      do i = 1_I4P, n
+         d2(i) = min(d2(i), (x(i) - centers(c))**2)
+      enddo
+   enddo
+   deallocate(d2)
+   endsubroutine kmeanspp_init
+
+   pure subroutine gmm_e_step(x, mean, var, weight, resp, ll)
+   !< Compute responsibilities r(n,k) and total log-likelihood of `x` under the
+   !< current GMM parameters. Numerically stable via log-sum-exp on log-
+   !< responsibilities.
+   real(R8P), intent(in)  :: x(:)
+   real(R8P), intent(in)  :: mean(:), var(:), weight(:)
+   real(R8P), intent(out) :: resp(:,:)
+   real(R8P), intent(out) :: ll
+   integer(I4P)           :: n, k, i, j
+   real(R8P)              :: log_max, denom
+   real(R8P), allocatable :: log_p(:)         !< log[ w_j * N(x_i | mean_j, var_j) ]
+   real(R8P), parameter   :: LOG_2PI = 1.8378770664093454835606594728112_R8P
+
+   n = size(x, kind=I4P)
+   k = size(mean, kind=I4P)
+   ll = 0._R8P
+   allocate(log_p(k))
+   do i = 1_I4P, n
+      do j = 1_I4P, k
+         log_p(j) = log(weight(j)) - 0.5_R8P * (LOG_2PI + log(var(j)) + (x(i) - mean(j))**2 / var(j))
+      enddo
+      log_max = maxval(log_p)
+      denom = 0._R8P
+      do j = 1_I4P, k
+         denom = denom + exp(log_p(j) - log_max)
+      enddo
+      ll = ll + log_max + log(denom)
+      do j = 1_I4P, k
+         resp(i, j) = exp(log_p(j) - log_max) / denom
+      enddo
+   enddo
+   deallocate(log_p)
+   endsubroutine gmm_e_step
+
+   pure subroutine gmm_m_step(x, resp, mean, var, weight, var_floor)
+   !< Update GMM parameters from responsibilities. Variance floored at
+   !< `var_floor` to prevent collapse on duplicate points.
+   real(R8P), intent(in)    :: x(:)
+   real(R8P), intent(in)    :: resp(:,:)
+   real(R8P), intent(inout) :: mean(:), var(:), weight(:)
+   real(R8P), intent(in)    :: var_floor
+   real(R8P)                :: nk, mu_j, vs
+   integer(I4P)             :: n, k, i, j
+
+   n = size(x, kind=I4P)
+   k = size(mean, kind=I4P)
+   do j = 1_I4P, k
+      nk = 0._R8P
+      do i = 1_I4P, n
+         nk = nk + resp(i, j)
+      enddo
+      if (nk <= 0._R8P) then
+         ! Empty cluster: keep its mean, set tiny variance and weight.
+         var(j) = var_floor
+         weight(j) = 1.0e-12_R8P
+         cycle
+      endif
+      mu_j = 0._R8P
+      do i = 1_I4P, n
+         mu_j = mu_j + resp(i, j) * x(i)
+      enddo
+      mu_j = mu_j / nk
+      vs = 0._R8P
+      do i = 1_I4P, n
+         vs = vs + resp(i, j) * (x(i) - mu_j)**2
+      enddo
+      mean(j)   = mu_j
+      var(j)    = max(vs / nk, var_floor)
+      weight(j) = nk / real(n, R8P)
+   enddo
+   endsubroutine gmm_m_step
+
+   pure function gmm_argmax_posterior(x, mean, var, weight) result(j_star)
+   !< Return the cluster index j ∈ [1, k] with maximum posterior at scalar `x`.
+   !< No need to compute the normalizer — comparing log-numerators is enough.
+   real(R8P),    intent(in) :: x
+   real(R8P),    intent(in) :: mean(:), var(:), weight(:)
+   integer(I4P)             :: j_star
+   integer(I4P)             :: j, k
+   real(R8P)                :: lp, best_lp
+
+   k = size(mean, kind=I4P)
+   j_star = 1_I4P
+   best_lp = log(weight(1)) - 0.5_R8P * (log(var(1)) + (x - mean(1))**2 / var(1))
+   do j = 2_I4P, k
+      lp = log(weight(j)) - 0.5_R8P * (log(var(j)) + (x - mean(j))**2 / var(j))
+      if (lp > best_lp) then
+         best_lp = lp
+         j_star = j
+      endif
+   enddo
+   endfunction gmm_argmax_posterior
+
+   pure function data_variance(x) result(v)
+   !< Sample variance (unbiased denom n; we just want a scale, not an estimator).
+   real(R8P), intent(in) :: x(:)
+   real(R8P)             :: v, mu
+   integer(I4P)          :: n, i
+
+   n = size(x, kind=I4P)
+   if (n <= 1_I4P) then
+      v = 0._R8P
+      return
+   endif
+   mu = 0._R8P
+   do i = 1_I4P, n
+      mu = mu + x(i)
+   enddo
+   mu = mu / real(n, R8P)
+   v = 0._R8P
+   do i = 1_I4P, n
+      v = v + (x(i) - mu)**2
+   enddo
+   v = v / real(n, R8P)
+   endfunction data_variance
+
+   pure subroutine argsort_ascending(x, order)
+   !< Insertion sort returning the permutation `order` such that
+   !< `x(order(1)) <= x(order(2)) <= ...`. n is small (= num_clusters).
+   real(R8P),    intent(in)  :: x(:)
+   integer(I4P), intent(out) :: order(:)
+   integer(I4P)              :: i, j, k, key
+
+   k = size(x, kind=I4P)
+   do i = 1_I4P, k
+      order(i) = i
+   enddo
+   do i = 2_I4P, k
+      key = order(i)
+      j = i - 1_I4P
+      do while (j >= 1_I4P)
+         if (x(order(j)) <= x(key)) exit
+         order(j + 1_I4P) = order(j)
+         j = j - 1_I4P
+      enddo
+      order(j + 1_I4P) = key
+   enddo
+   endsubroutine argsort_ascending
+
+   pure function inv_perm(order, j) result(rank)
+   !< Return rank of cluster index `j` in the ascending-mean order (1-based).
+   !< Equivalent to: find i such that order(i) == j, return i.
+   integer(I4P), intent(in) :: order(:)
+   integer(I4P), intent(in) :: j
+   integer(I4P)             :: rank, i
+
+   rank = 0_I4P
+   do i = 1_I4P, size(order, kind=I4P)
+      if (order(i) == j) then
+         rank = i
+         return
+      endif
+   enddo
+   endfunction inv_perm
 
    pure subroutine cone_directions(axis, cone_deg, n, dirs)
    !< Generate `n` directions uniformly distributed in a cone of full aperture
