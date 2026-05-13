@@ -65,6 +65,7 @@ type :: facet_object
       procedure, pass(self) :: destroy                         !< Destroy facet.
       procedure, pass(self) :: destroy_connectivity            !< Destroy facet connectivity.
       procedure, pass(self) :: do_ray_intersect                !< Return true if facet is intersected by a ray.
+      procedure, pass(self) :: intersect_ray                   !< Möller-Trumbore: return parametric t and barycentrics (issue #18 §2.5).
       procedure, pass(self) :: intersect_facet                 !< Return tri-tri intersection segment with another facet (issue #18 §1.2).
       procedure, pass(self) :: initialize                      !< Initialize facet.
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
@@ -477,6 +478,55 @@ contains
    t = f * self%E13.dot.q
    if (t > EPS) intersect = .true.
    endfunction do_ray_intersect
+
+   pure subroutine intersect_ray(self, ray_origin, ray_direction, t, u, v, hit)
+   !< Möller-Trumbore ray-triangle intersection (issue #18 §2.5).
+   !<
+   !< Differs from `do_ray_intersect` by exposing the hit data (`t`, `u`, `v`)
+   !< instead of returning a bare logical, and by NOT filtering on `t > EPS`
+   !< (the caller decides what range of `t` is valid — required for shadow
+   !< rays with a max_t bound, and for first-hit queries that include
+   !< boundary-touching hits).
+   !<
+   !< Convention: `t` is the ray parameter, the hit point is `ray_origin + t*ray_direction`.
+   !< If the caller passes a unit-length `ray_direction`, `t` equals Euclidean distance.
+   !< `(u, v)` are the barycentric coordinates of the hit on the triangle, with
+   !< `(1-u-v, u, v)` as weights of `vertex(1), vertex(2), vertex(3)`.
+   !<
+   !< Returns `hit = .false.` when the ray is parallel to the triangle plane
+   !< or misses the triangle (incl. back-face miss based on the standard
+   !< culling-free test). Caller must check `hit` before consuming `t/u/v`.
+   class(facet_object), intent(in)  :: self          !< Facet (metrix must be precomputed).
+   type(vector_R8P),    intent(in)  :: ray_origin    !< Ray origin.
+   type(vector_R8P),    intent(in)  :: ray_direction !< Ray direction (need not be unit; see note above).
+   real(R8P),           intent(out) :: t             !< Parametric distance along the ray.
+   real(R8P),           intent(out) :: u             !< Barycentric weight on vertex(2).
+   real(R8P),           intent(out) :: v             !< Barycentric weight on vertex(3).
+   logical,             intent(out) :: hit           !< True if the ray hits the triangle.
+   type(vector_R8P)                 :: h, s, q       !< Möller-Trumbore work vectors.
+   real(R8P)                        :: a, f          !< Determinant and its inverse.
+   ! Parallel-ray cutoff. fossil_utils' EPS is 0.0_R8P so we cannot reuse it here —
+   ! the guard would be `if (a > 0 .and. a < 0)`, never true, leading to division
+   ! by ~zero and NaN in `t`. 1e-12 is the standard Möller-Trumbore value.
+   real(R8P), parameter             :: PARALLEL_TOL = 1.0e-12_R8P
+
+   hit = .false.
+   t   = 0._R8P
+   u   = 0._R8P
+   v   = 0._R8P
+   h = ray_direction%crossproduct(rhs=self%E13)
+   a = self%E12%dotproduct(rhs=h)
+   if (abs(a) < PARALLEL_TOL) return  ! ray is parallel to the triangle plane
+   f = 1._R8P / a
+   s = ray_origin - self%vertex(1)
+   u = f * (s%dotproduct(rhs=h))
+   if ((u < 0._R8P) .or. (u > 1._R8P)) return
+   q = s%crossproduct(rhs=self%E12)
+   v = f * ray_direction.dot.q
+   if ((v < 0._R8P) .or. (u + v > 1._R8P)) return
+   t = f * self%E13.dot.q
+   hit = .true.
+   endsubroutine intersect_ray
 
    pure subroutine intersect_facet(self, other, p, q, intersects)
    !< Triangle-triangle intersection test (Möller 1997, "A Fast Triangle-Triangle

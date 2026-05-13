@@ -14,6 +14,8 @@ use fossil_self_intersection, only : intersection_pair_t, &
 use fossil_marching_cubes, only : compute_isosurface => extract_isosurface, MC_STATUS_OK
 use fossil_decimate, only : compute_decimate => decimate, &
                             DEC_STATUS_OK, DEC_STATUS_BAD_INPUT, DEC_STATUS_NO_PROGRESS
+use fossil_ray_query, only : ray_hit_t, ray_intersect_all_flat, &
+                             RAY_STATUS_OK, RAY_STATUS_BAD_INPUT
 use fossil_remesh, only : compute_remesh => isotropic_remesh, &
                           REM_STATUS_OK, REM_STATUS_BAD_INPUT
 use fossil_boolean, only : compute_boolean => boolean_compute, &
@@ -154,6 +156,7 @@ type :: surface_stl_object
       procedure, pass(self) :: resample_via_distance_field      !< SDF-based remesh via Marching Cubes (issue #18 §1.5).
       procedure, pass(self) :: decimate                         !< QEM edge-collapse mesh decimation (issue #18 §1.3).
       procedure, pass(self) :: isotropic_remesh                 !< Botsch-Kobbelt isotropic remeshing (issue #18 §1.7).
+      procedure, pass(self) :: intersect_ray_all                !< All ray-facet hits, sorted by t (issue #18 §2.5).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1603,6 +1606,28 @@ contains
    if (rem_status /= REM_STATUS_OK) return
    call self%adopt_facets(facets=working)
    endsubroutine isotropic_remesh
+
+   subroutine intersect_ray_all(self, ray_origin, ray_direction, hits, status)
+   !< Return every ray-facet intersection on this surface, sorted by `t` ascending.
+   !<
+   !< Issue #18 §2.5 — step 1 implementation: flat O(n) facet loop. Step 2 swaps
+   !< the body for an AABB-tree-accelerated traversal; the public contract here
+   !< (sorted ascending by `t`, only `t >= 0` hits, status semantics) is the
+   !< invariant that survives the swap.
+   class(surface_stl_object),    intent(in)            :: self           !< Surface.
+   type(vector_R8P),             intent(in)            :: ray_origin     !< Ray origin.
+   type(vector_R8P),             intent(in)            :: ray_direction  !< Ray direction (need not be unit; t is in ray-parameter units).
+   type(ray_hit_t), allocatable, intent(out)           :: hits(:)        !< Sorted hit records.
+   integer(I4P),                 intent(out), optional :: status         !< Status code.
+
+   if (self%facets_number == 0_I4P) then
+      allocate(hits(0))
+      if (present(status)) status = RAY_STATUS_BAD_INPUT
+      return
+   endif
+   call ray_intersect_all_flat(facet=self%facet, ray_origin=ray_origin, ray_direction=ray_direction, &
+                               hits=hits, status=status)
+   endsubroutine intersect_ray_all
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
