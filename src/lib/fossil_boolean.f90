@@ -220,61 +220,112 @@ contains
    !< For **non-shared** sub-triangles (the common case — sub-triangle's
    !< centroid is strictly inside or outside the other surface):
    !<   the standard mesh-arrangement table applies, indexed by (owner, in_other).
+   !<   Each row below describes whether to keep the sub-triangle and whether
+   !<   to flip its normal (B's facets need flipping when they become the
+   !<   *inner* surface of the result, e.g. cavity walls in A\B).
    !<
-   !< For **shared boundary** sub-triangles (centroid on BOTH surfaces — i.e.
-   !< the two surfaces have coplanar facets that overlap in this region):
-   !<   the answer depends on whether the two surfaces' outward normals point
-   !<   the same way at this point.
-   !<     - same orientation (orient_dot > 0): both surfaces locally bound the
-   !<       same volume. For DIFFERENCE the shared face does NOT bound the
-   !<       result (just below: inside both → outside A\B; just above: outside
-   !<       both → outside A\B), so drop both copies. By convention we drop
-   !<       both A and B copies (rather than keeping one) to avoid downstream
-   !<       deduplication.
-   !<     - opposite orientation (orient_dot < 0): one surface's interior
-   !<       coincides with the other's exterior. For DIFFERENCE the shared
-   !<       face IS a boundary of the result; keep A's copy (B's would be
-   !<       inverted-orientation, which `reverse_normal` could fix but for
-   !<       the simpler symmetric case we let A own it).
+   !<     op             owner  in_other   keep   flip
+   !<     -------------- -----  --------   -----  ----
+   !<     UNION          A      out B      yes    no
+   !<     UNION          A      in  B      no     -
+   !<     UNION          B      out A      yes    no
+   !<     UNION          B      in  A      no     -
+   !<     INTERSECT      A      out B      no     -
+   !<     INTERSECT      A      in  B      yes    no
+   !<     INTERSECT      B      out A      no     -
+   !<     INTERSECT      B      in  A      yes    no
+   !<     DIFFERENCE     A      out B      yes    no
+   !<     DIFFERENCE     A      in  B      no     -
+   !<     DIFFERENCE     B      out A      no     -
+   !<     DIFFERENCE     B      in  A      yes    YES   (cavity wall, flip outward)
+   !<     SYMDIFF        A      out B      yes    no    (outer surface)
+   !<     SYMDIFF        A      in  B      yes    YES   (cavity wall)
+   !<     SYMDIFF        B      out A      yes    no    (outer surface)
+   !<     SYMDIFF        B      in  A      yes    YES   (cavity wall)
+   !<
+   !< For **shared boundary** sub-triangles (centroid on BOTH surfaces — the
+   !< two surfaces have coplanar facets that overlap in this region):
+   !<   - same orientation (orient_dot > 0): both surfaces locally bound the
+   !<     same volume. The shared face is or is not a boundary of the result
+   !<     depending on the op. By convention we let A own any kept copy and
+   !<     drop B's, to avoid downstream coincident-facet deduplication.
+   !<   - opposite orientation (orient_dot < 0): one surface's interior
+   !<     coincides with the other's exterior. Rare on ordinary watertight
+   !<     meshes; treated symmetrically with same-orientation per op below.
+   !<
+   !<     op             shared   orient   owner=A keep   owner=B keep
+   !<     -------------- ------   ------   -------------  -------------
+   !<     UNION          yes      same     yes            no
+   !<     UNION          yes      opp      no             no    (cancel)
+   !<     INTERSECT      yes      same     yes            no
+   !<     INTERSECT      yes      opp      no             no
+   !<     DIFFERENCE     yes      same     no             no
+   !<     DIFFERENCE     yes      opp      yes (no flip)  no
+   !<     SYMDIFF        yes      any      no             no    (shared cancels)
    integer(I4P), intent(in)            :: op, owner
    logical,      intent(in)            :: in_a, in_b
    logical,      intent(in)            :: shared      !< True if centroid is on the OTHER surface (shared boundary).
    real(R8P),    intent(in)            :: orient_dot  !< Dot product of sub-tri normal with closest other-surface normal.
    logical,      intent(out)           :: keep, flip
    integer(I4P), intent(out), optional :: status
+   logical                             :: in_other    !< Inside the OTHER surface from owner's perspective.
 
    keep = .false. ; flip = .false.
    if (present(status)) status = BOOL_STATUS_OK
 
-   select case (op)
-   case (BOOL_DIFFERENCE)
-      if (shared) then
-         ! Shared boundary: opposite-orientation faces ARE boundaries of A\B
-         ! (kept by A's copy; B's copy would be opposite, drop). Same-orientation
-         ! faces are NOT boundaries of A\B (both surfaces enclose the same side
-         ! locally, so the shared face is interior of both A and B); drop both.
-         if (owner == 1_I4P) then
-            keep = (orient_dot < 0._R8P)
-            flip = .false.
-         else  ! owner == 2 (B): always drop on shared boundary
-            keep = .false.
-         endif
-      else
-         ! Non-shared: standard truth table.
-         ! A \ B = A's outer surface (the parts not inside B) ∪ B's surface
-         ! flipped (the parts that lie inside A become the cavity walls).
-         if (owner == 1_I4P) then
-            keep = .not. in_b   ! A-facets outside B
-            flip = .false.
-         else  ! owner == 2 (B)
-            keep = in_a         ! B-facets inside A
-            flip = .true.       ! flip to point outward (into A's exterior)
-         endif
+   ! "in_other" is the inside-flag of whichever surface is NOT the owner.
+   if (owner == 1_I4P) then
+      in_other = in_b
+   else
+      in_other = in_a
+   endif
+
+   if (shared) then
+      ! All four ops drop B's copy on shared boundaries (A owns the boundary
+      ! by convention). DIFFERENCE alone keeps A's copy when orientations
+      ! oppose. SYMDIFF drops both unconditionally (boundary cancels).
+      if (owner == 2_I4P) then
+         keep = .false. ; return
       endif
+      ! owner == 1 (A) on shared boundary:
+      select case (op)
+      case (BOOL_UNION)
+         keep = (orient_dot > 0._R8P)
+      case (BOOL_INTERSECT)
+         keep = (orient_dot > 0._R8P)
+      case (BOOL_DIFFERENCE)
+         keep = (orient_dot < 0._R8P)
+      case (BOOL_SYMDIFF)
+         keep = .false.
+      case default
+         if (present(status)) status = BOOL_STATUS_NOT_IMPLEMENTED
+      endselect
+      return
+   endif
 
-   case (BOOL_UNION, BOOL_INTERSECT, BOOL_SYMDIFF)
-      if (present(status)) status = BOOL_STATUS_NOT_IMPLEMENTED
-
+   ! Non-shared sub-triangle — apply the per-op truth table.
+   select case (op)
+   case (BOOL_UNION)
+      keep = .not. in_other        ! keep the parts of each surface that lie outside the other
+      flip = .false.
+   case (BOOL_INTERSECT)
+      keep = in_other              ! keep the parts of each surface that lie inside the other
+      flip = .false.
+   case (BOOL_DIFFERENCE)
+      ! A's outer surface (parts not inside B) ∪ B's surface flipped (parts
+      ! inside A — the cavity walls).
+      if (owner == 1_I4P) then
+         keep = .not. in_b
+         flip = .false.
+      else
+         keep = in_a
+         flip = .true.
+      endif
+   case (BOOL_SYMDIFF)
+      ! Always keep; flip when the sub-triangle is inside the other body
+      ! (it serves as the inner cavity wall).
+      keep = .true.
+      flip = in_other
    case default
       if (present(status)) status = BOOL_STATUS_NOT_IMPLEMENTED
    endselect

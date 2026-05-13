@@ -1315,10 +1315,12 @@ contains
    subroutine boolean(self, other, op, status)
    !< Boolean operation against another surface (issue #18 §1.1).
    !<
-   !< On success, `self` is replaced by the result `op(self, other)`. Currently
-   !< only `BOOL_DIFFERENCE` is wired end-to-end; the other ops parse their
-   !< constants and return BOOL_STATUS_NOT_IMPLEMENTED so callers can detect
-   !< the gap cleanly.
+   !< On success, `self` is replaced by the result `op(self, other)`. All four
+   !< standard ops are wired:
+   !<   - `BOOL_UNION`      : A ∪ B (everything inside either body)
+   !<   - `BOOL_INTERSECT`  : A ∩ B (only what is inside both)
+   !<   - `BOOL_DIFFERENCE` : A \ B (inside A but not inside B)
+   !<   - `BOOL_SYMDIFF`    : A △ B (inside exactly one of A, B)
    !<
    !< Pipeline: arrangement_initialize → collect_intersections → retriangulate
    !< (CDT-based) → tag_and_select (winding-number per sub-triangle) → adopt
@@ -1331,6 +1333,45 @@ contains
    !<       - cuts between A and B do not produce inputs that trip the CDT's
    !<         convex-flip-greedy recovery (see fossil_dt docstring); on
    !<         degenerate inputs, returns BOOL_STATUS_CDT_FAILED.
+   !<
+   !< ## Limitations (degenerate-coplanar correctness)
+   !<
+   !< The boolean is **bit-exact correct** when no facets of A and B are
+   !< coplanar (the generic case for arbitrarily-positioned solids). On the
+   !< canonical 3D-offset cube test (cube vs cube offset by (0.5, 0.5, 0.5))
+   !< all four ops match the analytic volume to FP precision.
+   !<
+   !< When A and B have **axis-aligned coplanar face overlaps** (e.g. two
+   !< cubes offset along a single axis, or any pair of solids with
+   !< parallel faces meeting on a shared region), the result `status` is
+   !< still `BOOL_STATUS_OK` but the volume can be wrong. Two known
+   !< failure modes contribute:
+   !<
+   !<   1. The Möller-style tri-tri test in `facet%intersect_facet` produces
+   !<      degenerate or NaN intervals when one triangle's edge lies on the
+   !<      other triangle's plane. The post-clip mitigates this for the
+   !<      segment endpoints but does not recover *missing* intersections
+   !<      that the algorithm fails to detect at all.
+   !<   2. Adjacent A-facets and B-facets sharing an edge along a coplanar
+   !<      region produce sub-triangles whose centroids are equidistant from
+   !<      both surfaces; the WN classifier evaluates to ~1 from both
+   !<      (rather than the textbook ~0.5), defeating the boundary detector
+   !<      that the shared-face truth table relies on.
+   !<
+   !< Workarounds:
+   !<   - Perturb one of the inputs by a small offset along each axis
+   !<     (`surface%translate(delta=vector_R8P(eps, eps, eps))`) before the
+   !<     boolean. This breaks the coplanarity and routes through the
+   !<     bit-exact generic codepath. `eps = 1e-6 * bbox_diagonal` is a
+   !<     reasonable choice.
+   !<   - For axis-aligned cut-cell-style use cases (box ∖ body), this
+   !<     limitation is exactly the configuration that matters; a future
+   !<     PR will add coplanar-aware handling in the arrangement step.
+   !<
+   !< Closing this gap requires either an exact-arithmetic tri-tri primitive
+   !< (Shewchuk-style adaptive predicates against the line-of-intersection)
+   !< or a coplanar pre-pass in `arrangement_collect_intersections` that
+   !< handles coplanar facet pairs separately from the generic Möller path.
    class(surface_stl_object),     intent(inout)        :: self     !< Surface A; replaced by `op(A, B)` on success.
    class(surface_stl_object),     intent(in)           :: other    !< Surface B.
    integer(I4P),                  intent(in)           :: op       !< BOOL_UNION / BOOL_INTERSECT / BOOL_DIFFERENCE / BOOL_SYMDIFF.
@@ -1350,7 +1391,7 @@ contains
    endsubroutine boolean
 
    subroutine resolve_self_intersections(self, status)
-   !< Self-boolean union — closes the §1.2 deferred resolution path.
+   !< Self-boolean union — closes §1.2's deferred resolution path.
    !<
    !< Runs `boolean(self, self, BOOL_UNION)`: the arrangement collects every
    !< self-crossing as if A and B were the same surface; the union selection
@@ -1358,9 +1399,10 @@ contains
    !< by the self-intersections. Result is a self-intersection-free version
    !< of the input.
    !<
-   !< @note Returns BOOL_STATUS_NOT_IMPLEMENTED until BOOL_UNION lands in a
-   !<       follow-up PR. This stub exists so the API surface matches what
-   !<       §1.2 promised, and so callers can detect the gap.
+   !< Inherits the same coplanar-degenerate limitation as `boolean` — meshes
+   !< with self-overlaps along axis-aligned coplanar regions can produce
+   !< wrong-volume results. See `surface%boolean` docstring's Limitations
+   !< section.
    class(surface_stl_object),     intent(inout)        :: self
    integer(I4P),                  intent(out), optional :: status
 

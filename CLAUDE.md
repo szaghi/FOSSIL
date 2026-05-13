@@ -160,6 +160,17 @@ git submodule update --init
 - Numeric types from PENF (`I4P`, `R8P`, etc.) — never use bare `integer` or `real` for library code
 - 3D geometry via VecFor `vector_R8P` — not plain arrays
 
+## Known limitations
+
+- **`surface%boolean` / `surface%resolve_self_intersections`** (issue #18 §1.1):
+  bit-exact correct on inputs where no facets of A and B are coplanar (the
+  generic case). On inputs with axis-aligned coplanar face overlaps (e.g.
+  cubes offset along a single axis only), the call returns `BOOL_STATUS_OK`
+  but the result volume is wrong. Workaround: perturb one input by
+  `eps = 1e-6 * bbox_diagonal` along each axis before the boolean. Full
+  details and the upgrade path in the `surface%boolean` docstring's
+  "Limitations" section in `src/lib/fossil_surface_stl.f90`.
+
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
 
