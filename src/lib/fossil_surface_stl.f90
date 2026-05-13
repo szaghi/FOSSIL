@@ -25,6 +25,9 @@ use fossil_csr_matrix, only : csr_matrix_t
 use fossil_laplacian, only : build_cotangent_laplacian, &
                              LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
                              LAPL_STATUS_DEGENERATE_TRIANGLE
+use fossil_curvature, only : build_gaussian_curvature, &
+                             CURV_STATUS_OK, CURV_STATUS_BAD_INPUT, &
+                             CURV_STATUS_DEGENERATE_TRIANGLE
 use fossil_remesh, only : compute_remesh => isotropic_remesh, &
                           REM_STATUS_OK, REM_STATUS_BAD_INPUT
 use fossil_boolean, only : compute_boolean => boolean_compute, &
@@ -171,6 +174,7 @@ type :: surface_stl_object
       procedure, pass(self) :: segment_sdf                      !< Per-facet labels via SDF + GMM (issue #18 §1.9).
       procedure, pass(self) :: alpha_wrap                       !< Watertight surrogate from broken triangle soup (issue #18 §1.6).
       procedure, pass(self) :: cotangent_laplacian              !< Cotangent Laplacian + barycentric mass (issue #18 §2.1).
+      procedure, pass(self) :: gaussian_curvature                !< Per-vertex Gaussian curvature via angle defect (issue #18 §2.4).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1917,6 +1921,42 @@ contains
    call build_cotangent_laplacian(facet=self%facet, pool=self%vertex_pool, &
                                    L=L, M=M, status=status)
    endsubroutine cotangent_laplacian
+
+   subroutine gaussian_curvature(self, K, status)
+   !< Per-vertex Gaussian curvature via the angle-defect formula
+   !< (issue #18 §2.4).
+   !<
+   !<     K_i = (2*pi - sum of incident triangle angles) / A_i      (interior)
+   !<         = (pi   - sum of incident triangle angles) / A_i      (boundary)
+   !<
+   !< where `A_i` is the barycentric area assigned to vertex `i`.
+   !<
+   !< Sign convention: K > 0 at convex vertices (sphere surface, cube
+   !< corners), K < 0 at saddles, K ~ 0 in locally-flat regions.
+   !<
+   !< Gauss-Bonnet identity (the load-bearing global check): for any
+   !< closed orientable surface of genus g,
+   !<
+   !<     sum_i K_i * A_i = 2 * pi * (2 - 2 g)
+   !<
+   !< For genus-0 surfaces (cube, sphere) this is `4 * pi`.
+   !<
+   !< Pre-condition: the surface's vertex pool must be initialized — true
+   !< after `load_from_file`, `analyze`, or `adopt_facets`. Boundary
+   !< detection uses `facet%fcon_edge`, so `build_connectivity` must
+   !< also have run.
+   class(surface_stl_object), intent(in)            :: self
+   real(R8P), allocatable,    intent(out)           :: K(:)
+   integer(I4P),              intent(out), optional :: status
+
+   if (self%facets_number == 0_I4P) then
+      allocate(K(0))
+      if (present(status)) status = CURV_STATUS_BAD_INPUT
+      return
+   endif
+   call build_gaussian_curvature(facet=self%facet, pool=self%vertex_pool, &
+                                  K=K, status=status)
+   endsubroutine gaussian_curvature
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
