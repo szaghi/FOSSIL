@@ -5,6 +5,7 @@ module fossil
 
 use fossil_aabb_tree_object, only : AABB_AUTO_REFINEMENT, AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 use fossil_facet_object
+use fossil_marching_cubes, only : extract_isosurface, MC_STATUS_OK, MC_STATUS_BAD_DIMENSIONS
 use fossil_surface_stl_object
 
 implicit none
@@ -20,4 +21,6 @@ public :: AABB_AUTO_REFINEMENT
 public :: AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 public :: BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF
 public :: BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, BOOL_STATUS_EMPTY_INPUT
+public :: extract_isosurface
+public :: MC_STATUS_OK, MC_STATUS_BAD_DIMENSIONS
 endmodule fossil

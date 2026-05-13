@@ -11,6 +11,7 @@ use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil_winding_number, only : compute_winding_number => winding_number
 use fossil_self_intersection, only : intersection_pair_t, &
                                      compute_self_intersections => find_self_intersections
+use fossil_marching_cubes, only : compute_isosurface => extract_isosurface, MC_STATUS_OK
 use fossil_boolean, only : compute_boolean => boolean_compute, &
                            BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF, &
                            BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, &
@@ -146,6 +147,7 @@ type :: surface_stl_object
       procedure, pass(self) :: find_self_intersections          !< Find all self-intersecting facet pairs (issue #18 §1.2).
       procedure, pass(self) :: boolean                          !< Boolean op against another surface (issue #18 §1.1).
       procedure, pass(self) :: resolve_self_intersections       !< Self-boolean union, closes §1.2's deferred resolution path.
+      procedure, pass(self) :: resample_via_distance_field      !< SDF-based remesh via Marching Cubes (issue #18 §1.5).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1408,6 +1410,78 @@ contains
 
    call self%boolean(other=self, op=BOOL_UNION, status=status)
    endsubroutine resolve_self_intersections
+
+   subroutine resample_via_distance_field(self, resolution, surface_out, status)
+   !< Resample `self` via its signed distance field through Marching Cubes
+   !< (issue #18 §1.5).
+   !<
+   !< The "repair via level set" idiom: sample `self%distance` (signed) on a
+   !< regular grid spanning `self`'s bbox plus a small margin, then extract
+   !< the iso=0 surface via `extract_isosurface`. The output is a clean,
+   !< watertight remesh whose triangle distribution is determined by the
+   !< grid spacing rather than by the input's tessellation. Useful for:
+   !<   - repairing dirty STLs (the SDF smooths over local defects)
+   !<   - producing a uniformly-sized triangulation for downstream simulation
+   !<   - shrinking / offsetting (sample at iso != 0 by calling
+   !<     `extract_isosurface` directly on the same field with a non-zero iso).
+   !<
+   !< `resolution` is the number of grid corners along the **longest** bbox
+   !< axis; the other two axes scale proportionally so cells are cubic.
+   !< Margin: 5% of bbox diagonal, enough to capture geometry that would
+   !< otherwise touch the grid boundary.
+   !<
+   !< The output is adopted into `surface_out` via `adopt_facets`, which runs
+   !< `analyze` and `connect_nearby_vertices` — this dedupes the per-edge
+   !< duplicate vertices that MC naturally produces, yielding a watertight
+   !< mesh.
+   class(surface_stl_object),  intent(in)            :: self        !< Source surface; queried via `distance`.
+   integer(I4P),               intent(in)            :: resolution  !< Grid points along longest bbox axis.
+   type(surface_stl_object),   intent(out)           :: surface_out !< Result of MC extraction at iso=0.
+   integer(I4P),               intent(out), optional :: status      !< MC_STATUS_* (or 0 on success).
+   type(vector_R8P)                                  :: bmin, bmax, diag
+   real(R8P)                                         :: longest, margin, h
+   integer(I4P)                                      :: nx, ny, nz, i, j, k
+   real(R8P), allocatable                            :: values(:, :, :)
+   type(vector_R8P)                                  :: p
+   type(facet_object), allocatable                   :: facets(:)
+   integer(I4P)                                      :: mc_status
+
+   if (present(status)) status = 0_I4P
+
+   ! Bbox + margin so the iso-surface stays well inside the grid.
+   bmin = self%get_bmin() ; bmax = self%get_bmax()
+   diag = bmax - bmin
+   longest = max(diag%x, diag%y, diag%z)
+   margin  = 0.05_R8P * longest
+   bmin    = bmin - vector_R8P(margin, margin, margin)
+   bmax    = bmax + vector_R8P(margin, margin, margin)
+   diag    = bmax - bmin
+
+   ! Cell size: pick `resolution` corners along the longest axis, scale others.
+   longest = max(diag%x, diag%y, diag%z)
+   h  = longest / real(resolution - 1, R8P)
+   nx = max(2, int(diag%x / h, I4P) + 1)
+   ny = max(2, int(diag%y / h, I4P) + 1)
+   nz = max(2, int(diag%z / h, I4P) + 1)
+
+   allocate(values(nx, ny, nz))
+   do k = 1, nz
+      do j = 1, ny
+         do i = 1, nx
+            p = vector_R8P(bmin%x + (i - 1) * (diag%x / real(nx - 1, R8P)), &
+                           bmin%y + (j - 1) * (diag%y / real(ny - 1, R8P)), &
+                           bmin%z + (k - 1) * (diag%z / real(nz - 1, R8P)))
+            values(i, j, k) = self%distance(point=p, is_signed=.true., is_square_root=.true.)
+         enddo
+      enddo
+   enddo
+
+   call compute_isosurface(values=values, bmin=bmin, bmax=bmax, iso=0._R8P, &
+                           surface=facets, status=mc_status)
+   if (present(status)) status = mc_status
+   if (mc_status /= MC_STATUS_OK) return
+   call surface_out%adopt_facets(facets=facets)
+   endsubroutine resample_via_distance_field
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
