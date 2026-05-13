@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.12] — 2026-05-13
+### Added
+- **alpha-wrap**: Step 1 — leaf-size-α octree (issue #18 §1.6)
+
+- **alpha-wrap**: Step 2 — inside/outside flood fill (issue #18 §1.6)
+
+- **alpha-wrap**: Step 3 — boundary surface extraction (issue #18 §1.6)
+
+- **alpha-wrap**: Step 4 — vertex projection toward input (issue #18 §1.6)
+
+- **alpha-wrap**: Step 5 — surface%alpha_wrap capstone TBP (issue #18 §1.6)
+
+
 ## [1.2.11] — 2026-05-13
 ### Added
 - **fossil**: Implement SDF functionality with AABB tree ray query and test coverage
