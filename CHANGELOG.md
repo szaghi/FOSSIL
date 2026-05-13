@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.9] — 2026-05-13
+### Added
+- **remesh**: Isotropic remeshing foundation, steps 1-4 (issue #18 §1.7)
+
+- **remesh**: Step 5 — edge flip pass for valence balancing (issue #18 §1.7)
+
+- **remesh**: Step 6 — relax + projection (issue #18 §1.7)
+
+- **remesh,surface**: Step 7 — feature lock + surface TBP (issue #18 §1.7)
+
+
 ## [1.2.8] — 2026-05-13
 ### Added
 - **decimate,surface**: QEM mesh decimation (issue #18 §1.3)
