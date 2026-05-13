@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.10] — 2026-05-13
+### Added
+- **fossil**: Implement ray query functionality with test coverage
+
+- **fossil**: Implement AABB tree ray query with test coverage
+
+- **ray-query,surface**: Step 3 — any-hit early-exit (issue #18 §2.5)
+
+
+### Fixed
+- **fossil_decimate**: Prevent out-of-bounds heap access with nested guards
+
+
 ## [1.2.9] — 2026-05-13
 ### Added
 - **remesh**: Isotropic remeshing foundation, steps 1-4 (issue #18 §1.7)
