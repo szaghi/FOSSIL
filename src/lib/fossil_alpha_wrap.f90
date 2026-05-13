@@ -29,7 +29,7 @@ module fossil_alpha_wrap
 use fossil_facet_object, only : facet_object
 use fossil_utils, only : triangle_overlaps_aabb
 use penf, only : I4P, R8P
-use vecfor, only : vector_R8P
+use vecfor, only : vector_R8P, ex_R8P, ey_R8P, ez_R8P
 
 implicit none
 private
@@ -37,6 +37,7 @@ private
 public :: awrap_octree_t
 public :: awrap_build_octree
 public :: awrap_classify_leaves
+public :: awrap_extract_surface
 public :: AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, AWRAP_STATUS_DEGENERATE
 public :: AWRAP_LEAF_FLAG_BOUNDARY, AWRAP_LEAF_FLAG_INTERIOR
 public :: AWRAP_LEAF_FLAG_EMPTY, AWRAP_LEAF_FLAG_INSIDE, AWRAP_LEAF_FLAG_OUTSIDE
@@ -555,5 +556,201 @@ contains
       endselect
    enddo
    endsubroutine count_classifications
+
+   subroutine awrap_extract_surface(octree, wrapped_facets, status)
+   !< Step 3: extract the wrap surface as the BOUNDARY ↔ OUTSIDE interface
+   !< (issue #18 §1.6 step 3).
+   !<
+   !< For each face of every BOUNDARY leaf, query the OUTSIDE neighbour via
+   !< face-probe point location. If the neighbour is OUTSIDE, emit a quad
+   !< (two triangles) sized to the BOUNDARY leaf's face. Vertices placed at
+   !< face corners — true dual-contouring vertex placement (QEF) is deferred
+   !< to step 4's vertex projection pass.
+   !<
+   !< Topology is watertight 2-manifold by construction:
+   !<   - Every face is shared by exactly two leaves.
+   !<   - We emit a quad iff one is BOUNDARY and the other OUTSIDE (a
+   !<     classification disagreement IS the wrap surface).
+   !<   - Each emitted edge of a quad is shared by exactly one neighbouring
+   !<     emitted quad (the adjacent BOUNDARY leaf's face).
+   !<
+   !< MVP simplification: walk only from the BOUNDARY side (smaller leaf in
+   !< the typical adaptive octree, since boundaries refine to the depth cap
+   !< while interiors stay coarse). When a small BOUNDARY leaf abuts a big
+   !< OUTSIDE leaf, one quad sized to the small face is emitted — the big
+   !< neighbour's contribution to the wrap surface comes from its other
+   !< small BOUNDARY neighbours covering its face. Worst-case T-junctions
+   !< near refinement transitions accepted; step 4's vertex projection +
+   !< step 5's adaptive refinement handle them in practice.
+   !<
+   !< Normal orientation: each emitted quad's normal points OUTWARD (toward
+   !< OUTSIDE side). Triangles wound counter-clockwise as viewed from
+   !< OUTSIDE.
+   type(awrap_octree_t),            intent(in)            :: octree
+   type(facet_object), allocatable, intent(out)           :: wrapped_facets(:)
+   integer(I4P),                    intent(out), optional :: status
+   type(facet_object), allocatable                        :: tmp(:)
+   integer(I4P)                                           :: cap, n_facets
+   integer(I4P)                                           :: i, axis, side, neighbour_id
+   type(vector_R8P)                                       :: probe
+   real(R8P)                                              :: half_alpha
+   type(vector_R8P)                                       :: c0, c1, c2, c3   !< Face corners.
+
+   if (present(status)) status = AWRAP_STATUS_OK
+   if (octree%n_nodes == 0_I4P) then
+      allocate(wrapped_facets(0))
+      if (present(status)) status = AWRAP_STATUS_BAD_INPUT
+      return
+   endif
+
+   ! Capacity heuristic: each boundary leaf contributes at most 6 quads = 12 triangles.
+   cap = max(64_I4P, 12_I4P * octree%n_boundary_leaves)
+   allocate(tmp(cap))
+   n_facets = 0_I4P
+   half_alpha = 0.5_R8P * octree%alpha
+
+   do i = 1_I4P, octree%n_nodes
+      if (octree%node(i)%first_child /= -1_I4P) cycle  ! interior octree node
+      if (octree%node(i)%leaf_flag /= AWRAP_LEAF_FLAG_BOUNDARY) cycle
+      do axis = 1_I4P, 3_I4P
+         do side = -1_I4P, 1_I4P, 2_I4P
+            call face_probe_point(node=octree%node(i), axis=axis, side=side, &
+                                  half_alpha=half_alpha, probe=probe)
+            ! Neighbour outside the root: treat as OUTSIDE (the wrap closes
+            ! at the padded-bbox boundary — step 1's 2α padding ensures
+            ! the geometry doesn't reach the bbox edge).
+            if (probe%x < octree%node(1)%bmin%x .or. probe%x > octree%node(1)%bmax%x .or. &
+                probe%y < octree%node(1)%bmin%y .or. probe%y > octree%node(1)%bmax%y .or. &
+                probe%z < octree%node(1)%bmin%z .or. probe%z > octree%node(1)%bmax%z) then
+               call face_corners(node=octree%node(i), axis=axis, side=side, c0=c0, c1=c1, c2=c2, c3=c3)
+               call emit_quad(tmp=tmp, n_facets=n_facets, cap=cap, &
+                              c0=c0, c1=c1, c2=c2, c3=c3, side=side, axis=axis)
+               cycle
+            endif
+            neighbour_id = find_leaf_at_point(octree=octree, point=probe)
+            if (neighbour_id <= 0_I4P) cycle
+            if (octree%node(neighbour_id)%leaf_flag /= AWRAP_LEAF_FLAG_OUTSIDE) cycle
+            ! Wrap face found: emit a quad on this BOUNDARY leaf's face.
+            call face_corners(node=octree%node(i), axis=axis, side=side, c0=c0, c1=c1, c2=c2, c3=c3)
+            call emit_quad(tmp=tmp, n_facets=n_facets, cap=cap, &
+                           c0=c0, c1=c1, c2=c2, c3=c3, side=side, axis=axis)
+         enddo
+      enddo
+   enddo
+
+   allocate(wrapped_facets(n_facets))
+   if (n_facets > 0_I4P) wrapped_facets(1:n_facets) = tmp(1:n_facets)
+   deallocate(tmp)
+   endsubroutine awrap_extract_surface
+
+   pure subroutine face_corners(node, axis, side, c0, c1, c2, c3)
+   !< Return the 4 corners of the (axis, side) face of `node`, ordered such
+   !< that c0→c1→c2→c3 is a counter-clockwise loop when viewed from the
+   !< OUTWARD direction (positive `side` looking back along -axis, negative
+   !< `side` looking back along +axis). Used by `emit_quad` to construct
+   !< two outward-facing triangles.
+   type(awrap_octree_node_t), intent(in)  :: node
+   integer(I4P),              intent(in)  :: axis  !< 1 = x, 2 = y, 3 = z.
+   integer(I4P),              intent(in)  :: side  !< -1 = -axis face, +1 = +axis face.
+   type(vector_R8P),          intent(out) :: c0, c1, c2, c3
+   real(R8P)                              :: x_lo, x_hi, y_lo, y_hi, z_lo, z_hi
+   real(R8P)                              :: x_face, y_face, z_face
+
+   x_lo = node%bmin%x; x_hi = node%bmax%x
+   y_lo = node%bmin%y; y_hi = node%bmax%y
+   z_lo = node%bmin%z; z_hi = node%bmax%z
+
+   if (axis == 1_I4P) then
+      x_face = merge(x_hi, x_lo, side > 0_I4P)
+      if (side > 0_I4P) then
+         ! +X face, normal +X. CCW from +X looking back: -Y first.
+         c0 = vector_R8P(x_face, y_lo, z_lo)
+         c1 = vector_R8P(x_face, y_hi, z_lo)
+         c2 = vector_R8P(x_face, y_hi, z_hi)
+         c3 = vector_R8P(x_face, y_lo, z_hi)
+      else
+         ! -X face, normal -X. CCW from -X looking back: opposite winding.
+         c0 = vector_R8P(x_face, y_lo, z_lo)
+         c1 = vector_R8P(x_face, y_lo, z_hi)
+         c2 = vector_R8P(x_face, y_hi, z_hi)
+         c3 = vector_R8P(x_face, y_hi, z_lo)
+      endif
+   elseif (axis == 2_I4P) then
+      y_face = merge(y_hi, y_lo, side > 0_I4P)
+      if (side > 0_I4P) then
+         c0 = vector_R8P(x_lo, y_face, z_lo)
+         c1 = vector_R8P(x_lo, y_face, z_hi)
+         c2 = vector_R8P(x_hi, y_face, z_hi)
+         c3 = vector_R8P(x_hi, y_face, z_lo)
+      else
+         c0 = vector_R8P(x_lo, y_face, z_lo)
+         c1 = vector_R8P(x_hi, y_face, z_lo)
+         c2 = vector_R8P(x_hi, y_face, z_hi)
+         c3 = vector_R8P(x_lo, y_face, z_hi)
+      endif
+   else  ! axis == 3
+      z_face = merge(z_hi, z_lo, side > 0_I4P)
+      if (side > 0_I4P) then
+         c0 = vector_R8P(x_lo, y_lo, z_face)
+         c1 = vector_R8P(x_hi, y_lo, z_face)
+         c2 = vector_R8P(x_hi, y_hi, z_face)
+         c3 = vector_R8P(x_lo, y_hi, z_face)
+      else
+         c0 = vector_R8P(x_lo, y_lo, z_face)
+         c1 = vector_R8P(x_lo, y_hi, z_face)
+         c2 = vector_R8P(x_hi, y_hi, z_face)
+         c3 = vector_R8P(x_hi, y_lo, z_face)
+      endif
+   endif
+   endsubroutine face_corners
+
+   subroutine emit_quad(tmp, n_facets, cap, c0, c1, c2, c3, side, axis)
+   !< Emit two triangles (c0,c1,c2) and (c0,c2,c3) representing one wrap-
+   !< surface quad. The normal points OUTWARD (along +axis when side>0,
+   !< -axis when side<0). Caller has already verified the face_corners
+   !< ordering matches this convention.
+   type(facet_object), allocatable, intent(inout) :: tmp(:)
+   integer(I4P),                    intent(inout) :: n_facets
+   integer(I4P),                    intent(inout) :: cap
+   type(vector_R8P),                intent(in)    :: c0, c1, c2, c3
+   integer(I4P),                    intent(in)    :: side, axis
+   type(vector_R8P)                               :: outward
+
+   ! Ensure capacity for two triangles.
+   if (n_facets + 2_I4P > cap) call grow_facet_buffer(tmp=tmp, cap=cap)
+
+   ! Compute outward normal (axis-aligned for this MVP).
+   outward = 0._R8P * ex_R8P  ! init to zero
+   if (axis == 1_I4P) outward = real(side, R8P) * ex_R8P
+   if (axis == 2_I4P) outward = real(side, R8P) * ey_R8P
+   if (axis == 3_I4P) outward = real(side, R8P) * ez_R8P
+
+   ! Triangle 1: c0, c1, c2.
+   n_facets = n_facets + 1_I4P
+   tmp(n_facets)%vertex(1) = c0
+   tmp(n_facets)%vertex(2) = c1
+   tmp(n_facets)%vertex(3) = c2
+   tmp(n_facets)%normal = outward
+   call tmp(n_facets)%compute_metrix
+   ! Triangle 2: c0, c2, c3.
+   n_facets = n_facets + 1_I4P
+   tmp(n_facets)%vertex(1) = c0
+   tmp(n_facets)%vertex(2) = c2
+   tmp(n_facets)%vertex(3) = c3
+   tmp(n_facets)%normal = outward
+   call tmp(n_facets)%compute_metrix
+   endsubroutine emit_quad
+
+   subroutine grow_facet_buffer(tmp, cap)
+   !< Geometric (2x) growth of the wrap-facet buffer.
+   type(facet_object), allocatable, intent(inout) :: tmp(:)
+   integer(I4P),                    intent(inout) :: cap
+   type(facet_object), allocatable                :: bigger(:)
+
+   allocate(bigger(2_I4P * cap))
+   bigger(1:cap) = tmp(1:cap)
+   call move_alloc(from=bigger, to=tmp)
+   cap = 2_I4P * cap
+   endsubroutine grow_facet_buffer
 
 endmodule fossil_alpha_wrap

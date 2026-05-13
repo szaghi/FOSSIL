@@ -2,10 +2,11 @@
 !<
 !< Step 1: validate the leaf-size-α octree built by `awrap_build_octree`.
 !< Step 2: validate the inside/outside flood fill from `awrap_classify_leaves`.
-!< Subsequent commits add steps 3 (dual-contour), 4 (project), 5 (adaptive
-!< refinement + capstone TBP).
+!< Step 3: validate the dual-contour boundary extraction
+!<         from `awrap_extract_surface`.
+!< Subsequent commits add steps 4 (project), 5 (adaptive refinement + capstone TBP).
 !<
-!< Three invariants for step 1, three more for step 2:
+!< Three invariants for step 1, three more for step 2, three more for step 3:
 !<   1. Cube — refinement structure. cube.stl is a closed unit cube. Build
 !<      octree with α = 0.1. Assert: n_boundary_leaves > 0 (geometry is
 !<      captured), every boundary leaf actually overlaps at least one input
@@ -36,11 +37,24 @@
 !<      This is NOT a bug — step 3+ closes the wrap surface across the
 !<      hole, NOT by repairing the input. Without this expected-leak the
 !<      algorithm is broken.
+!<   7. Cube wrap surface — extract via awrap_extract_surface, adopt as a
+!<      surface, assert is_watertight() AND volume within 30% of unit cube
+!<      (axis-aligned voxel-y wrap is bigger than the input by up to one
+!<      α-thick layer). The watertightness is the load-bearing property:
+!<      a 2-manifold output by construction is the whole point of this step.
+!<   8. Sphere wrap surface — same on a curved input. Watertight + volume
+!<      within 30% of (4/3)π. Voxel-y at α=0.1 → expect ~10% inflation.
+!<   9. Holed cube wrap surface — n_facets > 0 (something is emitted) but
+!<      step 3 alone CANNOT close the hole (no INSIDE leaves means the
+!<      wrap emits twin quads on both sides of the boundary band; topology
+!<      is degenerate). Step 5's adaptive refinement closes it. Asserts
+!<      facet count > 0 and skips watertightness — documented gap.
 
 program fossil_test_alpha_wrap
 
 use fossil, only : surface_stl_object, extract_isosurface
 use fossil_alpha_wrap, only : awrap_octree_t, awrap_build_octree, awrap_classify_leaves, &
+                              awrap_extract_surface, &
                               AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, AWRAP_STATUS_DEGENERATE, &
                               AWRAP_LEAF_FLAG_BOUNDARY, AWRAP_LEAF_FLAG_INTERIOR, &
                               AWRAP_LEAF_FLAG_EMPTY, AWRAP_LEAF_FLAG_INSIDE, AWRAP_LEAF_FLAG_OUTSIDE, &
@@ -52,21 +66,24 @@ use vecfor, only : vector_R8P
 
 implicit none
 
-type(surface_stl_object) :: cube, sphere, cube_holed
+type(surface_stl_object) :: cube, sphere, cube_holed, wrap_surface
 type(facet_object), allocatable :: sphere_facets(:)
 type(facet_object), allocatable, target :: holed_facets(:)
+type(facet_object), allocatable :: wrap_facets(:)
 type(facet_object), pointer :: facets(:)
 type(awrap_octree_t) :: octree
 real(R8P), allocatable :: values(:,:,:)
 type(vector_R8P) :: bmin, bmax, centroid
 real(R8P) :: x, y, z, dx, alpha
 real(R8P) :: max_leaf_size, leaf_sx, leaf_sy, leaf_sz
+real(R8P) :: wrap_volume, expected_volume
 integer(I4P) :: status, i, j, k, n, max_depth
 integer(I4P) :: n_false_pos, n_false_neg
 integer(I4P) :: n_in_geometry, n_outside_geometry, n_empty_remaining
 integer(I4P) :: n_inside_closed_cube
+integer(I4P) :: n_wrap_facets
 logical :: any_overlap, prop_no_false_pos, prop_no_false_neg, prop_size_ok
-logical :: are_tests_passed(6)
+logical :: are_tests_passed(9)
 
 integer(I4P), parameter :: N_GRID = 32_I4P
 
@@ -229,7 +246,51 @@ print '(A,I0,A,I0,A,I0)', &
 are_tests_passed(6) = (status == AWRAP_STATUS_OK) .and. &
                       (octree%n_inside_leaves < n_inside_closed_cube * 30_I4P / 100_I4P)
 
-print '(A,6L2)', 'per-case results: ', are_tests_passed
+! ---- Invariant 7: cube wrap surface — watertight, volume reasonable.
+facets => cube%facets_ref()
+call awrap_build_octree(facet=facets, alpha=alpha, octree=octree, status=status)
+call awrap_classify_leaves(octree=octree, status=status)
+call awrap_extract_surface(octree=octree, wrapped_facets=wrap_facets, status=status)
+n_wrap_facets = size(wrap_facets, kind=I4P)
+call wrap_surface%adopt_facets(facets=wrap_facets)
+wrap_volume = wrap_surface%get_volume()
+expected_volume = 1._R8P  ! unit cube
+print '(A,I0,A,L1,A,F8.4,A,F8.4)', &
+      'inv 7 (cube wrap): n_facets=', n_wrap_facets, ' watertight=', wrap_surface%is_watertight(), &
+      ' volume=', wrap_volume, ' expected=', expected_volume
+are_tests_passed(7) = (status == AWRAP_STATUS_OK)                   .and. &
+                      (n_wrap_facets > 0_I4P)                       .and. &
+                      wrap_surface%is_watertight()                  .and. &
+                      (abs(wrap_volume - expected_volume) <= 0.30_R8P * expected_volume)
+
+! ---- Invariant 8: sphere wrap surface — watertight, volume reasonable.
+facets => sphere%facets_ref()
+call awrap_build_octree(facet=facets, alpha=alpha, octree=octree, status=status)
+call awrap_classify_leaves(octree=octree, status=status)
+call awrap_extract_surface(octree=octree, wrapped_facets=wrap_facets, status=status)
+n_wrap_facets = size(wrap_facets, kind=I4P)
+call wrap_surface%adopt_facets(facets=wrap_facets)
+wrap_volume = wrap_surface%get_volume()
+expected_volume = 4._R8P / 3._R8P * 3.14159265358979_R8P  ! unit sphere
+print '(A,I0,A,L1,A,F8.4,A,F8.4)', &
+      'inv 8 (sphere wrap): n_facets=', n_wrap_facets, ' watertight=', wrap_surface%is_watertight(), &
+      ' volume=', wrap_volume, ' expected=', expected_volume
+are_tests_passed(8) = (status == AWRAP_STATUS_OK)                   .and. &
+                      (n_wrap_facets > 0_I4P)                       .and. &
+                      wrap_surface%is_watertight()                  .and. &
+                      (abs(wrap_volume - expected_volume) <= 0.30_R8P * expected_volume)
+
+! ---- Invariant 9: holed cube wrap — emits something but not closed at this step.
+facets => cube_holed%facets_ref()
+call awrap_build_octree(facet=facets, alpha=alpha, octree=octree, status=status)
+call awrap_classify_leaves(octree=octree, status=status)
+call awrap_extract_surface(octree=octree, wrapped_facets=wrap_facets, status=status)
+n_wrap_facets = size(wrap_facets, kind=I4P)
+print '(A,I0,A,A)', 'inv 9 (holed cube wrap): n_facets=', n_wrap_facets, &
+      ' (watertightness deferred to step 5 adaptive refinement)'
+are_tests_passed(9) = (status == AWRAP_STATUS_OK) .and. (n_wrap_facets > 0_I4P)
+
+print '(A,9L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 
 contains
