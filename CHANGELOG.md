@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.5] — 2026-05-13
+### Added
+- **surface**: Add self-intersection detection (issue #18 §1.2)
+
+
 ## [1.2.4] — 2026-05-12
 ### Added
 - **surface**: Add generalized / fast winding number (issue #18 §1.4)
