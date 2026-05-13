@@ -4,9 +4,10 @@
 !< Step 2: validate the inside/outside flood fill from `awrap_classify_leaves`.
 !< Step 3: validate the dual-contour boundary extraction
 !<         from `awrap_extract_surface`.
-!< Subsequent commits add steps 4 (project), 5 (adaptive refinement + capstone TBP).
+!< Step 4: validate vertex projection from `awrap_project_vertices`.
+!< Subsequent commits add step 5 (adaptive refinement + capstone TBP).
 !<
-!< Three invariants for step 1, three more for step 2, three more for step 3:
+!< 3 invariants for step 1, 3 for step 2, 3 for step 3, 3 for step 4:
 !<   1. Cube — refinement structure. cube.stl is a closed unit cube. Build
 !<      octree with α = 0.1. Assert: n_boundary_leaves > 0 (geometry is
 !<      captured), every boundary leaf actually overlaps at least one input
@@ -49,12 +50,22 @@
 !<      wrap emits twin quads on both sides of the boundary band; topology
 !<      is degenerate). Step 5's adaptive refinement closes it. Asserts
 !<      facet count > 0 and skips watertightness — documented gap.
+!<  10. Cube wrap + projection — volume drops closer to the analytic value
+!<      (1.0 for unit cube) compared to the unprojected step-3 wrap.
+!<      Watertightness preserved (vertex dedup is doing its job).
+!<      offset = α/3 per CGAL's recommended ratio.
+!<  11. Sphere wrap + projection — same on a curved input. Volume drops
+!<      closer to (4/3)π. Watertightness preserved.
+!<  12. Projection manifold preservation. Compute non_manifold_edges_number
+!<      for the projected wrap of the cube; must be zero (vertex dedup
+!<      ensures shared vertices stay shared after projection, so no
+!<      seams open up).
 
 program fossil_test_alpha_wrap
 
 use fossil, only : surface_stl_object, extract_isosurface
 use fossil_alpha_wrap, only : awrap_octree_t, awrap_build_octree, awrap_classify_leaves, &
-                              awrap_extract_surface, &
+                              awrap_extract_surface, awrap_project_vertices, &
                               AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, AWRAP_STATUS_DEGENERATE, &
                               AWRAP_LEAF_FLAG_BOUNDARY, AWRAP_LEAF_FLAG_INTERIOR, &
                               AWRAP_LEAF_FLAG_EMPTY, AWRAP_LEAF_FLAG_INSIDE, AWRAP_LEAF_FLAG_OUTSIDE, &
@@ -77,13 +88,14 @@ type(vector_R8P) :: bmin, bmax, centroid
 real(R8P) :: x, y, z, dx, alpha
 real(R8P) :: max_leaf_size, leaf_sx, leaf_sy, leaf_sz
 real(R8P) :: wrap_volume, expected_volume
+real(R8P) :: vol_before, vol_after, offset
 integer(I4P) :: status, i, j, k, n, max_depth
 integer(I4P) :: n_false_pos, n_false_neg
 integer(I4P) :: n_in_geometry, n_outside_geometry, n_empty_remaining
 integer(I4P) :: n_inside_closed_cube
-integer(I4P) :: n_wrap_facets
+integer(I4P) :: n_wrap_facets, n_nm_edges
 logical :: any_overlap, prop_no_false_pos, prop_no_false_neg, prop_size_ok
-logical :: are_tests_passed(9)
+logical :: are_tests_passed(12)
 
 integer(I4P), parameter :: N_GRID = 32_I4P
 
@@ -290,7 +302,53 @@ print '(A,I0,A,A)', 'inv 9 (holed cube wrap): n_facets=', n_wrap_facets, &
       ' (watertightness deferred to step 5 adaptive refinement)'
 are_tests_passed(9) = (status == AWRAP_STATUS_OK) .and. (n_wrap_facets > 0_I4P)
 
-print '(A,9L2)', 'per-case results: ', are_tests_passed
+! ---- Invariant 10: cube wrap + projection — volume snaps closer to input.
+facets => cube%facets_ref()
+call awrap_build_octree(facet=facets, alpha=alpha, octree=octree, status=status)
+call awrap_classify_leaves(octree=octree, status=status)
+call awrap_extract_surface(octree=octree, wrapped_facets=wrap_facets, status=status)
+call wrap_surface%adopt_facets(facets=wrap_facets)
+vol_before = wrap_surface%get_volume()
+! Re-extract for projection (adopt_facets consumed wrap_facets via move_alloc).
+call awrap_extract_surface(octree=octree, wrapped_facets=wrap_facets, status=status)
+offset = alpha / 3._R8P
+call awrap_project_vertices(wrap_facets=wrap_facets, input_facet=facets, input_tree=cube%aabb, &
+                            offset=offset, status=status)
+call wrap_surface%adopt_facets(facets=wrap_facets)
+vol_after = wrap_surface%get_volume()
+print '(A,F8.4,A,F8.4,A,L1)', &
+      'inv 10 (cube projected): vol_before=', vol_before, ' vol_after=', vol_after, &
+      ' watertight=', wrap_surface%is_watertight()
+are_tests_passed(10) = (status == AWRAP_STATUS_OK)              .and. &
+                       (abs(vol_after - 1._R8P) <= abs(vol_before - 1._R8P)) .and. &
+                       wrap_surface%is_watertight()
+
+! ---- Invariant 11: sphere wrap + projection — volume snaps closer to input.
+facets => sphere%facets_ref()
+call awrap_build_octree(facet=facets, alpha=alpha, octree=octree, status=status)
+call awrap_classify_leaves(octree=octree, status=status)
+call awrap_extract_surface(octree=octree, wrapped_facets=wrap_facets, status=status)
+call wrap_surface%adopt_facets(facets=wrap_facets)
+vol_before = wrap_surface%get_volume()
+call awrap_extract_surface(octree=octree, wrapped_facets=wrap_facets, status=status)
+call awrap_project_vertices(wrap_facets=wrap_facets, input_facet=facets, input_tree=sphere%aabb, &
+                            offset=offset, status=status)
+call wrap_surface%adopt_facets(facets=wrap_facets)
+vol_after = wrap_surface%get_volume()
+expected_volume = 4._R8P / 3._R8P * 3.14159265358979_R8P
+print '(A,F8.4,A,F8.4,A,L1)', &
+      'inv 11 (sphere projected): vol_before=', vol_before, ' vol_after=', vol_after, &
+      ' watertight=', wrap_surface%is_watertight()
+are_tests_passed(11) = (status == AWRAP_STATUS_OK)              .and. &
+                       (abs(vol_after - expected_volume) <= abs(vol_before - expected_volume)) .and. &
+                       wrap_surface%is_watertight()
+
+! ---- Invariant 12: projection preserves manifoldness (vertex dedup works).
+n_nm_edges = wrap_surface%get_non_manifold_edges_number()
+print '(A,I0)', 'inv 12 (projected manifold): non_manifold_edges=', n_nm_edges
+are_tests_passed(12) = (n_nm_edges == 0_I4P)
+
+print '(A,12L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 
 contains
