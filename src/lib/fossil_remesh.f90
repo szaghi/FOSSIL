@@ -13,11 +13,11 @@ module fossil_remesh
 !< STEP 1: public API + collect_state + materialize round-trip. No topology.
 !< STEP 2: build_edges + median L exposed via two private helpers.
 !< STEP 3: pass_split — insert midpoints on over-length edges.
-!< STEP 4 (this commit): pass_collapse — collapse short edges with
-!< normal-flip / duplicate-vertex / non-manifold safety checks. Same
-!< incidence-rebuild-each-pass pattern as split. The §1.3 decimate module's
-!< safety logic was the inspiration; reimplemented here with simpler
-!< rectangular v2f incidence (no packed-array bookkeeping).
+!< STEP 4: pass_collapse — collapse short edges with safety checks.
+!< STEP 5 (this commit): pass_flip — flip interior edges when doing so
+!< improves valence balance toward the target valence (6 for interior).
+!< Geometric validity check uses post-flip normal direction relative to
+!< pre-flip; degenerate (zero-area) flips are rejected.
 
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object,     only : facet_object
@@ -35,6 +35,7 @@ public :: count_unique_edges
 public :: compute_median_edge_length
 public :: run_split_only
 public :: run_split_and_collapse
+public :: run_split_collapse_flip
 
 integer(I4P), parameter :: MAX_VAL = 32_I4P  !< Max vertex valence supported (rectangular incidence cap).
 
@@ -101,12 +102,13 @@ contains
       L = compute_median_edge_length(facet=facet)
    endif
 
-   ! Stage 3: outer loop. Steps 3-4 wire split+collapse only.
+   ! Stage 3: outer loop. Steps 3-5 wire split + collapse + flip.
    do it = 1, iterations
       call apply_split_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                             nv=nv, nf_alive=nf_alive)
       call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                                nf_alive=nf_alive)
+      call apply_flip_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive)
    enddo
 
    ! Stage final: materialize.
@@ -127,14 +129,46 @@ contains
    endsubroutine run_split_only
 
    subroutine run_split_and_collapse(facet, target_length, n_iterations)
-   !< Testing helper: alias for run_split_only; named for clarity in the
-   !< step-4 test.
+   !< Testing helper: split + collapse only (no flip). Used by the step-4
+   !< test to verify split+collapse correctness in isolation, before flip
+   !< was wired in step 5.
+   type(facet_object), allocatable, intent(inout) :: facet(:)
+   real(R8P),                       intent(in)    :: target_length
+   integer(I4P),                    intent(in)    :: n_iterations
+   integer(I4P), allocatable :: f_v(:, :)
+   real(R8P),    allocatable :: vcoord(:, :)
+   logical,      allocatable :: facet_alive(:)
+   integer(I4P) :: nv, nf_alive, st, it
+   real(R8P) :: L
+
+   if (.not. allocated(facet) .or. size(facet) == 0_I4P) return
+   call collect_state(facet=facet, f_v=f_v, vcoord=vcoord, nv=nv, st=st)
+   if (st /= REM_STATUS_OK) return
+   allocate(facet_alive(size(facet)), source=.true.)
+   nf_alive = size(facet)
+   if (target_length > 0._R8P) then
+      L = target_length
+   else
+      L = compute_median_edge_length(facet=facet)
+   endif
+   do it = 1, n_iterations
+      call apply_split_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
+                            nv=nv, nf_alive=nf_alive)
+      call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
+                               nf_alive=nf_alive)
+   enddo
+   call materialize(facet=facet, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive)
+   endsubroutine run_split_and_collapse
+
+   subroutine run_split_collapse_flip(facet, target_length, n_iterations)
+   !< Testing helper: split + collapse + flip (the steps wired by the
+   !< public API as of step 5). Named for clarity in the step-5 test.
    type(facet_object), allocatable, intent(inout) :: facet(:)
    real(R8P),                       intent(in)    :: target_length
    integer(I4P),                    intent(in)    :: n_iterations
 
    call run_split_only(facet=facet, target_length=target_length, n_iterations=n_iterations)
-   endsubroutine run_split_and_collapse
+   endsubroutine run_split_collapse_flip
 
    ! ===========================================================================
    ! Stage helpers
@@ -692,6 +726,153 @@ contains
       if (any(f_v(:, f) == w)) then ; yes = .true. ; return ; endif
    enddo
    endfunction vertex_neighbor_of
+
+   ! ===========================================================================
+   ! Step 5: edge flip pass
+   ! ===========================================================================
+
+   subroutine apply_flip_pass(f_v, vcoord, facet_alive)
+   !< Walk every interior edge (one shared by exactly 2 facets); flip the
+   !< diagonal of the resulting quad if doing so reduces the total deviation
+   !< from the target valence (6 for interior vertices) AND the post-flip
+   !< triangles are geometrically valid (no normal flip, no degenerate area)
+   !< AND the new diagonal doesn't duplicate an existing edge.
+   !<
+   !< Convention for the flip: edge `(va, vb)` shared by facets `f1` and
+   !< `f2` with apexes `w1` and `w2` becomes edge `(w1, w2)`; the new facets
+   !< are `(va, w2, w1)` and `(vb, w1, w2)`. CCW orientation is preserved
+   !< when the original facets were CCW.
+   !<
+   !< Each flip changes valences by:
+   !<   val(va) -= 1, val(vb) -= 1, val(w1) += 1, val(w2) += 1.
+   !<
+   !< Maintains a side `new_edges` list of (w1, w2) pairs created during
+   !< this pass. The duplicate-edge check consults both `e_v` (initial) and
+   !< the side list, preventing two flips in the same pass from creating
+   !< two copies of the same diagonal (which would produce a non-manifold
+   !< edge with 4+ incident facets after both flips applied).
+   integer(I4P), intent(inout) :: f_v(:, :)
+   real(R8P),    intent(in)    :: vcoord(:, :)
+   logical,      intent(inout) :: facet_alive(:)
+   integer(I4P), allocatable   :: e_v(:, :), e_facets(:, :), valence(:)
+   integer(I4P), allocatable   :: new_edges(:, :)
+   integer(I4P)                :: n_new
+   integer(I4P)                :: ne, e, va, vb, f1, f2, w1, w2, nv
+   integer(I4P)                :: dev_before, dev_after
+
+   nv = size(vcoord, dim=2)
+   call build_edges_with_facets(f_v=f_v, facet_alive=facet_alive, &
+                                 e_v=e_v, e_facets=e_facets, ne=ne)
+   call compute_valences(e_v=e_v, ne=ne, nv=nv, valence=valence)
+   ! Side list of edges created this pass. Worst case 1 per scanned edge.
+   allocate(new_edges(2, ne), source=0_I4P)
+   n_new = 0_I4P
+
+   do e = 1, ne
+      f1 = e_facets(1, e) ; f2 = e_facets(2, e)
+      if (f1 == 0_I4P .or. f2 == 0_I4P) cycle
+      if (.not. facet_alive(f1)) cycle
+      if (.not. facet_alive(f2)) cycle
+      va = e_v(1, e) ; vb = e_v(2, e)
+      ! Validity: a previous flip in this pass may have mutated f1 or f2's
+      ! vertex set such that (va, vb) is no longer their shared edge. Skip
+      ! if so — `e_v`/`e_facets` are stale for this edge.
+      if (.not. (any(f_v(:, f1) == va) .and. any(f_v(:, f1) == vb))) cycle
+      if (.not. (any(f_v(:, f2) == va) .and. any(f_v(:, f2) == vb))) cycle
+      w1 = facet_apex(f_v=f_v, f=f1, va=va, vb=vb)
+      w2 = facet_apex(f_v=f_v, f=f2, va=va, vb=vb)
+      if (w1 == 0_I4P .or. w2 == 0_I4P .or. w1 == w2) cycle
+      if (edge_exists(e_v=e_v, ne=ne, va=w1, vb=w2)) cycle
+      if (edge_exists(e_v=new_edges, ne=n_new, va=w1, vb=w2)) cycle
+
+      dev_before = abs(valence(va) - 6) + abs(valence(vb) - 6) + &
+                   abs(valence(w1) - 6) + abs(valence(w2) - 6)
+      dev_after  = abs(valence(va) - 1 - 6) + abs(valence(vb) - 1 - 6) + &
+                   abs(valence(w1) + 1 - 6) + abs(valence(w2) + 1 - 6)
+      if (dev_after >= dev_before) cycle
+      if (flip_would_break(va=va, vb=vb, w1=w1, w2=w2, f1=f1, f2=f2, &
+                            f_v=f_v, vcoord=vcoord)) cycle
+      f_v(:, f1) = [va, w2, w1]
+      f_v(:, f2) = [vb, w1, w2]
+      valence(va) = valence(va) - 1
+      valence(vb) = valence(vb) - 1
+      valence(w1) = valence(w1) + 1
+      valence(w2) = valence(w2) + 1
+      n_new = n_new + 1
+      new_edges(1, n_new) = min(w1, w2)
+      new_edges(2, n_new) = max(w1, w2)
+   enddo
+   endsubroutine apply_flip_pass
+
+   subroutine compute_valences(e_v, ne, nv, valence)
+   !< Per-vertex valence = number of incident edges. Computed by walking
+   !< the unique-edge list (each edge contributes +1 to both endpoints).
+   integer(I4P),              intent(in)  :: e_v(:, :), ne, nv
+   integer(I4P), allocatable, intent(out) :: valence(:)
+   integer(I4P)                           :: e
+
+   allocate(valence(nv), source=0_I4P)
+   do e = 1, ne
+      valence(e_v(1, e)) = valence(e_v(1, e)) + 1
+      valence(e_v(2, e)) = valence(e_v(2, e)) + 1
+   enddo
+   endsubroutine compute_valences
+
+   pure function edge_exists(e_v, ne, va, vb) result(yes)
+   !< True iff edge (va, vb) (canonical min-max) appears in the edge list.
+   !< Linear scan; for typical pass sizes this is fine.
+   integer(I4P), intent(in) :: e_v(:, :), ne, va, vb
+   logical                  :: yes
+   integer(I4P)             :: lo, hi, e
+
+   lo = min(va, vb) ; hi = max(va, vb)
+   yes = .false.
+   do e = 1, ne
+      if (e_v(1, e) == lo .and. e_v(2, e) == hi) then ; yes = .true. ; return ; endif
+   enddo
+   endfunction edge_exists
+
+   pure function flip_would_break(va, vb, w1, w2, f1, f2, f_v, vcoord) result(yes)
+   !< True iff flipping edge (va, vb) → (w1, w2) would invert one of the
+   !< two new triangles' normals relative to the current pre-flip facets,
+   !< or produce a degenerate (zero-area) triangle.
+   integer(I4P), intent(in) :: va, vb, w1, w2, f1, f2
+   integer(I4P), intent(in) :: f_v(:, :)
+   real(R8P),    intent(in) :: vcoord(:, :)
+   logical                  :: yes
+   real(R8P)                :: pa(3), pb(3), pw1(3), pw2(3)
+   real(R8P)                :: n_old1(3), n_old2(3), n_new1(3), n_new2(3)
+   real(R8P)                :: len2_1, len2_2
+
+   pa  = vcoord(:, va)  ; pb  = vcoord(:, vb)
+   pw1 = vcoord(:, w1)  ; pw2 = vcoord(:, w2)
+   n_old1 = facet_normal_uv(f_v=f_v, vcoord=vcoord, f=f1)
+   n_old2 = facet_normal_uv(f_v=f_v, vcoord=vcoord, f=f2)
+   ! New triangles: (va, w2, w1) and (vb, w1, w2).
+   n_new1 = cross(pw2 - pa, pw1 - pa)
+   n_new2 = cross(pw1 - pb, pw2 - pb)
+   len2_1 = n_new1(1)**2 + n_new1(2)**2 + n_new1(3)**2
+   len2_2 = n_new2(1)**2 + n_new2(2)**2 + n_new2(3)**2
+   if (len2_1 < tiny(1._R8P) .or. len2_2 < tiny(1._R8P)) then
+      yes = .true. ; return  ! degenerate
+   endif
+   yes = (n_old1(1)*n_new1(1) + n_old1(2)*n_new1(2) + n_old1(3)*n_new1(3) < 0._R8P) .or. &
+         (n_old2(1)*n_new2(1) + n_old2(2)*n_new2(2) + n_old2(3)*n_new2(3) < 0._R8P)
+   endfunction flip_would_break
+
+   pure function facet_normal_uv(f_v, vcoord, f) result(n)
+   !< Compute the unnormalized face normal of facet `f` from the current
+   !< vcoord positions. (Unnormalized is sufficient because the only use
+   !< downstream is a sign test via dot product.)
+   integer(I4P), intent(in) :: f_v(:, :), f
+   real(R8P),    intent(in) :: vcoord(:, :)
+   real(R8P)                :: n(3)
+   real(R8P)                :: e12(3), e13(3)
+
+   e12 = vcoord(:, f_v(2, f)) - vcoord(:, f_v(1, f))
+   e13 = vcoord(:, f_v(3, f)) - vcoord(:, f_v(1, f))
+   n = cross(e12, e13)
+   endfunction facet_normal_uv
 
    subroutine build_edges_with_facets(f_v, facet_alive, e_v, e_facets, ne)
    !< Build the unique-edge list AND per-edge incident-facet pairs (the up
