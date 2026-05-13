@@ -509,17 +509,28 @@ contains
    endsubroutine arrangement_retriangulate
 
    function find_or_append_2d(pts2d, n_pts, x, y) result(idx)
-   !< Look up (x, y) in `pts2d(:, 1:n_pts)` within EPS; if found return its
-   !< index, otherwise append and return the new index. EPS comparison in
-   !< 2D — caller must ensure facet's local frame uses comparable scale.
+   !< Look up (x, y) in `pts2d(:, 1:n_pts)` within tolerance; if found return
+   !< its index, otherwise append and return the new index.
+   !<
+   !< Tolerance: scale-aware — `max(|coord|, 1) * DEDUP_REL_TOL`. Cannot use
+   !< the project-wide `EPS` because it is hardcoded to 0 in `fossil_utils`
+   !< (a known pre-existing oddity), which would defeat the whole purpose of
+   !< this dedup pass. The relative tolerance `1e-10` accommodates the
+   !< inevitable round-off in `project_to_plane` while still distinguishing
+   !< genuinely different points whose 2D coordinates differ at the eighth
+   !< significant digit or further apart.
    real(R8P),    intent(inout) :: pts2d(:, :)
    integer(I4P), intent(inout) :: n_pts
    real(R8P),    intent(in)    :: x, y
    integer(I4P)                :: idx
    integer(I4P)                :: i
+   real(R8P)                   :: tol_x, tol_y
+   real(R8P), parameter        :: DEDUP_REL_TOL = 1.0e-10_R8P
 
+   tol_x = max(abs(x), 1._R8P) * DEDUP_REL_TOL
+   tol_y = max(abs(y), 1._R8P) * DEDUP_REL_TOL
    do i = 1, n_pts
-      if (abs(pts2d(1, i) - x) <= EPS .and. abs(pts2d(2, i) - y) <= EPS) then
+      if (abs(pts2d(1, i) - x) <= tol_x .and. abs(pts2d(2, i) - y) <= tol_y) then
          idx = i ; return
       endif
    enddo

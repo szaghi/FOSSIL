@@ -495,19 +495,15 @@ contains
    !<   2. Otherwise the two triangles share the line `L = N_self x N_other`. Project
    !<      both triangles onto L; each yields a 1D interval. The intersection segment
    !<      is the overlap of the two intervals.
+   !<   3. Robustness clip: 2D Liang-Barsky clip of the returned segment against
+   !<      both triangle interiors (`clip_segment_to_triangle`). Necessary because
+   !<      step 2 can produce NaN-corrupted bounds when an edge of one triangle
+   !<      lies on the other's plane (the "T-junction" / "shared boundary" case),
+   !<      with NaN propagation through `min`/`max` widening rather than
+   !<      collapsing the overlap. The clip recovers a correct (possibly empty)
+   !<      intersection regardless of the upstream computation's robustness.
    !<
    !< @note Both facets' metrix must be already computed (`compute_metrix`).
-   !<
-   !< Known limitation (issue #18 §1.1): when one triangle has an *edge* lying on
-   !< the other triangle's plane (the "T-junction" or "shared boundary" case),
-   !< the 1D-interval overlap can return a segment whose endpoints lie outside
-   !< one of the two triangles. The §1.2 self-intersection use case tolerates
-   !< this (it just records facet pairs); the §1.1 boolean use case must
-   !< therefore avoid configurations that hit this case (e.g. cubes offset
-   !< along a single axis where pairs of faces become coplanar — instead use
-   !< an offset along all three axes so no faces or edges align).
-   !< The clean fix is to clip the returned segment against both triangles'
-   !< 2D projections; deferred as future work.
    class(facet_object), intent(in)  :: self        !< First facet (this).
    type(facet_object),  intent(in)  :: other       !< Second facet.
    type(vector_R8P),    intent(out) :: p           !< Intersection segment start.
@@ -587,12 +583,174 @@ contains
    call lift_endpoint_to_3d(self=self, other=other, dist=doth, &
                             pv_self=pv_self, pv_oth=pv_oth, target_t=thi, axis=axis, point=q)
 
+   ! Robustness clip: the 1D-overlap path above can return endpoints lying
+   ! outside one or both source triangles when an edge of one triangle lies
+   ! on the other's plane (the shared-boundary / T-junction case). Worse,
+   ! that configuration produces NaN in the tlo/thi overlap calculation, and
+   ! NaN propagation through `min`/`max` can widen the bounds rather than
+   ! collapsing them. Clipping the resulting 3D segment against both source
+   ! triangles' interiors recovers a correct (possibly empty) intersection
+   ! regardless of whether the upstream computation was clean.
+   call clip_segment_to_triangle(face=self,  p=p, q=q, intersects=intersects)
+   if (.not. intersects) return
+   call clip_segment_to_triangle(face=other, p=p, q=q, intersects=intersects)
+   if (.not. intersects) return
+
    ! Reject degenerate (point-touch) intersections.
    D = q - p
-   if (D%normL2() <= EPS) return
+   if (D%normL2() <= EPS) then
+      intersects = .false.
+      return
+   endif
 
    intersects = .true.
    endsubroutine intersect_facet
+
+   pure subroutine clip_segment_to_triangle(face, p, q, intersects)
+   !< Clip the 3D segment (p, q) against the interior of triangle `face`.
+   !<
+   !< Both p and q are assumed to lie (approximately) on `face`'s plane —
+   !< the caller (e.g. `intersect_facet`) has already established that the
+   !< segment lies on the line of intersection of two planes, one of which
+   !< is `face`'s. We project (p, q) into `face`'s local 2D frame, run a
+   !< Liang-Barsky-style parametric clip against the three edge half-planes,
+   !< then lift the clipped endpoints back to 3D.
+   !<
+   !< On return, `intersects = .true.` iff the clipped segment has positive
+   !< length within the triangle. Otherwise (p, q) are left in an unspecified
+   !< state and the caller should not use them.
+   type(facet_object), intent(in)    :: face       !< Reference triangle.
+   type(vector_R8P),   intent(inout) :: p, q       !< Segment endpoints; rewritten to clipped values on success.
+   logical,            intent(out)   :: intersects !< True iff clipped segment has positive length.
+   real(R8P)                         :: pu, pv, qu, qv  !< Endpoints in face's local 2D frame.
+   real(R8P)                         :: u3, v3          !< Third vertex of face in local 2D (v1 = origin, v2 = (|E12|, 0)).
+   real(R8P)                         :: len_e12
+   type(vector_R8P)                  :: e12_hat, vaxis
+   real(R8P)                         :: t_lo, t_hi      !< Parametric interval [t_lo, t_hi] along p→q surviving clip.
+   logical                           :: ok
+
+   intersects = .false.
+
+   ! Build face's local 2D frame.
+   len_e12 = face%E12%normL2()
+   if (len_e12 <= EPS) return  ! degenerate face
+   e12_hat = face%E12 * (1._R8P / len_e12)
+   vaxis   = face%normal%crossproduct(rhs=e12_hat)
+
+   ! Project p, q, and face's third vertex into the local frame.
+   call project_point_local(face=face, e12_hat=e12_hat, vaxis=vaxis, p3d=p, u=pu, v=pv)
+   call project_point_local(face=face, e12_hat=e12_hat, vaxis=vaxis, p3d=q, u=qu, v=qv)
+   call project_point_local(face=face, e12_hat=e12_hat, vaxis=vaxis, p3d=face%vertex(3), u=u3, v=v3)
+   ! Triangle in 2D: (0,0), (len_e12, 0), (u3, v3).
+
+   t_lo = 0._R8P ; t_hi = 1._R8P
+   ! Clip against each of the three edges. Each edge defines a half-plane; the
+   ! interior is on the side that contains the third vertex (the one not on
+   ! that edge). Compute the half-plane sign as the orient2d of the edge with
+   ! the third vertex; the segment p→q must remain on that same side.
+   call clip_against_edge(t_lo=t_lo, t_hi=t_hi,                          &
+                          ax=0._R8P,  ay=0._R8P,  bx=len_e12, by=0._R8P, &
+                          cx=u3,      cy=v3,                             &
+                          pu=pu, pv=pv, qu=qu, qv=qv, ok=ok)
+   if (.not. ok) return
+   call clip_against_edge(t_lo=t_lo, t_hi=t_hi,                          &
+                          ax=len_e12, ay=0._R8P,  bx=u3,      by=v3,     &
+                          cx=0._R8P,  cy=0._R8P,                         &
+                          pu=pu, pv=pv, qu=qu, qv=qv, ok=ok)
+   if (.not. ok) return
+   call clip_against_edge(t_lo=t_lo, t_hi=t_hi,                          &
+                          ax=u3,      ay=v3,      bx=0._R8P,  by=0._R8P, &
+                          cx=len_e12, cy=0._R8P,                         &
+                          pu=pu, pv=pv, qu=qu, qv=qv, ok=ok)
+   if (.not. ok) return
+
+   if (t_hi - t_lo <= 0._R8P) return  ! collapsed to nothing (or to a point)
+
+   ! Lift the clipped 2D endpoints back to 3D. p_clip = p + t_lo * (q - p)
+   ! computed in 2D and then reconstructed via the inverse projection.
+   block
+      real(R8P)        :: u_lo, v_lo, u_hi, v_hi
+      type(vector_R8P) :: p_new, q_new
+      u_lo = pu + t_lo * (qu - pu)
+      v_lo = pv + t_lo * (qv - pv)
+      u_hi = pu + t_hi * (qu - pu)
+      v_hi = pv + t_hi * (qv - pv)
+      p_new = face%vertex(1) + e12_hat * u_lo + vaxis * v_lo
+      q_new = face%vertex(1) + e12_hat * u_hi + vaxis * v_hi
+      p = p_new ; q = q_new
+   endblock
+   intersects = .true.
+   endsubroutine clip_segment_to_triangle
+
+   pure subroutine project_point_local(face, e12_hat, vaxis, p3d, u, v)
+   !< Project a 3D point into a face's pre-computed local 2D frame.
+   !< (Inline equivalent of `fossil_arrangement%project_to_plane` but staying
+   !< inside this module to avoid cross-module dep.)
+   type(facet_object), intent(in)  :: face
+   type(vector_R8P),   intent(in)  :: e12_hat, vaxis, p3d
+   real(R8P),          intent(out) :: u, v
+   type(vector_R8P)                :: dp
+
+   dp = p3d - face%vertex(1)
+   u  = dp%dotproduct(rhs=e12_hat)
+   v  = dp%dotproduct(rhs=vaxis)
+   endsubroutine project_point_local
+
+   pure subroutine clip_against_edge(t_lo, t_hi, ax, ay, bx, by, cx, cy, &
+                                     pu, pv, qu, qv, ok)
+   !< Liang-Barsky-style clip of segment (pu,pv)→(qu,qv) (parametrized t∈[0,1])
+   !< against the half-plane defined by directed edge (ax,ay)→(bx,by) whose
+   !< interior is the side containing the third triangle vertex (cx, cy).
+   !<
+   !< On call, `[t_lo, t_hi]` is the surviving sub-interval of [0,1] from
+   !< prior clips. On return it is shrunk to the intersection with this
+   !< half-plane (or `ok=.false.` if the segment is fully outside).
+   real(R8P), intent(inout) :: t_lo, t_hi
+   real(R8P), intent(in)    :: ax, ay, bx, by, cx, cy
+   real(R8P), intent(in)    :: pu, pv, qu, qv
+   logical,   intent(out)   :: ok
+   real(R8P)                :: nx, ny             !< Inward normal of the edge.
+   real(R8P)                :: side_c             !< Sign of (c) wrt edge → tells us which side is interior.
+   real(R8P)                :: dist_p, dist_q     !< Signed in-side distance of p, q.
+   real(R8P)                :: t_cross
+
+   ! Edge direction (dx, dy). The two perpendiculars are (-dy, dx) and (dy, -dx).
+   ! We pick the one whose sign matches the third-vertex side.
+   nx = -(by - ay)
+   ny =  (bx - ax)
+   side_c = nx * (cx - ax) + ny * (cy - ay)
+   if (side_c < 0._R8P) then
+      nx = -nx ; ny = -ny  ! flip to point inward
+      side_c = -side_c
+   endif
+   if (side_c <= 0._R8P) then
+      ! Degenerate triangle (cx,cy) on the edge — accept conservatively.
+      ok = .true. ; return
+   endif
+
+   ! Signed in-side distance of each segment endpoint.
+   dist_p = nx * (pu - ax) + ny * (pv - ay)
+   dist_q = nx * (qu - ax) + ny * (qv - ay)
+
+   ! Both fully outside?
+   if (dist_p < 0._R8P .and. dist_q < 0._R8P) then
+      ok = .false. ; return
+   endif
+   ! Both fully inside?
+   if (dist_p >= 0._R8P .and. dist_q >= 0._R8P) then
+      ok = .true.  ; return
+   endif
+   ! One inside, one outside → compute crossing t.
+   t_cross = dist_p / (dist_p - dist_q)
+   if (dist_p < 0._R8P) then
+      ! p is outside, q is inside → clip t_lo upward.
+      t_lo = max(t_lo, t_cross)
+   else
+      ! p is inside, q is outside → clip t_hi downward.
+      t_hi = min(t_hi, t_cross)
+   endif
+   ok = (t_lo <= t_hi)
+   endsubroutine clip_against_edge
 
    pure subroutine interval_from_signs(pv, dist, t)
    !< Compute the 1D interval `[t(1), t(2)]` on the intersection line where the
