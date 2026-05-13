@@ -9,6 +9,8 @@ use fossil_ray_query, only : ray_hit_t, RAY_STATUS_OK, RAY_STATUS_BAD_INPUT
 use fossil_remesh, only : REM_STATUS_OK, REM_STATUS_BAD_INPUT
 use fossil_sdf, only : SDF_STATUS_OK, SDF_STATUS_BAD_INPUT, &
                        SDF_LABEL_UNASSIGNED, SDF_SENTINEL
+use fossil_alpha_wrap, only : AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, &
+                              AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
 use fossil_facet_object
 use fossil_marching_cubes, only : extract_isosurface, MC_STATUS_OK, MC_STATUS_BAD_DIMENSIONS
 use fossil_surface_stl_object
@@ -34,4 +36,6 @@ public :: ray_hit_t
 public :: RAY_STATUS_OK, RAY_STATUS_BAD_INPUT
 public :: SDF_STATUS_OK, SDF_STATUS_BAD_INPUT
 public :: SDF_LABEL_UNASSIGNED, SDF_SENTINEL
+public :: AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT
+public :: AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
 endmodule fossil

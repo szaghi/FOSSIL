@@ -40,15 +40,19 @@ public :: awrap_build_octree
 public :: awrap_classify_leaves
 public :: awrap_extract_surface
 public :: awrap_project_vertices
+public :: awrap_run
 public :: AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, AWRAP_STATUS_DEGENERATE
+public :: AWRAP_STATUS_NOT_CONVERGED
 public :: AWRAP_LEAF_FLAG_BOUNDARY, AWRAP_LEAF_FLAG_INTERIOR
 public :: AWRAP_LEAF_FLAG_EMPTY, AWRAP_LEAF_FLAG_INSIDE, AWRAP_LEAF_FLAG_OUTSIDE
 public :: AWRAP_MAX_DEPTH
 public :: AWRAP_DEFAULT_PROJECTION_ITERATIONS
+public :: AWRAP_DEFAULT_MAX_OUTER_ITERATIONS
 
 integer(I4P), parameter :: AWRAP_STATUS_OK         = 0_I4P
 integer(I4P), parameter :: AWRAP_STATUS_BAD_INPUT  = 1_I4P  !< Empty facet list, or alpha <= 0.
 integer(I4P), parameter :: AWRAP_STATUS_DEGENERATE = 2_I4P  !< Alpha > bbox diagonal: octree won't refine, output empty.
+integer(I4P), parameter :: AWRAP_STATUS_NOT_CONVERGED = 3_I4P  !< Outer-loop refinement hit max_iterations with vertices still outside ε.
 
 integer(I4P), parameter :: AWRAP_LEAF_FLAG_INTERIOR = 0_I4P  !< Step 1 only: leaf has no overlapping input facets (kept for back-compat in tests).
 integer(I4P), parameter :: AWRAP_LEAF_FLAG_BOUNDARY = 1_I4P  !< Leaf overlaps at least one input facet (barrier for step 2 flood fill).
@@ -65,6 +69,7 @@ integer(I4P), parameter :: AWRAP_INITIAL_CAPACITY = 1024_I4P !< Initial node-arr
 real(R8P),    parameter :: AWRAP_PADDING_FACTOR = 2.0_R8P    !< Octree root bbox padded by this * alpha along each axis (ensures corner seed is outside geometry).
 
 integer(I4P), parameter :: AWRAP_DEFAULT_PROJECTION_ITERATIONS = 3_I4P  !< Sync-update sweeps for vertex projection (Portaneri uses 2-3).
+integer(I4P), parameter :: AWRAP_DEFAULT_MAX_OUTER_ITERATIONS = 5_I4P    !< Max adaptive-refinement passes before giving up.
 real(R8P),    parameter :: AWRAP_VERTEX_DEDUP_TOL = 1.0e-9_R8P          !< Lex-sort vertex match tolerance (relative to bbox; rescaled at runtime).
 real(R8P),    parameter :: AWRAP_AREA_DROP_REVERT = 0.01_R8P             !< Revert per-vertex move if any incident triangle area drops below this fraction of pre-move.
 
@@ -1032,5 +1037,167 @@ contains
    n = e1%crossproduct(rhs=e2)
    a = 0.5_R8P * sqrt(n%dotproduct(rhs=n))
    endfunction triangle_area
+
+   subroutine awrap_run(input_facet, input_tree, alpha, offset, max_iterations, &
+                        wrapped_facets, status)
+   !< Step 5 (capstone): single-pass alpha-wrap pipeline (issue #18 §1.6 step 5).
+   !<
+   !< Pipeline:
+   !<   1. Build leaf-size-α octree (step 1).
+   !<   2. Classify INSIDE/OUTSIDE via flood fill (step 2).
+   !<   3. Extract wrap surface (step 3).
+   !<   4. Project vertices toward input within ε (step 4).
+   !<   5. Report convergence: if all vertex projection errors ≤ offset,
+   !<      status = OK. Otherwise status = NOT_CONVERGED (still returns the
+   !<      wrap, just acknowledges the Hausdorff bound wasn't met).
+   !<
+   !< **MVP scope note (deferred to §1.6b follow-up)**: the original spec
+   !< called for an adaptive-refinement outer loop that re-runs steps 2-4
+   !< after splitting BOUNDARY leaves whose vertices didn't snap within ε.
+   !< This MVP omits the loop because:
+   !<
+   !<   The face-quad extraction in step 3 is correct only on a
+   !<   uniform-depth octree. Adaptive refinement creates depth-differential
+   !<   leaves which produce T-junction edges in the extracted wrap surface
+   !<   (small children's quads abut one big quad on the unrefined
+   !<   neighbour) — non-manifold by construction. Even with 2:1 balance
+   !<   forcing depth-diff ≤ 1, the simple "one quad per face" extraction
+   !<   produces T-junctions on the 1-vs-4 face configuration. Closing the
+   !<   gap requires either proper adaptive dual contouring with vertex
+   !<   placement at the dual cell (Ju 2002 + manifold-preserving QEF, ~300
+   !<   LOC) or polygon fan-out at refinement transitions (~150 LOC).
+   !<   Either path is a substantial extension and properly belongs in
+   !<   §1.6b.
+   !<
+   !< For typical AMR-CFD use cases this MVP is fit for purpose: the wrap
+   !< at the user's chosen α is watertight, manifold, within
+   !< (alpha + offset) Hausdorff of the input, and produces volumes within
+   !< a few percent of the input on convex/closed inputs. Inputs with
+   !< holes or self-intersections still produce a wrap (no crash) but
+   !< watertightness is not guaranteed — same limitation that needs the
+   !< offset-isosurface barrier from full Portaneri.
+   !<
+   !< `max_iterations` parameter retained in the signature for API
+   !< stability across the future §1.6b upgrade; ignored in this MVP.
+   type(facet_object),              intent(in)            :: input_facet(:)
+   type(aabb_tree_object),          intent(in)            :: input_tree
+   real(R8P),                       intent(in)            :: alpha
+   real(R8P),                       intent(in)            :: offset
+   integer(I4P),                    intent(in),  optional :: max_iterations
+   type(facet_object), allocatable, intent(out)           :: wrapped_facets(:)
+   integer(I4P),                    intent(out), optional :: status
+   type(awrap_octree_t)                                   :: octree
+   integer(I4P)                                           :: ierr
+   real(R8P)                                              :: max_err
+   integer(I4P), allocatable                              :: leaves_to_refine(:)
+   integer(I4P)                                           :: n_to_refine
+
+   if (present(status)) status = AWRAP_STATUS_OK
+   if (present(max_iterations)) continue  ! reserved for §1.6b adaptive loop
+
+   call awrap_build_octree(facet=input_facet, alpha=alpha, octree=octree, status=ierr)
+   if (ierr /= AWRAP_STATUS_OK) then
+      allocate(wrapped_facets(0))
+      if (present(status)) status = ierr
+      return
+   endif
+   call awrap_classify_leaves(octree=octree, status=ierr)
+   if (ierr /= AWRAP_STATUS_OK) then
+      allocate(wrapped_facets(0))
+      if (present(status)) status = ierr
+      return
+   endif
+   call awrap_extract_surface(octree=octree, wrapped_facets=wrapped_facets, status=ierr)
+   if (ierr /= AWRAP_STATUS_OK) then
+      if (present(status)) status = ierr
+      return
+   endif
+   if (size(wrapped_facets, kind=I4P) == 0_I4P) return
+   call awrap_project_vertices(wrap_facets=wrapped_facets, input_facet=input_facet, &
+                               input_tree=input_tree, offset=offset, status=ierr)
+   if (ierr /= AWRAP_STATUS_OK) then
+      if (present(status)) status = ierr
+      return
+   endif
+
+   ! Convergence report (no refinement in MVP, just a status hint).
+   call collect_high_error_leaves(octree=octree, wrap_facets=wrapped_facets, &
+                                  input_facet=input_facet, input_tree=input_tree, &
+                                  offset=offset, leaves_to_refine=leaves_to_refine, &
+                                  n_to_refine=n_to_refine, max_err=max_err)
+   if (n_to_refine > 0_I4P .and. present(status)) status = AWRAP_STATUS_NOT_CONVERGED
+   if (allocated(leaves_to_refine)) deallocate(leaves_to_refine)
+   endsubroutine awrap_run
+
+   subroutine collect_high_error_leaves(octree, wrap_facets, input_facet, input_tree, &
+                                         offset, leaves_to_refine, n_to_refine, max_err)
+   !< For each wrap-mesh vertex, find its closest input point. If the gap
+   !< exceeds `offset`, locate the BOUNDARY octree leaf containing that
+   !< vertex and add it to the refinement set. Returns the de-duplicated
+   !< leaf list and the running max error (for progress reporting).
+   type(awrap_octree_t),       intent(in)             :: octree
+   type(facet_object),         intent(in)             :: wrap_facets(:)
+   type(facet_object),         intent(in)             :: input_facet(:)
+   type(aabb_tree_object),     intent(in)             :: input_tree
+   real(R8P),                  intent(in)             :: offset
+   integer(I4P), allocatable,  intent(out)            :: leaves_to_refine(:)
+   integer(I4P),               intent(out)            :: n_to_refine
+   real(R8P),                  intent(out)            :: max_err
+   integer(I4P)                                       :: nf, fi, vi
+   real(R8P)                                          :: dist_sq, dist
+   integer(I4P)                                       :: closest_facet, closest_region
+   type(vector_R8P)                                   :: vert
+   integer(I4P)                                       :: leaf_id, cap, k
+   integer(I4P), allocatable                          :: tmp(:)
+   logical                                            :: already_in
+
+   max_err = 0._R8P
+   nf = size(wrap_facets, kind=I4P)
+   cap = max(64_I4P, octree%n_boundary_leaves)
+   allocate(tmp(cap))
+   n_to_refine = 0_I4P
+   do fi = 1_I4P, nf
+      do vi = 1_I4P, 3_I4P
+         vert = wrap_facets(fi)%vertex(vi)
+         call input_tree%distance_tree_with_region(facet=input_facet, point=vert, &
+                                                   distance=dist_sq, closest_facet=closest_facet, &
+                                                   closest_region=closest_region)
+         dist = sqrt(max(dist_sq, 0._R8P))
+         if (dist > max_err) max_err = dist
+         if (dist <= offset) cycle
+         leaf_id = find_leaf_at_point(octree=octree, point=vert)
+         if (leaf_id <= 0_I4P) cycle
+         ! Only refine BOUNDARY leaves (those with input geometry to project onto).
+         ! INSIDE/OUTSIDE leaves don't carry input facets and refining them does
+         ! nothing useful in the next step-1-style subdivision.
+         if (octree%node(leaf_id)%leaf_flag /= AWRAP_LEAF_FLAG_BOUNDARY) cycle
+         ! Don't refine leaves that have hit the depth cap.
+         if (octree%node(leaf_id)%depth >= AWRAP_MAX_DEPTH) cycle
+         already_in = .false.
+         do k = 1_I4P, n_to_refine
+            if (tmp(k) == leaf_id) then
+               already_in = .true.
+               exit
+            endif
+         enddo
+         if (already_in) cycle
+         n_to_refine = n_to_refine + 1_I4P
+         if (n_to_refine > cap) then
+            block
+               integer(I4P), allocatable :: bigger(:)
+               allocate(bigger(2_I4P * cap))
+               bigger(1:cap) = tmp(1:cap)
+               call move_alloc(from=bigger, to=tmp)
+               cap = 2_I4P * cap
+            endblock
+         endif
+         tmp(n_to_refine) = leaf_id
+      enddo
+   enddo
+   allocate(leaves_to_refine(n_to_refine))
+   if (n_to_refine > 0_I4P) leaves_to_refine(1:n_to_refine) = tmp(1:n_to_refine)
+   deallocate(tmp)
+   endsubroutine collect_high_error_leaves
+
 
 endmodule fossil_alpha_wrap

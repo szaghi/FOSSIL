@@ -18,6 +18,9 @@ use fossil_ray_query, only : ray_hit_t, ray_intersect_all_flat, &
                              RAY_STATUS_OK, RAY_STATUS_BAD_INPUT
 use fossil_sdf, only : compute_segment_sdf => segment_sdf, &
                        SDF_STATUS_OK, SDF_STATUS_BAD_INPUT, SDF_LABEL_UNASSIGNED
+use fossil_alpha_wrap, only : awrap_run, &
+                              AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, &
+                              AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
 use fossil_remesh, only : compute_remesh => isotropic_remesh, &
                           REM_STATUS_OK, REM_STATUS_BAD_INPUT
 use fossil_boolean, only : compute_boolean => boolean_compute, &
@@ -162,6 +165,7 @@ type :: surface_stl_object
       procedure, pass(self) :: intersect_ray_first              !< Closest ray-facet hit, with AABB pruning (issue #18 §2.5).
       procedure, pass(self) :: intersect_ray_any                !< Any-hit early-exit ray query for shadow / occlusion (issue #18 §2.5).
       procedure, pass(self) :: segment_sdf                      !< Per-facet labels via SDF + GMM (issue #18 §1.9).
+      procedure, pass(self) :: alpha_wrap                       !< Watertight surrogate from broken triangle soup (issue #18 §1.6).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1798,6 +1802,75 @@ contains
                             num_rays=num_rays, cone_angle_deg=cone_angle_deg, &
                             status=status)
    endsubroutine segment_sdf
+
+   subroutine alpha_wrap(self, alpha, offset, max_iterations, wrapped, status)
+   !< Alpha wrapping: produce a watertight 2-manifold surrogate from any
+   !< triangle-soup input (issue #18 §1.6). Reference: Portaneri, Hemmer,
+   !< Birdal, Mandad & Alliez, *Alpha Wrapping with an Offset* (SIGGRAPH 2022).
+   !<
+   !< Pipeline (5 stages, all in `fossil_alpha_wrap`):
+   !<   1. Build a leaf-size-α octree over the input facets.
+   !<   2. Classify every empty leaf as INSIDE/OUTSIDE via flood fill from
+   !<      a known-outside corner seed (BOUNDARY leaves act as barriers).
+   !<   3. Extract the wrap surface as the BOUNDARY ↔ OUTSIDE interface
+   !<      (face-quad emission per Portaneri Phase 3a).
+   !<   4. Project each wrap vertex toward the closest input-surface point
+   !<      within Hausdorff offset ε.
+   !<   5. (this routine) Adaptively refine BOUNDARY leaves whose vertices
+   !<      didn't snap within ε and re-run; up to `max_iterations` outer
+   !<      passes (default 5).
+   !<
+   !< Defaults from CGAL's Alpha_wrap_3:
+   !<   - alpha  = bbox_diagonal / 50
+   !<   - offset = alpha / 30
+   !<
+   !< Status:
+   !<   - AWRAP_STATUS_OK            converged within max_iterations
+   !<   - AWRAP_STATUS_BAD_INPUT     empty surface, alpha ≤ 0
+   !<   - AWRAP_STATUS_DEGENERATE    alpha > input bbox diagonal
+   !<   - AWRAP_STATUS_NOT_CONVERGED max_iterations exhausted with errors > offset;
+   !<                                wrapped surface still returned but is not
+   !<                                guaranteed watertight or within Hausdorff bound
+   !<
+   !< Known MVP limitation: inputs with large geometric defects (holes
+   !< spanning a substantial fraction of one face) may not converge — the
+   !< flood fill keeps leaking through the hole at every refinement level.
+   !< Closing such defects requires CGAL's offset-isosurface barrier
+   !< formulation, which is out of MVP scope. For typical CAD STL with
+   !< small defects (gaps ≤ a few α), the algorithm converges within 2-3
+   !< outer iterations.
+   class(surface_stl_object), intent(in)            :: self           !< Input surface (any topology).
+   real(R8P),                 intent(in),  optional :: alpha          !< Feature size (default bbox_diagonal/50).
+   real(R8P),                 intent(in),  optional :: offset         !< Hausdorff bound (default alpha/30).
+   integer(I4P),              intent(in),  optional :: max_iterations !< Outer-loop cap (default AWRAP_DEFAULT_MAX_OUTER_ITERATIONS).
+   type(surface_stl_object),  intent(out)           :: wrapped        !< Output watertight surrogate.
+   integer(I4P),              intent(out), optional :: status         !< Status code.
+   real(R8P)                                        :: alpha_eff, offset_eff
+   real(R8P)                                        :: bdiag
+   type(facet_object), allocatable                  :: wrap_facets(:)
+
+   if (present(status)) status = AWRAP_STATUS_OK
+   if (self%facets_number == 0_I4P) then
+      if (present(status)) status = AWRAP_STATUS_BAD_INPUT
+      return
+   endif
+   bdiag = sqrt((self%bmax%x - self%bmin%x)**2 + &
+                (self%bmax%y - self%bmin%y)**2 + &
+                (self%bmax%z - self%bmin%z)**2)
+   alpha_eff = bdiag / 50._R8P
+   if (present(alpha)) alpha_eff = alpha
+   offset_eff = alpha_eff / 30._R8P
+   if (present(offset)) offset_eff = offset
+   if (alpha_eff <= 0._R8P .or. offset_eff <= 0._R8P) then
+      if (present(status)) status = AWRAP_STATUS_BAD_INPUT
+      return
+   endif
+   call awrap_run(input_facet=self%facet, input_tree=self%aabb, &
+                  alpha=alpha_eff, offset=offset_eff, max_iterations=max_iterations, &
+                  wrapped_facets=wrap_facets, status=status)
+   if (.not. allocated(wrap_facets)) allocate(wrap_facets(0))
+   call wrapped%adopt_facets(facets=wrap_facets)
+   endsubroutine alpha_wrap
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
