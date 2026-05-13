@@ -158,6 +158,7 @@ type :: surface_stl_object
       procedure, pass(self) :: isotropic_remesh                 !< Botsch-Kobbelt isotropic remeshing (issue #18 §1.7).
       procedure, pass(self) :: intersect_ray_all                !< All ray-facet hits, sorted by t (issue #18 §2.5).
       procedure, pass(self) :: intersect_ray_first              !< Closest ray-facet hit, with AABB pruning (issue #18 §2.5).
+      procedure, pass(self) :: intersect_ray_any                !< Any-hit early-exit ray query for shadow / occlusion (issue #18 §2.5).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1687,6 +1688,61 @@ contains
       endif
    endif
    endsubroutine intersect_ray_first
+
+   subroutine intersect_ray_any(self, ray_origin, ray_direction, max_t, found, status)
+   !< Any-hit early-exit ray query (issue #18 §2.5).
+   !<
+   !< Returns `found = .true.` as soon as any facet is intersected at parameter
+   !< `0 <= t <= max_t`. No record is kept of which facet or where — by design,
+   !< since the use cases (shadow rays, occlusion, conservative inside-tests)
+   !< only need a yes/no answer and the early-exit is the whole point.
+   !<
+   !< `max_t` is optional; when omitted, defaults to `MaxR8P` (any hit anywhere
+   !< along the forward half-ray). Pass `max_t = euclidean_distance_to_target`
+   !< to test whether anything occludes a target; with a unit-length direction,
+   !< `t` and Euclidean distance coincide.
+   class(surface_stl_object), intent(in)            :: self           !< Surface.
+   type(vector_R8P),          intent(in)            :: ray_origin     !< Ray origin.
+   type(vector_R8P),          intent(in)            :: ray_direction  !< Ray direction.
+   real(R8P),                 intent(in),  optional :: max_t          !< Upper t bound (default MaxR8P).
+   logical,                   intent(out)           :: found          !< True iff any hit in [0, max_t].
+   integer(I4P),              intent(out), optional :: status         !< Status code.
+   real(R8P)                                        :: cap            !< Effective max_t.
+   real(R8P)                                        :: dir_norm2      !< |dir|^2 for BAD_INPUT guard.
+   integer(I4P)                                     :: f              !< Fallback loop counter.
+   real(R8P)                                        :: t, u, v        !< Per-facet output (fallback).
+   logical                                          :: facet_hit      !< Per-facet flag (fallback).
+
+   found = .false.
+   if (present(status)) status = RAY_STATUS_OK
+   if (self%facets_number == 0_I4P) then
+      if (present(status)) status = RAY_STATUS_BAD_INPUT
+      return
+   endif
+   dir_norm2 = ray_direction%dotproduct(rhs=ray_direction)
+   if (dir_norm2 < 1.0e-30_R8P) then
+      if (present(status)) status = RAY_STATUS_BAD_INPUT
+      return
+   endif
+   cap = MaxR8P
+   if (present(max_t)) cap = max_t
+   if (cap < 0._R8P) return  ! Empty interval; trivially "no hit".
+   if (self%aabb%get_nodes_number() > 0_I4P) then
+      call self%aabb%intersect_ray_any_tree(facet=self%facet, ray_origin=ray_origin, &
+                                            ray_direction=ray_direction, max_t=cap, found=found)
+   else
+      ! Flat fallback: scan facets, exit on first hit in [0, cap].
+      do f = 1_I4P, self%facets_number
+         call self%facet(f)%intersect_ray(ray_origin=ray_origin, ray_direction=ray_direction, &
+                                          t=t, u=u, v=v, hit=facet_hit)
+         if (.not. facet_hit) cycle
+         if (t < 0._R8P) cycle
+         if (t > cap)    cycle
+         found = .true.
+         return
+      enddo
+   endif
+   endsubroutine intersect_ray_any
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.

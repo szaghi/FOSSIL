@@ -48,6 +48,7 @@ type :: aabb_node_object
       procedure, pass(self) :: ray_slab_interval           !< Return AABB-ray slab-intersection interval (issue #18 §2.5).
       procedure, pass(self) :: intersect_ray_all_facets    !< Append every t >= 0 hit on this node's facets (issue #18 §2.5).
       procedure, pass(self) :: intersect_ray_first_facets  !< Update closest hit using this node's facets (issue #18 §2.5).
+      procedure, pass(self) :: intersect_ray_any_facets    !< Early-exit any-hit on this node's facets (issue #18 §2.5).
       procedure, pass(self) :: facet_id                    !< Return the facets IDs list.
       procedure, pass(self) :: get_aabb_facets             !< Get AABB facets list.
       procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
@@ -290,6 +291,34 @@ contains
       hit%point    = ray_origin + t * ray_direction
    enddo
    endsubroutine intersect_ray_first_facets
+
+   subroutine intersect_ray_any_facets(self, facet, ray_origin, ray_direction, max_t, found)
+   !< Set `found = .true.` and return as soon as any facet on this node hits at
+   !< `0 <= t <= max_t` (issue #18 §2.5). No record kept; the caller only cares
+   !< about existence (shadow ray, occlusion test).
+   class(aabb_node_object), intent(in)    :: self           !< AABB node.
+   type(facet_object),      intent(in)    :: facet(:)       !< Facets list.
+   type(vector_R8P),        intent(in)    :: ray_origin     !< Ray origin.
+   type(vector_R8P),        intent(in)    :: ray_direction  !< Ray direction.
+   real(R8P),               intent(in)    :: max_t          !< Upper t bound (use MaxR8P for "any hit").
+   logical,                 intent(inout) :: found          !< Set true on first hit; left untouched otherwise.
+   integer(I4P)                           :: nf, f, fid     !< Counters.
+   real(R8P)                              :: t, u, v        !< Per-facet output.
+   logical                                :: facet_hit      !< Per-facet flag.
+
+   if (.not. allocated(self%aabb)) return
+   nf = self%aabb%facet_id%ids_number
+   do f = 1_I4P, nf
+      fid = self%aabb%facet_id%id(f)
+      call facet(fid)%intersect_ray(ray_origin=ray_origin, ray_direction=ray_direction, &
+                                    t=t, u=u, v=v, hit=facet_hit)
+      if (.not. facet_hit) cycle
+      if (t < 0._R8P) cycle
+      if (t > max_t)   cycle
+      found = .true.
+      return
+   enddo
+   endsubroutine intersect_ray_any_facets
 
    pure subroutine ray_slab_interval(self, ray_origin, ray_direction, t_near, t_far, do_intersect)
    !< Forward to `aabb%ray_slab_interval`. Returns `do_intersect = .false.` and a

@@ -7,8 +7,8 @@
 !<   - `intersect_ray_first%hit` matches `intersect_ray_all%hits(1)` whenever
 !<     the all-hits list is non-empty.
 !<
-!< Step 1 covers invariants 1..4 (cube-only sanity). Step 2 adds 5..7 to
-!< exercise the tree-accelerated path:
+!< Step 1 covers invariants 1..4 (cube-only sanity). Step 2 adds 5..7 for the
+!< tree-accelerated path. Step 3 adds 8..9 for the any-hit early-exit query:
 !<   5. Tree-vs-flat parity on bunny.stl. 100 deterministic random rays:
 !<      `intersect_ray_all` (which now goes through the AABB tree) must produce
 !<      hit lists bit-identical to the flat O(n) reference oracle
@@ -20,6 +20,15 @@
 !<      this validates the curved-mesh path independently of axis alignment.
 !<   7. `intersect_ray_first` matches `intersect_ray_all%hits(1)` on the
 !<      cube oblique ray (which gives a deterministic single best hit).
+!<   8. `intersect_ray_any` `max_t` boundary toggle. Cube + ray with a known
+!<      first-hit `t = 1.0`. With `max_t = 0.5` (below the hit), expect
+!<      `found = .false.`. With `max_t = 1.5` (above), expect `found = .true.`.
+!<      The exactly-on-boundary case `max_t = 1.0` should also be `.true.`
+!<      because the contract is `t <= max_t`.
+!<   9. `intersect_ray_any` ≡ `size(intersect_ray_all%hits) > 0` over the
+!<      same 100 random bunny rays from invariant 5. Cross-check between the
+!<      two query types — protects against a divergence where one accepts a
+!<      hit the other rejects (e.g. different `t < 0` filtering).
 !<
 !< Geometry note (cube fixture in src/tests/cube.stl spans [0,1]^3): each face
 !< is split along one of {y=z, x=z, x+y=1} (depending on the face). Test rays
@@ -50,9 +59,10 @@ real(R8P) :: sqrt3
 real(R8P) :: x, y, z, dx
 integer(I4P) :: status
 integer(I4P) :: i, j, k, r
-integer(I4P) :: n_diff
-logical :: has_hit
-logical :: are_tests_passed(7)
+integer(I4P) :: n_diff, n_any_diff
+logical :: has_hit, found_below, found_at, found_above
+logical :: any_tree, any_all
+logical :: are_tests_passed(9)
 
 real(R8P), parameter :: TOL    = 1.0e-12_R8P
 real(R8P), parameter :: TOL_FP = 1.0e-9_R8P  ! tree vs flat: identical math, but reordered → FP rounding
@@ -179,7 +189,37 @@ are_tests_passed(7) = has_hit                                       .and. &
                       (best_hit%facet_id == hits(1)%facet_id)       .and. &
                       (abs(best_hit%t - hits(1)%t) < TOL)
 
-print '(A,7L2)', 'per-case results: ', are_tests_passed
+! ---- Invariant 8: intersect_ray_any max_t boundary toggle.
+!      Same +X cube ray as invariant 1 — first hit is at t = 1.0.
+origin    = vector_R8P(-1._R8P, 0.3_R8P, 0.6_R8P)
+direction = ex_R8P
+call cube%intersect_ray_any(ray_origin=origin, ray_direction=direction, max_t=0.5_R8P, &
+                            found=found_below, status=status)
+call cube%intersect_ray_any(ray_origin=origin, ray_direction=direction, max_t=1.0_R8P, &
+                            found=found_at, status=status)
+call cube%intersect_ray_any(ray_origin=origin, ray_direction=direction, max_t=1.5_R8P, &
+                            found=found_above, status=status)
+print '(A,3L2)', 'inv 8 (any max_t toggle): below/at/above = ', found_below, found_at, found_above
+are_tests_passed(8) = (.not. found_below) .and. found_at .and. found_above
+
+! ---- Invariant 9: any-hit ≡ (size(all-hits) > 0) over the same 100 bunny rays.
+n_any_diff = 0_I4P
+do r = 1_I4P, N_RANDOM_RAYS
+   call cheap_random_origin_dir(seed=r, origin=origin, direction=direction)
+   call bunny%intersect_ray_any(ray_origin=origin, ray_direction=direction, &
+                                found=any_tree, status=status)
+   call bunny%intersect_ray_all(ray_origin=origin, ray_direction=direction, &
+                                hits=hits, status=status)
+   any_all = (size(hits, kind=I4P) > 0_I4P)
+   if (any_tree .neqv. any_all) then
+      n_any_diff = n_any_diff + 1_I4P
+      if (n_any_diff <= 3_I4P) print '(A,I0,A,L1,A,L1)', '   ray ', r, ' any/all mismatch any=', any_tree, ' all=', any_all
+   endif
+enddo
+print '(A,I0,A,I0,A)', 'inv 9 (any==(any-of-all)): ', N_RANDOM_RAYS - n_any_diff, '/', N_RANDOM_RAYS, ' rays match'
+are_tests_passed(9) = (n_any_diff == 0_I4P)
+
+print '(A,9L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 
 contains

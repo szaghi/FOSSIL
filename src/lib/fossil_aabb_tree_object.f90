@@ -130,6 +130,7 @@ type :: aabb_tree_object
       procedure, pass(self) :: ray_intersections_number    !< Return ray intersections number.
       procedure, pass(self) :: intersect_ray_all_tree      !< Tree-accelerated all-hits ray query (issue #18 §2.5).
       procedure, pass(self) :: intersect_ray_first_tree    !< Tree-accelerated first-hit ray query (issue #18 §2.5).
+      procedure, pass(self) :: intersect_ray_any_tree      !< Tree-accelerated any-hit ray query with early exit (issue #18 §2.5).
       procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB tree boxes geometry into Tecplot ascii file.
       procedure, pass(self) :: translate                   !< Translate AABB tree by delta.
       ! operators
@@ -145,6 +146,7 @@ type :: aabb_tree_object
       procedure, pass(self), private :: ray_intersections_number_node !< Return ray intersections number into a node of AABB tree.
       procedure, pass(self), private :: intersect_ray_all_node        !< Recursive driver behind intersect_ray_all_tree.
       procedure, pass(self), private :: intersect_ray_first_node      !< Recursive driver behind intersect_ray_first_tree.
+      procedure, pass(self), private :: intersect_ray_any_node        !< Recursive driver behind intersect_ray_any_tree.
 endtype aabb_tree_object
 
 contains
@@ -1407,6 +1409,64 @@ contains
       endif
    endassociate
    endsubroutine intersect_ray_first_node
+
+   subroutine intersect_ray_any_tree(self, facet, ray_origin, ray_direction, max_t, found)
+   !< Tree-accelerated any-hit ray query with early exit (issue #18 §2.5).
+   !<
+   !< Stops as soon as ANY facet on the surface is hit at `0 <= t <= max_t`.
+   !< Use cases: shadow rays (occlusion), point-in-mesh quick-rejection. Caller
+   !< passes `max_t = MaxR8P` to mean "any hit anywhere along the forward ray".
+   !<
+   !< Depth-first traversal — no best-first ordering needed because we stop on
+   !< the first hit found, regardless of `t`. Subtrees whose AABB the ray
+   !< misses or whose AABB-entry is past `max_t` are pruned.
+   class(aabb_tree_object), intent(in)  :: self           !< AABB tree.
+   type(facet_object),      intent(in)  :: facet(:)       !< Facets list.
+   type(vector_R8P),        intent(in)  :: ray_origin     !< Ray origin.
+   type(vector_R8P),        intent(in)  :: ray_direction  !< Ray direction.
+   real(R8P),               intent(in)  :: max_t          !< Upper t bound (parametric).
+   logical,                 intent(out) :: found          !< True iff at least one hit in [0, max_t].
+
+   found = .false.
+   call self%intersect_ray_any_node(n=0_I4P, facet=facet, ray_origin=ray_origin, &
+                                    ray_direction=ray_direction, max_t=max_t, found=found)
+   endsubroutine intersect_ray_any_tree
+
+   recursive subroutine intersect_ray_any_node(self, n, facet, ray_origin, ray_direction, max_t, found)
+   !< Depth-first early-exit recursion. Returns immediately once `found` is set.
+   class(aabb_tree_object), intent(in)    :: self           !< AABB tree.
+   integer(I4P),            intent(in)    :: n              !< Current AABB node.
+   type(facet_object),      intent(in)    :: facet(:)       !< Facets list.
+   type(vector_R8P),        intent(in)    :: ray_origin     !< Ray origin.
+   type(vector_R8P),        intent(in)    :: ray_direction  !< Ray direction.
+   real(R8P),               intent(in)    :: max_t          !< Upper t bound.
+   logical,                 intent(inout) :: found          !< Early-exit flag.
+   integer(I4P)                           :: child_idx(TREE_RATIO)
+   integer(I4P)                           :: nchild
+   integer(I4P)                           :: i
+   real(R8P)                              :: t_near, t_far
+   logical                                :: hits_box
+
+   if (found) return
+   associate(node=>self%node)
+      if (.not. node(n)%is_allocated()) return
+      call node(n)%ray_slab_interval(ray_origin=ray_origin, ray_direction=ray_direction, &
+                                     t_near=t_near, t_far=t_far, do_intersect=hits_box)
+      if (.not. hits_box) return
+      if (t_near > max_t) return  ! whole subtree begins past max_t
+      call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
+      if (nchild == 0_I4P) then
+         call node(n)%intersect_ray_any_facets(facet=facet, ray_origin=ray_origin, &
+                                               ray_direction=ray_direction, max_t=max_t, found=found)
+      else
+         do i = 1_I4P, nchild
+            if (found) return
+            call self%intersect_ray_any_node(n=child_idx(i), facet=facet, ray_origin=ray_origin, &
+                                             ray_direction=ray_direction, max_t=max_t, found=found)
+         enddo
+      endif
+   endassociate
+   endsubroutine intersect_ray_any_node
 
    pure subroutine sort_hits_by_t(hits)
    !< Insertion sort hits ascending by `t`. Hit counts are typically small (~2..20),
