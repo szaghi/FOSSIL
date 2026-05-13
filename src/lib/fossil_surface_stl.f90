@@ -11,6 +11,10 @@ use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil_winding_number, only : compute_winding_number => winding_number
 use fossil_self_intersection, only : intersection_pair_t, &
                                      compute_self_intersections => find_self_intersections
+use fossil_boolean, only : compute_boolean => boolean_compute, &
+                           BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF, &
+                           BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, &
+                           BOOL_STATUS_EMPTY_INPUT
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 use penf, only : I4P, I8P, R8P, MaxR8P, str
@@ -24,6 +28,8 @@ public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL
 public :: sign_algorithm_from_string
 public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL
 public :: STATUS_INVALID_INPUT
+public :: BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF
+public :: BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, BOOL_STATUS_EMPTY_INPUT
 
 ! Point-in-polyhedron algorithm selector for `is_point_inside`, `compute_distance`,
 ! and `distance` (when `is_signed=.true.`):
@@ -138,6 +144,8 @@ type :: surface_stl_object
       procedure, pass(self) :: is_point_inside_polyhedron_sa   !< Determinate if point is inside or not STL facets by solid angle.
       procedure, pass(self) :: winding_number                  !< Generalized / fast winding number at a query point (issue #18 §1.4).
       procedure, pass(self) :: find_self_intersections          !< Find all self-intersecting facet pairs (issue #18 §1.2).
+      procedure, pass(self) :: boolean                          !< Boolean op against another surface (issue #18 §1.1).
+      procedure, pass(self) :: resolve_self_intersections       !< Self-boolean union, closes §1.2's deferred resolution path.
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1303,6 +1311,61 @@ contains
    endif
    call compute_self_intersections(facet=self%facet, tree=self%aabb, pairs=pairs, status=status)
    endsubroutine find_self_intersections
+
+   subroutine boolean(self, other, op, status)
+   !< Boolean operation against another surface (issue #18 §1.1).
+   !<
+   !< On success, `self` is replaced by the result `op(self, other)`. Currently
+   !< only `BOOL_DIFFERENCE` is wired end-to-end; the other ops parse their
+   !< constants and return BOOL_STATUS_NOT_IMPLEMENTED so callers can detect
+   !< the gap cleanly.
+   !<
+   !< Pipeline: arrangement_initialize → collect_intersections → retriangulate
+   !< (CDT-based) → tag_and_select (winding-number per sub-triangle) → adopt
+   !< into `self`. Both surfaces must have their AABB tree built (true after
+   !< `load_from_file`, `analyze`, or `adopt_facets`).
+   !<
+   !< @note Pre-conditions for clean output:
+   !<       - both inputs are watertight, manifold solids
+   !<       - both have outward-oriented normals (run `sanitize_normals` first)
+   !<       - cuts between A and B do not produce inputs that trip the CDT's
+   !<         convex-flip-greedy recovery (see fossil_dt docstring); on
+   !<         degenerate inputs, returns BOOL_STATUS_CDT_FAILED.
+   class(surface_stl_object),     intent(inout)        :: self     !< Surface A; replaced by `op(A, B)` on success.
+   class(surface_stl_object),     intent(in)           :: other    !< Surface B.
+   integer(I4P),                  intent(in)           :: op       !< BOOL_UNION / BOOL_INTERSECT / BOOL_DIFFERENCE / BOOL_SYMDIFF.
+   integer(I4P),                  intent(out), optional :: status  !< BOOL_STATUS_*.
+   type(facet_object), allocatable                     :: kept(:)
+   integer(I4P)                                        :: bool_status
+
+   call compute_boolean(facet_a=self%facet,  tree_a=self%aabb, &
+                        facet_b=other%facet, tree_b=other%aabb, &
+                        op=op, kept_facet=kept, status=bool_status)
+   if (present(status)) status = bool_status
+   if (bool_status /= BOOL_STATUS_OK) return
+
+   ! Adopt the result into self. `adopt_facets` re-runs `analyze` so the
+   ! AABB tree, connectivity, and pseudo-normals are rebuilt for queries.
+   call self%adopt_facets(facets=kept)
+   endsubroutine boolean
+
+   subroutine resolve_self_intersections(self, status)
+   !< Self-boolean union — closes the §1.2 deferred resolution path.
+   !<
+   !< Runs `boolean(self, self, BOOL_UNION)`: the arrangement collects every
+   !< self-crossing as if A and B were the same surface; the union selection
+   !< rule keeps only the outer manifold, dropping interior cavities formed
+   !< by the self-intersections. Result is a self-intersection-free version
+   !< of the input.
+   !<
+   !< @note Returns BOOL_STATUS_NOT_IMPLEMENTED until BOOL_UNION lands in a
+   !<       follow-up PR. This stub exists so the API surface matches what
+   !<       §1.2 promised, and so callers can detect the gap.
+   class(surface_stl_object),     intent(inout)        :: self
+   integer(I4P),                  intent(out), optional :: status
+
+   call self%boolean(other=self, op=BOOL_UNION, status=status)
+   endsubroutine resolve_self_intersections
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.

@@ -497,6 +497,17 @@ contains
    !<      is the overlap of the two intervals.
    !<
    !< @note Both facets' metrix must be already computed (`compute_metrix`).
+   !<
+   !< Known limitation (issue #18 §1.1): when one triangle has an *edge* lying on
+   !< the other triangle's plane (the "T-junction" or "shared boundary" case),
+   !< the 1D-interval overlap can return a segment whose endpoints lie outside
+   !< one of the two triangles. The §1.2 self-intersection use case tolerates
+   !< this (it just records facet pairs); the §1.1 boolean use case must
+   !< therefore avoid configurations that hit this case (e.g. cubes offset
+   !< along a single axis where pairs of faces become coplanar — instead use
+   !< an offset along all three axes so no faces or edges align).
+   !< The clean fix is to clip the returned segment against both triangles'
+   !< 2D projections; deferred as future work.
    class(facet_object), intent(in)  :: self        !< First facet (this).
    type(facet_object),  intent(in)  :: other       !< Second facet.
    type(vector_R8P),    intent(out) :: p           !< Intersection segment start.

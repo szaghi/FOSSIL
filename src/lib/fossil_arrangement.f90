@@ -37,12 +37,16 @@ module fossil_arrangement
 !<   stage 5 (next PR — stitch):
 !<     adopt selected triangles back into a surface_stl_object, run sanitize_normals.
 !<
-!< This module ships only stage 1. The cut-list output is exposed as a public
-!< type so the next PR can wire stages 2-5 against it without changing this
-!< module.
+!< This module now provides stages 1 and 2 (initialization, intersection
+!< collection, retriangulation). Stages 3-5 (WN tagging, op-specific
+!< selection, stitching) live in the boolean driver — see
+!< `surface_stl_object%boolean`.
 
 use fossil_aabb_node_object, only : aabb_node_object
 use fossil_aabb_tree_object, only : aabb_tree_object
+use fossil_dt,               only : triangulation_t, cdt_build, &
+                                    DT_STATUS_OK, DT_STATUS_RECOVERY_FAILED, &
+                                    DT_STATUS_CROSSING_CONSTRAINTS
 use fossil_facet_object,     only : facet_object
 use fossil_list_id_object,   only : list_id_object
 use fossil_utils,            only : EPS
@@ -55,10 +59,16 @@ public :: cut_list_t
 public :: arrangement_t
 public :: arrangement_initialize
 public :: arrangement_collect_intersections
+public :: arrangement_retriangulate
 public :: project_to_plane
 public :: lift_from_plane
+public :: ARR_STATUS_OK, ARR_STATUS_CDT_FAILED
 
 integer(I4P), parameter :: MAX_CHILDREN = 8_I4P  !< Buffer size for `enumerate_children` (octree fan-out).
+
+! Status codes for arrangement_retriangulate.
+integer(I4P), parameter :: ARR_STATUS_OK         = 0_I4P  !< Retriangulation completed successfully.
+integer(I4P), parameter :: ARR_STATUS_CDT_FAILED = 1_I4P  !< CDT could not recover one or more constraint segments.
 
 type :: cut_list_t
    !< Per-facet list of intersection-segment endpoints in **3D world** coordinates.
@@ -371,5 +381,217 @@ contains
    v_axis  = facet%normal%crossproduct(rhs=e12_hat)
    p3d     = facet%vertex(1) + e12_hat * u + v_axis * v
    endsubroutine lift_from_plane
+
+   subroutine arrangement_retriangulate(arr, sub_facet, sub_owner, sub_source, status)
+   !< Walk every facet in `arr`; for those with non-empty cuts, retriangulate
+   !< them along the cut segments using the constrained Delaunay triangulator
+   !< (`fossil_dt%cdt_build`). Facets with no cuts pass through unchanged.
+   !<
+   !< Output is a flat parallel-array trio:
+   !<   - `sub_facet(:)`  — every emitted sub-triangle (or pass-through facet),
+   !<                       with `compute_metrix` already called.
+   !<   - `sub_owner(:)`  — 1 if the sub-triangle came from surface A, 2 from B
+   !<                       (inherited from the parent facet's owner tag).
+   !<   - `sub_source(:)` — global index of the parent facet in `arr%facet`,
+   !<                       so callers can trace each sub-triangle back to its
+   !<                       origin if needed.
+   !<
+   !< Per-facet algorithm:
+   !<   1. Project the 3 facet vertices into the facet's local 2D frame
+   !<      (project_to_plane). They become CDT input points 1, 2, 3.
+   !<   2. For each cut segment (p, q): project both endpoints to 2D, dedup
+   !<      against existing input points (within EPS in 2D), append the
+   !<      surviving new points; record (idx_p, idx_q) as a CDT constraint.
+   !<   3. Run cdt_build with the 2D points + segment constraints. Status
+   !<      DT_STATUS_RECOVERY_FAILED bubbles up as ARR_STATUS_CDT_FAILED so
+   !<      the boolean driver can decide how to handle it.
+   !<   4. For each output sub-triangle, lift its 3 vertices back to 3D via
+   !<      lift_from_plane, build a fresh facet_object, copy the parent's
+   !<      normal (the lift preserves the plane, so all sub-facets share the
+   !<      parent's normal direction), call compute_metrix, append to output.
+   !<
+   !< Pass-through (empty cuts) emits the parent facet unchanged. We deep-copy
+   !< via intrinsic assignment so downstream selection can mutate without
+   !< aliasing back into `arr`.
+   type(arrangement_t),             intent(in)            :: arr
+   type(facet_object), allocatable, intent(out)           :: sub_facet(:)
+   integer(I4P),       allocatable, intent(out)           :: sub_owner(:)
+   integer(I4P),       allocatable, intent(out)           :: sub_source(:)
+   integer(I4P),                    intent(out), optional :: status
+   integer(I4P)                                           :: gi, i, k, n_total, n_pts, n_segs, n_cuts
+   integer(I4P)                                           :: cdt_status, sub_v(3), n_sub
+   real(R8P), allocatable                                 :: pts2d(:,:)
+   integer(I4P), allocatable                              :: segs(:,:)
+   type(triangulation_t)                                  :: tri
+   type(vector_R8P)                                       :: p3d
+   real(R8P)                                              :: u, v
+   integer(I4P)                                           :: idx_p, idx_q
+   ! Output accumulator, doubled on demand.
+   type(facet_object), allocatable                        :: buf_facet(:)
+   integer(I4P),       allocatable                        :: buf_owner(:), buf_source(:)
+   integer(I4P)                                           :: cap, used
+
+   if (present(status)) status = ARR_STATUS_OK
+
+   ! Initial accumulator capacity — most facets pass through, so we grow
+   ! geometrically from the original facet count.
+   n_total = arr%n_a + arr%n_b
+   cap = max(64_I4P, n_total)
+   allocate(buf_facet(cap), buf_owner(cap), buf_source(cap))
+   used = 0_I4P
+
+   do gi = 1, n_total
+      n_cuts = arr%cut(gi)%n_segments
+
+      if (n_cuts == 0_I4P) then
+         ! Pass-through.
+         call push(buf_facet, buf_owner, buf_source, used, cap, &
+                   arr%facet(gi), arr%owner(gi), gi)
+         cycle
+      endif
+
+      ! --- Build CDT input: 3 facet vertices + cut endpoints (deduped). ---
+      ! Maximum points = 3 + 2 * n_cuts ; segments = n_cuts.
+      n_pts = 0_I4P ; n_segs = 0_I4P
+      if (allocated(pts2d)) deallocate(pts2d)
+      if (allocated(segs))  deallocate(segs)
+      allocate(pts2d(2, 3 + 2 * n_cuts))
+      allocate(segs(2, n_cuts))
+
+      ! Three facet vertices first (so they keep stable indices 1, 2, 3).
+      do i = 1, 3
+         call project_to_plane(facet=arr%facet(gi), p3d=arr%facet(gi)%vertex(i), &
+                               u=pts2d(1, i), v=pts2d(2, i))
+      enddo
+      n_pts = 3_I4P
+
+      ! Cut endpoints: project, dedup against existing points (within EPS),
+      ! record (start_idx, end_idx) as a constraint segment.
+      do k = 1, n_cuts
+         call project_to_plane(facet=arr%facet(gi), p3d=arr%cut(gi)%point(2*k - 1), u=u, v=v)
+         idx_p = find_or_append_2d(pts2d=pts2d, n_pts=n_pts, x=u, y=v)
+         call project_to_plane(facet=arr%facet(gi), p3d=arr%cut(gi)%point(2*k), u=u, v=v)
+         idx_q = find_or_append_2d(pts2d=pts2d, n_pts=n_pts, x=u, y=v)
+         if (idx_p == idx_q) cycle  ! degenerate zero-length cut after dedup
+         n_segs = n_segs + 1
+         segs(1, n_segs) = idx_p
+         segs(2, n_segs) = idx_q
+      enddo
+
+      ! --- Run CDT. ---
+      call cdt_build(tri=tri, points=pts2d(:, 1:n_pts), segments=segs(:, 1:n_segs), status=cdt_status)
+      if (cdt_status /= DT_STATUS_OK) then
+         ! Recovery failed for this facet's cuts. We could fall back to the
+         ! original facet (better than nothing) or propagate the error. The
+         ! boolean driver treats this as a global failure so the user knows
+         ! the result is incorrect rather than silently degraded.
+         if (present(status)) status = ARR_STATUS_CDT_FAILED
+         return
+      endif
+
+      ! --- Emit sub-triangles. ---
+      n_sub = tri%num_triangles()
+      do k = 1, n_sub
+         call tri%triangle_vertices(k=k, v=sub_v)
+         call build_subfacet_from_uv(arr=arr, gi=gi, pts2d=pts2d, sub_v=sub_v, &
+                                     buf_facet=buf_facet, buf_owner=buf_owner, &
+                                     buf_source=buf_source, used=used, cap=cap)
+      enddo
+   enddo
+
+   ! Trim accumulators to exact size.
+   allocate(sub_facet (used))
+   allocate(sub_owner (used))
+   allocate(sub_source(used))
+   sub_facet (1:used) = buf_facet (1:used)
+   sub_owner (1:used) = buf_owner (1:used)
+   sub_source(1:used) = buf_source(1:used)
+   endsubroutine arrangement_retriangulate
+
+   function find_or_append_2d(pts2d, n_pts, x, y) result(idx)
+   !< Look up (x, y) in `pts2d(:, 1:n_pts)` within EPS; if found return its
+   !< index, otherwise append and return the new index. EPS comparison in
+   !< 2D — caller must ensure facet's local frame uses comparable scale.
+   real(R8P),    intent(inout) :: pts2d(:, :)
+   integer(I4P), intent(inout) :: n_pts
+   real(R8P),    intent(in)    :: x, y
+   integer(I4P)                :: idx
+   integer(I4P)                :: i
+
+   do i = 1, n_pts
+      if (abs(pts2d(1, i) - x) <= EPS .and. abs(pts2d(2, i) - y) <= EPS) then
+         idx = i ; return
+      endif
+   enddo
+   n_pts = n_pts + 1
+   pts2d(1, n_pts) = x
+   pts2d(2, n_pts) = y
+   idx = n_pts
+   endfunction find_or_append_2d
+
+   subroutine build_subfacet_from_uv(arr, gi, pts2d, sub_v, buf_facet, buf_owner, &
+                                     buf_source, used, cap)
+   !< Lift one CDT sub-triangle (vertex indices into pts2d) back to 3D as a
+   !< facet, inheriting the parent facet's normal, then push to the output
+   !< accumulator.
+   type(arrangement_t),             intent(in)    :: arr
+   integer(I4P),                    intent(in)    :: gi
+   real(R8P),                       intent(in)    :: pts2d(:, :)
+   integer(I4P),                    intent(in)    :: sub_v(3)
+   type(facet_object), allocatable, intent(inout) :: buf_facet(:)
+   integer(I4P),       allocatable, intent(inout) :: buf_owner(:), buf_source(:)
+   integer(I4P),                    intent(inout) :: used, cap
+   type(facet_object)                             :: f
+   type(vector_R8P)                               :: p3d
+   integer(I4P)                                   :: i
+
+   do i = 1, 3
+      call lift_from_plane(facet=arr%facet(gi), &
+                           u=pts2d(1, sub_v(i)), v=pts2d(2, sub_v(i)), p3d=p3d)
+      f%vertex(i) = p3d
+   enddo
+   ! Inherit parent's normal direction (the lift preserves the plane, so the
+   ! geometric normal will be ±parent's normal; copying it sets the orientation
+   ! correctly for sub-triangles emitted in the same CCW sense as the CDT).
+   f%normal = arr%facet(gi)%normal
+   call f%compute_metrix
+   ! `compute_metrix` recomputes the normal from vertex order; if it ended up
+   ! anti-parallel to the parent (i.e. the CDT emitted the sub-triangle in
+   ! CW order relative to the parent's outward normal), flip to restore.
+   if (f%normal%dotproduct(rhs=arr%facet(gi)%normal) < 0._R8P) then
+      call f%reverse_normal
+      call f%compute_metrix
+   endif
+   call push(buf_facet, buf_owner, buf_source, used, cap, f, arr%owner(gi), gi)
+   endsubroutine build_subfacet_from_uv
+
+   subroutine push(buf_facet, buf_owner, buf_source, used, cap, f, owner, source)
+   !< Append (f, owner, source) to the parallel-array accumulator, doubling
+   !< capacity on overflow.
+   type(facet_object), allocatable, intent(inout) :: buf_facet(:)
+   integer(I4P),       allocatable, intent(inout) :: buf_owner(:), buf_source(:)
+   integer(I4P),                    intent(inout) :: used, cap
+   type(facet_object),              intent(in)    :: f
+   integer(I4P),                    intent(in)    :: owner, source
+   type(facet_object), allocatable                :: tmp_f(:)
+   integer(I4P),       allocatable                :: tmp_i(:)
+
+   if (used == cap) then
+      cap = 2 * cap
+      allocate(tmp_f(cap))
+      tmp_f(1:used) = buf_facet(1:used)
+      call move_alloc(from=tmp_f, to=buf_facet)
+      allocate(tmp_i(cap))
+      tmp_i(1:used) = buf_owner(1:used)
+      call move_alloc(from=tmp_i, to=buf_owner)
+      allocate(tmp_i(cap))
+      tmp_i(1:used) = buf_source(1:used)
+      call move_alloc(from=tmp_i, to=buf_source)
+   endif
+   used = used + 1
+   buf_facet (used) = f
+   buf_owner (used) = owner
+   buf_source(used) = source
+   endsubroutine push
 
 endmodule fossil_arrangement
