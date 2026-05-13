@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.6] — 2026-05-13
+### Added
+- **predicates,arrangement**: Boolean foundation (issue #18 §1.1 stage 1)
+
+- **dt**: 2D Delaunay triangulation, Phase 1 (issue #18 §1.1 stage 2)
+
+- **dt**: Constrained Delaunay triangulation, Phase 2 (issue #18 §1.1 stage 2)
+
+- **boolean**: Mesh-mesh booleans, BOOL_DIFFERENCE MVP (issue #18 §1.1)
+
+- **facet**: Clip tri-tri intersection segments to both triangles (issue #18 §1.1)
+
+- **boolean**: Coplanar-aware shared-boundary tagging (issue #18 §1.1)
+
+- **boolean**: Wire UNION/INTERSECT/SYMDIFF + complete §1.1 (issue #18 §1.1)
+
+
 ## [1.2.5] — 2026-05-13
 ### Added
 - **surface**: Add self-intersection detection (issue #18 §1.2)
