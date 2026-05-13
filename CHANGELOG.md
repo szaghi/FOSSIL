@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.11] — 2026-05-13
+### Added
+- **fossil**: Implement SDF functionality with AABB tree ray query and test coverage
+
+- **sdf**: Implement Laplacian smoothing for SDF values with test coverage
+
+- **sdf,surface**: Step 3 — GMM clustering + segment_sdf TBP (issue #18 §1.9)
+
+
 ## [1.2.10] — 2026-05-13
 ### Added
 - **fossil**: Implement ray query functionality with test coverage
