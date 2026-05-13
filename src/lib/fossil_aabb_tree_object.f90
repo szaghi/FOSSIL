@@ -136,7 +136,7 @@ type :: aabb_tree_object
       final :: aabb_tree_finalize
       ! private methods
       procedure, pass(self), private :: build_bvh_sah                 !< Build a SAH BVH over the given facet list.
-      procedure, pass(self), private :: enumerate_children            !< List the allocated children of a node (octree or BVH).
+      procedure, pass(self) :: enumerate_children                    !< List the allocated children of a node (octree or BVH).
       procedure, pass(self), private :: distance_node                 !< Update best squared distance by recursing into a node.
       procedure, pass(self), private :: distance_node_with_region     !< Update (best d^2, best facet id, best region) by recursing into a node.
       procedure, pass(self), private :: ray_intersections_number_node !< Return ray intersections number into a node of AABB tree.

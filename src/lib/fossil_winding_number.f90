@@ -44,7 +44,7 @@ public :: winding_number
 
 real(R8P), parameter :: FOUR_PI         = 4._R8P * PI
 real(R8P), parameter :: DEFAULT_BETA    = 2._R8P
-integer(I4P), parameter :: TREE_RATIO_LOCAL = 8_I4P  !< Octree fan-out, mirrors fossil_aabb_tree_object.
+integer(I4P), parameter :: MAX_CHILDREN = 8_I4P  !< Buffer size for `enumerate_children` output (octree fan-out).
 
 type :: dipole_cache_t
    !< Per-node cache for the Barnes-Hut style winding-number traversal.
@@ -136,7 +136,7 @@ contains
    integer(I4P),           intent(in)            :: n        !< Node index.
    type(dipole_cache_t),   intent(inout)         :: cache(0:) !< Per-node cache.
    type(aabb_node_object), pointer               :: node     !< Pointer to node n.
-   integer(I4P)                                  :: child_idx(TREE_RATIO_LOCAL), nchild, c, fid, k
+   integer(I4P)                                  :: child_idx(MAX_CHILDREN), nchild, c, fid, k
    type(list_id_object)                          :: ids
    type(vector_R8P)                              :: bmin, bmax
    type(vector_R8P)                              :: dipole_acc
@@ -153,7 +153,7 @@ contains
    cache(n)%diag2 = diag%dotproduct(rhs=diag)
 
    ! Recurse into children first.
-   call enumerate_children_local(tree=tree, n=n, out_idx=child_idx, nchild=nchild)
+   call tree%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
    do c = 1, nchild
       call build_cache(facet=facet, tree=tree, n=child_idx(c), cache=cache)
    enddo
@@ -184,39 +184,6 @@ contains
    cache(n)%ready  = .true.
    endsubroutine build_cache
 
-   subroutine enumerate_children_local(tree, n, out_idx, nchild)
-   !< Local replica of `aabb_tree_object%enumerate_children` (which is private to
-   !< its module). Lists allocated children of node `n`, dispatching on tree kind.
-   type(aabb_tree_object), intent(in)  :: tree       !< AABB tree.
-   integer(I4P),           intent(in)  :: n          !< Node index.
-   integer(I4P),           intent(out) :: out_idx(:) !< Output: child indices, caller buffer >= TREE_RATIO_LOCAL.
-   integer(I4P),           intent(out) :: nchild     !< Number of allocated children.
-   type(aabb_node_object), pointer     :: node, child
-   integer(I4P)                        :: lc, rc, fcn, i
-
-   nchild = 0
-   node => tree%node_at(i=n)
-   if (.not. associated(node)) return
-
-   if (tree%get_tree_kind() == AABB_TREE_SAH_BVH) then
-      lc = node%get_left_child() ; rc = node%get_right_child()
-      if (lc > 0) then ; nchild = nchild + 1 ; out_idx(nchild) = lc ; endif
-      if (rc > 0) then ; nchild = nchild + 1 ; out_idx(nchild) = rc ; endif
-   else
-      ! Octree implicit indexing: first_child = TREE_RATIO * parent + 1.
-      fcn = TREE_RATIO_LOCAL * n + 1
-      if (fcn > tree%get_nodes_number() - TREE_RATIO_LOCAL) return
-      do i = fcn, fcn + TREE_RATIO_LOCAL - 1
-         child => tree%node_at(i=i)
-         if (.not. associated(child)) cycle
-         if (child%is_allocated()) then
-            nchild = nchild + 1
-            out_idx(nchild) = i
-         endif
-      enddo
-   endif
-   endsubroutine enumerate_children_local
-
    recursive subroutine traverse(facet, tree, n, point, beta2, cache, omega)
    !< Walk the tree adding solid-angle contributions from node `n`'s subtree.
    !<
@@ -234,7 +201,7 @@ contains
    real(R8P),              intent(inout)         :: omega
    type(aabb_node_object), pointer               :: node
    type(list_id_object)                          :: ids
-   integer(I4P)                                  :: child_idx(TREE_RATIO_LOCAL), nchild, c, k, fid
+   integer(I4P)                                  :: child_idx(MAX_CHILDREN), nchild, c, k, fid
    type(vector_R8P)                              :: r
    real(R8P)                                     :: r2, r1, inv_r3, dot
    logical                                       :: is_leaf
@@ -265,7 +232,7 @@ contains
       enddo
    endif
 
-   call enumerate_children_local(tree=tree, n=n, out_idx=child_idx, nchild=nchild)
+   call tree%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
    is_leaf = (nchild == 0)
    if (is_leaf) return
 

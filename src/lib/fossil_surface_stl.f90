@@ -9,6 +9,8 @@ use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil_winding_number, only : compute_winding_number => winding_number
+use fossil_self_intersection, only : intersection_pair_t, &
+                                     compute_self_intersections => find_self_intersections
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 use penf, only : I4P, I8P, R8P, MaxR8P, str
@@ -17,6 +19,7 @@ use vecfor, only : ex_R8P, ey_R8P, ez_R8P, mirror_matrix_R8P, rotation_matrix_R8
 implicit none
 private
 public :: surface_stl_object
+public :: intersection_pair_t
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL
 public :: sign_algorithm_from_string
 public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL
@@ -134,6 +137,7 @@ type :: surface_stl_object
       procedure, pass(self) :: is_point_inside_polyhedron_ri   !< Determinate if point is inside or not STL facets by ray intersect.
       procedure, pass(self) :: is_point_inside_polyhedron_sa   !< Determinate if point is inside or not STL facets by solid angle.
       procedure, pass(self) :: winding_number                  !< Generalized / fast winding number at a query point (issue #18 §1.4).
+      procedure, pass(self) :: find_self_intersections          !< Find all self-intersecting facet pairs (issue #18 §1.2).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1272,6 +1276,33 @@ contains
    endif
    w = compute_winding_number(facet=self%facet, tree=self%aabb, point=point, beta=beta)
    endfunction winding_number
+
+   subroutine find_self_intersections(self, pairs, status)
+   !< Find all self-intersecting facet pairs in the surface (issue #18 §1.2).
+   !<
+   !< On return:
+   !<   - `pairs` is allocated with exactly the number of intersections found
+   !<     (zero-length allocation if none, never unallocated).
+   !<   - Each record carries the pair of facet ids (`a < b`) and the 3D
+   !<     intersection segment endpoints `p`, `q`.
+   !<   - Adjacent facets (sharing a vertex or edge) are filtered — they
+   !<     "intersect" only at the shared feature, which is not a defect.
+   !<
+   !< Performance:
+   !<   - Broad phase via tree-vs-tree traversal on the existing AABB tree
+   !<     (O(N log N) on typical inputs, both BVH and octree kinds).
+   !<   - Falls back to O(N^2) brute force if the tree is not initialized.
+   class(surface_stl_object),                     intent(in)            :: self     !< Surface.
+   type(intersection_pair_t), allocatable,        intent(out)           :: pairs(:) !< Output: list of intersection records.
+   integer(I4P),                                  intent(out), optional :: status   !< 0 on success.
+
+   if (self%facets_number <= 0) then
+      allocate(pairs(0))
+      if (present(status)) status = 0_I4P
+      return
+   endif
+   call compute_self_intersections(facet=self%facet, tree=self%aabb, pairs=pairs, status=status)
+   endsubroutine find_self_intersections
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.

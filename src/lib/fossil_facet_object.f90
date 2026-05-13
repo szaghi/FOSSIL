@@ -65,6 +65,7 @@ type :: facet_object
       procedure, pass(self) :: destroy                         !< Destroy facet.
       procedure, pass(self) :: destroy_connectivity            !< Destroy facet connectivity.
       procedure, pass(self) :: do_ray_intersect                !< Return true if facet is intersected by a ray.
+      procedure, pass(self) :: intersect_facet                 !< Return tri-tri intersection segment with another facet (issue #18 §1.2).
       procedure, pass(self) :: initialize                      !< Initialize facet.
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: load_from_file_ascii            !< Load facet from ASCII file.
@@ -476,6 +477,210 @@ contains
    t = f * self%E13.dot.q
    if (t > EPS) intersect = .true.
    endfunction do_ray_intersect
+
+   pure subroutine intersect_facet(self, other, p, q, intersects)
+   !< Triangle-triangle intersection test (Möller 1997, "A Fast Triangle-Triangle
+   !< Intersection Test", JGT 2(2)).
+   !<
+   !< Returns `intersects = .true.` and the segment endpoints `p`, `q` when the two
+   !< triangles cross transversally. Coplanar overlap and degenerate / shared-feature
+   !< intersections (segment length below EPS) return `intersects = .false.` — those
+   !< cases are filtered upstream by the adjacency check, and treating them here as
+   !< non-intersections matches what §1.2's "real geometric self-intersection"
+   !< definition wants.
+   !<
+   !< Algorithm sketch:
+   !<   1. Reject if `other`'s vertices are all on the same side of `self`'s plane,
+   !<      or vice versa (two cheap sign tests).
+   !<   2. Otherwise the two triangles share the line `L = N_self x N_other`. Project
+   !<      both triangles onto L; each yields a 1D interval. The intersection segment
+   !<      is the overlap of the two intervals.
+   !<
+   !< @note Both facets' metrix must be already computed (`compute_metrix`).
+   class(facet_object), intent(in)  :: self        !< First facet (this).
+   type(facet_object),  intent(in)  :: other       !< Second facet.
+   type(vector_R8P),    intent(out) :: p           !< Intersection segment start.
+   type(vector_R8P),    intent(out) :: q           !< Intersection segment end.
+   logical,             intent(out) :: intersects  !< True if the triangles cross transversally.
+   real(R8P)                        :: dself(3)    !< Signed distances of `other`'s vertices to `self`'s plane.
+   real(R8P)                        :: doth(3)     !< Signed distances of `self`'s vertices to `other`'s plane.
+   type(vector_R8P)                 :: D           !< Intersection-line direction = N_self x N_other.
+   real(R8P)                        :: D_abs(3)    !< |D| component-wise, for axis-of-projection selection.
+   real(R8P)                        :: pv_self(3)  !< Projection of `self`'s vertices onto axis.
+   real(R8P)                        :: pv_oth(3)   !< Projection of `other`'s vertices onto axis.
+   real(R8P)                        :: t_self(2), t_oth(2) !< 1D intervals on the intersection line.
+   real(R8P)                        :: tlo, thi    !< Overlap interval.
+   integer(I4P)                     :: axis        !< Index of the largest |D| component.
+   integer(I4P)                     :: i
+
+   intersects = .false.
+   p = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   q = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+
+   ! Step 1a: signed distances of `other`'s vertices to `self`'s plane (n.x - d).
+   do i = 1, 3
+      dself(i) = self%normal%dotproduct(rhs=other%vertex(i)) - self%d
+   enddo
+   if (all(dself >  EPS)) return  ! all on positive side
+   if (all(dself < -EPS)) return  ! all on negative side
+   if (all(abs(dself) <= EPS)) return  ! coplanar — out of scope here
+
+   ! Step 1b: signed distances of `self`'s vertices to `other`'s plane.
+   do i = 1, 3
+      doth(i) = other%normal%dotproduct(rhs=self%vertex(i)) - other%d
+   enddo
+   if (all(doth >  EPS)) return
+   if (all(doth < -EPS)) return
+   if (all(abs(doth) <= EPS)) return  ! defensive — covered by the dself coplanar check
+
+   ! Step 2: intersection-line direction.
+   D = self%normal%crossproduct(rhs=other%normal)
+   D_abs = [abs(D%x), abs(D%y), abs(D%z)]
+   axis = maxloc(D_abs, dim=1)
+   if (D_abs(axis) <= EPS) return  ! parallel planes (coplanar already rejected)
+
+   ! Project each triangle's vertices onto the chosen axis (cheaper than projecting
+   ! onto D itself; only relative ordering on the line matters for the interval).
+   select case (axis)
+   case (1) ; pv_self = [self%vertex(1)%x, self%vertex(2)%x, self%vertex(3)%x]
+              pv_oth  = [other%vertex(1)%x, other%vertex(2)%x, other%vertex(3)%x]
+   case (2) ; pv_self = [self%vertex(1)%y, self%vertex(2)%y, self%vertex(3)%y]
+              pv_oth  = [other%vertex(1)%y, other%vertex(2)%y, other%vertex(3)%y]
+   case (3) ; pv_self = [self%vertex(1)%z, self%vertex(2)%z, self%vertex(3)%z]
+              pv_oth  = [other%vertex(1)%z, other%vertex(2)%z, other%vertex(3)%z]
+   endselect
+
+   ! Compute the 1D interval of `self` on the intersection line.
+   call interval_from_signs(pv=pv_self, dist=doth, t=t_self)
+   call interval_from_signs(pv=pv_oth,  dist=dself, t=t_oth)
+
+   ! Overlap test.
+   tlo = max(min(t_self(1), t_self(2)), min(t_oth(1), t_oth(2)))
+   thi = min(max(t_self(1), t_self(2)), max(t_oth(1), t_oth(2)))
+   if (thi < tlo) return  ! disjoint intervals
+
+   ! Recover 3D segment endpoints by mapping the 1D parameter back through the
+   ! axis projection. The intersection line lives in both planes; a point at 1D
+   ! coordinate `tlo` along `axis` lies on the intersection line iff its other
+   ! two coordinates are determined by the planes. The cheap reconstruction:
+   ! find the segment endpoint by solving for the point on `self`'s edge between
+   ! the vertex on the opposite side of `other`'s plane and the next.
+   !
+   ! Simpler equivalent: the intersection segment's endpoints are the *closest*
+   ! points along each triangle's two crossing edges. Use t_self / t_oth's
+   ! enclosing parameters directly — they already mark where each triangle
+   ! crosses the intersection line in the 1D projection, so we can lift back to
+   ! 3D by linearly interpolating along the corresponding edge.
+   call lift_endpoint_to_3d(self=self, other=other, dist=doth, &
+                            pv_self=pv_self, pv_oth=pv_oth, target_t=tlo, axis=axis, point=p)
+   call lift_endpoint_to_3d(self=self, other=other, dist=doth, &
+                            pv_self=pv_self, pv_oth=pv_oth, target_t=thi, axis=axis, point=q)
+
+   ! Reject degenerate (point-touch) intersections.
+   D = q - p
+   if (D%normL2() <= EPS) return
+
+   intersects = .true.
+   endsubroutine intersect_facet
+
+   pure subroutine interval_from_signs(pv, dist, t)
+   !< Compute the 1D interval `[t(1), t(2)]` on the intersection line where the
+   !< triangle (whose vertices project to `pv(1:3)` and have signed distances
+   !< `dist(1:3)` to the *other* triangle's plane) crosses that plane.
+   !<
+   !< Two of the three signed distances have one sign and the third has the other
+   !< (already guaranteed by the caller's reject tests). The two crossing edges
+   !< are the ones connecting opposite-sign vertex pairs; for each edge we
+   !< linearly interpolate the projected coordinate at the zero-crossing.
+   real(R8P), intent(in)  :: pv(3)   !< Projected vertex coordinates.
+   real(R8P), intent(in)  :: dist(3) !< Signed distances to the other plane.
+   real(R8P), intent(out) :: t(2)    !< Interval endpoints on the intersection axis.
+   integer(I4P)           :: lone, i, k
+   real(R8P)              :: alpha
+
+   ! Find the lone vertex (the one whose sign differs from the other two).
+   if      (dist(1) * dist(2) > 0._R8P) then ; lone = 3
+   else if (dist(1) * dist(3) > 0._R8P) then ; lone = 2
+   else                                      ; lone = 1
+   endif
+
+   ! Interpolate along each of the two edges incident to the lone vertex.
+   k = 0
+   do i = 1, 3
+      if (i == lone) cycle
+      k = k + 1
+      ! Edge from `lone` to `i`: parameter alpha in [0,1] where dist crosses 0.
+      alpha = dist(lone) / (dist(lone) - dist(i))
+      t(k)  = pv(lone) + alpha * (pv(i) - pv(lone))
+   enddo
+   endsubroutine interval_from_signs
+
+   pure subroutine lift_endpoint_to_3d(self, other, dist, pv_self, pv_oth, target_t, axis, point)
+   !< Reconstruct the 3D point on `self`'s plane corresponding to coordinate
+   !< `target_t` along `axis`. The point lies on one of `self`'s edges (the one
+   !< whose endpoints' projections bracket `target_t` and whose `dist` values
+   !< have opposite signs — i.e., the edge that crosses `other`'s plane).
+   !<
+   !< If `target_t` matches `pv_oth`'s crossing instead (i.e., the overlap
+   !< interval is bounded by `other`'s edge), reconstruct on `other`'s edge and
+   !< return its 3D point — both lie on the intersection line so they describe
+   !< the same 3D point up to floating-point round-off.
+   type(facet_object), intent(in)  :: self
+   type(facet_object), intent(in)  :: other
+   real(R8P),          intent(in)  :: dist(3)    !< Signed distances of self's vertices to other's plane.
+   real(R8P),          intent(in)  :: pv_self(3)
+   real(R8P),          intent(in)  :: pv_oth(3)
+   real(R8P),          intent(in)  :: target_t   !< Target coordinate on `axis`.
+   integer(I4P),       intent(in)  :: axis
+   type(vector_R8P),   intent(out) :: point      !< Reconstructed 3D point.
+   integer(I4P)                    :: lone_self, i
+   real(R8P)                       :: alpha, t_edge
+
+   ! Find self's lone vertex (matches interval_from_signs convention).
+   if      (dist(1) * dist(2) > 0._R8P) then ; lone_self = 3
+   else if (dist(1) * dist(3) > 0._R8P) then ; lone_self = 2
+   else                                      ; lone_self = 1
+   endif
+
+   ! Try each of self's two crossing edges; pick the one whose 1D projection
+   ! brackets target_t.
+   do i = 1, 3
+      if (i == lone_self) cycle
+      alpha  = dist(lone_self) / (dist(lone_self) - dist(i))
+      t_edge = pv_self(lone_self) + alpha * (pv_self(i) - pv_self(lone_self))
+      if (abs(t_edge - target_t) <= EPS * max(1._R8P, abs(target_t))) then
+         point = self%vertex(lone_self) + (self%vertex(i) - self%vertex(lone_self)) * alpha
+         return
+      endif
+   enddo
+
+   ! Fallback: the target_t came from `other`'s edge. Reconstruct via that edge.
+   ! (Other's signed distances to self's plane are not in scope here; recompute
+   ! locally — same algebra.)
+   block
+      real(R8P) :: dother(3), beta_oth
+      integer(I4P) :: lone_other, j
+      do j = 1, 3
+         dother(j) = self%normal%dotproduct(rhs=other%vertex(j)) - self%d
+      enddo
+      if      (dother(1) * dother(2) > 0._R8P) then ; lone_other = 3
+      else if (dother(1) * dother(3) > 0._R8P) then ; lone_other = 2
+      else                                          ; lone_other = 1
+      endif
+      do j = 1, 3
+         if (j == lone_other) cycle
+         beta_oth = dother(lone_other) / (dother(lone_other) - dother(j))
+         t_edge   = pv_oth(lone_other) + beta_oth * (pv_oth(j) - pv_oth(lone_other))
+         if (abs(t_edge - target_t) <= EPS * max(1._R8P, abs(target_t))) then
+            point = other%vertex(lone_other) + (other%vertex(j) - other%vertex(lone_other)) * beta_oth
+            return
+         endif
+      enddo
+      ! Should not reach here — if it does, return an obviously-bogus value to
+      ! flag the bug rather than silently passing.
+      point = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   endblock
+   endsubroutine lift_endpoint_to_3d
 
    elemental subroutine initialize(self)
    !< Initialize facet.
