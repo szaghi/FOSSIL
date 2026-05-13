@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.7] — 2026-05-13
+### Added
+- **mc,surface**: Marching cubes isosurface extraction (issue #18 §1.5)
+
+
 ## [1.2.6] — 2026-05-13
 ### Added
 - **predicates,arrangement**: Boolean foundation (issue #18 §1.1 stage 1)
