@@ -33,7 +33,7 @@ program fossil_test_distance_bench
 
 use fossil,              only : surface_stl_object, SIGN_PSEUDO_NORMAL
 use fossil_facet_object, only : facet_object
-use penf,                only : I4P, R8P
+use penf,                only : I4P, I8P, R8P
 use vecfor,              only : vector_R8P
 
 implicit none
@@ -41,17 +41,21 @@ implicit none
 type(surface_stl_object)      :: surface
 type(vector_R8P)              :: bmin, bmax, span, probe
 type(vector_R8P), allocatable :: points(:)
-real(R8P),        allocatable :: d_signed(:), d_unsigned(:)
+real(R8P),        allocatable :: d_signed(:), d_unsigned(:), d_batch(:)
 real(R8P)                     :: t0, t1, t_signed, t_unsigned
 real(R8P)                     :: lo(3), hi(3), frac
-real(R8P)                     :: d_tree, d_brute, max_abs_err
+real(R8P)                     :: d_tree, d_brute, max_abs_err, batch_abs_err
+real(R8P)                     :: t_serial_wall, t_batch_wall
+integer(I8P)                  :: clk0, clk1, clk_rate
 integer(I4P)                  :: grid_n, n_queries, nf
 integer(I4P)                  :: i, j, k, q
 integer(I4P)                  :: argc, n_sample, s, stride
+integer(I4P)                  :: n_threads
 character(len=512)            :: stl_path, arg2
-logical                       :: correctness_ok
+logical                       :: correctness_ok, batch_ok
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
+!$ integer, external          :: omp_get_max_threads       !< OpenMP runtime thread-count query (only declared under -fopenmp).
 
 ! ---- arguments ---------------------------------------------------------------
 argc = command_argument_count()
@@ -87,6 +91,7 @@ n_queries = grid_n * grid_n * grid_n
 allocate(points(n_queries))
 allocate(d_signed(n_queries))
 allocate(d_unsigned(n_queries))
+allocate(d_batch(n_queries))
 
 q = 0_I4P
 do k = 1_I4P, grid_n
@@ -120,6 +125,35 @@ do q = 1_I4P, n_queries
 enddo
 call cpu_time(t1)
 t_unsigned = t1 - t0
+
+! ---- timed: serial loop vs distance_many batch (issue #19 §B3) --------------
+! Both timed with system_clock (wall time): cpu_time would sum across OpenMP
+! threads and hide any parallel speedup. The serial loop here is the apples-to-
+! apples baseline for the batch call below — same query, same options.
+n_threads = 1_I4P
+!$ n_threads = omp_get_max_threads()
+
+call system_clock(count=clk0, count_rate=clk_rate)
+do q = 1_I4P, n_queries
+   d_signed(q) = surface%distance(point=points(q), is_signed=.true., &
+                                  sign_algorithm=SIGN_PSEUDO_NORMAL, is_square_root=.true.)
+enddo
+call system_clock(count=clk1)
+t_serial_wall = real(clk1 - clk0, R8P) / real(clk_rate, R8P)
+
+call system_clock(count=clk0, count_rate=clk_rate)
+call surface%distance_many(points=points, distances=d_batch, is_signed=.true., &
+                           sign_algorithm=SIGN_PSEUDO_NORMAL, is_square_root=.true.)
+call system_clock(count=clk1)
+t_batch_wall = real(clk1 - clk0, R8P) / real(clk_rate, R8P)
+
+! distance_many must be bit-exact against the serial loop — it is semantically a
+! loop of the same `distance` calls, just OpenMP-parallel over disjoint outputs.
+batch_abs_err = 0._R8P
+do q = 1_I4P, n_queries
+   batch_abs_err = max(batch_abs_err, abs(d_batch(q) - d_signed(q)))
+enddo
+batch_ok = (batch_abs_err == 0._R8P)
 
 ! ---- correctness invariant: BVH vs brute force on a sub-sample --------------
 ! Force the brute-force scan, recompute signed distance on a strided
@@ -156,8 +190,15 @@ print '(A,F12.4,A)', '   total wall-clock:        ', 1000._R8P * t_unsigned, ' m
 print '(A,F12.2,A)', '   throughput:             ', real(n_queries, R8P) / max(t_unsigned, tiny(1._R8P)), ' queries/s'
 print '(A,F12.4,A)', '   mean per query:         ', 1.0e6_R8P * t_unsigned / real(n_queries, R8P), ' us'
 print '(A)',         ''
+print '(A,I0,A)',    'distance_many batch (signed, OpenMP — ', n_threads, ' thread(s)):'
+print '(A,F12.4,A)', '   serial loop wall-clock: ', 1000._R8P * t_serial_wall, ' ms'
+print '(A,F12.4,A)', '   distance_many wall-clock:', 1000._R8P * t_batch_wall, ' ms'
+print '(A,F12.4,A)', '   batch mean per query:   ', 1.0e6_R8P * t_batch_wall / real(n_queries, R8P), ' us'
+print '(A,F12.2,A)', '   speedup vs serial:      ', t_serial_wall / max(t_batch_wall, tiny(1._R8P)), ' x'
+print '(A,ES10.3)',  '   batch vs serial max |d| err: ', batch_abs_err
+print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
-print '(A,L1)',      'Are all tests passed? ', correctness_ok
+print '(A,L1)',      'Are all tests passed? ', (correctness_ok .and. batch_ok)
 
 endprogram fossil_test_distance_bench

@@ -163,6 +163,7 @@ type :: surface_stl_object
       procedure, pass(self) :: remove_duplicate_facets         !< Drop facets that duplicate another facet (up to vertex permutation).
       procedure, pass(self) :: destroy                         !< Destroy file.
       procedure, pass(self) :: distance                        !< Return the (minimum) distance from point to triangulated surface.
+      procedure, pass(self) :: distance_many                   !< Batch distance over a point array; OpenMP-parallel (issue #19 §B3).
       procedure, pass(self) :: initialize                      !< Initialize file.
       procedure, pass(self) :: is_point_inside                 !< Determinate if point is inside or not STL.
       procedure, pass(self) :: is_point_inside_polyhedron_ri   !< Determinate if point is inside or not STL facets by ray intersect.
@@ -1265,6 +1266,68 @@ contains
    call self%compute_distance(point=point, distance=distance, &
                               is_signed=is_signed, sign_algorithm=sign_algorithm, is_square_root=is_square_root)
    endfunction distance
+
+   subroutine distance_many(self, points, distances, is_signed, sign_algorithm, is_square_root, status)
+   !< Batch distance query over a point array — the Adam/Xall embedded-boundary
+   !< access pattern (one distance per Cartesian grid point against a static
+   !< surface). Issue #19 §B3.
+   !<
+   !< Semantically a loop of `distance` calls: `distances(i)` is the distance from
+   !< `points(i)` to the surface, under the same `is_signed` / `sign_algorithm` /
+   !< `is_square_root` options applied uniformly to every point. The win is not the
+   !< per-call semantics — it is that the loop is **`!$omp parallel do`**: the AABB
+   !< tree is `intent(in)` (read-only) for the whole batch and each query writes
+   !< only its own `distances(i)` slot, so the iterations are independent with no
+   !< locks. Builds without `-fopenmp` compile the directive as an inert comment
+   !< and the loop runs serially — correctness is identical either way.
+   !<
+   !< The option arguments are resolved once here and passed as concrete (non-
+   !< optional) values into the worker, so the hot loop does not re-test `present()`
+   !< per query.
+   !<
+   !< `points` and `distances` must be the same length; `distances` is
+   !< caller-allocated. A length mismatch sets `status = STATUS_INVALID_INPUT` and
+   !< the routine returns without touching `distances`.
+   !<
+   !< @note STL's metrix must be already computed (as for `distance`).
+   class(surface_stl_object), intent(in)            :: self            !< Surface STL.
+   type(vector_R8P),          intent(in)            :: points(:)       !< Query points.
+   real(R8P),                 intent(out)           :: distances(:)    !< Per-point distances (caller-allocated, same size as `points`).
+   logical,                   intent(in),  optional :: is_signed       !< Sentinel to trigger signed distance.
+   integer(I4P),              intent(in),  optional :: sign_algorithm  !< Algorithm code (SIGN_*).
+   logical,                   intent(in),  optional :: is_square_root  !< Sentinel to trigger square-root distance.
+   integer(I4P),              intent(out), optional :: status          !< STATUS_OK or STATUS_INVALID_INPUT (size mismatch).
+   logical                                          :: is_signed_      !< Resolved signed sentinel.
+   integer(I4P)                                     :: algo            !< Resolved sign-algorithm code.
+   logical                                          :: is_sqrt_        !< Resolved square-root sentinel.
+   integer(I4P)                                     :: n               !< Number of query points.
+   integer(I4P)                                     :: i               !< Loop counter.
+
+   if (present(status)) status = STATUS_OK
+   n = size(points, kind=I4P)
+   if (size(distances, kind=I4P) /= n) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (n == 0_I4P) return
+
+   ! Resolve options once — the per-query worker takes concrete values, so the
+   ! parallel loop never re-tests present().
+   is_signed_ = .false. ; if (present(is_signed))     is_signed_ = is_signed
+   algo       = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   is_sqrt_   = .false. ; if (present(is_square_root)) is_sqrt_   = is_square_root
+
+   ! The AABB tree and facet array are read-only for the whole batch; each
+   ! iteration writes only distances(i). Embarrassingly parallel, no locks.
+   !$omp parallel do default(none) schedule(static) &
+   !$omp   shared(self, points, distances, n, is_signed_, algo, is_sqrt_) &
+   !$omp   private(i)
+   do i = 1_I4P, n
+      call self%compute_distance(point=points(i), distance=distances(i), &
+                                 is_signed=is_signed_, sign_algorithm=algo, is_square_root=is_sqrt_)
+   enddo
+   !$omp end parallel do
+   endsubroutine distance_many
 
    function is_point_inside(self, point, sign_algorithm) result(is_inside)
    !< Compute sign.
