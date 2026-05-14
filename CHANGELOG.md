@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.3] — 2026-05-14
+### Performance
+- **distance**: Split point-to-triangle kernel into lean and rich faces
+
+
 ## [1.3.2] — 2026-05-14
 ### Added
 - **surface**: Add OpenMP-parallel distance_many batch query
