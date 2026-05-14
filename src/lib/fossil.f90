@@ -17,6 +17,11 @@ use fossil_laplacian, only : LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
                              LAPL_STATUS_DEGENERATE_TRIANGLE
 use fossil_curvature, only : CURV_STATUS_OK, CURV_STATUS_BAD_INPUT, &
                              CURV_STATUS_DEGENERATE_TRIANGLE
+use fossil_smoothing, only : SMOOTH_STATUS_OK, SMOOTH_STATUS_BAD_INPUT, &
+                             SMOOTH_STATUS_DEGENERATE, &
+                             SMOOTH_METHOD_EXPLICIT, SMOOTH_METHOD_TAUBIN, &
+                             SMOOTH_DEFAULT_LAMBDA, SMOOTH_DEFAULT_MU, &
+                             SMOOTH_DEFAULT_ITERATIONS
 use fossil_facet_object
 use fossil_marching_cubes, only : extract_isosurface, MC_STATUS_OK, MC_STATUS_BAD_DIMENSIONS
 use fossil_surface_stl_object
@@ -48,4 +53,7 @@ public :: csr_matrix_t
 public :: CSR_STATUS_OK, CSR_STATUS_BAD_INPUT, CSR_STATUS_OUT_OF_RANGE
 public :: LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, LAPL_STATUS_DEGENERATE_TRIANGLE
 public :: CURV_STATUS_OK, CURV_STATUS_BAD_INPUT, CURV_STATUS_DEGENERATE_TRIANGLE
+public :: SMOOTH_STATUS_OK, SMOOTH_STATUS_BAD_INPUT, SMOOTH_STATUS_DEGENERATE
+public :: SMOOTH_METHOD_EXPLICIT, SMOOTH_METHOD_TAUBIN
+public :: SMOOTH_DEFAULT_LAMBDA, SMOOTH_DEFAULT_MU, SMOOTH_DEFAULT_ITERATIONS
 endmodule fossil

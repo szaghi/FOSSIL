@@ -28,6 +28,12 @@ use fossil_laplacian, only : build_cotangent_laplacian, &
 use fossil_curvature, only : build_gaussian_curvature, build_mean_curvature, &
                              CURV_STATUS_OK, CURV_STATUS_BAD_INPUT, &
                              CURV_STATUS_DEGENERATE_TRIANGLE
+use fossil_smoothing, only : do_smooth_mesh => smooth_mesh, &
+                             SMOOTH_STATUS_OK, SMOOTH_STATUS_BAD_INPUT, &
+                             SMOOTH_STATUS_DEGENERATE, &
+                             SMOOTH_METHOD_EXPLICIT, SMOOTH_METHOD_TAUBIN, &
+                             SMOOTH_DEFAULT_LAMBDA, SMOOTH_DEFAULT_MU, &
+                             SMOOTH_DEFAULT_ITERATIONS
 use fossil_remesh, only : compute_remesh => isotropic_remesh, &
                           REM_STATUS_OK, REM_STATUS_BAD_INPUT
 use fossil_boolean, only : compute_boolean => boolean_compute, &
@@ -176,6 +182,7 @@ type :: surface_stl_object
       procedure, pass(self) :: cotangent_laplacian              !< Cotangent Laplacian + barycentric mass (issue #18 §2.1).
       procedure, pass(self) :: gaussian_curvature                !< Per-vertex Gaussian curvature via angle defect (issue #18 §2.4).
       procedure, pass(self) :: mean_curvature                    !< Per-vertex signed mean curvature H = (1/2)||M^-1 L V|| (issue #18 §2.4).
+      procedure, pass(self) :: smooth                            !< Mesh smoothing (explicit Laplacian or Taubin lambda|mu) (issue #18 §2.3).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1988,6 +1995,61 @@ contains
    call build_mean_curvature(facet=self%facet, pool=self%vertex_pool, &
                               H=H, status=status)
    endsubroutine mean_curvature
+
+   subroutine smooth(self, method, lambda, mu, iterations, status)
+   !< Smooth the mesh in place via explicit Laplacian or Taubin
+   !< lambda|mu flow (issue #18 §2.3).
+   !<
+   !< - `method = SMOOTH_METHOD_EXPLICIT`: `iterations` single-step
+   !<   applications of `V_new = V + lambda M^-1 L V`. **Shrinks the
+   !<   volume**; useful only for noise removal where shrinkage is
+   !<   tolerable, or as a building block. `mu` is ignored.
+   !< - `method = SMOOTH_METHOD_TAUBIN` (default): `iterations`
+   !<   complete (lambda, mu) pairs. Each pair smooths then counter-
+   !<   shrinks, designed to preserve volume while attenuating
+   !<   high-frequency surface noise. **The right choice for mesh
+   !<   denoising in production.** Defaults: `lambda = 0.5`,
+   !<   `mu = -0.53`, `iterations = 5` pairs (10 total Laplacian
+   !<   applies).
+   !<
+   !< Implicit Laplacian smoothing `(M - tau L) V_new = M V` is the
+   !< third variant from the §2.3 spec; it requires a sparse
+   !< symmetric-positive-definite solver and is deferred to the
+   !< Tier-2 sparse-solver gate.
+   !<
+   !< After return, the surface is re-adopted (AABB tree, vertex
+   !< pool, connectivity, pseudo-normals all rebuilt) so all
+   !< downstream queries work without further user action.
+   class(surface_stl_object),  intent(inout)         :: self
+   integer(I4P),               intent(in),  optional :: method
+   real(R8P),                  intent(in),  optional :: lambda
+   real(R8P),                  intent(in),  optional :: mu
+   integer(I4P),               intent(in),  optional :: iterations
+   integer(I4P),               intent(out), optional :: status
+   type(facet_object), allocatable                   :: working(:)
+   integer(I4P)                                      :: ierr
+
+   if (present(status)) status = SMOOTH_STATUS_OK
+   if (self%facets_number == 0_I4P) then
+      if (present(status)) status = SMOOTH_STATUS_BAD_INPUT
+      return
+   endif
+
+   ! Copy facets to a working array, smooth in place, then re-adopt.
+   ! The smoothing routine mutates the facet vertex caches but leaves
+   ! the pool stale; adopt_facets rebuilds the pool from the facets.
+   allocate(working(self%facets_number))
+   working(1:self%facets_number) = self%facet(1:self%facets_number)
+   call do_smooth_mesh(facet=working, pool=self%vertex_pool, &
+                       method=method, lambda=lambda, mu=mu, &
+                       iterations=iterations, status=ierr)
+   if (present(status)) status = ierr
+   if (ierr /= SMOOTH_STATUS_OK .and. ierr /= SMOOTH_STATUS_DEGENERATE) then
+      deallocate(working)
+      return
+   endif
+   call self%adopt_facets(facets=working)
+   endsubroutine smooth
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
