@@ -128,31 +128,49 @@ does not depend on them.
 
 ## Examples
 
-### Gauss–Bonnet on a sphere
+### Gaussian curvature on a sphere
 
 ```fortran
-program ex_gauss_bonnet
+program ex_gaussian_curvature
 use fossil
-use penf, only : I4P, R8P
+use fossil_facet_object, only : facet_object
+use penf,                only : I4P, R8P
+use vecfor,              only : vector_R8P
 implicit none
 
-type(surface_stl_object) :: sphere
-real(R8P), allocatable   :: K(:)
-real(R8P)                :: integrated, expected
-integer(I4P)             :: i, status
+type(surface_stl_object)        :: sphere
+type(facet_object), allocatable :: facets(:)
+real(R8P),          allocatable :: values(:,:,:), curv_k(:)
+real(R8P)                       :: x, y, z, dx
+integer(I4P), parameter         :: ng = 32_I4P
+integer(I4P)                    :: ix, iy, iz, status
 
-call build_unit_sphere_via_mc(sphere)        ! see §1.5 marching cubes
-call sphere%gaussian_curvature(K=K, status=status)
-print '(A,I0)', 'status = ', status
-
-! Integrate K * A_vertex — should equal 4*pi (chi = 2 for a sphere).
-integrated = 0._R8P
-do i = 1_I4P, size(K, kind=I4P)
-   integrated = integrated + K(i) * vertex_area(sphere, i)
+! Build a unit-sphere surface: sample the analytic SDF on a 32^3 grid
+! spanning [-2, 2]^3, then marching-cubes the iso=0 level set.
+allocate(values(ng, ng, ng))
+dx = 4._R8P / real(ng - 1_I4P, R8P)
+do iz = 1_I4P, ng
+   z = -2._R8P + (iz - 1_I4P) * dx
+   do iy = 1_I4P, ng
+      y = -2._R8P + (iy - 1_I4P) * dx
+      do ix = 1_I4P, ng
+         x = -2._R8P + (ix - 1_I4P) * dx
+         values(ix, iy, iz) = sqrt(x*x + y*y + z*z) - 1._R8P
+      enddo
+   enddo
 enddo
-expected = 4._R8P * acos(-1._R8P)
-print '(A,F8.4,A,F8.4)', 'integrated K = ', integrated, '   expected = ', expected
-endprogram ex_gauss_bonnet
+call extract_isosurface(values=values, bmin=vector_R8P(-2._R8P, -2._R8P, -2._R8P), &
+                        bmax=vector_R8P(2._R8P, 2._R8P, 2._R8P), iso=0._R8P,       &
+                        surface=facets, status=status)
+call sphere%adopt_facets(facets=facets)
+
+call sphere%gaussian_curvature(K=curv_k, status=status)
+print '(A,I0)',      'curv status = ', status
+print '(A,I0)',      'n_vertices  = ', size(curv_k, kind=I4P)
+print '(A,ES12.5)',  'mean K      = ', sum(curv_k) / real(size(curv_k, kind=I4P), R8P)
+! A unit sphere has K = 1 everywhere; the discrete mean lands near 1
+! (tessellation noise spreads the per-vertex values — see Known limitations).
+endprogram ex_gaussian_curvature
 ```
 
 ### Mean curvature on a unit sphere
@@ -160,25 +178,43 @@ endprogram ex_gauss_bonnet
 ```fortran
 program ex_mean_curvature_sphere
 use fossil
-use penf, only : I4P, R8P
+use fossil_facet_object, only : facet_object
+use penf,                only : I4P, R8P
+use vecfor,              only : vector_R8P
 implicit none
 
-type(surface_stl_object) :: sphere
-real(R8P), allocatable   :: H(:)
-real(R8P)                :: median_H
-integer(I4P)             :: n_pos, n_total, i, status
+type(surface_stl_object)        :: sphere
+type(facet_object), allocatable :: facets(:)
+real(R8P),          allocatable :: values(:,:,:), h_curv(:)
+real(R8P)                       :: x, y, z, dx
+integer(I4P), parameter         :: ng = 32_I4P
+integer(I4P)                    :: ix, iy, iz, n_pos, n_total, status
 
-call build_unit_sphere_via_mc(sphere)
-call sphere%mean_curvature(H=H, status=status)
+! Same unit-sphere construction as the Gaussian example above.
+allocate(values(ng, ng, ng))
+dx = 4._R8P / real(ng - 1_I4P, R8P)
+do iz = 1_I4P, ng
+   z = -2._R8P + (iz - 1_I4P) * dx
+   do iy = 1_I4P, ng
+      y = -2._R8P + (iy - 1_I4P) * dx
+      do ix = 1_I4P, ng
+         x = -2._R8P + (ix - 1_I4P) * dx
+         values(ix, iy, iz) = sqrt(x*x + y*y + z*z) - 1._R8P
+      enddo
+   enddo
+enddo
+call extract_isosurface(values=values, bmin=vector_R8P(-2._R8P, -2._R8P, -2._R8P), &
+                        bmax=vector_R8P(2._R8P, 2._R8P, 2._R8P), iso=0._R8P,       &
+                        surface=facets, status=status)
+call sphere%adopt_facets(facets=facets)
 
-n_total = size(H, kind=I4P)
-n_pos   = count(H > 0._R8P)
-median_H = percentile_50(H)
-
-print '(A,F8.4,A)', 'median(H) = ', median_H, &
-                    '   (analytic value for unit sphere = 1.0)'
+call sphere%mean_curvature(H=h_curv, status=status)
+n_total = size(h_curv, kind=I4P)
+n_pos   = count(h_curv > 0._R8P)
+print '(A,ES12.5,A)', 'mean H = ', sum(h_curv) / real(n_total, R8P), &
+                      '   (analytic value for a unit sphere = 1.0)'
 print '(A,I0,A,I0,A)', 'sign: ', n_pos, ' / ', n_total, ' vertices have H > 0'
-! Expected: 100% positive — sphere surface is convex outward everywhere.
+! Expected: ~100% positive — the sphere surface is convex outward everywhere.
 endprogram ex_mean_curvature_sphere
 ```
 

@@ -1946,14 +1946,14 @@ program ex_mean_curvature_api
 use fossil
 use penf, only : I4P, R8P
 implicit none
-type(surface_stl_object) :: sphere
+type(surface_stl_object) :: surface
 real(R8P), allocatable   :: H(:)
 integer(I4P)             :: status
 
-call sphere%load_from_file(file_name='sphere.stl', guess_format=.true.)
-call sphere%mean_curvature(H=H, status=status)
-print '(A,ES12.5)', 'median |H| (unit sphere analytic = 1) ~ ', &
-                    percentile_50(abs(H))
+call surface%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call surface%mean_curvature(H=H, status=status)
+print '(A,I0)',     'curv status = ', status
+print '(A,ES12.5)', 'mean H      = ', sum(H) / real(size(H, kind=I4P), R8P)
 endprogram ex_mean_curvature_api
 ```
 
