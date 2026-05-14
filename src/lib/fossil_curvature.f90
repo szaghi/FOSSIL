@@ -49,6 +49,7 @@ implicit none
 private
 
 public :: build_gaussian_curvature
+public :: build_mean_curvature
 public :: CURV_STATUS_OK, CURV_STATUS_BAD_INPUT, CURV_STATUS_DEGENERATE_TRIANGLE
 
 integer(I4P), parameter :: CURV_STATUS_OK                   = 0_I4P
@@ -173,6 +174,156 @@ contains
    deallocate(angle_sum, area_third, on_boundary)
    if (had_degenerate .and. present(status)) status = CURV_STATUS_DEGENERATE_TRIANGLE
    endsubroutine build_gaussian_curvature
+
+   subroutine build_mean_curvature(facet, pool, H, status)
+   !< Compute per-vertex **signed** mean curvature `H(1:n_vertices)` via
+   !<
+   !<   H_i * n_i  =  (1/2) M^-1 (L V)_i
+   !<
+   !< where `L` is the cotangent Laplacian, `M` is the diagonal
+   !< barycentric mass, and `V` is the per-vertex coordinate field.
+   !<
+   !< Sign convention: H > 0 at convex-outward vertices (sphere
+   !< surface, cube corners), H < 0 at saddle / concave-outward
+   !< vertices. Sign is set by projecting the mean-curvature normal
+   !< vector onto the per-vertex angle-weighted pseudo-normal
+   !< (`facet%vertex_pnormal`, populated by `surface%analyze`); the
+   !< magnitude is `(1/2) ||M^-1 L V||`.
+   !<
+   !< **Important note retracting an earlier claim**: the §2.4 commit
+   !< message that shipped Gaussian curvature stated mean curvature
+   !< needed a sparse linear solver. That was wrong. The mass matrix
+   !< `M` is diagonal (barycentric per the §2.1 builder), so `M^-1`
+   !< is just per-row scalar division. Mean H is shippable today
+   !< without any external solver.
+   !<
+   !< Pre-conditions:
+   !<   - `pool` initialized.
+   !<   - `analyze` has run (pseudo-normals populated). All public
+   !<     surface construction paths ensure both.
+   !<
+   !< Vertices with no surviving incident triangle (e.g. all triangles
+   !< degenerate) get `H = 0` — defensible default.
+   type(facet_object),       intent(in)            :: facet(:)
+   type(vertex_pool_object), intent(in)            :: pool
+   real(R8P), allocatable,   intent(out)           :: H(:)
+   integer(I4P),             intent(out), optional :: status
+   integer(I4P)                                    :: n_vertices, nf, f, i
+   integer(I4P)                                    :: v1, v2, v3
+   type(vector_R8P)                                :: p1, p2, p3
+   type(vector_R8P)                                :: e12, e23, e31, cross_full
+   real(R8P)                                       :: area_2x, area_tri
+   real(R8P)                                       :: cot1, cot2, cot3
+   type(vector_R8P), allocatable                   :: LV(:)
+   real(R8P),        allocatable                   :: area_third(:)
+   type(vector_R8P), allocatable                   :: pnormal_at(:)  !< Per-pool-vertex pseudo-normal proxy.
+   logical, allocatable                            :: pnormal_set(:)
+   type(vector_R8P)                                :: Hn, n_proxy
+   real(R8P)                                       :: mag, sign_dot
+   logical                                         :: had_degenerate
+
+   if (present(status)) status = CURV_STATUS_OK
+   nf = size(facet, kind=I4P)
+   if (nf == 0_I4P .or. .not. pool%get_is_initialized()) then
+      allocate(H(0))
+      if (present(status)) status = CURV_STATUS_BAD_INPUT
+      return
+   endif
+
+   n_vertices = pool%vertex_count()
+   allocate(H(n_vertices))
+   allocate(LV(n_vertices))
+   allocate(area_third(n_vertices))
+   allocate(pnormal_at(n_vertices))
+   allocate(pnormal_set(n_vertices))
+   H = 0._R8P
+   do i = 1_I4P, n_vertices
+      LV(i) = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+      pnormal_at(i) = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   enddo
+   area_third  = 0._R8P
+   pnormal_set = .false.
+   had_degenerate = .false.
+
+   ! Single per-triangle pass: assemble L*V, accumulate areas, and
+   ! capture one pseudo-normal per pool vertex (any incident facet's
+   ! vertex_pnormal — all are angle-weighted toward the same outward
+   ! direction, so picking the first is fine for sign assignment).
+   do f = 1_I4P, nf
+      v1 = pool%facet_vid(facet_id=f, local_v=1_I4P)
+      v2 = pool%facet_vid(facet_id=f, local_v=2_I4P)
+      v3 = pool%facet_vid(facet_id=f, local_v=3_I4P)
+      if (v1 == 0_I4P .or. v2 == 0_I4P .or. v3 == 0_I4P) cycle
+
+      p1 = pool%coord(vid=v1)
+      p2 = pool%coord(vid=v2)
+      p3 = pool%coord(vid=v3)
+
+      e12 = p2 - p1
+      e23 = p3 - p2
+      e31 = p1 - p3
+      cross_full = e12%crossproduct(rhs=e23)
+      area_2x = sqrt(cross_full%dotproduct(rhs=cross_full))
+      if (area_2x < DEGENERATE_AREA_TOL) then
+         had_degenerate = .true.
+         cycle
+      endif
+      area_tri = 0.5_R8P * area_2x
+
+      cot1 = (-(e31%dotproduct(rhs=e12))) / area_2x
+      cot2 = (-(e12%dotproduct(rhs=e23))) / area_2x
+      cot3 = (-(e23%dotproduct(rhs=e31))) / area_2x
+
+      LV(v1) = LV(v1) + (0.5_R8P * cot3) * (p2 - p1) + (0.5_R8P * cot2) * (p3 - p1)
+      LV(v2) = LV(v2) + (0.5_R8P * cot3) * (p1 - p2) + (0.5_R8P * cot1) * (p3 - p2)
+      LV(v3) = LV(v3) + (0.5_R8P * cot2) * (p1 - p3) + (0.5_R8P * cot1) * (p2 - p3)
+
+      area_third(v1) = area_third(v1) + area_tri / 3._R8P
+      area_third(v2) = area_third(v2) + area_tri / 3._R8P
+      area_third(v3) = area_third(v3) + area_tri / 3._R8P
+
+      ! First-touch capture of pseudo-normals for sign assignment.
+      if (.not. pnormal_set(v1)) then
+         pnormal_at(v1) = facet(f)%vertex_pnormal(1_I4P)
+         pnormal_set(v1) = .true.
+      endif
+      if (.not. pnormal_set(v2)) then
+         pnormal_at(v2) = facet(f)%vertex_pnormal(2_I4P)
+         pnormal_set(v2) = .true.
+      endif
+      if (.not. pnormal_set(v3)) then
+         pnormal_at(v3) = facet(f)%vertex_pnormal(3_I4P)
+         pnormal_set(v3) = .true.
+      endif
+   enddo
+
+   ! Per-vertex post-process: H_i * n_i = (1/2) M^-1 LV_i, then signed
+   ! magnitude via projection onto pseudo-normal.
+   do i = 1_I4P, n_vertices
+      if (area_third(i) <= 0._R8P) cycle
+      Hn = (0.5_R8P / area_third(i)) * LV(i)
+      mag = sqrt(Hn%dotproduct(rhs=Hn))
+      if (mag <= 0._R8P) then
+         H(i) = 0._R8P
+         cycle
+      endif
+      n_proxy = pnormal_at(i)
+      sign_dot = Hn%dotproduct(rhs=n_proxy)
+      ! Sign convention: H > 0 outward-convex. With FOSSIL's
+      ! positive-semidefinite cotangent Laplacian (L_ii < 0 on the
+      ! diagonal), H*n = (1/2) M^-1 L V points INWARD on convex
+      ! surfaces — opposite to the outward pseudo-normal. So
+      ! `sign_dot < 0` means convex outward → assign H positive.
+      if (sign_dot <= 0._R8P) then
+         H(i) =  mag
+      else
+         H(i) = -mag
+      endif
+   enddo
+
+   deallocate(LV, area_third, pnormal_at, pnormal_set)
+   if (had_degenerate .and. present(status)) status = CURV_STATUS_DEGENERATE_TRIANGLE
+   endsubroutine build_mean_curvature
 
    pure function angle_at(u, v) result(theta)
    !< Angle between vectors u and v via atan2(|u x v|, u . v). Well-

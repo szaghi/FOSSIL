@@ -25,7 +25,7 @@ use fossil_csr_matrix, only : csr_matrix_t
 use fossil_laplacian, only : build_cotangent_laplacian, &
                              LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
                              LAPL_STATUS_DEGENERATE_TRIANGLE
-use fossil_curvature, only : build_gaussian_curvature, &
+use fossil_curvature, only : build_gaussian_curvature, build_mean_curvature, &
                              CURV_STATUS_OK, CURV_STATUS_BAD_INPUT, &
                              CURV_STATUS_DEGENERATE_TRIANGLE
 use fossil_remesh, only : compute_remesh => isotropic_remesh, &
@@ -175,6 +175,7 @@ type :: surface_stl_object
       procedure, pass(self) :: alpha_wrap                       !< Watertight surrogate from broken triangle soup (issue #18 §1.6).
       procedure, pass(self) :: cotangent_laplacian              !< Cotangent Laplacian + barycentric mass (issue #18 §2.1).
       procedure, pass(self) :: gaussian_curvature                !< Per-vertex Gaussian curvature via angle defect (issue #18 §2.4).
+      procedure, pass(self) :: mean_curvature                    !< Per-vertex signed mean curvature H = (1/2)||M^-1 L V|| (issue #18 §2.4).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
@@ -1957,6 +1958,36 @@ contains
    call build_gaussian_curvature(facet=self%facet, pool=self%vertex_pool, &
                                   K=K, status=status)
    endsubroutine gaussian_curvature
+
+   subroutine mean_curvature(self, H, status)
+   !< Per-vertex signed mean curvature `H` via `H_i n_i = (1/2) M^-1 L V`,
+   !< returning the magnitude with sign from projection onto the
+   !< per-vertex angle-weighted pseudo-normal (issue #18 §2.4).
+   !<
+   !< Sign convention: H > 0 outward-convex (sphere surface, cube
+   !< corners), H < 0 saddle / concave-outward, H ~ 0 in flat regions.
+   !<
+   !< **Note retracting the §2.4 commit message**: that earlier commit
+   !< stated mean curvature required a sparse linear solver. That was
+   !< wrong — the mass matrix is diagonal (barycentric per the §2.1
+   !< builder), so `M^-1` is per-row scalar division and mean H is
+   !< pure-Fortran today. The implicit-smoothing case in §2.3 still
+   !< needs a real solver and remains gated.
+   !<
+   !< Pre-condition: `analyze` must have run (pseudo-normals
+   !< populated). All public construction paths ensure this.
+   class(surface_stl_object), intent(in)            :: self
+   real(R8P), allocatable,    intent(out)           :: H(:)
+   integer(I4P),              intent(out), optional :: status
+
+   if (self%facets_number == 0_I4P) then
+      allocate(H(0))
+      if (present(status)) status = CURV_STATUS_BAD_INPUT
+      return
+   endif
+   call build_mean_curvature(facet=self%facet, pool=self%vertex_pool, &
+                              H=H, status=status)
+   endsubroutine mean_curvature
 
    function is_point_inside_polyhedron_ri(self, point) result(is_inside)
    !< Determinate is a point is inside or not to a polyhedron described by STL facets by means ray intersections count.
