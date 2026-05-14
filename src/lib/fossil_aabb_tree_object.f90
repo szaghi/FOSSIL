@@ -9,7 +9,7 @@ module fossil_aabb_tree_object
 
 use fossil_aabb_object, only : aabb_object
 use fossil_aabb_node_object, only : aabb_node_object
-use fossil_facet_object, only : facet_object, triangle_point_distance
+use fossil_facet_object, only : facet_object, triangle_point_distance_sq
 use fossil_list_id_object, only : list_id_object
 use fossil_ray_query, only : ray_hit_t
 use penf, only : I4P, R8P, MaxR8P, str
@@ -1272,14 +1272,12 @@ contains
    !< A no-op on internal BVH nodes (`payload_count == 0`). The payload carries
    !< the packed triangle metrix contiguously, so this is a sequential sweep with
    !< no `node -> aabb -> facet_id -> facet(fid)` indirection.
-   class(aabb_tree_object), intent(in)    :: self    !< AABB tree.
-   integer(I4P),            intent(in)    :: n       !< Node index.
-   type(vector_R8P),        intent(in)    :: point   !< Point coordinates.
-   real(R8P),               intent(inout) :: best    !< Running best squared distance.
+   class(aabb_tree_object), intent(in)    :: self  !< AABB tree.
+   integer(I4P),            intent(in)    :: n     !< Node index.
+   type(vector_R8P),        intent(in)    :: point !< Point coordinates.
+   real(R8P),               intent(inout) :: best  !< Running best squared distance.
    integer(I4P)                           :: first, count, k, idx !< Slice bounds and counters.
-   real(R8P)                              :: d2      !< Candidate squared distance.
-   type(vector_R8P)                       :: closest !< Discarded (unsigned path).
-   integer(I4P)                           :: region  !< Discarded (unsigned path).
+   real(R8P)                              :: d2    !< Candidate squared distance.
 
    count = self%node(n)%get_payload_count()
    if (count <= 0_I4P) return
@@ -1287,11 +1285,14 @@ contains
    do k = 0_I4P, count - 1_I4P
       idx = first + k
       associate (p => self%payload(idx))
-         call triangle_point_distance(v1=vector_R8P(p%v1(1), p%v1(2), p%v1(3)),       &
-                                      e12=vector_R8P(p%e12(1), p%e12(2), p%e12(3)),   &
-                                      e13=vector_R8P(p%e13(1), p%e13(2), p%e13(3)),   &
-                                      a=p%a, b=p%b, c=p%c, det=p%det, point=point,    &
-                                      distance=d2, closest=closest, region=region)
+         ! Lean d^2-only kernel (issue #19 §B5): the traversal only ranks d^2;
+         ! the closest point and Voronoi region are never needed in the unsigned
+         ! path, so the rich kernel's reconstruction + classification are skipped.
+         call triangle_point_distance_sq(v1=vector_R8P(p%v1(1), p%v1(2), p%v1(3)),     &
+                                         e12=vector_R8P(p%e12(1), p%e12(2), p%e12(3)), &
+                                         e13=vector_R8P(p%e13(1), p%e13(2), p%e13(3)), &
+                                         a=p%a, b=p%b, c=p%c, det=p%det, point=point,  &
+                                         distance=d2)
       end associate
       if (d2 < best) best = d2
    enddo
@@ -1370,8 +1371,6 @@ contains
    integer(I4P),            intent(inout) :: best_facet !< Running best facet id.
    integer(I4P)                           :: first, count, k, idx !< Slice bounds and counters.
    real(R8P)                              :: d2         !< Candidate squared distance.
-   type(vector_R8P)                       :: closest    !< Discarded (region recomputed on the winner).
-   integer(I4P)                           :: region     !< Discarded (region recomputed on the winner).
 
    count = self%node(n)%get_payload_count()
    if (count <= 0_I4P) return
@@ -1379,11 +1378,16 @@ contains
    do k = 0_I4P, count - 1_I4P
       idx = first + k
       associate (p => self%payload(idx))
-         call triangle_point_distance(v1=vector_R8P(p%v1(1), p%v1(2), p%v1(3)),       &
-                                      e12=vector_R8P(p%e12(1), p%e12(2), p%e12(3)),   &
-                                      e13=vector_R8P(p%e13(1), p%e13(2), p%e13(3)),   &
-                                      a=p%a, b=p%b, c=p%c, det=p%det, point=point,    &
-                                      distance=d2, closest=closest, region=region)
+         ! Lean d^2-only kernel (issue #19 §B5): the traversal ranks d^2 and keeps
+         ! the winning facet id; the closest point and Voronoi region of *that*
+         ! winner are recomputed once by the surface layer via
+         ! `compute_distance_with_region`. Computing them per facet here would be
+         ! wasted work on every non-winning facet.
+         call triangle_point_distance_sq(v1=vector_R8P(p%v1(1), p%v1(2), p%v1(3)),     &
+                                         e12=vector_R8P(p%e12(1), p%e12(2), p%e12(3)), &
+                                         e13=vector_R8P(p%e13(1), p%e13(2), p%e13(3)), &
+                                         a=p%a, b=p%b, c=p%c, det=p%det, point=point,  &
+                                         distance=d2)
          if (d2 < best) then
             best       = d2
             best_facet = p%facet_id

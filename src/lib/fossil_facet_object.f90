@@ -14,6 +14,7 @@ private
 public :: facet_object
 public :: EDGE_12, EDGE_23, EDGE_31
 public :: triangle_point_distance
+public :: triangle_point_distance_sq
 
 ! Edge indices for the connectivity API (fcon_edge, edge_pnormal, make_normal_consistent,
 ! flip_edge, edge_connection_in_other_ref). Convention:
@@ -135,15 +136,19 @@ contains
    pure subroutine compute_distance(self, point, distance)
    !< Compute the (unsigned, squared) distance from a point to the facet surface.
    !<
-   !< Thin wrapper around `compute_distance_with_region` that discards the
-   !< closest-point and region outputs — kept for callers that only want d^2.
-   class(facet_object), intent(in)  :: self      !< Facet.
-   type(vector_R8P),    intent(in)  :: point     !< Point.
-   real(R8P),           intent(out) :: distance  !< Closest squared distance from point to the facet.
-   type(vector_R8P)                 :: closest   !< Discarded.
-   integer(I4P)                     :: region    !< Discarded.
+   !< Thin wrapper around the **lean** `triangle_point_distance_sq` kernel — d^2
+   !< only, no closest point and no Voronoi-region classification (issue #19 §B5).
+   !< This is the right kernel for callers that only want d^2 (the octree unsigned
+   !< traversal): the original wrapper went through `compute_distance_with_region`
+   !< and discarded the closest point + region, paying for the reconstruction and
+   !< the six-branch classification on every facet for nothing.
+   class(facet_object), intent(in)  :: self     !< Facet.
+   type(vector_R8P),    intent(in)  :: point    !< Point.
+   real(R8P),           intent(out) :: distance !< Closest squared distance from point to the facet.
 
-   call self%compute_distance_with_region(point=point, distance=distance, closest=closest, region=region)
+   call triangle_point_distance_sq(v1=self%vertex(1), e12=self%E12, e13=self%E13, &
+                                   a=self%a, b=self%b, c=self%c, det=self%det,    &
+                                   point=point, distance=distance)
    endsubroutine compute_distance
 
    pure subroutine compute_distance_with_region(self, point, distance, closest, region)
@@ -181,18 +186,98 @@ contains
    !< Squared distance from a point to a triangle, plus the closest point and the
    !< Voronoi-region tag of that closest point.
    !<
-   !< This is the single source of truth for the point-to-triangle geometry. It is
-   !< parametrised on the raw triangle metrix — first vertex `v1`, edge vectors
-   !< `e12 = v2-v1` and `e13 = v3-v1`, and the Gram coefficients
-   !< `a = e12.e12`, `b = e12.e13`, `c = e13.e13`, `det = a*c - b*b` — rather than on
-   !< a `facet_object`, so the BVH's flattened distance payload (issue #19 §B1) can
-   !< call it directly on its packed SoA without the `node -> aabb -> facet_id ->
-   !< facet(fid)` indirection chain.
+   !< The "rich" face of the point-to-triangle kernel — used by the signed-distance
+   !< sign step, which needs the closest point and which Voronoi region (face / edge
+   !< / vertex) the closest point falls in to pick the right pseudo-normal. The
+   !< `(sq, tq)` parametric solve is shared with `triangle_point_distance_sq` via
+   !< `triangle_closest_st`; this routine adds the `closest` reconstruction and the
+   !< region classification on top.
    !<
    !< Region encoding:
    !<    0          : interior (face region)
    !<    1, 2, 3    : edge EDGE_12, EDGE_23, EDGE_31 respectively
    !<   -1, -2, -3  : vertex 1, 2, 3 respectively
+   !<
+   !< @note Algorithm by David Eberly, Geometric Tools LLC, http://www.geometrictools.com.
+   type(vector_R8P), intent(in)  :: v1                     !< Triangle first vertex.
+   type(vector_R8P), intent(in)  :: e12                    !< Edge 1-2, `v2 - v1`.
+   type(vector_R8P), intent(in)  :: e13                    !< Edge 1-3, `v3 - v1`.
+   real(R8P),        intent(in)  :: a                      !< `e12 . e12`.
+   real(R8P),        intent(in)  :: b                      !< `e12 . e13`.
+   real(R8P),        intent(in)  :: c                      !< `e13 . e13`.
+   real(R8P),        intent(in)  :: det                    !< Gram determinant `a*c - b*b`.
+   type(vector_R8P), intent(in)  :: point                  !< Point.
+   real(R8P),        intent(out) :: distance               !< Closest squared distance from point to the triangle.
+   type(vector_R8P), intent(out) :: closest                !< Closest point on the triangle.
+   integer(I4P),     intent(out) :: region                 !< Voronoi region tag (see encoding above).
+   real(R8P)                     :: sq, tq                 !< Parametric coordinates of the closest point.
+   real(R8P), parameter          :: BARY_TOL = 1.0e-12_R8P !< Tolerance for classifying barycentric coords as 0/1.
+
+   call triangle_closest_st(v1=v1, e12=e12, e13=e13, a=a, b=b, c=c, det=det, &
+                            point=point, sq=sq, tq=tq, distance=distance)
+   closest = v1 + sq * e12 + tq * e13
+   ! Region classification from (sq, tq) barycentric-style coordinates.
+   ! Vertex correspondence: V1 ↔ (0,0), V2 ↔ (1,0), V3 ↔ (0,1).
+   ! Edge correspondence:   EDGE_12 (V1→V2) ↔ tq=0; EDGE_23 (V2→V3) ↔ sq+tq=1; EDGE_31 (V3→V1) ↔ sq=0.
+   if (sq < BARY_TOL .and. tq < BARY_TOL) then
+      region = -1_I4P                            ! vertex 1
+   elseif (sq > 1._R8P - BARY_TOL .and. tq < BARY_TOL) then
+      region = -2_I4P                            ! vertex 2
+   elseif (tq > 1._R8P - BARY_TOL .and. sq < BARY_TOL) then
+      region = -3_I4P                            ! vertex 3
+   elseif (tq < BARY_TOL) then
+      region = EDGE_12                           ! edge V1-V2
+   elseif (sq < BARY_TOL) then
+      region = EDGE_31                           ! edge V3-V1
+   elseif (sq + tq > 1._R8P - BARY_TOL) then
+      region = EDGE_23                           ! edge V2-V3
+   else
+      region = 0_I4P                             ! face interior
+   endif
+   endsubroutine triangle_point_distance
+
+   pure subroutine triangle_point_distance_sq(v1, e12, e13, a, b, c, det, point, distance)
+   !< Squared distance from a point to a triangle — **distance only**, no closest
+   !< point and no Voronoi-region classification (issue #19 §B5).
+   !<
+   !< This is the lean face of the point-to-triangle kernel, for the BVH distance
+   !< traversal's innermost loop. The traversal compares `d^2` against the running
+   !< best across every facet in a leaf, but only the *winning* facet's closest
+   !< point and region are ever used — so computing them per facet (the vector
+   !< reconstruction + the six-branch region classification) is wasted work on
+   !< every non-winning facet. The surface layer recomputes the closest point and
+   !< region exactly once, on the final winning facet, via
+   !< `compute_distance_with_region`.
+   !<
+   !< The `(sq, tq)` parametric solve is shared with `triangle_point_distance` via
+   !< `triangle_closest_st` — single source of truth, zero duplicated branchy math.
+   type(vector_R8P), intent(in)  :: v1       !< Triangle first vertex.
+   type(vector_R8P), intent(in)  :: e12      !< Edge 1-2, `v2 - v1`.
+   type(vector_R8P), intent(in)  :: e13      !< Edge 1-3, `v3 - v1`.
+   real(R8P),        intent(in)  :: a        !< `e12 . e12`.
+   real(R8P),        intent(in)  :: b        !< `e12 . e13`.
+   real(R8P),        intent(in)  :: c        !< `e13 . e13`.
+   real(R8P),        intent(in)  :: det      !< Gram determinant `a*c - b*b`.
+   type(vector_R8P), intent(in)  :: point    !< Point.
+   real(R8P),        intent(out) :: distance !< Closest squared distance from point to the triangle.
+   real(R8P)                     :: sq, tq   !< Parametric coordinates of the closest point (discarded).
+
+   call triangle_closest_st(v1=v1, e12=e12, e13=e13, a=a, b=b, c=c, det=det, &
+                            point=point, sq=sq, tq=tq, distance=distance)
+   endsubroutine triangle_point_distance_sq
+
+   pure subroutine triangle_closest_st(v1, e12, e13, a, b, c, det, point, sq, tq, distance)
+   !< Solve for the parametric coordinates `(sq, tq)` of the closest point on a
+   !< triangle to `point`, and the squared distance there.
+   !<
+   !< The shared core of the point-to-triangle kernel — `triangle_point_distance`
+   !< (rich: + closest point + region) and `triangle_point_distance_sq` (lean:
+   !< distance only, issue #19 §B5) are both thin wrappers over this. Keeping the
+   !< ~120-line branchy `(sq, tq)` solve in one place is the single source of truth:
+   !< the two public faces differ only in what they compute *after* the solve.
+   !<
+   !< The closest point is `v1 + sq*e12 + tq*e13`; `(sq, tq)` are barycentric-style
+   !< coordinates with V1 ↔ (0,0), V2 ↔ (1,0), V3 ↔ (0,1).
    !<
    !< @note Algorithm by David Eberly, Geometric Tools LLC, http://www.geometrictools.com.
    type(vector_R8P), intent(in)  :: v1                               !< Triangle first vertex.
@@ -203,13 +288,12 @@ contains
    real(R8P),        intent(in)  :: c                                !< `e13 . e13`.
    real(R8P),        intent(in)  :: det                              !< Gram determinant `a*c - b*b`.
    type(vector_R8P), intent(in)  :: point                            !< Point.
+   real(R8P),        intent(out) :: sq                               !< Parametric coordinate along `e12`.
+   real(R8P),        intent(out) :: tq                               !< Parametric coordinate along `e13`.
    real(R8P),        intent(out) :: distance                         !< Closest squared distance from point to the triangle.
-   type(vector_R8P), intent(out) :: closest                          !< Closest point on the triangle.
-   integer(I4P),     intent(out) :: region                           !< Voronoi region tag (see encoding above).
    type(vector_R8P)              :: V1P                              !< `v1 - point`.
-   real(R8P)                     :: d, e, f, s, t, sq, tq            !< Plane equation coefficients.
+   real(R8P)                     :: d, e, f, s, t                    !< Plane equation coefficients.
    real(R8P)                     :: tmp0, tmp1, numer, denom, invdet !< Temporary.
-   real(R8P), parameter          :: BARY_TOL = 1.0e-12_R8P           !< Tolerance for classifying barycentric coords as 0/1.
 
    V1P = v1 - point
    d = e12.dot.V1P
@@ -335,27 +419,11 @@ contains
          tq = 1._R8P - sq
       endif
    endif
-   distance = abs(a * sq * sq + 2._R8P * b * sq * tq + c * tq * tq + 2._R8P * d * sq + 2._R8P * e * tq + f)
-   closest = v1 + sq * e12 + tq * e13
-   ! Region classification from (sq, tq) barycentric-style coordinates.
-   ! Vertex correspondence: V1 ↔ (0,0), V2 ↔ (1,0), V3 ↔ (0,1).
-   ! Edge correspondence:   EDGE_12 (V1→V2) ↔ tq=0; EDGE_23 (V2→V3) ↔ sq+tq=1; EDGE_31 (V3→V1) ↔ sq=0.
-   if (sq < BARY_TOL .and. tq < BARY_TOL) then
-      region = -1_I4P                            ! vertex 1
-   elseif (sq > 1._R8P - BARY_TOL .and. tq < BARY_TOL) then
-      region = -2_I4P                            ! vertex 2
-   elseif (tq > 1._R8P - BARY_TOL .and. sq < BARY_TOL) then
-      region = -3_I4P                            ! vertex 3
-   elseif (tq < BARY_TOL) then
-      region = EDGE_12                           ! edge V1-V2
-   elseif (sq < BARY_TOL) then
-      region = EDGE_31                           ! edge V3-V1
-   elseif (sq + tq > 1._R8P - BARY_TOL) then
-      region = EDGE_23                           ! edge V2-V3
-   else
-      region = 0_I4P                             ! face interior
-   endif
-   endsubroutine triangle_point_distance
+   ! Quadratic form Q(sq, tq) = ||point - (v1 + sq*e12 + tq*e13)||^2. Non-negative
+   ! by construction (it is a squared norm); no defensive abs() needed — issue #19
+   ! §B5 dropped the abs that the original Eberly port carried.
+   distance = a * sq * sq + 2._R8P * b * sq * tq + c * tq * tq + 2._R8P * d * sq + 2._R8P * e * tq + f
+   endsubroutine triangle_closest_st
 
    pure function pseudo_normal_for_region(self, region) result(n)
    !< Return the pseudo-normal of `self` corresponding to a closest-point region tag
