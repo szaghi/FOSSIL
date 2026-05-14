@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.0] — 2026-05-14
+### Documentation
+- **advanced**: Document cotangent Laplacian, curvature, smoothing + sync hero
+
+
 ## [1.2.13] — 2026-05-14
 ### Added
 - **laplacian,surface**: Cotangent Laplacian + barycentric mass (issue #18 §2.1)
