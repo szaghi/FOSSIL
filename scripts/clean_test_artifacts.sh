@@ -39,11 +39,14 @@ artifacts=(
   ib_aabb_tree.dat
 )
 
-# Tree-dump outputs whose count depends on AABB refinement levels.
+# Tree-dump outputs whose count depends on AABB refinement levels, plus
+# valgrind profiler dumps from fossil_test_distance_bench (one per pid).
 # Scoped to repo root with explicit prefixes so the glob cannot escape.
 artifact_globs=(
   'fossil_test_distance_aabb-l_*-b_*.stl'
   'ibaabb-l_*-b_*.stl'
+  'cachegrind.out.*'
+  'callgrind.out.*'
 )
 
 removed=0

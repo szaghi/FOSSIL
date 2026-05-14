@@ -24,6 +24,10 @@
 # log files
 *.log
 
+# profiler output (valgrind cachegrind/callgrind from the distance benchmark)
+cachegrind.out.*
+callgrind.out.*
+
 # special directories
 exe/
 reference/
