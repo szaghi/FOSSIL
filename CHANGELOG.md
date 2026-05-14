@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.13] — 2026-05-14
+### Added
+- **laplacian,surface**: Cotangent Laplacian + barycentric mass (issue #18 §2.1)
+
+- **curvature,surface**: Per-vertex Gaussian curvature (issue #18 §2.4)
+
+- **curvature,surface**: Per-vertex signed mean curvature (issue #18 §2.4)
+
+- **smoothing,surface**: Explicit Laplacian + Taubin lambda|mu (issue #18 §2.3)
+
+
+### Documentation
+- **advanced**: Add user-facing pages for the 9 advanced primitives
+
+
 ## [1.2.12] — 2026-05-13
 ### Added
 - **alpha-wrap**: Step 1 — leaf-size-α octree (issue #18 §1.6)
