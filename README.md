@@ -1,16 +1,16 @@
 # FOSSIL
 
 >#### FOrtran Stereo Litography parser
->a pure Fortran 2003+ OOP library for reading, writing, and manipulating [STL](https://en.wikipedia.org/wiki/STL_(file_format)) mesh files.
+>A pure Fortran 2003+ OOP library for reading, writing, and manipulating [STL](https://en.wikipedia.org/wiki/STL_(file_format)) mesh files.
 
 [![CI](https://github.com/szaghi/FOSSIL/actions/workflows/ci.yml/badge.svg)](https://github.com/szaghi/FOSSIL/actions)
 [![Coverage](https://img.shields.io/codecov/c/github/szaghi/FOSSIL.svg)](https://app.codecov.io/gh/szaghi/FOSSIL)
 [![GitHub tag](https://img.shields.io/github/tag/szaghi/FOSSIL.svg)](https://github.com/szaghi/FOSSIL/releases)
 [![License](https://img.shields.io/badge/license-GPLv3%20%7C%20BSD%20%7C%20MIT-blue.svg)](#copyrights)
 
-| 📂 **ASCII & binary STL**<br>Auto-detect format with `guess_format=.true.`; load with on-the-fly clipping; refuse NaN/Inf coordinates via a status code | 🔧 **Surface manipulation**<br>Translate, rotate, mirror, resize, clip, and merge STL surfaces | 📐 **Geometry analysis**<br>Volume, centroid, bounding box, connectivity (symmetric edge-adjacency), and watertight / manifold / volume predicates | 🔨 **Mesh repair**<br>Sanitize normals (outward orientation), drop degenerate slivers and literal duplicates, reconnect nearby vertices, detect non-manifold edges |
+| 📂 **STL I/O**<br>Load and save ASCII or binary STL files. Format is auto-detected; bad input (NaN/Inf coordinates) is rejected via a status code | 🔧 **Surface manipulation**<br>Translate, rotate, mirror, resize, clip, and merge STL surfaces with a clean type-bound API | 🩺 **Surface analysis & repair**<br>Sanitize pipeline detects and fixes degenerate slivers, literal duplicates, disconnected edges, non-manifold edges, and inward-pointing normals. `is_watertight` / `is_manifold` / `is_volume` predicates summarise the result | 📏 **Signed distance**<br>Bit-exact closest-facet lookup via best-first traversal with d² pruning. Sign via Bærentzen–Aanæs pseudo-normal (default), ray intersection, or solid angle |
 |:---:|:---:|:---:|:---:|
-| 📏 **Signed-distance queries**<br>Bit-exact closest facet via best-first AABB traversal with d² pruning. Sign via Bærentzen–Aanæs pseudo-normal (default), ray intersection, or solid angle | ⚡ **SAH BVH (default)**<br>Binary BVH partitioning triangles with the surface-area heuristic — ~100× faster than the legacy octree on dragon-scale meshes; both kinds remain selectable | 🏗️ **OOP/TDD designed**<br>Two public types (`surface_stl_object`, `facet_object`), all functionality as type-bound procedures, every public operation under test | 🖥️ **fossilizer CLI**<br>Companion command-line app for interactive STL analysis and manipulation |
+| ⚡ **SAH BVH acceleration**<br>Binary BVH built with the surface-area heuristic — adapts to triangle density. ~100× faster distance queries than the legacy octree on dragon-scale meshes. Octree remains selectable | 🧪 **OOP / TDD designed**<br>Two public types — `surface_stl_object` and `facet_object` — every public operation exercised by the regression suite | 🚀 **Advanced geometry processing**<br>Booleans, winding number, alpha wrap, isotropic remesh, decimation, marching cubes, SDF segmentation, ray queries, cotangent Laplacian, per-vertex curvature, Taubin smoothing — twelve libigl/CGAL-class primitives, every one a single TBP | 🆓 **Free & open source**<br>Multi-licensed — GPLv3 for FOSS projects, BSD 2/3-Clause or MIT for commercial use. Fortran 2003+ standard compliant |
 
 >#### [Documentation](https://szaghi.github.io/FOSSIL/)
 > For full documentation (guide, API reference, examples, etc...) see the [FOSSIL website](https://szaghi.github.io/FOSSIL/).
@@ -21,9 +21,34 @@
 
 ---
 
+## Advanced features
+
+FOSSIL ships a focused subset of the libigl / CGAL geometry-processing toolkit, drawn directly from the standard references in the field. Each is a single type-bound procedure on `surface_stl_object`; every one has a dedicated page with a CFD-relevant motivation, a worked Fortran example, and an honest list of known limitations.
+
+| Feature | Reference |
+|---|---|
+| [Boolean operations](https://szaghi.github.io/FOSSIL/guide/advanced/booleans) — union, intersection, difference, symmetric difference | Zhou et al. 2016 |
+| [Self-intersection detection / resolution](https://szaghi.github.io/FOSSIL/guide/advanced/self-intersection) — Möller tri-tri broad-and-narrow phase | Möller 1997 |
+| [Mesh decimation](https://szaghi.github.io/FOSSIL/guide/advanced/decimate) — quadric edge collapse with normal-flip / non-manifold safety | Garland & Heckbert 1997 |
+| [Generalized winding number](https://szaghi.github.io/FOSSIL/guide/advanced/winding-number) — robust inside/outside on dirty STL, hierarchical Barnes-Hut traversal | Jacobson 2013 + Barill 2018 |
+| [Marching cubes](https://szaghi.github.io/FOSSIL/guide/advanced/marching-cubes) — isosurface extraction with the SDF→STL roundtrip | Lorensen-Cline 1987 |
+| [Alpha wrapping](https://szaghi.github.io/FOSSIL/guide/advanced/alpha-wrap) — guaranteed watertight 2-manifold surrogate from any triangle soup | Portaneri et al. 2022 |
+| [Isotropic remeshing](https://szaghi.github.io/FOSSIL/guide/advanced/isotropic-remesh) — uniform-edge re-tessellation with optional sharp-feature preservation | Botsch & Kobbelt 2004 |
+| [SDF segmentation](https://szaghi.github.io/FOSSIL/guide/advanced/sdf-segmentation) — per-facet semantic labels via Shape Diameter Function + Gaussian-mixture clustering | Shapira, Shamir & Cohen-Or 2008 |
+| [Ray-mesh intersection queries](https://szaghi.github.io/FOSSIL/guide/advanced/ray-queries) — closest hit, all hits, any-hit early-exit | Möller-Trumbore |
+| [Cotangent Laplacian + barycentric mass](https://szaghi.github.io/FOSSIL/guide/advanced/cotangent-laplacian) — sparse SPD operator; foundation for curvature and smoothing | Pinkall & Polthier 1993; Meyer et al. 2003 |
+| [Per-vertex Gaussian + mean curvature](https://szaghi.github.io/FOSSIL/guide/advanced/curvature) — angle-defect Gaussian and signed mean curvature from `H n = (1/2) M⁻¹ L V` | Meyer et al. 2003 |
+| [Mesh smoothing (explicit + Taubin λ\|μ)](https://szaghi.github.io/FOSSIL/guide/advanced/smoothing) — production-grade denoiser for CFD-grade STL | Taubin 1995 |
+
+---
+
 ## Authors
 
-- Stefano Zaghi — [@szaghi](https://github.com/szaghi)
+**[Stefano Zaghi](https://github.com/szaghi)** · stefano.zaghi@cnr.it
+> *Chief Yak Shaver, Accidental Research Scientist, and HPC Farmer* — CFD researcher who decided that one more day debugging Fortran build systems was one day too many, opened a Python REPL "just to prototype," and now finds himself maintaining a meshing library, a chimera assembler, an MPI load balancer, and the seven blog tabs he keeps meaning to read.
+
+**[Claude](https://claude.ai)** (Anthropic)
+> *Omniscient Code Oracle & Tireless Rubber Duck* — AI pair programmer, responsible for writing the boring parts so humans don't have to.
 
 Contributions are welcome — see the [Contributing](https://szaghi.github.io/FOSSIL/guide/contributing) page.
 
@@ -62,6 +87,8 @@ call surface%save_into_file(file_name='cube-moved.stl')
 ```
 
 See [`src/tests/`](src/tests/) for more examples including clipping, distance queries, and validity predicates (`is_watertight`, `is_manifold`, `is_volume`).
+
+For interactive use without writing Fortran, the companion **`fossilizer`** CLI (`src/app/fossilizer.f90`) wraps the library for command-line STL analysis and manipulation.
 
 ---
 

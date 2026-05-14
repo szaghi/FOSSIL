@@ -37,3 +37,7 @@ docs/node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
 docs/api/
+
+# doc-image fixtures — regeneratable via scripts/make_doc_images.sh,
+# large (tens of MB of STL/VTU); only the rendered PNGs are committed
+docs/pictures/advanced/_fixtures/

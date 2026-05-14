@@ -1,8 +1,8 @@
 ---
-title: Marching cubes (§1.5)
+title: Marching cubes
 ---
 
-# §1.5 — Marching cubes / isosurface extraction
+# Marching cubes / isosurface extraction
 
 ## What it does
 

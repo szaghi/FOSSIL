@@ -37,7 +37,7 @@ features:
     details: Two public types — surface_stl_object and facet_object — every public operation exercised by the regression suite.
   - icon: 🚀
     title: Advanced Geometry Processing
-    details: Boolean operations, generalized winding number, alpha wrapping, isotropic remeshing, mesh decimation, marching cubes, SDF segmentation, ray queries — nine libigl/CGAL-class primitives, every one a single TBP. See the Advanced Features guide.
+    details: Booleans, winding number, alpha wrap, isotropic remesh, decimation, marching cubes, SDF segmentation, ray queries, cotangent Laplacian, per-vertex curvature, Taubin smoothing — twelve libigl/CGAL-class primitives, every one a single TBP. See the Advanced Features guide.
   - icon: 🆓
     title: Free & Open Source
     details: Multi-licensed — GPLv3 for FOSS projects, BSD 2/3-Clause or MIT for commercial use. Fortran 2003+ standard compliant.
@@ -71,6 +71,15 @@ toolkit, drawn directly from the standard references in the field:
   clustering. Shapira, Shamir & Cohen-Or 2008.
 - **[Ray-mesh intersection queries](/guide/advanced/ray-queries)** — closest
   hit, all hits, any-hit early-exit. Möller-Trumbore + AABB tree.
+- **[Cotangent Laplacian + barycentric mass](/guide/advanced/cotangent-laplacian)** —
+  sparse SPD operator over the surface; foundation for curvature,
+  smoothing, and (when a sparse solver lands) heat-method geodesics.
+  Pinkall & Polthier 1993; Meyer et al. 2003.
+- **[Per-vertex Gaussian + mean curvature](/guide/advanced/curvature)** —
+  angle-defect Gaussian and signed mean curvature from `H n = (1/2) M⁻¹ L V`.
+  Meyer et al. 2003.
+- **[Mesh smoothing (explicit + Taubin λ\|μ)](/guide/advanced/smoothing)** —
+  the right production-grade denoiser for CFD-grade STL. Taubin 1995.
 
 Each algorithm has a dedicated page with a CFD-relevant motivation, a
 worked Fortran example, and an honest list of known limitations.
@@ -103,7 +112,11 @@ call surface%save_into_file(file_name='cube-moved.stl')
 
 ## Authors
 
-- Stefano Zaghi — [@szaghi](https://github.com/szaghi)
+**[Stefano Zaghi](https://github.com/szaghi)** · stefano.zaghi@cnr.it
+> *Chief Yak Shaver, Accidental Research Scientist, and HPC Farmer* — CFD researcher who decided that one more day debugging Fortran build systems was one day too many, opened a Python REPL "just to prototype," and now finds himself maintaining a meshing library, a chimera assembler, an MPI load balancer, and the seven blog tabs he keeps meaning to read.
+
+**[Claude](https://claude.ai)** (Anthropic)
+> *Omniscient Code Oracle & Tireless Rubber Duck* — AI pair programmer, responsible for writing the boring parts so humans don't have to.
 
 Contributions are welcome — see the [Contributing](/guide/contributing) page.
 

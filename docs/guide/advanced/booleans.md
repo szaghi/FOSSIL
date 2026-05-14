@@ -1,8 +1,8 @@
 ---
-title: Boolean operations (§1.1)
+title: Boolean operations
 ---
 
-# §1.1 — Boolean operations
+# Boolean operations
 
 ## What it does
 
@@ -178,7 +178,7 @@ All three results match their analytic volume to FP precision.
 
 - [`resolve_self_intersections`](/guide/api/surface-stl-object) —
   self-intersection cleanup, a pre-requisite for clean booleans.
-- [§1.4 winding number](/guide/advanced/winding-number) — used internally
+- [winding number](/guide/advanced/winding-number) — used internally
   to classify each sub-triangle.
 - [Constants](/guide/api/constants) — `BOOL_*` and `BOOL_STATUS_*`.
 - [Roadmap issue](https://github.com/szaghi/FOSSIL/issues/18) — full

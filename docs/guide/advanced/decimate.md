@@ -1,8 +1,8 @@
 ---
-title: Mesh decimation (§1.3)
+title: Mesh decimation
 ---
 
-# §1.3 — Mesh decimation (QEM)
+# Mesh decimation (QEM)
 
 ## What it does
 
@@ -11,7 +11,7 @@ overall shape. Iteratively collapses the edge that introduces the
 smallest geometric error, as measured by the **quadric error metric**
 (Garland & Heckbert 1997).
 
-Complementary to [isotropic remeshing (§1.7)](/guide/advanced/isotropic-remesh):
+Complementary to [isotropic remeshing](/guide/advanced/isotropic-remesh):
 decimation reduces facet *count* and is shape-preserving (silhouette
 priority); isotropic remeshing equalizes edge *length* without
 changing the count. Reach for decimation when "this 2 M-facet STL
@@ -131,7 +131,7 @@ Production-grade quality requires fixing all four:
 
 ## See also
 
-- [§1.7 isotropic remeshing](/guide/advanced/isotropic-remesh) — the
+- [isotropic remeshing](/guide/advanced/isotropic-remesh) — the
   complementary primitive for tessellation regularity.
 - [`surface%get_facets_number`](/guide/api/surface-stl-object) — read
   the count before/after decimation.

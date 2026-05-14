@@ -1741,6 +1741,237 @@ endprogram ex_isotropic_remesh_api
 
 ---
 
+### `smooth`
+
+```fortran
+call surface%smooth(method=SMOOTH_METHOD_TAUBIN, status=status)
+call surface%smooth(method=SMOOTH_METHOD_EXPLICIT, lambda=0.25_R8P, iterations=1_I4P)
+```
+
+**Purpose.** In-place mesh smoothing via either an explicit
+uniform-weight Laplacian or Taubin's `λ|μ` non-shrinking alternation.
+Defaults to Taubin (band-pass, volume-preserving). The implicit
+variant `(M − τL) V_new = M V` is deferred until a sparse SPD solver
+is bound. Conceptual overview on the
+[§2.3 feature page](/guide/advanced/smoothing).
+
+**Arguments.**
+
+| Argument     | Intent       | Type           | Notes                                                                                                  |
+| ------------ | ------------ | -------------- | ------------------------------------------------------------------------------------------------------ |
+| `method`     | `in`, opt.   | `integer(I4P)` | `SMOOTH_METHOD_EXPLICIT` or `SMOOTH_METHOD_TAUBIN` (default).                                          |
+| `lambda`     | `in`, opt.   | `real(R8P)`    | Positive step. Default `SMOOTH_DEFAULT_LAMBDA = 0.5`.                                                  |
+| `mu`         | `in`, opt.   | `real(R8P)`    | Negative counter-step (Taubin only). Default `SMOOTH_DEFAULT_MU = -0.53`. **Must satisfy `mu < -lambda`** or `SMOOTH_STATUS_BAD_INPUT` is returned. |
+| `iterations` | `in`, opt.   | `integer(I4P)` | Explicit: step count. Taubin: pair count (each pair = `λ` + `μ`). Default `SMOOTH_DEFAULT_ITERATIONS = 5`. |
+| `status`     | `out`, opt.  | `integer(I4P)` | `SMOOTH_STATUS_OK`, `SMOOTH_STATUS_BAD_INPUT`, or `SMOOTH_STATUS_DEGENERATE` (some triangles skipped). |
+
+Mutates `self` in place; AABB tree, vertex pool, connectivity, and
+pseudo-normals are all rebuilt before return.
+
+**Example.**
+
+```fortran
+program ex_smooth_api
+use fossil
+use penf, only : I4P, R8P
+implicit none
+type(surface_stl_object) :: bunny
+real(R8P)                :: v_before, v_after
+integer(I4P)             :: status
+
+call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
+v_before = bunny%get_volume()
+call bunny%smooth(method=SMOOTH_METHOD_TAUBIN, status=status)
+v_after = bunny%get_volume()
+print '(A,F6.3,A)', 'volume drift = ', &
+                    100._R8P * abs(v_after - v_before) / v_before, ' %'
+endprogram ex_smooth_api
+```
+
+**Notes.**
+
+- **Prefer Taubin** for production denoising of closed solids — it
+  preserves volume to within ~0.5 % on the standard bunny while
+  attenuating high-frequency surface noise.
+- The uniform-weight Laplacian (not the area-normalised cotangent
+  `M⁻¹ L`) is used deliberately; see
+  [§2.3 page — Why uniform weights, not cotangent](/guide/advanced/smoothing#why-uniform-weights-not-cotangent).
+- After return the surface re-adopts the smoothed facets; downstream
+  queries (`distance`, `winding_number`, `mean_curvature`) work
+  without further user action.
+
+**See also.**
+[§2.3 feature page](/guide/advanced/smoothing),
+[`isotropic_remesh`](#isotropic_remesh) (the right primitive when sharp
+features must be preserved),
+[`mean_curvature`](#mean_curvature) (cleaner curvature fields after
+a few Taubin passes).
+
+---
+
+## Discrete differential geometry
+
+Operators and per-vertex scalar fields derived from the surface mesh.
+Conceptual coverage on the
+[Cotangent Laplacian](/guide/advanced/cotangent-laplacian) and
+[Curvature](/guide/advanced/curvature) feature pages.
+
+### `cotangent_laplacian`
+
+```fortran
+call surface%cotangent_laplacian(L=L, M=M, status=status)
+```
+
+**Purpose.** Builds the sparse cotangent Laplacian `L` and diagonal
+barycentric mass `M` on the surface mesh. Both returned as
+`csr_matrix_t`. The diagonal post-pass enforces `L_ii = -Σ_{j ≠ i} L_ij`
+so the constant-vector kernel `L · 1 = 0` is floating-point exact.
+Conceptual overview on the
+[§2.1 feature page](/guide/advanced/cotangent-laplacian).
+
+**Arguments.**
+
+| Argument | Intent       | Type                 | Notes                                                                  |
+| -------- | ------------ | -------------------- | ---------------------------------------------------------------------- |
+| `L`      | `out`        | `type(csr_matrix_t)` | Sparse SPD cotangent Laplacian, `n_vertices × n_vertices`.             |
+| `M`      | `out`        | `type(csr_matrix_t)` | Diagonal barycentric mass, `n_vertices × n_vertices`.                  |
+| `status` | `out`, opt.  | `integer(I4P)`       | `LAPL_STATUS_OK`, `LAPL_STATUS_BAD_INPUT`, or `LAPL_STATUS_DEGENERATE_TRIANGLE`. |
+
+Does **not** mutate `self`.
+
+**Example.**
+
+```fortran
+program ex_cotangent_laplacian_api
+use fossil
+use penf, only : I4P, R8P
+implicit none
+type(surface_stl_object) :: sphere
+type(csr_matrix_t)       :: L, M
+real(R8P), allocatable   :: ones(:), Lones(:)
+integer(I4P)             :: n, status
+
+call sphere%load_from_file(file_name='sphere.stl', guess_format=.true.)
+call sphere%cotangent_laplacian(L=L, M=M, status=status)
+n = L%get_nrows()
+allocate(ones(n), Lones(n))
+ones = 1._R8P
+call L%multiply_vector(x=ones, y=Lones)
+print '(A,ES12.5)', 'max |L * 1| = ', maxval(abs(Lones))   ! ~ 0
+endprogram ex_cotangent_laplacian_api
+```
+
+**See also.**
+[§2.1 feature page](/guide/advanced/cotangent-laplacian),
+[`csr_matrix_t`](/guide/api/constants),
+[`mean_curvature`](#mean_curvature),
+[`gaussian_curvature`](#gaussian_curvature).
+
+---
+
+### `gaussian_curvature`
+
+```fortran
+call surface%gaussian_curvature(K=K, status=status)
+```
+
+**Purpose.** Per-vertex Gaussian curvature `K_i` from the angle defect:
+`(2π − Σ θ) / A_i` for interior vertices, `(π − Σ θ) / A_i` for
+boundary vertices. `K > 0` on convex caps, `K < 0` on saddles, `K = 0`
+on developable surfaces. Integrated `K · A_i` recovers `4π χ` for
+closed orientable manifolds (Gauss–Bonnet). Conceptual overview on the
+[§2.4 feature page](/guide/advanced/curvature).
+
+**Arguments.**
+
+| Argument | Intent       | Type                   | Notes                                                                                 |
+| -------- | ------------ | ---------------------- | ------------------------------------------------------------------------------------- |
+| `K`      | `out`        | `real(R8P), alloc(:)`  | Length `n_vertices`. Indexed by pool vertex id.                                       |
+| `status` | `out`, opt.  | `integer(I4P)`         | `CURV_STATUS_OK`, `CURV_STATUS_BAD_INPUT`, or `CURV_STATUS_DEGENERATE_TRIANGLE`.      |
+
+Does **not** mutate `self`. Pre-condition: `analyze` has run (every
+public construction path guarantees this).
+
+**Example.**
+
+```fortran
+program ex_gaussian_curvature_api
+use fossil
+use penf, only : I4P, R8P
+implicit none
+type(surface_stl_object) :: sphere
+real(R8P), allocatable   :: K(:)
+integer(I4P)             :: status
+
+call sphere%load_from_file(file_name='sphere.stl', guess_format=.true.)
+call sphere%gaussian_curvature(K=K, status=status)
+print '(A,ES12.5)', 'mean K = ', sum(K) / real(size(K, kind=I4P), R8P)
+endprogram ex_gaussian_curvature_api
+```
+
+**See also.**
+[§2.4 feature page](/guide/advanced/curvature),
+[`mean_curvature`](#mean_curvature),
+[`cotangent_laplacian`](#cotangent_laplacian).
+
+---
+
+### `mean_curvature`
+
+```fortran
+call surface%mean_curvature(H=H, status=status)
+```
+
+**Purpose.** Per-vertex **signed** mean curvature `H_i` from the
+mean-curvature normal identity `H_i n_i = (1/2) M⁻¹ (L V)_i`. Magnitude
+is `||H_i n_i||`; sign comes from projecting onto the per-vertex
+angle-weighted pseudo-normal. `H > 0` outward-convex, `H < 0`
+saddle / inward-concave, `H ≈ 0` flat. Conceptual overview on the
+[§2.4 feature page](/guide/advanced/curvature).
+
+**Arguments.**
+
+| Argument | Intent       | Type                   | Notes                                                                                 |
+| -------- | ------------ | ---------------------- | ------------------------------------------------------------------------------------- |
+| `H`      | `out`        | `real(R8P), alloc(:)`  | Length `n_vertices`. Indexed by pool vertex id.                                       |
+| `status` | `out`, opt.  | `integer(I4P)`         | `CURV_STATUS_OK`, `CURV_STATUS_BAD_INPUT`, or `CURV_STATUS_DEGENERATE_TRIANGLE`.      |
+
+Does **not** mutate `self`. Pre-condition: `analyze` has run (every
+public construction path guarantees this).
+
+**Example.**
+
+```fortran
+program ex_mean_curvature_api
+use fossil
+use penf, only : I4P, R8P
+implicit none
+type(surface_stl_object) :: sphere
+real(R8P), allocatable   :: H(:)
+integer(I4P)             :: status
+
+call sphere%load_from_file(file_name='sphere.stl', guess_format=.true.)
+call sphere%mean_curvature(H=H, status=status)
+print '(A,ES12.5)', 'median |H| (unit sphere analytic = 1) ~ ', &
+                    percentile_50(abs(H))
+endprogram ex_mean_curvature_api
+```
+
+**Notes.**
+
+- Sign relies on outward-consistent pseudo-normals — run
+  [`sanitize_normals`](#sanitize_normals) on dirty inputs first.
+- A few Taubin [`smooth`](#smooth) passes before this call produce
+  noticeably cleaner `H` fields without volume loss.
+
+**See also.**
+[§2.4 feature page](/guide/advanced/curvature),
+[`gaussian_curvature`](#gaussian_curvature),
+[`cotangent_laplacian`](#cotangent_laplacian),
+[`smooth`](#smooth).
+
+---
+
 ## Getters and predicates
 
 The read-only accessors are listed here as a single table — they are

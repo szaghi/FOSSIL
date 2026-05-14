@@ -1,8 +1,8 @@
 ---
-title: Generalized winding number (§1.4)
+title: Generalized winding number
 ---
 
-# §1.4 — Generalized / fast winding number
+# Generalized / fast winding number
 
 ## What it does
 

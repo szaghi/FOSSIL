@@ -12,7 +12,11 @@ The library is designed with a test-driven approach; every surface operation is 
 
 ## Authors
 
-- Stefano Zaghi — [@szaghi](https://github.com/szaghi)
+**[Stefano Zaghi](https://github.com/szaghi)** · stefano.zaghi@cnr.it
+> *Chief Yak Shaver, Accidental Research Scientist, and HPC Farmer* — CFD researcher who decided that one more day debugging Fortran build systems was one day too many, opened a Python REPL "just to prototype," and now finds himself maintaining a meshing library, a chimera assembler, an MPI load balancer, and the seven blog tabs he keeps meaning to read.
+
+**[Claude](https://claude.ai)** (Anthropic)
+> *Omniscient Code Oracle & Tireless Rubber Duck* — AI pair programmer, responsible for writing the boring parts so humans don't have to.
 
 Contributions are welcome — see the [Contributing](contributing) page.
 

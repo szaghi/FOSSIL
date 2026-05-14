@@ -269,3 +269,101 @@ end program ex_status
 [`save_into_file`](/guide/api/surface-stl-object#save_into_file),
 [`translate`](/guide/api/surface-stl-object#translate),
 [`resize`](/guide/api/surface-stl-object#resize).
+
+---
+
+## Smoothing — methods, defaults, status codes
+
+Constants consumed by [`surface%smooth`](/guide/api/surface-stl-object#smooth)
+and the underlying `fossil_smoothing` module. Conceptual overview on the
+[§2.3 feature page](/guide/advanced/smoothing).
+
+### Methods
+
+| Constant                  | Meaning                                                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `SMOOTH_METHOD_EXPLICIT`  | One `V_new = V + λ ΔV` step per iteration. Shrinks. Use only as a building block.                                        |
+| `SMOOTH_METHOD_TAUBIN`    | One `(λ, μ)` pair per iteration (Taubin 1995 band-pass). Volume-preserving. **The default**; pick this for production.   |
+
+### Defaults
+
+| Constant                       | Value      | Used by                            |
+| ------------------------------ | ---------- | ---------------------------------- |
+| `SMOOTH_DEFAULT_LAMBDA`        | `0.5`      | `lambda` default for both methods. |
+| `SMOOTH_DEFAULT_MU`            | `-0.53`    | `mu` default for Taubin.           |
+| `SMOOTH_DEFAULT_ITERATIONS`    | `5`        | Step count (explicit) or pair count (Taubin). |
+
+### Status codes
+
+| Constant                    | Meaning                                                                                                                   |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `SMOOTH_STATUS_OK`          | Smoothing completed normally.                                                                                             |
+| `SMOOTH_STATUS_BAD_INPUT`   | Empty surface, `iterations ≤ 0`, unknown `method`, or Taubin called with `μ ≥ −λ` (band-pass property violated).          |
+| `SMOOTH_STATUS_DEGENERATE`  | At least one triangle had area below tolerance during Laplacian assembly; iteration proceeded on the rest.                |
+
+**See also.** [`surface%smooth`](/guide/api/surface-stl-object#smooth),
+[§2.3 feature page](/guide/advanced/smoothing).
+
+---
+
+## Curvature / Laplacian status codes
+
+Constants consumed by
+[`surface%cotangent_laplacian`](/guide/api/surface-stl-object#cotangent_laplacian),
+[`surface%gaussian_curvature`](/guide/api/surface-stl-object#gaussian_curvature),
+and [`surface%mean_curvature`](/guide/api/surface-stl-object#mean_curvature).
+Conceptual overview on the
+[Cotangent Laplacian](/guide/advanced/cotangent-laplacian) and
+[Curvature](/guide/advanced/curvature) feature pages.
+
+### Cotangent Laplacian
+
+| Constant                              | Meaning                                                                                            |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `LAPL_STATUS_OK`                      | Operator built successfully.                                                                       |
+| `LAPL_STATUS_BAD_INPUT`               | Empty surface or uninitialised vertex pool.                                                        |
+| `LAPL_STATUS_DEGENERATE_TRIANGLE`     | At least one triangle had area below tolerance and was skipped; operator returned on the survivors.|
+
+### Curvature (Gaussian + mean, shared code set)
+
+| Constant                              | Meaning                                                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `CURV_STATUS_OK`                      | Curvature field built successfully.                                                                    |
+| `CURV_STATUS_BAD_INPUT`               | Empty surface or uninitialised pool.                                                                   |
+| `CURV_STATUS_DEGENERATE_TRIANGLE`     | At least one triangle had area below tolerance and was skipped; degenerate vertices receive 0.         |
+
+---
+
+## `csr_matrix_t` — sparse-matrix container
+
+A minimal compressed-sparse-row (CSR) container exported by
+`use fossil`. Returned by
+[`surface%cotangent_laplacian`](/guide/api/surface-stl-object#cotangent_laplacian).
+Designed for read-only use after construction (matrix-vector product +
+element / structure inspection); not a general linear-algebra library.
+
+**Member procedures.**
+
+| Procedure                  | Signature                                                                                          | Notes                                                                |
+| -------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `get_nrows()`              | `pure function get_nrows() result(n)` — `integer(I4P)`                                             | Row count.                                                           |
+| `get_ncols()`              | `pure function get_ncols() result(n)` — `integer(I4P)`                                             | Column count. For the operators returned by §2.1 this equals `get_nrows()`. |
+| `get_nnz()`                | `pure function get_nnz() result(nz)` — `integer(I4P)`                                              | Number of structurally stored non-zeros.                             |
+| `get_value(i, j, status)`  | `function get_value(i, j, status) result(v)` — `real(R8P)`                                         | Element access; returns `0` for non-stored entries. Optional `status` for bounds violations. |
+| `multiply_vector(x, y)`    | `subroutine multiply_vector(x, y)` — `real(R8P), intent(in) :: x(:)` / `real(R8P), intent(out) :: y(:)` | Computes `y = A · x`.                                                |
+| `row_sum(i)`               | `function row_sum(i) result(s)` — `real(R8P)`                                                      | Sum of all stored entries on row `i`. Used internally for the `L_ii = -Σ_j L_ij` post-pass. |
+| `is_symmetric()`           | `function is_symmetric() result(sym)` — `logical`                                                  | True iff `A_ij == A_ji` to within a small tolerance — useful as a sanity check on the cotangent Laplacian. |
+
+**Status codes** (currently informational — the construction paths
+shipped today always succeed):
+
+| Constant                       | Meaning                                                       |
+| ------------------------------ | ------------------------------------------------------------- |
+| `CSR_STATUS_OK`                | Operation completed.                                          |
+| `CSR_STATUS_BAD_INPUT`         | Constructor / mutator received an inconsistent argument.      |
+| `CSR_STATUS_OUT_OF_RANGE`      | `get(i, j)` / `matvec` called with out-of-range index.        |
+
+**See also.**
+[`surface%cotangent_laplacian`](/guide/api/surface-stl-object#cotangent_laplacian),
+[§2.1 feature page](/guide/advanced/cotangent-laplacian),
+[§2.4 feature page](/guide/advanced/curvature).

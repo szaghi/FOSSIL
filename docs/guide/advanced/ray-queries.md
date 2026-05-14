@@ -1,8 +1,8 @@
 ---
-title: Ray queries (§2.5)
+title: Ray queries
 ---
 
-# §2.5 — Ray-mesh intersection queries
+# Ray-mesh intersection queries
 
 ## What it does
 
@@ -198,7 +198,7 @@ endprogram ex_intersect_ray_any
 - [`facet%intersect_ray`](/guide/api/facet-object) — the per-facet
   Möller-Trumbore that the AABB traversal calls into. Useful if you
   want to test against a single triangle without building a surface.
-- [§1.9 SDF segmentation](/guide/advanced/sdf-segmentation) — the
+- [SDF segmentation](/guide/advanced/sdf-segmentation) — the
   cone-of-rays SDF query uses `intersect_ray_first` for every cone
   ray.
 - [`ray_hit_t`](/guide/api/constants) — the record type returned by

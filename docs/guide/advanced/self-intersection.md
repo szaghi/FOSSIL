@@ -1,8 +1,8 @@
 ---
-title: Self-intersection (§1.2)
+title: Self-intersection
 ---
 
-# §1.2 — Self-intersection detection and resolution
+# Self-intersection detection and resolution
 
 ## What it does
 
@@ -162,7 +162,7 @@ inspection and that `is_watertight()` doesn't catch.
 
 ## See also
 
-- [§1.1 booleans](/guide/advanced/booleans) — the resolution path is a
+- [booleans](/guide/advanced/booleans) — the resolution path is a
   one-liner over the boolean engine; same coplanar limitation
   applies.
 - [`surface%sanitize`](/guide/api/surface-stl-object#sanitize) — local
@@ -170,7 +170,7 @@ inspection and that `is_watertight()` doesn't catch.
   Run this *before* `find_self_intersections` to filter out
   intersection records that exist only because of degenerate-facet
   noise.
-- [§1.6 alpha wrapping](/guide/advanced/alpha-wrap) — the heavyweight
+- [alpha wrapping](/guide/advanced/alpha-wrap) — the heavyweight
   alternative for inputs too dirty for `resolve` to handle (large
   holes, missing facets that aren't just self-intersection
   artifacts).

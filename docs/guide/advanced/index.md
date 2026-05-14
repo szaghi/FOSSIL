@@ -5,11 +5,11 @@ title: Advanced Features
 # Advanced features
 
 Beyond the core STL I/O, repair, and signed-distance API documented in
-the [API companion guide](/guide/api/), FOSSIL ships **nine algorithmic
-primitives** drawn from the libigl / CGAL geometry-processing toolkit.
-They turn FOSSIL from "an STL parser with an AABB tree" into a CFD
-preprocessing toolchain on its own. Every item is a single TBP on
-`surface_stl_object`.
+the [API companion guide](/guide/api/), FOSSIL ships **twelve
+algorithmic primitives** drawn from the libigl / CGAL geometry-
+processing toolkit. They turn FOSSIL from "an STL parser with an AABB
+tree" into a CFD preprocessing toolchain on its own. Every item is a
+single TBP on `surface_stl_object`.
 
 The pages here explain **what each algorithm is**, **when to use it**,
 **when not to**, and **how to call it from Fortran**. For the raw API
@@ -30,6 +30,9 @@ advanced-feature pages cross-link to both.
 | [Isotropic remeshing](/guide/advanced/isotropic-remesh) | `surface%isotropic_remesh(target_length, ...)` | Botsch & Kobbelt (SGP 2004) |
 | [SDF segmentation](/guide/advanced/sdf-segmentation) | `surface%segment_sdf(...)` | Shapira, Shamir & Cohen-Or (Vis. Comp. 2008) |
 | [Ray-mesh intersection queries](/guide/advanced/ray-queries) | `surface%intersect_ray_first/_all/_any(...)` | Möller-Trumbore |
+| [Cotangent Laplacian + barycentric mass](/guide/advanced/cotangent-laplacian) | `surface%cotangent_laplacian(L, M, status)` | Pinkall & Polthier 1993; Meyer et al. 2003 |
+| [Per-vertex Gaussian + mean curvature](/guide/advanced/curvature) | `surface%gaussian_curvature(K, status)` / `surface%mean_curvature(H, status)` | Meyer et al. 2003 |
+| [Mesh smoothing (explicit + Taubin)](/guide/advanced/smoothing) | `surface%smooth(method, lambda, mu, iterations, status)` | Taubin (SIGGRAPH 1995) |
 
 RANSAC shape detection was deliberately **not** shipped — see the
 [roadmap issue](https://github.com/szaghi/FOSSIL/issues/18) for the

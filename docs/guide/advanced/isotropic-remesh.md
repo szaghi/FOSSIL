@@ -1,8 +1,8 @@
 ---
-title: Isotropic remeshing (§1.7)
+title: Isotropic remeshing
 ---
 
-# §1.7 — Isotropic remeshing
+# Isotropic remeshing
 
 ## What it does
 
@@ -152,7 +152,7 @@ decimation, it just redistributes triangles.
 
 ## See also
 
-- [`decimate`](/guide/api/surface-stl-object) (§1.3 — facet count
+- [`decimate`](/guide/api/surface-stl-object) (facet count
   reduction; complementary primitive).
 - [`statistics`](/guide/api/surface-stl-object#statistics) — print
   edge-length distribution before and after to verify the remesh

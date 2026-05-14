@@ -1,8 +1,8 @@
 ---
-title: SDF segmentation (§1.9)
+title: SDF segmentation
 ---
 
-# §1.9 — SDF segmentation
+# SDF segmentation
 
 ## What it does
 
@@ -134,7 +134,7 @@ label 1) through "thickest body region" (label 4).
 
 ## See also
 
-- [§2.5 ray queries](/guide/advanced/ray-queries) — the `intersect_ray_first`
+- [ray queries](/guide/advanced/ray-queries) — the `intersect_ray_first`
   TBP that the cone-of-rays SDF query uses internally.
 - [`get_facets_number`](/guide/api/surface-stl-object) — to size your
   `labels` allocation if pre-allocating.

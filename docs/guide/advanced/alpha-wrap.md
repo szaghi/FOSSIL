@@ -1,8 +1,8 @@
 ---
-title: Alpha wrapping (§1.6)
+title: Alpha wrapping
 ---
 
-# §1.6 — Alpha wrapping
+# Alpha wrapping
 
 ## What it does
 

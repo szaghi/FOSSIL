@@ -85,11 +85,12 @@ Selection is per-surface via the optional `aabb_tree_kind` argument on `load_fro
 
 ## Advanced features
 
-Beyond the core load / sanitize / distance API above, FOSSIL ships nine
-algorithmic primitives drawn from the libigl / CGAL geometry-processing
-toolkit. Each is a single TBP on `surface_stl_object`. Conceptual pages
-(what the algorithm is, when to use it, when not to, code examples,
-known limitations) live under [Advanced Features](/guide/advanced/).
+Beyond the core load / sanitize / distance API above, FOSSIL ships
+**twelve** algorithmic primitives drawn from the libigl / CGAL geometry-
+processing toolkit. Each is a single TBP on `surface_stl_object`.
+Conceptual pages (what the algorithm is, when to use it, when not to,
+code examples, known limitations) live under
+[Advanced Features](/guide/advanced/).
 
 | Feature | API entry point | Page |
 |---|---|---|
@@ -103,10 +104,16 @@ known limitations) live under [Advanced Features](/guide/advanced/).
 | Isotropic remeshing | `surface%isotropic_remesh(target_length, ...)` | [Isotropic remesh](/guide/advanced/isotropic-remesh) |
 | SDF segmentation | `surface%segment_sdf(facet_labels, ...)` | [SDF segmentation](/guide/advanced/sdf-segmentation) |
 | Ray-mesh queries | `surface%intersect_ray_first/_all/_any(...)` | [Ray queries](/guide/advanced/ray-queries) |
+| Cotangent Laplacian + barycentric mass | `surface%cotangent_laplacian(L, M, status)` | [Cotangent Laplacian](/guide/advanced/cotangent-laplacian) |
+| Per-vertex Gaussian curvature | `surface%gaussian_curvature(K, status)` | [Curvature](/guide/advanced/curvature) |
+| Per-vertex signed mean curvature | `surface%mean_curvature(H, status)` | [Curvature](/guide/advanced/curvature) |
+| Mesh smoothing (explicit + Taubin) | `surface%smooth(method, lambda, mu, iterations, status)` | [Smoothing](/guide/advanced/smoothing) |
 
-RANSAC shape detection was deliberately dropped from the roadmap —
-see the [implementation issue](https://github.com/szaghi/FOSSIL/issues/18)
-for the rationale.
+RANSAC shape detection was deliberately dropped from the roadmap; a few
+solver-dependent items (heat-method geodesics, implicit smoothing)
+remain deferred — see the [implementation
+issue](https://github.com/szaghi/FOSSIL/issues/18) for the full
+rationale.
 
 ## `fossilizer` CLI
 
