@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.2] — 2026-05-14
+### Added
+- **surface**: Add OpenMP-parallel distance_many batch query
+
+
 ## [1.3.1] — 2026-05-14
 ### Performance
 - **distance**: Flatten BVH leaf facets into a contiguous distance SoA
