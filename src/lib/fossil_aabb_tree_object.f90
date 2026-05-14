@@ -9,7 +9,7 @@ module fossil_aabb_tree_object
 
 use fossil_aabb_object, only : aabb_object
 use fossil_aabb_node_object, only : aabb_node_object
-use fossil_facet_object, only : facet_object
+use fossil_facet_object, only : facet_object, triangle_point_distance
 use fossil_list_id_object, only : list_id_object
 use fossil_ray_query, only : ray_hit_t
 use penf, only : I4P, R8P, MaxR8P, str
@@ -23,6 +23,32 @@ public :: AABB_AUTO_REFINEMENT
 public :: AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 
 integer(I4P), parameter :: TREE_RATIO=8 !< Tree refinement ratio, it is assumed to be an **octree**.
+
+! Flattened distance-only facet payload for the SAH BVH (issue #19 §B1).
+!
+! The distance traversal's innermost kernel needs only the triangle metrix
+! `[v1, e12, e13, a, b, c, det]` — 13 reals out of a ~400-byte `facet_object`.
+! Carrying that as a contiguous, leaf-grouped SoA removes the
+! `node -> aabb -> facet_id%id -> facet(fid)` indirection chain (three pointer
+! hops + a random-stride gather) and turns each leaf's facet scan into a
+! stride-1 sweep. `facet_id` keeps the global facet index so the winning facet
+! can be mapped back for the pseudo-normal sign step.
+!
+! The payload is built once after the BVH is built (`build_distance_payload`),
+! by walking leaves in node order so each leaf's facets land contiguously; the
+! leaf records its `(payload_first, payload_count)` slice. Only the SAH BVH
+! populates it — the octree path is untouched and still scans via `facet_id`.
+type :: facet_distance_payload
+   !< Packed per-facet triangle metrix for the BVH distance traversal.
+   real(R8P)    :: v1(3)   = 0._R8P !< Triangle first vertex.
+   real(R8P)    :: e12(3)  = 0._R8P !< Edge 1-2, `v2 - v1`.
+   real(R8P)    :: e13(3)  = 0._R8P !< Edge 1-3, `v3 - v1`.
+   real(R8P)    :: a       = 0._R8P !< `e12 . e12`.
+   real(R8P)    :: b       = 0._R8P !< `e12 . e13`.
+   real(R8P)    :: c       = 0._R8P !< `e13 . e13`.
+   real(R8P)    :: det     = 0._R8P !< Gram determinant `a*c - b*b`.
+   integer(I4P) :: facet_id = 0_I4P !< Global facet index (maps the winner back for sign determination).
+endtype facet_distance_payload
 
 ! dispatch knob exposed through `use_index`/`set_use_index`: lets callers force the brute-force
 ! distance/ray-intersection path for benchmarking without lying about `is_initialized`.
@@ -102,6 +128,7 @@ type :: aabb_tree_object
    integer(I4P)                        :: refinement_levels=AABB_AUTO_REFINEMENT !< Octree depth (AABB_AUTO_REFINEMENT = auto-tune); unused by SAH BVH.
    integer(I4P)                        :: nodes_number=0         !< Total number of tree nodes.
    type(aabb_node_object), allocatable :: node(:)                !< AABB tree nodes [0:nodes_number-1].
+   type(facet_distance_payload), allocatable :: payload(:)       !< Flattened distance-only facet SoA, leaf-grouped (SAH BVH only, issue #19 §B1).
    logical                             :: is_initialized=.false. !< Sentinel to check is AABB tree is initialized.
    logical                             :: use_index=.true.       !< Dispatch knob: .true.=use index tree, .false.=brute-force scan.
    contains
@@ -140,9 +167,12 @@ type :: aabb_tree_object
       final :: aabb_tree_finalize
       ! private methods
       procedure, pass(self), private :: build_bvh_sah                 !< Build a SAH BVH over the given facet list.
+      procedure, pass(self), private :: build_distance_payload        !< Flatten BVH leaf facets into the contiguous distance SoA (issue #19 §B1).
       procedure, pass(self) :: enumerate_children                    !< List the allocated children of a node (octree or BVH).
       procedure, pass(self), private :: distance_node                 !< Update best squared distance by recursing into a node.
       procedure, pass(self), private :: distance_node_with_region     !< Update (best d^2, best facet id, best region) by recursing into a node.
+      procedure, pass(self), private :: scan_payload                  !< Stride-1 unsigned leaf scan over the distance payload (issue #19 §B1).
+      procedure, pass(self), private :: scan_payload_with_facet       !< Stride-1 signed leaf scan over the distance payload (issue #19 §B1).
       procedure, pass(self), private :: ray_intersections_number_node !< Return ray intersections number into a node of AABB tree.
       procedure, pass(self), private :: intersect_ray_all_node        !< Recursive driver behind intersect_ray_all_tree.
       procedure, pass(self), private :: intersect_ray_first_node      !< Recursive driver behind intersect_ray_first_tree.
@@ -278,7 +308,8 @@ contains
    !< Release node storage and reset state.
    type(aabb_tree_object), intent(inout) :: self !< AABB tree.
 
-   if (allocated(self%node)) deallocate(self%node)
+   if (allocated(self%node))    deallocate(self%node)
+   if (allocated(self%payload)) deallocate(self%payload)
    self%nodes_number   = 0
    self%is_initialized = .false.
    endsubroutine aabb_tree_finalize
@@ -655,9 +686,69 @@ contains
       self%node(f) = nodes_tmp(f)
    enddo
    self%nodes_number   = n_used
-   self%is_initialized = .true.
    deallocate(nodes_tmp, indices)
+
+   ! Flatten the leaf facets into the contiguous distance payload (issue #19 §B1).
+   call self%build_distance_payload(facet=facet)
+
+   self%is_initialized = .true.
    endsubroutine build_bvh_sah
+
+   pure subroutine build_distance_payload(self, facet)
+   !< Flatten every BVH leaf's facets into the tree's contiguous
+   !< `facet_distance_payload` array, leaf-grouped (issue #19 §B1).
+   !<
+   !< Walks the node array in index order; for each leaf (a node with
+   !< `payload_count`-eligible facets — i.e. `facet_id%ids_number > 0` and no
+   !< children) it appends that leaf's facets to `self%payload(:)` contiguously
+   !< and records the leaf's `(payload_first, payload_count)` slice. After this
+   !< pass the distance traversal never touches `facet_id` again: a leaf scan is
+   !< a stride-1 sweep over `self%payload(first : first+count-1)`.
+   !<
+   !< The total payload length equals the sum of leaf facet counts. For the SAH
+   !< BVH this equals `n_facets` exactly (the partition is a permutation — every
+   !< facet lands in exactly one leaf), but the code does not rely on that: it
+   !< sizes the array from the actual leaf-count sum so it stays correct if the
+   !< builder ever changes.
+   class(aabb_tree_object), intent(inout) :: self        !< AABB tree.
+   type(facet_object),      intent(in)    :: facet(:)    !< Facets list (read-only source of the triangle metrix).
+   integer(I4P)                           :: n, total, cursor, k, fid !< Counters.
+
+   if (allocated(self%payload)) deallocate(self%payload)
+   if (self%nodes_number <= 0) return
+
+   ! First pass: total payload length = sum of leaf facet counts.
+   total = 0_I4P
+   do n = 0, self%nodes_number - 1
+      if (self%node(n)%get_left_child() == 0 .and. self%node(n)%get_right_child() == 0) then
+         total = total + self%node(n)%facet_id_count()
+      endif
+   enddo
+   if (total <= 0_I4P) return
+   allocate(self%payload(total))
+
+   ! Second pass: emit each leaf's facets contiguously, record its slice.
+   cursor = 1_I4P
+   do n = 0, self%nodes_number - 1
+      if (self%node(n)%get_left_child() /= 0 .or. self%node(n)%get_right_child() /= 0) cycle
+      associate (count => self%node(n)%facet_id_count())
+         if (count <= 0_I4P) cycle
+         call self%node(n)%set_payload_slice(first=cursor, count=count)
+         do k = 1_I4P, count
+            fid = self%node(n)%facet_id_at(k)
+            self%payload(cursor)%v1     = [facet(fid)%vertex(1)%x, facet(fid)%vertex(1)%y, facet(fid)%vertex(1)%z]
+            self%payload(cursor)%e12    = [facet(fid)%E12%x, facet(fid)%E12%y, facet(fid)%E12%z]
+            self%payload(cursor)%e13    = [facet(fid)%E13%x, facet(fid)%E13%y, facet(fid)%E13%z]
+            self%payload(cursor)%a      = facet(fid)%a
+            self%payload(cursor)%b      = facet(fid)%b
+            self%payload(cursor)%c      = facet(fid)%c
+            self%payload(cursor)%det    = facet(fid)%det
+            self%payload(cursor)%facet_id = fid
+            cursor = cursor + 1_I4P
+         enddo
+      end associate
+   enddo
+   endsubroutine build_distance_payload
 
    pure recursive subroutine build_node(nodes, idx, lo, hi, facet, this_node, next_idx, n_max)
    !< One recursive build step. Operates on the slice `idx(lo:hi)` of facet ids:
@@ -1050,6 +1141,7 @@ contains
       enddo
       deallocate(lhs%node)
    endif
+   if (allocated(lhs%payload)) deallocate(lhs%payload)
    lhs%tree_kind         = rhs%tree_kind
    lhs%refinement_levels = rhs%refinement_levels
    lhs%nodes_number      = rhs%nodes_number
@@ -1059,6 +1151,7 @@ contains
          lhs%node(b) = rhs%node(b)
       enddo
    endif
+   if (allocated(rhs%payload)) lhs%payload = rhs%payload
    lhs%is_initialized = rhs%is_initialized
    lhs%use_index      = rhs%use_index
    endsubroutine aabb_tree_assign_aabb_tree
@@ -1132,9 +1225,14 @@ contains
 
    associate(node => self%node)
       ! 1. node's own facets — internal nodes can still carry facets (octree).
-      !    For the BVH this is a no-op on internal nodes (their facet_id list is empty).
-      facet_d2 = node(n)%distance_from_facets(facet=facet, point=point)
-      if (facet_d2 < best) best = facet_d2
+      !    BVH: stride-1 sweep over the flattened distance payload (issue #19 §B1).
+      !    Octree: legacy facet_id-indexed scan into the global facet array.
+      if (self%tree_kind == AABB_TREE_SAH_BVH) then
+         call self%scan_payload(n=n, point=point, best=best)
+      else
+         facet_d2 = node(n)%distance_from_facets(facet=facet, point=point)
+         if (facet_d2 < best) best = facet_d2
+      endif
 
       ! 2. enumerate allocated children. Tree-kind-agnostic via the helper.
       call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
@@ -1167,6 +1265,38 @@ contains
    end associate
    endsubroutine distance_node
 
+   pure subroutine scan_payload(self, n, point, best)
+   !< Stride-1 scan of leaf `n`'s slice of the flattened distance payload,
+   !< updating `best` squared distance (issue #19 §B1, unsigned path).
+   !<
+   !< A no-op on internal BVH nodes (`payload_count == 0`). The payload carries
+   !< the packed triangle metrix contiguously, so this is a sequential sweep with
+   !< no `node -> aabb -> facet_id -> facet(fid)` indirection.
+   class(aabb_tree_object), intent(in)    :: self    !< AABB tree.
+   integer(I4P),            intent(in)    :: n       !< Node index.
+   type(vector_R8P),        intent(in)    :: point   !< Point coordinates.
+   real(R8P),               intent(inout) :: best    !< Running best squared distance.
+   integer(I4P)                           :: first, count, k, idx !< Slice bounds and counters.
+   real(R8P)                              :: d2      !< Candidate squared distance.
+   type(vector_R8P)                       :: closest !< Discarded (unsigned path).
+   integer(I4P)                           :: region  !< Discarded (unsigned path).
+
+   count = self%node(n)%get_payload_count()
+   if (count <= 0_I4P) return
+   first = self%node(n)%get_payload_first()
+   do k = 0_I4P, count - 1_I4P
+      idx = first + k
+      associate (p => self%payload(idx))
+         call triangle_point_distance(v1=vector_R8P(p%v1(1), p%v1(2), p%v1(3)),       &
+                                      e12=vector_R8P(p%e12(1), p%e12(2), p%e12(3)),   &
+                                      e13=vector_R8P(p%e13(1), p%e13(2), p%e13(3)),   &
+                                      a=p%a, b=p%b, c=p%c, det=p%det, point=point,    &
+                                      distance=d2, closest=closest, region=region)
+      end associate
+      if (d2 < best) best = d2
+   enddo
+   endsubroutine scan_payload
+
    recursive subroutine distance_node_with_region(self, n, facet, point, best, best_facet, best_region)
    !< Same best-first descent as `distance_node`, but tracks the facet id and Voronoi region
    !< of the closest point (needed for pseudo-normal sign determination).
@@ -1184,8 +1314,16 @@ contains
    real(R8P)                              :: swap_d                     !< Sort helper.
 
    associate(node => self%node)
-      call node(n)%update_best_from_facets(facet=facet, point=point, &
-                                           best=best, best_facet=best_facet, best_region=best_region)
+      ! BVH: stride-1 sweep over the flattened distance payload, recording the
+      ! winning facet id (issue #19 §B1). The Voronoi region is NOT computed here
+      ! — only the winner's region matters and the surface layer recomputes it
+      ! once on the final closest facet. Octree: legacy facet_id-indexed scan.
+      if (self%tree_kind == AABB_TREE_SAH_BVH) then
+         call self%scan_payload_with_facet(n=n, point=point, best=best, best_facet=best_facet)
+      else
+         call node(n)%update_best_from_facets(facet=facet, point=point, &
+                                              best=best, best_facet=best_facet, best_region=best_region)
+      endif
 
       call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
       if (nchild == 0) return
@@ -1214,6 +1352,45 @@ contains
       enddo
    end associate
    endsubroutine distance_node_with_region
+
+   pure subroutine scan_payload_with_facet(self, n, point, best, best_facet)
+   !< Stride-1 scan of leaf `n`'s payload slice, updating `best` squared distance
+   !< and the winning facet id (issue #19 §B1, signed/pseudo-normal path).
+   !<
+   !< Unlike the octree's `update_best_from_facets`, the Voronoi region is not
+   !< tracked per facet here: only the *winning* facet's region is needed, and the
+   !< surface layer (`compute_distance`) recomputes it once via
+   !< `facet(best_facet)%compute_distance_with_region` on the final closest facet.
+   !< Dropping the per-facet region work is part of issue #19 §B5; doing it here
+   !< for free since the payload kernel is being written fresh.
+   class(aabb_tree_object), intent(in)    :: self       !< AABB tree.
+   integer(I4P),            intent(in)    :: n          !< Node index.
+   type(vector_R8P),        intent(in)    :: point      !< Point coordinates.
+   real(R8P),               intent(inout) :: best       !< Running best squared distance.
+   integer(I4P),            intent(inout) :: best_facet !< Running best facet id.
+   integer(I4P)                           :: first, count, k, idx !< Slice bounds and counters.
+   real(R8P)                              :: d2         !< Candidate squared distance.
+   type(vector_R8P)                       :: closest    !< Discarded (region recomputed on the winner).
+   integer(I4P)                           :: region     !< Discarded (region recomputed on the winner).
+
+   count = self%node(n)%get_payload_count()
+   if (count <= 0_I4P) return
+   first = self%node(n)%get_payload_first()
+   do k = 0_I4P, count - 1_I4P
+      idx = first + k
+      associate (p => self%payload(idx))
+         call triangle_point_distance(v1=vector_R8P(p%v1(1), p%v1(2), p%v1(3)),       &
+                                      e12=vector_R8P(p%e12(1), p%e12(2), p%e12(3)),   &
+                                      e13=vector_R8P(p%e13(1), p%e13(2), p%e13(3)),   &
+                                      a=p%a, b=p%b, c=p%c, det=p%det, point=point,    &
+                                      distance=d2, closest=closest, region=region)
+         if (d2 < best) then
+            best       = d2
+            best_facet = p%facet_id
+         endif
+      end associate
+   enddo
+   endsubroutine scan_payload_with_facet
 
    recursive function ray_intersections_number_node(self, n, facet, ray_origin, ray_direction) result(intersections_number)
    !< Return ray intersections number into a node of the AABB tree.

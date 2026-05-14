@@ -13,6 +13,7 @@ implicit none
 private
 public :: facet_object
 public :: EDGE_12, EDGE_23, EDGE_31
+public :: triangle_point_distance
 
 ! Edge indices for the connectivity API (fcon_edge, edge_pnormal, make_normal_consistent,
 ! flip_edge, edge_connection_in_other_ref). Convention:
@@ -161,24 +162,61 @@ contains
    !<
    !< @note Facet's metrix must be already computed.
    !<
-   !< @note Algorithm by David Eberly, Geometric Tools LLC, http://www.geometrictools.com.
-   class(facet_object), intent(in)  :: self                             !< Facet.
-   type(vector_R8P),    intent(in)  :: point                            !< Point.
-   real(R8P),           intent(out) :: distance                         !< Closest squared distance from point to the facet.
-   type(vector_R8P),    intent(out) :: closest                          !< Closest point on the facet.
-   integer(I4P),        intent(out) :: region                           !< Voronoi region tag (see encoding above).
-   type(vector_R8P)                 :: V1P                              !< `vertex(1)-point`.
-   real(R8P)                        :: d, e, f, s, t, sq, tq            !< Plane equation coefficients.
-   real(R8P)                        :: tmp0, tmp1, numer, denom, invdet !< Temporary.
-   real(R8P), parameter             :: BARY_TOL = 1.0e-12_R8P           !< Tolerance for classifying barycentric coords as 0/1.
+   !< Thin wrapper over `triangle_point_distance` — the actual point-to-triangle
+   !< geometry lives there so the BVH's packed distance payload (issue #19 §B1)
+   !< can share the exact same kernel without going through a `facet_object`.
+   class(facet_object), intent(in)  :: self     !< Facet.
+   type(vector_R8P),    intent(in)  :: point    !< Point.
+   real(R8P),           intent(out) :: distance !< Closest squared distance from point to the facet.
+   type(vector_R8P),    intent(out) :: closest  !< Closest point on the facet.
+   integer(I4P),        intent(out) :: region   !< Voronoi region tag (see encoding above).
 
-   associate(a=>self%a, b=>self%b, c=>self%c, det=>self%det)
-   V1P = self%vertex(1) - point
-   d = self%E12.dot.V1P
-   e = self%E13.dot.V1P
+   call triangle_point_distance(v1=self%vertex(1), e12=self%E12, e13=self%E13,    &
+                                a=self%a, b=self%b, c=self%c, det=self%det,       &
+                                point=point, distance=distance, closest=closest, &
+                                region=region)
+   endsubroutine compute_distance_with_region
+
+   pure subroutine triangle_point_distance(v1, e12, e13, a, b, c, det, point, distance, closest, region)
+   !< Squared distance from a point to a triangle, plus the closest point and the
+   !< Voronoi-region tag of that closest point.
+   !<
+   !< This is the single source of truth for the point-to-triangle geometry. It is
+   !< parametrised on the raw triangle metrix — first vertex `v1`, edge vectors
+   !< `e12 = v2-v1` and `e13 = v3-v1`, and the Gram coefficients
+   !< `a = e12.e12`, `b = e12.e13`, `c = e13.e13`, `det = a*c - b*b` — rather than on
+   !< a `facet_object`, so the BVH's flattened distance payload (issue #19 §B1) can
+   !< call it directly on its packed SoA without the `node -> aabb -> facet_id ->
+   !< facet(fid)` indirection chain.
+   !<
+   !< Region encoding:
+   !<    0          : interior (face region)
+   !<    1, 2, 3    : edge EDGE_12, EDGE_23, EDGE_31 respectively
+   !<   -1, -2, -3  : vertex 1, 2, 3 respectively
+   !<
+   !< @note Algorithm by David Eberly, Geometric Tools LLC, http://www.geometrictools.com.
+   type(vector_R8P), intent(in)  :: v1                               !< Triangle first vertex.
+   type(vector_R8P), intent(in)  :: e12                              !< Edge 1-2, `v2 - v1`.
+   type(vector_R8P), intent(in)  :: e13                              !< Edge 1-3, `v3 - v1`.
+   real(R8P),        intent(in)  :: a                                !< `e12 . e12`.
+   real(R8P),        intent(in)  :: b                                !< `e12 . e13`.
+   real(R8P),        intent(in)  :: c                                !< `e13 . e13`.
+   real(R8P),        intent(in)  :: det                              !< Gram determinant `a*c - b*b`.
+   type(vector_R8P), intent(in)  :: point                            !< Point.
+   real(R8P),        intent(out) :: distance                         !< Closest squared distance from point to the triangle.
+   type(vector_R8P), intent(out) :: closest                          !< Closest point on the triangle.
+   integer(I4P),     intent(out) :: region                           !< Voronoi region tag (see encoding above).
+   type(vector_R8P)              :: V1P                              !< `v1 - point`.
+   real(R8P)                     :: d, e, f, s, t, sq, tq            !< Plane equation coefficients.
+   real(R8P)                     :: tmp0, tmp1, numer, denom, invdet !< Temporary.
+   real(R8P), parameter          :: BARY_TOL = 1.0e-12_R8P           !< Tolerance for classifying barycentric coords as 0/1.
+
+   V1P = v1 - point
+   d = e12.dot.V1P
+   e = e13.dot.V1P
    f = V1P.dot.V1P
-   s = self%b * e - self%c * d
-   t = self%b * d - self%a * e
+   s = b * e - c * d
+   t = b * d - a * e
    if (s+t <= det) then
       if (s < 0._R8P) then
          if (t < 0._R8P) then ! region 4
@@ -298,7 +336,7 @@ contains
       endif
    endif
    distance = abs(a * sq * sq + 2._R8P * b * sq * tq + c * tq * tq + 2._R8P * d * sq + 2._R8P * e * tq + f)
-   closest = self%vertex(1) + sq * self%E12 + tq * self%E13
+   closest = v1 + sq * e12 + tq * e13
    ! Region classification from (sq, tq) barycentric-style coordinates.
    ! Vertex correspondence: V1 ↔ (0,0), V2 ↔ (1,0), V3 ↔ (0,1).
    ! Edge correspondence:   EDGE_12 (V1→V2) ↔ tq=0; EDGE_23 (V2→V3) ↔ sq+tq=1; EDGE_31 (V3→V1) ↔ sq=0.
@@ -317,8 +355,7 @@ contains
    else
       region = 0_I4P                             ! face interior
    endif
-   endassociate
-   endsubroutine compute_distance_with_region
+   endsubroutine triangle_point_distance
 
    pure function pseudo_normal_for_region(self, region) result(n)
    !< Return the pseudo-normal of `self` corresponding to a closest-point region tag

@@ -28,12 +28,21 @@ type :: aabb_node_object
    type(aabb_object), allocatable :: aabb           !< AABB data.
    integer(I4P)                   :: left_child=0   !< BVH left child node index into the tree's node array; 0 = leaf.
    integer(I4P)                   :: right_child=0  !< BVH right child node index into the tree's node array; 0 = leaf.
+   ! Flattened distance-payload slice for the SAH BVH (issue #19 §B1). A leaf owns
+   ! `payload(payload_first : payload_first + payload_count - 1)` of the tree's
+   ! contiguous `facet_distance_payload` array. `payload_count = 0` on internal
+   ! nodes and on the octree path.
+   integer(I4P)                   :: payload_first=0 !< First index into the tree's distance payload (1-based; 0 = unset).
+   integer(I4P)                   :: payload_count=0 !< Number of payload entries owned by this leaf (0 = not a BVH leaf).
    contains
       ! public methods
       procedure, pass(self) :: add_facets                  !< Add facets to AABB.
       procedure, pass(self) :: get_left_child              !< Return left_child (BVH); 0 if leaf or octree.
       procedure, pass(self) :: get_right_child             !< Return right_child (BVH); 0 if leaf or octree.
+      procedure, pass(self) :: get_payload_first           !< Return payload_first (BVH distance payload slice start).
+      procedure, pass(self) :: get_payload_count           !< Return payload_count (BVH distance payload slice length).
       procedure, pass(self) :: set_children                !< Set (left_child, right_child) — BVH builder.
+      procedure, pass(self) :: set_payload_slice           !< Set (payload_first, payload_count) — BVH distance-payload builder.
       procedure, pass(self) :: set_facet_ids               !< Bulk-load the leaf's facet_id list (BVH builder).
       procedure, pass(self) :: bmin                        !< Return AABB bmin.
       procedure, pass(self) :: bmax                        !< Return AABB bmax.
@@ -50,6 +59,8 @@ type :: aabb_node_object
       procedure, pass(self) :: intersect_ray_first_facets  !< Update closest hit using this node's facets (issue #18 §2.5).
       procedure, pass(self) :: intersect_ray_any_facets    !< Early-exit any-hit on this node's facets (issue #18 §2.5).
       procedure, pass(self) :: facet_id                    !< Return the facets IDs list.
+      procedure, pass(self) :: facet_id_count              !< Return the facet-id count without copying the list (issue #19 §B1).
+      procedure, pass(self) :: facet_id_at                 !< Return the k-th facet id without copying the list (issue #19 §B1).
       procedure, pass(self) :: get_aabb_facets             !< Get AABB facets list.
       procedure, pass(self) :: has_facets                  !< Return true if AABB has facets.
       procedure, pass(self) :: initialize                  !< Initialize AABB.
@@ -115,6 +126,35 @@ contains
    self%right_child = right_child
    endsubroutine set_children
 
+   pure function get_payload_first(self) result(first)
+   !< Return the start index of this leaf's slice into the tree's distance payload
+   !< (issue #19 §B1). 0 if the node is not a BVH leaf.
+   class(aabb_node_object), intent(in) :: self  !< AABB node.
+   integer(I4P)                        :: first !< Payload slice start (1-based; 0 = unset).
+
+   first = self%payload_first
+   endfunction get_payload_first
+
+   pure function get_payload_count(self) result(count)
+   !< Return the length of this leaf's slice into the tree's distance payload
+   !< (issue #19 §B1). 0 on internal nodes and on the octree path.
+   class(aabb_node_object), intent(in) :: self  !< AABB node.
+   integer(I4P)                        :: count !< Payload slice length.
+
+   count = self%payload_count
+   endfunction get_payload_count
+
+   pure subroutine set_payload_slice(self, first, count)
+   !< Record this leaf's `(first, count)` slice into the tree's flattened distance
+   !< payload (issue #19 §B1). Set by `build_distance_payload` after the BVH is built.
+   class(aabb_node_object), intent(inout) :: self  !< AABB node.
+   integer(I4P),            intent(in)    :: first !< Payload slice start (1-based).
+   integer(I4P),            intent(in)    :: count !< Payload slice length.
+
+   self%payload_first = first
+   self%payload_count = count
+   endsubroutine set_payload_slice
+
    pure subroutine set_facet_ids(self, ids)
    !< Bulk-load this node's facet_id list with the given ids array, replacing any
    !< previous contents. Used by the BVH builder to populate a leaf without going
@@ -172,8 +212,10 @@ contains
       call self%aabb%destroy
       deallocate(self%aabb)
    endif
-   self%left_child  = 0_I4P
-   self%right_child = 0_I4P
+   self%left_child    = 0_I4P
+   self%right_child   = 0_I4P
+   self%payload_first = 0_I4P
+   self%payload_count = 0_I4P
    endsubroutine destroy
 
    pure function distance(self, point)
@@ -345,6 +387,30 @@ contains
    if (self%is_allocated()) facet_id = self%aabb%facet_id
    endfunction facet_id
 
+   pure function facet_id_count(self) result(count)
+   !< Return the number of facet ids in this node's `facet_id` list, without
+   !< copying the whole `list_id_object` (issue #19 §B1 payload builder).
+   class(aabb_node_object), intent(in) :: self  !< AABB node.
+   integer(I4P)                        :: count !< Facet-id count (0 if the node has no AABB).
+
+   count = 0_I4P
+   if (self%is_allocated()) count = self%aabb%facet_id%ids_number
+   endfunction facet_id_count
+
+   pure function facet_id_at(self, k) result(fid)
+   !< Return the `k`-th facet id from this node's `facet_id` list, without
+   !< copying the whole `list_id_object` (issue #19 §B1 payload builder).
+   !< `k` is assumed in range `[1, facet_id_count()]`.
+   class(aabb_node_object), intent(in) :: self !< AABB node.
+   integer(I4P),            intent(in) :: k    !< 1-based index into the facet-id list.
+   integer(I4P)                        :: fid  !< Facet id (0 if out of range or no AABB).
+
+   fid = 0_I4P
+   if (self%is_allocated()) then
+      if (k >= 1_I4P .and. k <= self%aabb%facet_id%ids_number) fid = self%aabb%facet_id%id(k)
+   endif
+   endfunction facet_id_at
+
    pure subroutine get_aabb_facets(self, facet, aabb_facet)
    !< Get AABB facets list.
    class(aabb_node_object), intent(in)               :: self          !< AABB.
@@ -462,7 +528,9 @@ contains
       allocate(lhs%aabb)
       lhs%aabb = rhs%aabb
    endif
-   lhs%left_child  = rhs%left_child
-   lhs%right_child = rhs%right_child
+   lhs%left_child    = rhs%left_child
+   lhs%right_child   = rhs%right_child
+   lhs%payload_first = rhs%payload_first
+   lhs%payload_count = rhs%payload_count
    endsubroutine aabb_node_assign_aabb_node
 endmodule fossil_aabb_node_object
