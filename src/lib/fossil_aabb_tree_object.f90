@@ -69,6 +69,17 @@ integer(I4P), parameter :: AABB_TREE_SAH_BVH = 1_I4P
 ! and `initialize` picks the depth from the facet count via `auto_refinement_levels`.
 ! Only meaningful for the octree path; the SAH BVH self-tunes depth from cost.
 integer(I4P), parameter :: AABB_AUTO_REFINEMENT = -1_I4P
+
+! Iterative-traversal explicit-stack capacity (issue #20 §Step 3). The recursive
+! distance_node was replaced by an explicit LIFO of node indices to make the
+! traversal device-callable -- nvfortran allows recursion inside `!$acc routine`
+! only via per-thread call stacks, which murder occupancy at GPU thread counts.
+! Realistic worst case: max-tree-depth * children-per-node = pending siblings on
+! the descent path. SAH BVH depth ~9 with 2 children = ~18; octree depth ~8 with
+! 8 children = ~64. 128 is generous; the path-pending invariant + the bench's
+! BVH-vs-brute correctness gate would catch any overflow as a numerical
+! regression, not silent skip.
+integer(I4P), parameter :: MAX_TRAVERSAL_STACK = 128_I4P
 ! Heuristic parameters (private; the literature suggests 16-32 facets per leaf is
 ! a broad sweet spot for triangle-mesh BVHs, and FOSSIL's flat empirical curve
 ! tolerates any choice in that range to within 5%).
@@ -169,8 +180,8 @@ type :: aabb_tree_object
       procedure, pass(self), private :: build_bvh_sah                 !< Build a SAH BVH over the given facet list.
       procedure, pass(self), private :: build_distance_payload        !< Flatten BVH leaf facets into the contiguous distance SoA (issue #19 §B1).
       procedure, pass(self) :: enumerate_children                    !< List the allocated children of a node (octree or BVH).
-      procedure, pass(self), private :: distance_node                 !< Update best squared distance by recursing into a node.
-      procedure, pass(self), private :: distance_node_with_region     !< Update (best d^2, best facet id, best region) by recursing into a node.
+      procedure, pass(self), private :: distance_node                 !< Update best squared distance by iterative explicit-stack traversal from a node (issue #20 §Step 3).
+      procedure, pass(self), private :: distance_node_with_region     !< Update (best d^2, best facet id, best region) by iterative explicit-stack traversal (issue #20 §Step 3).
       procedure, pass(self), private :: scan_payload                  !< Stride-1 unsigned leaf scan over the distance payload (issue #19 §B1).
       procedure, pass(self), private :: scan_payload_with_facet       !< Stride-1 signed leaf scan over the distance payload (issue #19 §B1).
       procedure, pass(self), private :: ray_intersections_number_node !< Return ray intersections number into a node of AABB tree.
@@ -1196,27 +1207,42 @@ contains
    endif
    endsubroutine enumerate_children
 
-   recursive subroutine distance_node(self, n, facet, point, best)
+   pure subroutine distance_node(self, n, facet, point, best)
    !< Update `best` squared distance by visiting node `n` and pruning descendants.
    !<
-   !< Algorithm (best-first BVH traversal with d^2 pruning):
-   !<  1. Test the node's own facets against `best` (every node may carry facets;
+   !< Algorithm (best-first traversal with d^2 pruning, iterative explicit stack):
+   !<  1. Pop a node index from the stack. For every non-root pop, re-test the
+   !<     node's box d^2 against the current `best` (DEFERRED PRUNE): `best` may
+   !<     have tightened since the node was pushed by an earlier-popped sibling's
+   !<     subtree, so what was promising at push time may now be prunable.
+   !<  2. Test the node's own facets against `best` (every node may carry facets;
    !<     a non-leaf can still hold facets that did not fit deeper levels).
-   !<  2. Gather allocated children with their AABB squared distance, sort
-   !<     ascending so the most promising subtree is visited first — this makes
-   !<     `best` tighten quickly and prune siblings.
-   !<  3. Recurse only into children whose box d^2 is < current `best`.
+   !<  3. Gather allocated children with their AABB squared distance, sort
+   !<     ascending. Push children with `child_d2 < best` onto the stack
+   !<     FARTHEST-FIRST so the NEAREST sits on top of the LIFO and is popped
+   !<     next -- reproducing the recursive form's best-first descent order
+   !<     (a prerequisite for bit-exactness with the prior recursive version).
    !<
    !< Correctness depends on the fact that an AABB's squared distance to a point
    !< is a lower bound on the squared distance to any facet inside that AABB.
    !< This is why a child whose box d^2 already exceeds the best can be skipped:
    !< its facets cannot improve the answer.
+   !<
+   !< Was `recursive` pre-issue #20 §Step 3. Made iterative so the routine can be
+   !< called from inside an `!$acc routine seq` (Step 4): OpenACC accepts
+   !< recursion only via per-thread call stacks, which murder occupancy at GPU
+   !< thread counts. The CPU benchmark is within noise of the recursive form;
+   !< this lands as the device prerequisite, not for CPU speed (see issue #19
+   !< Step 5 / B4 measurement comment).
    class(aabb_tree_object), intent(in)    :: self                       !< AABB tree.
-   integer(I4P),            intent(in)    :: n                          !< Current AABB node.
+   integer(I4P),            intent(in)    :: n                          !< Root node to traverse from.
    type(facet_object),      intent(in)    :: facet(:)                   !< Facets list.
    type(vector_R8P),        intent(in)    :: point                      !< Point coordinates.
    real(R8P),               intent(inout) :: best                       !< Running best squared distance.
-   real(R8P)                              :: facet_d2                   !< Distance from this node's facets.
+   integer(I4P)                           :: stack(MAX_TRAVERSAL_STACK) !< Explicit LIFO of pending node indices.
+   integer(I4P)                           :: sp                         !< Stack pointer (1-based; 0 == empty).
+   integer(I4P)                           :: cur                        !< Current popped node index.
+   real(R8P)                              :: facet_d2                   !< Distance from a node's facets.
    real(R8P)                              :: child_d2(TREE_RATIO)       !< Per-child box d^2 (sized for octree).
    integer(I4P)                           :: child_idx(TREE_RATIO)      !< Per-child node index (sized for octree).
    integer(I4P)                           :: nchild                     !< Number of allocated children.
@@ -1224,43 +1250,62 @@ contains
    real(R8P)                              :: swap_d                     !< Sort helper.
 
    associate(node => self%node)
-      ! 1. node's own facets — internal nodes can still carry facets (octree).
-      !    BVH: stride-1 sweep over the flattened distance payload (issue #19 §B1).
-      !    Octree: legacy facet_id-indexed scan into the global facet array.
-      if (self%tree_kind == AABB_TREE_SAH_BVH) then
-         call self%scan_payload(n=n, point=point, best=best)
-      else
-         facet_d2 = node(n)%distance_from_facets(facet=facet, point=point)
-         if (facet_d2 < best) best = facet_d2
-      endif
+      stack(1) = n
+      sp       = 1_I4P
+      do while (sp > 0_I4P)
+         cur = stack(sp)
+         sp  = sp - 1_I4P
 
-      ! 2. enumerate allocated children. Tree-kind-agnostic via the helper.
-      call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
-      if (nchild == 0) return
-      do i = 1, nchild
-         child_d2(i) = node(child_idx(i))%distance(point=point)
-      enddo
+         ! 1. Deferred prune. Skip non-root nodes whose box d^2 no longer beats `best`
+         !    (a sibling's subtree may have tightened `best` since this node was pushed).
+         !    The root is always entered.
+         if (cur /= n) then
+            if (node(cur)%distance(point=point) >= best) cycle
+         endif
 
-      ! 3. insertion sort by ascending box d^2 (tiny array, branch-predictable).
-      do i = 2, nchild
-         swap_d  = child_d2(i)
-         swap_i  = child_idx(i)
-         j = i - 1
-         do while (j >= 1)
-            if (child_d2(j) <= swap_d) exit
-            child_d2(j + 1)  = child_d2(j)
-            child_idx(j + 1) = child_idx(j)
-            j = j - 1
+         ! 2. Node's own facets — internal nodes can still carry facets (octree).
+         !    BVH: stride-1 sweep over the flattened distance payload (issue #19 §B1).
+         !    Octree: legacy facet_id-indexed scan into the global facet array.
+         if (self%tree_kind == AABB_TREE_SAH_BVH) then
+            call self%scan_payload(n=cur, point=point, best=best)
+         else
+            facet_d2 = node(cur)%distance_from_facets(facet=facet, point=point)
+            if (facet_d2 < best) best = facet_d2
+         endif
+
+         ! 3. Enumerate allocated children. Tree-kind-agnostic via the helper.
+         call self%enumerate_children(n=cur, out_idx=child_idx, nchild=nchild)
+         if (nchild == 0_I4P) cycle
+         do i = 1_I4P, nchild
+            child_d2(i) = node(child_idx(i))%distance(point=point)
          enddo
-         child_d2(j + 1)  = swap_d
-         child_idx(j + 1) = swap_i
-      enddo
 
-      ! 4. recurse with pruning — once a child's box d^2 >= best, all remaining
-      !    (sorted) children are at least as far, so we can stop early.
-      do i = 1, nchild
-         if (child_d2(i) >= best) exit
-         call self%distance_node(n=child_idx(i), facet=facet, point=point, best=best)
+         ! 4. Insertion sort by ascending box d^2 (tiny array, branch-predictable).
+         do i = 2_I4P, nchild
+            swap_d  = child_d2(i)
+            swap_i  = child_idx(i)
+            j = i - 1_I4P
+            do while (j >= 1_I4P)
+               if (child_d2(j) <= swap_d) exit
+               child_d2(j + 1_I4P)  = child_d2(j)
+               child_idx(j + 1_I4P) = child_idx(j)
+               j = j - 1_I4P
+            enddo
+            child_d2(j + 1_I4P)  = swap_d
+            child_idx(j + 1_I4P) = swap_i
+         enddo
+
+         ! 5. Push children FARTHEST-FIRST (i = nchild down to 1, descending in sort
+         !    order). This puts the NEAREST child on top of the LIFO so it pops next,
+         !    reproducing the recursive form's best-first descent order -- prerequisite
+         !    for bit-exactness with the prior recursive code. Prune-at-push skips any
+         !    child already worse than the current `best`; pop-time re-prune (step 1)
+         !    catches the rest as `best` tightens during the traversal.
+         do i = nchild, 1_I4P, -1_I4P
+            if (child_d2(i) >= best) cycle
+            sp = sp + 1_I4P
+            stack(sp) = child_idx(i)
+         enddo
       enddo
    end associate
    endsubroutine distance_node
@@ -1298,16 +1343,23 @@ contains
    enddo
    endsubroutine scan_payload
 
-   recursive subroutine distance_node_with_region(self, n, facet, point, best, best_facet, best_region)
-   !< Same best-first descent as `distance_node`, but tracks the facet id and Voronoi region
-   !< of the closest point (needed for pseudo-normal sign determination).
+   pure subroutine distance_node_with_region(self, n, facet, point, best, best_facet, best_region)
+   !< Same best-first descent as `distance_node` -- explicit-stack iterative form
+   !< (issue #20 §Step 3) -- but additionally tracks the facet id and Voronoi region
+   !< of the closest point (needed for pseudo-normal sign determination). See
+   !< `distance_node` for the algorithm; the only difference here is the leaf-scan
+   !< call (`scan_payload_with_facet` or `update_best_from_facets`) and the extra
+   !< intent(inout) outputs.
    class(aabb_tree_object), intent(in)    :: self                       !< AABB tree.
-   integer(I4P),            intent(in)    :: n                          !< Current AABB node.
+   integer(I4P),            intent(in)    :: n                          !< Root node to traverse from.
    type(facet_object),      intent(in)    :: facet(:)                   !< Facets list.
    type(vector_R8P),        intent(in)    :: point                      !< Point coordinates.
    real(R8P),               intent(inout) :: best                       !< Running best squared distance.
    integer(I4P),            intent(inout) :: best_facet                 !< Running best facet id.
    integer(I4P),            intent(inout) :: best_region                !< Running best Voronoi region tag.
+   integer(I4P)                           :: stack(MAX_TRAVERSAL_STACK) !< Explicit LIFO of pending node indices.
+   integer(I4P)                           :: sp                         !< Stack pointer (1-based; 0 == empty).
+   integer(I4P)                           :: cur                        !< Current popped node index.
    real(R8P)                              :: child_d2(TREE_RATIO)       !< Per-child box d^2 (sized for octree).
    integer(I4P)                           :: child_idx(TREE_RATIO)      !< Per-child node index (sized for octree).
    integer(I4P)                           :: nchild                     !< Number of allocated children.
@@ -1315,41 +1367,55 @@ contains
    real(R8P)                              :: swap_d                     !< Sort helper.
 
    associate(node => self%node)
-      ! BVH: stride-1 sweep over the flattened distance payload, recording the
-      ! winning facet id (issue #19 §B1). The Voronoi region is NOT computed here
-      ! — only the winner's region matters and the surface layer recomputes it
-      ! once on the final closest facet. Octree: legacy facet_id-indexed scan.
-      if (self%tree_kind == AABB_TREE_SAH_BVH) then
-         call self%scan_payload_with_facet(n=n, point=point, best=best, best_facet=best_facet)
-      else
-         call node(n)%update_best_from_facets(facet=facet, point=point, &
-                                              best=best, best_facet=best_facet, best_region=best_region)
-      endif
+      stack(1) = n
+      sp       = 1_I4P
+      do while (sp > 0_I4P)
+         cur = stack(sp)
+         sp  = sp - 1_I4P
 
-      call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
-      if (nchild == 0) return
-      do i = 1, nchild
-         child_d2(i) = node(child_idx(i))%distance(point=point)
-      enddo
+         ! Deferred prune (see distance_node).
+         if (cur /= n) then
+            if (node(cur)%distance(point=point) >= best) cycle
+         endif
 
-      do i = 2, nchild
-         swap_d = child_d2(i)
-         swap_i = child_idx(i)
-         j = i - 1
-         do while (j >= 1)
-            if (child_d2(j) <= swap_d) exit
-            child_d2(j + 1)  = child_d2(j)
-            child_idx(j + 1) = child_idx(j)
-            j = j - 1
+         ! Leaf scan. BVH: payload sweep recording winning facet id (region computed
+         ! once at the end by the surface layer). Octree: facet_id-indexed scan that
+         ! also tracks the region per facet.
+         if (self%tree_kind == AABB_TREE_SAH_BVH) then
+            call self%scan_payload_with_facet(n=cur, point=point, best=best, best_facet=best_facet)
+         else
+            call node(cur)%update_best_from_facets(facet=facet, point=point, &
+                                                   best=best, best_facet=best_facet, best_region=best_region)
+         endif
+
+         ! Enumerate children + box-d^2.
+         call self%enumerate_children(n=cur, out_idx=child_idx, nchild=nchild)
+         if (nchild == 0_I4P) cycle
+         do i = 1_I4P, nchild
+            child_d2(i) = node(child_idx(i))%distance(point=point)
          enddo
-         child_d2(j + 1)  = swap_d
-         child_idx(j + 1) = swap_i
-      enddo
 
-      do i = 1, nchild
-         if (child_d2(i) >= best) exit
-         call self%distance_node_with_region(n=child_idx(i), facet=facet, point=point, &
-                                             best=best, best_facet=best_facet, best_region=best_region)
+         ! Ascending insertion sort.
+         do i = 2_I4P, nchild
+            swap_d = child_d2(i)
+            swap_i = child_idx(i)
+            j = i - 1_I4P
+            do while (j >= 1_I4P)
+               if (child_d2(j) <= swap_d) exit
+               child_d2(j + 1_I4P)  = child_d2(j)
+               child_idx(j + 1_I4P) = child_idx(j)
+               j = j - 1_I4P
+            enddo
+            child_d2(j + 1_I4P)  = swap_d
+            child_idx(j + 1_I4P) = swap_i
+         enddo
+
+         ! Push farthest-first (nearest pops next).
+         do i = nchild, 1_I4P, -1_I4P
+            if (child_d2(i) >= best) cycle
+            sp = sp + 1_I4P
+            stack(sp) = child_idx(i)
+         enddo
       enddo
    end associate
    endsubroutine distance_node_with_region
