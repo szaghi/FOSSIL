@@ -24,16 +24,26 @@ type :: aabb_node_object
    !< parent/child indexing (`first_child_node = TREE_RATIO * parent + 1`), so the
    !< two trees share the same node type without conflict. A BVH leaf has
    !< `left_child = right_child = 0`; an internal node has both non-zero.
+   !<
+   !< The `aabb` component is **inlined by value**, not allocatable (issue #20 §Step 2):
+   !< this makes the node fully device-mappable (`!$acc enter data copyin(node)` works
+   !< as a shallow copy of POD plus the embedded `list_id_object`'s allocatable `id(:)`,
+   !< which the device traversal does not read). Empty-slot semantic — formerly encoded
+   !< by `allocated(self%aabb) == .false.` — is now carried by the explicit
+   !< `is_present` flag. This same change incidentally unblocks the previously-deferred
+   !< octree-on-device follow-up: every octree `is_allocated()` test now resolves
+   !< against `is_present`, with no special-case work needed for the octree path.
    private
-   type(aabb_object), allocatable :: aabb           !< AABB data.
-   integer(I4P)                   :: left_child=0   !< BVH left child node index into the tree's node array; 0 = leaf.
-   integer(I4P)                   :: right_child=0  !< BVH right child node index into the tree's node array; 0 = leaf.
+   type(aabb_object) :: aabb              !< AABB data (inlined by value; see header note).
+   logical           :: is_present=.false. !< True iff this slot has been initialised (was: `allocated(self%aabb)`).
+   integer(I4P)      :: left_child=0      !< BVH left child node index into the tree's node array; 0 = leaf.
+   integer(I4P)      :: right_child=0     !< BVH right child node index into the tree's node array; 0 = leaf.
    ! Flattened distance-payload slice for the SAH BVH (issue #19 §B1). A leaf owns
    ! `payload(payload_first : payload_first + payload_count - 1)` of the tree's
    ! contiguous `facet_distance_payload` array. `payload_count = 0` on internal
    ! nodes and on the octree path.
-   integer(I4P)                   :: payload_first=0 !< First index into the tree's distance payload (1-based; 0 = unset).
-   integer(I4P)                   :: payload_count=0 !< Number of payload entries owned by this leaf (0 = not a BVH leaf).
+   integer(I4P)      :: payload_first=0   !< First index into the tree's distance payload (1-based; 0 = unset).
+   integer(I4P)      :: payload_count=0   !< Number of payload entries owned by this leaf (0 = not a BVH leaf).
    contains
       ! public methods
       procedure, pass(self) :: add_facets                  !< Add facets to AABB.
@@ -87,7 +97,7 @@ contains
    type(facet_object),      intent(in)           :: facet(:)     !< Facets list.
    logical,                 intent(in), optional :: is_exclusive !< Sentinel to enable/disable exclusive addition.
 
-   if (allocated(self%aabb)) call self%aabb%add_facets(facet_id=facet_id, facet=facet, is_exclusive=is_exclusive)
+   if (self%is_present) call self%aabb%add_facets(facet_id=facet_id, facet=facet, is_exclusive=is_exclusive)
    endsubroutine add_facets
 
    pure function bmin(self)
@@ -95,7 +105,7 @@ contains
    class(aabb_node_object), intent(in) :: self !< AABB box.
    type(vector_R8P)                    :: bmin !< AABB bmin.
 
-   if (allocated(self%aabb)) bmin = self%aabb%bmin
+   if (self%is_present) bmin = self%aabb%bmin
    endfunction bmin
 
    pure function get_left_child(self) result(idx)
@@ -164,7 +174,7 @@ contains
    class(aabb_node_object), intent(inout) :: self   !< AABB node.
    integer(I4P),            intent(in)    :: ids(:) !< Facet ids to store.
 
-   if (allocated(self%aabb)) call self%aabb%facet_id%initialize(id=ids)
+   if (self%is_present) call self%aabb%facet_id%initialize(id=ids)
    endsubroutine set_facet_ids
 
    pure function bmax(self)
@@ -172,7 +182,7 @@ contains
    class(aabb_node_object), intent(in) :: self !< AABB box.
    type(vector_R8P)                    :: bmax !< AABB bmax.
 
-   if (allocated(self%aabb)) bmax = self%aabb%bmax
+   if (self%is_present) bmax = self%aabb%bmax
    endfunction bmax
 
    pure function closest_point(self, point) result(closest)
@@ -182,7 +192,7 @@ contains
    type(vector_R8P)                    :: closest !< Closest point on (on in) aabb to point.
 
    closest = MaxR8P
-   if (allocated(self%aabb)) closest = self%aabb%closest_point(point=point)
+   if (self%is_present) closest = self%aabb%closest_point(point=point)
    endfunction closest_point
 
    pure subroutine compute_octants(self, octant)
@@ -201,17 +211,15 @@ contains
    type(facet_object),      intent(inout) :: facet(:)               !< Facets list.
    real(R8P),               intent(in)    :: tolerance_to_be_nearby !< Tolerance to identify nearby vertices.
 
-   if (allocated(self%aabb)) call self%aabb%compute_vertices_nearby(facet=facet, tolerance_to_be_nearby=tolerance_to_be_nearby)
+   if (self%is_present) call self%aabb%compute_vertices_nearby(facet=facet, tolerance_to_be_nearby=tolerance_to_be_nearby)
    endsubroutine compute_vertices_nearby
 
    elemental subroutine destroy(self)
    !< Destroy AABB.
    class(aabb_node_object), intent(inout) :: self  !< AABB.
 
-   if (allocated(self%aabb)) then
-      call self%aabb%destroy
-      deallocate(self%aabb)
-   endif
+   if (self%is_present) call self%aabb%destroy
+   self%is_present    = .false.
    self%left_child    = 0_I4P
    self%right_child   = 0_I4P
    self%payload_first = 0_I4P
@@ -225,7 +233,7 @@ contains
    real(R8P)                           :: distance !< Distance from point to AABB.
 
    distance = MaxR8P
-   if (allocated(self%aabb)) distance = self%aabb%distance(point=point)
+   if (self%is_present) distance = self%aabb%distance(point=point)
    endfunction distance
 
    pure function distance_from_facets(self, facet, point) result(distance)
@@ -236,7 +244,7 @@ contains
    real(R8P)                           :: distance  !< Distance from point to AABB's facets.
 
    distance = MaxR8P
-   if (allocated(self%aabb)) distance = self%aabb%distance_from_facets(facet=facet, point=point)
+   if (self%is_present) distance = self%aabb%distance_from_facets(facet=facet, point=point)
    endfunction distance_from_facets
 
    pure subroutine update_best_from_facets(self, facet, point, best, best_facet, best_region)
@@ -248,7 +256,7 @@ contains
    integer(I4P),            intent(inout) :: best_facet  !< Running best facet id.
    integer(I4P),            intent(inout) :: best_region !< Running best Voronoi region tag.
 
-   if (allocated(self%aabb)) call self%aabb%update_best_from_facets(facet=facet, point=point, &
+   if (self%is_present) call self%aabb%update_best_from_facets(facet=facet, point=point, &
                                                                     best=best, best_facet=best_facet, best_region=best_region)
    endsubroutine update_best_from_facets
 
@@ -260,7 +268,7 @@ contains
    logical                             :: do_intersect  !< Test result.
 
    do_intersect = .false.
-   if (allocated(self%aabb)) do_intersect = self%aabb%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)
+   if (self%is_present) do_intersect = self%aabb%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)
    endfunction do_ray_intersect
 
    subroutine intersect_ray_all_facets(self, facet, ray_origin, ray_direction, tmp, n_hits, n_overflow)
@@ -281,7 +289,7 @@ contains
    real(R8P)                                   :: t, u, v        !< Per-facet output.
    logical                                     :: facet_hit      !< Per-facet flag.
 
-   if (.not. allocated(self%aabb)) return
+   if (.not. self%is_present) return
    nf = self%aabb%facet_id%ids_number
    do f = 1_I4P, nf
       fid = self%aabb%facet_id%id(f)
@@ -317,7 +325,7 @@ contains
    real(R8P)                              :: t, u, v        !< Per-facet output.
    logical                                :: facet_hit      !< Per-facet flag.
 
-   if (.not. allocated(self%aabb)) return
+   if (.not. self%is_present) return
    nf = self%aabb%facet_id%ids_number
    do f = 1_I4P, nf
       fid = self%aabb%facet_id%id(f)
@@ -348,7 +356,7 @@ contains
    real(R8P)                              :: t, u, v        !< Per-facet output.
    logical                                :: facet_hit      !< Per-facet flag.
 
-   if (.not. allocated(self%aabb)) return
+   if (.not. self%is_present) return
    nf = self%aabb%facet_id%ids_number
    do f = 1_I4P, nf
       fid = self%aabb%facet_id%id(f)
@@ -375,7 +383,7 @@ contains
    t_near = 0._R8P
    t_far  = 0._R8P
    do_intersect = .false.
-   if (allocated(self%aabb)) call self%aabb%ray_slab_interval(ray_origin=ray_origin, ray_direction=ray_direction, &
+   if (self%is_present) call self%aabb%ray_slab_interval(ray_origin=ray_origin, ray_direction=ray_direction, &
                                                               t_near=t_near, t_far=t_far, do_intersect=do_intersect)
    endsubroutine ray_slab_interval
 
@@ -417,7 +425,7 @@ contains
    type(facet_object),      intent(in)               :: facet(:)      !< Whole facets list.
    type(facet_object),      intent(out), allocatable :: aabb_facet(:) !< AABB facets list.
 
-   if (allocated(self%aabb)) call self%aabb%get_aabb_facets(facet=facet, aabb_facet=aabb_facet)
+   if (self%is_present) call self%aabb%get_aabb_facets(facet=facet, aabb_facet=aabb_facet)
    endsubroutine get_aabb_facets
 
    pure function has_facets(self)
@@ -425,7 +433,7 @@ contains
    class(aabb_node_object), intent(in) :: self       !< AABB box.
    logical                             :: has_facets !< Check result.
 
-   has_facets = allocated(self%aabb)
+   has_facets = self%is_present
    if (has_facets) has_facets = self%aabb%has_facets()
    endfunction has_facets
 
@@ -438,17 +446,21 @@ contains
 
    call self%destroy
    if (present(facet).or.(present(bmin).and.present(bmin))) then
-      allocate(self%aabb)
       call self%aabb%initialize(facet=facet, bmin=bmin, bmax=bmax)
+      self%is_present = .true.   ! mark slot populated (was: allocate(self%aabb))
    endif
    endsubroutine initialize
 
    pure function is_allocated(self)
-   !< Return true if node is allocated.
+   !< Return true if node is initialised (post-#20 §Step 2: was `allocated(self%aabb)`).
+   !<
+   !< The TBP name is kept for caller-side backwards compatibility — every existing
+   !< `node%is_allocated()` call site reads identically — but the underlying
+   !< implementation is now a logical-flag test against `is_present`.
    class(aabb_node_object), intent(in) :: self         !< AABB box.
    logical                             :: is_allocated !< Check result.
 
-   is_allocated = allocated(self%aabb)
+   is_allocated = self%is_present
    endfunction is_allocated
 
    pure function ray_intersections_number(self, facet, ray_origin, ray_direction) result(intersections_number)
@@ -460,7 +472,7 @@ contains
    integer(I4P)                        :: intersections_number !< Intersection number.
 
    intersections_number = 0
-   if (allocated(self%aabb)) &
+   if (self%is_present) &
       intersections_number = self%aabb%ray_intersections_number(facet=facet, ray_origin=ray_origin, ray_direction=ray_direction)
    endfunction ray_intersections_number
 
@@ -470,7 +482,7 @@ contains
    integer(I4P),            intent(in)           :: file_unit  !< File unit.
    character(*),            intent(in), optional :: aabb_name  !< Name of AABB.
 
-   if (allocated(self%aabb)) call self%aabb%save_geometry_tecplot_ascii(file_unit=file_unit, aabb_name=aabb_name)
+   if (self%is_present) call self%aabb%save_geometry_tecplot_ascii(file_unit=file_unit, aabb_name=aabb_name)
    endsubroutine  save_geometry_tecplot_ascii
 
    subroutine save_facets_into_file_stl(self, facet, file_name, is_ascii)
@@ -480,7 +492,7 @@ contains
    character(*),            intent(in) :: file_name !< File name.
    logical,                 intent(in) :: is_ascii  !< Sentinel for file format.
 
-   if (allocated(self%aabb)) call self%aabb%save_facets_into_file_stl(facet=facet, file_name=file_name, is_ascii=is_ascii)
+   if (self%is_present) call self%aabb%save_facets_into_file_stl(facet=facet, file_name=file_name, is_ascii=is_ascii)
    endsubroutine save_facets_into_file_stl
 
    elemental subroutine translate(self, delta)
@@ -488,7 +500,7 @@ contains
    class(aabb_node_object), intent(inout) :: self  !< AABB.
    type(vector_R8P),        intent(in)    :: delta !< Delta of translation.
 
-   if (allocated(self%aabb)) call self%aabb%translate(delta=delta)
+   if (self%is_present) call self%aabb%translate(delta=delta)
    endsubroutine translate
 
    pure subroutine union(self, node, id)
@@ -499,9 +511,9 @@ contains
    integer(I4P)                           :: i       !< Counter.
 
    call self%destroy
-   allocate(self%aabb)
+   self%is_present = .true.   ! union always produces a populated slot (was: allocate(self%aabb))
    do i=1, size(id, dim=1)
-      if (allocated(node(id(i))%aabb)) call self%aabb%union(other=node(id(i))%aabb)
+      if (node(id(i))%is_present) call self%aabb%union(other=node(id(i))%aabb)
    enddo
    endsubroutine union
 
@@ -510,24 +522,27 @@ contains
    class(aabb_node_object), intent(inout) :: self     !< AABB.
    type(facet_object),      intent(in)    :: facet(:) !< Facets list.
 
-   if (allocated(self%aabb)) call self%aabb%update_extents(facet=facet)
+   if (self%is_present) call self%aabb%update_extents(facet=facet)
    endsubroutine update_extents
 
    ! operators
    ! =
    pure subroutine aabb_node_assign_aabb_node(lhs, rhs)
    !< Operator `=`.
+   !<
+   !< Post-#20 §Step 2 (`aabb` inlined by value, `is_present` flag added): explicitly
+   !< copy `is_present` and the inlined `aabb` whenever `rhs%is_present` is true. When
+   !< `rhs%is_present` is false, the inlined `aabb` content is logically don't-care, but
+   !< the intrinsic `aabb_object` assignment is still invoked so that any residual state
+   !< on `lhs%aabb` is overwritten — keeps the overload robust against the caller having
+   !< populated `lhs` previously. The embedded `facet_id`'s allocatable `id(:)` is
+   !< handled by `aabb_object`'s own `=` overload, which is a deep copy.
    class(aabb_node_object), intent(inout) :: lhs !< Left hand side.
    type(aabb_node_object),  intent(in)    :: rhs !< Right hand side.
 
-   if (allocated(lhs%aabb)) then
-      call lhs%aabb%destroy
-      deallocate(lhs%aabb)
-   endif
-   if (allocated(rhs%aabb)) then
-      allocate(lhs%aabb)
-      lhs%aabb = rhs%aabb
-   endif
+   if (lhs%is_present) call lhs%aabb%destroy
+   if (rhs%is_present) lhs%aabb = rhs%aabb
+   lhs%is_present    = rhs%is_present
    lhs%left_child    = rhs%left_child
    lhs%right_child   = rhs%right_child
    lhs%payload_first = rhs%payload_first
