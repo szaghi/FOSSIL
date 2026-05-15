@@ -23,6 +23,23 @@ modes = shared-gnu static-gnu shared-gnu-debug static-gnu-debug
         shared-intel static-intel shared-intel-debug static-intel-debug
         tests-gnu tests-gnu-debug tests-gnu-openmp
         tests-intel tests-intel-debug
+        static-nvidia tests-nvidia
+
+# Variable sets. The nvidia modes (static-nvidia / tests-nvidia, issue #20
+# Step 0) need nvfortran and a GPU compute-capability target ($NVF_CC). They
+# are NOT built by CI and NOT validated on the standard dev host (no nvfortran
+# there) -- they are manual-only: select the local_nvf varset explicitly, e.g.
+#   fobis build --mode tests-nvidia --varset local_nvf
+# The default varset is local_gnu, a no-op placeholder, so every existing
+# GNU/Intel mode is completely unaffected. $NVF_CC mirrors ADAM's local_nvf
+# (cc89); override it for a different GPU, e.g. --varset leonardo-style cc80.
+[varsets]
+default = local_gnu
+
+[varset:local_gnu]
+
+[varset:local_nvf]
+$NVF_CC = cc89
 
 [common-variables]
 $CSHARED_GNU = -cpp -c -fPIC -frealloc-lhs
@@ -30,6 +47,8 @@ $CSHARED_INT = -cpp -c -fpic -assume realloc_lhs
 $LSHARED     = -shared
 $CSTATIC_GNU = -cpp -c -frealloc-lhs
 $CSTATIC_INT = -cpp -c -assume realloc_lhs
+$CSTATIC_NV  = -cpp -c -acc -gpu=$NVF_CC -Minfo=accel
+$LSTATIC_NV  = -acc -gpu=$NVF_CC -Minfo=accel
 $OPENMP_GNU  = -fopenmp
 $DEBUG_GNU   = -O0 -g3 -Warray-bounds -Wcharacter-truncation -Wline-truncation -Wimplicit-interface -Wimplicit-procedure -Wunderflow -fcheck=all -fmodule-private -ffree-line-length-132 -fimplicit-none -fbacktrace -fdump-core -finit-real=nan -std=f2018 -fall-intrinsics
 $DEBUG_INT   = -O0 -debug all -check all -warn all -extend-source 132 -traceback -gen-interfaces#-fpe-all=0 -fp-stack-check -fstack-protector-all -ftrapuv -no-ftz -std18
@@ -124,6 +143,21 @@ build_dir = ./exe/
 
 [tests-intel-debug]
 template  = template-static-intel-debug
+build_dir = ./exe/
+
+# NVIDIA (OpenACC device target, issue #20). nvfortran-only, manual build:
+#   fobis build --mode static-nvidia --varset local_nvf
+#   fobis build --mode tests-nvidia  --varset local_nvf
+# Not in CI, not validated on the standard dev host -- see [varsets] comment.
+[static-nvidia]
+template  = template-static-nvidia
+target    = fossil.f90
+build_dir = ./static/
+output    = libfossil.a
+mklib     = static
+
+[tests-nvidia]
+template  = template-static-nvidia
 build_dir = ./exe/
 
 #templates
@@ -234,6 +268,23 @@ jobs         = 2
 compiler     = intel
 cflags       = $CSTATIC_INT $DEBUG_INT
 lflags       = $DEBUG_INT
+exclude_dirs = $EXDIRS
+mod_dir      = ./mod/
+obj_dir      = ./obj/
+src          = ./src/
+colors       = True
+quiet        = False
+log          = True
+jobs         = 2
+
+# NVIDIA (issue #20 Step 0). OpenACC device target via nvfortran. $NVF_CC comes
+# from the local_nvf varset -- the build aborts if no varset providing it is
+# selected, which is the intended guard against an accidental device build on a
+# host without nvfortran.
+[template-static-nvidia]
+compiler     = nvfortran
+cflags       = $CSTATIC_NV $OPTIMIZE
+lflags       = $LSTATIC_NV $OPTIMIZE
 exclude_dirs = $EXDIRS
 mod_dir      = ./mod/
 obj_dir      = ./obj/
