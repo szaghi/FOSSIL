@@ -34,18 +34,26 @@ Intel compiler variants are available by replacing `-gnu` with `-intel`.
 ### NVIDIA / device build (OpenACC, issue #20)
 
 The `static-nvidia` and `tests-nvidia` modes target the GPU via OpenACC with
-`nvfortran`. They are **manual-only** — not built by CI, not validated on the
-standard dev host (no `nvfortran` there). They require explicitly selecting the
-`local_nvf` varset, which supplies `$NVF_CC` (GPU compute capability, default
-`cc89`):
+`nvfortran`. They are **manual-only** — not built by CI, but **validated
+locally** by loading the nvhpc module before the build:
 
 ```bash
+module load nvhpc/26                                  # or any installed nvhpc/* version
 fobis build --mode tests-nvidia --varset local_nvf
 ```
 
-The device build scope is **BVH-only** (the octree stays CPU-only). The default
-varset is `local_gnu` (a no-op placeholder), so every GNU/Intel mode is
-unaffected. Override `$NVF_CC` for a different GPU (e.g. `cc80` for A100/V100).
+The `local_nvf` varset supplies `$NVF_CC` (GPU compute capability, default
+`cc89`); override for a different GPU (`cc80` for A100/V100). The default
+varset is `local_gnu`, a no-op placeholder, so every GNU/Intel mode is
+unaffected.
+
+The `tests-nvidia` mode builds a **single targeted test** (`fossil_test_distance_bench`)
+that exercises the distance kernel chain — not the full suite. Host-only tests
+(file I/O, mesh-quality invariants) stay in `tests-gnu` / `tests-intel`; some
+trip nvfortran 26.1 parser quirks unrelated to the device port (e.g. parser
+rejects `(expr) .cross. (expr)` in one strict-normal test).
+
+The device build scope is **BVH-only** (the octree stays CPU-only).
 
 ### Running tests
 
