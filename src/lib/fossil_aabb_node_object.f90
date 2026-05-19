@@ -15,6 +15,19 @@ use vecfor, only : vector_R8P
 implicit none
 private
 public :: aabb_node_object
+! Device-callable scalar accessors (issue #20 §Step 4). The TBP accessors above
+! cannot be reached from inside an `!$acc routine seq`: TBP `pass` arguments
+! resolve as `class(...)`, and nvfortran 26.1 rejects `class` arguments in
+! device code (NVFORTRAN-W-0155 "indirect function/procedure call"). These
+! `_oac` free functions take `type(aabb_node_object), intent(in)`, return a
+! scalar (`real(R8P)` or `integer(I4P)`) and are annotated `!$acc routine seq`.
+! Scalar returns dodge the function-temp bug observed under nvhpc 26.1 with
+! derived-type returning device functions (see VecFor `_oac` API rationale).
+public :: bvh_bmin_x_oac, bvh_bmin_y_oac, bvh_bmin_z_oac
+public :: bvh_bmax_x_oac, bvh_bmax_y_oac, bvh_bmax_z_oac
+public :: bvh_left_child_oac, bvh_right_child_oac
+public :: bvh_payload_first_oac, bvh_payload_count_oac
+public :: bvh_box_distance_sq_oac
 
 type :: aabb_node_object
    !< FOSSIL Axis-Aligned Bounding Box (AABB) tree-node class.
@@ -153,6 +166,107 @@ contains
 
    count = self%payload_count
    endfunction get_payload_count
+
+   ! Device-callable scalar accessors (issue #20 §Step 4). Module-level free
+   ! functions taking `type(aabb_node_object)` (not `class`), each returning
+   ! a single scalar. The TBP accessors above stay for host callers.
+
+   pure function bvh_bmin_x_oac(node) result(v)
+   !$acc routine seq
+   type(aabb_node_object), intent(in) :: node !< AABB node.
+   real(R8P)                          :: v    !< `bmin%x`.
+   v = node%aabb%bmin%x
+   endfunction bvh_bmin_x_oac
+
+   pure function bvh_bmin_y_oac(node) result(v)
+   !$acc routine seq
+   type(aabb_node_object), intent(in) :: node !< AABB node.
+   real(R8P)                          :: v    !< `bmin%y`.
+   v = node%aabb%bmin%y
+   endfunction bvh_bmin_y_oac
+
+   pure function bvh_bmin_z_oac(node) result(v)
+   !$acc routine seq
+   type(aabb_node_object), intent(in) :: node !< AABB node.
+   real(R8P)                          :: v    !< `bmin%z`.
+   v = node%aabb%bmin%z
+   endfunction bvh_bmin_z_oac
+
+   pure function bvh_bmax_x_oac(node) result(v)
+   !$acc routine seq
+   type(aabb_node_object), intent(in) :: node !< AABB node.
+   real(R8P)                          :: v    !< `bmax%x`.
+   v = node%aabb%bmax%x
+   endfunction bvh_bmax_x_oac
+
+   pure function bvh_bmax_y_oac(node) result(v)
+   !$acc routine seq
+   type(aabb_node_object), intent(in) :: node !< AABB node.
+   real(R8P)                          :: v    !< `bmax%y`.
+   v = node%aabb%bmax%y
+   endfunction bvh_bmax_y_oac
+
+   pure function bvh_bmax_z_oac(node) result(v)
+   !$acc routine seq
+   type(aabb_node_object), intent(in) :: node !< AABB node.
+   real(R8P)                          :: v    !< `bmax%z`.
+   v = node%aabb%bmax%z
+   endfunction bvh_bmax_z_oac
+
+   pure function bvh_left_child_oac(node) result(idx)
+   !$acc routine seq
+   type(aabb_node_object), intent(in) :: node !< AABB node.
+   integer(I4P)                       :: idx  !< Left-child index (0 = leaf).
+   idx = node%left_child
+   endfunction bvh_left_child_oac
+
+   pure function bvh_right_child_oac(node) result(idx)
+   !$acc routine seq
+   type(aabb_node_object), intent(in) :: node !< AABB node.
+   integer(I4P)                       :: idx  !< Right-child index (0 = leaf).
+   idx = node%right_child
+   endfunction bvh_right_child_oac
+
+   pure function bvh_payload_first_oac(node) result(first)
+   !$acc routine seq
+   type(aabb_node_object), intent(in) :: node  !< AABB node.
+   integer(I4P)                       :: first !< Payload slice start (1-based).
+   first = node%payload_first
+   endfunction bvh_payload_first_oac
+
+   pure function bvh_payload_count_oac(node) result(count)
+   !$acc routine seq
+   type(aabb_node_object), intent(in) :: node  !< AABB node.
+   integer(I4P)                       :: count !< Payload slice length.
+   count = node%payload_count
+   endfunction bvh_payload_count_oac
+
+   pure function bvh_box_distance_sq_oac(node, px, py, pz) result(d2)
+   !$acc routine seq
+   !< Device-callable box-d^2 test, inlining `aabb_object%distance(point)`. The
+   !< query point is passed as three scalars (not `type(vector_R8P)`) to keep
+   !< the device call shape entirely on scalar reals -- no derived-type plumbing
+   !< across this single hot accessor. Bit-exact vs the TBP form on CPU.
+   !<
+   !< BVH-only — does **not** guard on `is_present`. BVH nodes are always present
+   !< (the builder fills both children of every internal node, leaves have
+   !< `left_child=right_child=0` but their own `aabb` is populated). The
+   !< host TBP `aabb_node_object%distance` returns `MaxR8P` on unallocated octree
+   !< slots; that path stays on the host.
+   type(aabb_node_object), intent(in) :: node !< AABB node.
+   real(R8P),              intent(in) :: px   !< Point x.
+   real(R8P),              intent(in) :: py   !< Point y.
+   real(R8P),              intent(in) :: pz   !< Point z.
+   real(R8P)                          :: d2   !< Squared distance.
+
+   d2 = 0._R8P
+   if (px < node%aabb%bmin%x) d2 = d2 + (node%aabb%bmin%x - px) * (node%aabb%bmin%x - px)
+   if (px > node%aabb%bmax%x) d2 = d2 + (px - node%aabb%bmax%x) * (px - node%aabb%bmax%x)
+   if (py < node%aabb%bmin%y) d2 = d2 + (node%aabb%bmin%y - py) * (node%aabb%bmin%y - py)
+   if (py > node%aabb%bmax%y) d2 = d2 + (py - node%aabb%bmax%y) * (py - node%aabb%bmax%y)
+   if (pz < node%aabb%bmin%z) d2 = d2 + (node%aabb%bmin%z - pz) * (node%aabb%bmin%z - pz)
+   if (pz > node%aabb%bmax%z) d2 = d2 + (pz - node%aabb%bmax%z) * (pz - node%aabb%bmax%z)
+   endfunction bvh_box_distance_sq_oac
 
    pure subroutine set_payload_slice(self, first, count)
    !< Record this leaf's `(first, count)` slice into the tree's flattened distance

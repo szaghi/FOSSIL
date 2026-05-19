@@ -7,7 +7,9 @@ use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : FR4P, I2P, I4P, R4P, R8P, str, ZeroR8P
-use vecfor, only : angle_R8P, face_normal3_R8P, mirror_matrix_R8P, normL2_R8P, rotation_matrix_R8P, vector_R8P
+use vecfor, only : angle_R8P, face_normal3_R8P, mirror_matrix_R8P, normL2_R8P, rotation_matrix_R8P, vector_R8P, &
+                   assign_vector_R8P_oac, dotproduct_R8P_oac, R8P_mul_vector_R8P_oac, vector_sub_vector_R8P_oac, &
+                   vector_sum_vector_R8P_oac
 
 implicit none
 private
@@ -183,6 +185,7 @@ contains
    endsubroutine compute_distance_with_region
 
    pure subroutine triangle_point_distance(v1, e12, e13, a, b, c, det, point, distance, closest, region)
+   !$acc routine seq
    !< Squared distance from a point to a triangle, plus the closest point and the
    !< Voronoi-region tag of that closest point.
    !<
@@ -211,11 +214,20 @@ contains
    type(vector_R8P), intent(out) :: closest                !< Closest point on the triangle.
    integer(I4P),     intent(out) :: region                 !< Voronoi region tag (see encoding above).
    real(R8P)                     :: sq, tq                 !< Parametric coordinates of the closest point.
+   type(vector_R8P)              :: sq_e12, tq_e13, sum_v1 !< Intermediates for `closest = v1 + sq*e12 + tq*e13`.
    real(R8P), parameter          :: BARY_TOL = 1.0e-12_R8P !< Tolerance for classifying barycentric coords as 0/1.
 
    call triangle_closest_st(v1=v1, e12=e12, e13=e13, a=a, b=b, c=c, det=det, &
                             point=point, sq=sq, tq=tq, distance=distance)
-   closest = v1 + sq * e12 + tq * e13
+   ! Device-callable form of `closest = v1 + sq*e12 + tq*e13` (issue #20 §Step 4):
+   ! TBP-generic `+`/`*` and the user-defined `vector = vector` assignment all
+   ! lower to vtable dispatch / NVFORTRAN-F-1252, both rejected inside
+   ! `!$acc routine seq`. The `_oac` subroutines write into intent(out) temps and
+   ! `assign_vector_R8P_oac` bypasses the assignment overload.
+   call R8P_mul_vector_R8P_oac(sq, e12, sq_e12)
+   call R8P_mul_vector_R8P_oac(tq, e13, tq_e13)
+   call vector_sum_vector_R8P_oac(v1, sq_e12, sum_v1)
+   call vector_sum_vector_R8P_oac(sum_v1, tq_e13, closest)
    ! Region classification from (sq, tq) barycentric-style coordinates.
    ! Vertex correspondence: V1 ↔ (0,0), V2 ↔ (1,0), V3 ↔ (0,1).
    ! Edge correspondence:   EDGE_12 (V1→V2) ↔ tq=0; EDGE_23 (V2→V3) ↔ sq+tq=1; EDGE_31 (V3→V1) ↔ sq=0.
@@ -237,6 +249,7 @@ contains
    endsubroutine triangle_point_distance
 
    pure subroutine triangle_point_distance_sq(v1, e12, e13, a, b, c, det, point, distance)
+   !$acc routine seq
    !< Squared distance from a point to a triangle — **distance only**, no closest
    !< point and no Voronoi-region classification (issue #19 §B5).
    !<
@@ -267,6 +280,7 @@ contains
    endsubroutine triangle_point_distance_sq
 
    pure subroutine triangle_closest_st(v1, e12, e13, a, b, c, det, point, sq, tq, distance)
+   !$acc routine seq
    !< Solve for the parametric coordinates `(sq, tq)` of the closest point on a
    !< triangle to `point`, and the squared distance there.
    !<
@@ -295,10 +309,14 @@ contains
    real(R8P)                     :: d, e, f, s, t                    !< Plane equation coefficients.
    real(R8P)                     :: tmp0, tmp1, numer, denom, invdet !< Temporary.
 
-   V1P = v1 - point
-   d = e12.dot.V1P
-   e = e13.dot.V1P
-   f = V1P.dot.V1P
+   ! Device-callable VecFor `_oac` API (issue #20 §Step 4): `vector - vector` and
+   ! `.dot.` lower to TBP-generic operator dispatch, which nvfortran 26.1 rejects
+   ! inside `!$acc routine seq`. The `_oac` free subroutines take `type(...)` (not
+   ! `class`) and are device-safe. Bit-exact vs the operator form on CPU.
+   call vector_sub_vector_R8P_oac(v1, point, V1P)
+   d = dotproduct_R8P_oac(e12, V1P)
+   e = dotproduct_R8P_oac(e13, V1P)
+   f = dotproduct_R8P_oac(V1P, V1P)
    s = b * e - c * d
    t = b * d - a * e
    if (s+t <= det) then

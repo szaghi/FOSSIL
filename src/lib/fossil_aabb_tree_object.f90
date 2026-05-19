@@ -8,7 +8,10 @@ module fossil_aabb_tree_object
 !< @note The tree is assumed to be an **octree**.
 
 use fossil_aabb_object, only : aabb_object
-use fossil_aabb_node_object, only : aabb_node_object
+use fossil_aabb_node_object, only : aabb_node_object,                                  &
+                                    bvh_box_distance_sq_oac,                           &
+                                    bvh_left_child_oac, bvh_right_child_oac,           &
+                                    bvh_payload_first_oac, bvh_payload_count_oac
 use fossil_facet_object, only : facet_object, triangle_point_distance_sq
 use fossil_list_id_object, only : list_id_object
 use fossil_ray_query, only : ray_hit_t
@@ -1249,6 +1252,15 @@ contains
    integer(I4P)                           :: i, j, swap_i               !< Counter.
    real(R8P)                              :: swap_d                     !< Sort helper.
 
+   ! BVH branch dispatches to the device-callable `_oac` traversal (issue #20
+   ! §Step 4). One implementation, one code path: every CPU regression test
+   ! exercises the device code, eliminating any drift risk between host and
+   ! device. The octree path (recursive-style, TBP-based) follows below.
+   if (self%tree_kind == AABB_TREE_SAH_BVH) then
+      call bvh_distance_node_oac(node=self%node, payload=self%payload, n=n, point=point, best=best)
+      return
+   endif
+
    associate(node => self%node)
       stack(1) = n
       sp       = 1_I4P
@@ -1264,14 +1276,10 @@ contains
          endif
 
          ! 2. Node's own facets — internal nodes can still carry facets (octree).
-         !    BVH: stride-1 sweep over the flattened distance payload (issue #19 §B1).
          !    Octree: legacy facet_id-indexed scan into the global facet array.
-         if (self%tree_kind == AABB_TREE_SAH_BVH) then
-            call self%scan_payload(n=cur, point=point, best=best)
-         else
-            facet_d2 = node(cur)%distance_from_facets(facet=facet, point=point)
-            if (facet_d2 < best) best = facet_d2
-         endif
+         !    (BVH dispatched above via `bvh_distance_node_oac`.)
+         facet_d2 = node(cur)%distance_from_facets(facet=facet, point=point)
+         if (facet_d2 < best) best = facet_d2
 
          ! 3. Enumerate allocated children. Tree-kind-agnostic via the helper.
          call self%enumerate_children(n=cur, out_idx=child_idx, nchild=nchild)
@@ -1366,6 +1374,17 @@ contains
    integer(I4P)                           :: i, j, swap_i               !< Counter.
    real(R8P)                              :: swap_d                     !< Sort helper.
 
+   ! BVH branch dispatches to the device-callable `_oac` traversal (issue #20
+   ! §Step 4). The surface layer recomputes the winning facet's region once via
+   ! `compute_distance_with_region` -- the BVH branch never needs per-facet
+   ! region tracking here. Octree path (recursive-style, TBP-based) follows.
+   if (self%tree_kind == AABB_TREE_SAH_BVH) then
+      best_region = 0_I4P
+      call bvh_distance_node_with_region_oac(node=self%node, payload=self%payload, n=n, point=point, &
+                                              best=best, best_facet=best_facet)
+      return
+   endif
+
    associate(node => self%node)
       stack(1) = n
       sp       = 1_I4P
@@ -1378,15 +1397,10 @@ contains
             if (node(cur)%distance(point=point) >= best) cycle
          endif
 
-         ! Leaf scan. BVH: payload sweep recording winning facet id (region computed
-         ! once at the end by the surface layer). Octree: facet_id-indexed scan that
-         ! also tracks the region per facet.
-         if (self%tree_kind == AABB_TREE_SAH_BVH) then
-            call self%scan_payload_with_facet(n=cur, point=point, best=best, best_facet=best_facet)
-         else
-            call node(cur)%update_best_from_facets(facet=facet, point=point, &
-                                                   best=best, best_facet=best_facet, best_region=best_region)
-         endif
+         ! Leaf scan: octree facet_id-indexed scan tracking region per facet.
+         ! (BVH dispatched above via `bvh_distance_node_with_region_oac`.)
+         call node(cur)%update_best_from_facets(facet=facet, point=point, &
+                                                best=best, best_facet=best_facet, best_region=best_region)
 
          ! Enumerate children + box-d^2.
          call self%enumerate_children(n=cur, out_idx=child_idx, nchild=nchild)
@@ -1461,6 +1475,199 @@ contains
       end associate
    enddo
    endsubroutine scan_payload_with_facet
+
+   pure subroutine bvh_distance_node_oac(node, payload, n, point, best)
+   !$acc routine seq
+   !< Device-callable BVH distance traversal (issue #20 §Step 4): same best-first
+   !< descent + d^2 pruning as `distance_node`, but as a module-level free
+   !< subroutine taking `type(aabb_node_object)` (not `class`) -- nvfortran 26.1
+   !< rejects `class(...)` arguments and TBP dispatch inside `!$acc routine seq`
+   !< (NVFORTRAN-W-0155 "indirect function/procedure call"). Reads through the
+   !< `bvh_*_oac` scalar accessors, calls the `_oac` triangle kernel, inlines
+   !< the box-d^2 test via `bvh_box_distance_sq_oac`.
+   !<
+   !< **BVH-only.** Octree continues to use the recursive-style host TBP
+   !< `distance_node` body that follows; it is the host caller's job to
+   !< dispatch tree_kind == BVH to here and tree_kind == octree to the TBP.
+   !<
+   !< The CPU build calls this routine through `distance_node`'s BVH branch, so
+   !< every CPU regression test exercises the device code path. The `_oac`
+   !< designation indicates **device-callability**, not exclusivity.
+   type(aabb_node_object),       intent(in)    :: node(0:)                  !< Tree node array (0-based: root at index 0).
+   type(facet_distance_payload), intent(in)    :: payload(:)                !< Flat per-facet distance SoA (1-based).
+   integer(I4P),                 intent(in)    :: n                         !< Root node to traverse from.
+   type(vector_R8P),             intent(in)    :: point                     !< Point coordinates (read as `%x %y %z`).
+   real(R8P),                    intent(inout) :: best                      !< Running best squared distance.
+   integer(I4P)                                :: stack(MAX_TRAVERSAL_STACK) !< Explicit LIFO of pending node indices.
+   integer(I4P)                                :: sp                        !< Stack pointer (1-based; 0 == empty).
+   integer(I4P)                                :: cur                       !< Current popped node index.
+   integer(I4P)                                :: child_idx(2)              !< BVH per-child node index (max 2).
+   real(R8P)                                   :: child_d2(2)               !< BVH per-child box d^2.
+   integer(I4P)                                :: nchild                    !< Number of populated children (0..2).
+   integer(I4P)                                :: lc, rc                    !< Left/right child indices.
+   integer(I4P)                                :: first, count, k, idx      !< Payload slice bounds + counters.
+   real(R8P)                                   :: d2                        !< Candidate squared distance.
+   real(R8P)                                   :: swap_d                    !< Sort helper.
+   integer(I4P)                                :: swap_i                    !< Sort helper.
+   real(R8P)                                   :: px, py, pz                !< Cached scalar point coords.
+
+   px = point%x
+   py = point%y
+   pz = point%z
+   stack(1) = n
+   sp       = 1_I4P
+   do while (sp > 0_I4P)
+      cur = stack(sp)
+      sp  = sp - 1_I4P
+
+      ! 1. Deferred prune: re-test the popped node's box d^2 against `best` (the
+      !    root is always entered).
+      if (cur /= n) then
+         if (bvh_box_distance_sq_oac(node(cur), px, py, pz) >= best) cycle
+      endif
+
+      ! 2. Leaf scan: stride-1 sweep over this node's slice of the flattened
+      !    distance payload (issue #19 §B1). `payload_count == 0` on internal
+      !    nodes -> this is a no-op there.
+      count = bvh_payload_count_oac(node(cur))
+      if (count > 0_I4P) then
+         first = bvh_payload_first_oac(node(cur))
+         do k = 0_I4P, count - 1_I4P
+            idx = first + k
+            call triangle_point_distance_sq(v1=vector_R8P(payload(idx)%v1(1),  payload(idx)%v1(2),  payload(idx)%v1(3)),  &
+                                            e12=vector_R8P(payload(idx)%e12(1), payload(idx)%e12(2), payload(idx)%e12(3)), &
+                                            e13=vector_R8P(payload(idx)%e13(1), payload(idx)%e13(2), payload(idx)%e13(3)), &
+                                            a=payload(idx)%a, b=payload(idx)%b, c=payload(idx)%c, det=payload(idx)%det,    &
+                                            point=point, distance=d2)
+            if (d2 < best) best = d2
+         enddo
+      endif
+
+      ! 3. Enumerate BVH children (at most 2) and compute their box d^2.
+      nchild = 0_I4P
+      lc = bvh_left_child_oac(node(cur))
+      rc = bvh_right_child_oac(node(cur))
+      if (lc > 0_I4P) then
+         nchild = nchild + 1_I4P
+         child_idx(nchild) = lc
+         child_d2(nchild)  = bvh_box_distance_sq_oac(node(lc), px, py, pz)
+      endif
+      if (rc > 0_I4P) then
+         nchild = nchild + 1_I4P
+         child_idx(nchild) = rc
+         child_d2(nchild)  = bvh_box_distance_sq_oac(node(rc), px, py, pz)
+      endif
+      if (nchild == 0_I4P) cycle
+
+      ! 4. Two-element ascending sort (degenerates to a single compare-swap for BVH).
+      if (nchild == 2_I4P) then
+         if (child_d2(1) > child_d2(2)) then
+            swap_d       = child_d2(1)  ; swap_i       = child_idx(1)
+            child_d2(1)  = child_d2(2)  ; child_idx(1) = child_idx(2)
+            child_d2(2)  = swap_d       ; child_idx(2) = swap_i
+         endif
+      endif
+
+      ! 5. Push children farthest-first (descending sort order) -- nearest pops next.
+      !    Prune-at-push skips any child already worse than `best`.
+      if (nchild == 2_I4P) then
+         if (child_d2(2) < best) then
+            sp = sp + 1_I4P ; stack(sp) = child_idx(2)
+         endif
+      endif
+      if (child_d2(1) < best) then
+         sp = sp + 1_I4P ; stack(sp) = child_idx(1)
+      endif
+   enddo
+   endsubroutine bvh_distance_node_oac
+
+   pure subroutine bvh_distance_node_with_region_oac(node, payload, n, point, best, best_facet)
+   !$acc routine seq
+   !< Device-callable signed-path BVH traversal (issue #20 §Step 4). Same descent
+   !< as `bvh_distance_node_oac`, but additionally tracks the winning facet id
+   !< for the surface-layer pseudo-normal sign step. Voronoi region is **not**
+   !< tracked per-facet here -- the surface layer recomputes it once on the
+   !< final winning facet via `compute_distance_with_region`.
+   type(aabb_node_object),       intent(in)    :: node(0:)                  !< Tree node array.
+   type(facet_distance_payload), intent(in)    :: payload(:)                !< Flat per-facet distance SoA.
+   integer(I4P),                 intent(in)    :: n                         !< Root node to traverse from.
+   type(vector_R8P),             intent(in)    :: point                     !< Point coordinates.
+   real(R8P),                    intent(inout) :: best                      !< Running best squared distance.
+   integer(I4P),                 intent(inout) :: best_facet                !< Running best facet id.
+   integer(I4P)                                :: stack(MAX_TRAVERSAL_STACK) !< Explicit LIFO of pending node indices.
+   integer(I4P)                                :: sp, cur                   !< Stack pointer + current node.
+   integer(I4P)                                :: child_idx(2)              !< BVH per-child node index.
+   real(R8P)                                   :: child_d2(2)               !< BVH per-child box d^2.
+   integer(I4P)                                :: nchild, lc, rc            !< Child count, indices.
+   integer(I4P)                                :: first, count, k, idx      !< Payload slice bounds + counters.
+   real(R8P)                                   :: d2                        !< Candidate squared distance.
+   real(R8P)                                   :: swap_d                    !< Sort helper.
+   integer(I4P)                                :: swap_i                    !< Sort helper.
+   real(R8P)                                   :: px, py, pz                !< Cached scalar point coords.
+
+   px = point%x
+   py = point%y
+   pz = point%z
+   stack(1) = n
+   sp       = 1_I4P
+   do while (sp > 0_I4P)
+      cur = stack(sp)
+      sp  = sp - 1_I4P
+
+      if (cur /= n) then
+         if (bvh_box_distance_sq_oac(node(cur), px, py, pz) >= best) cycle
+      endif
+
+      count = bvh_payload_count_oac(node(cur))
+      if (count > 0_I4P) then
+         first = bvh_payload_first_oac(node(cur))
+         do k = 0_I4P, count - 1_I4P
+            idx = first + k
+            call triangle_point_distance_sq(v1=vector_R8P(payload(idx)%v1(1),  payload(idx)%v1(2),  payload(idx)%v1(3)),  &
+                                            e12=vector_R8P(payload(idx)%e12(1), payload(idx)%e12(2), payload(idx)%e12(3)), &
+                                            e13=vector_R8P(payload(idx)%e13(1), payload(idx)%e13(2), payload(idx)%e13(3)), &
+                                            a=payload(idx)%a, b=payload(idx)%b, c=payload(idx)%c, det=payload(idx)%det,    &
+                                            point=point, distance=d2)
+            if (d2 < best) then
+               best       = d2
+               best_facet = payload(idx)%facet_id
+            endif
+         enddo
+      endif
+
+      nchild = 0_I4P
+      lc = bvh_left_child_oac(node(cur))
+      rc = bvh_right_child_oac(node(cur))
+      if (lc > 0_I4P) then
+         nchild = nchild + 1_I4P
+         child_idx(nchild) = lc
+         child_d2(nchild)  = bvh_box_distance_sq_oac(node(lc), px, py, pz)
+      endif
+      if (rc > 0_I4P) then
+         nchild = nchild + 1_I4P
+         child_idx(nchild) = rc
+         child_d2(nchild)  = bvh_box_distance_sq_oac(node(rc), px, py, pz)
+      endif
+      if (nchild == 0_I4P) cycle
+
+      if (nchild == 2_I4P) then
+         if (child_d2(1) > child_d2(2)) then
+            swap_d       = child_d2(1)  ; swap_i       = child_idx(1)
+            child_d2(1)  = child_d2(2)  ; child_idx(1) = child_idx(2)
+            child_d2(2)  = swap_d       ; child_idx(2) = swap_i
+         endif
+      endif
+
+      if (nchild == 2_I4P) then
+         if (child_d2(2) < best) then
+            sp = sp + 1_I4P ; stack(sp) = child_idx(2)
+         endif
+      endif
+      if (child_d2(1) < best) then
+         sp = sp + 1_I4P ; stack(sp) = child_idx(1)
+      endif
+   enddo
+   endsubroutine bvh_distance_node_with_region_oac
 
    recursive function ray_intersections_number_node(self, n, facet, ray_origin, ray_direction) result(intersections_number)
    !< Return ray intersections number into a node of the AABB tree.
