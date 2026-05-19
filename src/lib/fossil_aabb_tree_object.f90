@@ -726,7 +726,7 @@ contains
    !< builder ever changes.
    class(aabb_tree_object), intent(inout) :: self        !< AABB tree.
    type(facet_object),      intent(in)    :: facet(:)    !< Facets list (read-only source of the triangle metrix).
-   integer(I4P)                           :: n, total, cursor, k, fid !< Counters.
+   integer(I4P)                           :: n, total, cursor, k, fid, count !< Counters.
 
    if (allocated(self%payload)) deallocate(self%payload)
    if (self%nodes_number <= 0) return
@@ -742,25 +742,29 @@ contains
    allocate(self%payload(total))
 
    ! Second pass: emit each leaf's facets contiguously, record its slice.
+   ! Note: an `associate (count => self%node(n)%facet_id_count())` was rewritten
+   ! to a plain local scalar — nvfortran 26.1 wrongly emits a polymorphic
+   ! deallocate on associate-block exit when the named entity binds to a TBP
+   ! whose `self` is `class(...)`, segfaulting in `pgf90_dealloc_poly03_i8`
+   ! (issue #20 §Step 4 host-validation gate).
    cursor = 1_I4P
    do n = 0, self%nodes_number - 1
       if (self%node(n)%get_left_child() /= 0 .or. self%node(n)%get_right_child() /= 0) cycle
-      associate (count => self%node(n)%facet_id_count())
-         if (count <= 0_I4P) cycle
-         call self%node(n)%set_payload_slice(first=cursor, count=count)
-         do k = 1_I4P, count
-            fid = self%node(n)%facet_id_at(k)
-            self%payload(cursor)%v1     = [facet(fid)%vertex(1)%x, facet(fid)%vertex(1)%y, facet(fid)%vertex(1)%z]
-            self%payload(cursor)%e12    = [facet(fid)%E12%x, facet(fid)%E12%y, facet(fid)%E12%z]
-            self%payload(cursor)%e13    = [facet(fid)%E13%x, facet(fid)%E13%y, facet(fid)%E13%z]
-            self%payload(cursor)%a      = facet(fid)%a
-            self%payload(cursor)%b      = facet(fid)%b
-            self%payload(cursor)%c      = facet(fid)%c
-            self%payload(cursor)%det    = facet(fid)%det
-            self%payload(cursor)%facet_id = fid
-            cursor = cursor + 1_I4P
-         enddo
-      end associate
+      count = self%node(n)%facet_id_count()
+      if (count <= 0_I4P) cycle
+      call self%node(n)%set_payload_slice(first=cursor, count=count)
+      do k = 1_I4P, count
+         fid = self%node(n)%facet_id_at(k)
+         self%payload(cursor)%v1     = [facet(fid)%vertex(1)%x, facet(fid)%vertex(1)%y, facet(fid)%vertex(1)%z]
+         self%payload(cursor)%e12    = [facet(fid)%E12%x, facet(fid)%E12%y, facet(fid)%E12%z]
+         self%payload(cursor)%e13    = [facet(fid)%E13%x, facet(fid)%E13%y, facet(fid)%E13%z]
+         self%payload(cursor)%a      = facet(fid)%a
+         self%payload(cursor)%b      = facet(fid)%b
+         self%payload(cursor)%c      = facet(fid)%c
+         self%payload(cursor)%det    = facet(fid)%det
+         self%payload(cursor)%facet_id = fid
+         cursor = cursor + 1_I4P
+      enddo
    enddo
    endsubroutine build_distance_payload
 
