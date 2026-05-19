@@ -38,6 +38,7 @@ integer(I8P)                   :: timing(0:4)          !< Tic toc timing.
 
 ! parse command line input e load STL file
 call cli_parse
+call cli_print
 call surface_stl%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true., &
                                 aabb_refinement_levels=refinement_levels)
 print '(A)', 'STL statistics before sanitization'
@@ -208,11 +209,11 @@ if (ei(1)>=2.or.ei(2)>=2.or.ej(1)>=2.or.ej(2)>=2.or.ek(1)>=2.or.ek(2)>=2) then
    endif
    print '(A)', 'save output'
    call export_vtk_file(nodes_=nodes_ext, distance_=distance_ext, file_name=trim(output_base_name)//'.vts')
-   call export_xall_files(nodes_=nodes_ext, distance_=distance_ext, basename=trim(output_base_name))
+   ! call export_xall_files(nodes_=nodes_ext, distance_=distance_ext, basename=trim(output_base_name))
 else
    print '(A)', 'save output'
    call export_vtk_file(nodes_=nodes, distance_=distance, file_name=trim(output_base_name)//'.vts')
-   call export_xall_files(nodes_=nodes, distance_=distance, basename=trim(output_base_name))
+   call export_xall_files(ni=ni,nj=nj,nk=nk,gi=gi,gj=gj,gk=gk,nodes_=nodes,distance_=distance,basename=trim(output_base_name))
 endif
 
 contains
@@ -274,20 +275,20 @@ contains
   call cli%add(switch='--gi',                            &
                help='ghost cells number in i direction', &
                required=.false.,                         &
-               def='32',                                 &
+               def='2',                                  &
                act='store')
 
   call cli%add(switch='--gj',                            &
                help='ghost cells number in j direction', &
                required=.false.,                         &
                nargs='2',                                &
-               def='32 0',                               &
+               def='2 2',                                &
                act='store')
 
   call cli%add(switch='--gk',                            &
                help='ghost cells number in k direction', &
                required=.false.,                         &
-               def='32',                                 &
+               def='2',                                  &
                act='store')
 
   call cli%add(switch='--ei',                                                  &
@@ -352,6 +353,30 @@ contains
   call cli%get(switch='--unsigned',                val=unsigned,          error=error) ; if (error/=0) stop
   endsubroutine cli_parse
 
+  subroutine cli_print()
+  !< Print cli options.
+  real(R8P)    :: bb(3) !< Bounding box extents, local variable.
+  integer(I4P) :: error !< Error trapping flag.
+
+  print  '(A)' ,'CLI options'
+  print  '(A)' ,'--stl             '//trim(    file_name_stl          )
+  print  '(A)' ,'--out             '//trim(    output_base_name       )
+  print  '(A)' ,'--bmin            '//trim(str([bmin%x,bmin%y,bmin%z]))
+  print  '(A)' ,'--bmax            '//trim(str([bmax%x,bmax%y,bmax%z]))
+  print  '(A)' ,'--ni              '//trim(str(ni                    ))
+  print  '(A)' ,'--nj              '//trim(str(nj                    ))
+  print  '(A)' ,'--nk              '//trim(str(nk                    ))
+  print  '(A)' ,'--gi              '//trim(str(gi                    ))
+  print  '(A)' ,'--gj              '//trim(str(gj                    ))
+  print  '(A)' ,'--gk              '//trim(str(gk                    ))
+  print  '(A)' ,'--ei              '//trim(str(ei                    ))
+  print  '(A)' ,'--ej              '//trim(str(ej                    ))
+  print  '(A)' ,'--ek              '//trim(str(ek                    ))
+  print  '(A)' ,'--ref_levels      '//trim(str(refinement_levels     ))
+  print  '(A)' ,'--sign_algorithm  '//trim(    sign_algorithm         )
+  print  '(A)' ,'--unsigned        '//trim(str(unsigned              ))
+  endsubroutine cli_print
+
    subroutine export_vtk_file(nodes_, distance_, file_name)
    !< Export IB data into VTK file format.
    type(vector_R8P), intent(in) :: nodes_(:,:,:)    !< Grid nodes.
@@ -374,18 +399,15 @@ contains
    error = vtk%finalize()
    endsubroutine export_vtk_file
 
-   subroutine export_xall_files(nodes_, distance_, basename)
+   subroutine export_xall_files(ni, nj, nk, gi, gj, gk, nodes_, distance_, basename)
    !< Export IB data into XALL files format.
-   type(vector_R8P), intent(in) :: nodes_(-2:,-2:,-2:)    !< Grid nodes.
-   real(R8P),        intent(in) :: distance_(-1:,-1:,-1:) !< Distance of grid centers.
-   character(*),     intent(in) :: basename               !< Base files name.
-   integer(I4P)                 :: ni, nj, nk             !< Grid dimensions.
-   integer(I4P)                 :: funit                  !< File unit.
+   integer(I4P),     intent(in) :: ni, nj, nk                      !< Grid dimensions.
+   integer(I4P),     intent(in) :: gi, gj(2), gk                   !< Frame dimensions around the grid.
+   type(vector_R8P), intent(in) :: nodes_(   0-gi:,0-gj(1):,0-gk:) !< Grid nodes.
+   real(R8P),        intent(in) :: distance_(1-gi:,1-gj(1):,1-gk:) !< Distance of grid centers.
+   character(*),     intent(in) :: basename                        !< Base files name.
+   integer(I4P)                 :: funit                           !< File unit.
 
-   ! number of cells subtracted ghost cells
-   ni = size(distance_, dim=1) - 4
-   nj = size(distance_, dim=2) - 4
-   nk = size(distance_, dim=3) - 4
    ! grid
    open(newunit=funit, file=adjustl(trim(basename))//'.grd', form='UNFORMATTED', action='WRITE')
    write(funit) 1 ! number of blocks
@@ -399,7 +421,7 @@ contains
    open(newunit=funit, file=adjustl(trim(basename))//'.ib', form='UNFORMATTED', action='WRITE')
    write(funit) 0._R8P ! time
    write(funit) ni, nj, nk
-   write(funit) distance_
+   write(funit) distance_(-1:ni+2,-1:nj+2,-1:nk+2)
    close(funit)
    endsubroutine export_xall_files
 endprogram fossil_ib_generator
