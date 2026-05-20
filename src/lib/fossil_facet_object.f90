@@ -17,6 +17,28 @@ public :: facet_object
 public :: EDGE_12, EDGE_23, EDGE_31
 public :: triangle_point_distance
 public :: triangle_point_distance_sq
+public :: pnormal_payload_t
+public :: pnormal_x_oac, pnormal_y_oac, pnormal_z_oac
+
+! Flat, device-mappable pseudo-normal record (issue #20 §Step 5). One per facet.
+! Holds the 7 vectors that `pseudo_normal_for_region` selects between (face normal,
+! 3 edge pseudo-normals, 3 vertex pseudo-normals). Pure POD: no allocatables, no
+! TBPs. Built once by the surface layer (mirroring `facet_distance_payload`'s SoA
+! pattern from §B1) and copied to device by `surface%enter_device`. Reads happen
+! through the three scalar `pnormal_*_oac` accessors below -- scalar returns dodge
+! the nvfortran 26.1 derived-type-function-temp bug already documented in the
+! Step-4 commit message.
+type :: pnormal_payload_t
+   real(R8P) :: nx  = 0._R8P                              !< Facet outward normal x.
+   real(R8P) :: ny  = 0._R8P                              !< Facet outward normal y.
+   real(R8P) :: nz  = 0._R8P                              !< Facet outward normal z.
+   real(R8P) :: ex(3) = [0._R8P, 0._R8P, 0._R8P]          !< Edge pseudo-normal x for edges 1,2,3.
+   real(R8P) :: ey(3) = [0._R8P, 0._R8P, 0._R8P]          !< Edge pseudo-normal y for edges 1,2,3.
+   real(R8P) :: ez(3) = [0._R8P, 0._R8P, 0._R8P]          !< Edge pseudo-normal z for edges 1,2,3.
+   real(R8P) :: vx(3) = [0._R8P, 0._R8P, 0._R8P]          !< Vertex pseudo-normal x for vertices 1,2,3.
+   real(R8P) :: vy(3) = [0._R8P, 0._R8P, 0._R8P]          !< Vertex pseudo-normal y for vertices 1,2,3.
+   real(R8P) :: vz(3) = [0._R8P, 0._R8P, 0._R8P]          !< Vertex pseudo-normal z for vertices 1,2,3.
+endtype pnormal_payload_t
 
 ! Edge indices for the connectivity API (fcon_edge, edge_pnormal, make_normal_consistent,
 ! flip_edge, edge_connection_in_other_ref). Convention:
@@ -297,6 +319,66 @@ contains
    case default         ; n = self%normal             ! safety fallback
    end select
    endfunction pseudo_normal_for_region
+
+   pure function pnormal_x_oac(p, region) result(nx)
+   !$acc routine seq
+   !< Device-callable analogue of `pseudo_normal_for_region(facet, region)%x`.
+   !< Reads from a flat `pnormal_payload_t`, returns a plain `real(R8P)` scalar so
+   !< the call dodges the nvfortran 26.1 derived-type-function-temp bug already
+   !< documented in the Step-4 commit. Same `select case` as the host helper.
+   type(pnormal_payload_t), intent(in) :: p      !< Flat per-facet pseudo-normal record.
+   integer(I4P),            intent(in) :: region !< Voronoi region tag (see `compute_distance_with_region`).
+   real(R8P)                           :: nx     !< Pseudo-normal x component.
+
+   select case (region)
+   case (0_I4P)  ; nx = p%nx
+   case (1_I4P)  ; nx = p%ex(1)
+   case (2_I4P)  ; nx = p%ex(2)
+   case (3_I4P)  ; nx = p%ex(3)
+   case (-1_I4P) ; nx = p%vx(1)
+   case (-2_I4P) ; nx = p%vx(2)
+   case (-3_I4P) ; nx = p%vx(3)
+   case default  ; nx = p%nx
+   end select
+   endfunction pnormal_x_oac
+
+   pure function pnormal_y_oac(p, region) result(ny)
+   !$acc routine seq
+   !< Device-callable analogue of `pseudo_normal_for_region(facet, region)%y`.
+   type(pnormal_payload_t), intent(in) :: p      !< Flat per-facet pseudo-normal record.
+   integer(I4P),            intent(in) :: region !< Voronoi region tag.
+   real(R8P)                           :: ny     !< Pseudo-normal y component.
+
+   select case (region)
+   case (0_I4P)  ; ny = p%ny
+   case (1_I4P)  ; ny = p%ey(1)
+   case (2_I4P)  ; ny = p%ey(2)
+   case (3_I4P)  ; ny = p%ey(3)
+   case (-1_I4P) ; ny = p%vy(1)
+   case (-2_I4P) ; ny = p%vy(2)
+   case (-3_I4P) ; ny = p%vy(3)
+   case default  ; ny = p%ny
+   end select
+   endfunction pnormal_y_oac
+
+   pure function pnormal_z_oac(p, region) result(nz)
+   !$acc routine seq
+   !< Device-callable analogue of `pseudo_normal_for_region(facet, region)%z`.
+   type(pnormal_payload_t), intent(in) :: p      !< Flat per-facet pseudo-normal record.
+   integer(I4P),            intent(in) :: region !< Voronoi region tag.
+   real(R8P)                           :: nz     !< Pseudo-normal z component.
+
+   select case (region)
+   case (0_I4P)  ; nz = p%nz
+   case (1_I4P)  ; nz = p%ez(1)
+   case (2_I4P)  ; nz = p%ez(2)
+   case (3_I4P)  ; nz = p%ez(3)
+   case (-1_I4P) ; nz = p%vz(1)
+   case (-2_I4P) ; nz = p%vz(2)
+   case (-3_I4P) ; nz = p%vz(3)
+   case default  ; nz = p%nz
+   end select
+   endfunction pnormal_z_oac
 
    elemental subroutine compute_metrix(self)
    !< Compute local (plane) metrix.

@@ -3,8 +3,13 @@
 module fossil_surface_stl_object
 !< FOSSIL, STL surface class definition.
 
-use fossil_aabb_tree_object, only : aabb_tree_object, AABB_TREE_OCTREE
-use fossil_facet_object, only : facet_object
+use fossil_aabb_tree_object, only : aabb_tree_object, AABB_TREE_OCTREE, AABB_TREE_SAH_BVH,     &
+                                    facet_distance_payload,                                    &
+                                    bvh_distance_node_oac, bvh_distance_node_with_region_oac
+use fossil_aabb_node_object, only : aabb_node_object
+use fossil_facet_object, only : facet_object, pnormal_payload_t,                               &
+                                pnormal_x_oac, pnormal_y_oac, pnormal_z_oac,                   &
+                                triangle_point_distance
 use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
@@ -120,6 +125,16 @@ type :: surface_stl_object
    type(vector_R8P),                private :: centroid        !< Centroid of STL surface.
    character(FRLEN),                private :: header=''       !< STL file header (preserved across load/save).
    type(vertex_pool_object),        private :: vertex_pool     !< Unique-vertex pool (issue #5 stage 1: derived artifact).
+   ! Issue #20 §Step 5 -- device-residency state for the GPU distance path. The
+   ! flat `pnormal_payload(:)` holds per-facet pseudo-normals (7 vectors per
+   ! facet, indexed by facet_id 1..facets_number) used by the device sign step;
+   ! built in `analyze` after the per-facet pseudo-normals are populated.
+   ! `is_on_device` guards `enter_device` / `exit_device` against double-enter
+   ! or use-without-enter. Both `pnormal_payload` and the underlying BVH arrays
+   ! (`self%aabb%node`, `self%aabb%payload`) get `!$acc enter data copyin` in
+   ! `enter_device` and `!$acc exit data delete` in `exit_device`.
+   type(pnormal_payload_t), allocatable, public :: pnormal_payload(:) !< Per-facet pseudo-normal SoA (Step 5). PUBLIC for !$acc directive access.
+   logical, public                          :: is_on_device=.false. !< Sentinel: true between matched enter_device / exit_device calls.
    contains
       ! read-only accessors (pure, inlined at -O2, zero data copy for scalars)
       procedure, pass(self) :: get_facets_number !< Return facets_number.
@@ -164,6 +179,11 @@ type :: surface_stl_object
       procedure, pass(self) :: destroy                         !< Destroy file.
       procedure, pass(self) :: distance                        !< Return the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: distance_many                   !< Batch distance over a point array; OpenMP-parallel (issue #19 §B3).
+      ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
+      procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
+      procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
+      procedure, pass(self) :: distance_many_device            !< Batch distance over a point array, dispatched via !$acc parallel loop.
+      procedure, pass(self), private :: build_pnormal_payload  !< Build the flat per-facet pseudo-normal SoA from self%facet.
       procedure, pass(self) :: initialize                      !< Initialize file.
       procedure, pass(self) :: is_point_inside                 !< Determinate if point is inside or not STL.
       procedure, pass(self) :: is_point_inside_polyhedron_ri   !< Determinate if point is inside or not STL facets by ray intersect.
@@ -489,6 +509,11 @@ contains
             call compute_pseudo_normals_via_pool(self%facet(ff), self%facet, self%vertex_pool)
          enddo
       end block
+      ! Issue #20 §Step 5 -- flatten the per-facet pseudo-normals into the device-
+      ! mappable SoA. Built once here (after the per-facet pnormals exist), held
+      ! for the lifetime of the surface, copied to device by `enter_device`. No
+      ! device cost is paid until the user explicitly opts in.
+      call self%build_pnormal_payload
    endif
    endsubroutine analyze
 
@@ -1232,9 +1257,22 @@ contains
 
    elemental subroutine destroy(self)
    !< Destroy file.
+   !<
+   !< @warning Issue #20 §Step 5: this routine does NOT release device-side
+   !< storage from `enter_device`. If the surface is device-resident, the caller
+   !< must invoke `exit_device` explicitly **before** `destroy` (or before the
+   !< surface goes out of scope). Skipping that leaks the `!$acc enter data`
+   !< mappings: the host arrays disappear here, but the device-side allocations
+   !< stay registered in the OpenACC present-table against now-dangling host
+   !< addresses. `destroy` cannot do the cleanup itself because it is
+   !< `elemental` (callable on arrays) and `!$acc exit data` is not permitted
+   !< inside an `elemental` / `pure` routine. The `is_on_device` flag is reset
+   !< to `.false.` so a future host-only re-use of this object is not confused.
    class(surface_stl_object), intent(inout) :: self  !< File STL.
 
    if (allocated(self%facet)) deallocate(self%facet)
+   if (allocated(self%pnormal_payload)) deallocate(self%pnormal_payload)
+   self%is_on_device = .false.
    self%facets_number = 0
    self%non_manifold_edges_number = 0
    self%degenerate_facets_removed = 0
@@ -1328,6 +1366,247 @@ contains
    enddo
    !$omp end parallel do
    endsubroutine distance_many
+
+   pure subroutine build_pnormal_payload(self)
+   !< Build the flat per-facet pseudo-normal SoA for the device sign path
+   !< (issue #20 §Step 5). One `pnormal_payload_t` record per facet, indexed by
+   !< `facet_id` (1..facets_number). Pure-POD layout: no allocatable components,
+   !< nothing the device cannot `copyin` shallowly.
+   !<
+   !< Called by `analyze` after `compute_pseudo_normals_via_pool` has populated
+   !< the per-facet `normal`, `edge_pnormal`, `vertex_pnormal`. Strictly mechanical
+   !< unpack of `vector_R8P` -> scalar SoA; bit-exact equivalent to the host
+   !< `pseudo_normal_for_region` selector by construction.
+   class(surface_stl_object), intent(inout) :: self !< File STL.
+   integer(I4P)                             :: ff   !< Facet counter.
+
+   if (allocated(self%pnormal_payload)) deallocate(self%pnormal_payload)
+   if (self%facets_number <= 0_I4P) return
+   allocate(self%pnormal_payload(self%facets_number))
+   do ff = 1_I4P, self%facets_number
+      associate (p => self%pnormal_payload(ff), f => self%facet(ff))
+         p%nx    = f%normal%x ; p%ny = f%normal%y ; p%nz = f%normal%z
+         p%ex(1) = f%edge_pnormal(1)%x ; p%ey(1) = f%edge_pnormal(1)%y ; p%ez(1) = f%edge_pnormal(1)%z
+         p%ex(2) = f%edge_pnormal(2)%x ; p%ey(2) = f%edge_pnormal(2)%y ; p%ez(2) = f%edge_pnormal(2)%z
+         p%ex(3) = f%edge_pnormal(3)%x ; p%ey(3) = f%edge_pnormal(3)%y ; p%ez(3) = f%edge_pnormal(3)%z
+         p%vx(1) = f%vertex_pnormal(1)%x ; p%vy(1) = f%vertex_pnormal(1)%y ; p%vz(1) = f%vertex_pnormal(1)%z
+         p%vx(2) = f%vertex_pnormal(2)%x ; p%vy(2) = f%vertex_pnormal(2)%y ; p%vz(2) = f%vertex_pnormal(2)%z
+         p%vx(3) = f%vertex_pnormal(3)%x ; p%vy(3) = f%vertex_pnormal(3)%y ; p%vz(3) = f%vertex_pnormal(3)%z
+      end associate
+   enddo
+   endsubroutine build_pnormal_payload
+
+   subroutine enter_device(self)
+   !< Make the surface device-resident (issue #20 §Step 5). Performs `!$acc enter
+   !< data copyin` of the three flat arrays the GPU distance kernel reads:
+   !< `self%aabb%node`, `self%aabb%payload`, and `self%pnormal_payload`. Idempotent:
+   !< if `self%is_on_device` is already true, the call is a no-op (a second
+   !< `enter data copyin` would create a refcount the user did not ask for).
+   !<
+   !< This is the explicit half of the explicit/implicit API split: the caller
+   !< pays the copyin cost exactly once, at a point of their choosing (typically
+   !< right after `load_from_file` and `sanitize`, before the embedded-boundary
+   !< marker pass that issues millions of `distance_many_device` queries).
+   !<
+   !< Restrictions:
+   !<  - Only the SAH BVH tree (`AABB_TREE_SAH_BVH`) is device-callable.
+   !<    `AABB_TREE_OCTREE` would copy `node(:)` but the device traversal kernels
+   !<    do not enumerate the octree's 8-way children. If the tree kind is octree,
+   !<    the call refuses and writes a stderr diagnostic; the surface stays on host.
+   !<  - The surface must already be analyzed (BVH built, pnormal_payload populated).
+   !<    Called on an empty surface, the routine returns without touching the
+   !<    device.
+   class(surface_stl_object), intent(inout) :: self !< File STL.
+
+   if (self%is_on_device) return
+   if (self%facets_number <= 0_I4P) return
+   if (self%aabb%get_tree_kind() /= AABB_TREE_SAH_BVH) then
+      write(stderr, '(A)') 'fossil_surface_stl_object%enter_device: refused -- device path requires AABB_TREE_SAH_BVH.'
+      return
+   endif
+   if (.not. allocated(self%aabb%node))      return
+   if (.not. allocated(self%aabb%payload))   return
+   if (.not. allocated(self%pnormal_payload)) return
+
+   !$acc enter data copyin(self%aabb%node, self%aabb%payload, self%pnormal_payload)
+   self%is_on_device = .true.
+   endsubroutine enter_device
+
+   subroutine exit_device(self)
+   !< Release the device-resident copy of the surface (issue #20 §Step 5).
+   !< Symmetric inverse of `enter_device`: `!$acc exit data delete` of the three
+   !< arrays previously copied in. Idempotent on `is_on_device=.false.`
+   !< (returns without acting). Called automatically by `destroy` to prevent
+   !< device-side leaks; user code may also call it explicitly between marker
+   !< passes on the same surface.
+   class(surface_stl_object), intent(inout) :: self !< File STL.
+
+   if (.not. self%is_on_device) return
+
+   !$acc exit data delete(self%aabb%node, self%aabb%payload, self%pnormal_payload)
+   self%is_on_device = .false.
+   endsubroutine exit_device
+
+   subroutine distance_many_device(self, points, distances, is_signed, is_square_root, status)
+   !< GPU-offloaded batch distance query (issue #20 §Step 5). Device analogue of
+   !< `distance_many`. Same semantics on the output -- `distances(i)` is the
+   !< distance from `points(i)` to the surface -- but the loop body executes on
+   !< the accelerator via `!$acc parallel loop`, driving the device-callable
+   !< `bvh_distance_node_with_region_oac` kernel chain.
+   !<
+   !< Pre-conditions:
+   !<  - `self%enter_device` has been called and `self%is_on_device` is true.
+   !<    The `present(...)` clause on the parallel loop asserts this; calling
+   !<    without `enter_device` first surfaces as a runtime "present" failure
+   !<    from the OpenACC runtime, which is the documented loud-failure mode.
+   !<  - The tree kind is `AABB_TREE_SAH_BVH` (octree not supported on device).
+   !<
+   !< Restrictions vs `distance_many`:
+   !<  - `sign_algorithm` is fixed to `SIGN_PSEUDO_NORMAL` (the only device-
+   !<    callable sign path). `SIGN_RAY_INTERSECTIONS` / `SIGN_SOLID_ANGLE`
+   !<    require a separate ray traversal that has not been device-ported.
+   !<  - The sign decision uses the flat `pnormal_payload(best_facet)` record
+   !<    and the rich `triangle_point_distance` recompute over
+   !<    `payload(best_payload_idx)`, both device-callable.
+   !<
+   !< Numerical contract: bit-exact vs the CPU serial `compute_distance` path
+   !< where the device libm and FMA contraction allow; documented-tolerance
+   !< fallback otherwise (see test acceptance gates in Step 6).
+   class(surface_stl_object), intent(inout), target :: self           !< File STL (target: device arrays aliased to local pointers, see decls).
+   type(vector_R8P),          intent(in)            :: points(:)      !< Query points (host).
+   real(R8P),                 intent(out)           :: distances(:)   !< Per-point distances (host, caller-allocated).
+   logical,                   intent(in),  optional :: is_signed      !< Trigger signed distance (default .false.).
+   logical,                   intent(in),  optional :: is_square_root !< Trigger sqrt of d^2 (default .false.).
+   integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical                                          :: is_signed_     !< Resolved signed sentinel.
+   logical                                          :: is_sqrt_       !< Resolved sqrt sentinel.
+   integer(I4P)                                     :: n              !< Number of query points.
+   integer(I4P)                                     :: i              !< Loop counter.
+   real(R8P), allocatable                           :: px(:), py(:), pz(:) !< Flat SoA of query-point coords (see note).
+   real(R8P)                                        :: d2             !< Per-point best d^2.
+   integer(I4P)                                     :: best_facet     !< Per-point winning facet id (1-based).
+   integer(I4P)                                     :: best_payload   !< Per-point winning payload index.
+   real(R8P)                                        :: cx, cy, cz     !< Per-point closest-point coords (sign step).
+   integer(I4P)                                     :: region         !< Per-point Voronoi region (sign step).
+   real(R8P)                                        :: nx, ny, nz     !< Per-point pseudo-normal components.
+   real(R8P)                                        :: dx, dy, dz     !< Per-point (point - closest) components.
+   real(R8P)                                        :: side           !< Sign-decision dot product.
+   type(vector_R8P)                                 :: point_i        !< Reconstructed query point (kernel API).
+   type(vector_R8P)                                 :: closest_v      !< Closest-point as vector_R8P (kernel API).
+   type(vector_R8P)                                 :: v1_v, e12_v, e13_v !< Winning-triangle vertex/edges as vector_R8P (kernel API).
+   ! Top-level local pointer aliases for the device arrays. nvfortran 26.1 does
+   ! not attach a device pointer for a nested allocatable component
+   ! (`self%aabb%payload`) subscripted directly in a compute region, so the loop
+   ! body references these flat aliases instead. The `!$acc enter data` in
+   ! enter_device mapped the underlying targets; the present(...) clause below
+   ! lists the aliases (pointer association is a host-side rename, same address).
+   type(aabb_node_object),       pointer            :: node_p(:)      !< Alias of self%aabb%node.
+   type(facet_distance_payload), pointer            :: payload_p(:)   !< Alias of self%aabb%payload.
+   type(pnormal_payload_t),      pointer            :: pnormal_p(:)   !< Alias of self%pnormal_payload.
+
+   if (present(status)) status = STATUS_OK
+   n = size(points, kind=I4P)
+   if (size(distances, kind=I4P) /= n) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (n == 0_I4P) return
+   if (.not. self%is_on_device) then
+      ! Refuse cleanly rather than relying on the OpenACC runtime's "present"
+      ! abort message: more discoverable, and the host-side check costs nothing.
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_surface_stl_object%distance_many_device: surface not on device -- call enter_device first.'
+      return
+   endif
+
+   is_signed_ = .false. ; if (present(is_signed))      is_signed_ = is_signed
+   is_sqrt_   = .false. ; if (present(is_square_root)) is_sqrt_   = is_square_root
+
+   ! Flatten the query points into a plain real SoA before the kernel (issue #20
+   ! §Step 5 triage). nvfortran 26.1 mis-maps an array of `type(vector_R8P)`
+   ! (a derived type with a user-defined assignment) into device global memory:
+   ! the array `copyin` succeeds but per-element subscripting inside the
+   ! `!$acc parallel loop` dereferences an illegal address (CUDA error 700).
+   ! Three contiguous `real(R8P)` arrays sidestep the derived-type mapping
+   ! entirely; the kernel rebuilds a `vector_R8P` per iteration from scalars
+   ! (cheap, register-resident) to feed the `_oac` kernel API unchanged.
+   allocate(px(n), py(n), pz(n))
+   do i = 1_I4P, n
+      px(i) = points(i)%x ; py(i) = points(i)%y ; pz(i) = points(i)%z
+   enddo
+
+   ! Alias the device arrays to top-level local pointers. The compute region
+   ! references the aliases (`node_p`, `payload_p`, `pnormal_p`) rather than the
+   ! nested `self%aabb%...` components -- see the alias declarations for why.
+   ! The targets were mapped by enter_device; pointer association is a host-side
+   ! rename to the same allocation, so `present(node_p, ...)` finds them.
+   node_p    => self%aabb%node
+   payload_p => self%aabb%payload
+   pnormal_p => self%pnormal_payload
+
+   !$acc parallel loop                                                                       &
+   !$acc&  present(node_p, payload_p, pnormal_p)                                             &
+   !$acc&  copyin(px, py, pz)                                                                 &
+   !$acc&  copyout(distances)                                                                &
+   !$acc&  private(point_i, d2, best_facet, best_payload, cx, cy, cz, region, nx, ny, nz,    &
+   !$acc&          dx, dy, dz, side, closest_v, v1_v, e12_v, e13_v)
+   do i = 1_I4P, n
+      ! Component-wise set (NOT `point_i = vector_R8P(...)`): the assignment form
+      ! resolves to VecFor's `assign_vector` TBP, which nvfortran 26.1 rejects on
+      ! device (NVFORTRAN-F-1252). Writing the three scalar components directly
+      ! is a plain memory store -- no TBP, device-legal.
+      point_i%x    = px(i)
+      point_i%y    = py(i)
+      point_i%z    = pz(i)
+      d2           = huge(0._R8P)
+      best_facet   = 0_I4P
+      best_payload = 0_I4P
+      call bvh_distance_node_with_region_oac(node=node_p, payload=payload_p,                  &
+                                              n=0_I4P, point=point_i,                          &
+                                              best=d2, best_facet=best_facet,                  &
+                                              best_payload_idx=best_payload)
+      if (is_signed_ .and. best_facet > 0_I4P) then
+         ! Recompute closest point and Voronoi region on the winning triangle via
+         ! the rich kernel (already !$acc routine seq from Step 4). Metrics are
+         ! read from the flat payload through the LOCAL pointer alias `payload_p`
+         ! -- NOT `self%aabb%payload(best_payload)`: nvfortran 26.1 does not attach
+         ! a device pointer for a nested allocatable component (`self%aabb%payload`)
+         ! subscripted directly inside the compute region, so a body-level deep
+         ! subscript faults with CUDA 700, even though passing the whole component
+         ! as a kernel argument resolves fine. Aliasing to a top-level local
+         ! pointer before the loop sidesteps the deep-component attachment gap.
+         ! (issue #20 §Step 5 -- this aliasing IS the signed-path crash fix.)
+         !
+         ! v1_v/e12_v/e13_v are filled by component-wise stores rather than inline
+         ! `vector_R8P(...)` constructors purely to reuse the named temps; the
+         ! constructor form is itself device-legal here (the unsigned BVH kernel
+         ! uses it inline), so this is style, not a workaround.
+         associate (p => payload_p(best_payload))
+            v1_v%x  = p%v1(1)  ; v1_v%y  = p%v1(2)  ; v1_v%z  = p%v1(3)
+            e12_v%x = p%e12(1) ; e12_v%y = p%e12(2) ; e12_v%z = p%e12(3)
+            e13_v%x = p%e13(1) ; e13_v%y = p%e13(2) ; e13_v%z = p%e13(3)
+            call triangle_point_distance(v1=v1_v, e12=e12_v, e13=e13_v,    &
+                                         a=p%a, b=p%b, c=p%c, det=p%det,   &
+                                         point=point_i, distance=d2,       &
+                                         closest=closest_v, region=region)
+         end associate
+         cx = closest_v%x ; cy = closest_v%y ; cz = closest_v%z
+         nx = pnormal_x_oac(pnormal_p(best_facet), region)
+         ny = pnormal_y_oac(pnormal_p(best_facet), region)
+         nz = pnormal_z_oac(pnormal_p(best_facet), region)
+         dx = px(i) - cx ; dy = py(i) - cy ; dz = pz(i) - cz
+         side = dx * nx + dy * ny + dz * nz
+         if (is_sqrt_) d2 = sqrt(d2)
+         if (side < 0._R8P) d2 = -d2
+      else
+         if (is_sqrt_) d2 = sqrt(d2)
+      endif
+      distances(i) = d2
+   enddo
+   !$acc end parallel loop
+
+   deallocate(px, py, pz)
+   endsubroutine distance_many_device
 
    function is_point_inside(self, point, sign_algorithm) result(is_inside)
    !< Compute sign.

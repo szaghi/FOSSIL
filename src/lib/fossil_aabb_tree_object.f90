@@ -24,6 +24,10 @@ public :: aabb_tree_object
 public :: AABB_USE_INDEX, AABB_USE_BRUTE_FORCE
 public :: AABB_AUTO_REFINEMENT
 public :: AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
+! Issue #20 §Step 5: surface-layer device path needs the flat distance payload
+! type and the device-callable BVH traversal entry points.
+public :: facet_distance_payload
+public :: bvh_distance_node_oac, bvh_distance_node_with_region_oac
 
 integer(I4P), parameter :: TREE_RATIO=8 !< Tree refinement ratio, it is assumed to be an **octree**.
 
@@ -138,11 +142,19 @@ type :: aabb_tree_object
    !>  +----+----+             +------->x(i)
    !<```
    private
+   ! Type-bound default: PRIVATE. Per-component visibility relaxed below for the
+   ! two arrays the surface-layer device path needs by name (issue #20 §Step 5):
+   ! `node(:)` and `payload(:)` carry an explicit `public ::` line below the
+   ! private-default block. The surface module's `enter_device` /
+   ! `distance_many_device` directives reference these by name in
+   ! `!$acc enter data` / `!$acc parallel loop present(...)` clauses --
+   ! source-level access that `private` would block. The documented invariant
+   ! is "treat as read-only outside the tree's own builder/destroy code".
    integer(I4P)                        :: tree_kind=AABB_TREE_SAH_BVH            !< Selects between the SAH BVH (default) and the legacy octree.
    integer(I4P)                        :: refinement_levels=AABB_AUTO_REFINEMENT !< Octree depth (AABB_AUTO_REFINEMENT = auto-tune); unused by SAH BVH.
    integer(I4P)                        :: nodes_number=0         !< Total number of tree nodes.
-   type(aabb_node_object), allocatable :: node(:)                !< AABB tree nodes [0:nodes_number-1].
-   type(facet_distance_payload), allocatable :: payload(:)       !< Flattened distance-only facet SoA, leaf-grouped (SAH BVH only, issue #19 §B1).
+   type(aabb_node_object), allocatable, public :: node(:)        !< AABB tree nodes [0:nodes_number-1]. PUBLIC for device access (Step 5).
+   type(facet_distance_payload), allocatable, public :: payload(:) !< Flat distance SoA (issue #19 §B1). PUBLIC for device access (Step 5).
    logical                             :: is_initialized=.false. !< Sentinel to check is AABB tree is initialized.
    logical                             :: use_index=.true.       !< Dispatch knob: .true.=use index tree, .false.=brute-force scan.
    contains
@@ -1377,15 +1389,22 @@ contains
    integer(I4P)                           :: nchild                     !< Number of allocated children.
    integer(I4P)                           :: i, j, swap_i               !< Counter.
    real(R8P)                              :: swap_d                     !< Sort helper.
+   integer(I4P)                           :: best_payload_idx_dummy     !< Step-5 host sink for the device-only output.
 
    ! BVH branch dispatches to the device-callable `_oac` traversal (issue #20
    ! §Step 4). The surface layer recomputes the winning facet's region once via
    ! `compute_distance_with_region` -- the BVH branch never needs per-facet
    ! region tracking here. Octree path (recursive-style, TBP-based) follows.
+   !
+   ! Issue #20 §Step 5: `bvh_distance_node_with_region_oac` now also returns the
+   ! winner's index into `payload(:)` for the device sign-decision recompute.
+   ! Host callers do not use it -- routed to a local sink.
    if (self%tree_kind == AABB_TREE_SAH_BVH) then
-      best_region = 0_I4P
+      best_region              = 0_I4P
+      best_payload_idx_dummy   = 0_I4P
       call bvh_distance_node_with_region_oac(node=self%node, payload=self%payload, n=n, point=point, &
-                                              best=best, best_facet=best_facet)
+                                              best=best, best_facet=best_facet,                       &
+                                              best_payload_idx=best_payload_idx_dummy)
       return
    endif
 
@@ -1585,19 +1604,27 @@ contains
    enddo
    endsubroutine bvh_distance_node_oac
 
-   pure subroutine bvh_distance_node_with_region_oac(node, payload, n, point, best, best_facet)
+   pure subroutine bvh_distance_node_with_region_oac(node, payload, n, point, best, best_facet, best_payload_idx)
    !$acc routine seq
    !< Device-callable signed-path BVH traversal (issue #20 §Step 4). Same descent
    !< as `bvh_distance_node_oac`, but additionally tracks the winning facet id
    !< for the surface-layer pseudo-normal sign step. Voronoi region is **not**
    !< tracked per-facet here -- the surface layer recomputes it once on the
-   !< final winning facet via `compute_distance_with_region`.
+   !< final winning facet via `compute_distance_with_region` (host) or
+   !< `triangle_point_distance` over `payload(best_payload_idx)` (device, Step 5).
+   !<
+   !< `best_payload_idx` (Step 5 addendum) is the index of the winner into the
+   !< flat `payload(:)` array — used by the device sign-decision recompute to
+   !< read triangle metrics without a `class(facet_object)` second call. Host
+   !< callers ignore it. Tracking it costs one extra scalar assignment per
+   !< facet improvement (i.e. almost never) — no extra branches, no extra loads.
    type(aabb_node_object),       intent(in)    :: node(0:)                  !< Tree node array.
    type(facet_distance_payload), intent(in)    :: payload(:)                !< Flat per-facet distance SoA.
    integer(I4P),                 intent(in)    :: n                         !< Root node to traverse from.
    type(vector_R8P),             intent(in)    :: point                     !< Point coordinates.
    real(R8P),                    intent(inout) :: best                      !< Running best squared distance.
    integer(I4P),                 intent(inout) :: best_facet                !< Running best facet id.
+   integer(I4P),                 intent(inout) :: best_payload_idx          !< Running winner's index into payload(:) (Step 5).
    integer(I4P)                                :: stack(MAX_TRAVERSAL_STACK) !< Explicit LIFO of pending node indices.
    integer(I4P)                                :: sp, cur                   !< Stack pointer + current node.
    integer(I4P)                                :: child_idx(2)              !< BVH per-child node index.
@@ -1633,8 +1660,9 @@ contains
                                             a=payload(idx)%a, b=payload(idx)%b, c=payload(idx)%c, det=payload(idx)%det,    &
                                             point=point, distance=d2)
             if (d2 < best) then
-               best       = d2
-               best_facet = payload(idx)%facet_id
+               best             = d2
+               best_facet       = payload(idx)%facet_id
+               best_payload_idx = idx
             endif
          enddo
       endif
