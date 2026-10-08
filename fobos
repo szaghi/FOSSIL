@@ -63,6 +63,15 @@ $EXDIRS      = BeFoR64/src/tests/
                VecFor/src/tests/
                VTKFortran/src/tests/
                VTKFortran/references/
+               BeFoR64/docs/
+               FACE/docs/
+               FLAP/docs/
+               FoXy/docs/
+               PENF/docs/
+               PENF/scripts/
+               StringiFor/docs/
+               VecFor/docs/
+               VTKFortran/docs/
 
 # main modes
 # GNU
