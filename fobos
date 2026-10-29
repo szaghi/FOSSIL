@@ -58,6 +58,7 @@ $EXDIRS      = BeFoR64/src/tests/
                FACE/src/tests/
                FLAP/src/tests/
                FoXy/src/tests/
+               FoXy/benchmarks/
                PENF/src/tests/
                StringiFor/src/tests/
                VecFor/src/tests/
