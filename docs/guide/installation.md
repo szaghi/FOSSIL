@@ -10,8 +10,26 @@ A Fortran 2003+ compliant compiler is required. The following compilers are know
 
 | Compiler | Minimum version |
 |----------|----------------|
-| GNU gfortran | ≥ 5.3.0 |
+| GNU gfortran | 14.3+ on the 14 series, or ≥ 15.2 |
 | Intel Fortran (ifort / ifx) | ≥ 16.x |
+| NVIDIA HPC Fortran (nvfortran) | ≥ 26.9 (GPU device build only, see below) |
+
+::: warning gfortran versions with a known internal compiler error
+gfortran **13.x, 14.0–14.2 and 15.1** crash while building the test suite
+(`internal compiler error: in matching_typebound_op`, on
+`src/tests/fossil_test_sanitize_normals_strict.f90`, see
+[issue #24](https://github.com/szaghi/FOSSIL/issues/24)). This is a gfortran bug, fixed in
+the 14.3 and 15.2 releases. Verified versions:
+
+| gfortran | Result |
+|----------|--------|
+| 13.3, 14.2, 15.1 | internal compiler error |
+| 14.3 | builds, all tests pass (CI) |
+| 15.2, 16.2 | builds, all tests pass |
+:::
+
+The NVIDIA modes (`static-nvidia`, `tests-nvidia`) build the OpenACC GPU distance
+path; `tests-nvidia` builds only the distance benchmark, not the full test suite.
 
 FOSSIL is developed on GNU/Linux. Windows should work but is not officially tested.
 

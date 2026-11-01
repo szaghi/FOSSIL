@@ -128,9 +128,9 @@ A command-line utility (`src/app/fossilizer.f90`) wraps the library for interact
 
 | Compiler | Status |
 |----------|--------|
-| GNU gfortran ≥ 5.3 | Supported |
+| GNU gfortran 14.3+ (14 series) or ≥ 15.2 | Supported (13.x, 14.0–14.2 and 15.1 hit a compiler bug, see [Installation](installation.md)) |
 | Intel Fortran ≥ 16.x | Supported |
-| NVIDIA HPC Fortran (nvfortran) | Supported |
+| NVIDIA HPC Fortran (nvfortran) ≥ 26.9 | GPU device build of the BVH distance path only |
 | IBM XL Fortran | Not tested |
 | g95 | Not tested |
 | NAG Fortran | Not tested |
