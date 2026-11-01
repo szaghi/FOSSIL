@@ -29,8 +29,9 @@ modes = shared-gnu static-gnu shared-gnu-debug static-gnu-debug
 # Step 0) need nvfortran and a GPU compute-capability target ($NVF_CC). They
 # are NOT built by CI, but ARE validated locally via `module load nvhpc/<ver>`
 # before the build, e.g.
-#   module load nvhpc/26
+#   module load nvhpc/26.9
 #   fobis build --mode tests-nvidia --varset local_nvf
+# Requires nvfortran >= 26.9 (validated on 26.9; 26.1 is no longer supported).
 # The default varset is local_gnu, a no-op placeholder, so every existing
 # GNU/Intel mode is completely unaffected. $NVF_CC mirrors ADAM's local_nvf
 # (cc89); override it for a different GPU, e.g. cc80 for A100.
@@ -156,8 +157,8 @@ build_dir = ./exe/
 template  = template-static-intel-debug
 build_dir = ./exe/
 
-# NVIDIA (OpenACC device target, issue #20). nvfortran-only, manual local build:
-#   module load nvhpc/26
+# NVIDIA (OpenACC device target, issue #20). nvfortran >= 26.9, manual local build:
+#   module load nvhpc/26.9
 #   fobis build --mode static-nvidia --varset local_nvf
 #   fobis build --mode tests-nvidia  --varset local_nvf
 # Not in CI (no public runner with nvfortran) -- see [varsets] comment.

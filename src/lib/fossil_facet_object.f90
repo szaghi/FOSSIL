@@ -25,9 +25,10 @@ public :: pnormal_x_oac, pnormal_y_oac, pnormal_z_oac
 ! 3 edge pseudo-normals, 3 vertex pseudo-normals). Pure POD: no allocatables, no
 ! TBPs. Built once by the surface layer (mirroring `facet_distance_payload`'s SoA
 ! pattern from §B1) and copied to device by `surface%enter_device`. Reads happen
-! through the three scalar `pnormal_*_oac` accessors below -- scalar returns dodge
-! the nvfortran 26.1 derived-type-function-temp bug already documented in the
-! Step-4 commit message.
+! through the three scalar `pnormal_*_oac` accessors below. They return `real(R8P)`
+! rather than a `vector_R8P` because a `vector_R8P`-using `!$acc routine seq`
+! procedure in this module triggers the nvfortran NVVM duplicate-type bug (see
+! `fossil_triangle_closest`).
 type :: pnormal_payload_t
    real(R8P) :: nx  = 0._R8P                              !< Facet outward normal x.
    real(R8P) :: ny  = 0._R8P                              !< Facet outward normal y.
@@ -323,9 +324,9 @@ contains
    pure function pnormal_x_oac(p, region) result(nx)
    !$acc routine seq
    !< Device-callable analogue of `pseudo_normal_for_region(facet, region)%x`.
-   !< Reads from a flat `pnormal_payload_t`, returns a plain `real(R8P)` scalar so
-   !< the call dodges the nvfortran 26.1 derived-type-function-temp bug already
-   !< documented in the Step-4 commit. Same `select case` as the host helper.
+   !< Reads from a flat `pnormal_payload_t`, returns a plain `real(R8P)` scalar
+   !< (see the `pnormal_payload_t` note on why not a `vector_R8P`). Same
+   !< `select case` as the host helper.
    type(pnormal_payload_t), intent(in) :: p      !< Flat per-facet pseudo-normal record.
    integer(I4P),            intent(in) :: region !< Voronoi region tag (see `compute_distance_with_region`).
    real(R8P)                           :: nx     !< Pseudo-normal x component.

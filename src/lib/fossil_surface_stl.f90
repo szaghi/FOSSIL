@@ -1482,7 +1482,6 @@ contains
    logical                                          :: is_sqrt_       !< Resolved sqrt sentinel.
    integer(I4P)                                     :: n              !< Number of query points.
    integer(I4P)                                     :: i              !< Loop counter.
-   real(R8P), allocatable                           :: px(:), py(:), pz(:) !< Flat SoA of query-point coords (see note).
    real(R8P)                                        :: d2             !< Per-point best d^2.
    integer(I4P)                                     :: best_facet     !< Per-point winning facet id (1-based).
    integer(I4P)                                     :: best_payload   !< Per-point winning payload index.
@@ -1494,12 +1493,14 @@ contains
    type(vector_R8P)                                 :: point_i        !< Reconstructed query point (kernel API).
    type(vector_R8P)                                 :: closest_v      !< Closest-point as vector_R8P (kernel API).
    type(vector_R8P)                                 :: v1_v, e12_v, e13_v !< Winning-triangle vertex/edges as vector_R8P (kernel API).
-   ! Top-level local pointer aliases for the device arrays. nvfortran 26.1 does
-   ! not attach a device pointer for a nested allocatable component
-   ! (`self%aabb%payload`) subscripted directly in a compute region, so the loop
-   ! body references these flat aliases instead. The `!$acc enter data` in
-   ! enter_device mapped the underlying targets; the present(...) clause below
-   ! lists the aliases (pointer association is a host-side rename, same address).
+   ! Top-level local pointer aliases for the device arrays. enter_device maps
+   ! only the member arrays, never `self` or `self%aabb`, so referencing
+   ! `self%aabb%payload(i)` in the compute region makes the compiler implicitly
+   ! copy `self` (OpenACC 3.4 §2.6.2: aggregates with no data clause are `copy`).
+   ! That copy holds host addresses (nothing attached it, §2.6.8) and the
+   ! subscript faults with CUDA 700. The loop body uses these flat aliases
+   ! instead; pointer association is a host-side rename of the mapped
+   ! allocation, so present(...) finds them.
    type(aabb_node_object),       pointer            :: node_p(:)      !< Alias of self%aabb%node.
    type(facet_distance_payload), pointer            :: payload_p(:)   !< Alias of self%aabb%payload.
    type(pnormal_payload_t),      pointer            :: pnormal_p(:)   !< Alias of self%pnormal_payload.
@@ -1522,19 +1523,6 @@ contains
    is_signed_ = .false. ; if (present(is_signed))      is_signed_ = is_signed
    is_sqrt_   = .false. ; if (present(is_square_root)) is_sqrt_   = is_square_root
 
-   ! Flatten the query points into a plain real SoA before the kernel (issue #20
-   ! §Step 5 triage). nvfortran 26.1 mis-maps an array of `type(vector_R8P)`
-   ! (a derived type with a user-defined assignment) into device global memory:
-   ! the array `copyin` succeeds but per-element subscripting inside the
-   ! `!$acc parallel loop` dereferences an illegal address (CUDA error 700).
-   ! Three contiguous `real(R8P)` arrays sidestep the derived-type mapping
-   ! entirely; the kernel rebuilds a `vector_R8P` per iteration from scalars
-   ! (cheap, register-resident) to feed the `_oac` kernel API unchanged.
-   allocate(px(n), py(n), pz(n))
-   do i = 1_I4P, n
-      px(i) = points(i)%x ; py(i) = points(i)%y ; pz(i) = points(i)%z
-   enddo
-
    ! Alias the device arrays to top-level local pointers. The compute region
    ! references the aliases (`node_p`, `payload_p`, `pnormal_p`) rather than the
    ! nested `self%aabb%...` components -- see the alias declarations for why.
@@ -1546,18 +1534,18 @@ contains
 
    !$acc parallel loop                                                                       &
    !$acc&  present(node_p, payload_p, pnormal_p)                                             &
-   !$acc&  copyin(px, py, pz)                                                                 &
+   !$acc&  copyin(points)                                                                    &
    !$acc&  copyout(distances)                                                                &
    !$acc&  private(point_i, d2, best_facet, best_payload, cx, cy, cz, region, nx, ny, nz,    &
    !$acc&          dx, dy, dz, side, closest_v, v1_v, e12_v, e13_v)
    do i = 1_I4P, n
-      ! Component-wise set (NOT `point_i = vector_R8P(...)`): the assignment form
-      ! resolves to VecFor's `assign_vector` TBP, which nvfortran 26.1 rejects on
-      ! device (NVFORTRAN-F-1252). Writing the three scalar components directly
-      ! is a plain memory store -- no TBP, device-legal.
-      point_i%x    = px(i)
-      point_i%y    = py(i)
-      point_i%z    = pz(i)
+      ! Component-wise set (NOT `point_i = vector_R8P(...)`): VecFor overloads
+      ! assignment(=) as a type-bound generic, and nvfortran does not allow TBP
+      ! calls in device code (NVFORTRAN-F-1252). A language-support restriction,
+      ! not a compiler bug. Plain component stores need no TBP.
+      point_i%x    = points(i)%x
+      point_i%y    = points(i)%y
+      point_i%z    = points(i)%z
       d2           = huge(0._R8P)
       best_facet   = 0_I4P
       best_payload = 0_I4P
@@ -1568,33 +1556,36 @@ contains
       if (is_signed_ .and. best_facet > 0_I4P) then
          ! Recompute closest point and Voronoi region on the winning triangle via
          ! the rich kernel (already !$acc routine seq from Step 4). Metrics are
-         ! read from the flat payload through the LOCAL pointer alias `payload_p`
-         ! -- NOT `self%aabb%payload(best_payload)`: nvfortran 26.1 does not attach
-         ! a device pointer for a nested allocatable component (`self%aabb%payload`)
-         ! subscripted directly inside the compute region, so a body-level deep
-         ! subscript faults with CUDA 700, even though passing the whole component
-         ! as a kernel argument resolves fine. Aliasing to a top-level local
-         ! pointer before the loop sidesteps the deep-component attachment gap.
-         ! (issue #20 §Step 5 -- this aliasing IS the signed-path crash fix.)
+         ! read through the pointer alias `payload_p`, not
+         ! `self%aabb%payload(best_payload)` (see the alias declarations).
+         ! Indexed directly rather than through an `associate` name: nvfortran
+         ! treated an in-kernel associate name as a variable and generated an
+         ! implicit `copy(p)` for it.
          !
-         ! v1_v/e12_v/e13_v are filled by component-wise stores rather than inline
-         ! `vector_R8P(...)` constructors purely to reuse the named temps; the
-         ! constructor form is itself device-legal here (the unsigned BVH kernel
-         ! uses it inline), so this is style, not a workaround.
-         associate (p => payload_p(best_payload))
-            v1_v%x  = p%v1(1)  ; v1_v%y  = p%v1(2)  ; v1_v%z  = p%v1(3)
-            e12_v%x = p%e12(1) ; e12_v%y = p%e12(2) ; e12_v%z = p%e12(3)
-            e13_v%x = p%e13(1) ; e13_v%y = p%e13(2) ; e13_v%z = p%e13(3)
-            call triangle_point_distance(v1=v1_v, e12=e12_v, e13=e13_v,    &
-                                         a=p%a, b=p%b, c=p%c, det=p%det,   &
-                                         point=point_i, distance=d2,       &
-                                         closest=closest_v, region=region)
-         end associate
+         ! v1_v/e12_v/e13_v are filled by component-wise stores, not by assigning
+         ! `vector_R8P(...)`: that assignment would call VecFor's `assign_vector`
+         ! TBP (see the `point_i` note above).
+         v1_v%x  = payload_p(best_payload)%v1(1)
+         v1_v%y  = payload_p(best_payload)%v1(2)
+         v1_v%z  = payload_p(best_payload)%v1(3)
+         e12_v%x = payload_p(best_payload)%e12(1)
+         e12_v%y = payload_p(best_payload)%e12(2)
+         e12_v%z = payload_p(best_payload)%e12(3)
+         e13_v%x = payload_p(best_payload)%e13(1)
+         e13_v%y = payload_p(best_payload)%e13(2)
+         e13_v%z = payload_p(best_payload)%e13(3)
+         call triangle_point_distance(v1=v1_v, e12=e12_v, e13=e13_v,                       &
+                                      a=payload_p(best_payload)%a,                         &
+                                      b=payload_p(best_payload)%b,                         &
+                                      c=payload_p(best_payload)%c,                         &
+                                      det=payload_p(best_payload)%det,                     &
+                                      point=point_i, distance=d2,                          &
+                                      closest=closest_v, region=region)
          cx = closest_v%x ; cy = closest_v%y ; cz = closest_v%z
          nx = pnormal_x_oac(pnormal_p(best_facet), region)
          ny = pnormal_y_oac(pnormal_p(best_facet), region)
          nz = pnormal_z_oac(pnormal_p(best_facet), region)
-         dx = px(i) - cx ; dy = py(i) - cy ; dz = pz(i) - cz
+         dx = points(i)%x - cx ; dy = points(i)%y - cy ; dz = points(i)%z - cz
          side = dx * nx + dy * ny + dz * nz
          if (is_sqrt_) d2 = sqrt(d2)
          if (side < 0._R8P) d2 = -d2
@@ -1605,7 +1596,6 @@ contains
    enddo
    !$acc end parallel loop
 
-   deallocate(px, py, pz)
    endsubroutine distance_many_device
 
    function is_point_inside(self, point, sign_algorithm) result(is_inside)

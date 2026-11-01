@@ -4,8 +4,9 @@ module fossil_triangle_closest
 !< Shared core of the point-to-triangle kernel: solve for the parametric
 !< coordinates `(sq, tq)` of the closest point on a triangle to a query point.
 !<
-!< Extracted from `fossil_facet_object` (issue #20 Step 4) to work around
-!< nvfortran 26.1 NVVM codegen bug: when `triangle_closest_st` shares a TU
+!< Extracted from `fossil_facet_object` (issue #20 Step 4) to work around an
+!< nvfortran NVVM codegen bug (seen on 26.1, still present on 26.9): when
+!< `triangle_closest_st` shares a TU
 !< with `triangle_point_distance` and `triangle_point_distance_sq` (both
 !< `!$acc routine seq` callers), the device-IR emission emits two
 !< structurally-identical-but-nominally-distinct LLVM type aliases
@@ -16,6 +17,11 @@ module fossil_triangle_closest
 !< Isolating `triangle_closest_st` in its own module gives nvfortran a clean
 !< compilation context where only ONE LLVM type alias is generated for
 !< `vector_R8P`, and the duplicate-global emission is avoided.
+!<
+!< The bug is not specific to this routine: adding ANY further
+!< `!$acc routine seq` procedure that uses `vector_R8P` to `fossil_facet_object`
+!< triggers it again (verified on 26.9). New device routines of that kind must
+!< live in their own module, like this one.
 
 use penf, only : I4P, R8P
 use vecfor, only : vector_R8P, dotproduct_R8P_oac, vector_sub_vector_R8P_oac
@@ -56,8 +62,8 @@ contains
    real(R8P)                     :: tmp0, tmp1, numer, denom, invdet !< Temporary.
 
    ! Device-callable VecFor `_oac` API (issue #20 §Step 4): `vector - vector` and
-   ! `.dot.` lower to TBP-generic operator dispatch, which nvfortran 26.1 rejects
-   ! inside `!$acc routine seq`. The `_oac` free subroutines take `type(...)` (not
+   ! `.dot.` lower to TBP-generic operator dispatch, and nvfortran does not
+   ! support type-bound procedure calls inside `!$acc routine seq`. The `_oac` free subroutines take `type(...)` (not
    ! `class`) and are device-safe. Bit-exact vs the operator form on CPU.
    call vector_sub_vector_R8P_oac(v1, point, V1P)
    d = dotproduct_R8P_oac(e12, V1P)

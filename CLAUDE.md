@@ -38,9 +38,26 @@ The `static-nvidia` and `tests-nvidia` modes target the GPU via OpenACC with
 locally** by loading the nvhpc module before the build:
 
 ```bash
-module load nvhpc/26                                  # or any installed nvhpc/* version
+module load nvhpc/26.9
 fobis build --mode tests-nvidia --varset local_nvf
 ```
+
+**Requires nvfortran >= 26.9.** Validated on 26.9 (RTX 4070, `cc89`); 26.1 is no
+longer supported, since the query-point mapping workaround it needed was removed.
+In a non-interactive shell `module load` may not populate `PATH`; export the SDK's
+`compilers/bin` and `compilers/lib` (+ `cuda/lib64`) directly instead.
+
+Device-code rules (issue #20; see the comments in the named files):
+
+- No type-bound procedure calls or `class(...)` dummies in device code: use the
+  `_oac` free procedures (FOSSIL and VecFor). This includes VecFor's overloaded
+  `=`, so set `vector_R8P` components directly (or call `assign_vector_R8P_oac`).
+- A `!$acc routine seq` procedure that uses `vector_R8P` must not be added to
+  `fossil_facet_object`: it triggers an nvfortran NVVM duplicate-type bug (still
+  present in 26.9). Put it in its own module, like `fossil_triangle_closest`.
+- `enter_device` maps member arrays, never `self`: inside a compute region,
+  reference them through top-level pointer aliases, never as
+  `self%aabb%payload(i)`.
 
 The `local_nvf` varset supplies `$NVF_CC` (GPU compute capability, default
 `cc89`); override for a different GPU (`cc80` for A100/V100). The default
@@ -50,7 +67,7 @@ unaffected.
 The `tests-nvidia` mode builds a **single targeted test** (`fossil_test_distance_bench`)
 that exercises the distance kernel chain — not the full suite. Host-only tests
 (file I/O, mesh-quality invariants) stay in `tests-gnu` / `tests-intel`; some
-trip nvfortran 26.1 parser quirks unrelated to the device port (e.g. parser
+tripped nvfortran 26.1 parser quirks unrelated to the device port (e.g. parser
 rejects `(expr) .cross. (expr)` in one strict-normal test).
 
 The device build scope is **BVH-only** (the octree stays CPU-only).

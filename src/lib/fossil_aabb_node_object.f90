@@ -17,12 +17,12 @@ private
 public :: aabb_node_object
 ! Device-callable scalar accessors (issue #20 §Step 4). The TBP accessors above
 ! cannot be reached from inside an `!$acc routine seq`: TBP `pass` arguments
-! resolve as `class(...)`, and nvfortran 26.1 rejects `class` arguments in
+! resolve as `class(...)`, and nvfortran does not support `class` arguments in
 ! device code (NVFORTRAN-W-0155 "indirect function/procedure call"). These
 ! `_oac` free functions take `type(aabb_node_object), intent(in)`, return a
 ! scalar (`real(R8P)` or `integer(I4P)`) and are annotated `!$acc routine seq`.
-! Scalar returns dodge the function-temp bug observed under nvhpc 26.1 with
-! derived-type returning device functions (see VecFor `_oac` API rationale).
+! Scalar returns were chosen to dodge a derived-type function-result bug in
+! nvfortran 26.1; that bug is gone in 26.9, the scalar API stays as is.
 public :: bvh_bmin_x_oac, bvh_bmin_y_oac, bvh_bmin_z_oac
 public :: bvh_bmax_x_oac, bvh_bmax_y_oac, bvh_bmax_z_oac
 public :: bvh_left_child_oac, bvh_right_child_oac

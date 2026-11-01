@@ -754,11 +754,6 @@ contains
    allocate(self%payload(total))
 
    ! Second pass: emit each leaf's facets contiguously, record its slice.
-   ! Note: an `associate (count => self%node(n)%facet_id_count())` was rewritten
-   ! to a plain local scalar — nvfortran 26.1 wrongly emits a polymorphic
-   ! deallocate on associate-block exit when the named entity binds to a TBP
-   ! whose `self` is `class(...)`, segfaulting in `pgf90_dealloc_poly03_i8`
-   ! (issue #20 §Step 4 host-validation gate).
    cursor = 1_I4P
    do n = 0, self%nodes_number - 1
       if (self%node(n)%get_left_child() /= 0 .or. self%node(n)%get_right_child() /= 0) cycle
@@ -1503,8 +1498,8 @@ contains
    !$acc routine seq
    !< Device-callable BVH distance traversal (issue #20 §Step 4): same best-first
    !< descent + d^2 pruning as `distance_node`, but as a module-level free
-   !< subroutine taking `type(aabb_node_object)` (not `class`) -- nvfortran 26.1
-   !< rejects `class(...)` arguments and TBP dispatch inside `!$acc routine seq`
+   !< subroutine taking `type(aabb_node_object)` (not `class`) -- nvfortran does
+   !< not support `class(...)` arguments or TBP dispatch inside `!$acc routine seq`
    !< (NVFORTRAN-W-0155 "indirect function/procedure call"). Reads through the
    !< `bvh_*_oac` scalar accessors, calls the `_oac` triangle kernel, inlines
    !< the box-d^2 test via `bvh_box_distance_sq_oac`.
