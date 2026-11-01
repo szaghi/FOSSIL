@@ -95,12 +95,13 @@ fobis rule --ex makedoc   # Requires 'formal' and npm/VitePress
 fobis rule --ex deldoc    # Delete doc build artifacts
 ```
 
-### Alternative builds (via install.sh)
+### Alternative build (fpm)
 
 ```bash
-./scripts/install.sh --build make     # GNU Make
-./scripts/install.sh --build cmake    # CMake
+fpm build --profile release   # dependencies resolved from fpm.toml
 ```
+
+There are no CMake/Make build files: `scripts/install.sh --build cmake|make` skips.
 
 ## Source Architecture
 
@@ -109,7 +110,7 @@ src/
 ├── lib/           # Core library modules
 ├── tests/         # Test programs (one per feature)
 ├── app/           # fossilizer CLI application
-└── third_party/   # Git submodules
+└── third_party/   # fobos [dependencies], fetched by `fobis fetch`
 ```
 
 ### Core object hierarchy
@@ -168,9 +169,9 @@ Set via the optional `sign_algorithm` argument on `distance` / `compute_distance
 - `SIGN_RAY_INTERSECTIONS` — axis-aligned ray casts; odd intersections = inside.
 - `SIGN_SOLID_ANGLE` — sum of projected solid angles ≈ ±4π.
 
-### Third-party submodules (`src/third_party/`)
+### Third-party dependencies (`src/third_party/`)
 
-| Submodule | Key exports used in FOSSIL |
+| Dependency | Key exports used in FOSSIL |
 |-----------|---------------------------|
 | **PENF** | Portable numeric types: `I4P` (int32), `R8P` (real64), `str()` |
 | **VecFor** | 3D vectors: `vector_R8P`, unit vectors `ex_R8P/ey_R8P/ez_R8P`, `rotation_matrix_R8P`, `mirror_matrix_R8P` |
@@ -181,9 +182,10 @@ Set via the optional `sign_algorithm` argument on `distance` / `compute_distance
 | **StringiFor** | String utilities |
 | **VTKFortran** | VTK file I/O |
 
-After cloning, initialize submodules:
+They are not git submodules: they are declared in `fobos` `[dependencies]` and fetched
+(pinned by `src/third_party/fobos.lock`) with:
 ```bash
-git submodule update --init
+fobis fetch            # --update to re-fetch
 ```
 
 ### Key internal modules

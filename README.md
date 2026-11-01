@@ -96,10 +96,11 @@ For interactive use without writing Fortran, the companion **`fossilizer`** CLI 
 
 ### FoBiS
 
-**Standalone** — clone with submodules and build:
+**Standalone** — clone, fetch the dependencies into `src/third_party/`, and build:
 
 ```bash
-git clone https://github.com/szaghi/FOSSIL --recursive && cd FOSSIL
+git clone https://github.com/szaghi/FOSSIL && cd FOSSIL
+fobis fetch                     # fetch the fobos [dependencies]
 fobis build --mode static-gnu   # build static library
 fobis build --mode tests-gnu && ./scripts/run_tests.sh  # build and run tests
 ```
@@ -117,16 +118,18 @@ fobis fetch              # fetch and build
 fobis fetch --update     # re-fetch and rebuild
 ```
 
-### CMake
+### fpm
 
 ```bash
-git clone https://github.com/szaghi/FOSSIL --recursive && cd FOSSIL
-cmake -B build && cmake --build build && ctest --test-dir build
+git clone https://github.com/szaghi/FOSSIL && cd FOSSIL
+fpm build --profile release     # fpm resolves the dependencies from fpm.toml
 ```
 
-**As a CMake subdirectory:**
+**As an fpm dependency:**
 
-```cmake
-add_subdirectory(FOSSIL)
-target_link_libraries(your_target FOSSIL::FOSSIL)
+```toml
+[dependencies]
+FOSSIL = { git = "https://github.com/szaghi/FOSSIL.git" }
 ```
+
+FOSSIL ships no CMake or Make build files.

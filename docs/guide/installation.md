@@ -35,22 +35,20 @@ FOSSIL is developed on GNU/Linux. Windows should work but is not officially test
 
 ## Download
 
-FOSSIL uses **git submodules** for its third-party dependencies. Clone recursively:
-
 ```bash
-git clone https://github.com/szaghi/FOSSIL --recursive
+git clone https://github.com/szaghi/FOSSIL
 cd FOSSIL
+fobis fetch
 ```
 
-If you already have a non-recursive clone:
-
-```bash
-git submodule update --init
-```
+FOSSIL's third-party dependencies are **not** git submodules. They are declared in the
+`[dependencies]` section of `fobos` and fetched into `src/third_party/` by `fobis fetch`
+(pinned in `src/third_party/fobos.lock`). `fobis fetch --update` re-fetches them. fpm users
+need neither step: `fpm` resolves the same dependencies from `fpm.toml`.
 
 ### Third-Party Dependencies
 
-The submodules live under `src/third_party/`:
+Fetched into `src/third_party/`:
 
 | Library | Purpose |
 |---------|---------|
@@ -59,7 +57,7 @@ The submodules live under `src/third_party/`:
 | [FLAP](https://github.com/szaghi/FLAP) | Fortran command-line argument parser (used by `fossilizer`) |
 | [FACE](https://github.com/szaghi/FACE) | ANSI terminal color/style support |
 | [BeFoR64](https://github.com/szaghi/BeFoR64) | Base64 encoding |
-| [FoXy](https://github.com/szaghi/FoXy) | XML/XDMF support |
+| [FoXy](https://github.com/Fortran-FOSS-Programmers/FoXy) | XML/XDMF support |
 | [StringiFor](https://github.com/szaghi/StringiFor) | String utilities |
 | [VTKFortran](https://github.com/szaghi/VTKFortran) | VTK file I/O |
 
@@ -86,11 +84,16 @@ Available modes:
 | `static-gnu-debug` | Static library with gfortran (debug + checks) |
 | `shared-gnu-debug` | Shared library with gfortran (debug) |
 | `tests-gnu` | Build all tests with gfortran (release) |
+| `tests-gnu-openmp` | Build all tests with gfortran + OpenMP (`distance_many` threaded) |
 | `tests-gnu-debug` | Build all tests with gfortran (debug) |
 | `static-intel` | Static library with ifort (release) |
 | `shared-intel` | Shared library with ifort (release) |
+| `static-intel-debug` | Static library with ifort (debug) |
+| `shared-intel-debug` | Shared library with ifort (debug) |
 | `tests-intel` | Build all tests with ifort (release) |
 | `tests-intel-debug` | Build all tests with ifort (debug) |
+| `static-nvidia` | Static library with nvfortran + OpenACC (GPU, needs `--varset local_nvf`) |
+| `tests-nvidia` | GPU distance benchmark only, with nvfortran + OpenACC (needs `--varset local_nvf`) |
 
 ### Build the library
 
@@ -105,7 +108,7 @@ fobis build --mode shared-gnu
 fobis build --mode static-intel
 ```
 
-The library is placed in `./static/` or `./shared/` respectively. Module files go to `./mod/`.
+The library is placed in `./static/` or `./shared/` respectively, with its module files in `mod/` under the same directory (e.g. `./static/mod/`).
 
 ### Build and run tests
 
@@ -126,14 +129,16 @@ To run a single test:
 
 ```bash
 fobis rule --ex makecoverage   # build + run tests + gcov report
-fobis rule --ex makedoc        # build ford API docs + VitePress site
+fobis rule --ex makedoc        # build formal API docs + VitePress site
 ```
 
-## Alternative builds
-
-The `scripts/install.sh` helper also supports `make` and `cmake` backends:
+## Build with fpm
 
 ```bash
-./scripts/install.sh --build make
-./scripts/install.sh --build cmake
+fpm build --profile release
 ```
+
+fpm resolves the dependencies declared in `fpm.toml`; no `fobis fetch` is needed.
+
+FOSSIL ships no CMake or Make build files: `scripts/install.sh --build cmake|make`
+skips the build with a warning. Use `--build fobis` or `--build fpm`.
