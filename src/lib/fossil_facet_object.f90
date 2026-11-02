@@ -5,6 +5,7 @@ module fossil_facet_object
 
 use fossil_list_id_object, only : list_id_object
 use fossil_triangle_closest, only : triangle_closest_st
+use fossil_solid_angle,      only : solid_angle_oac
 use fossil_utils, only : EPS, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : FR4P, I2P, I4P, R4P, R8P, str, ZeroR8P
@@ -1168,29 +1169,18 @@ contains
    endfunction smallest_edge_len
 
    pure function solid_angle(self, point)
-   !< Return the (projected) solid angle of the facet with respect the point.
-   class(facet_object), intent(in) :: self                      !< Facet.
-   type(vector_R8P),    intent(in) :: point                     !< Point.
-   real(R8P)                       :: solid_angle               !< Solid angle.
-   type(vector_R8P)                :: R1, R2, R3                !< Edges from point to facet vertices.
-   real(R8P)                       :: R1_norm, R2_norm, R3_norm !< Norms (L2) of edges from point to facet vertices.
-   real(R8P)                       :: numerator                 !< Archtangent numerator.
-   real(R8P)                       :: denominator               !< Archtangent denominator.
+   !< Return the signed solid angle of the facet seen from the point (Van Oosterom-Strackee).
+   !<
+   !< Delegates to `fossil_solid_angle::solid_angle_oac`, the plain-real core shared with the
+   !< device fast-winding-number traversal (issue #29), so host and device use one formula.
+   class(facet_object), intent(in) :: self        !< Facet.
+   type(vector_R8P),    intent(in) :: point       !< Point.
+   real(R8P)                       :: solid_angle !< Solid angle.
 
-   R1 = self%vertex(1) - point ; R1_norm = R1%normL2()
-   R2 = self%vertex(2) - point ; R2_norm = R2%normL2()
-   R3 = self%vertex(3) - point ; R3_norm = R3%normL2()
-
-   ! numerator = R1.dot.(R2.cross.R3)
-   numerator = R1%dotproduct(rhs=R2%crossproduct(rhs=R3))
-   ! denominator = R1_norm * R2_norm * R3_norm + (R1.dot.R2) * R3_norm + &
-   !                                             (R1.dot.R3) * R2_norm + &
-   !                                             (R2.dot.R3) * R1_norm
-   denominator = R1_norm * R2_norm * R3_norm + (R1%dotproduct(rhs=R2)) * R3_norm + &
-                                               (R1%dotproduct(rhs=R3)) * R2_norm + &
-                                               (R2%dotproduct(rhs=R3)) * R1_norm
-
-   solid_angle = 2._R8P * atan2(numerator, denominator)
+   solid_angle = solid_angle_oac(point%x, point%y, point%z,                               &
+                                 self%vertex(1)%x, self%vertex(1)%y, self%vertex(1)%z,    &
+                                 self%vertex(2)%x, self%vertex(2)%y, self%vertex(2)%z,    &
+                                 self%vertex(3)%x, self%vertex(3)%y, self%vertex(3)%z)
    endfunction solid_angle
 
    pure function tetrahedron_volume(self, apex) result(volume)
