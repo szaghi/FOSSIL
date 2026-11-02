@@ -22,14 +22,18 @@ call cli_parse
 call surface%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
 
 call surface%translate(delta=delta)
+call surface%analyze   ! transforms leave the AABB tree stale: rebuild before querying
 call surface%save_into_file(file_name='fossil_test_translate-delta.stl')
 are_tests_passed(1) = nint(surface%distance(point=2 * ex_R8P + 0 * ey_R8P + 0 * ez_R8P)) == 0
 call surface%translate(delta=-delta)
 call surface%translate(x=x)
+call surface%analyze   ! transforms leave the AABB tree stale: rebuild before querying
 are_tests_passed(2) = nint(surface%distance(point=2 * ex_R8P + 0 * ey_R8P + 0 * ez_R8P)) == 0
 call surface%translate(y=y)
+call surface%analyze   ! transforms leave the AABB tree stale: rebuild before querying
 are_tests_passed(3) = nint(surface%distance(point=2 * ex_R8P + 2 * ey_R8P + 0 * ez_R8P)) == 0
 call surface%translate(z=z)
+call surface%analyze   ! transforms leave the AABB tree stale: rebuild before querying
 are_tests_passed(4) = nint(surface%distance(point=2 * ex_R8P + 2 * ey_R8P + 2 * ez_R8P)) == 0
 call surface%save_into_file(file_name='fossil_test_translate-xyz.stl')
 

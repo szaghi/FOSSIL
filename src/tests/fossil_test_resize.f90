@@ -23,14 +23,18 @@ call surface%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format
 print '(A)', surface%statistics()
 
 call surface%resize(factor=factor)
+call surface%analyze   ! transforms leave the AABB tree stale: rebuild before querying
 call surface%save_into_file(file_name='fossil_test_resize-factor.stl')
 are_tests_passed(1) = nint(surface%distance(point=2 * ex_R8P + 0 * ey_R8P + 0 * ez_R8P)) == 0
 call surface%resize(factor=factor/4._R8P)
 call surface%resize(x=x)
+call surface%analyze   ! transforms leave the AABB tree stale: rebuild before querying
 are_tests_passed(2) = nint(surface%distance(point=2 * ex_R8P + 0 * ey_R8P + 0 * ez_R8P)) == 0
 call surface%resize(y=y)
+call surface%analyze   ! transforms leave the AABB tree stale: rebuild before querying
 are_tests_passed(3) = nint(surface%distance(point=2 * ex_R8P + 2 * ey_R8P + 0 * ez_R8P)) == 0
 call surface%resize(z=z)
+call surface%analyze   ! transforms leave the AABB tree stale: rebuild before querying
 are_tests_passed(4) = nint(surface%distance(point=2 * ex_R8P + 2 * ey_R8P + 2 * ez_R8P)) == 0
 call surface%save_into_file(file_name='fossil_test_resize-xyz.stl')
 

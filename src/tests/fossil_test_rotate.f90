@@ -22,6 +22,7 @@ call cli_parse
 call surface%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
 
 call surface%rotate(axis=axis, angle=angle)
+call surface%analyze   ! transforms leave the AABB tree stale: rebuild before querying
 call surface%save_into_file(file_name='fossil_test_rotate.stl')
 are_tests_passed(1) = nint(surface%distance(point=0 * ex_R8P - 1 * ey_R8P + 1 * ez_R8P)) == 0
 are_tests_passed(2) = nint(surface%distance(point=1 * ex_R8P - 1 * ey_R8P + 0 * ez_R8P)) == 0
