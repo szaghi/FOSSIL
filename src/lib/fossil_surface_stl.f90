@@ -15,6 +15,7 @@ use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil_winding_number, only : compute_winding_number => winding_number
+use fossil_hole_filling,   only : boundary_loop_t, extract_boundary_loops, triangulate_loop
 use fossil_self_intersection, only : intersection_pair_t, &
                                      compute_self_intersections => find_self_intersections
 use fossil_marching_cubes, only : compute_isosurface => extract_isosurface, MC_STATUS_OK
@@ -228,6 +229,7 @@ type :: surface_stl_object
       procedure, pass(self) :: resize                          !< Resize (scale) facets by x or y or z or vectorial factors.
       generic               :: rotate => rotate_by_axis_angle, &
                                          rotate_by_matrix      !< Rotate facets.
+      procedure, pass(self) :: fill_holes                      !< Close small holes (boundary loops) with minimum-weight patches.
       procedure, pass(self) :: sanitize                        !< Sanitize STL.
       procedure, pass(self) :: sanitize_normals                !< Sanitize facets normals, make them consistent.
       procedure, pass(self) :: smallest_edge_len               !< Return the smallest edge length.
@@ -2609,6 +2611,69 @@ contains
    endsubroutine reverse_normals
 
    ! pure subroutine sanitize(self, do_analysis)
+   subroutine fill_holes(self, max_hole_edges, max_hole_size, holes_filled, holes_skipped, open_edges, status)
+   !< Close small holes: boundary loops filled with Liepa minimum-weight patches (issue #31).
+   !<
+   !< Every closed loop of boundary edges (facet edges without a neighbour) is a candidate. A loop
+   !< is filled only if it has at most `max_hole_edges` edges (default 200; the triangulation is
+   !< O(n^3)) and its bounding-box diagonal is at most `max_hole_size` times the surface's
+   !< (default 0.1), so genuine open boundaries (a sheet, an inlet cut) stay open. Patches are
+   !< oriented like the surrounding mesh and reuse its vertices exactly, so after the closing
+   !< `analyze` (same tree kind and refinement) the filled surface is connected across them.
+   !< Boundary edges that do not close into a loop (inconsistent orientation, non-manifold
+   !< boundaries) are reported in `open_edges` and left alone.
+   class(surface_stl_object), intent(inout)         :: self           !< Surface (analyzed).
+   integer(I4P),              intent(in),  optional :: max_hole_edges !< Largest loop to fill, in edges (default 200).
+   real(R8P),                 intent(in),  optional :: max_hole_size  !< Largest loop bbox diagonal / surface bbox diagonal (default 0.1).
+   integer(I4P),              intent(out), optional :: holes_filled   !< Loops filled.
+   integer(I4P),              intent(out), optional :: holes_skipped  !< Loops left open by the thresholds.
+   integer(I4P),              intent(out), optional :: open_edges     !< Boundary edges not forming a closed loop.
+   integer(I4P),              intent(out), optional :: status         !< STATUS_OK.
+   type(boundary_loop_t), allocatable :: loops(:)
+   type(facet_object),    allocatable :: patch(:), merged(:)
+   integer(I4P)                       :: max_edges_, n_filled, n_skipped, n_open, k, ist, n_new, cursor
+   real(R8P)                          :: max_size_, diag, loop_diag
+   type(facet_object),    allocatable :: patches(:)
+
+   max_edges_ = 200_I4P   ; if (present(max_hole_edges)) max_edges_ = max_hole_edges
+   max_size_  = 0.1_R8P   ; if (present(max_hole_size))  max_size_  = max_hole_size
+   n_filled = 0_I4P ; n_skipped = 0_I4P ; n_open = 0_I4P
+   if (present(status)) status = STATUS_OK
+   if (self%facets_number > 0_I4P) then
+      call extract_boundary_loops(facet=self%facet, loops=loops, n_open=n_open)
+      diag = sqrt((self%bmax%x - self%bmin%x)**2 + (self%bmax%y - self%bmin%y)**2 + (self%bmax%z - self%bmin%z)**2)
+      allocate(patches(0)) ; n_new = 0_I4P
+      do k = 1, size(loops)
+         loop_diag = sqrt((maxval(loops(k)%x(:)%x) - minval(loops(k)%x(:)%x))**2 + &
+                          (maxval(loops(k)%x(:)%y) - minval(loops(k)%x(:)%y))**2 + &
+                          (maxval(loops(k)%x(:)%z) - minval(loops(k)%x(:)%z))**2)
+         if (size(loops(k)%vid) > max_edges_ .or. loop_diag > max_size_ * diag) then
+            n_skipped = n_skipped + 1_I4P
+            cycle
+         endif
+         call triangulate_loop(loop=loops(k), facet=self%facet, patch=patch, status=ist)
+         if (ist /= 0_I4P) then
+            n_skipped = n_skipped + 1_I4P
+            cycle
+         endif
+         patches = [patches, patch]
+         n_filled = n_filled + 1_I4P
+      enddo
+      if (n_filled > 0_I4P) then
+         n_new = size(patches, kind=I4P)
+         allocate(merged(self%facets_number + n_new))
+         merged(1:self%facets_number) = self%facet(1:self%facets_number)
+         cursor = self%facets_number
+         merged(cursor + 1:cursor + n_new) = patches
+         call self%adopt_facets(facets=merged, aabb_refinement_levels=self%aabb%get_refinement_levels(), &
+                                aabb_tree_kind=self%aabb%get_tree_kind())
+      endif
+   endif
+   if (present(holes_filled))  holes_filled  = n_filled
+   if (present(holes_skipped)) holes_skipped = n_skipped
+   if (present(open_edges))    open_edges    = n_open
+   endsubroutine fill_holes
+
    subroutine sanitize(self, do_analysis, status)
    !< Sanitize STL — top-level orchestrator for the mesh-repair pipeline.
    !<
