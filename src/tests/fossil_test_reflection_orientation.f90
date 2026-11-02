@@ -7,7 +7,8 @@
 !< the map reverses orientation. Cases on the sanitized unit cube, each followed by
 !< `analyze`: volume +V, signed distance at the image of the centre negative, inside:
 !<   mirror(normal), mirror(matrix), resize(-1,1,1), resize(-2,-2,-2) (odd, reflection),
-!<   resize(-1,-1,1) (even, a rotation: must stay outward too).
+!<   resize(-1,-1,1) (even, a rotation: must stay outward too),
+!<   rotate(matrix=M) with an improper M (a reflection) and with a proper 90-degree rotation.
 !< Then dragon-fine mirrored through x = 0 against the original at mirrored points: same
 !< sign everywhere, |d| equal to a relative 1e-12.
 
@@ -15,19 +16,21 @@ program fossil_test_reflection_orientation
 
 use fossil, only : surface_stl_object
 use penf,   only : I4P, R8P
-use vecfor, only : vector_R8P, ex_R8P, mirror_matrix_R8P
+use vecfor, only : vector_R8P, ex_R8P, ez_R8P, mirror_matrix_R8P, rotation_matrix_R8P
 
 implicit none
 
 real(R8P), parameter :: REL_TOL = 1.e-12_R8P !< Relative |d| tolerance for the dragon comparison.
-logical              :: ok(6)                !< Per-case results.
+logical              :: ok(8)                !< Per-case results.
 
 ok(1) = check_cube(kind=1_I4P, centre=vector_R8P(-0.5_R8P,  0.5_R8P, 0.5_R8P), volume=1._R8P,  label='mirror(normal=ex)      ')
 ok(2) = check_cube(kind=2_I4P, centre=vector_R8P(-0.5_R8P,  0.5_R8P, 0.5_R8P), volume=1._R8P,  label='mirror(matrix)         ')
 ok(3) = check_cube(kind=3_I4P, centre=vector_R8P(-0.5_R8P,  0.5_R8P, 0.5_R8P), volume=1._R8P,  label='resize(-1, 1, 1)       ')
 ok(4) = check_cube(kind=4_I4P, centre=vector_R8P(-1._R8P,  -1._R8P, -1._R8P),  volume=8._R8P,  label='resize(-2,-2,-2)       ')
 ok(5) = check_cube(kind=5_I4P, centre=vector_R8P(-0.5_R8P, -0.5_R8P, 0.5_R8P), volume=1._R8P,  label='resize(-1,-1, 1) (even)')
-ok(6) = check_dragon()
+ok(6) = check_cube(kind=6_I4P, centre=vector_R8P(-0.5_R8P,  0.5_R8P, 0.5_R8P), volume=1._R8P,  label='rotate(matrix=improper)')
+ok(7) = check_cube(kind=7_I4P, centre=vector_R8P(-0.5_R8P,  0.5_R8P, 0.5_R8P), volume=1._R8P,  label='rotate(matrix=proper)  ')
+ok(8) = check_dragon()
 
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
@@ -52,6 +55,8 @@ contains
    case (3) ; call cube%resize(x=-1._R8P)
    case (4) ; call cube%resize(factor=vector_R8P(-2._R8P, -2._R8P, -2._R8P))
    case (5) ; call cube%resize(factor=vector_R8P(-1._R8P, -1._R8P, 1._R8P))
+   case (6) ; call cube%rotate(matrix=mirror_matrix_R8P(normal=ex_R8P))
+   case (7) ; call cube%rotate(matrix=rotation_matrix_R8P(axis=ez_R8P, angle=acos(-1._R8P)/2._R8P))
    end select
    call cube%analyze
    d      = cube%distance(point=centre, is_signed=.true., is_square_root=.true.)

@@ -1350,15 +1350,11 @@ contains
    class(facet_object), intent(inout)        :: self             !< Facet.
    real(R8P),           intent(in)           :: matrix(3,3)      !< Mirroring matrix.
    logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
-   real(R8P)                                 :: det              !< Determinant of matrix.
 
    call self%vertex(1)%mirror(matrix=matrix)
    call self%vertex(2)%mirror(matrix=matrix)
    call self%vertex(3)%mirror(matrix=matrix)
-   det = matrix(1,1) * (matrix(2,2) * matrix(3,3) - matrix(2,3) * matrix(3,2)) &
-       - matrix(1,2) * (matrix(2,1) * matrix(3,3) - matrix(2,3) * matrix(3,1)) &
-       + matrix(1,3) * (matrix(2,1) * matrix(3,2) - matrix(2,2) * matrix(3,1))
-   if (det < 0._R8P) call self%flip_edge(edge=EDGE_23)
+   if (det3(matrix) < 0._R8P) call self%flip_edge(edge=EDGE_23)
    if (present(recompute_metrix)) then
       if (recompute_metrix) call self%compute_metrix
    endif
@@ -1405,6 +1401,9 @@ contains
       call self%vertex(2)%rotate(matrix=matrix)
       call self%vertex(3)%rotate(matrix=matrix)
    endif
+   ! An improper matrix (det < 0: a rotation combined with a reflection) reverses the
+   ! vertex handedness; swap two vertices to keep the outward orientation, as in mirror.
+   if (det3(matrix) < 0._R8P) call self%flip_edge(edge=EDGE_23)
    if (present(recompute_metrix)) then
       if (recompute_metrix) call self%compute_metrix
    endif
@@ -1432,4 +1431,15 @@ contains
    error stop 'fossil_facet_object%edge_connection_in_other_ref: facets are not connected'
    endsubroutine edge_connection_in_other_ref
 
+   ! private helpers
+   pure function det3(matrix) result(det)
+   !< Determinant of a 3x3 matrix; its sign tells a proper (det > 0) from an improper,
+   !< orientation-reversing (det < 0) linear map.
+   real(R8P), intent(in) :: matrix(3,3) !< Matrix.
+   real(R8P)             :: det         !< Determinant.
+
+   det = matrix(1,1) * (matrix(2,2) * matrix(3,3) - matrix(2,3) * matrix(3,2)) &
+       - matrix(1,2) * (matrix(2,1) * matrix(3,3) - matrix(2,3) * matrix(3,1)) &
+       + matrix(1,3) * (matrix(2,1) * matrix(3,2) - matrix(2,2) * matrix(3,1))
+   endfunction det3
 endmodule fossil_facet_object
