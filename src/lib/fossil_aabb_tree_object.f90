@@ -81,12 +81,23 @@ integer(I4P), parameter :: AABB_AUTO_REFINEMENT = -1_I4P
 ! distance_node was replaced by an explicit LIFO of node indices to make the
 ! traversal device-callable -- nvfortran allows recursion inside `!$acc routine`
 ! only via per-thread call stacks, which murder occupancy at GPU thread counts.
-! Realistic worst case: max-tree-depth * children-per-node = pending siblings on
-! the descent path. SAH BVH depth ~9 with 2 children = ~18; octree depth ~8 with
-! 8 children = ~64. 128 is generous; the path-pending invariant + the bench's
-! BVH-vs-brute correctness gate would catch any overflow as a numerical
-! regression, not silent skip.
+! The push is not bounds-checked (a device kernel has no error path), so the
+! capacity must be guaranteed by construction; an overflow writes past `stack`
+! and corrupts the caller's frame. Peak occupancy: a node popped at depth d
+! pushes at most its children while at most one pending sibling per level above
+! it waits, so a binary BVH of depth D needs D + 1 entries, and an octree of L
+! levels needs 7*L + 1. The SAH builder caps the BVH depth at `MAX_BVH_DEPTH`
+! (below), which is what makes 128 safe: without the cap a skewed but valid mesh
+! builds deeper trees (1001 self-similar triangles at x = 2^k gave depth 208 and
+! crashed `distance`). Octree depth comes from `refinement_levels` (auto-tuned
+! to at most AUTO_MAX_LEVELS = 6); 128 holds up to 18 levels, far beyond any memory-feasible octree
+! (8^18 nodes).
 integer(I4P), parameter :: MAX_TRAVERSAL_STACK = 128_I4P
+! Maximum SAH BVH depth (root = 0), so that depth + 1 <= MAX_TRAVERSAL_STACK.
+! A subtree reaching it becomes a leaf regardless of size: queries stay exact,
+! only slower on that subtree. Real meshes are far below it (bunny 12,
+! dragon-fine 13).
+integer(I4P), parameter :: MAX_BVH_DEPTH = MAX_TRAVERSAL_STACK - 1_I4P
 ! Heuristic parameters (private; the literature suggests 16-32 facets per leaf is
 ! a broad sweet spot for triangle-mesh BVHs, and FOSSIL's flat empirical curve
 ! tolerates any choice in that range to within 5%).
@@ -655,8 +666,10 @@ contains
    !< Algorithm — top-down, recursive:
    !<   1. Compute the union of triangle bboxes (the "node bbox") and the bbox of
    !<      triangle centroids (the "centroid bbox", which guides binning).
-   !<   2. If N <= LEAF_TARGET, write a leaf: store all facet ids in the node's
-   !<      facet_id list, mark left_child = right_child = 0, return.
+   !<   2. If N <= LEAF_TARGET, or the node is at depth MAX_BVH_DEPTH, write a
+   !<      leaf: store all facet ids in the node's facet_id list, mark
+   !<      left_child = right_child = 0, return. The depth cap bounds the
+   !<      traversal stack (see MAX_TRAVERSAL_STACK).
    !<   3. Else, on the longest axis of the centroid bbox, bin centroids into
    !<      `BVH_BUCKETS` buckets. For each of `BVH_BUCKETS - 1` candidate splits,
    !<      compute SAH cost:
@@ -704,7 +717,7 @@ contains
 
    n_used = 1   ! node 0 is the root, already accounted for
    call build_node(nodes=nodes_tmp, idx=indices, lo=1_I4P, hi=n_facets,                                 &
-                   facet=facet, this_node=0_I4P, next_idx=n_used, n_max=n_max)
+                   facet=facet, this_node=0_I4P, depth=0_I4P, next_idx=n_used, n_max=n_max)
 
    ! Compact to exact size and hand off to self.
    allocate(self%node(0:n_used - 1))
@@ -775,7 +788,7 @@ contains
    enddo
    endsubroutine build_distance_payload
 
-   pure recursive subroutine build_node(nodes, idx, lo, hi, facet, this_node, next_idx, n_max)
+   pure recursive subroutine build_node(nodes, idx, lo, hi, facet, this_node, depth, next_idx, n_max)
    !< One recursive build step. Operates on the slice `idx(lo:hi)` of facet ids:
    !< chooses to write `this_node` as a leaf or to split and recurse.
    !<
@@ -787,6 +800,7 @@ contains
    integer(I4P),           intent(in)    :: lo, hi           !< Inclusive range of `idx` owned by this call.
    type(facet_object),     intent(in)    :: facet(:)         !< Facets list (read-only).
    integer(I4P),           intent(in)    :: this_node        !< Index of the node we are writing into `nodes(:)`.
+   integer(I4P),           intent(in)    :: depth            !< Depth of `this_node` (root = 0); capped at MAX_BVH_DEPTH.
    integer(I4P),           intent(inout) :: next_idx         !< Next free slot in `nodes(:)` (incremented as children are allocated).
    integer(I4P),           intent(in)    :: n_max            !< Upper bound on nodes_tmp size; safety guard.
    integer(I4P), parameter :: BVH_LEAF_TARGET = 64_I4P       !< Below this, write a leaf without trying to split.
@@ -811,8 +825,10 @@ contains
    call compute_node_bboxes(facet, idx, lo, hi, node_bmin, node_bmax, centroid_bmin, centroid_bmax)
    call write_node_bbox(nodes(this_node), node_bmin, node_bmax)
 
-   ! Step 2: small enough -> leaf.
-   if (n <= BVH_LEAF_TARGET) then
+   ! Step 2: small enough, or as deep as the traversal stack allows -> leaf.
+   ! The depth cap keeps depth + 1 <= MAX_TRAVERSAL_STACK (see its comment); it
+   ! only fires on pathologically skewed meshes and costs speed, not exactness.
+   if (n <= BVH_LEAF_TARGET .or. depth >= MAX_BVH_DEPTH) then
       call write_leaf(nodes(this_node), idx(lo:hi), n)
       return
    endif
@@ -935,9 +951,9 @@ contains
       right_idx = next_idx + 1_I4P
       next_idx  = next_idx + 2_I4P
       call build_node(nodes=nodes, idx=idx, lo=lo,    hi=mid, facet=facet, &
-                      this_node=left_idx,  next_idx=next_idx, n_max=n_max)
+                      this_node=left_idx,  depth=depth+1_I4P, next_idx=next_idx, n_max=n_max)
       call build_node(nodes=nodes, idx=idx, lo=mid+1, hi=hi,  facet=facet, &
-                      this_node=right_idx, next_idx=next_idx, n_max=n_max)
+                      this_node=right_idx, depth=depth+1_I4P, next_idx=next_idx, n_max=n_max)
    end block
    contains
       pure function component(v, axis) result(c)
