@@ -13,6 +13,7 @@ use fossil_aabb_node_object, only : aabb_node_object,                           
                                     bvh_left_child_oac, bvh_right_child_oac,           &
                                     bvh_payload_first_oac, bvh_payload_count_oac
 use fossil_facet_object, only : facet_object, triangle_point_distance_sq
+use fossil_solid_angle,  only : solid_angle_oac
 use fossil_list_id_object, only : list_id_object
 use fossil_ray_query, only : ray_hit_t
 use penf, only : I4P, R8P, MaxR8P, str
@@ -29,7 +30,7 @@ public :: AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 public :: facet_distance_payload
 public :: bvh_distance_node_oac, bvh_distance_node_with_region_oac
 ! Issue #29: persistent fast-winding-number cache (one record per tree node).
-public :: wn_node_t
+public :: wn_node_t, bvh_winding_number_oac
 
 integer(I4P), parameter :: TREE_RATIO=8 !< Tree refinement ratio, it is assumed to be an **octree**.
 
@@ -65,7 +66,8 @@ endtype facet_distance_payload
 ! array is device-mappable like `payload(:)`.
 type :: wn_node_t
    real(R8P) :: cx = 0._R8P, cy = 0._R8P, cz = 0._R8P !< Dipole expansion centre (node bbox centre).
-   real(R8P) :: dx = 0._R8P, dy = 0._R8P, dz = 0._R8P !< Subtree dipole moment, sum of area * normal.
+   real(R8P) :: dx = 0._R8P, dy = 0._R8P, dz = 0._R8P !< Subtree dipole moment D = sum of area * normal.
+   real(R8P) :: c2(3,3) = 0._R8P                       !< Second moment C(i,j) = sum of area * n(i) * (x - centre)(j).
    real(R8P) :: diag2 = 0._R8P                         !< Squared node bbox diagonal (admissibility size).
    logical   :: ready = .false.                        !< True for every present node.
 endtype wn_node_t
@@ -1232,6 +1234,8 @@ contains
    integer(I4P)                              :: n, c, k, fid                  !< Counters.
    type(vector_R8P)                          :: bmin, bmax, dip               !< Work vectors.
    real(R8P)                                 :: area_f                        !< Facet area.
+   real(R8P)                                 :: an(3), xc(3)                  !< Area*normal (or child dipole); offset.
+   integer(I4P)                              :: jj                            !< Counter.
 
    if (self%nodes_number <= 0) return
    allocate(wn(0:self%nodes_number - 1))
@@ -1240,6 +1244,10 @@ contains
       bmin = self%node(n)%bmin() ; bmax = self%node(n)%bmax()
       wn(n)%diag2 = (bmax%x - bmin%x)**2 + (bmax%y - bmin%y)**2 + (bmax%z - bmin%z)**2
       dip = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+      wn(n)%cx = (bmin%x + bmax%x) * 0.5_R8P
+      wn(n)%cy = (bmin%y + bmax%y) * 0.5_R8P
+      wn(n)%cz = (bmin%z + bmax%z) * 0.5_R8P
+      wn(n)%c2 = 0._R8P
       call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
       if (nchild == 0 .and. self%node(n)%has_facets()) then
          do k = 1, self%node(n)%facet_id_count()
@@ -1247,6 +1255,12 @@ contains
             if (fid < 1 .or. fid > size(facet, dim=1)) cycle
             area_f = facet(fid)%area()
             dip = dip + facet(fid)%normal * area_f
+            ! Exact for a triangle: the integral of (x - centre) over it is area * (centroid - centre).
+            an = [facet(fid)%normal%x, facet(fid)%normal%y, facet(fid)%normal%z] * area_f
+            xc = [facet(fid)%centroid%x - wn(n)%cx, facet(fid)%centroid%y - wn(n)%cy, facet(fid)%centroid%z - wn(n)%cz]
+            do jj = 1, 3
+               wn(n)%c2(:, jj) = wn(n)%c2(:, jj) + an(:) * xc(jj)
+            enddo
          enddo
       endif
       do c = 1, nchild
@@ -1254,10 +1268,13 @@ contains
          dip%x = dip%x + wn(child_idx(c))%dx
          dip%y = dip%y + wn(child_idx(c))%dy
          dip%z = dip%z + wn(child_idx(c))%dz
+         ! Shift the child's second moment to this node's centre: C += D_child (c_child - c)^T.
+         an = [wn(child_idx(c))%dx, wn(child_idx(c))%dy, wn(child_idx(c))%dz]
+         xc = [wn(child_idx(c))%cx - wn(n)%cx, wn(child_idx(c))%cy - wn(n)%cy, wn(child_idx(c))%cz - wn(n)%cz]
+         do jj = 1, 3
+            wn(n)%c2(:, jj) = wn(n)%c2(:, jj) + wn(child_idx(c))%c2(:, jj) + an(:) * xc(jj)
+         enddo
       enddo
-      wn(n)%cx = (bmin%x + bmax%x) * 0.5_R8P
-      wn(n)%cy = (bmin%y + bmax%y) * 0.5_R8P
-      wn(n)%cz = (bmin%z + bmax%z) * 0.5_R8P
       wn(n)%dx = dip%x ; wn(n)%dy = dip%y ; wn(n)%dz = dip%z
       wn(n)%ready = .true.
    enddo
@@ -1574,6 +1591,85 @@ contains
       end associate
    enddo
    endsubroutine scan_payload_with_facet
+
+   pure function bvh_winding_number_oac(node, payload, wn, px, py, pz, beta2) result(omega)
+   !< Total signed solid angle of the surface seen from (px, py, pz), by fast winding number
+   !< (Barill et al. 2018) over the SAH BVH, issue #29. Divide by 4 pi for the winding number.
+   !<
+   !< Iterative, device-callable form of the Barnes-Hut traversal:
+   !<  - a node whose expansion centre is farther than sqrt(beta2) times its bbox diagonal is
+   !<    replaced by its dipole term `dipole . r / |r|^3` (r = point - centre);
+   !<  - a leaf otherwise contributes the exact solid angles of its payload triangles
+   !<    (vertices v1, v1 + e12, v1 + e13), via the shared `solid_angle_oac`;
+   !<  - an internal node otherwise pushes both children.
+   !< `beta2 <= 0` never admits the far field, so it returns the exact sum over all facets.
+   !< The explicit stack needs depth + 1 entries; the SAH depth cap keeps that within
+   !< MAX_TRAVERSAL_STACK (see its comment). Plain-real point so no derived-type temporaries
+   !< are needed on the device.
+   !$acc routine seq
+   type(aabb_node_object),       intent(in) :: node(0:)    !< Tree node array (root at 0).
+   type(facet_distance_payload), intent(in) :: payload(:)  !< Flat per-facet payload (1-based).
+   type(wn_node_t),              intent(in) :: wn(0:)      !< Per-node dipole cache.
+   real(R8P),                    intent(in) :: px, py, pz  !< Query point.
+   real(R8P),                    intent(in) :: beta2       !< Squared admissibility ratio (<= 0: exact).
+   real(R8P)                                :: omega       !< Total solid angle.
+   integer(I4P)                             :: stack(MAX_TRAVERSAL_STACK) !< Pending node indices.
+   integer(I4P)                             :: sp, cur, lc, rc            !< Stack pointer, nodes.
+   integer(I4P)                             :: first, count, k, idx       !< Payload slice.
+   real(R8P)                                :: rx, ry, rz, r2, r1         !< Point minus centre.
+   real(R8P)                                :: rcr, trc                   !< r^T C r and trace of C.
+   real(R8P)                                :: ax, ay, az                 !< Triangle vertex 1.
+
+   omega    = 0._R8P
+   stack(1) = 0_I4P
+   sp       = 1_I4P
+   do while (sp > 0_I4P)
+      cur = stack(sp)
+      sp  = sp - 1_I4P
+      if (.not. wn(cur)%ready) cycle
+      ! Far field: the whole subtree by its dipole.
+      if (beta2 > 0._R8P .and. wn(cur)%diag2 > 0._R8P) then
+         rx = px - wn(cur)%cx ; ry = py - wn(cur)%cy ; rz = pz - wn(cur)%cz
+         r2 = rx * rx + ry * ry + rz * rz
+         if (r2 > beta2 * wn(cur)%diag2) then
+            ! Taylor expansion of the solid angle about the node centre c, with r' = c - p:
+            !   first order  D . r' / |r'|^3,
+            !   second order -(3 r'^T C r' - |r'|^2 tr C) / |r'|^5.
+            ! Here r = p - c = -r', so the first-order term changes sign and the second does not.
+            r1 = sqrt(r2)
+            omega = omega - (wn(cur)%dx * rx + wn(cur)%dy * ry + wn(cur)%dz * rz) / (r2 * r1)
+            rcr = rx * (wn(cur)%c2(1,1) * rx + wn(cur)%c2(1,2) * ry + wn(cur)%c2(1,3) * rz) + &
+                  ry * (wn(cur)%c2(2,1) * rx + wn(cur)%c2(2,2) * ry + wn(cur)%c2(2,3) * rz) + &
+                  rz * (wn(cur)%c2(3,1) * rx + wn(cur)%c2(3,2) * ry + wn(cur)%c2(3,3) * rz)
+            trc = wn(cur)%c2(1,1) + wn(cur)%c2(2,2) + wn(cur)%c2(3,3)
+            omega = omega - (3._R8P * rcr - r2 * trc) / (r2 * r2 * r1)
+            cycle
+         endif
+      endif
+      ! Near field, leaf: exact solid angles of its triangles.
+      count = bvh_payload_count_oac(node(cur))
+      if (count > 0_I4P) then
+         first = bvh_payload_first_oac(node(cur))
+         do k = 0_I4P, count - 1_I4P
+            idx = first + k
+            ax = payload(idx)%v1(1) ; ay = payload(idx)%v1(2) ; az = payload(idx)%v1(3)
+            omega = omega + solid_angle_oac(px, py, pz, ax, ay, az,                                         &
+                                            ax + payload(idx)%e12(1), ay + payload(idx)%e12(2), az + payload(idx)%e12(3), &
+                                            ax + payload(idx)%e13(1), ay + payload(idx)%e13(2), az + payload(idx)%e13(3))
+         enddo
+         cycle
+      endif
+      ! Near field, internal node: descend.
+      lc = bvh_left_child_oac(node(cur))
+      rc = bvh_right_child_oac(node(cur))
+      if (lc > 0_I4P) then
+         sp = sp + 1_I4P ; stack(sp) = lc
+      endif
+      if (rc > 0_I4P) then
+         sp = sp + 1_I4P ; stack(sp) = rc
+      endif
+   enddo
+   endfunction bvh_winding_number_oac
 
    pure subroutine bvh_distance_node_oac(node, payload, n, point, best)
    !$acc routine seq
