@@ -29,7 +29,10 @@ module fossil_distance_field
 !<
 !< Sign convention: negative inside, positive outside, as `surface%distance`.
 
-use fossil, only : surface_stl_object, facet_object, SIGN_PSEUDO_NORMAL, STATUS_OK, STATUS_INVALID_INPUT
+! The surface and facet modules, not `fossil`: `fossil` re-exports this module, so it is built
+! into the library.
+use fossil_surface_stl_object, only : surface_stl_object, SIGN_PSEUDO_NORMAL, STATUS_OK, STATUS_INVALID_INPUT
+use fossil_facet_object, only : facet_object
 use penf, only : I4P, I8P, R8P, MaxR8P
 use vecfor, only : vector_R8P
 
