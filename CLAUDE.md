@@ -57,7 +57,14 @@ Device-code rules (issue #20; see the comments in the named files):
   present in 26.9). Put it in its own module, like `fossil_triangle_closest`.
 - `enter_device` maps member arrays, never `self`: inside a compute region,
   reference them through top-level pointer aliases, never as
-  `self%aabb%payload(i)`.
+  `self%aabb%payload(i)`. The mapped arrays are `aabb%node`, `aabb%payload`,
+  `pnormal_payload` and `wn_payload` (aliases `node_p`, `payload_p`,
+  `pnormal_p`, `wn_p` in `distance_many_device`).
+- The device sign algorithms are `SIGN_PSEUDO_NORMAL` and
+  `SIGN_FAST_WINDING_NUMBER` (issue #30). The FWN branch calls
+  `bvh_winding_number_oac` with `FOUR_PI` / `DEFAULT_BETA` exported by
+  `fossil_winding_number`, so the CPU and device paths share routine and
+  constants: keep it that way, or bit-exactness breaks.
 
 The `local_nvf` varset supplies `$NVF_CC` (GPU compute capability, default
 `cc89`); override for a different GPU (`cc80` for A100/V100). The default

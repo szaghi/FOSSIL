@@ -4,14 +4,16 @@ title: GPU distance queries
 
 # GPU-offloaded distance queries
 
-::: warning Scope: SAH BVH only, pseudo-normal sign only
+::: warning Scope: SAH BVH only, two sign algorithms
 The device path runs **only on surfaces built with the SAH BVH**
 (`AABB_TREE_SAH_BVH`, the default tree kind). An octree-backed surface
 (`AABB_TREE_OCTREE`) stays CPU-only: `enter_device` refuses it with a
-stderr diagnostic and leaves the surface on the host. The sign is always
-the Bærentzen–Aanæs pseudo-normal (`SIGN_PSEUDO_NORMAL`); the ray-cast and
-solid-angle sign algorithms have no device port. The reasons, and what an
-octree port would cost, are under [Known limitations](#known-limitations).
+stderr diagnostic and leaves the surface on the host. Two signs run on the
+device: the Bærentzen–Aanæs pseudo-normal (`SIGN_PSEUDO_NORMAL`, the
+default) and the fast winding number (`SIGN_FAST_WINDING_NUMBER`). The
+ray-cast and solid-angle signs have no device port, and the call refuses
+them. The reasons, and what an octree port would cost, are under
+[Known limitations](#known-limitations).
 :::
 
 ## What it does
@@ -22,12 +24,17 @@ the access pattern of an immersed-boundary (IB) marker pass on a Cartesian
 grid, where every cell centre needs its signed distance to the body to
 decide whether the cell is inside, outside, or cut by the surface. The loop
 over query points is an OpenACC `parallel loop`, one GPU thread per point,
-and each thread runs the same best-first BVH traversal and pseudo-normal
-sign test as the CPU path.
+and each thread runs the same best-first BVH traversal and sign test as the
+CPU path.
+
+The sign test is either the pseudo-normal at the closest point (the
+default, cheap, exact on closed outward surfaces) or the fast winding
+number (robust on surfaces with holes and gaps, at a higher cost; see
+[Performance](#performance)).
 
 The surface's search structures (the flat BVH node array, the flat
-triangle payload, and the per-facet pseudo-normals) are copied to the GPU
-**once**, by `enter_device`, and stay there for as many query calls as the
+triangle payload, the per-facet pseudo-normals and the per-node winding
+number cache) are copied to the GPU **once**, by `enter_device`, and stay there for as many query calls as the
 caller makes. Each `distance_many_device` call moves only the query points
 in and the distances out.
 
@@ -37,24 +44,38 @@ validated so far (nvfortran 26.9, RTX 4070, see [Performance](#performance)).
 ## Pipeline
 
 1. **Residency** (`enter_device`, once per surface). `!$acc enter data
-   copyin` of three flat arrays: the BVH nodes (`aabb%node`), the triangle
-   metrics (`aabb%payload`), and the per-facet pseudo-normals
-   (`pnormal_payload`, 7 vectors per facet, built by `analyze`). Only those
-   member arrays are mapped, never the `surface_stl_object` itself.
+   copyin` of four flat arrays, all built by `analyze`:
+   - the BVH nodes (`aabb%node`);
+   - the triangle metrics (`aabb%payload`);
+   - the per-facet pseudo-normals (`pnormal_payload`, 7 vectors per facet);
+   - the per-node winding-number cache (`wn_payload`: dipole, second
+     moment, expansion centre and size of each node).
+
+   Only those member arrays are mapped, never the `surface_stl_object`
+   itself.
 2. **Launch** (`distance_many_device`, per batch). A host-side check refuses
-   the call if the surface is not resident; then one `parallel loop` over
-   the points, with `present(...)` on the three arrays, `copyin(points)` and
+   the call if the surface is not resident or the sign algorithm has no
+   device port; then one `parallel loop` over the points, with
+   `present(...)` on the four arrays, `copyin(points)` and
    `copyout(distances)`.
 3. **Traversal** (per thread). `bvh_distance_node_with_region_oac`: the
    same best-first descent with d² pruning as on the CPU, written with an
    explicit stack instead of recursion (recursion inside an `!$acc routine`
    costs per-thread call stacks). It returns the best d², the winning facet
    and its payload index.
-4. **Sign** (per thread, only with `is_signed=.true.`). Recompute the closest
-   point and its Voronoi region (face, edge or vertex) on the winning
-   triangle, take the matching pseudo-normal from `pnormal_payload`, and
-   sign the distance by the dot product with `point - closest`.
-5. **Release** (`exit_device`, once). `!$acc exit data delete` of the three
+4. **Sign** (per thread, only with `is_signed=.true.`). The closest point and
+   its Voronoi region (face, edge or vertex) on the winning triangle are
+   recomputed, then:
+   - `SIGN_PSEUDO_NORMAL`: take the matching pseudo-normal from
+     `pnormal_payload` and sign the distance by its dot product with
+     `point - closest`;
+   - `SIGN_FAST_WINDING_NUMBER`: a second traversal,
+     `bvh_winding_number_oac`, sums the solid angle of the surface over the
+     BVH. A far node counts by its second-order expansion from
+     `wn_payload`, a near leaf by the exact solid angles of its triangles.
+     The point is inside when the winding number exceeds 0.5. It is the
+     routine the CPU path calls, with the same constants (β = 2).
+5. **Release** (`exit_device`, once). `!$acc exit data delete` of the four
    arrays.
 
 ## API
@@ -75,24 +96,39 @@ stderr; a later `distance_many_device` then refuses too (see below).
 ### Query
 
 ```fortran
-call surface%distance_many_device(points, distances, is_signed, is_square_root, status)
+call surface%distance_many_device(points, distances, is_signed, sign_algorithm, is_square_root, status)
    class(surface_stl_object), intent(inout), target   :: self
    type(vector_R8P),          intent(in)              :: points(:)
    real(R8P),                 intent(out)             :: distances(:)  ! caller-allocated, size(points)
    logical,                   intent(in),  optional   :: is_signed       ! default .false.
+   integer(I4P),              intent(in),  optional   :: sign_algorithm  ! SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER
    logical,                   intent(in),  optional   :: is_square_root  ! default .false. (d²)
    integer(I4P),              intent(out), optional   :: status          ! STATUS_OK / STATUS_INVALID_INPUT
 ```
 
-The arguments mirror `distance_many`, minus `sign_algorithm`, so a caller
-switches between host and device by changing the call name. As for
-`distance_many`, the default result is the **squared** distance; pass
-`is_square_root=.true.` for the Euclidean one.
+The arguments mirror `distance_many`, so a caller switches between host
+and device by changing the call name. As for `distance_many`, the default
+result is the **squared** distance; pass `is_square_root=.true.` for the
+Euclidean one.
 
-`status = STATUS_INVALID_INPUT` when `size(distances) /= size(points)`, or
-when the surface is not resident (the call also writes `surface not on
-device -- call enter_device first.` to stderr). `distances` is left
-untouched in both cases.
+Choosing the sign:
+
+- `SIGN_PSEUDO_NORMAL` (default) is the cheap one, and exact on closed
+  surfaces with consistently outward normals: call `sanitize` first.
+- `SIGN_FAST_WINDING_NUMBER` is the one to use on surfaces that are not
+  closed (holes, gaps, missing facets): the winding number degrades
+  gracefully where the pseudo-normal is undefined. On the GPU it costs 3.5
+  to 10 times the pseudo-normal query (see [Performance](#performance)).
+
+`status = STATUS_INVALID_INPUT`, with `distances` left untouched, when:
+
+- `size(distances) /= size(points)`;
+- the surface is not resident (the call also writes `surface not on
+  device -- call enter_device first.` to stderr);
+- `sign_algorithm` is neither of the two above (the call writes `refused
+  -- sign_algorithm must be SIGN_PSEUDO_NORMAL or SIGN_FAST_WINDING_NUMBER
+  on the device.` to stderr). `distance_many` on the CPU accepts all four
+  sign algorithms.
 
 ### Release
 
@@ -218,6 +254,29 @@ How to read these numbers:
   kernel is FP64 throughout, so a data-centre GPU (A100, H100) should do
   better. That has not been measured.
 
+### Fast-winding-number sign
+
+Same benchmark and hardware, `sign_algorithm=SIGN_FAST_WINDING_NUMBER`.
+Times are the median of three single-shot runs; the serial baselines are
+one CPU core.
+
+| Mesh | Query grid | Serial PN | Device PN | Serial FWN | Device FWN | Device FWN vs serial FWN | max \|d_device − d_cpu\| |
+|---|---|---|---|---|---|---|---|
+| bunny | 32³ | 443 ms | 50 ms | 590 ms | 203 ms | 2.9× | 0 |
+| bunny | 48³ | 1458 ms | 118 ms | 1960 ms | 412 ms | 4.8× | 0 |
+| dragon-fine | 32³ | 234 ms | 30 ms | 590 ms | 310 ms | 1.9× | 0 |
+
+Also bit-exact, with no sign mismatch, on bunny 16³, cube-01 32³ and a
+holed cube (cube-02 with one facet removed).
+
+The winding number gains far less from the GPU than the distance does.
+Near the surface its traversal opens many nodes, and how many differs from
+one point to the next, so the threads of a warp diverge; each node it reads
+is a 136-byte record. On the GPU the FWN query costs 3.5 to 10 times the
+pseudo-normal one, against 1.3 to 2.5 times on the CPU. Use it where the
+surface is open; on a closed, sanitized surface the pseudo-normal gives
+the same signs for a fraction of the cost.
+
 ## Known limitations
 
 - **SAH BVH only.** The octree is not supported on the device. The original
@@ -242,12 +301,18 @@ How to read these numbers:
   The work is left out on purpose: the octree is opt-in, the default is the
   BVH, and on dragon-fine the octree is about 110× slower than the BVH even
   on the CPU, so a device octree would have no user.
-- **Pseudo-normal sign only.** `SIGN_RAY_INTERSECTIONS` and
-  `SIGN_SOLID_ANGLE` need their own traversals, which have not been
-  ported. Like the CPU default, the pseudo-normal sign needs consistently
-  outward normals: call `sanitize` before `enter_device`.
+- **Two sign algorithms.** `SIGN_RAY_INTERSECTIONS` and
+  `SIGN_SOLID_ANGLE` have no device port: the first needs a ray traversal,
+  the second is an O(N) sum per point that the fast winding number
+  supersedes. The pseudo-normal sign needs consistently outward normals:
+  call `sanitize` before `enter_device`. The fast winding number does not,
+  but it is approximate far from the surface (β = 2, the CPU default; not
+  adjustable on the device). Its measured error at β = 2 is at most
+  8.7e-3 (bunny), so it can flip a sign only where the exact winding number
+  is within that margin of 0.5: on the surface itself, or across a hole.
 - **Distances only.** `compute_distance`'s richer outputs (closest facet,
-  edge, vertex), ray queries and winding numbers have no device version.
+  edge, vertex), ray queries and the winding-number value itself have no
+  device version: the winding number is used only for the sign.
 - **No automatic coherence.** The device copy is a snapshot taken by
   `enter_device`, and nothing checks that it is still current. Operations
   that rebuild the tree (`analyze` and the procedures that call it:
@@ -268,7 +333,9 @@ How to read these numbers:
   exact, only slower on the capped subtree. The CPU path shares the
   traversal and the cap.
 - **Validated on one GPU.** Bit-exactness and the timings above come from
-  one consumer GPU (RTX 4070) with nvfortran 26.9. The device build is not
+  one consumer GPU (RTX 4070) with nvfortran 26.9. Bit-exactness means
+  against the CPU path of the same nvfortran build; a gfortran build of
+  the CPU path is not compared bit for bit. The device build is not
   part of CI (no GPU runner): it is validated manually with
   `fossil_test_distance_bench`, which fails unless the device result
   matches the serial CPU result bit for bit. Bit-exactness is not
@@ -282,13 +349,19 @@ How to read these numbers:
 - [AABB acceleration](/guide/features#aabb-acceleration): the BVH and octree tree kinds.
 - [Installation](/guide/installation): the `static-nvidia` / `tests-nvidia`
   modes and the nvfortran version requirement.
+- [Generalized winding number](/guide/advanced/winding-number): the CPU
+  winding number and its error at β = 2.
 - [Issue #20](https://github.com/szaghi/FOSSIL/issues/20): the
   implementation plan, the device-code rules and the validation history.
+- [Issue #30](https://github.com/szaghi/FOSSIL/issues/30): the
+  fast-winding-number sign on the device.
 
 ## References
 
 - Bærentzen & Aanæs, *Signed Distance Computation Using the Angle Weighted
   Pseudonormal*, IEEE TVCG 11(3), 2005. The sign test.
+- Barill, Dickson, Schmidt, Levin & Jacobson, *Fast Winding Numbers for
+  Soups and Clouds*, ACM TOG 37(4), 2018. The hierarchical winding number.
 - Wald, *On Fast Construction of SAH-based Bounding Volume Hierarchies*,
   IEEE Symposium on Interactive Ray Tracing, 2007. The bucketed SAH build.
 - OpenACC-Standard.org, *The OpenACC Application Programming Interface*,

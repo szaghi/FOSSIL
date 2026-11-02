@@ -68,7 +68,7 @@ Individual passes (`remove_degenerate_facets`, `remove_duplicate_facets`, `conne
   - `SIGN_FAST_WINDING_NUMBER` — inside when the fast (hierarchical, second-order) winding number exceeds 0.5. The most robust choice on surfaces with holes or gaps; about 13 µs per query on a 70k-facet mesh on top of the distance search.
 - `surface%is_point_inside(point, sign_algorithm)` is the predicate form of the same test.
 - `surface%distance_many(points, distances, ...)` is the batch form: one distance per point of an array, with the same options. The loop is OpenMP-parallel when built with OpenMP (`tests-gnu-openmp`) and serial otherwise, with identical results.
-- `surface%distance_many_device(points, distances, ...)` runs the same batch on the GPU (OpenACC, nvfortran), between `enter_device` and `exit_device`. SAH BVH and `SIGN_PSEUDO_NORMAL` only; bit-exact vs the CPU path where validated. See [GPU distance queries](/guide/advanced/device-distance).
+- `surface%distance_many_device(points, distances, ...)` runs the same batch on the GPU (OpenACC, nvfortran), between `enter_device` and `exit_device`. SAH BVH only; `SIGN_PSEUDO_NORMAL` or `SIGN_FAST_WINDING_NUMBER`; bit-exact vs the CPU path where validated. See [GPU distance queries](/guide/advanced/device-distance).
 
 All tree-accelerated queries are **bit-exact** vs. brute force on the regression suite — best-first traversal with d² pruning never prunes the true closest facet.
 
