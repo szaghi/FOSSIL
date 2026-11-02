@@ -34,6 +34,15 @@ advanced-feature pages cross-link to both.
 | [Per-vertex Gaussian + mean curvature](/guide/advanced/curvature) | `surface%gaussian_curvature(K, status)` / `surface%mean_curvature(H, status)` | Meyer et al. 2003 |
 | [Mesh smoothing (explicit + Taubin)](/guide/advanced/smoothing) | `surface%smooth(method, lambda, mu, iterations, status)` | Taubin (SIGGRAPH 1995) |
 
+## Execution backends
+
+One page covers a different way to run a core query rather than a new
+algorithm, so it is not counted among the primitives:
+
+| Page | Entry points | What it adds |
+|---|---|---|
+| [GPU distance queries](/guide/advanced/device-distance) | `surface%enter_device()` / `surface%distance_many_device(...)` / `surface%exit_device()` | Batch signed distance on the GPU via OpenACC (nvfortran), SAH BVH only, bit-exact vs the CPU path |
+
 RANSAC shape detection was deliberately **not** shipped — see the
 [roadmap issue](https://github.com/szaghi/FOSSIL/issues/18) for the
 detailed rationale, summarised: detected primitives still need manual BC
@@ -65,7 +74,8 @@ Each advanced-feature page follows the same template:
 
 ## Roadmap and follow-up reading
 
-All nine shipped advanced features have a dedicated page. For the
+All twelve shipped primitives, and the GPU distance backend, have a
+dedicated page. For the
 multi-commit history, design decisions, and the deferred follow-up
 refinements (alpha-wrap adaptive refinement, SDF graph-cut), see the
 [implementation roadmap issue](https://github.com/szaghi/FOSSIL/issues/18).
