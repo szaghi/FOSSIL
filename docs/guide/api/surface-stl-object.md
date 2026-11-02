@@ -191,7 +191,10 @@ The fixed pipeline is:
 5. `analyze` again, if step 4 removed anything, so winding fixup starts from
    a clean state.
 6. `sanitize_normals` — BFS-propagate winding consistency from facet 1, then
-   flip globally if the signed volume came out negative.
+   flip globally if the signed volume came out negative. If anything was
+   flipped, `analyze` runs once more so the pseudo-normals and the AABB
+   distance payload match the new winding (without it, an inside-out input
+   reported its interior as outside).
 7. **Warnings** — one line to `stderr` for every defect class with non-zero
    count. Suppress them by redirecting unit `error_unit`; preserve them in
    production logs so you notice when your inputs degrade.
@@ -368,6 +371,7 @@ end program ex_connect_nearby
 
 ```fortran
 call surface%sanitize_normals
+call surface%sanitize_normals(flipped_count=n)
 ```
 
 **Purpose.** Make every facet's winding consistent with its neighbours, then
@@ -375,7 +379,20 @@ flip the whole surface if the signed volume is negative — yielding outward
 normals on a closed body. This is the precondition for the default
 [`SIGN_PSEUDO_NORMAL`](/guide/api/constants#sign_pseudo_normal) sign algorithm.
 
-**Arguments.** None.
+**Arguments.**
+
+| Argument        | Intent       | Type           | Notes                                                                 |
+| --------------- | ------------ | -------------- | --------------------------------------------------------------------- |
+| `flipped_count` | `out`, opt.  | `integer(I4P)` | Facets whose winding was reversed; a global flip counts every facet.  |
+
+::: warning Call analyze after a flip
+A flip reverses facet windings, but the pseudo-normals and the AABB distance
+payload built by [`analyze`](#analyze) still describe the old winding, so
+signed-distance and inside queries are wrong until `analyze` runs again.
+[`sanitize`](#sanitize) does this for you. Called on its own,
+`sanitize_normals` leaves it to you: re-run `analyze` whenever `flipped_count`
+is positive.
+:::
 
 **Example.**
 
@@ -385,20 +402,25 @@ use fossil
 use penf, only : I4P, R8P
 implicit none
 type(surface_stl_object) :: surface
+integer(I4P)             :: n_flipped
 
 call surface%load_from_file(file_name='cube-inconsistent.stl', guess_format=.true.)
-call surface%sanitize_normals
-print '(A, ES12.5)', 'volume after normals fix = ', surface%get_volume()
+call surface%sanitize_normals(flipped_count=n_flipped)
+if (n_flipped > 0) call surface%analyze   ! rebuild pseudo-normals for the new winding
+print '(A, I0, A, ES12.5)', 'flipped ', n_flipped, ' facet(s); volume = ', surface%get_volume()
 end program ex_sanitize_normals
 ```
 
 **Notes.**
 
-- The BFS starts at facet 1; if your mesh has disconnected components, each
-  component is walked independently and the global sign is decided per
-  component, by component-signed-volume.
-- For open shells (non-closed surfaces), "outward" is ill-defined and the
-  global flip is skipped; the BFS still produces locally-consistent winding.
+- The BFS starts at facet 1 and walks every connected component in turn, so
+  each component ends up internally consistent. The outward decision is then
+  **one** check on the volume of the whole surface: if it is negative, every
+  facet is flipped. A component whose orientation disagrees with the rest
+  (an inward-facing inner shell, say) is not corrected separately.
+- No closedness check is made. On an open shell the volume is not meaningful,
+  so the global flip may or may not happen; the BFS still makes the winding
+  locally consistent.
 
 **See also.** [`reverse_normals`](#reverse_normals),
 [`SIGN_PSEUDO_NORMAL`](/guide/api/constants#sign_pseudo_normal),
