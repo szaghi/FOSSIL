@@ -34,6 +34,7 @@ associate (f5 => surface_2%facet_at(5))
 end associate
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
+if (.not. (all(are_tests_passed))) error stop 1
 
 open(newunit=file_unit, file='fossil_test_load_save-naca0012-ascii.stl')
 close(unit=file_unit, status='delete')

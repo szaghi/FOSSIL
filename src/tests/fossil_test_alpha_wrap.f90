@@ -399,6 +399,7 @@ are_tests_passed(15) = (wrapped_tbp%get_facets_number() > 0_I4P)
 
 print '(A,15L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
+if (.not. (all(are_tests_passed))) error stop 1
 
 contains
 

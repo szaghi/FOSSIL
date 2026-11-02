@@ -47,6 +47,7 @@ print '(A,I0,A,I0,A,I0,A,4L2)', 'facets: original=', n_original, ' kept=', n_kep
       ' remainder=', remainder%get_facets_number(), '  checks:', are_tests_passed
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
+if (.not. (all(are_tests_passed))) error stop 1
 contains
   function all_overlap_box(s) result(ok)
   !< True if every facet's bounding box intersects [bmin, bmax].

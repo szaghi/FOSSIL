@@ -43,6 +43,7 @@ tests_passed(2) = (surface%get_facets_number() == 0)
 print '(A,I0)',     'status returned:       ', st
 print '(A,I0)',     'facets after load:     ', surface%get_facets_number()
 print '(A,L1)', 'Are all tests passed? ', all(tests_passed)
+if (.not. (all(tests_passed))) error stop 1
 
 ! Tidy up the temp file (best-effort).
 open(newunit=file_unit, file=TMP_PATH, status='old', action='read', iostat=st)

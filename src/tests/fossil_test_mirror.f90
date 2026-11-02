@@ -27,6 +27,7 @@ are_tests_passed(1) = nint(surface%distance(point=0 * ex_R8P - 1 * ey_R8P + 1 * 
 are_tests_passed(2) = nint(surface%distance(point=1 * ex_R8P - 1 * ey_R8P + 0 * ez_R8P)) == 1
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
+if (.not. (all(are_tests_passed))) error stop 1
 contains
   subroutine cli_parse()
   !< Build and parse test cli.

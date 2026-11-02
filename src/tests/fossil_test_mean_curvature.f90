@@ -96,6 +96,7 @@ are_tests_passed(3) = (status == CURV_STATUS_OK) .and. (n_bad == 0_I4P)
 
 print '(A,3L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
+if (.not. (all(are_tests_passed))) error stop 1
 
 contains
 

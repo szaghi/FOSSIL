@@ -153,6 +153,7 @@ endblock
 
 print '(A,4L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
+if (.not. (all(are_tests_passed))) error stop 1
 
 contains
 

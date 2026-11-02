@@ -230,5 +230,6 @@ print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
 print '(A,L1)',      'Are all tests passed? ', (correctness_ok .and. batch_ok .and. device_ok)
+if (.not. (correctness_ok .and. batch_ok .and. device_ok)) error stop 1
 
 endprogram fossil_test_distance_bench

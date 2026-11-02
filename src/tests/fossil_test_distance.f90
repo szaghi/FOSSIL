@@ -127,6 +127,7 @@ enddo
 close(file_unit)
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
+if (.not. (all(are_tests_passed))) error stop 1
 contains
   subroutine cli_parse()
   !< Build and parse test cli.

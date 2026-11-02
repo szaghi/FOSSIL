@@ -191,5 +191,6 @@ are_tests_passed(4) = (mism_sa       == 0_I4P)
 
 print '(A,4L2)',       'per-path results: ', are_tests_passed
 print '(A,L1)',        'Are all tests passed? ', all(are_tests_passed)
+if (.not. (all(are_tests_passed))) error stop 1
 
 endprogram fossil_test_distance_concurrency

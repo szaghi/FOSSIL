@@ -196,6 +196,7 @@ are_tests_passed(6) = (status == SDF_STATUS_OK)             .and. &
 
 print '(A,6L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
+if (.not. (all(are_tests_passed))) error stop 1
 
 contains
 

@@ -163,6 +163,7 @@ deallocate(Vx, Vy, Vz, LVx, LVy, LVz, Hmag)
 
 print '(A,5L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
+if (.not. (all(are_tests_passed))) error stop 1
 
 contains
 

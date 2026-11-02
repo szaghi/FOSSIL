@@ -83,4 +83,5 @@ are_tests_passed(4) = (status == SMOOTH_STATUS_OK)
 
 print '(A,4L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
+if (.not. (all(are_tests_passed))) error stop 1
 endprogram fossil_test_smoothing
