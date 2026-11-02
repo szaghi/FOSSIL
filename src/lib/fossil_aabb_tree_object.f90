@@ -28,6 +28,8 @@ public :: AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 ! type and the device-callable BVH traversal entry points.
 public :: facet_distance_payload
 public :: bvh_distance_node_oac, bvh_distance_node_with_region_oac
+! Issue #29: persistent fast-winding-number cache (one record per tree node).
+public :: wn_node_t
 
 integer(I4P), parameter :: TREE_RATIO=8 !< Tree refinement ratio, it is assumed to be an **octree**.
 
@@ -56,6 +58,17 @@ type :: facet_distance_payload
    real(R8P)    :: det     = 0._R8P !< Gram determinant `a*c - b*b`.
    integer(I4P) :: facet_id = 0_I4P !< Global facet index (maps the winner back for sign determination).
 endtype facet_distance_payload
+
+! Per-node record of the fast-winding-number (Barnes-Hut) cache, issue #29. One per tree
+! node, same indexing as `node(:)` (root = 0). Built once by `build_winding_payload` (called
+! from `surface%analyze`) instead of on every `winding_number` call. Plain reals, so the
+! array is device-mappable like `payload(:)`.
+type :: wn_node_t
+   real(R8P) :: cx = 0._R8P, cy = 0._R8P, cz = 0._R8P !< Dipole expansion centre (node bbox centre).
+   real(R8P) :: dx = 0._R8P, dy = 0._R8P, dz = 0._R8P !< Subtree dipole moment, sum of area * normal.
+   real(R8P) :: diag2 = 0._R8P                         !< Squared node bbox diagonal (admissibility size).
+   logical   :: ready = .false.                        !< True for every present node.
+endtype wn_node_t
 
 ! dispatch knob exposed through `use_index`/`set_use_index`: lets callers force the brute-force
 ! distance/ray-intersection path for benchmarking without lying about `is_initialized`.
@@ -205,6 +218,7 @@ type :: aabb_tree_object
       ! private methods
       procedure, pass(self), private :: build_bvh_sah                 !< Build a SAH BVH over the given facet list.
       procedure, pass(self), private :: build_distance_payload        !< Flatten BVH leaf facets into the contiguous distance SoA (issue #19 §B1).
+      procedure, pass(self) :: build_winding_payload !< Build the per-node fast-winding-number cache (issue #29).
       procedure, pass(self) :: enumerate_children                    !< List the allocated children of a node (octree or BVH).
       procedure, pass(self), private :: distance_node                 !< Update best squared distance by iterative explicit-stack traversal from a node (issue #20 §Step 3).
       procedure, pass(self), private :: distance_node_with_region     !< Update (best d^2, best facet id, best region) by iterative explicit-stack traversal (issue #20 §Step 3).
@@ -1198,6 +1212,57 @@ contains
    endsubroutine aabb_tree_assign_aabb_tree
 
    ! private methods
+   pure subroutine build_winding_payload(self, facet, wn)
+   !< Build the per-node fast-winding-number cache (issue #29).
+   !<
+   !< For every present node: expansion centre = bbox centre, `diag2` = squared bbox diagonal,
+   !< dipole = sum of area * normal over the node's own facets if it is a leaf, otherwise the
+   !< sum of its children's dipoles. Children always have a larger index than their parent
+   !< (BVH: allocated after it; octree: `8 * parent + 1 ...`), so one loop from the last node
+   !< down to the root aggregates bottom-up without recursion.
+   !<
+   !< Leaf-only facets matter for the octree: it stores every facet once per level (each
+   !< ancestor repeats it; bunny: 5 copies per facet), so adding a node's own facets *and* its
+   !< children's dipoles multi-counts. The former per-call cache in fossil_winding_number did
+   !< exactly that. BVH internal nodes hold no facets, so the BVH is unaffected.
+   class(aabb_tree_object),      intent(in)  :: self     !< AABB tree.
+   type(facet_object),           intent(in)  :: facet(:) !< Facets the tree was built over.
+   type(wn_node_t), allocatable, intent(out) :: wn(:)    !< Cache, indexed like node(:).
+   integer(I4P)                              :: child_idx(TREE_RATIO), nchild !< Children.
+   integer(I4P)                              :: n, c, k, fid                  !< Counters.
+   type(vector_R8P)                          :: bmin, bmax, dip               !< Work vectors.
+   real(R8P)                                 :: area_f                        !< Facet area.
+
+   if (self%nodes_number <= 0) return
+   allocate(wn(0:self%nodes_number - 1))
+   do n = self%nodes_number - 1, 0, -1
+      if (.not. self%node(n)%is_allocated()) cycle
+      bmin = self%node(n)%bmin() ; bmax = self%node(n)%bmax()
+      wn(n)%diag2 = (bmax%x - bmin%x)**2 + (bmax%y - bmin%y)**2 + (bmax%z - bmin%z)**2
+      dip = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+      call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
+      if (nchild == 0 .and. self%node(n)%has_facets()) then
+         do k = 1, self%node(n)%facet_id_count()
+            fid = self%node(n)%facet_id_at(k)
+            if (fid < 1 .or. fid > size(facet, dim=1)) cycle
+            area_f = facet(fid)%area()
+            dip = dip + facet(fid)%normal * area_f
+         enddo
+      endif
+      do c = 1, nchild
+         if (.not. wn(child_idx(c))%ready) cycle
+         dip%x = dip%x + wn(child_idx(c))%dx
+         dip%y = dip%y + wn(child_idx(c))%dy
+         dip%z = dip%z + wn(child_idx(c))%dz
+      enddo
+      wn(n)%cx = (bmin%x + bmax%x) * 0.5_R8P
+      wn(n)%cy = (bmin%y + bmax%y) * 0.5_R8P
+      wn(n)%cz = (bmin%z + bmax%z) * 0.5_R8P
+      wn(n)%dx = dip%x ; wn(n)%dy = dip%y ; wn(n)%dz = dip%z
+      wn(n)%ready = .true.
+   enddo
+   endsubroutine build_winding_payload
+
    pure subroutine enumerate_children(self, n, out_idx, nchild)
    !< List the allocated children of node `n` into `out_idx(1:nchild)`, in no
    !< particular order. Dispatches on `self%tree_kind`:

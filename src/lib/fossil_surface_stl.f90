@@ -5,7 +5,8 @@ module fossil_surface_stl_object
 
 use fossil_aabb_tree_object, only : aabb_tree_object, AABB_TREE_OCTREE, AABB_TREE_SAH_BVH,     &
                                     facet_distance_payload,                                    &
-                                    bvh_distance_node_oac, bvh_distance_node_with_region_oac
+                                    bvh_distance_node_oac, bvh_distance_node_with_region_oac, &
+                                    wn_node_t
 use fossil_aabb_node_object, only : aabb_node_object
 use fossil_facet_object, only : facet_object, pnormal_payload_t,                               &
                                 pnormal_x_oac, pnormal_y_oac, pnormal_z_oac,                   &
@@ -140,6 +141,7 @@ type :: surface_stl_object
    ! (`self%aabb%node`, `self%aabb%payload`) get `!$acc enter data copyin` in
    ! `enter_device` and `!$acc exit data delete` in `exit_device`.
    type(pnormal_payload_t), allocatable, public :: pnormal_payload(:) !< Per-facet pseudo-normal SoA (Step 5). PUBLIC for !$acc directive access.
+   type(wn_node_t),         allocatable, public :: wn_payload(:)      !< Per-node fast-winding-number cache, indexed like aabb%node (issue #29). PUBLIC for !$acc directive access.
    logical, public                          :: is_on_device=.false. !< Sentinel: true between matched enter_device / exit_device calls.
    contains
       ! read-only accessors (pure, inlined at -O2, zero data copy for scalars)
@@ -520,6 +522,9 @@ contains
       ! for the lifetime of the surface, copied to device by `enter_device`. No
       ! device cost is paid until the user explicitly opts in.
       call self%build_pnormal_payload
+      ! Issue #29 -- persistent fast-winding-number cache, built once per analyze instead
+      ! of on every winding_number call.
+      call self%aabb%build_winding_payload(facet=self%facet, wn=self%wn_payload)
    endif
    endsubroutine analyze
 
@@ -1278,6 +1283,7 @@ contains
 
    if (allocated(self%facet)) deallocate(self%facet)
    if (allocated(self%pnormal_payload)) deallocate(self%pnormal_payload)
+   if (allocated(self%wn_payload)) deallocate(self%wn_payload)
    self%is_on_device = .false.
    self%facets_number = 0
    self%non_manifold_edges_number = 0
