@@ -1113,6 +1113,9 @@ contains
    self%vertex(1) = (self%vertex(1) - center) * factor + center
    self%vertex(2) = (self%vertex(2) - center) * factor + center
    self%vertex(3) = (self%vertex(3) - center) * factor + center
+   ! An odd number of negative factors is a reflection: swap two vertices so the facet
+   ! keeps its outward orientation (see mirror_by_matrix).
+   if (factor%x * factor%y * factor%z < 0._R8P) call self%flip_edge(edge=EDGE_23)
    endsubroutine resize
 
    elemental subroutine reverse_normal(self)
@@ -1339,13 +1342,23 @@ contains
 
    pure subroutine mirror_by_matrix(self, matrix, recompute_metrix)
    !< Mirror facet given matrix (of mirroring).
+   !<
+   !< A reflection (det(matrix) < 0) reverses the handedness of the vertex order, which
+   !< would turn an outward normal inward. Two vertices are then swapped (`flip_edge`,
+   !< which keeps vertex ids and connectivity consistent) so the facet keeps its outward
+   !< orientation. A proper matrix (det > 0) leaves the order unchanged.
    class(facet_object), intent(inout)        :: self             !< Facet.
    real(R8P),           intent(in)           :: matrix(3,3)      !< Mirroring matrix.
    logical,             intent(in), optional :: recompute_metrix !< Sentinel to activate metrix recomputation.
+   real(R8P)                                 :: det              !< Determinant of matrix.
 
    call self%vertex(1)%mirror(matrix=matrix)
    call self%vertex(2)%mirror(matrix=matrix)
    call self%vertex(3)%mirror(matrix=matrix)
+   det = matrix(1,1) * (matrix(2,2) * matrix(3,3) - matrix(2,3) * matrix(3,2)) &
+       - matrix(1,2) * (matrix(2,1) * matrix(3,3) - matrix(2,3) * matrix(3,1)) &
+       + matrix(1,3) * (matrix(2,1) * matrix(3,2) - matrix(2,2) * matrix(3,1))
+   if (det < 0._R8P) call self%flip_edge(edge=EDGE_23)
    if (present(recompute_metrix)) then
       if (recompute_metrix) call self%compute_metrix
    endif
