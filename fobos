@@ -62,6 +62,7 @@ $EXDIRS      = BeFoR64/src/tests/
                FoXy/benchmarks/
                PENF/src/tests/
                StringiFor/src/tests/
+               StringiFor/scripts/
                VecFor/src/tests/
                VTKFortran/src/tests/
                VTKFortran/references/
