@@ -23,6 +23,7 @@ implicit none
 private
 public :: boundary_loop_t
 public :: extract_boundary_loops
+public :: triangulate_loop
 
 type :: boundary_loop_t
    !< One closed boundary loop, in patch orientation.
@@ -158,4 +159,113 @@ contains
       enddo
       endsubroutine emit
    endsubroutine extract_boundary_loops
+
+   subroutine triangulate_loop(loop, facet, patch, status)
+   !< Triangulate one boundary loop by Liepa's minimum-weight dynamic programming (Liepa 2003).
+   !<
+   !< Over sub-polygons (i, k) of the loop, the best apex m minimizes, lexicographically:
+   !<  1. the largest dihedral angle (angle between unit normals) of triangle (i, m, k) with its
+   !<     neighbours across edges (i, m) and (m, k): the sub-problems' best triangles, or the
+   !<     owning mesh facet when the edge is a loop edge; the top triangle also checks the closing
+   !<     loop edge (n -> 1) against its owner. Degenerate triangles count as angle pi;
+   !<  2. the total area.
+   !< O(n^3) time, O(n^2) memory. `patch` gets n - 2 facets with metrix computed, oriented like the
+   !< mesh (loops are stored in patch orientation). `status` = 0, or 1 if the loop has < 3 vertices.
+   type(boundary_loop_t),           intent(in)  :: loop      !< Loop to fill.
+   type(facet_object),              intent(in)  :: facet(:)  !< Mesh facets (owners of the loop edges).
+   type(facet_object), allocatable, intent(out) :: patch(:)  !< Patch triangles.
+   integer(I4P),                    intent(out) :: status    !< 0 = ok.
+   real(R8P),    parameter   :: PI_ = acos(-1._R8P)
+   real(R8P),    parameter   :: TIE = 1.e-12_R8P           !< Angle tie tolerance before comparing areas.
+   real(R8P),    allocatable :: w_ang(:,:), w_area(:,:)    !< DP weights per sub-polygon (i, k).
+   integer(I4P), allocatable :: apex(:,:)                  !< Best apex per sub-polygon.
+   integer(I4P)              :: n, i, k, m, gap, sp, np
+   integer(I4P), allocatable :: stack(:,:)
+   real(R8P)                 :: ang, area, nt(3), tarea, best_ang, best_area
+
+   n = size(loop%vid, kind=I4P)
+   status = 1_I4P
+   allocate(patch(0))
+   if (n < 3_I4P) return
+   status = 0_I4P
+   allocate(w_ang(n, n), w_area(n, n), apex(n, n))
+   w_ang = 0._R8P ; w_area = 0._R8P ; apex = 0_I4P
+   do gap = 2, n - 1
+      do i = 1, n - gap
+         k = i + gap
+         best_ang = huge(1._R8P) ; best_area = huge(1._R8P)
+         do m = i + 1, k - 1
+            call tri_normal(loop%x(i), loop%x(m), loop%x(k), nt, tarea)
+            if (tarea <= 0._R8P) then
+               ang = PI_
+            else
+               ang = max(w_ang(i, m), w_ang(m, k))
+               ang = max(ang, across(i, m, nt), across(m, k, nt))
+               if (i == 1 .and. k == n) ang = max(ang, angle_to(facet(loop%owner(n))%normal, nt))
+            endif
+            area = w_area(i, m) + w_area(m, k) + tarea
+            if (ang < best_ang - TIE .or. (abs(ang - best_ang) <= TIE .and. area < best_area)) then
+               best_ang = ang ; best_area = area ; apex(i, k) = m
+            endif
+         enddo
+         w_ang(i, k) = best_ang ; w_area(i, k) = best_area
+      enddo
+   enddo
+   ! Recover the triangles from the apex table.
+   deallocate(patch) ; allocate(patch(n - 2)) ; np = 0
+   allocate(stack(2, n)) ; sp = 1 ; stack(:, 1) = [1_I4P, n]
+   do while (sp > 0)
+      i = stack(1, sp) ; k = stack(2, sp) ; sp = sp - 1
+      if (k - i < 2) cycle
+      m = apex(i, k)
+      np = np + 1
+      patch(np)%vertex(1) = loop%x(i) ; patch(np)%vertex(2) = loop%x(m) ; patch(np)%vertex(3) = loop%x(k)
+      patch(np)%vertex_id = [loop%vid(i), loop%vid(m), loop%vid(k)]
+      call patch(np)%compute_metrix
+      sp = sp + 1 ; stack(:, sp) = [i, m]
+      sp = sp + 1 ; stack(:, sp) = [m, k]
+   enddo
+   contains
+      function across(a, b, nt) result(ang)
+      !< Dihedral angle of a triangle with normal nt across its edge (a, b): against the mesh owner
+      !< if (a, b) is a loop edge, else against the sub-problem's best triangle on (a, b).
+      integer(I4P), intent(in) :: a, b
+      real(R8P),    intent(in) :: nt(3)
+      real(R8P)                :: ang, nb(3), ab
+      if (b == a + 1) then
+         ang = angle_to(facet(loop%owner(a))%normal, nt)
+      else
+         call tri_normal(loop%x(a), loop%x(apex(a, b)), loop%x(b), nb, ab)
+         if (ab <= 0._R8P) then
+            ang = PI_
+         else
+            ang = acos(max(-1._R8P, min(1._R8P, dot_product(nb, nt))))
+         endif
+      endif
+      endfunction across
+
+      function angle_to(v, nt) result(ang)
+      type(vector_R8P), intent(in) :: v
+      real(R8P),        intent(in) :: nt(3)
+      real(R8P)                    :: ang
+      ang = acos(max(-1._R8P, min(1._R8P, v%x * nt(1) + v%y * nt(2) + v%z * nt(3))))
+      endfunction angle_to
+   endsubroutine triangulate_loop
+
+   pure subroutine tri_normal(a, b, c, nrm, area)
+   !< Unit normal and area of triangle (a, b, c); area 0 and normal 0 if degenerate.
+   type(vector_R8P), intent(in)  :: a, b, c
+   real(R8P),        intent(out) :: nrm(3), area
+   real(R8P)                     :: u(3), v(3), w(3), len2
+
+   u = [b%x - a%x, b%y - a%y, b%z - a%z]
+   v = [c%x - a%x, c%y - a%y, c%z - a%z]
+   w = [u(2) * v(3) - u(3) * v(2), u(3) * v(1) - u(1) * v(3), u(1) * v(2) - u(2) * v(1)]
+   len2 = sum(w * w)
+   if (len2 <= tiny(1._R8P)) then
+      nrm = 0._R8P ; area = 0._R8P
+   else
+      nrm = w / sqrt(len2) ; area = 0.5_R8P * sqrt(len2)
+   endif
+   endsubroutine tri_normal
 endmodule fossil_hole_filling
