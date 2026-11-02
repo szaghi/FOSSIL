@@ -83,6 +83,12 @@ public :: BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, B
 integer(I4P), parameter :: SIGN_RAY_INTERSECTIONS = 1_I4P
 integer(I4P), parameter :: SIGN_SOLID_ANGLE       = 2_I4P
 integer(I4P), parameter :: SIGN_PSEUDO_NORMAL     = 3_I4P
+! Ray directions for SIGN_RAY_INTERSECTIONS (see is_point_inside_polyhedron_ri): generic,
+! non-coplanar, none parallel to an axis or a coordinate plane, so a ray from a point of an
+! axis-aligned lattice does not run exactly through a mesh edge or vertex.
+type(vector_R8P), parameter :: RAY_DIR_X = vector_R8P(1._R8P,               0.2718281828459045_R8P, 0.1414213562373095_R8P)
+type(vector_R8P), parameter :: RAY_DIR_Y = vector_R8P(0.1732050807568877_R8P, 1._R8P,               0.3141592653589793_R8P)
+type(vector_R8P), parameter :: RAY_DIR_Z = vector_R8P(0.2236067977499790_R8P, 0.1618033988749895_R8P, 1._R8P)
 
 ! Status codes returned via the optional `status` argument on mutating procedures.
 integer(I4P), parameter :: STATUS_OK               = 0_I4P !< Success.
@@ -2395,12 +2401,19 @@ contains
    logical                               :: is_inside_by_y !< Test result by y-aligned ray intersections.
    logical                               :: is_inside_by_z !< Test result by z-aligned ray intersections.
 
-   is_inside_by_x = is_inside_by_ray_intersect(ray_origin=point, ray_direction=      ex_R8P + EPS * ey_R8P + EPS * ez_R8P)
-   is_inside_by_y = is_inside_by_ray_intersect(ray_origin=point, ray_direction=EPS * ex_R8P +       ey_R8P + EPS * ez_R8P)
+   ! The three rays must not be axis-aligned. They used to be `ex + EPS*(ey + ez)` etc.,
+   ! but EPS is 0, so they were exactly axis-aligned: on axis-aligned geometry (the usual
+   ! CAD case) a ray from a lattice point runs exactly through the diagonal shared by two
+   ! triangles of a face, the closed u/v intervals of the facet test count it twice, and
+   ! the parity flips (the unit cube's centre came out "outside"). Fixed generic directions,
+   ! dominated by x, y and z respectively, with irrational-looking secondary components,
+   ! make such exact edge hits non-generic; the 2-of-3 vote absorbs a residual one.
+   is_inside_by_x = is_inside_by_ray_intersect(ray_origin=point, ray_direction=RAY_DIR_X)
+   is_inside_by_y = is_inside_by_ray_intersect(ray_origin=point, ray_direction=RAY_DIR_Y)
    if (is_inside_by_x.and.is_inside_by_y) then
      is_inside = .true.
    else
-      is_inside_by_z = is_inside_by_ray_intersect(ray_origin=point, ray_direction=EPS * ex_R8P + EPS * ey_R8P + ez_R8P)
+      is_inside_by_z = is_inside_by_ray_intersect(ray_origin=point, ray_direction=RAY_DIR_Z)
       is_inside = ((is_inside_by_x.and.is_inside_by_y).or.&
                    (is_inside_by_x.and.is_inside_by_z).or.&
                    (is_inside_by_y.and.is_inside_by_z))
