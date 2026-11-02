@@ -1651,20 +1651,25 @@ contains
    !<   - ~ 0.0 strictly outside
    !<   - intermediate on the boundary or for open / non-watertight meshes
    !<
-   !< Uses the hierarchical Barnes-Hut traversal when the AABB tree is
-   !< initialized; falls back to the exact O(n_facets) per-facet sum otherwise.
-   !< Set `beta <= 0` to force the exact sum regardless (useful for ground-truth
-   !< tests). Default `beta = 2.0`.
+   !< Uses the hierarchical (fast, second-order) traversal over the persistent per-node cache
+   !< `wn_payload` built by `analyze` (issue #29); falls back to the exact O(n_facets) per-facet
+   !< sum when no cache exists. Set `beta <= 0` to force the exact sum (ground-truth tests).
+   !< Default `beta = 2.0`; measured |w_fast - w_exact| <= 8.7e-3 (bunny) at beta = 2.
    class(surface_stl_object), intent(in)           :: self  !< Surface.
    type(vector_R8P),          intent(in)           :: point !< Query point.
    real(R8P),                 intent(in), optional :: beta  !< Multipole admissibility ratio (default 2.0).
    real(R8P)                                       :: w     !< Winding number.
+   type(wn_node_t)                                 :: empty_wn(0:-1) !< No cache: forces the exact sum.
 
    if (self%facets_number <= 0) then
       w = 0._R8P
       return
    endif
-   w = compute_winding_number(facet=self%facet, tree=self%aabb, point=point, beta=beta)
+   if (.not. allocated(self%wn_payload)) then
+      w = compute_winding_number(facet=self%facet, tree=self%aabb, wn=empty_wn, point=point, beta=-1._R8P)
+   else
+      w = compute_winding_number(facet=self%facet, tree=self%aabb, wn=self%wn_payload, point=point, beta=beta)
+   endif
    endfunction winding_number
 
    subroutine find_self_intersections(self, pairs, status)

@@ -33,7 +33,7 @@ use fossil_arrangement,    only : arrangement_t, arrangement_initialize, &
                                   arrangement_collect_intersections, &
                                   arrangement_retriangulate, &
                                   ARR_STATUS_OK, ARR_STATUS_CDT_FAILED
-use fossil_aabb_tree_object, only : aabb_tree_object
+use fossil_aabb_tree_object, only : aabb_tree_object, wn_node_t
 use fossil_facet_object,   only : facet_object
 use fossil_winding_number, only : winding_number
 use penf,                  only : I4P, R8P, MaxR8P
@@ -144,10 +144,17 @@ contains
    type(facet_object), allocatable                        :: buf(:), tmp(:)
    integer(I4P)                                           :: cap, used, k, n_sub
    real(R8P)                                              :: wn_a, wn_b
+   type(wn_node_t), allocatable                           :: cache_a(:), cache_b(:) !< Winding-number caches, built once.
    logical                                                :: in_a, in_b, keep, flip
    type(vector_R8P)                                       :: c
 
    n_sub = size(sub_facet, dim=1)
+   ! Build each operand's fast-winding-number cache once (issue #29): the per-call rebuild made
+   ! every query O(N).
+   call tree_a%build_winding_payload(facet=facet_a, wn=cache_a)
+   call tree_b%build_winding_payload(facet=facet_b, wn=cache_b)
+   if (.not. allocated(cache_a)) allocate(cache_a(0:-1))
+   if (.not. allocated(cache_b)) allocate(cache_b(0:-1))
    cap = max(64_I4P, n_sub)
    allocate(buf(cap))
    used = 0_I4P
@@ -156,8 +163,8 @@ contains
       ! Centroid in 3D — the facet's `centroid` is set by compute_metrix,
       ! which arrangement_retriangulate calls on every emitted sub-facet.
       c    = sub_facet(k)%centroid
-      wn_a = winding_number(facet=facet_a, tree=tree_a, point=c)
-      wn_b = winding_number(facet=facet_b, tree=tree_b, point=c)
+      wn_a = winding_number(facet=facet_a, tree=tree_a, wn=cache_a, point=c)
+      wn_b = winding_number(facet=facet_b, tree=tree_b, wn=cache_b, point=c)
 
       ! Detect "shared boundary" sub-triangles: those whose centroid lies on
       ! a coplanar facet of the OTHER surface.

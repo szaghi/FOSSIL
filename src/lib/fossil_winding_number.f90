@@ -17,23 +17,28 @@ module fossil_winding_number
 !< open / non-watertight meshes — which is precisely why this is preferred over
 !< the parity / Baerentzen-Aanaes sign tests on dirty STL.
 !<
-!< The hierarchical (fast) variant traverses the surface's AABB tree and replaces
-!< distant subtrees by a single dipole approximation: when |q - centroid_node| is
-!< greater than beta times the node's bounding-box diagonal, the contribution of
-!< all facets in that subtree is approximated by
+!< The hierarchical (fast) variant (Barill et al. 2018) replaces a distant subtree by a Taylor
+!< expansion of its solid angle about the node centre c (r' = c - q):
 !<
-!<     Omega_node(q) ~= (dipole_node . (q - centroid_node)) / |q - centroid_node|^3
+!<     Omega_node(q) ~= D . r' / |r'|^3  -  (3 r'^T C r' - |r'|^2 tr C) / |r'|^5
 !<
-!< where dipole_node = sum_{f in subtree} area_f * normal_f. Otherwise the
-!< traversal recurses.
+!< with the dipole D = sum_f area_f n_f and the second moment C = sum_f area_f n_f (x_f - c)^T,
+!< admissible when |q - c| > beta * (bbox diagonal of the node). D, C, c and the diagonal live in
+!< the persistent per-node cache `surface%wn_payload` (`wn_node_t`), built once by `analyze`
+!< (issue #29).
 !<
-!< The default beta = 2.0 (Barill et al. recommended ratio) keeps the
-!< approximation error well below 1e-6 on typical meshes.
+!< Two defects of the former implementation are fixed here (issue #29):
+!<  - the far-field term had the wrong sign (it used q - c instead of c - q): the error was ~2 on
+!<    bunny at beta = 2, i.e. the result was meaningless wherever the far field was used;
+!<  - the cache was rebuilt over the whole tree on every call (O(N) per query) and, on octrees,
+!<    counted every facet once per tree level (the octree stores a facet at each level).
+!<
+!< Measured |w_fast - w_exact| with the second-order expansion: beta = 2: bunny 8.7e-3,
+!< dragon-fine 9.8e-4; beta = 4: 1.7e-3 and 7.2e-5. Ample for an inside/outside decision at
+!< w = 0.5; pass beta <= 0 for the exact O(N) sum.
 
-use fossil_aabb_tree_object, only : aabb_tree_object, AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
-use fossil_aabb_node_object, only : aabb_node_object
+use fossil_aabb_tree_object, only : aabb_tree_object, AABB_TREE_SAH_BVH, wn_node_t, bvh_winding_number_oac
 use fossil_facet_object,     only : facet_object
-use fossil_list_id_object,   only : list_id_object
 use fossil_utils,            only : PI
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
@@ -42,76 +47,39 @@ implicit none
 private
 public :: winding_number
 
-real(R8P), parameter :: FOUR_PI         = 4._R8P * PI
-real(R8P), parameter :: DEFAULT_BETA    = 2._R8P
-integer(I4P), parameter :: MAX_CHILDREN = 8_I4P  !< Buffer size for `enumerate_children` output (octree fan-out).
-
-type :: dipole_cache_t
-   !< Per-node cache for the Barnes-Hut style winding-number traversal.
-   !<
-   !< The dipole expansion is taken about the node's bounding-box centre rather
-   !< than an area-weighted centroid. The centre-of-mass would slightly tighten
-   !< the multipole error, but it requires propagating an extra scalar (the
-   !< subtree's total area) up the tree; the bbox-centre choice keeps the cache
-   !< small and is the variant used by most production fast-WN implementations.
-   !< The admissibility test still uses the bbox diagonal as the size proxy.
-   type(vector_R8P) :: centre  !< Subtree expansion centre (bbox midpoint).
-   type(vector_R8P) :: dipole  !< Subtree dipole moment, sum_f area_f * normal_f.
-   real(R8P)        :: diag2 = 0._R8P !< Squared bounding-box diagonal of the node.
-   logical          :: ready = .false. !< True once cache is populated for this node.
-endtype dipole_cache_t
+real(R8P),    parameter :: FOUR_PI      = 4._R8P * PI
+real(R8P),    parameter :: DEFAULT_BETA = 2._R8P
+integer(I4P), parameter :: MAX_CHILDREN = 8_I4P   !< enumerate_children buffer (octree fan-out).
+integer(I4P), parameter :: MAX_STACK    = 128_I4P !< Octree traversal stack (7 * levels + 1 entries needed).
 
 contains
-
-   function winding_number(facet, tree, point, beta) result(w)
-   !< Generalized / fast winding number at `point`.
+   function winding_number(facet, tree, wn, point, beta) result(w)
+   !< Generalized winding number of `point` with respect to the surface (`facet`, `tree`, `wn`).
    !<
-   !< Returns the continuous scalar w(q):
-   !<   - ~ 1.0 strictly inside a closed, outward-oriented surface
-   !<   - ~ 0.0 strictly outside
-   !<   - intermediate on the boundary or for open / non-watertight meshes
-   !<
-   !< If the AABB tree is initialized, performs the hierarchical Barnes-Hut
-   !< evaluation with subtree-dipole approximation. Otherwise falls back to the
-   !< exact O(n_facets) per-facet sum.
-   !<
-   !< `beta` is the multipole admissibility ratio. Default 2.0 (Barill et al.).
-   !< Setting beta <= 0 disables the dipole approximation and forces the exact
-   !< per-facet sum; useful for ground-truth tests.
+   !< SAH BVH: the device-callable `bvh_winding_number_oac` (the same routine the GPU path uses).
+   !< Octree: `octree_solid_angle`, the same expansion over up to 8 children. Without a tree or
+   !< cache, or with beta <= 0, the exact per-facet sum.
    type(facet_object),     intent(in)           :: facet(:) !< Facets array (caller's surface).
-   type(aabb_tree_object), intent(in), target   :: tree     !< AABB tree built over `facet`.
+   type(aabb_tree_object), intent(in)           :: tree     !< AABB tree built over `facet`.
+   type(wn_node_t),        intent(in)           :: wn(0:)   !< Per-node cache built over `tree`.
    type(vector_R8P),       intent(in)           :: point    !< Query point.
-   real(R8P),              intent(in), optional :: beta     !< Admissibility ratio (default 2.0).
+   real(R8P),              intent(in), optional :: beta     !< Admissibility ratio (default 2.0; <= 0: exact).
    real(R8P)                                    :: w        !< Winding number.
    real(R8P)                                    :: beta_    !< Local copy of beta.
-   type(dipole_cache_t), allocatable            :: cache(:) !< Per-node cache (root index 0).
-   real(R8P)                                    :: omega    !< Accumulated solid angle.
 
    beta_ = DEFAULT_BETA ; if (present(beta)) beta_ = beta
-
-   if (tree%get_nodes_number() <= 0 .or. beta_ <= 0._R8P) then
-      ! No tree available, or caller asked for exact: brute-force per-facet sum.
-      omega = exact_solid_angle_sum(facet=facet, point=point)
-      w = omega / FOUR_PI
-      return
+   if (tree%get_nodes_number() <= 0 .or. size(wn) /= tree%get_nodes_number() .or. beta_ <= 0._R8P) then
+      w = exact_solid_angle_sum(facet=facet, point=point) / FOUR_PI
+   elseif (tree%get_tree_kind() == AABB_TREE_SAH_BVH) then
+      w = bvh_winding_number_oac(tree%node, tree%payload, wn, point%x, point%y, point%z, beta_ * beta_) / FOUR_PI
+   else
+      w = octree_solid_angle(facet=facet, tree=tree, wn=wn, point=point, beta2=beta_ * beta_) / FOUR_PI
    endif
-
-   ! Build the per-node dipole cache (post-order over the tree topology).
-   allocate(cache(0:tree%get_nodes_number() - 1))
-   call build_cache(facet=facet, tree=tree, n=0_I4P, cache=cache)
-
-   ! Hierarchical traversal from root (node 0).
-   omega = 0._R8P
-   call traverse(facet=facet, tree=tree, n=0_I4P, point=point, beta2=beta_*beta_, &
-                 cache=cache, omega=omega)
-
-   w = omega / FOUR_PI
    endfunction winding_number
 
    pure function exact_solid_angle_sum(facet, point) result(omega)
-   !< Brute-force sum of signed solid angles over every facet. Used as the
-   !< fallback when no tree is available, and as the ground truth for
-   !< validating the hierarchical path.
+   !< Brute-force sum of signed solid angles over every facet: the fallback when no tree or cache
+   !< is available, and the ground truth for the hierarchical paths.
    type(facet_object), intent(in) :: facet(:) !< Facets array.
    type(vector_R8P),   intent(in) :: point    !< Query point.
    real(R8P)                      :: omega    !< Sum of solid angles.
@@ -123,129 +91,55 @@ contains
    enddo
    endfunction exact_solid_angle_sum
 
-   recursive subroutine build_cache(facet, tree, n, cache)
-   !< Populate `cache(n)` with the subtree's dipole centroid + dipole moment +
-   !< squared box-diagonal, recursing into children first (post-order).
-   !<
-   !< Aggregation rule: dipole_node = sum_subtree area_f * normal_f.
-   !< Centroid: area-weighted mean of facet centroids over the subtree.
-   !< Cache entries for empty / unallocated nodes are left with `ready = .false.`
-   !< (their `dipole` is the zero vector, so they contribute nothing).
-   type(facet_object),     intent(in)            :: facet(:) !< Facets array.
-   type(aabb_tree_object), intent(in)            :: tree     !< AABB tree.
-   integer(I4P),           intent(in)            :: n        !< Node index.
-   type(dipole_cache_t),   intent(inout)         :: cache(0:) !< Per-node cache.
-   type(aabb_node_object), pointer               :: node     !< Pointer to node n.
-   integer(I4P)                                  :: child_idx(MAX_CHILDREN), nchild, c, fid, k
-   type(list_id_object)                          :: ids
-   type(vector_R8P)                              :: bmin, bmax
-   type(vector_R8P)                              :: dipole_acc
-   type(vector_R8P)                              :: diag
-   real(R8P)                                     :: area_f
+   function octree_solid_angle(facet, tree, wn, point, beta2) result(omega)
+   !< Fast solid-angle sum over an octree: the expansion of `bvh_winding_number_oac` with up to 8
+   !< children per node. Facets are summed at leaves only (the octree repeats each facet at every
+   !< level, matching the leaf-only aggregation of the cache). CPU only.
+   type(facet_object),     intent(in) :: facet(:)  !< Facets array.
+   type(aabb_tree_object), intent(in) :: tree      !< Octree.
+   type(wn_node_t),        intent(in) :: wn(0:)    !< Per-node cache.
+   type(vector_R8P),       intent(in) :: point     !< Query point.
+   real(R8P),              intent(in) :: beta2     !< Squared admissibility ratio (> 0).
+   real(R8P)                          :: omega     !< Total solid angle.
+   integer(I4P)                       :: stack(MAX_STACK), sp, cur, c, k, fid
+   integer(I4P)                       :: child_idx(MAX_CHILDREN), nchild
+   real(R8P)                          :: rx, ry, rz, r2, r1, rcr, trc
 
-   node => tree%node_at(i=n)
-   if (.not. associated(node)) return
-   if (.not. node%is_allocated()) return
-
-   ! Box diagonal squared — used by the admissibility test on the host node.
-   bmin = node%bmin() ; bmax = node%bmax()
-   diag = bmax - bmin
-   cache(n)%diag2 = diag%dotproduct(rhs=diag)
-
-   ! Recurse into children first.
-   call tree%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
-   do c = 1, nchild
-      call build_cache(facet=facet, tree=tree, n=child_idx(c), cache=cache)
+   omega    = 0._R8P
+   stack(1) = 0_I4P
+   sp       = 1_I4P
+   do while (sp > 0_I4P)
+      cur = stack(sp)
+      sp  = sp - 1_I4P
+      if (.not. wn(cur)%ready) cycle
+      if (wn(cur)%diag2 > 0._R8P) then
+         rx = point%x - wn(cur)%cx ; ry = point%y - wn(cur)%cy ; rz = point%z - wn(cur)%cz
+         r2 = rx * rx + ry * ry + rz * rz
+         if (r2 > beta2 * wn(cur)%diag2) then
+            r1  = sqrt(r2)
+            rcr = rx * (wn(cur)%c2(1,1) * rx + wn(cur)%c2(1,2) * ry + wn(cur)%c2(1,3) * rz) + &
+                  ry * (wn(cur)%c2(2,1) * rx + wn(cur)%c2(2,2) * ry + wn(cur)%c2(2,3) * rz) + &
+                  rz * (wn(cur)%c2(3,1) * rx + wn(cur)%c2(3,2) * ry + wn(cur)%c2(3,3) * rz)
+            trc = wn(cur)%c2(1,1) + wn(cur)%c2(2,2) + wn(cur)%c2(3,3)
+            omega = omega - (wn(cur)%dx * rx + wn(cur)%dy * ry + wn(cur)%dz * rz) / (r2 * r1) &
+                          - (3._R8P * rcr - r2 * trc) / (r2 * r2 * r1)
+            cycle
+         endif
+      endif
+      call tree%enumerate_children(n=cur, out_idx=child_idx, nchild=nchild)
+      if (nchild == 0) then
+         if (tree%node(cur)%has_facets()) then
+            do k = 1, tree%node(cur)%facet_id_count()
+               fid = tree%node(cur)%facet_id_at(k)
+               if (fid < 1 .or. fid > size(facet, dim=1)) cycle
+               omega = omega + facet(fid)%solid_angle(point=point)
+            enddo
+         endif
+      else
+         do c = 1, nchild
+            sp = sp + 1_I4P ; stack(sp) = child_idx(c)
+         enddo
+      endif
    enddo
-
-   ! Aggregate this subtree's dipole moment. Two contributions:
-   !   (a) facets stored directly on this node (octree internal nodes can carry
-   !       facets that did not fit deeper; for the SAH BVH only leaves carry).
-   !   (b) child subtree dipoles already computed.
-   dipole_acc = vector_R8P(0._R8P, 0._R8P, 0._R8P)
-
-   if (node%has_facets()) then
-      ids = node%facet_id()
-      do k = 1, ids%ids_number
-         fid = ids%id(k)
-         if (fid < 1 .or. fid > size(facet, dim=1)) cycle
-         area_f     = facet(fid)%area()
-         dipole_acc = dipole_acc + facet(fid)%normal * area_f
-      enddo
-   endif
-
-   do c = 1, nchild
-      if (.not. cache(child_idx(c))%ready) cycle
-      dipole_acc = dipole_acc + cache(child_idx(c))%dipole
-   enddo
-
-   cache(n)%centre = (bmin + bmax) * 0.5_R8P
-   cache(n)%dipole = dipole_acc
-   cache(n)%ready  = .true.
-   endsubroutine build_cache
-
-   recursive subroutine traverse(facet, tree, n, point, beta2, cache, omega)
-   !< Walk the tree adding solid-angle contributions from node `n`'s subtree.
-   !<
-   !< Two cases:
-   !<   - Far field (|point - centroid|^2 > beta^2 * diag^2): use the dipole.
-   !<   - Near field: sum this node's own facets exactly, and recurse into
-   !<     children. (For SAH BVH only leaves have facets; for octrees internal
-   !<     nodes may also carry facets.)
-   type(facet_object),     intent(in)            :: facet(:)
-   type(aabb_tree_object), intent(in)            :: tree
-   integer(I4P),           intent(in)            :: n
-   type(vector_R8P),       intent(in)            :: point
-   real(R8P),              intent(in)            :: beta2  !< Squared admissibility ratio.
-   type(dipole_cache_t),   intent(in)            :: cache(0:)
-   real(R8P),              intent(inout)         :: omega
-   type(aabb_node_object), pointer               :: node
-   type(list_id_object)                          :: ids
-   integer(I4P)                                  :: child_idx(MAX_CHILDREN), nchild, c, k, fid
-   type(vector_R8P)                              :: r
-   real(R8P)                                     :: r2, r1, inv_r3, dot
-   logical                                       :: is_leaf
-
-   node => tree%node_at(i=n)
-   if (.not. associated(node)) return
-   if (.not. node%is_allocated()) return
-   if (.not. cache(n)%ready) return
-
-   ! Far-field test: replace the entire subtree by its dipole.
-   r  = point - cache(n)%centre
-   r2 = r%dotproduct(rhs=r)
-   if (r2 > beta2 * cache(n)%diag2 .and. cache(n)%diag2 > 0._R8P) then
-      r1     = sqrt(r2)
-      inv_r3 = 1._R8P / (r2 * r1)
-      dot    = cache(n)%dipole%dotproduct(rhs=r)
-      omega  = omega + dot * inv_r3
-      return
-   endif
-
-   ! Near field: account for facets stored directly on this node, then recurse.
-   if (node%has_facets()) then
-      ids = node%facet_id()
-      do k = 1, ids%ids_number
-         fid = ids%id(k)
-         if (fid < 1 .or. fid > size(facet, dim=1)) cycle
-         omega = omega + facet(fid)%solid_angle(point=point)
-      enddo
-   endif
-
-   call tree%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
-   is_leaf = (nchild == 0)
-   if (is_leaf) return
-
-   ! For SAH BVH internal nodes the facets are not stored on the parent (they are
-   ! in the leaves); recursing into children is the correct path. For octree
-   ! internal nodes, we have already counted the parent's own facets above and
-   ! must NOT double-count by recursing — but the octree representation stores a
-   ! given facet exactly once (parent OR child), so the parent's facets are
-   ! disjoint from the children's. So recursion is correct in both cases.
-   do c = 1, nchild
-      call traverse(facet=facet, tree=tree, n=child_idx(c), point=point, beta2=beta2, &
-                    cache=cache, omega=omega)
-   enddo
-   endsubroutine traverse
-
+   endfunction octree_solid_angle
 endmodule fossil_winding_number
