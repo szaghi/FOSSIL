@@ -12,6 +12,9 @@ module fossil_distance_field
 !<     signed distance, computed in one `surface%distance_many` batch. Candidates come from
 !<     rasterizing each facet's bounding box, inflated by `band`, onto the index space
 !<     (binary search on the 1D coordinates, so stretched grids cost the same).
+!<  2. **Signs** (`compute_signs`): the cells outside the band are grouped into 6-connected
+!<     components; the band separates inside from outside, so each component takes the sign
+!<     of the band cells it touches. Point queries cover what the band cannot decide.
 !<
 !< Halo: the outer `ng` layers of cells on each side are halo cells. They are never
 !< computed; a caller with a block decomposition fills them from the neighbouring blocks.
@@ -41,6 +44,8 @@ type :: distance_field_object
    real(R8P),             allocatable :: y(:)                !< y coordinates, strictly increasing.
    real(R8P),             allocatable :: z(:)                !< z coordinates, strictly increasing.
    real(R8P)                          :: band_width = 0._R8P !< Band half-width used by the last compute_band.
+   real(R8P)                          :: local_spacing = 0._R8P !< Largest spacing near the surface (default_band / 2).
+   integer(I4P)                       :: sign_algorithm = SIGN_PSEUDO_NORMAL !< Sign algorithm of the last compute_band.
    integer(I4P)                       :: band_cells = 0_I4P  !< Number of band cells.
    logical                            :: is_signed = .true.  !< Signed field (else unsigned distance).
    real(R8P),    allocatable, public  :: phi(:,:,:)          !< Signed distance; FAR_VALUE where unknown. PUBLIC for halo exchange.
@@ -49,10 +54,13 @@ type :: distance_field_object
       procedure, pass(self) :: initialize     !< Set the grid; reset the field.
       procedure, pass(self) :: destroy        !< Free the field.
       procedure, pass(self) :: compute_band   !< Exact signed distances in the narrow band.
+      procedure, pass(self) :: compute_signs  !< Signs outside the band by flood fill.
       procedure, pass(self) :: get_dims       !< Points per axis and halo width.
       procedure, pass(self) :: get_band_width !< Band half-width of the last compute_band.
       procedure, pass(self) :: get_band_cells !< Number of band cells.
       procedure, pass(self) :: default_band   !< Default band for a surface: 2 x the local max spacing.
+      procedure, pass(self), private :: linear   !< Linear index of a cell.
+      procedure, pass(self), private :: unlinear !< Cell of a linear index.
 endtype distance_field_object
 
 contains
@@ -100,6 +108,8 @@ contains
    if (allocated(self%in_band)) deallocate(self%in_band)
    self%ni = 0_I4P ; self%nj = 0_I4P ; self%nk = 0_I4P ; self%ng = 0_I4P
    self%band_width = 0._R8P
+   self%local_spacing = 0._R8P
+   self%sign_algorithm = SIGN_PSEUDO_NORMAL
    self%band_cells = 0_I4P
    self%is_signed  = .true.
    endsubroutine destroy
@@ -200,6 +210,8 @@ contains
    endif
    self%is_signed = .true. ; if (present(is_signed)) self%is_signed = is_signed
    algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   self%sign_algorithm = algo
+   self%local_spacing  = 0.5_R8P * self%default_band(surface)
 
    self%phi        = FAR_VALUE
    self%in_band    = .false.
@@ -257,6 +269,185 @@ contains
       endif
    enddo
    endsubroutine compute_band
+
+   subroutine compute_signs(self, surface, fallback_cells, status)
+   !< Signs of the cells outside the band (call after `compute_band`, before `sweep`).
+   !<
+   !< The non-band interior cells are split into 6-connected components (halo cells take no
+   !< part). When the band is at least as thick as the largest grid spacing near the surface,
+   !< both ends of every grid edge that crosses the surface are band cells, so no component
+   !< contains both inside and outside cells. Each component then takes:
+   !<  - the sign of the band cells it touches, if they all agree (cells exactly on the
+   !<    surface, d = 0, carry no sign);
+   !<  - one point query, at its first cell, if it touches no band cell (a block that does not
+   !<    see the surface, or a cavity thinner than the band);
+   !<  - a point query per cell if it touches band cells of both signs, which can only happen
+   !<    with an inconsistent band (defensive).
+   !< If the band is thinner than the largest spacing near the surface, a component can leak
+   !< across the surface while touching band cells of one sign only, so every non-band cell
+   !< gets a point query instead: correct, at the cost of one distance query per cell.
+   !<
+   !< Point queries use `surface%distance_many` with the sign algorithm of `compute_band`.
+   !< Magnitudes are kept (`phi = sign(|phi|, s)`). No-op on an unsigned field.
+   class(distance_field_object), intent(inout)         :: self           !< Distance field.
+   type(surface_stl_object),     intent(inout), target :: surface        !< Surface.
+   integer(I4P),                 intent(out), optional :: fallback_cells !< Cells signed by a point query.
+   integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),                 allocatable           :: label(:,:,:)   !< Component id; 0 unvisited, -1 band/halo.
+   integer(I4P),                 allocatable           :: queue(:)       !< BFS queue (linear indices).
+   integer(I4P),                 allocatable           :: comp_sign(:)   !< Per component: +1, -1, 0 (query each cell), 2 (query one).
+   integer(I4P),                 allocatable           :: comp_first(:)  !< Per component: first cell (linear index).
+   type(vector_R8P),             allocatable           :: points(:)      !< Query points.
+   real(R8P),                    allocatable           :: d(:)           !< Query results.
+   integer(I4P),                 allocatable           :: qcell(:)       !< Query cells (linear indices) or components.
+   integer(I4P)                                        :: i, j, k, l, m, c, n_comp, head, tail, nb
+   integer(I4P)                                        :: ii, jj, kk, n_query, st
+   logical                                             :: touch_pos, touch_neg, thin
+   integer(I4P), parameter                             :: OFF(3, 6) = reshape([-1, 0, 0,  1, 0, 0,  0, -1, 0, &
+                                                                               0, 1, 0,  0, 0, -1,  0, 0, 1], [3, 6])
+
+   if (present(status)) status = STATUS_OK
+   if (present(fallback_cells)) fallback_cells = 0_I4P
+   if (.not. allocated(self%phi)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (.not. self%is_signed) return
+   thin = self%band_width < self%local_spacing
+
+   allocate(label(self%ni, self%nj, self%nk))
+   label = -1_I4P
+   label(self%ng + 1:self%ni - self%ng, self%ng + 1:self%nj - self%ng, self%ng + 1:self%nk - self%ng) = 0_I4P
+   where (self%in_band) label = -1_I4P
+   allocate(queue(count(label == 0_I4P, kind=I4P)))
+   allocate(comp_sign(size(queue)), comp_first(size(queue)))
+
+   ! label the components, recording the band signs each one touches
+   n_comp = 0_I4P
+   do k = 1_I4P, self%nk
+      do j = 1_I4P, self%nj
+         do i = 1_I4P, self%ni
+            if (label(i, j, k) /= 0_I4P) cycle
+            n_comp = n_comp + 1_I4P
+            label(i, j, k) = n_comp
+            comp_first(n_comp) = self%linear(i, j, k)
+            touch_pos = .false. ; touch_neg = .false.
+            head = 1_I4P ; tail = 1_I4P ; queue(1) = comp_first(n_comp)
+            do while (head <= tail)
+               call self%unlinear(queue(head), ii, jj, kk)
+               head = head + 1_I4P
+               do nb = 1, 6
+                  l = ii + OFF(1, nb) ; m = jj + OFF(2, nb) ; c = kk + OFF(3, nb)
+                  if (l < 1_I4P .or. l > self%ni .or. m < 1_I4P .or. m > self%nj .or. c < 1_I4P .or. c > self%nk) cycle
+                  if (self%in_band(l, m, c)) then
+                     if (self%phi(l, m, c) > 0._R8P) touch_pos = .true.
+                     if (self%phi(l, m, c) < 0._R8P) touch_neg = .true.
+                  elseif (label(l, m, c) == 0_I4P) then
+                     label(l, m, c) = n_comp
+                     tail = tail + 1_I4P
+                     queue(tail) = self%linear(l, m, c)
+                  endif
+               enddo
+            enddo
+            if (thin .or. (touch_pos .and. touch_neg)) then
+               comp_sign(n_comp) = 0_I4P
+            elseif (touch_pos) then
+               comp_sign(n_comp) = 1_I4P
+            elseif (touch_neg) then
+               comp_sign(n_comp) = -1_I4P
+            else
+               comp_sign(n_comp) = 2_I4P
+            endif
+         enddo
+      enddo
+   enddo
+
+   ! point queries: every cell of a 0-component, the first cell of a 2-component
+   n_query = count(comp_sign(1:n_comp) == 2_I4P, kind=I4P)
+   do k = 1_I4P, self%nk
+      do j = 1_I4P, self%nj
+         do i = 1_I4P, self%ni
+            if (label(i, j, k) > 0_I4P) then
+               if (comp_sign(label(i, j, k)) == 0_I4P) n_query = n_query + 1_I4P
+            endif
+         enddo
+      enddo
+   enddo
+   allocate(points(n_query), d(n_query), qcell(n_query))
+   m = 0_I4P
+   do c = 1_I4P, n_comp
+      if (comp_sign(c) /= 2_I4P) cycle
+      m = m + 1_I4P
+      qcell(m) = comp_first(c)
+      call self%unlinear(comp_first(c), ii, jj, kk)
+      points(m)%x = self%x(ii) ; points(m)%y = self%y(jj) ; points(m)%z = self%z(kk)
+   enddo
+   do k = 1_I4P, self%nk
+      do j = 1_I4P, self%nj
+         do i = 1_I4P, self%ni
+            if (label(i, j, k) <= 0_I4P) cycle
+            if (comp_sign(label(i, j, k)) /= 0_I4P) cycle
+            m = m + 1_I4P
+            qcell(m) = self%linear(i, j, k)
+            points(m)%x = self%x(i) ; points(m)%y = self%y(j) ; points(m)%z = self%z(k)
+         enddo
+      enddo
+   enddo
+   if (n_query > 0_I4P) then
+      call surface%distance_many(points=points, distances=d, is_signed=.true., sign_algorithm=self%sign_algorithm, &
+                                 status=st)
+      if (st /= STATUS_OK) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+   endif
+   if (present(fallback_cells)) fallback_cells = n_query
+
+   ! component-wide signs from the one-point queries
+   do m = 1_I4P, n_query
+      call self%unlinear(qcell(m), ii, jj, kk)
+      c = label(ii, jj, kk)
+      if (comp_sign(c) == 2_I4P) then
+         comp_sign(c) = 1_I4P ; if (d(m) < 0._R8P) comp_sign(c) = -1_I4P
+      else
+         self%phi(ii, jj, kk) = sign(abs(self%phi(ii, jj, kk)), d(m))
+      endif
+   enddo
+   ! apply
+   do k = 1_I4P, self%nk
+      do j = 1_I4P, self%nj
+         do i = 1_I4P, self%ni
+            if (label(i, j, k) <= 0_I4P) cycle
+            c = comp_sign(label(i, j, k))
+            if (c == 1_I4P)  self%phi(i, j, k) =  abs(self%phi(i, j, k))
+            if (c == -1_I4P) self%phi(i, j, k) = -abs(self%phi(i, j, k))
+         enddo
+      enddo
+   enddo
+   endsubroutine compute_signs
+
+   pure function linear(self, i, j, k) result(l)
+   !< Linear index of cell (i, j, k).
+   class(distance_field_object), intent(in) :: self    !< Distance field.
+   integer(I4P),                 intent(in) :: i, j, k !< Cell.
+   integer(I4P)                             :: l       !< Linear index.
+
+   l = i + self%ni * ((j - 1_I4P) + self%nj * (k - 1_I4P))
+   endfunction linear
+
+   pure subroutine unlinear(self, l, i, j, k)
+   !< Cell (i, j, k) of linear index l.
+   class(distance_field_object), intent(in)  :: self    !< Distance field.
+   integer(I4P),                 intent(in)  :: l       !< Linear index.
+   integer(I4P),                 intent(out) :: i, j, k !< Cell.
+   integer(I4P)                              :: r       !< Remainder.
+
+   r = l - 1_I4P
+   i = mod(r, self%ni) + 1_I4P
+   r = r / self%ni
+   j = mod(r, self%nj) + 1_I4P
+   k = r / self%nj + 1_I4P
+   endsubroutine unlinear
 
    ! private helpers
    pure function is_valid_axis(c, ng) result(ok)
