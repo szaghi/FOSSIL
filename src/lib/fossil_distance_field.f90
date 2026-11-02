@@ -56,6 +56,7 @@ type :: distance_field_object
    real(R8P)                          :: band_width = 0._R8P !< Band half-width used by the last compute_band.
    real(R8P)                          :: local_spacing = 0._R8P !< Largest spacing near the surface (default_band / 2).
    integer(I4P)                       :: sign_algorithm = SIGN_PSEUDO_NORMAL !< Sign algorithm of the last compute_band.
+   logical                            :: use_device = .false. !< Device flag of the last compute_band (point queries follow it).
    integer(I4P)                       :: band_cells = 0_I4P  !< Number of band cells.
    logical                            :: is_signed = .true.  !< Signed field (else unsigned distance).
    real(R8P),    allocatable, public  :: phi(:,:,:)          !< Signed distance; FAR_VALUE where unknown. PUBLIC for halo exchange.
@@ -124,6 +125,7 @@ contains
    self%band_width = 0._R8P
    self%local_spacing = 0._R8P
    self%sign_algorithm = SIGN_PSEUDO_NORMAL
+   self%use_device = .false.
    self%band_cells = 0_I4P
    self%is_signed  = .true.
    endsubroutine destroy
@@ -203,8 +205,6 @@ contains
    logical,                      intent(in),  optional :: use_device     !< Band batch on the GPU (default .false.).
    integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    real(R8P)                                           :: band_          !< Resolved band.
-   logical                                             :: use_device_    !< Resolved device flag.
-   logical                                             :: was_resident   !< Surface already on the device.
    integer(I4P)                                        :: algo           !< Resolved sign algorithm.
    logical,                      allocatable           :: candidate(:,:,:) !< Candidate mask.
    type(vector_R8P),             allocatable           :: points(:)      !< Candidate points.
@@ -233,6 +233,7 @@ contains
    self%is_signed = .true. ; if (present(is_signed)) self%is_signed = is_signed
    algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
    self%sign_algorithm = algo
+   self%use_device = .false. ; if (present(use_device)) self%use_device = use_device
    self%local_spacing  = 0.5_R8P * self%default_band(surface)
 
    self%phi        = FAR_VALUE
@@ -275,17 +276,8 @@ contains
          enddo
       enddo
    enddo
-   use_device_ = .false. ; if (present(use_device)) use_device_ = use_device
-   if (use_device_) then
-      was_resident = surface%is_on_device
-      if (.not. was_resident) call surface%enter_device
-      call surface%distance_many_device(points=points, distances=d, is_signed=self%is_signed, sign_algorithm=algo, &
-                                        is_square_root=.true., status=st)
-      if (.not. was_resident) call surface%exit_device
-   else
-      call surface%distance_many(points=points, distances=d, is_signed=self%is_signed, sign_algorithm=algo, &
-                                 is_square_root=.true., status=st)
-   endif
+   call batch_distances(surface=surface, points=points, d=d, is_signed=self%is_signed, sign_algorithm=algo, &
+                        use_device=self%use_device, status=st)
    if (st /= STATUS_OK) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
@@ -318,7 +310,9 @@ contains
    !< across the surface while touching band cells of one sign only, so every non-band cell
    !< gets a point query instead: correct, at the cost of one distance query per cell.
    !<
-   !< Point queries use `surface%distance_many` with the sign algorithm of `compute_band`.
+   !< Point queries use `surface%distance_many` with the sign algorithm of `compute_band`, or
+   !< `surface%distance_many_device` if `compute_band` ran with `use_device=.true.` (bit-exact
+   !< with the host queries where validated).
    !< Magnitudes are kept (`phi = sign(|phi|, s)`). No-op on an unsigned field.
    class(distance_field_object), intent(inout)         :: self           !< Distance field.
    type(surface_stl_object),     intent(inout), target :: surface        !< Surface.
@@ -425,8 +419,8 @@ contains
       enddo
    enddo
    if (n_query > 0_I4P) then
-      call surface%distance_many(points=points, distances=d, is_signed=.true., sign_algorithm=self%sign_algorithm, &
-                                 status=st)
+      call batch_distances(surface=surface, points=points, d=d, is_signed=.true., sign_algorithm=self%sign_algorithm, &
+                           use_device=self%use_device, status=st)
       if (st /= STATUS_OK) then
          if (present(status)) status = STATUS_INVALID_INPUT
          return
@@ -659,6 +653,31 @@ contains
    endsubroutine compute
 
    ! private helpers
+   subroutine batch_distances(surface, points, d, is_signed, sign_algorithm, use_device, status)
+   !< One batch of distance queries, on the host (`distance_many`) or on the device
+   !< (`distance_many_device`). The device path makes the surface resident for the call and
+   !< releases it after, unless it was already resident.
+   type(surface_stl_object), intent(inout), target :: surface        !< Surface.
+   type(vector_R8P),         intent(in)            :: points(:)      !< Query points.
+   real(R8P),                intent(out)           :: d(:)           !< Distances.
+   logical,                  intent(in)            :: is_signed      !< Signed distances.
+   integer(I4P),             intent(in)            :: sign_algorithm !< SIGN_* code.
+   logical,                  intent(in)            :: use_device     !< Device batch.
+   integer(I4P),             intent(out)           :: status         !< distance_many(_device) status.
+   logical                                         :: was_resident   !< Surface already on the device.
+
+   if (use_device) then
+      was_resident = surface%is_on_device
+      if (.not. was_resident) call surface%enter_device
+      call surface%distance_many_device(points=points, distances=d, is_signed=is_signed, sign_algorithm=sign_algorithm, &
+                                        is_square_root=.true., status=status)
+      if (.not. was_resident) call surface%exit_device
+   else
+      call surface%distance_many(points=points, distances=d, is_signed=is_signed, sign_algorithm=sign_algorithm, &
+                                 is_square_root=.true., status=status)
+   endif
+   endsubroutine batch_distances
+
    pure function solve_quadratic(a, h) result(u)
    !< Solution of sum over the active axes of ((u - a(d)) / h(d))**2 = 1, where an axis is
    !< active when u > a(d): axes are added in increasing a(d) and the first consistent solution

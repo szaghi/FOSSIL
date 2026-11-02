@@ -9,7 +9,9 @@ program fossil_test_distance_field_sign
 !<    cells are outside the solid;
 !<  - the hollow cube with a band thinner than the grid spacing: the fallback must run
 !<    (fallback cells > 0) and the signs must still match;
-!<  - grids that do not see the surface (all outside, all inside): one point query each.
+!<  - grids that do not see the surface (all outside, all inside): one point query each;
+!<  - the thin-band hollow cube with `use_device=.true.` (host loop under gfortran, GPU under
+!<    nvfortran): the field equals the host field bit for bit, fallback queries included.
 
 use fossil, only : surface_stl_object, facet_object, SIGN_PSEUDO_NORMAL, STATUS_OK
 use fossil_distance_field, only : distance_field_object
@@ -62,10 +64,29 @@ call check_case(label='grid outside the surface', surface=cube, x=3._R8P + xg, e
 call check_case(label='grid inside the solid', surface=cube, x=0.4_R8P + 0.1_R8P * (xg + 0.3_R8P) / 1.6_R8P, &
                 band=0.05_R8P, expect_fallback=.true.)
 
+call device_case
+
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
 contains
+   subroutine device_case
+   !< Thin band (fallback) with the device flag: same signs and values as the host path.
+   type(distance_field_object) :: fh, fd
+   integer(I4P)                :: nfh, nfd
+   logical                     :: case_ok
+
+   call fh%initialize(x=xg, y=xg, z=xg)
+   call fd%initialize(x=xg, y=xg, z=xg)
+   call fh%compute_band(surface=hollow, band=0.3_R8P * (xg(2) - xg(1)))
+   call fd%compute_band(surface=hollow, band=0.3_R8P * (xg(2) - xg(1)), use_device=.true.)
+   call fh%compute_signs(surface=hollow, fallback_cells=nfh)
+   call fd%compute_signs(surface=hollow, fallback_cells=nfd)
+   case_ok = nfh > 0 .and. nfh == nfd .and. all(fh%phi == fd%phi) .and. .not. hollow%is_on_device
+   print '(A,I0,A,L1)', 'device flag, thin band: fallback ', nfd, '  field == host field: ', case_ok
+   ok = ok .and. case_ok
+   endsubroutine device_case
+
    subroutine check_case(label, surface, x, expect_fallback, band)
    !< Band + signs on an x = y = z grid; compare every interior sign with the per-cell PN sign.
    character(*),             intent(in)           :: label           !< Case label.

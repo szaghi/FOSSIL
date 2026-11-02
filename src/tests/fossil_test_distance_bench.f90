@@ -297,15 +297,16 @@ if (.not. (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refu
 
 contains
    subroutine field_band_case(ok)
-   !< Narrow band of a distance field over the probe box (grid_n^3 points, PN sign): the band
-   !< computed through distance_many_device must equal the host band bit for bit (issue #32).
-   !< Timings of both band batches printed (host: distance_many, OpenMP if enabled).
+   !< Narrow band and signs of a distance field over the probe box (grid_n^3 points, PN sign):
+   !< band and sign point queries through distance_many_device must equal the host ones bit for
+   !< bit (issue #32). Timings printed (host: distance_many, OpenMP if enabled).
    logical, intent(out)        :: ok              !< Pass flag.
    type(distance_field_object) :: host, dev       !< Host and device fields.
    real(R8P),    allocatable   :: gx(:), gy(:), gz(:)
-   integer(I4P)                :: m, st_h, st_d
+   integer(I4P)                :: m, st_h, st_d, fb_h, fb_d
    integer(I8P)                :: c0, c1, rate
-   real(R8P)                   :: t_host, t_dev
+   real(R8P)                   :: t_host, t_dev, ts_host, ts_dev
+   logical                     :: band_ok
 
    allocate(gx(grid_n), gy(grid_n), gz(grid_n))
    do m = 1_I4P, grid_n
@@ -324,13 +325,27 @@ contains
    call dev%compute_band(surface=surface, sign_algorithm=SIGN_PSEUDO_NORMAL, use_device=.true., status=st_d)
    call system_clock(c1)
    t_dev = real(c1 - c0, R8P) / real(rate, R8P)
-   ok = st_h == STATUS_OK .and. st_d == STATUS_OK .and. host%get_band_cells() > 0_I4P .and. &
+   band_ok = st_h == STATUS_OK .and. st_d == STATUS_OK .and. host%get_band_cells() > 0_I4P .and. &
         all(host%phi == dev%phi) .and. all(host%in_band .eqv. dev%in_band)
+   ! signs: the point queries follow the band's device flag (open meshes query most cells)
+   call system_clock(c0, rate)
+   call host%compute_signs(surface=surface, fallback_cells=fb_h, status=st_h)
+   call system_clock(c1)
+   ts_host = real(c1 - c0, R8P) / real(rate, R8P)
+   call system_clock(c0, rate)
+   call dev%compute_signs(surface=surface, fallback_cells=fb_d, status=st_d)
+   call system_clock(c1)
+   ts_dev = real(c1 - c0, R8P) / real(rate, R8P)
+   ok = band_ok .and. st_h == STATUS_OK .and. st_d == STATUS_OK .and. fb_h == fb_d .and. all(host%phi == dev%phi)
    print '(A)',          'distance-field band (issue #32, PN sign, probe box):'
    print '(A,I0,A,ES10.3)', '   band cells:             ', host%get_band_cells(), '   band ', host%get_band_width()
    print '(A,F12.4,A)',  '   host band wall-clock:   ', 1000._R8P * t_host, ' ms'
    print '(A,F12.4,A)',  '   device band wall-clock: ', 1000._R8P * t_dev, ' ms (incl. enter/exit_device)'
-   print '(A,L1)',       '   device band == host band: ', ok
+   print '(A,L1)',       '   device band == host band: ', band_ok
+   print '(A,I0)',       '   sign fallback cells:    ', fb_h
+   print '(A,F12.4,A)',  '   host signs wall-clock:  ', 1000._R8P * ts_host, ' ms'
+   print '(A,F12.4,A)',  '   device signs wall-clock:', 1000._R8P * ts_dev, ' ms (incl. enter/exit_device)'
+   print '(A,L1)',       '   device field == host field (band + signs): ', ok
    print '(A)',          ''
    endsubroutine field_band_case
 
