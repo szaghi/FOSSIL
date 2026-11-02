@@ -1,4 +1,8 @@
 !< FOSSIL, test normals *sanitization*.
+!<
+!< The default input, cube-inconsistent.stl, is the unit cube with one facet wound the
+!< wrong way: its signed volume is 1 - 2*(1/6) = 2/3 before the fix. sanitize_normals
+!< must report at least one flipped facet and restore volume 1.
 
 program fossil_test_sanitize_normals
 !< FOSSIL, test normals *sanitization*.
@@ -11,7 +15,8 @@ implicit none
 
 type(surface_stl_object) :: surface             !< STL surface.
 character(999)           :: file_name_stl       !< Input STL file name.
-logical                  :: are_tests_passed(2) !< Result of tests check.
+logical                  :: are_tests_passed(3) !< Result of tests check.
+integer(I4P)             :: flipped_count       !< Facets reversed by sanitize_normals.
 
 are_tests_passed = .false.
 
@@ -19,11 +24,13 @@ call cli_parse
 call surface%load_from_file(file_name=trim(adjustl(file_name_stl)), guess_format=.true.)
 
 print*, 'volume before sanitize normals: ', surface%get_volume()
-are_tests_passed(1) = surface%get_volume() <= 0._R8P
-call surface%sanitize_normals
+are_tests_passed(1) = abs(surface%get_volume() - 1._R8P) > 0.1_R8P   ! the defect is visible in the volume
+call surface%sanitize_normals(flipped_count=flipped_count)
 call surface%compute_volume
 print*, 'volume after sanitize normals:  ', surface%get_volume()
-are_tests_passed(2) = nint(surface%get_volume()) == 1
+print*, 'facets flipped:                 ', flipped_count
+are_tests_passed(2) = abs(surface%get_volume() - 1._R8P) < 1.e-12_R8P
+are_tests_passed(3) = flipped_count > 0_I4P
 
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 contains
