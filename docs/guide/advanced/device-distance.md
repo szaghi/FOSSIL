@@ -259,13 +259,14 @@ How to read these numbers:
   needed, `enter_device` again.
 - **`destroy` does not release the device copy** (see
   [Release](#release)).
-- **Traversal stack depth.** The explicit traversal stack holds 128
-  entries (`MAX_TRAVERSAL_STACK`). A binary BVH needs about one entry per
-  tree level. Measured depths are small: 12 levels on bunny (69451 facets),
-  13 on dragon-fine (24318 facets). But the builder does not cap the depth
-  and the push is not bounds-checked, so a pathologically skewed tree
-  deeper than about 127 levels would write past the stack. This applies to
-  the CPU path too, which uses the same traversal.
+- **Bounded tree depth.** The traversal uses a fixed stack of 128 entries
+  (`MAX_TRAVERSAL_STACK`), and a binary BVH of depth D needs D + 1 of them.
+  The SAH builder therefore stops splitting at depth 127 and makes the rest
+  of that subtree one leaf. Real meshes never get near it (12 levels on
+  bunny, 13 on dragon-fine): reaching it takes facet sizes spread over
+  roughly 600 binary orders of magnitude. A mesh that does reach it stays
+  exact, only slower on the capped subtree. The CPU path shares the
+  traversal and the cap.
 - **Validated on one GPU.** Bit-exactness and the timings above come from
   one consumer GPU (RTX 4070) with nvfortran 26.9. The device build is not
   part of CI (no GPU runner): it is validated manually with
