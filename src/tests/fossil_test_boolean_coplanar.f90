@@ -1,5 +1,5 @@
 !< FOSSIL test: mesh booleans on coplanar overlaps (issue #33).
-program fossil_xfail_boolean_coplanar
+program fossil_test_boolean_coplanar
 !< FOSSIL test: mesh booleans on coplanar overlaps (issue #33).
 !<
 !< A = unit cube, B = a box at an offset; the four ops against analytic volumes, axis-aligned
@@ -11,11 +11,13 @@ program fossil_xfail_boolean_coplanar
 !<  - a 1 x 0.5 x 0.5 box on A's z = 0 plane, partially overlapping it;
 !<  - generic offset (0.5, 0.5, 0.5), no coplanar faces (control).
 !< A check passes when the status is OK, the volume is within 1e-10 (relative to max(V, 1)) of
-!< the analytic one, and a non-empty result is watertight and manifold.
+!< the analytic one, and a non-empty result is watertight and manifold. Exception: a symmetric
+!< difference A^B = (A\B) u (B\A) whose two pieces touch along the curves where the surfaces cross
+!< (offset xy, box on face plane, generic) is non-manifold by definition (four facets at each
+!< such edge), so there only its volume is checked.
 !<
-!< Expected-failure program while the coplanar support is incomplete: it exits 1 if any check
-!< fails (run_tests.sh requires *_xfail_* programs to exit non-zero). Issue #33 step 5 renames
-!< it to fossil_test_boolean_coplanar once every check passes.
+!< Started as fossil_xfail_boolean_coplanar (4 of 48 checks passing); a regular test since the
+!< coplanar cuts, the exact pair classification and the T-junction closing made all 48 pass.
 use fossil, only : surface_stl_object, BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF, BOOL_STATUS_OK
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
@@ -29,22 +31,22 @@ mesh = 'src/tests/cube.stl'
 if (command_argument_count() >= 1) call get_command_argument(1, mesh)
 do r = 0, 1
    ! A = unit cube; B = box of size s at offset t; expected volumes [U, I, D, S]
-   call run('offset x 0.5', &
+   call run('offset x 0.5', .true., &
             [0.5_R8P, 0._R8P, 0._R8P], [1._R8P, 1._R8P, 1._R8P], &
             [1.5_R8P, 0.5_R8P, 0.5_R8P, 1._R8P], r == 1)
-   call run('offset xy 0.5', &
+   call run('offset xy 0.5', .false., &
             [0.5_R8P, 0.5_R8P, 0._R8P], [1._R8P, 1._R8P, 1._R8P], &
             [1.75_R8P, 0.25_R8P, 0.75_R8P, 1.5_R8P], r == 1)
-   call run('face touching', &
+   call run('face touching', .true., &
             [1._R8P, 0._R8P, 0._R8P], [1._R8P, 1._R8P, 1._R8P], &
             [2._R8P, 0._R8P, 1._R8P, 2._R8P], r == 1)
-   call run('identical', &
+   call run('identical', .true., &
             [0._R8P, 0._R8P, 0._R8P], [1._R8P, 1._R8P, 1._R8P], &
             [1._R8P, 1._R8P, 0._R8P, 0._R8P], r == 1)
-   call run('box on face plane', &
+   call run('box on face plane', .false., &
             [0.5_R8P, 0.25_R8P, 0._R8P], [1._R8P, 0.5_R8P, 0.5_R8P], &
             [1.125_R8P, 0.125_R8P, 0.875_R8P, 1._R8P], r == 1)
-   call run('generic xyz 0.5', &
+   call run('generic xyz 0.5', .false., &
             [0.5_R8P, 0.5_R8P, 0.5_R8P], [1._R8P, 1._R8P, 1._R8P], &
             [1.875_R8P, 0.125_R8P, 0.875_R8P, 1.75_R8P], r == 1)
 enddo
@@ -52,8 +54,9 @@ print '(A,I0,A,I0)', 'checks passed: ', n_ok, ' of ', n_all
 print '(A,L1)', 'Are all tests passed? ', n_ok == n_all
 if (n_ok /= n_all) error stop 1
 contains
-   subroutine run(label, t, s, expected, rotated)
+   subroutine run(label, symdiff_manifold, t, s, expected, rotated)
    character(*), intent(in) :: label
+   logical,      intent(in) :: symdiff_manifold !< A\B and B\A disjoint or sharing whole faces.
    real(R8P),    intent(in) :: t(3), s(3), expected(4)
    logical,      intent(in) :: rotated
    type(surface_stl_object) :: a, b
@@ -76,7 +79,8 @@ contains
       v = a%get_volume()
       err = abs(v - expected(k)) / max(expected(k), 1._R8P)
       wt = a%is_watertight() ; mf = a%is_manifold()
-      ok = st == BOOL_STATUS_OK .and. err <= 1.e-10_R8P .and. (expected(k) == 0._R8P .or. (wt .and. mf))
+      ok = st == BOOL_STATUS_OK .and. err <= 1.e-10_R8P .and. &
+           (expected(k) == 0._R8P .or. (wt .and. mf) .or. (OPS(k) == BOOL_SYMDIFF .and. .not. symdiff_manifold))
       if (expected(k) == 0._R8P) ok = st == BOOL_STATUS_OK .and. abs(v) <= 1.e-10_R8P
       n_all = n_all + 1 ; if (ok) n_ok = n_ok + 1
       write(line(1+15*(k-1):), '(A1,A1,F9.5,A1,L1,L1)') OPN(k), merge('+', 'x', ok), v, ' ', wt, mf
@@ -84,4 +88,4 @@ contains
    enddo
    print '(A,A,A,I2,A,A)', merge('rot ', '    ', rotated), label, repeat(' ', 20 - len(label)), st, '  ', trim(line)
    endsubroutine run
-endprogram fossil_xfail_boolean_coplanar
+endprogram fossil_test_boolean_coplanar

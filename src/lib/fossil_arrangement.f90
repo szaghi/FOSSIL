@@ -84,6 +84,8 @@ type :: cut_list_t
    !< `2 * n_segments` (with `point` over-allocated to amortize append cost).
    integer(I4P)                  :: n_segments = 0_I4P  !< Number of intersection segments stored.
    type(vector_R8P), allocatable :: point(:)            !< Flat 3D point buffer; pairs of consecutive entries form segments.
+   integer(I4P)                  :: n_steiner = 0_I4P   !< Number of isolated points (issue #33).
+   type(vector_R8P), allocatable :: steiner(:)          !< Points on the facet's edges coming from the neighbour across them.
 endtype cut_list_t
 
 type :: arrangement_t
@@ -172,10 +174,12 @@ contains
    if (arr%tree_a%get_nodes_number() <= 0 .or. arr%tree_b%get_nodes_number() <= 0) then
       ! Brute-force fallback when either tree is empty.
       call collect_brute_force(arr=arr)
+      call propagate_edge_points(arr=arr)
       return
    endif
 
    call traverse_cross_pair(arr=arr, na=0_I4P, nb=0_I4P)
+   call propagate_edge_points(arr=arr)
    endsubroutine arrangement_collect_intersections
 
    subroutine collect_brute_force(arr)
@@ -281,6 +285,73 @@ contains
       enddo
    enddo
    endsubroutine enumerate_leaf_cross_pair
+
+   subroutine propagate_edge_points(arr)
+   !< Close the T-junctions (issue #33). A cut endpoint lying inside an edge of its facet splits
+   !< that edge in this facet's retriangulation; the facet across the edge (same surface, from
+   !< `fcon_edge`) must split it at the same point, or the result has a crack there and is not
+   !< watertight. Every such point is added to the neighbour as an isolated (Steiner) point. The
+   !< point is the same canonical point, so both sides get identical bits. A point lies inside an
+   !< edge when it differs from both endpoints, its parameter is in (0, 1), and its distance from
+   !< the edge line is below 1e-9 of the edge length.
+   type(arrangement_t), intent(inout) :: arr      !< Arrangement.
+   integer(I4P)                       :: gi, k, e, nb, gn
+   type(vector_R8P)                   :: pt, a, b
+   real(R8P)                          :: d(3), w(3), len2, t, dist2
+   real(R8P), parameter               :: REL_TOL = 1.e-9_R8P
+
+   do gi = 1, arr%n_a + arr%n_b
+      do k = 1, 2 * arr%cut(gi)%n_segments
+         pt = arr%cut(gi)%point(k)
+         do e = 1, 3
+            a = arr%facet(gi)%vertex(e)
+            b = arr%facet(gi)%vertex(mod(e, 3) + 1)
+            if (same_point(pt, a) .or. same_point(pt, b)) cycle
+            d = [b%x - a%x, b%y - a%y, b%z - a%z]
+            w = [pt%x - a%x, pt%y - a%y, pt%z - a%z]
+            len2 = sum(d * d)
+            if (len2 <= 0._R8P) cycle
+            t = sum(w * d) / len2
+            if (t <= 0._R8P .or. t >= 1._R8P) cycle
+            dist2 = sum((w - t * d)**2)
+            if (dist2 > (REL_TOL * REL_TOL) * len2) cycle
+            nb = arr%facet(gi)%fcon_edge(e)
+            if (nb <= 0_I4P) cycle
+            gn = nb ; if (arr%owner(gi) == 2_I4P) gn = arr%n_a + nb
+            if (gn < 1_I4P .or. gn > arr%n_a + arr%n_b) cycle
+            call append_steiner(cut=arr%cut(gn), p=pt)
+         enddo
+      enddo
+   enddo
+   endsubroutine propagate_edge_points
+
+   subroutine append_steiner(cut, p)
+   !< Append an isolated point to a cut list (no duplicates, compared bit for bit).
+   type(cut_list_t), intent(inout) :: cut !< Cut list.
+   type(vector_R8P), intent(in)    :: p   !< Point.
+   type(vector_R8P), allocatable   :: tmp(:)
+   integer(I4P)                    :: i
+
+   do i = 1, cut%n_steiner
+      if (same_point(cut%steiner(i), p)) return
+   enddo
+   if (.not. allocated(cut%steiner)) then
+      allocate(cut%steiner(4))
+   elseif (cut%n_steiner == size(cut%steiner)) then
+      allocate(tmp(2 * size(cut%steiner)))
+      tmp(1:cut%n_steiner) = cut%steiner(1:cut%n_steiner)
+      call move_alloc(from=tmp, to=cut%steiner)
+   endif
+   cut%n_steiner = cut%n_steiner + 1_I4P
+   cut%steiner(cut%n_steiner) = p
+   endsubroutine append_steiner
+
+   pure function same_point(a, b) result(same)
+   type(vector_R8P), intent(in) :: a, b
+   logical                      :: same
+
+   same = a%x == b%x .and. a%y == b%y .and. a%z == b%z
+   endfunction same_point
 
    subroutine collect_pair(arr, gi, gj)
    !< Intersect facets gi (of A) and gj (of B) with the exact pair classification and append a
@@ -447,6 +518,7 @@ contains
    real(R8P)                                              :: u, v
    integer(I4P)                                           :: idx_p, idx_q
    integer(I4P)                                           :: n_before   !< Points before a lookup.
+   integer(I4P)                                           :: n_st       !< Isolated points of the facet.
    ! Output accumulator, doubled on demand.
    type(facet_object), allocatable                        :: buf_facet(:)
    integer(I4P),       allocatable                        :: buf_owner(:), buf_source(:)
@@ -463,8 +535,8 @@ contains
 
    do gi = 1, n_total
       n_cuts = arr%cut(gi)%n_segments
-
-      if (n_cuts == 0_I4P) then
+      n_st   = arr%cut(gi)%n_steiner
+      if (n_cuts == 0_I4P .and. n_st == 0_I4P) then
          ! Pass-through.
          call push(buf_facet, buf_owner, buf_source, used, cap, &
                    arr%facet(gi), arr%owner(gi), gi)
@@ -477,9 +549,9 @@ contains
       if (allocated(pts2d)) deallocate(pts2d)
       if (allocated(pts3d)) deallocate(pts3d)
       if (allocated(segs))  deallocate(segs)
-      allocate(pts2d(2, 3 + 2 * n_cuts))
-      allocate(pts3d(3 + 2 * n_cuts))
-      allocate(segs(2, n_cuts))
+      allocate(pts2d(2, 3 + 2 * n_cuts + n_st))
+      allocate(pts3d(3 + 2 * n_cuts + n_st))
+      allocate(segs(2, max(n_cuts, 1_I4P)))
 
       ! Three facet vertices first (so they keep stable indices 1, 2, 3).
       do i = 1, 3
@@ -505,6 +577,14 @@ contains
          n_segs = n_segs + 1
          segs(1, n_segs) = idx_p
          segs(2, n_segs) = idx_q
+      enddo
+
+      ! Isolated points on the facet's edges, from the neighbours' cuts (T-junctions).
+      do k = 1, n_st
+         n_before = n_pts
+         call project_to_plane(facet=arr%facet(gi), p3d=arr%cut(gi)%steiner(k), u=u, v=v)
+         idx_p = find_or_append_2d(pts2d=pts2d, n_pts=n_pts, x=u, y=v)
+         if (n_pts > n_before) pts3d(idx_p) = arr%cut(gi)%steiner(k)
       enddo
 
       ! --- Split constraints at the points lying on them (collinear overlapping cuts, cuts along
