@@ -28,7 +28,7 @@ features:
     details: Sanitize pipeline detects and fixes degenerate slivers, literal duplicates, disconnected edges, non-manifold edges, and inward-pointing normals. Predicates is_watertight / is_manifold / is_volume summarise the result.
   - icon: 📏
     title: Signed Distance
-    details: Bit-exact closest-facet lookup via best-first traversal with d² pruning. Sign via Bærentzen–Aanæs pseudo-normal (default), ray intersection, or solid angle.
+    details: Bit-exact closest-facet lookup via best-first traversal with d² pruning. Sign via Bærentzen–Aanæs pseudo-normal (default), ray intersection, or solid angle. Batch queries run OpenMP-parallel on the CPU or, via OpenACC, on the GPU.
   - icon: ⚡
     title: SAH BVH Acceleration
     details: Binary BVH built with the surface-area heuristic — adapts to triangle density. ~100× faster distance queries than the legacy octree on dragon-scale meshes. Octree remains selectable.

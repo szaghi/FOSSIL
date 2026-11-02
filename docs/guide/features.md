@@ -66,6 +66,8 @@ Individual passes (`remove_degenerate_facets`, `remove_duplicate_facets`, `conne
   - `SIGN_RAY_INTERSECTIONS` — odd/even axis-aligned ray-cast count. Robust on meshes with mixed orientation but ~3× slower than pseudo-normal.
   - `SIGN_SOLID_ANGLE` — sum of projected solid angles ≈ ±4π. Robust but unaccelerated; O(N) per query.
 - `surface%is_point_inside(point, sign_algorithm)` is the predicate form of the same test.
+- `surface%distance_many(points, distances, ...)` is the batch form: one distance per point of an array, with the same options. The loop is OpenMP-parallel when built with OpenMP (`tests-gnu-openmp`) and serial otherwise, with identical results.
+- `surface%distance_many_device(points, distances, ...)` runs the same batch on the GPU (OpenACC, nvfortran), between `enter_device` and `exit_device`. SAH BVH and `SIGN_PSEUDO_NORMAL` only; bit-exact vs the CPU path where validated. See [GPU distance queries](/guide/advanced/device-distance).
 
 All tree-accelerated queries are **bit-exact** vs. brute force on the regression suite — best-first traversal with d² pruning never prunes the true closest facet.
 
