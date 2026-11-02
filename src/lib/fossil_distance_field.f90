@@ -15,6 +15,11 @@ module fossil_distance_field
 !<  2. **Signs** (`compute_signs`): the cells outside the band are grouped into 6-connected
 !<     components; the band separates inside from outside, so each component takes the sign
 !<     of the band cells it touches. Point queries cover what the band cannot decide.
+!<  3. **Far field** (`sweep`): the Fast Sweeping Method (Zhao 2005) solves |grad phi| = 1
+!<     outside the band, with the band values fixed. Godunov upwind update with the
+!<     non-uniform one-sided spacings of each axis; sweeps in hyperplane order (Detrixhe,
+!<     Gibou & Min 2013), so the cells of one plane are independent. First-order accurate.
+!<  `compute` runs the three stages.
 !<
 !< Halo: the outer `ng` layers of cells on each side are halo cells. They are never
 !< computed; a caller with a block decomposition fills them from the neighbouring blocks.
@@ -55,11 +60,15 @@ type :: distance_field_object
       procedure, pass(self) :: destroy        !< Free the field.
       procedure, pass(self) :: compute_band   !< Exact signed distances in the narrow band.
       procedure, pass(self) :: compute_signs  !< Signs outside the band by flood fill.
+      procedure, pass(self) :: sweep          !< Far-field magnitudes by fast sweeping.
+      procedure, pass(self) :: compute        !< compute_band + compute_signs + sweep.
       procedure, pass(self) :: get_dims       !< Points per axis and halo width.
       procedure, pass(self) :: get_band_width !< Band half-width of the last compute_band.
       procedure, pass(self) :: get_band_cells !< Number of band cells.
       procedure, pass(self) :: default_band   !< Default band for a surface: 2 x the local max spacing.
       procedure, pass(self), private :: linear   !< Linear index of a cell.
+      procedure, pass(self), private :: sweep_once !< One directional sweep.
+      procedure, pass(self), private :: godunov  !< Godunov update of one cell.
       procedure, pass(self), private :: unlinear !< Cell of a linear index.
 endtype distance_field_object
 
@@ -426,6 +435,151 @@ contains
    enddo
    endsubroutine compute_signs
 
+   subroutine sweep(self, tol, max_sweeps, sweeps, max_change, status)
+   !< Far-field magnitudes by the Fast Sweeping Method (call after `compute_band` and, for a
+   !< signed field, `compute_signs`).
+   !<
+   !< Solves |grad phi| = 1 on the non-band interior cells with the band cells and the halo
+   !< cells fixed. Each directional sweep visits the hyperplanes i' + j' + k' = s in order,
+   !< where (i', j', k') are the interior indices counted from the corner the sweep starts at;
+   !< a cell's six neighbours lie on the planes s - 1 and s + 1, so the cells of one plane are
+   !< independent and the result does not depend on the order inside a plane. The 8 sweep
+   !< directions alternate; after each full cycle of 8 the largest change of |phi| is
+   !< compared with `tol` times the diagonal of the interior box.
+   !<
+   !< The update of a cell takes, per axis, the neighbour that gives the larger one-sided slope
+   !< (u - a) / h at the solution (h is that side's spacing), and solves the Godunov quadratic
+   !< over the axes whose neighbour is below u. Magnitudes only decrease; signs are kept.
+   !<
+   !< Accuracy: first order away from the band (the band values are exact). A caller with a
+   !< block decomposition alternates halo exchanges with calls of `sweep(max_sweeps=8)` until
+   !< the global `max_change` is below its tolerance.
+   class(distance_field_object), intent(inout)         :: self       !< Distance field.
+   real(R8P),                    intent(in),  optional :: tol        !< Relative tolerance (default 1e-12).
+   integer(I4P),                 intent(in),  optional :: max_sweeps !< Maximum directional sweeps (default 400).
+   integer(I4P),                 intent(out), optional :: sweeps     !< Directional sweeps done.
+   real(R8P),                    intent(out), optional :: max_change !< Largest |phi| change of the last cycle.
+   integer(I4P),                 intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)                                           :: tol_       !< Absolute tolerance.
+   integer(I4P)                                        :: max_sweeps_, n_sweeps, dir
+   real(R8P)                                           :: cycle_change, change
+
+   if (present(status)) status = STATUS_OK
+   if (present(sweeps)) sweeps = 0_I4P
+   if (present(max_change)) max_change = 0._R8P
+   if (.not. allocated(self%phi)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   tol_ = 1.e-12_R8P ; if (present(tol)) tol_ = tol
+   tol_ = tol_ * sqrt((self%x(self%ni - self%ng) - self%x(self%ng + 1_I4P))**2 + &
+                      (self%y(self%nj - self%ng) - self%y(self%ng + 1_I4P))**2 + &
+                      (self%z(self%nk - self%ng) - self%z(self%ng + 1_I4P))**2)
+   max_sweeps_ = 400_I4P ; if (present(max_sweeps)) max_sweeps_ = max_sweeps
+
+   n_sweeps     = 0_I4P
+   cycle_change = 0._R8P
+   do while (n_sweeps < max_sweeps_)
+      dir = mod(n_sweeps, 8_I4P)
+      call self%sweep_once(dir=dir, change=change)
+      n_sweeps = n_sweeps + 1_I4P
+      cycle_change = max(cycle_change, change)
+      if (dir == 7_I4P) then
+         if (cycle_change <= tol_) exit
+         if (n_sweeps < max_sweeps_) cycle_change = 0._R8P
+      endif
+   enddo
+   if (present(sweeps)) sweeps = n_sweeps
+   if (present(max_change)) max_change = cycle_change
+   endsubroutine sweep
+
+   subroutine sweep_once(self, dir, change)
+   !< One directional sweep in hyperplane order. `dir` in 0..7 selects the signs of the three
+   !< axes (bit 0: x reversed, bit 1: y, bit 2: z). `change` is the largest |phi| decrease
+   !< (FAR_VALUE counts as a change of FAR_VALUE).
+   class(distance_field_object), intent(inout) :: self   !< Distance field.
+   integer(I4P),                 intent(in)    :: dir    !< Sweep direction.
+   real(R8P),                    intent(out)   :: change !< Largest change.
+   integer(I4P)                                :: n1, n2, n3, s, ip, jp, kp, i, j, k
+   logical                                     :: rx, ry, rz
+   real(R8P)                                   :: u, old
+
+   n1 = self%ni - 2_I4P * self%ng
+   n2 = self%nj - 2_I4P * self%ng
+   n3 = self%nk - 2_I4P * self%ng
+   rx = btest(dir, 0) ; ry = btest(dir, 1) ; rz = btest(dir, 2)
+   change = 0._R8P
+   do s = 0_I4P, n1 + n2 + n3 - 3_I4P
+      do kp = max(0_I4P, s - (n1 - 1_I4P) - (n2 - 1_I4P)), min(n3 - 1_I4P, s)
+         do jp = max(0_I4P, s - kp - (n1 - 1_I4P)), min(n2 - 1_I4P, s - kp)
+            ip = s - kp - jp
+            i = self%ng + 1_I4P + ip ; if (rx) i = self%ni - self%ng - ip
+            j = self%ng + 1_I4P + jp ; if (ry) j = self%nj - self%ng - jp
+            k = self%ng + 1_I4P + kp ; if (rz) k = self%nk - self%ng - kp
+            if (self%in_band(i, j, k)) cycle
+            old = abs(self%phi(i, j, k))
+            u   = self%godunov(i, j, k)
+            if (u < old) then
+               self%phi(i, j, k) = sign(u, self%phi(i, j, k))
+               change = max(change, old - u)
+            endif
+         enddo
+      enddo
+   enddo
+   endsubroutine sweep_once
+
+   pure function godunov(self, i, j, k) result(u)
+   !< Godunov upwind solution of |grad u| = 1 at cell (i, j, k) from the magnitudes of its six
+   !< neighbours, with non-uniform one-sided spacings. Missing neighbours (grid boundary) and
+   !< FAR_VALUE neighbours do not contribute. Returns FAR_VALUE when no neighbour is known.
+   class(distance_field_object), intent(in) :: self    !< Distance field.
+   integer(I4P),                 intent(in) :: i, j, k !< Cell.
+   real(R8P)                                :: u       !< Solution.
+   real(R8P)                                :: a(2, 3) !< Neighbour magnitudes (side, axis).
+   real(R8P)                                :: h(2, 3) !< One-sided spacings (side, axis).
+   real(R8P)                                :: aa(3), hh(3) !< Chosen side per axis.
+   integer(I4P)                             :: side(3), side_new(3), d, it
+   real(R8P)                                :: ub      !< One-axis upper bound.
+
+   a = FAR_VALUE ; h = 1._R8P
+   if (i > 1_I4P)       then ; a(1, 1) = abs(self%phi(i - 1_I4P, j, k)) ; h(1, 1) = self%x(i) - self%x(i - 1_I4P) ; endif
+   if (i < self%ni)     then ; a(2, 1) = abs(self%phi(i + 1_I4P, j, k)) ; h(2, 1) = self%x(i + 1_I4P) - self%x(i) ; endif
+   if (j > 1_I4P)       then ; a(1, 2) = abs(self%phi(i, j - 1_I4P, k)) ; h(1, 2) = self%y(j) - self%y(j - 1_I4P) ; endif
+   if (j < self%nj)     then ; a(2, 2) = abs(self%phi(i, j + 1_I4P, k)) ; h(2, 2) = self%y(j + 1_I4P) - self%y(j) ; endif
+   if (k > 1_I4P)       then ; a(1, 3) = abs(self%phi(i, j, k - 1_I4P)) ; h(1, 3) = self%z(k) - self%z(k - 1_I4P) ; endif
+   if (k < self%nk)     then ; a(2, 3) = abs(self%phi(i, j, k + 1_I4P)) ; h(2, 3) = self%z(k + 1_I4P) - self%z(k) ; endif
+
+   ! upper bound: the best one-axis solution
+   u = FAR_VALUE
+   do d = 1, 3
+      if (a(1, d) < FAR_VALUE) u = min(u, a(1, d) + h(1, d))
+      if (a(2, d) < FAR_VALUE) u = min(u, a(2, d) + h(2, d))
+   enddo
+   if (u >= FAR_VALUE) return
+   ub = u
+   ! choose per axis the side with the larger slope (u - a) / h at the current u, solve, repeat
+   side = 0_I4P
+   do it = 1, 4
+      do d = 1, 3
+         ! a FAR_VALUE side never wins; no division by h of a FAR_VALUE difference (overflow)
+         if (a(2, d) >= FAR_VALUE) then
+            side_new(d) = 1_I4P
+         elseif (a(1, d) >= FAR_VALUE) then
+            side_new(d) = 2_I4P
+         elseif ((u - a(1, d)) / h(1, d) >= (u - a(2, d)) / h(2, d)) then
+            side_new(d) = 1_I4P
+         else
+            side_new(d) = 2_I4P
+         endif
+         aa(d) = a(side_new(d), d) ; hh(d) = h(side_new(d), d)
+      enddo
+      if (all(side_new == side)) exit
+      side = side_new
+      u = solve_quadratic(aa, hh)
+   enddo
+   u = min(u, ub)   ! the multi-axis solution never exceeds the best one-axis one
+   endfunction godunov
+
    pure function linear(self, i, j, k) result(l)
    !< Linear index of cell (i, j, k).
    class(distance_field_object), intent(in) :: self    !< Distance field.
@@ -449,7 +603,66 @@ contains
    k = r / self%nj + 1_I4P
    endsubroutine unlinear
 
+   subroutine compute(self, surface, band, is_signed, sign_algorithm, tol, max_sweeps, sweeps, fallback_cells, status)
+   !< The whole field: `compute_band`, `compute_signs` (signed fields), `sweep`. See each one
+   !< for the arguments; `sweeps` and `fallback_cells` report their counters.
+   class(distance_field_object), intent(inout)         :: self           !< Distance field.
+   type(surface_stl_object),     intent(inout), target :: surface        !< Surface.
+   real(R8P),                    intent(in),  optional :: band           !< Band half-width (default `default_band`).
+   logical,                      intent(in),  optional :: is_signed      !< Signed distances (default .true.).
+   integer(I4P),                 intent(in),  optional :: sign_algorithm !< SIGN_* code (default SIGN_PSEUDO_NORMAL).
+   real(R8P),                    intent(in),  optional :: tol            !< Sweep tolerance (default 1e-12, relative).
+   integer(I4P),                 intent(in),  optional :: max_sweeps     !< Maximum directional sweeps (default 400).
+   integer(I4P),                 intent(out), optional :: sweeps         !< Directional sweeps done.
+   integer(I4P),                 intent(out), optional :: fallback_cells !< Cells signed by a point query.
+   integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P)                                        :: st             !< Stage status.
+
+   if (present(status)) status = STATUS_OK
+   call self%compute_band(surface=surface, band=band, is_signed=is_signed, sign_algorithm=sign_algorithm, status=st)
+   if (st == STATUS_OK) call self%compute_signs(surface=surface, fallback_cells=fallback_cells, status=st)
+   if (st == STATUS_OK) call self%sweep(tol=tol, max_sweeps=max_sweeps, sweeps=sweeps, status=st)
+   if (present(status)) status = st
+   endsubroutine compute
+
    ! private helpers
+   pure function solve_quadratic(a, h) result(u)
+   !< Solution of sum over the active axes of ((u - a(d)) / h(d))**2 = 1, where an axis is
+   !< active when u > a(d): axes are added in increasing a(d) and the first consistent solution
+   !< is returned. The one-axis solution min(a + h) is always consistent.
+   real(R8P), intent(in) :: a(3)  !< Neighbour magnitudes, one per axis.
+   real(R8P), intent(in) :: h(3)  !< Matching spacings.
+   real(R8P)             :: u     !< Solution.
+   real(R8P)             :: as(3), hs(3), t, qa, qb, qc, disc
+   integer(I4P)          :: m, p, q
+
+   as = a ; hs = h
+   do p = 1, 2   ! sort by a (3 elements)
+      do q = 1, 3 - p
+         if (as(q) > as(q + 1)) then
+            t = as(q) ; as(q) = as(q + 1) ; as(q + 1) = t
+            t = hs(q) ; hs(q) = hs(q + 1) ; hs(q + 1) = t
+         endif
+      enddo
+   enddo
+   u = as(1) + hs(1)
+   qa = 0._R8P ; qb = 0._R8P ; qc = -1._R8P
+   do m = 1, 3
+      if (as(m) >= FAR_VALUE) exit
+      qa = qa + 1._R8P / hs(m)**2
+      qb = qb + as(m) / hs(m)**2
+      qc = qc + (as(m) / hs(m))**2
+      disc = qb * qb - qa * qc
+      if (disc < 0._R8P) exit
+      t = (qb + sqrt(disc)) / qa
+      if (t < as(m)) exit
+      u = t
+      if (m < 3) then
+         if (t <= as(m + 1)) exit
+      endif
+   enddo
+   endfunction solve_quadratic
+
    pure function is_valid_axis(c, ng) result(ok)
    !< True if the axis has an interior point after `ng` halo layers per side and is strictly
    !< increasing.
