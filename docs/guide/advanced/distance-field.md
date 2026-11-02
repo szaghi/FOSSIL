@@ -146,8 +146,10 @@ fossil_ib_generator --stl body.stl --ni 128 --nj 128 --nk 128 --ei 20 20 \
                     --sign_algorithm pseudo_normal --band 0.01 --sweep_tol 1e-12 --out body
 ```
 
-`--device` computes the band on the GPU (nvfortran build, sign
-`pseudo_normal` or `fast_winding_number`).
+`--device` computes the band and the sign point queries on the GPU
+(nvfortran build, sign `pseudo_normal` or `fast_winding_number`). On bunny
+at 64³ with extension cells, the field takes 1.33 s with `--device` against
+5.52 s on the host of the same nvfortran build, with byte-identical output.
 
 ## Example
 
@@ -274,9 +276,6 @@ How to read it:
   to the GPU; the flood fill and the sweeps run on the host.
 - **No closest-facet field.** The band stores distances only, not the id of
   the closest facet.
-- **`fossil_ib_generator` does not run when built with nvfortran.** FLAP,
-  built with nvfortran 26.9, cannot read its 3-value real options
-  (`--bmin`, `--bmax`). Use the library directly on the GPU.
 - **`block_object%extrapolate_distances` is deprecated.** It copies boundary
   values outward, which are not distances.
 

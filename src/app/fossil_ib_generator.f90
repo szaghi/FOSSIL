@@ -121,8 +121,9 @@ if (all([ei, ej, ek] < 2) .and. min(gi, gj(1), gj(2), gk) >= 2) &
 contains
   subroutine cli_parse()
   !< Build and parse test cli.
-  real(R8P)    :: bb(3) !< Bounding box extents, local variable.
-  integer(I4P) :: error !< Error trapping flag.
+  real(R8P),    allocatable :: bbmin(:), bbmax(:)     !< Bounding box extents (get_varying, see below).
+  integer(I4P), allocatable :: lgj(:), lei(:), lej(:), lek(:) !< Frame/extension pairs (get_varying, see below).
+  integer(I4P)              :: error                  !< Error trapping flag.
 
   call cli%init(progname='fossil_ib_generator',                              &
                 authors='S. Zaghi',                                          &
@@ -261,19 +262,29 @@ contains
 
   call cli%get(switch='--stl',                     val=file_name_stl,     error=error) ; if (error/=0) stop
   call cli%get(switch='--out',                     val=output_base_name,  error=error) ; if (error/=0) stop
-  call cli%get(switch='--bmin',                    val=bb,                error=error) ; if (error/=0) stop
-  bmin%x = bb(1) ; bmin%y = bb(2) ;bmin%z = bb(3)
-  call cli%get(switch='--bmax',                    val=bb,                error=error) ; if (error/=0) stop
-  bmax%x = bb(1) ; bmax%y = bb(2) ;bmax%z = bb(3)
+  ! The list options are read with get_varying (typed allocatable arrays), not get into fixed-size
+  ! arrays: nvfortran 26.9 at -O2 and above loses the dynamic type of an element of a select-type
+  ! associate array passed to a class(*) dummy, which is how FLAP's get into a fixed-size array
+  ! converts each value, so every such get failed with "cannot be returned into a variable of this
+  ! type" (FLAP's own flap_test_casting fails the same way under nvfortran -O2). The sizes are
+  ! checked here, as nargs makes FLAP check them.
+  call cli%get_varying(switch='--bmin',            val=bbmin,             error=error) ; if (error/=0) stop
+  call cli%get_varying(switch='--bmax',            val=bbmax,             error=error) ; if (error/=0) stop
+  if (size(bbmin) /= 3 .or. size(bbmax) /= 3) error stop 'fossil_ib_generator: --bmin/--bmax need 3 values'
+  bmin%x = bbmin(1) ; bmin%y = bbmin(2) ; bmin%z = bbmin(3)
+  bmax%x = bbmax(1) ; bmax%y = bbmax(2) ; bmax%z = bbmax(3)
   call cli%get(switch='--ni',                      val=ni,                error=error) ; if (error/=0) stop
   call cli%get(switch='--nj',                      val=nj,                error=error) ; if (error/=0) stop
   call cli%get(switch='--nk',                      val=nk,                error=error) ; if (error/=0) stop
   call cli%get(switch='--gi',                      val=gi,                error=error) ; if (error/=0) stop
-  call cli%get(switch='--gj',                      val=gj,                error=error) ; if (error/=0) stop
+  call cli%get_varying(switch='--gj',              val=lgj,               error=error) ; if (error/=0) stop
   call cli%get(switch='--gk',                      val=gk,                error=error) ; if (error/=0) stop
-  call cli%get(switch='--ei',                      val=ei,                error=error) ; if (error/=0) stop
-  call cli%get(switch='--ej',                      val=ej,                error=error) ; if (error/=0) stop
-  call cli%get(switch='--ek',                      val=ek,                error=error) ; if (error/=0) stop
+  call cli%get_varying(switch='--ei',              val=lei,               error=error) ; if (error/=0) stop
+  call cli%get_varying(switch='--ej',              val=lej,               error=error) ; if (error/=0) stop
+  call cli%get_varying(switch='--ek',              val=lek,               error=error) ; if (error/=0) stop
+  if (any([size(lgj), size(lei), size(lej), size(lek)] /= 2)) &
+     error stop 'fossil_ib_generator: --gj/--ei/--ej/--ek need 2 values'
+  gj = lgj ; ei = lei ; ej = lej ; ek = lek
   call cli%get(switch='--ref_levels',              val=refinement_levels, error=error) ; if (error/=0) stop
   call cli%get(switch='--sign_algorithm',          val=sign_algorithm,    error=error) ; if (error/=0) stop
   sign_algorithm_code = sign_algorithm_from_string(trim(adjustl(sign_algorithm)))
