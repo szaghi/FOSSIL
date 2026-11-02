@@ -535,6 +535,23 @@ contains
       ! Issue #29 -- persistent fast-winding-number cache, built once per analyze instead
       ! of on every winding_number call.
       call self%aabb%build_winding_payload(facet=self%facet, wn=self%wn_payload)
+   else
+      ! No facets (e.g. an empty boolean result, issue #33): reset what the branch above computes,
+      ! so no query reads the values of the previous surface (the volume used to stay stale).
+      self%volume   = 0._R8P
+      self%area     = 0._R8P
+      self%centroid = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+      self%bmin     = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+      self%bmax     = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+      self%non_manifold_edges_number = 0_I4P
+      block
+         integer(I4P) :: kind
+         kind = self%aabb%get_tree_kind()
+         call self%aabb%destroy
+         call self%aabb%set_tree_kind(kind)
+      end block
+      if (allocated(self%pnormal_payload)) deallocate(self%pnormal_payload)
+      if (allocated(self%wn_payload))      deallocate(self%wn_payload)
    endif
    endsubroutine analyze
 

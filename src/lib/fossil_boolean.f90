@@ -344,23 +344,26 @@ contains
    !< normal. Returns the dot product of normals via `orient_dot` for
    !< `apply_selection` to disambiguate same-vs-opposite orientation.
    !<
-   !< Distance and normal-parallelism tolerances:
-   !<   - Distance: `SHARED_DIST_TOL` ≈ 1e-9 in the surface's coordinate units.
-   !<     Any sub-triangle centroid this close to another surface's facet is
-   !<     treated as coincident. Note that `distance_tree_with_region` returns
-   !<     SQUARED distance, so we compare against `SHARED_DIST_TOL**2`.
-   !<   - Normal parallelism: `|orient_dot| > SHARED_NORM_TOL` ≈ 0.99 (i.e.,
-   !<     angles within ~8° of parallel/antiparallel). Looser than 1.0 to
-   !<     accommodate per-facet normal jitter on retriangulated cuts.
+   !< Tests, relative to L = the longest edge of the closest other facet (issue #33):
+   !<   - on that facet's plane: |n . (c - v1)| <= `SHARED_PLANE_TOL` * L (1e-9). The plane distance
+   !<     is accurate to round-off; the tree's squared distance is not (it cancels: a point lying
+   !<     on the facet gets d^2 ~ eps L^2, i.e. d ~ 1e-8 L, which the former absolute 1e-9 test on d
+   !<     rejected for about half of the shared sub-triangles);
+   !<   - on the facet itself (not only its plane): d <= `SHARED_NEAR_TOL` * L (1e-6). Coplanar
+   !<     overlaps are cut by the arrangement, so a sub-triangle is either inside the other facet
+   !<     or away from it by a fraction of its own size;
+   !<   - normal parallelism: `|orient_dot| > SHARED_NORM_TOL` = 0.99.
    type(facet_object),     intent(in)         :: sub
    type(facet_object),     intent(in)         :: other_facet(:)
    type(aabb_tree_object), intent(in), target :: other_tree
    real(R8P),              intent(out)        :: orient_dot
    logical                                    :: yes
-   real(R8P)                                  :: distance_sq
+   real(R8P)                                  :: distance_sq, plane_dist, edge_len
    integer(I4P)                               :: closest_id, region_id
-   real(R8P), parameter :: SHARED_DIST_TOL = 1.0e-9_R8P
-   real(R8P), parameter :: SHARED_NORM_TOL = 0.99_R8P
+   type(vector_R8P)                           :: dc
+   real(R8P), parameter :: SHARED_PLANE_TOL = 1.0e-9_R8P
+   real(R8P), parameter :: SHARED_NEAR_TOL  = 1.0e-6_R8P
+   real(R8P), parameter :: SHARED_NORM_TOL  = 0.99_R8P
 
    yes = .false. ; orient_dot = 0._R8P
    distance_sq = MaxR8P
@@ -370,8 +373,15 @@ contains
                                               distance=distance_sq, closest_facet=closest_id, &
                                               closest_region=region_id)
    if (closest_id <= 0_I4P .or. closest_id > size(other_facet, dim=1)) return
-   if (distance_sq > SHARED_DIST_TOL * SHARED_DIST_TOL) return
-   orient_dot = sub%normal%dotproduct(rhs=other_facet(closest_id)%normal)
+   associate(g => other_facet(closest_id))
+      dc = g%vertex(3) - g%vertex(2)
+      edge_len = max(g%E12%normL2(), g%E13%normL2(), dc%normL2())
+      if (distance_sq > (SHARED_NEAR_TOL * edge_len)**2) return
+      dc = sub%centroid - g%vertex(1)
+      plane_dist = abs(g%normal%dotproduct(rhs=dc))
+      if (plane_dist > SHARED_PLANE_TOL * edge_len) return
+      orient_dot = sub%normal%dotproduct(rhs=g%normal)
+   end associate
    yes = (abs(orient_dot) > SHARED_NORM_TOL)
    endfunction is_on_other_surface
 

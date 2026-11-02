@@ -11,7 +11,13 @@ module fossil_tritri_exact
 !<  - PAIR_TOUCHING: they share a single point;
 !<  - PAIR_COPLANAR: all six signs are zero (handled by the caller's 2D pass).
 !<
-!< Exactness: the decisions are exact; the intersection points are floating-point constructions,
+!< Snap: a vertex closer to the other plane than `SNAP_REL` (1e-10) times the longest edge of the
+!< pair counts as lying on it (sign 0), and a pair whose six vertices all do is coplanar. Inputs
+!< meant to be coplanar are rarely exactly so once rotated or scaled in floating point; without
+!< the snap, faces coplanar by construction would be classified as near-coplanar crossings with
+!< sliver segments. Outside that band the decisions are the exact orient3d signs.
+!<
+!< Exactness: the decisions are exact up to the snap; the intersection points are floating-point constructions,
 !< but **canonical** ones. A point is produced only as
 !<  - an input vertex (a zero sign), copied bit for bit;
 !<  - an edge of one triangle crossing the plane of the other (`edge_plane_point`), or, when that
@@ -28,13 +34,15 @@ implicit none
 private
 public :: PAIR_SEPARATED, PAIR_CROSSING, PAIR_TOUCHING, PAIR_COPLANAR
 public :: pair_classify
+public :: coplanar_portion
 public :: edge_plane_point, edge_edge_point
 public :: lex_less
 
 integer(I4P), parameter :: PAIR_SEPARATED = 0_I4P !< No common point.
 integer(I4P), parameter :: PAIR_CROSSING  = 1_I4P !< Common segment of positive length.
 integer(I4P), parameter :: PAIR_TOUCHING  = 2_I4P !< Single common point.
-integer(I4P), parameter :: PAIR_COPLANAR  = 3_I4P !< Same plane (all six orient3d signs zero).
+integer(I4P), parameter :: PAIR_COPLANAR  = 3_I4P !< Same plane (all six orient3d signs zero, after the snap).
+real(R8P),    parameter :: SNAP_REL       = 1.e-10_R8P !< On-plane snap, relative to the pair's longest edge.
 
 contains
    subroutine pair_classify(ta, tb, kind, p, q)
@@ -50,12 +58,16 @@ contains
    type(vector_R8P)              :: d                      !< Direction of the planes' line (ordering only).
    real(R8P)                     :: sxa(2), sxb(2)         !< Parameters along d.
    integer(I4P)                  :: ia_lo, ia_hi, ib_lo, ib_hi, i
+   real(R8P)                     :: tol, area2_a, area2_b  !< Snap distance; twice the triangle areas.
 
    kind = PAIR_SEPARATED
    p = vector_R8P(0._R8P, 0._R8P, 0._R8P) ; q = p
+   tol = SNAP_REL * max(longest_edge(ta), longest_edge(tb))
+   area2_a = norm(cross(ta(2) - ta(1), ta(3) - ta(1)))
+   area2_b = norm(cross(tb(2) - tb(1), tb(3) - tb(1)))
    do i = 1, 3
-      sb(i) = sgn(orient3d(ta(1), ta(2), ta(3), tb(i)))
-      sa(i) = sgn(orient3d(tb(1), tb(2), tb(3), ta(i)))
+      sb(i) = snapped_sign(orient3d(ta(1), ta(2), ta(3), tb(i)), area2_a, tol)
+      sa(i) = snapped_sign(orient3d(tb(1), tb(2), tb(3), ta(i)), area2_b, tol)
    enddo
    if (all(sb == 0_I4P)) then
       kind = PAIR_COPLANAR
@@ -132,11 +144,15 @@ contains
    type(vector_R8P), intent(in) :: other(3) !< Triangle.
    type(vector_R8P)             :: x        !< Crossing point.
    integer(I4P)                 :: k, l, hits, last_k
+   real(R8P)                    :: tol, area2 !< Snap distance; twice the reference area.
 
    hits = 0_I4P ; last_k = 0_I4P
+   tol = SNAP_REL * max(longest_edge(other), norm(v - u))
    do k = 1, 3
       l = mod(k, 3) + 1
-      if (orient3d(other(k), other(l), u, v) == 0._R8P) then
+      ! coplanar lines (k, l) and (u, v): distance of v from the plane (k, l, u) within the snap
+      area2 = max(norm(cross(other(l) - other(k), u - other(k))), norm(cross(other(l) - other(k), v - other(k))))
+      if (snapped_sign(orient3d(other(k), other(l), u, v), area2, tol) == 0_I4P) then
          hits = hits + 1_I4P
          if (hits == 2_I4P) then
             ! two edges of `other` coplanar with (u, v): the point is their common vertex
@@ -218,7 +234,115 @@ contains
    endif
    endfunction lex_less
 
+   subroutine coplanar_portion(u, v, t, found, p, q)
+   !< Portion of segment (u, v) inside triangle t, both in the same plane (issue #33): the
+   !< intersection of a segment with a convex triangle is a segment whose endpoints are among
+   !<  - u and v, if inside t or on its boundary;
+   !<  - vertices of t lying on (u, v);
+   !<  - proper crossings of (u, v) with t's edges (canonical `edge_edge_point`).
+   !< The portion is the pair of extreme candidates along (u, v); `found` is false if it is empty or
+   !< a single point. The in-plane orientation tests are exact: the points are projected by dropping
+   !< the coordinate of the largest component of t's normal (an exact copy of the other two), and
+   !< the 2D sign is orient3d of the projected points with (0, 0, 1).
+   type(vector_R8P), intent(in)  :: u, v   !< Segment (coplanar with t).
+   type(vector_R8P), intent(in)  :: t(3)   !< Triangle.
+   logical,          intent(out) :: found  !< True if the portion has positive length.
+   type(vector_R8P), intent(out) :: p, q   !< Portion endpoints.
+   type(vector_R8P)              :: cand(9), nrm
+   integer(I4P)                  :: nc, k, l, m, drop, axis, ilo, ihi
+   integer(I4P)                  :: ori, su(3), sv(3), sk, sl
+   real(R8P)                     :: par(9), dv(3)
+
+   found = .false.
+   p = u ; q = v
+   nrm  = cross(t(2) - t(1), t(3) - t(1))
+   drop = maxloc([abs(nrm%x), abs(nrm%y), abs(nrm%z)], dim=1)
+   ori  = orient_in_plane(t(1), t(2), t(3), drop)
+   if (ori == 0_I4P) return ! degenerate triangle
+   nc = 0_I4P
+   do k = 1, 3
+      l = mod(k, 3) + 1
+      su(k) = ori * orient_in_plane(t(k), t(l), u, drop)
+      sv(k) = ori * orient_in_plane(t(k), t(l), v, drop)
+   enddo
+   if (all(su >= 0_I4P)) call add(u)
+   if (all(sv >= 0_I4P)) call add(v)
+   dv = [v%x - u%x, v%y - u%y, v%z - u%z]
+   axis = maxloc(abs(dv), dim=1)
+   do k = 1, 3
+      ! vertex of t on the segment
+      if (orient_in_plane(u, v, t(k), drop) == 0_I4P .and. between(t(k), u, v, axis)) call add(t(k))
+      ! proper crossing with edge (k, l)
+      l = mod(k, 3) + 1
+      if (su(k) * sv(k) < 0_I4P) then
+         sk = orient_in_plane(u, v, t(k), drop)
+         sl = orient_in_plane(u, v, t(l), drop)
+         if (sk * sl < 0_I4P) call add(edge_edge_point(u, v, t(k), t(l)))
+      endif
+   enddo
+   if (nc < 2_I4P) return
+   do m = 1, nc
+      par(m) = (cand(m)%x - u%x) * dv(1) + (cand(m)%y - u%y) * dv(2) + (cand(m)%z - u%z) * dv(3)
+   enddo
+   ilo = minloc(par(1:nc), dim=1)
+   ihi = maxloc(par(1:nc), dim=1)
+   if (same_point(cand(ilo), cand(ihi))) return
+   p = cand(ilo) ; q = cand(ihi)
+   found = .true.
+   contains
+      subroutine add(x)
+      type(vector_R8P), intent(in) :: x
+      integer(I4P)                 :: i
+
+      do i = 1, nc
+         if (same_point(cand(i), x)) return
+      enddo
+      nc = nc + 1_I4P
+      cand(nc) = x
+      endsubroutine add
+   endsubroutine coplanar_portion
+
    ! private helpers
+   function orient_in_plane(a, b, c, drop) result(s)
+   !< Exact sign of the 2D orientation of (a, b, c) in the coordinate plane obtained by dropping
+   !< axis `drop`: orient3d of the projected points (exact copies of two coordinates, z = 0) and
+   !< (0, 0, 1).
+   type(vector_R8P), intent(in) :: a, b, c !< Points.
+   integer(I4P),     intent(in) :: drop    !< Dropped axis (1, 2, 3).
+   integer(I4P)                 :: s       !< -1, 0, 1.
+
+   s = sgn(orient3d(proj(a, drop), proj(b, drop), proj(c, drop), vector_R8P(0._R8P, 0._R8P, 1._R8P)))
+   endfunction orient_in_plane
+
+   pure function proj(a, drop) result(r)
+   type(vector_R8P), intent(in) :: a
+   integer(I4P),     intent(in) :: drop
+   type(vector_R8P)             :: r
+
+   select case (drop)
+   case (1) ; r%x = a%y ; r%y = a%z
+   case (2) ; r%x = a%z ; r%y = a%x
+   case default ; r%x = a%x ; r%y = a%y
+   endselect
+   r%z = 0._R8P
+   endfunction proj
+
+   pure function between(w, a, b, axis) result(yes)
+   !< w (collinear with a, b) lies on the closed segment (a, b): compared on the axis of the largest
+   !< component of b - a.
+   type(vector_R8P), intent(in) :: w, a, b
+   integer(I4P),     intent(in) :: axis
+   logical                      :: yes
+   real(R8P)                    :: cw, ca, cb
+
+   select case (axis)
+   case (1) ; cw = w%x ; ca = a%x ; cb = b%x
+   case (2) ; cw = w%y ; ca = a%y ; cb = b%y
+   case default ; cw = w%z ; ca = a%z ; cb = b%z
+   endselect
+   yes = cw >= min(ca, cb) .and. cw <= max(ca, cb)
+   endfunction between
+
    pure function same_point(a, b) result(same)
    type(vector_R8P), intent(in) :: a, b
    logical                      :: same
@@ -247,6 +371,33 @@ contains
    if (lex_less(c, b)) then ; t = b ; b = c ; c = t ; endif
    if (lex_less(b, a)) then ; t = a ; a = b ; b = t ; endif
    endsubroutine sorted3
+
+   pure function snapped_sign(det, area2, tol) result(s)
+   !< Sign of an orient3d determinant, 0 when the point it measures is within `tol` of the plane:
+   !< det / area2 is that point's signed distance (area2 = twice the reference triangle's area).
+   real(R8P), intent(in) :: det, area2, tol
+   integer(I4P)          :: s
+
+   if (abs(det) <= tol * area2) then
+      s = 0_I4P
+   else
+      s = sgn(det)
+   endif
+   endfunction snapped_sign
+
+   pure function longest_edge(t) result(l)
+   type(vector_R8P), intent(in) :: t(3)
+   real(R8P)                    :: l
+
+   l = max(norm(t(2) - t(1)), norm(t(3) - t(2)), norm(t(1) - t(3)))
+   endfunction longest_edge
+
+   pure function norm(a) result(n)
+   type(vector_R8P), intent(in) :: a
+   real(R8P)                    :: n
+
+   n = sqrt(a%x * a%x + a%y * a%y + a%z * a%z)
+   endfunction norm
 
    pure function sgn(v) result(s)
    real(R8P), intent(in) :: v

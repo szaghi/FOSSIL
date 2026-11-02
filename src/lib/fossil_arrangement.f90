@@ -49,7 +49,7 @@ use fossil_dt,               only : triangulation_t, cdt_build, &
                                     DT_STATUS_CROSSING_CONSTRAINTS
 use fossil_facet_object,     only : facet_object
 use fossil_list_id_object,   only : list_id_object
-use fossil_tritri_exact,     only : pair_classify, PAIR_CROSSING
+use fossil_tritri_exact,     only : pair_classify, coplanar_portion, PAIR_CROSSING, PAIR_COPLANAR
 use fossil_utils,            only : EPS
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
@@ -286,16 +286,29 @@ contains
    !< Intersect facets gi (of A) and gj (of B) with the exact pair classification and append a
    !< crossing segment to both facets' cut lists. The segment endpoints are canonical points
    !< (`fossil_tritri_exact`), identical for every pair that produces them. Touching pairs (one
-   !< common point) add no cut; coplanar pairs are handled by the coplanar pass.
+   !< common point) add no cut. A coplanar pair cuts each facet along the portions of the other
+   !< facet's edges inside it (`coplanar_portion`), so the overlap region becomes a set of
+   !< sub-triangles of its own in both facets.
    type(arrangement_t), intent(inout) :: arr    !< Arrangement.
    integer(I4P),        intent(in)    :: gi, gj !< Global facet indices (A, B).
    integer(I4P)                       :: kind   !< PAIR_* code.
    type(vector_R8P)                   :: p, q   !< Common segment.
+   integer(I4P)                       :: e      !< Edge counter.
+   logical                            :: found  !< Coplanar portion found.
 
    call pair_classify(ta=arr%facet(gi)%vertex, tb=arr%facet(gj)%vertex, kind=kind, p=p, q=q)
    if (kind == PAIR_CROSSING) then
       call append_segment(cut=arr%cut(gi), p=p, q=q)
       call append_segment(cut=arr%cut(gj), p=p, q=q)
+   elseif (kind == PAIR_COPLANAR) then
+      do e = 1, 3
+         call coplanar_portion(u=arr%facet(gj)%vertex(e), v=arr%facet(gj)%vertex(mod(e, 3) + 1), &
+                               t=arr%facet(gi)%vertex, found=found, p=p, q=q)
+         if (found) call append_segment(cut=arr%cut(gi), p=p, q=q)
+         call coplanar_portion(u=arr%facet(gi)%vertex(e), v=arr%facet(gi)%vertex(mod(e, 3) + 1), &
+                               t=arr%facet(gj)%vertex, found=found, p=p, q=q)
+         if (found) call append_segment(cut=arr%cut(gj), p=p, q=q)
+      enddo
    endif
    endsubroutine collect_pair
 
@@ -494,6 +507,10 @@ contains
          segs(2, n_segs) = idx_q
       enddo
 
+      ! --- Split constraints at the points lying on them (collinear overlapping cuts, cuts along
+      ! the facet's edges through other points): the CDT needs disjoint constraint interiors. ---
+      call split_constraints(pts2d=pts2d(:, 1:n_pts), segs=segs, n_segs=n_segs)
+
       ! --- Run CDT. ---
       call cdt_build(tri=tri, points=pts2d(:, 1:n_pts), segments=segs(:, 1:n_segs), status=cdt_status)
       if (cdt_status /= DT_STATUS_OK) then
@@ -523,6 +540,80 @@ contains
    sub_owner (1:used) = buf_owner (1:used)
    sub_source(1:used) = buf_source(1:used)
    endsubroutine arrangement_retriangulate
+
+   subroutine split_constraints(pts2d, segs, n_segs)
+   !< Replace every constraint segment by the chain of its sub-segments between the points that
+   !< lie on it, then drop duplicates (issue #33). Points of a coplanar overlap lie on the edges
+   !< and diagonals of the facets, and collinear cuts overlap; the CDT needs constraints whose
+   !< interiors contain no point and do not overlap. A point is on segment (a, b) when its distance
+   !< from the line is below 1e-9 |b - a| and its parameter is strictly inside (0, 1): the points
+   !< meant to lie there are at round-off distance, distinct points are far apart.
+   real(R8P),                 intent(in)    :: pts2d(:, :)   !< Points (2, n).
+   integer(I4P), allocatable, intent(inout) :: segs(:, :)    !< Constraints (2, capacity).
+   integer(I4P),              intent(inout) :: n_segs        !< Number of constraints.
+   integer(I4P), allocatable                :: out(:, :), on(:)
+   real(R8P),    allocatable                :: t(:)
+   integer(I4P)                             :: s, c, n_on, n_out, i, j, a, b, it
+   real(R8P)                                :: dx, dy, len2, tc, dist2
+   logical                                  :: dup
+   real(R8P), parameter                     :: REL_TOL = 1.e-9_R8P
+
+   if (n_segs == 0_I4P) return
+   allocate(on(size(pts2d, dim=2)), t(size(pts2d, dim=2)))
+   allocate(out(2, n_segs * (size(pts2d, dim=2) + 1)))
+   n_out = 0_I4P
+   do s = 1, n_segs
+      a = segs(1, s) ; b = segs(2, s)
+      dx = pts2d(1, b) - pts2d(1, a) ; dy = pts2d(2, b) - pts2d(2, a)
+      len2 = dx * dx + dy * dy
+      if (len2 <= 0._R8P) cycle
+      n_on = 0_I4P
+      do c = 1, size(pts2d, dim=2)
+         if (c == a .or. c == b) cycle
+         tc = ((pts2d(1, c) - pts2d(1, a)) * dx + (pts2d(2, c) - pts2d(2, a)) * dy) / len2
+         if (tc <= 0._R8P .or. tc >= 1._R8P) cycle
+         dist2 = ((pts2d(1, c) - pts2d(1, a)) * dy - (pts2d(2, c) - pts2d(2, a)) * dx)**2 / len2
+         if (dist2 > (REL_TOL * REL_TOL) * len2) cycle
+         n_on = n_on + 1_I4P ; on(n_on) = c ; t(n_on) = tc
+      enddo
+      ! insertion sort of the points on the segment by parameter
+      do i = 2, n_on
+         j = i
+         do while (j > 1)
+            if (t(j - 1) <= t(j)) exit
+            tc = t(j) ; t(j) = t(j - 1) ; t(j - 1) = tc
+            it = on(j) ; on(j) = on(j - 1) ; on(j - 1) = it
+            j = j - 1
+         enddo
+      enddo
+      call emit(a, merge(on(1), b, n_on > 0))
+      do i = 1, n_on - 1
+         call emit(on(i), on(i + 1))
+      enddo
+      if (n_on > 0) call emit(on(n_on), b)
+   enddo
+   if (n_out > size(segs, dim=2)) then
+      deallocate(segs) ; allocate(segs(2, n_out))
+   endif
+   segs(:, 1:n_out) = out(:, 1:n_out)
+   n_segs = n_out
+   contains
+      subroutine emit(p1, p2)
+      integer(I4P), intent(in) :: p1, p2
+      integer(I4P)             :: k
+
+      if (p1 == p2) return
+      dup = .false.
+      do k = 1, n_out
+         if ((out(1, k) == p1 .and. out(2, k) == p2) .or. (out(1, k) == p2 .and. out(2, k) == p1)) then
+            dup = .true. ; exit
+         endif
+      enddo
+      if (dup) return
+      n_out = n_out + 1_I4P
+      out(1, n_out) = p1 ; out(2, n_out) = p2
+      endsubroutine emit
+   endsubroutine split_constraints
 
    function find_or_append_2d(pts2d, n_pts, x, y) result(idx)
    !< Look up (x, y) in `pts2d(:, 1:n_pts)` within tolerance; if found return
