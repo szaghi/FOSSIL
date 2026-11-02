@@ -2694,22 +2694,29 @@ contains
    integer(I4P)                             :: head, tail       !< Queue head/tail indices.
    integer(I4P)                             :: seed, f, e       !< Counters.
    integer(I4P)                             :: neighbour        !< Neighbour facet id along an edge.
+   integer(I4P), allocatable                :: comp(:)          !< Connected-component id per facet.
+   integer(I4P)                             :: n_comp           !< Number of connected components.
 
    n_flipped = 0_I4P
+   n_comp    = 0_I4P
    if (self%facets_number > 0) then
       allocate(facet_checked(1:self%facets_number))
       allocate(queue(1:self%facets_number))
+      allocate(comp(1:self%facets_number))
       facet_checked = .false.
+      comp = 0_I4P
 
       ! Outer loop covers disconnected components: pick any unvisited facet as a new
       ! seed and BFS from it. For a single connected mesh, the inner BFS visits
       ! everything and the outer loop exits after one iteration.
       do seed = 1, self%facets_number
          if (facet_checked(seed)) cycle
+         n_comp = n_comp + 1_I4P
          head = 1
          tail = 1
          queue(tail) = seed
          facet_checked(seed) = .true.
+         comp(seed) = n_comp
          do while (head <= tail)
             f = queue(head)
             head = head + 1
@@ -2720,22 +2727,114 @@ contains
                call self%facet(f)%make_normal_consistent(edge=e, other=self%facet(neighbour), flipped=flipped)
                if (flipped) n_flipped = n_flipped + 1_I4P
                facet_checked(neighbour) = .true.
+               comp(neighbour) = n_comp
                tail = tail + 1
                queue(tail) = neighbour
             enddo
          enddo
       enddo
+      ! Orient closed shells by nesting parity and open components by their summed volume
+      ! (see orient_shells). With no closed shell this is the former global volume rule.
+      call orient_shells(self=self, comp=comp, n_comp=n_comp, n_flipped=n_flipped)
    endif
+   ! Refresh the cached volume so get_volume() returns the post-sanitize value.
    call self%compute_volume
-   if (self%volume < 0) then
-      call self%reverse_normals
-      n_flipped = n_flipped + self%facets_number
-      ! Refresh cached volume after the global flip, so get_volume() returns the
-      ! post-sanitize value without callers needing to invoke compute_volume themselves.
-      call self%compute_volume
-   endif
    if (present(flipped_count)) flipped_count = n_flipped
    endsubroutine sanitize_normals
+
+   pure subroutine orient_shells(self, comp, n_comp, n_flipped)
+   !< Orient every connected component after the BFS made each one internally consistent.
+   !<
+   !< Closed components ("shells", every facet edge has a neighbour) are oriented by
+   !< nesting parity, open components as one group by the sign of their summed volume.
+   !<
+   !< A shell inside an even number of other closed shells (an outer boundary) must
+   !< enclose positive volume; inside an odd number (a cavity wall) negative. The BFS
+   !< made each shell internally consistent, so a shell with the wrong volume sign is
+   !< flipped as a whole. Containment of shell c in shell d: bbox(c) inside bbox(d), and
+   !< a point of c (its first facet's centroid) inside d by generalized winding number,
+   !< |sum of d's facet solid angles| > 2*pi, which does not depend on d's orientation.
+   !<
+   !< Open components (a non-watertight body with small holes, or sheets) have no exact
+   !< inside: they keep the former global rule, applied to them together. Their summed
+   !< signed volume (apex at facet 1's first vertex, as in compute_volume) must be
+   !< positive, otherwise every open facet is flipped. With no closed shell this is
+   !< exactly the former whole-surface rule.
+   class(surface_stl_object), intent(inout) :: self         !< File STL.
+   integer(I4P),              intent(in)    :: comp(:)      !< Connected-component id per facet.
+   integer(I4P),              intent(in)    :: n_comp       !< Number of connected components.
+   integer(I4P),              intent(inout) :: n_flipped    !< Running flip count.
+   logical,      allocatable   :: closed(:)    !< Shell is closed.
+   integer(I4P), allocatable   :: first(:)     !< First facet of each shell.
+   real(R8P),    allocatable   :: vol(:)       !< Signed volume of each shell.
+   real(R8P),    allocatable   :: bmin(:,:)    !< Shell bbox minimum (3, n_comp).
+   real(R8P),    allocatable   :: bmax(:,:)    !< Shell bbox maximum (3, n_comp).
+   integer(I4P), allocatable   :: depth(:)     !< Nesting depth of each closed shell.
+   type(vector_R8P)            :: apex, p      !< Volume apex of a shell; probe point.
+   real(R8P)                   :: omega        !< Solid-angle sum.
+   real(R8P)                   :: vol_open     !< Summed signed volume of the open components.
+   integer(I4P)                :: c, d, ff, v  !< Counters.
+
+   allocate(closed(n_comp), first(n_comp), vol(n_comp), bmin(3, n_comp), bmax(3, n_comp), depth(n_comp))
+   closed = .true. ; first = 0_I4P ; vol = 0._R8P ; depth = 0_I4P
+   bmin =  huge(1._R8P) ; bmax = -huge(1._R8P)
+   do ff = 1, self%facets_number
+      c = comp(ff)
+      if (first(c) == 0_I4P) first(c) = ff
+      if (any(self%facet(ff)%fcon_edge(:) <= 0_I4P)) closed(c) = .false.
+      do v = 1, 3
+         bmin(1, c) = min(bmin(1, c), self%facet(ff)%vertex(v)%x) ; bmax(1, c) = max(bmax(1, c), self%facet(ff)%vertex(v)%x)
+         bmin(2, c) = min(bmin(2, c), self%facet(ff)%vertex(v)%y) ; bmax(2, c) = max(bmax(2, c), self%facet(ff)%vertex(v)%y)
+         bmin(3, c) = min(bmin(3, c), self%facet(ff)%vertex(v)%z) ; bmax(3, c) = max(bmax(3, c), self%facet(ff)%vertex(v)%z)
+      enddo
+   enddo
+   ! Open components, as one group: the former global rule.
+   if (.not. all(closed)) then
+      vol_open = 0._R8P
+      do ff = 1, self%facets_number
+         if (.not. closed(comp(ff))) vol_open = vol_open + self%facet(ff)%tetrahedron_volume(apex=self%facet(1)%vertex(1))
+      enddo
+      if (vol_open < 0._R8P) then
+         do ff = 1, self%facets_number
+            if (closed(comp(ff))) cycle
+            call self%facet(ff)%reverse_normal
+            n_flipped = n_flipped + 1_I4P
+         enddo
+      endif
+   endif
+   if (.not. any(closed)) return
+   do ff = 1, self%facets_number
+      c = comp(ff)
+      if (.not. closed(c)) cycle
+      apex = self%facet(first(c))%vertex(1)
+      vol(c) = vol(c) + self%facet(ff)%tetrahedron_volume(apex=apex)
+   enddo
+   do c = 1, n_comp
+      if (.not. closed(c)) cycle
+      p = self%facet(first(c))%centroid
+      do d = 1, n_comp
+         if (d == c .or. .not. closed(d)) cycle
+         if (any(bmin(:, c) < bmin(:, d)) .or. any(bmax(:, c) > bmax(:, d))) cycle
+         omega = 0._R8P
+         do ff = 1, self%facets_number
+            if (comp(ff) == d) omega = omega + self%facet(ff)%solid_angle(point=p)
+         enddo
+         if (abs(omega) > 2._R8P * PI) depth(c) = depth(c) + 1_I4P
+      enddo
+   enddo
+   do c = 1, n_comp
+      if (.not. closed(c)) cycle
+      if ((mod(depth(c), 2_I4P) == 0_I4P .and. vol(c) < 0._R8P) .or. &
+          (mod(depth(c), 2_I4P) == 1_I4P .and. vol(c) > 0._R8P)) then
+         do ff = 1, self%facets_number
+            if (comp(ff) == c) then
+               call self%facet(ff)%reverse_normal
+               n_flipped = n_flipped + 1_I4P
+            endif
+         enddo
+      endif
+   enddo
+   endsubroutine orient_shells
 
    pure function smallest_edge_len(self) result(smallest)
    !< Return the smallest edge length.
