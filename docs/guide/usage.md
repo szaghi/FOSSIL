@@ -161,6 +161,14 @@ endif
 
 ---
 
+::: warning Call analyze after transforming
+`translate`, `rotate`, `mirror` and `resize` move the vertices only. The
+centroid, volume, bounding box, AABB tree and pseudo-normals stay as they were
+until `call surface%analyze`, so getters and distance queries return stale
+values until then. One `analyze` after the last transform of a batch is enough.
+See [After a transform](/guide/api/surface-stl-object#after-a-transform).
+:::
+
 ## Translate
 
 Move the surface by a vectorial delta or by individual axis components:
@@ -242,6 +250,11 @@ real(R8P) :: matrix(3,3)
 matrix = mirror_matrix_R8P(normal=ex_R8P)
 call surface%mirror(matrix=matrix)
 ```
+
+A reflection does not reverse the facet winding, so the mirrored surface is
+inside-out (negative volume, inverted distance sign). Follow every `mirror`
+with `call surface%reverse_normals` and then `call surface%analyze`. The same
+applies to `resize` with an odd number of negative factors.
 
 ---
 

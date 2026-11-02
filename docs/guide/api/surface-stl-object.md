@@ -959,6 +959,40 @@ endprogram ex_intersect_ray_any_api
 
 ## Manipulation
 
+### After a transform
+
+`translate`, `rotate`, `mirror` and `resize` move the facet vertices and
+nothing else. `recompute_metrix=.true.` refreshes the per-facet plane data,
+plus the surface bounding box for `translate` and `resize` only. **No
+transform updates** the centroid, volume, area, connectivity, pseudo-normals
+or AABB tree: getters and queries keep reading the values from before the
+transform until [`analyze`](#analyze) runs. Measured on the unit cube:
+
+| Transform | Read before `analyze` | Correct value |
+|---|---|---|
+| `translate` by 10 along x | signed distance at the new centre −9.5 | −0.5 |
+| `rotate` by 90° about z | signed distance at the new centre +0.5 (wrong sign) | −0.5 |
+| `resize` by 3 | volume 1, centroid (0.5, 0.5, 0.5) | 27, (1.5, 1.5, 1.5) |
+
+**Rule:** call `analyze` after the last transform of a batch, before any getter
+or query. `analyze` recomputes the facet metrix itself, so `recompute_metrix`
+is then unnecessary. Pivots read the stored centroid too
+(`center=surface%get_centroid()` in `rotate`, `respect_centroid=.true.` in
+`resize`): after an earlier transform, call `analyze` first or the pivot is
+the old centroid.
+
+**Reflections turn the surface inside-out.** `mirror`, and `resize` with an
+odd number of negative factors, reflect the vertices without reversing the
+facet winding, so every normal ends up pointing inward: after `analyze` the
+volume is negative and the default pseudo-normal sign reports inside points
+as outside. Restore the orientation with:
+
+```fortran
+call surface%mirror(normal=ex_R8P)
+call surface%reverse_normals
+call surface%analyze
+```
+
 ### `translate`
 
 ```fortran
@@ -976,7 +1010,7 @@ call surface%translate(x=1._R8P, y=2._R8P, z=3._R8P)
 | ------------------- | ------------ | ------------------- | ---------------------------------------------------------------------------------- |
 | `x`, `y`, `z`       | `in`, opt.   | `real(R8P)`         | Per-axis increments. Missing axes are not translated.                              |
 | `delta`             | `in`, opt.   | `type(vector_R8P)`  | Vectorial increment.                                                               |
-| `recompute_metrix`  | `in`, opt.   | `logical`           | Default `.false.`. Pass `.true.` to refresh facet plane equations in place.        |
+| `recompute_metrix`  | `in`, opt.   | `logical`           | Default `.false.`. Refreshes facet plane data and bounding box only; see notes.    |
 | `status`            | `out`, opt.  | `integer(I4P)`      | `STATUS_OK` or `STATUS_AMBIGUOUS_ARGS`.                                            |
 
 **Example.**
@@ -992,7 +1026,8 @@ type(surface_stl_object) :: surface
 type(vector_R8P)         :: c
 
 call surface%load_from_file(file_name='cube.stl', guess_format=.true.)
-call surface%translate(delta=10._R8P * ex_R8P, recompute_metrix=.true.)
+call surface%translate(delta=10._R8P * ex_R8P)
+call surface%analyze   ! without it, get_centroid returns the pre-translation centroid
 c = surface%get_centroid()
 print '(A, 3ES12.5)', 'centroid = ', c%x, c%y, c%z
 end program ex_translate
@@ -1000,11 +1035,10 @@ end program ex_translate
 
 **Notes.**
 
-- If you batch multiple transforms, pass `recompute_metrix=.false.` on every
-  call but the last; the final one (or a closing [`analyze`](#analyze)) brings
-  the cached state up to date.
-- Translation does not change connectivity — `analyze` is not strictly
-  required, but the bounding box, centroid, and AABB tree become stale.
+- `recompute_metrix=.true.` refreshes the facet plane data and the bounding
+  box, not the centroid or the AABB tree: call [`analyze`](#analyze) before
+  any getter or query (see [After a transform](#after-a-transform)). For a
+  batch of transforms, one `analyze` after the last one is enough.
 
 **See also.** [`rotate`](#rotate),
 [`mirror`](#mirror),
@@ -1047,16 +1081,20 @@ type(surface_stl_object) :: surface
 real(R8P),    parameter  :: pi = acos(-1._R8P)
 
 call surface%load_from_file(file_name='cube.stl', guess_format=.true.)
-call surface%rotate(axis=ez_R8P, angle=0.25_R8P * pi, &
-                    center=surface%get_centroid(), recompute_metrix=.true.)
+call surface%rotate(axis=ez_R8P, angle=0.25_R8P * pi, center=surface%get_centroid())
+call surface%analyze   ! refresh bounding box, AABB tree and pseudo-normals before queries
 end program ex_rotate
 ```
 
 **Notes.**
 
 - The axis is normalised internally; magnitude is irrelevant.
-- World-origin rotation moves the centroid; body-frame rotation does not. If
-  you want "rotate in place", always pass `center=surface%get_centroid()`.
+- World-origin rotation moves the body; body-frame rotation does not. If you
+  want "rotate in place", pass `center=surface%get_centroid()`, which reads the
+  centroid stored by the last [`analyze`](#analyze).
+- Even with `recompute_metrix=.true.` the bounding box, centroid and AABB tree
+  stay stale: call `analyze` before any getter or query (see
+  [After a transform](#after-a-transform)).
 
 **See also.** [`translate`](#translate),
 [`mirror`](#mirror).
@@ -1072,8 +1110,9 @@ call surface%mirror(matrix=M)
 
 **Purpose.** Mirror the surface through a plane. The plane is specified
 either by its unit normal (passing through the origin) or by an explicit 3×3
-reflection matrix. Vertex winding is reversed automatically so normals stay
-geometrically meaningful.
+reflection matrix. Vertex winding is **not** reversed: the mirrored surface is
+inside-out until you call [`reverse_normals`](#reverse_normals) and
+[`analyze`](#analyze) (see [After a transform](#after-a-transform)).
 
 **Arguments.**
 
@@ -1094,7 +1133,9 @@ implicit none
 type(surface_stl_object) :: surface
 
 call surface%load_from_file(file_name='cube.stl', guess_format=.true.)
-call surface%mirror(normal=ex_R8P, recompute_metrix=.true.)
+call surface%mirror(normal=ex_R8P)
+call surface%reverse_normals   ! the reflection leaves every normal pointing inward
+call surface%analyze           ! rebuild volume, centroid, AABB tree, pseudo-normals
 end program ex_mirror
 ```
 
@@ -1119,7 +1160,8 @@ call surface%resize(factor=2._R8P*ex_R8P+ey_R8P+ez_R8P, respect_centroid=.true.)
 **Purpose.** Anisotropic scaling. As with [`translate`](#translate), pass
 either a vector `factor` or scalar `x`/`y`/`z` — never both. By default the
 scale is around the world origin; pass `respect_centroid=.true.` to pivot
-about the current centroid (the scale is then "in place").
+about the centroid stored by the last [`analyze`](#analyze) (the scale is then
+"in place").
 
 **Arguments.**
 
@@ -1143,7 +1185,8 @@ type(surface_stl_object) :: surface
 
 call surface%load_from_file(file_name='cube.stl', guess_format=.true.)
 call surface%resize(factor=2._R8P*ex_R8P + 2._R8P*ey_R8P + 2._R8P*ez_R8P, &
-                    respect_centroid=.true., recompute_metrix=.true.)
+                    respect_centroid=.true.)
+call surface%analyze   ! volume, centroid and AABB tree are stale until this call
 end program ex_resize
 ```
 
@@ -1151,8 +1194,12 @@ end program ex_resize
 
 - The method is called `resize` and not `scale` because `scale` is a Fortran
   intrinsic.
-- Negative factors mirror across the corresponding axis. Use
-  [`mirror`](#mirror) instead if that is your intent — it adjusts winding.
+- Negative factors mirror across the corresponding axis, and like
+  [`mirror`](#mirror) they do not reverse the winding: with an odd number of
+  negative factors the surface is inside-out until `reverse_normals` +
+  `analyze` (see [After a transform](#after-a-transform)).
+- The volume and centroid change with the scale but are only recomputed by
+  [`analyze`](#analyze).
 
 **See also.** [`translate`](#translate),
 [`mirror`](#mirror).
