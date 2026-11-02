@@ -26,6 +26,10 @@ real(R8P)                             :: resize_x, resize_y, resize_z          !
 type(vector_R8P)                      :: rotate_axis                           !< Axis of rotation.
 real(R8P)                             :: rotate_angle                          !< Angle of rotation.
 logical                               :: sanitize                              !< Sanitize STL.
+logical                               :: fill_holes                            !< Close small holes (issue #31).
+integer(I4P)                          :: max_hole_edges                        !< Largest hole to fill, in edges.
+real(R8P)                             :: max_hole_size                         !< Largest hole bbox diagonal / surface bbox diagonal.
+integer(I4P)                          :: holes_filled, holes_skipped           !< fill_holes report.
 type(vector_R8P)                      :: translate_delta                       !< Translate delta.
 real(R8P)                             :: translate_x, translate_y, translate_z !< Translate scalar deltas.
 
@@ -101,8 +105,12 @@ do s=1, stl_numbers
    endif
    if (sanitize) then
       print '(A)', 'sanitize STL'
-      call surface(s)%sanitize
+      call surface(s)%sanitize(fill_holes=fill_holes, max_hole_edges=max_hole_edges, max_hole_size=max_hole_size)
       print '(A)', surface(s)%statistics()
+   elseif (fill_holes) then
+      call surface(s)%fill_holes(max_hole_edges=max_hole_edges, max_hole_size=max_hole_size, &
+                                 holes_filled=holes_filled, holes_skipped=holes_skipped)
+      print '(A,I0,A,I0,A)', 'fill holes: ', holes_filled, ' filled, ', holes_skipped, ' left open'
    endif
    if (cli%is_passed(switch='--output')) then
       print '(A)', 'save output in: '//trim(adjustl(output))
@@ -209,6 +217,24 @@ contains
                def='.false.',       &
                act='store_true')
 
+  call cli%add(switch='--fill_holes',                                                         &
+               help='close small holes (with --sanitize: inside the repair pipeline)',        &
+               required=.false.,                                                              &
+               def='.false.',                                                                 &
+               act='store_true')
+
+  call cli%add(switch='--max_hole_edges',                       &
+               help='largest hole to fill, in boundary edges', &
+               required=.false.,                                &
+               def='200',                                       &
+               act='store')
+
+  call cli%add(switch='--max_hole_size',                                              &
+               help='largest hole to fill: hole bbox diagonal / surface bbox diagonal', &
+               required=.false.,                                                      &
+               def='0.1',                                                             &
+               act='store')
+
   call cli%add(switch='--translate_delta', &
                help='translate delta',     &
                required=.false.,           &
@@ -249,6 +275,9 @@ contains
   call cli%get(        switch='--rotate_axis',     val=rotate_axis_,        error=error) ; if (error/=0) stop
   call cli%get(        switch='--rotate_angle',    val=rotate_angle,        error=error) ; if (error/=0) stop
   call cli%get(        switch='--sanitize',        val=sanitize,            error=error) ; if (error/=0) stop
+  call cli%get(        switch='--fill_holes',      val=fill_holes,          error=error) ; if (error/=0) stop
+  call cli%get(        switch='--max_hole_edges',  val=max_hole_edges,      error=error) ; if (error/=0) stop
+  call cli%get(        switch='--max_hole_size',   val=max_hole_size,       error=error) ; if (error/=0) stop
   call cli%get(        switch='--translate_delta', val=translate_delta_,    error=error) ; if (error/=0) stop
   call cli%get(        switch='--translate_x',     val=translate_x,         error=error) ; if (error/=0) stop
   call cli%get(        switch='--translate_y',     val=translate_y,         error=error) ; if (error/=0) stop
