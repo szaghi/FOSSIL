@@ -34,7 +34,7 @@ features:
     details: Binary BVH built with the surface-area heuristic — adapts to triangle density. ~100× faster distance queries than the legacy octree on dragon-scale meshes. Octree remains selectable.
   - icon: 🧪
     title: OOP / TDD Designed
-    details: Two public types — surface_stl_object and facet_object — every public operation exercised by the regression suite.
+    details: Three public types — surface_stl_object, facet_object and distance_field_object — every public operation exercised by the regression suite.
   - icon: 🚀
     title: Advanced Geometry Processing
     details: Booleans, winding number, alpha wrap, isotropic remesh, decimation, marching cubes, SDF segmentation, ray queries, cotangent Laplacian, per-vertex curvature, Taubin smoothing, hole filling — thirteen libigl/CGAL-class primitives, every one a single TBP. See the Advanced Features guide.
@@ -80,6 +80,9 @@ toolkit, drawn directly from the standard references in the field:
   Meyer et al. 2003.
 - **[Mesh smoothing (explicit + Taubin λ\|μ)](/guide/advanced/smoothing)** —
   the right production-grade denoiser for CFD-grade STL. Taubin 1995.
+- **[Signed-distance field](/guide/advanced/distance-field)** — the
+  distance of every cell of a stretched rectilinear grid: exact narrow band,
+  flood-fill signs, fast sweeping. Zhao 2005; Detrixhe et al. 2013.
 
 Each algorithm has a dedicated page with a CFD-relevant motivation, a
 worked Fortran example, and an honest list of known limitations.

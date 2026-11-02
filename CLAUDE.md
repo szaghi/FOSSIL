@@ -122,12 +122,13 @@ src/
 
 ### Core object hierarchy
 
-The public API is accessed via `use fossil`, which re-exports two types plus the named constants:
+The public API is accessed via `use fossil`, which re-exports three types plus the named constants:
 
 | Type | Module file | Purpose |
 |------|-------------|---------|
 | `surface_stl_object` | `fossil_surface_stl.f90` | Surface geometry: I/O, analysis, sanitization, manipulation, distance queries |
 | `facet_object` | `fossil_facet_object.f90` | Individual triangular facet — vertices, normal, connectivity, pseudo-normals |
+| `distance_field_object` | `fossil_distance_field.f90` | Signed-distance field on a rectilinear (stretched) grid: narrow band, flood-fill signs, fast sweeping |
 
 `fossil.f90` also re-exports:
 
@@ -201,7 +202,8 @@ fobis fetch            # --update to re-fetch
 - `fossil_utils.f90` — constants (`EPS`, `PI`, `FRLEN`) and helpers (`is_inside_bb`)
 - `fossil_list_id_object.f90` — dynamic integer ID list used for connectivity tracking
 - `fossil_aabb_object.f90` / `fossil_aabb_node_object.f90` — AABB primitives
-- `fossil_block_object.f90` / `fossil_block_aabb_object.f90` — structured mesh block with AABB
+- `fossil_block_object.f90` / `fossil_block_aabb_object.f90` — structured mesh block with AABB (`extrapolate_distances` deprecated, issue #32)
+- `fossil_distance_field.f90` — `distance_field_object` (re-exported by `fossil`, issue #32): signed-distance field on a rectilinear grid; narrow band via `distance_many(_device)`, flood-fill signs, fast sweeping in hyperplane order (OpenMP bit-exact). It imports the surface/facet modules, never `fossil` (circular). `fossil_ib_generator` is built on it.
 
 ## Coding conventions
 

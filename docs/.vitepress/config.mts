@@ -78,6 +78,7 @@ export default withMermaid({
             { text: 'Per-vertex curvature',       link: '/guide/advanced/curvature' },
             { text: 'Mesh smoothing',             link: '/guide/advanced/smoothing' },
             { text: 'Hole filling',               link: '/guide/advanced/hole-filling' },
+            { text: 'Signed-distance field',      link: '/guide/advanced/distance-field' },
             { text: 'GPU distance queries',       link: '/guide/advanced/device-distance' },
           ],
         },

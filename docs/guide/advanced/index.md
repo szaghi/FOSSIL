@@ -35,14 +35,15 @@ advanced-feature pages cross-link to both.
 | [Mesh smoothing (explicit + Taubin)](/guide/advanced/smoothing) | `surface%smooth(method, lambda, mu, iterations, status)` | Taubin (SIGGRAPH 1995) |
 | [Hole filling](/guide/advanced/hole-filling) | `surface%fill_holes(max_hole_edges, max_hole_size, ...)` | Liepa (SGP 2003) |
 
-## Execution backends
+## Execution backends and grid fields
 
-One page covers a different way to run a core query rather than a new
-algorithm, so it is not counted among the primitives:
+Two pages cover something other than a surface TBP, so they are not counted
+among the primitives:
 
 | Page | Entry points | What it adds |
 |---|---|---|
 | [GPU distance queries](/guide/advanced/device-distance) | `surface%enter_device()` / `surface%distance_many_device(...)` / `surface%exit_device()` | Batch signed distance on the GPU via OpenACC (nvfortran), SAH BVH only, bit-exact vs the CPU path |
+| [Signed-distance field](/guide/advanced/distance-field) | `distance_field_object`: `initialize(x, y, z, ng)` / `compute(surface, ...)` | Signed distance of every cell of a stretched rectilinear grid: exact narrow band, flood-fill signs, fast sweeping (OpenMP, bit-exact); used by `fossil_ib_generator` |
 
 RANSAC shape detection was deliberately **not** shipped — see the
 [roadmap issue](https://github.com/szaghi/FOSSIL/issues/18) for the
@@ -75,8 +76,8 @@ Each advanced-feature page follows the same template:
 
 ## Roadmap and follow-up reading
 
-All thirteen shipped primitives, and the GPU distance backend, have a
-dedicated page. For the
+All thirteen shipped primitives, the GPU distance backend and the
+distance field have a dedicated page. For the
 multi-commit history, design decisions, and the deferred follow-up
 refinements (alpha-wrap adaptive refinement, SDF graph-cut), see the
 [implementation roadmap issue](https://github.com/szaghi/FOSSIL/issues/18).
