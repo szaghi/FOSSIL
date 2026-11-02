@@ -5,7 +5,7 @@ title: Advanced Features
 # Advanced features
 
 Beyond the core STL I/O, repair, and signed-distance API documented in
-the [API companion guide](/guide/api/), FOSSIL ships **twelve
+the [API companion guide](/guide/api/), FOSSIL ships **thirteen
 algorithmic primitives** drawn from the libigl / CGAL geometry-
 processing toolkit. They turn FOSSIL from "an STL parser with an AABB
 tree" into a CFD preprocessing toolchain on its own. Every item is a
@@ -33,6 +33,7 @@ advanced-feature pages cross-link to both.
 | [Cotangent Laplacian + barycentric mass](/guide/advanced/cotangent-laplacian) | `surface%cotangent_laplacian(L, M, status)` | Pinkall & Polthier 1993; Meyer et al. 2003 |
 | [Per-vertex Gaussian + mean curvature](/guide/advanced/curvature) | `surface%gaussian_curvature(K, status)` / `surface%mean_curvature(H, status)` | Meyer et al. 2003 |
 | [Mesh smoothing (explicit + Taubin)](/guide/advanced/smoothing) | `surface%smooth(method, lambda, mu, iterations, status)` | Taubin (SIGGRAPH 1995) |
+| [Hole filling](/guide/advanced/hole-filling) | `surface%fill_holes(max_hole_edges, max_hole_size, ...)` | Liepa (SGP 2003) |
 
 ## Execution backends
 
@@ -74,7 +75,7 @@ Each advanced-feature page follows the same template:
 
 ## Roadmap and follow-up reading
 
-All twelve shipped primitives, and the GPU distance backend, have a
+All thirteen shipped primitives, and the GPU distance backend, have a
 dedicated page. For the
 multi-commit history, design decisions, and the deferred follow-up
 refinements (alpha-wrap adaptive refinement, SDF graph-cut), see the

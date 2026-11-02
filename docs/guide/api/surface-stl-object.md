@@ -205,6 +205,9 @@ The fixed pipeline is:
 | -------------- | ------------ | -------------- | ------------------------------------------------------------------------------------ |
 | `do_analysis`  | `in`, opt.   | `logical`      | If `.true.`, run an initial `analyze` before step 1. Default `.false.` — the caller normally arrives here straight from `load_from_file`, which has already analysed. |
 | `status`       | `out`, opt.  | `integer(I4P)` | `STATUS_OK`; reserved for future status codes.                                       |
+| `fill_holes`   | `in`, opt.   | `logical`      | Default `.false.`. Close small holes after orientation, see [`fill_holes`](#fill_holes); orientation runs once more if anything was filled. |
+| `max_hole_edges` | `in`, opt. | `integer(I4P)` | Passed to `fill_holes` (default 200).                                                 |
+| `max_hole_size`  | `in`, opt. | `real(R8P)`    | Passed to `fill_holes` (default 0.1 of the bounding-box diagonal).                    |
 
 **Example.** Load a deliberately broken mesh and verify repair.
 
@@ -364,6 +367,33 @@ end program ex_connect_nearby
 
 **See also.** [`sanitize`](#sanitize),
 [`analyze`](#analyze).
+
+---
+
+### `fill_holes`
+
+```fortran
+call surface%fill_holes(max_hole_size=0.05_R8P, holes_filled=n, holes_skipped=m)
+```
+
+**Purpose.** Close small holes: every closed loop of boundary edges with at
+most `max_hole_edges` edges and a bounding-box diagonal of at most
+`max_hole_size` times the surface's is triangulated by Liepa's minimum-weight
+dynamic programming, oriented like the surrounding facets. The surface is
+re-analysed afterwards. See [Hole filling](/guide/advanced/hole-filling).
+
+**Arguments.**
+
+| Argument         | Intent       | Type           | Notes                                                              |
+| ---------------- | ------------ | -------------- | ------------------------------------------------------------------ |
+| `max_hole_edges` | `in`, opt.   | `integer(I4P)` | Largest loop filled, in edges (default 200; the DP is O(n³)).      |
+| `max_hole_size`  | `in`, opt.   | `real(R8P)`    | Largest loop bbox diagonal / surface bbox diagonal (default 0.1).  |
+| `holes_filled`   | `out`, opt.  | `integer(I4P)` | Loops filled.                                                      |
+| `holes_skipped`  | `out`, opt.  | `integer(I4P)` | Loops left open by the thresholds.                                 |
+| `open_edges`     | `out`, opt.  | `integer(I4P)` | Boundary edges that do not close into a loop.                      |
+| `status`         | `out`, opt.  | `integer(I4P)` | `STATUS_OK`.                                                       |
+
+**See also.** [`sanitize`](#sanitize), [`is_watertight`](#getters-and-predicates).
 
 ---
 

@@ -89,7 +89,7 @@ Selection is per-surface via the optional `aabb_tree_kind` argument on `load_fro
 ## Advanced features
 
 Beyond the core load / sanitize / distance API above, FOSSIL ships
-**twelve** algorithmic primitives drawn from the libigl / CGAL geometry-
+**thirteen** algorithmic primitives drawn from the libigl / CGAL geometry-
 processing toolkit. Each is a single TBP on `surface_stl_object`.
 Conceptual pages (what the algorithm is, when to use it, when not to,
 code examples, known limitations) live under
@@ -111,6 +111,7 @@ code examples, known limitations) live under
 | Per-vertex Gaussian curvature | `surface%gaussian_curvature(K, status)` | [Curvature](/guide/advanced/curvature) |
 | Per-vertex signed mean curvature | `surface%mean_curvature(H, status)` | [Curvature](/guide/advanced/curvature) |
 | Mesh smoothing (explicit + Taubin) | `surface%smooth(method, lambda, mu, iterations, status)` | [Smoothing](/guide/advanced/smoothing) |
+| Hole filling (Liepa minimum-weight patches) | `surface%fill_holes(max_hole_edges, max_hole_size, ...)` | [Hole filling](/guide/advanced/hole-filling) |
 
 RANSAC shape detection was deliberately dropped from the roadmap; a few
 solver-dependent items (heat-method geodesics, implicit smoothing)

@@ -77,6 +77,7 @@ export default withMermaid({
             { text: 'Cotangent Laplacian',        link: '/guide/advanced/cotangent-laplacian' },
             { text: 'Per-vertex curvature',       link: '/guide/advanced/curvature' },
             { text: 'Mesh smoothing',             link: '/guide/advanced/smoothing' },
+            { text: 'Hole filling',               link: '/guide/advanced/hole-filling' },
             { text: 'GPU distance queries',       link: '/guide/advanced/device-distance' },
           ],
         },

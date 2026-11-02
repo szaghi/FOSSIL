@@ -37,7 +37,7 @@ features:
     details: Two public types — surface_stl_object and facet_object — every public operation exercised by the regression suite.
   - icon: 🚀
     title: Advanced Geometry Processing
-    details: Booleans, winding number, alpha wrap, isotropic remesh, decimation, marching cubes, SDF segmentation, ray queries, cotangent Laplacian, per-vertex curvature, Taubin smoothing — twelve libigl/CGAL-class primitives, every one a single TBP. See the Advanced Features guide.
+    details: Booleans, winding number, alpha wrap, isotropic remesh, decimation, marching cubes, SDF segmentation, ray queries, cotangent Laplacian, per-vertex curvature, Taubin smoothing, hole filling — thirteen libigl/CGAL-class primitives, every one a single TBP. See the Advanced Features guide.
   - icon: 🆓
     title: Free & Open Source
     details: Multi-licensed — GPLv3 for FOSS projects, BSD 2/3-Clause or MIT for commercial use. Fortran 2003+ standard compliant.
