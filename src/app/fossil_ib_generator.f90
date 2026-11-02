@@ -319,7 +319,8 @@ contains
                act='store')
 
   call cli%add(switch='--sign_algorithm',                         &
-               help='algorithm used to compute sign of distance', &
+               help='algorithm used to compute sign of distance: ray_intersections, solid_angle, '// &
+                    'pseudo_normal, fast_winding_number (most robust on surfaces with holes)', &
                required=.false.,                                  &
                def='ray_intersections',                           &
                act='store')
