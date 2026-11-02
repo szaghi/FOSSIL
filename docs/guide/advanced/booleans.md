@@ -81,8 +81,9 @@ runtime check — set them up yourself):
 - Both have outward-oriented normals — run `surface%sanitize_normals`
   if you're not sure.
 - The intersection between A and B doesn't trip the CDT's recovery
-  loop (true for any pair of solids in *generic position*; coplanar
-  faces are the only known trouble).
+  loop. Coplanar faces, shared edges and touching contacts are handled
+  (issue #33); see [Known limitations](#known-limitations) for the
+  exactness statement.
 
 ## Example
 
@@ -130,39 +131,68 @@ input pair, the four boolean ops produce:
 
 All three results match their analytic volume to FP precision.
 
+### Coplanar faces
+
+Two unit cubes offset along x only: their y and z faces are coplanar and
+overlap. This is the box ∖ body configuration of cut-cell meshing, and it
+needs no perturbation:
+
+```fortran
+program ex_boolean_coplanar
+use fossil
+use penf,   only : I4P, R8P
+use vecfor, only : vector_R8P
+implicit none
+type(surface_stl_object) :: a, b
+integer(I4P)             :: status
+
+call a%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call b%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+call b%translate(delta=vector_R8P(0.5_R8P, 0._R8P, 0._R8P))
+call b%analyze
+call a%boolean(other=b, op=BOOL_DIFFERENCE, status=status)
+print '(A,I0,A,F8.5,A,L1,A,L1)', 'status ', status, '  volume ', a%get_volume(), &
+      ' (analytic 0.5)  watertight ', a%is_watertight(), '  manifold ', a%is_manifold()
+endprogram ex_boolean_coplanar
+```
+
+How the coplanar overlap is handled:
+
+1. Each facet pair is classified exactly (separated, crossing, touching,
+   coplanar) from `orient3d` signs, not from floating-point distances.
+2. A coplanar pair cuts each facet along the parts of the other facet's
+   edges that lie inside it, so the overlap becomes sub-triangles of its
+   own in both facets.
+3. Cut endpoints on a facet edge are also inserted in the facet across
+   that edge, so no crack (T-junction) is left.
+4. A sub-triangle lying on the other surface is classified by the
+   shared-face table (same or opposite orientation), not by the winding
+   number, which is ill-defined on the surface.
+
 ## Known limitations
 
-- **Axis-aligned coplanar face overlaps produce wrong volumes** even
-  though `status == BOOL_STATUS_OK`. Two failure modes contribute:
-  - The Möller-style tri-tri test produces degenerate or NaN
-    intervals when one triangle's edge lies on the other triangle's
-    plane.
-  - Adjacent A-facets and B-facets sharing an edge along a coplanar
-    region produce sub-triangles whose centroids are equidistant
-    from both surfaces; the winding-number classifier evaluates to
-    ~1 from both (rather than the textbook ~0.5), defeating the
-    boundary detector that the shared-face truth table relies on.
-
-  This is a **silent** failure (no status code flags it) — the
-  boolean returns successfully but the result volume is wrong.
-
-- **Workaround for coplanar inputs**: perturb one of the inputs by a
-  small offset along **each** axis before the boolean, breaking the
-  coplanarity and routing through the bit-exact generic codepath:
-
-  ```fortran
-  ! Avoid axis-aligned coplanar faces by 3D-offsetting B.
-  call b%translate(delta=vector_R8P(eps, eps, eps))
-  call b%analyze
-  call a%boolean(other=b, op=BOOL_DIFFERENCE, status=status)
-  ```
-
-  `eps = 1e-6 * bbox_diagonal` is a safe value: small enough to be
-  numerically negligible in the output volume, large enough to
-  defeat the coplanar pathology. The full discussion (with the two
-  contributing failure modes) is in the
-  `surface%boolean` source docstring at
-  `src/lib/fossil_surface_stl.f90`.
+- **Exactness.** The decisions (how two facets meet, which side a vertex
+  is on, whether points are collinear in a shared plane) use Shewchuk's
+  adaptive `orient3d`, with one snap: a vertex closer to the other facet's
+  plane, or to the other edge's line, than 10⁻¹⁰ of the local edge length
+  counts as lying on it. Faces coplanar by construction are rarely exactly
+  coplanar after a rotation or a scaling in floating point, and the snap
+  keeps them coplanar. Features smaller than that relative distance are
+  merged by design. The intersection points are floating-point
+  constructions, but canonical ones (each built by one formula from
+  lexicographically ordered inputs), so every facet that shares a point
+  gets the same bits and the result welds exactly.
+- **What is validated.** Coplanar overlaps, shared edges and contacts are
+  tested on box pairs: a 6-case matrix of all four ops, axis-aligned and
+  rotated (`fossil_test_boolean_coplanar`), and 400 booleans on snapped
+  random box pairs, half of them rotated (`fossil_test_boolean_stress`),
+  all with analytic volumes. Curved meshes with coplanar patches have not
+  been stress-tested.
+- **Non-manifold results by definition.** Solids that touch only along an
+  edge or at a point give a union (or difference) that is non-manifold
+  there, and a symmetric difference whose two pieces `A \ B` and `B \ A`
+  touch along the curves where the surfaces cross has four facets at each
+  such edge. The volume is right; `is_manifold()` is false, as it should be.
 
 - **Self-intersection in inputs** (each surface intersecting itself)
   produces undefined results. Run
@@ -182,8 +212,9 @@ All three results match their analytic volume to FP precision.
   to classify each sub-triangle.
 - [Constants](/guide/api/constants) — `BOOL_*` and `BOOL_STATUS_*`.
 - [Roadmap issue](https://github.com/szaghi/FOSSIL/issues/18) — full
-  multi-commit history including the coplanar-aware shared-boundary
-  tagging that handles the well-behaved subset of degenerate cases.
+  multi-commit history of the boolean pipeline.
+- [Issue #33](https://github.com/szaghi/FOSSIL/issues/33) — coplanar
+  overlaps, exact classification and the validation matrix.
 
 ## References
 

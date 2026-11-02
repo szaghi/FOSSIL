@@ -1785,44 +1785,23 @@ contains
    !<         convex-flip-greedy recovery (see fossil_dt docstring); on
    !<         degenerate inputs, returns BOOL_STATUS_CDT_FAILED.
    !<
-   !< ## Limitations (degenerate-coplanar correctness)
+   !< ## Coplanar faces, shared edges, contacts (issue #33)
    !<
-   !< The boolean is **bit-exact correct** when no facets of A and B are
-   !< coplanar (the generic case for arbitrarily-positioned solids). On the
-   !< canonical 3D-offset cube test (cube vs cube offset by (0.5, 0.5, 0.5))
-   !< all four ops match the analytic volume to FP precision.
+   !< Handled: facet pairs are classified exactly (`fossil_tritri_exact`,
+   !< orient3d signs with a 1e-10 relative on-plane snap); coplanar pairs cut
+   !< each other along the parts of their edges inside the other facet; cut
+   !< endpoints on a facet edge are inserted in the facet across it (no
+   !< T-junctions); sub-triangles on the other surface use the shared-face
+   !< table. Intersection points are canonical constructions, so the result
+   !< welds exactly. Validated on box pairs: fossil_test_boolean_coplanar (6
+   !< cases x 4 ops, axis-aligned and rotated) and fossil_test_boolean_stress
+   !< (400 booleans on snapped random box pairs), all with analytic volumes.
    !<
-   !< When A and B have **axis-aligned coplanar face overlaps** (e.g. two
-   !< cubes offset along a single axis, or any pair of solids with
-   !< parallel faces meeting on a shared region), the result `status` is
-   !< still `BOOL_STATUS_OK` but the volume can be wrong. Two known
-   !< failure modes contribute:
-   !<
-   !<   1. The Möller-style tri-tri test in `facet%intersect_facet` produces
-   !<      degenerate or NaN intervals when one triangle's edge lies on the
-   !<      other triangle's plane. The post-clip mitigates this for the
-   !<      segment endpoints but does not recover *missing* intersections
-   !<      that the algorithm fails to detect at all.
-   !<   2. Adjacent A-facets and B-facets sharing an edge along a coplanar
-   !<      region produce sub-triangles whose centroids are equidistant from
-   !<      both surfaces; the WN classifier evaluates to ~1 from both
-   !<      (rather than the textbook ~0.5), defeating the boundary detector
-   !<      that the shared-face truth table relies on.
-   !<
-   !< Workarounds:
-   !<   - Perturb one of the inputs by a small offset along each axis
-   !<     (`surface%translate(delta=vector_R8P(eps, eps, eps))`) before the
-   !<     boolean. This breaks the coplanarity and routes through the
-   !<     bit-exact generic codepath. `eps = 1e-6 * bbox_diagonal` is a
-   !<     reasonable choice.
-   !<   - For axis-aligned cut-cell-style use cases (box ∖ body), this
-   !<     limitation is exactly the configuration that matters; a future
-   !<     PR will add coplanar-aware handling in the arrangement step.
-   !<
-   !< Closing this gap requires either an exact-arithmetic tri-tri primitive
-   !< (Shewchuk-style adaptive predicates against the line-of-intersection)
-   !< or a coplanar pre-pass in `arrangement_collect_intersections` that
-   !< handles coplanar facet pairs separately from the generic Möller path.
+   !< Residual: features smaller than the snap (1e-10 of the local edge
+   !< length) merge by design; curved meshes with coplanar patches are not
+   !< stress-tested; solids touching only along an edge or at a point, and a
+   !< symmetric difference whose two pieces touch along the crossing curves,
+   !< give non-manifold results by definition (with the right volume).
    class(surface_stl_object),     intent(inout)        :: self     !< Surface A; replaced by `op(A, B)` on success.
    class(surface_stl_object),     intent(in)           :: other    !< Surface B.
    integer(I4P),                  intent(in)           :: op       !< BOOL_UNION / BOOL_INTERSECT / BOOL_DIFFERENCE / BOOL_SYMDIFF.
@@ -1850,10 +1829,8 @@ contains
    !< by the self-intersections. Result is a self-intersection-free version
    !< of the input.
    !<
-   !< Inherits the same coplanar-degenerate limitation as `boolean` — meshes
-   !< with self-overlaps along axis-aligned coplanar regions can produce
-   !< wrong-volume results. See `surface%boolean` docstring's Limitations
-   !< section.
+   !< Inherits the coplanar handling of `boolean` (issue #33); see its
+   !< docstring for the exactness statement and what has been validated.
    class(surface_stl_object),     intent(inout)        :: self
    integer(I4P),                  intent(out), optional :: status
 

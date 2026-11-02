@@ -215,14 +215,15 @@ fobis fetch            # --update to re-fetch
 
 ## Known limitations
 
-- **`surface%boolean` / `surface%resolve_self_intersections`** (issue #18 §1.1):
-  bit-exact correct on inputs where no facets of A and B are coplanar (the
-  generic case). On inputs with axis-aligned coplanar face overlaps (e.g.
-  cubes offset along a single axis only), the call returns `BOOL_STATUS_OK`
-  but the result volume is wrong. Workaround: perturb one input by
-  `eps = 1e-6 * bbox_diagonal` along each axis before the boolean. Full
-  details and the upgrade path in the `surface%boolean` docstring's
-  "Limitations" section in `src/lib/fossil_surface_stl.f90`.
+- **`surface%boolean` / `surface%resolve_self_intersections`**: coplanar
+  overlaps, shared edges and contacts are handled since issue #33 (exact
+  orient3d pair classification in `fossil_tritri_exact`, coplanar cuts,
+  T-junction closing). Residual: a 1e-10 relative on-plane snap (features
+  below it merge by design); validated on box pairs only
+  (`fossil_test_boolean_coplanar`, `fossil_test_boolean_stress`); contact-only
+  and touching-symdiff results are non-manifold by definition. Intersection
+  points must stay canonical constructions (same bits from every facet pair),
+  because the vertex weld compares coordinates exactly (`EPS` is 0).
 
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
