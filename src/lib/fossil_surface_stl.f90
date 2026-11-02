@@ -2586,7 +2586,11 @@ contains
    !<   5. `remove_duplicate_facets` — drop literal duplicates (any winding); if
    !<      anything was removed, re-`analyze` so winding fixup sees a clean state.
    !<   6. `sanitize_normals` — BFS-propagate winding consistency, then global
-   !<      flip if the volume sign indicates inward orientation.
+   !<      flip if the volume sign indicates inward orientation. If any facet was
+   !<      flipped, re-`analyze`: the pseudo-normals and the AABB distance payload
+   !<      were built for the old winding, and signed-distance / inside queries
+   !<      would otherwise use them (an inside-out input reported its interior as
+   !<      outside).
    !<   7. Warnings to stderr summarising every counter the user might care about.
    !<
    !< NaN/Inf scrubbing happens earlier, at `load_from_file`, since loading garbage
@@ -2597,6 +2601,7 @@ contains
    class(surface_stl_object), intent(inout)        :: self        !< File STL.
    logical,                   intent(in), optional :: do_analysis !< Sentil for performing a first analysis.
    integer(I4P),              intent(out), optional :: status     !< 0=success (reserved for future use).
+   integer(I4P)                                    :: flipped_count !< Facets reversed by sanitize_normals.
 
    if (present(status)) status = STATUS_OK
    if (self%facets_number>0) then
@@ -2617,7 +2622,10 @@ contains
       call self%remove_duplicate_facets
       if (self%duplicate_facets_removed > 0) &
          call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
-      call self%sanitize_normals
+      call self%sanitize_normals(flipped_count=flipped_count)
+      ! Orientation-dependent derived data (pseudo-normals, pnormal_payload, AABB
+      ! distance payload) still describes the pre-flip winding: rebuild it.
+      if (flipped_count > 0) call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
       if (self%degenerate_facets_removed > 0) &
          write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%degenerate_facets_removed, &
                                   ' degenerate facet(s) (zero-area / sliver) removed'
@@ -2636,7 +2644,7 @@ contains
    endif
    endsubroutine sanitize
 
-   pure subroutine sanitize_normals(self)
+   pure subroutine sanitize_normals(self, flipped_count)
    !< Sanitize facets normals — make windings consistent across the connectivity graph
    !< and oriented outward.
    !<
@@ -2658,13 +2666,23 @@ contains
    !< volume-sign flip cannot resolve (cancellation in the sum).
    !<
    !< @note Facets connectivity and normals must be already computed.
-   class(surface_stl_object), intent(inout) :: self             !< File STL.
+   !<
+   !< @warning A flip reverses a facet's winding but leaves the orientation-dependent
+   !< data built by `analyze` describing the old winding: the vertex/edge pseudo-normals,
+   !< `pnormal_payload` and the AABB distance payload. Signed-distance and inside queries
+   !< are then wrong until `analyze` runs again. `sanitize` does this automatically; a
+   !< direct caller should read `flipped_count` and call `analyze` when it is positive.
+   class(surface_stl_object), intent(inout)         :: self          !< File STL.
+   integer(I4P),              intent(out), optional :: flipped_count !< Facets whose winding was reversed (global flip counts every facet).
    logical,      allocatable                :: facet_checked(:) !< Visited flag per facet.
+   logical                                  :: flipped          !< One make_normal_consistent outcome.
+   integer(I4P)                             :: n_flipped        !< Running flip count.
    integer(I4P), allocatable                :: queue(:)         !< BFS work queue (facet ids).
    integer(I4P)                             :: head, tail       !< Queue head/tail indices.
    integer(I4P)                             :: seed, f, e       !< Counters.
    integer(I4P)                             :: neighbour        !< Neighbour facet id along an edge.
 
+   n_flipped = 0_I4P
    if (self%facets_number > 0) then
       allocate(facet_checked(1:self%facets_number))
       allocate(queue(1:self%facets_number))
@@ -2686,7 +2704,8 @@ contains
                neighbour = self%facet(f)%fcon_edge(e)
                if (neighbour <= 0) cycle
                if (facet_checked(neighbour)) cycle
-               call self%facet(f)%make_normal_consistent(edge=e, other=self%facet(neighbour))
+               call self%facet(f)%make_normal_consistent(edge=e, other=self%facet(neighbour), flipped=flipped)
+               if (flipped) n_flipped = n_flipped + 1_I4P
                facet_checked(neighbour) = .true.
                tail = tail + 1
                queue(tail) = neighbour
@@ -2695,10 +2714,14 @@ contains
       enddo
    endif
    call self%compute_volume
-   if (self%volume < 0) call self%reverse_normals
-   ! Refresh cached volume after the (possible) global flip, so get_volume() returns
-   ! the post-sanitize value without callers needing to invoke compute_volume themselves.
-   if (self%volume < 0) call self%compute_volume
+   if (self%volume < 0) then
+      call self%reverse_normals
+      n_flipped = n_flipped + self%facets_number
+      ! Refresh cached volume after the global flip, so get_volume() returns the
+      ! post-sanitize value without callers needing to invoke compute_volume themselves.
+      call self%compute_volume
+   endif
+   if (present(flipped_count)) flipped_count = n_flipped
    endsubroutine sanitize_normals
 
    pure function smallest_edge_len(self) result(smallest)

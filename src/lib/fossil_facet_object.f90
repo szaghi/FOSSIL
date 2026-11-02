@@ -1074,13 +1074,16 @@ contains
       endsubroutine check_ios
    endsubroutine load_from_file_binary
 
-   pure subroutine make_normal_consistent(self, edge, other)
+   pure subroutine make_normal_consistent(self, edge, other, flipped)
    !< Make normal of other facet consistent with self.
    !<
    !< `edge` is the edge index in self numeration (use EDGE_12/EDGE_23/EDGE_31, values 1..3).
-   class(facet_object), intent(in)    :: self        !< Facet.
-   integer(I4P),        intent(in)    :: edge        !< Edge in self numeration (1..3).
-   type(facet_object),  intent(inout) :: other       !< Other facet to make consistent with self.
+   !< `flipped` (optional) reports whether `other`'s winding was reversed: callers that
+   !< cache orientation-dependent data (pseudo-normals, distance payloads) must rebuild it.
+   class(facet_object), intent(in)            :: self        !< Facet.
+   integer(I4P),        intent(in)            :: edge        !< Edge in self numeration (1..3).
+   type(facet_object),  intent(inout)         :: other       !< Other facet to make consistent with self.
+   logical,             intent(out), optional :: flipped     !< True if other's winding was reversed.
    integer(I4P)                       :: edge_other  !< Edge in other numeration (1..3).
    type(vector_R8P)                   :: e_self      !< Edge vector in self reference.
    type(vector_R8P)                   :: e_other     !< Edge vector in other reference.
@@ -1091,9 +1094,11 @@ contains
    call self%edge_connection_in_other_ref(other=other, edge=edge_other, edge_vector=e_other)
    ! self edge vector: vertex(next) - vertex(edge), with next = mod(edge,3)+1
    e_self = self%vertex(mod(edge, 3) + 1) - self%vertex(edge)
+   if (present(flipped)) flipped = .false.
    if (e_self%dotproduct(e_other) > 0) then
       ! other numeration is consistent, normal has wrong orientation
       call other%flip_edge(edge=edge_other)
+      if (present(flipped)) flipped = .true.
    endif
    endsubroutine make_normal_consistent
 
