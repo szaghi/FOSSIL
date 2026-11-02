@@ -10,22 +10,24 @@ A Fortran 2003+ compliant compiler is required. The following compilers are know
 
 | Compiler | Minimum version |
 |----------|----------------|
-| GNU gfortran | 14.3+ on the 14 series, or ≥ 15.2 |
+| GNU gfortran | 14.3+ on the 14 series, or ≥ 15.1 |
 | Intel Fortran (ifort / ifx) | ≥ 16.x |
 | NVIDIA HPC Fortran (nvfortran) | ≥ 26.9 (GPU device build only, see below) |
 
-::: warning gfortran versions with a known internal compiler error
-gfortran **13.x, 14.0–14.2 and 15.1** crash while building the test suite
+::: warning Older gfortran versions
+gfortran **13.3 and 14.2** were reported to crash while building the test suite
 (`internal compiler error: in matching_typebound_op`, on
 `src/tests/fossil_test_sanitize_normals_strict.f90`, see
-[issue #24](https://github.com/szaghi/FOSSIL/issues/24)). This is a gfortran bug, fixed in
-the 14.3 and 15.2 releases. Verified versions:
+[issue #24](https://github.com/szaghi/FOSSIL/issues/24)). The trigger, an `associate`
+whose selector is a type-bound operator expression (a gfortran bug, fixed in 14.3 and
+15.2), has been removed from the test, which made 15.1 build again. 13.3 and 14.2 should
+now build too, but they are not tested. Verified versions:
 
 | gfortran | Result |
 |----------|--------|
-| 13.3, 14.2, 15.1 | internal compiler error |
+| 13.3, 14.2 | internal compiler error before the workaround; not retested |
 | 14.3 | builds, all tests pass (CI) |
-| 15.2, 16.2 | builds, all tests pass |
+| 15.1, 15.2, 16.2 | builds, all tests pass |
 :::
 
 The NVIDIA modes (`static-nvidia`, `tests-nvidia`) build the OpenACC GPU distance

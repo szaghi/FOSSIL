@@ -31,6 +31,7 @@ type(surface_stl_object)    :: surface
 type(facet_object), pointer :: f
 type(vector_R8P)            :: surface_centroid
 type(vector_R8P)            :: cross_n
+type(vector_R8P)            :: d       !< Facet centroid minus surface centroid.
 real(R8P)                   :: dot_outward
 real(R8P)                   :: cos_winding
 integer(I4P)                :: i, n_facets
@@ -61,9 +62,12 @@ do i = 1, n_facets
    if (cos_winding < DIRECTION_TOL) bad_winding = bad_winding + 1
 
    ! Invariant 2 (convex body): outward = points away from surface centroid.
-   associate(d => f%centroid - surface_centroid)
-      dot_outward = d%x * f%normal%x + d%y * f%normal%y + d%z * f%normal%z
-   end associate
+   ! Plain assignment, not `associate(d => f%centroid - surface_centroid)`: an
+   ! associate selector that is a type-bound operator expression crashes gfortran
+   ! 15.1 (ICE in matching_typebound_op, bisected to this line), and 13.3/14.2
+   ! report the same ICE on this file (issue #24). Fixed in gfortran 14.3/15.2.
+   d = f%centroid - surface_centroid
+   dot_outward = d%x * f%normal%x + d%y * f%normal%y + d%z * f%normal%z
    if (dot_outward < DIRECTION_TOL) bad_outward = bad_outward + 1
 enddo
 
