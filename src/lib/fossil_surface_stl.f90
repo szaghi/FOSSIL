@@ -55,7 +55,7 @@ implicit none
 private
 public :: surface_stl_object
 public :: intersection_pair_t
-public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL
+public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 public :: sign_algorithm_from_string
 public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL
 public :: STATUS_INVALID_INPUT
@@ -81,9 +81,17 @@ public :: BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, B
 !                            `sanitize_normals` produces; for open shells where
 !                            outward is ill-defined, pass SIGN_RAY_INTERSECTIONS
 !                            or SIGN_SOLID_ANGLE explicitly.
+!   SIGN_FAST_WINDING_NUMBER — inside iff the generalized winding number w > 0.5,
+!                            evaluated by the hierarchical (second-order) fast
+!                            winding number over the persistent cache built by
+!                            `analyze` (issue #29). The most robust choice on
+!                            meshes with holes or self-intersections: w degrades
+!                            smoothly instead of flipping. O(log N) amortized
+!                            per query after the sign-free distance traversal.
 integer(I4P), parameter :: SIGN_RAY_INTERSECTIONS = 1_I4P
 integer(I4P), parameter :: SIGN_SOLID_ANGLE       = 2_I4P
 integer(I4P), parameter :: SIGN_PSEUDO_NORMAL     = 3_I4P
+integer(I4P), parameter :: SIGN_FAST_WINDING_NUMBER = 4_I4P
 ! Ray directions for SIGN_RAY_INTERSECTIONS (see is_point_inside_polyhedron_ri): generic,
 ! non-coplanar, none parallel to an axis or a coordinate plane, so a ray from a point of an
 ! axis-aligned lattice does not run exactly through a mesh edge or vertex.
@@ -901,11 +909,11 @@ contains
                if (side < 0._R8P) distance = -distance
             end block
          endif
-      case (SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE)
+      case (SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_FAST_WINDING_NUMBER)
          if (self%is_point_inside(point=point, sign_algorithm=algo)) distance = -distance
       case default
          error stop 'fossil_surface_stl_object%compute_distance: unknown sign_algorithm code &
-                    &(valid: SIGN_RAY_INTERSECTIONS=1, SIGN_SOLID_ANGLE=2, SIGN_PSEUDO_NORMAL=3)'
+                    &(valid: SIGN_RAY_INTERSECTIONS=1, SIGN_SOLID_ANGLE=2, SIGN_PSEUDO_NORMAL=3, SIGN_FAST_WINDING_NUMBER=4)'
       end select
    endif
    contains
@@ -1619,6 +1627,7 @@ contains
    !<                                  computes a signed distance and returns its sign.
    !<   SIGN_RAY_INTERSECTIONS       — odd/even crossing count, majority over three generic rays.
    !<   SIGN_SOLID_ANGLE             — sum of projected solid angles ≈ ±4π.
+   !<   SIGN_FAST_WINDING_NUMBER     — fast winding number w > 0.5 (robust on holed meshes).
    !< Out-of-range values raise `error stop`.
    class(surface_stl_object), intent(in)           :: self            !< File STL.
    type(vector_R8P),          intent(in)           :: point           !< Point coordinates.
@@ -1637,9 +1646,11 @@ contains
       is_inside = self%is_point_inside_polyhedron_sa(point=point)
    case(SIGN_RAY_INTERSECTIONS)
       is_inside = self%is_point_inside_polyhedron_ri(point=point)
+   case(SIGN_FAST_WINDING_NUMBER)
+      is_inside = self%winding_number(point=point) > 0.5_R8P
    case default
       error stop 'fossil_surface_stl_object%is_point_inside: unknown sign_algorithm code &
-                 &(valid: SIGN_RAY_INTERSECTIONS=1, SIGN_SOLID_ANGLE=2, SIGN_PSEUDO_NORMAL=3)'
+                 &(valid: SIGN_RAY_INTERSECTIONS=1, SIGN_SOLID_ANGLE=2, SIGN_PSEUDO_NORMAL=3, SIGN_FAST_WINDING_NUMBER=4)'
    endselect
    endfunction is_point_inside
 
@@ -3066,9 +3077,11 @@ contains
       code = SIGN_SOLID_ANGLE
    case('pseudo_normal')
       code = SIGN_PSEUDO_NORMAL
+   case('fast_winding_number')
+      code = SIGN_FAST_WINDING_NUMBER
    case default
       error stop 'fossil_surface_stl_object%sign_algorithm_from_string: unknown name "'//trim(adjustl(name))// &
-                 '" (valid: "ray_intersections", "solid_angle", "pseudo_normal")'
+                 '" (valid: "ray_intersections", "solid_angle", "pseudo_normal", "fast_winding_number")'
    endselect
    endfunction sign_algorithm_from_string
 
