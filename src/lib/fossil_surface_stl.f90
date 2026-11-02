@@ -63,10 +63,10 @@ public :: BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, B
 
 ! Point-in-polyhedron algorithm selector for `is_point_inside`, `compute_distance`,
 ! and `distance` (when `is_signed=.true.`):
-!   SIGN_RAY_INTERSECTIONS — count intersections of an axis-aligned ray with the
-!                            polyhedron; odd = inside, even = outside. O(N) per query
-!                            even with AABB acceleration; sensitive to EPS jitter
-!                            near edges/vertices.
+!   SIGN_RAY_INTERSECTIONS — count intersections of a ray with the polyhedron; odd =
+!                            inside, even = outside; majority over three rays in fixed
+!                            generic directions (RAY_DIR_X/Y/Z). O(N) per query even
+!                            with AABB acceleration.
 !   SIGN_SOLID_ANGLE       — sum the projected solid angles of all facets;
 !                            ~±4π = inside, ~0 = outside. O(N) per query, no
 !                            AABB acceleration. Robust but slow.
@@ -1611,7 +1611,7 @@ contains
    !< `sign_algorithm` selects the point-in-polyhedron test:
    !<   SIGN_PSEUDO_NORMAL (default) — Baerentzen-Aanaes pseudo-normal sign;
    !<                                  computes a signed distance and returns its sign.
-   !<   SIGN_RAY_INTERSECTIONS       — odd/even axis-aligned ray intersection count.
+   !<   SIGN_RAY_INTERSECTIONS       — odd/even crossing count, majority over three generic rays.
    !<   SIGN_SOLID_ANGLE             — sum of projected solid angles ≈ ±4π.
    !< Out-of-range values raise `error stop`.
    class(surface_stl_object), intent(in)           :: self            !< File STL.

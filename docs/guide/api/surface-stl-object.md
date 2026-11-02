@@ -414,13 +414,21 @@ end program ex_sanitize_normals
 **Notes.**
 
 - The BFS starts at facet 1 and walks every connected component in turn, so
-  each component ends up internally consistent. The outward decision is then
-  **one** check on the volume of the whole surface: if it is negative, every
-  facet is flipped. A component whose orientation disagrees with the rest
-  (an inward-facing inner shell, say) is not corrected separately.
-- No closedness check is made. On an open shell the volume is not meaningful,
-  so the global flip may or may not happen; the BFS still makes the winding
-  locally consistent.
+  each component ends up internally consistent. Each component is then
+  oriented as a whole:
+  - a **closed** component (every facet edge has a neighbour) by nesting
+    parity: inside an even number of other closed shells it must enclose
+    positive volume (an outer boundary), inside an odd number negative (a
+    cavity wall). Disjoint bodies are oriented independently, and a hollow
+    body keeps its cavity wall facing inward. Containment is tested by
+    generalized winding number, which does not depend on the other shell's
+    orientation;
+  - the **open** components (a body with holes, a sheet) together, by the sign
+    of their summed volume. With no closed component this is the whole-surface
+    volume rule, and on open shells the volume is not meaningful, so the flip
+    may or may not happen.
+- Cost: for every pair of closed shells whose bounding boxes nest, one
+  winding-number evaluation over the outer shell's facets.
 
 **See also.** [`reverse_normals`](#reverse_normals),
 [`SIGN_PSEUDO_NORMAL`](/guide/api/constants#sign_pseudo_normal),
@@ -1081,7 +1089,7 @@ default the rotation pivots about the world origin.
 | ------------------- | ------------ | ------------------- | ------------------------------------------------------------------------------------ |
 | `axis`              | `in`         | `type(vector_R8P)`  | (axis-angle form) Rotation axis.                                                     |
 | `angle`             | `in`         | `real(R8P)`         | (axis-angle form) Angle in radians.                                                  |
-| `matrix`            | `in`         | `real(R8P)(3,3)`    | (matrix form) Rotation matrix. Mutually exclusive with `axis`/`angle`.               |
+| `matrix`            | `in`         | `real(R8P)(3,3)`    | (matrix form) Rotation matrix. An improper one (det < 0) keeps the orientation.      |
 | `center`            | `in`, opt.   | `type(vector_R8P)`  | Pivot. Defaults to the world origin. Pass `surface%get_centroid()` for body-frame.   |
 | `recompute_metrix`  | `in`, opt.   | `logical`           | Default `.false.`.                                                                   |
 

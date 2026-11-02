@@ -74,17 +74,21 @@ Weighted Pseudo-normal*, IEEE TVCG 11(3), 2005.
 
 ### `SIGN_RAY_INTERSECTIONS`
 
-**Purpose.** Axis-aligned ray cast from the query point: count surface
-intersections along the +x axis; odd means inside, even means outside. The sign
-is decided *after* the unsigned distance has been computed (two passes total).
+**Purpose.** Ray casts from the query point: count surface intersections along
+a ray; odd means inside, even means outside. Three rays are cast in fixed
+generic directions (none parallel to an axis or a coordinate plane) and the
+majority of the three decides. The sign is decided *after* the unsigned distance
+has been computed (two passes total).
 
 **When to use.** Meshes with mixed normal orientation that you cannot or do
 not want to repair (open shells, scan fragments). Also useful as a regression
 oracle against `SIGN_PSEUDO_NORMAL` on hand-crafted test surfaces.
 
 **Cost.** ~3× slower than `SIGN_PSEUDO_NORMAL` because of the second pass and
-the per-facet ray-triangle test. Ray-grazing tie-breaks are handled but
-introduce a small failure rate near edge-on geometry.
+the per-facet ray-triangle test. A ray passing exactly through a mesh edge is
+counted once per incident facet and flips the parity; the generic directions make
+that non-generic, even on axis-aligned meshes, and the 2-of-3 vote absorbs a
+residual case. Points on the surface itself remain ambiguous.
 
 **Example.**
 

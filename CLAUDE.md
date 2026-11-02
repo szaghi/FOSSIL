@@ -166,7 +166,7 @@ Selection is per-surface via the optional `aabb_tree_kind` argument on `load_fro
 Set via the optional `sign_algorithm` argument on `distance` / `compute_distance` / `is_point_inside`:
 
 - **`SIGN_PSEUDO_NORMAL` (default)** — Bærentzen–Aanæs angle-weighted pseudo-normal at the closest point. Fused with the distance traversal (no second pass). Requires outward-oriented normals (produced by `sanitize`).
-- `SIGN_RAY_INTERSECTIONS` — axis-aligned ray casts; odd intersections = inside.
+- `SIGN_RAY_INTERSECTIONS` — ray casts in three fixed generic directions (majority vote); odd intersections = inside.
 - `SIGN_SOLID_ANGLE` — sum of projected solid angles ≈ ±4π.
 
 ### Third-party dependencies (`src/third_party/`)

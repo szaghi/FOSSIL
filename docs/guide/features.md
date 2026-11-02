@@ -37,7 +37,7 @@ After calling `surface%analyze` (or `surface%sanitize`, which calls it internall
 All manipulation methods operate directly on `surface_stl_object`:
 
 - **Translate** — by a 3D vector (`delta=`) or by scalar components (`x=`, `y=`, `z=`)
-- **Rotate** — around an arbitrary axis by angle in radians, or by a given rotation matrix
+- **Rotate** — around an arbitrary axis by angle in radians, or by a given rotation matrix (an improper matrix keeps the outward orientation, as mirror does)
 - **Mirror** — with respect to a plane defined by its normal, or by a given mirror matrix
 - **Resize (scale)** — by a 3D vector factor or by scalar per-axis factors; optionally scale about the surface centroid
 - **Clip** — discard facets outside an axis-aligned bounding box; the cut-off remainder is returned as a separate surface
@@ -63,7 +63,7 @@ Individual passes (`remove_degenerate_facets`, `remove_duplicate_facets`, `conne
   - Pass `is_signed=.true.` for the signed distance (negative inside, positive outside)
 - Sign-determination algorithms (`sign_algorithm` argument):
   - `SIGN_PSEUDO_NORMAL` (default) — Bærentzen–Aanæs pseudo-normal test. Fused with the closest-facet traversal so signed distance costs the same as unsigned. Requires consistently oriented outward normals (which `sanitize` produces).
-  - `SIGN_RAY_INTERSECTIONS` — odd/even axis-aligned ray-cast count. Robust on meshes with mixed orientation but ~3× slower than pseudo-normal.
+  - `SIGN_RAY_INTERSECTIONS` — odd/even crossing count along three generic (non-axis-aligned) rays, majority vote. Robust on meshes with mixed orientation but ~3× slower than pseudo-normal.
   - `SIGN_SOLID_ANGLE` — sum of projected solid angles ≈ ±4π. Robust but unaccelerated; O(N) per query.
 - `surface%is_point_inside(point, sign_algorithm)` is the predicate form of the same test.
 - `surface%distance_many(points, distances, ...)` is the batch form: one distance per point of an array, with the same options. The loop is OpenMP-parallel when built with OpenMP (`tests-gnu-openmp`) and serial otherwise, with identical results.
