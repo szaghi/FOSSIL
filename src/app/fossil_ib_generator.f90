@@ -2,23 +2,36 @@
 
 program fossil_ib_generator
 !< FOSSIL, generate Immersed Boundary distance function.
+!<
+!< Signed distance of the cell centres of a Cartesian block to an STL surface, written as a
+!< VTK structured grid (and, without extension cells, as Xall `.grd` / `.ib` files). The
+!< block is the body-close grid (`--ni/--nj/--nk` cells over `--bmin`..`--bmax`), a frame of
+!< `--gi/--gj/--gk` cells with the same spacing, and optional extension cells
+!< (`--ei/--ej/--ek`) whose spacing grows by 1.1.
+!<
+!< The field comes from `distance_field_object` (issue #32): exact distances in a narrow band
+!< around the surface (`--band`, default twice the local spacing), signs outside it by flood
+!< fill, and the far field by fast sweeping (`--sweep_tol`), so every cell, extension cells
+!< included, holds a distance. `--device` computes the band on the GPU (nvfortran build;
+!< sign algorithm pseudo_normal or fast_winding_number). The written field is positive
+!< inside the body (Xall convention).
 
 use flap, only : command_line_interface
-use fossil, only : surface_stl_object, sign_algorithm_from_string
+use fossil, only : surface_stl_object, sign_algorithm_from_string, STATUS_OK, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
+use fossil_distance_field, only : distance_field_object
 use penf, only : I4P, I8P, R8P, str
-use vecfor, only : ex_R8P, ey_R8P, ez_R8P, vector_R8P
-use fossil_aabb_tree_object, only : aabb_tree_object, AABB_USE_INDEX
+use vecfor, only : vector_R8P
 use vtk_fortran, only : vtk_file
 
 implicit none
 
 type(command_line_interface)   :: cli                  !< Test command line interface.
 type(surface_stl_object)       :: surface_stl          !< STL surface.
+type(distance_field_object)    :: field                !< Signed-distance field.
 type(vector_R8P), allocatable  :: nodes(:,:,:)         !< Grid nodes.
-type(vector_R8P), allocatable  :: centers(:,:,:)       !< Grid centers.
-real(R8P),        allocatable  :: distance(:,:,:)      !< Distance of grid centers to STL surface.
-type(vector_R8P), allocatable  :: nodes_ext(:,:,:)     !< Grid nodes extrapolated.
-real(R8P),        allocatable  :: distance_ext(:,:,:)  !< Distance of grid centers extrapolated.
+real(R8P),        allocatable  :: distance(:,:,:)      !< Distance of grid centers to STL surface (positive inside).
+real(R8P),        allocatable  :: xn(:), yn(:), zn(:)  !< Node coordinates per axis.
+real(R8P),        allocatable  :: xc(:), yc(:), zc(:)  !< Centre coordinates per axis.
 type(vector_R8P)               :: bmin, bmax           !< Bounding box extents.
 character(999)                 :: file_name_stl        !< Input STL file name.
 character(999)                 :: output_base_name     !< Output base name.
@@ -26,15 +39,17 @@ integer(I4P)                   :: refinement_levels    !< AABB refinement levels
 character(999)                 :: sign_algorithm       !< Algorithm name as typed on the CLI.
 integer(I4P)                   :: sign_algorithm_code  !< Algorithm code derived from sign_algorithm.
 logical                        :: unsigned             !< Compute unsigned distance.
-integer(I4P)                   :: ni, nj, nk           !< Grid dimensions, close to STL: where distance is computed exactly.
-integer(I4P)                   :: gi, gj(2), gk        !< Frame dimensions around the grid: where distance is computed exactly.
-integer(I4P)                   :: ei(2), ej(2), ek(2)  !< Dimensions of extrapolation of the grid: where distance is extraplated.
+logical                        :: use_device           !< Narrow band on the GPU.
+real(R8P)                      :: band                 !< Band half-width (<= 0: default).
+real(R8P)                      :: sweep_tol            !< Fast-sweeping relative tolerance.
+integer(I4P)                   :: ni, nj, nk           !< Grid dimensions, close to STL.
+integer(I4P)                   :: gi, gj(2), gk        !< Frame dimensions around the grid.
+integer(I4P)                   :: ei(2), ej(2), ek(2)  !< Extension cells (high side, low side).
 integer(I4P)                   :: i, j, k              !< Counter.
-real(R8P)                      :: Dx, Dy, Dz           !< Space steps.
-real(R8P)                      :: Dxyz_ext             !< Space steps for extending domain.
+integer(I4P)                   :: sweeps, fallback     !< Field counters.
 type(vtk_file)                 :: vtk                  !< VTK file handler.
 integer(I4P)                   :: error                !< Status error.
-integer(I8P)                   :: timing(0:4)          !< Tic toc timing.
+integer(I8P)                   :: timing(0:2)          !< Tic toc timing.
 
 ! parse command line input e load STL file
 call cli_parse
@@ -48,173 +63,54 @@ call surface_stl%analyze(aabb_refinement_levels=refinement_levels)
 print '(A)', 'STL statistics after sanitization'
 print '(A)', surface_stl%statistics()
 
-if (.not.cli%is_passed(switch='--bmin')) then
-   bmin = surface_stl%get_bmin()
+if (.not.cli%is_passed(switch='--bmin')) bmin = surface_stl%get_bmin()
+if (.not.cli%is_passed(switch='--bmax')) bmax = surface_stl%get_bmax()
+if (use_device .and. sign_algorithm_code /= SIGN_PSEUDO_NORMAL .and. sign_algorithm_code /= SIGN_FAST_WINDING_NUMBER) then
+   write(*, '(A)') 'fossil_ib_generator: --device needs --sign_algorithm pseudo_normal or fast_winding_number'
+   error stop 1
 endif
-if (.not.cli%is_passed(switch='--bmax')) then
-   bmax = surface_stl%get_bmax()
-endif
 
-! create body-close mesh
-Dx = (bmax%x - bmin%x) / ni
-Dy = (bmax%y - bmin%y) / nj
-Dz = (bmax%z - bmin%z) / nk
+! grid: per-axis nodes (body-close + frame + extension) and cell centres
+xn = node_axis(bmin%x, bmax%x, ni, gi,    gi,    ei)
+yn = node_axis(bmin%y, bmax%y, nj, gj(1), gj(2), ej)
+zn = node_axis(bmin%z, bmax%z, nk, gk,    gk,    ek)
+xc = centres(xn)
+yc = centres(yn)
+zc = centres(zn)
 
-allocate(nodes(   0-gi:ni+gi, 0-gj(1):nj+gj(2), 0-gk:nk+gk))
-allocate(centers( 1-gi:ni+gi, 1-gj(1):nj+gj(2), 1-gk:nk+gk))
-allocate(distance(1-gi:ni+gi, 1-gj(1):nj+gj(2), 1-gk:nk+gk))
-
-do k=0 - gk, nk + gk
-   do j=0 - gj(1), nj + gj(2)
-      do i=0 - gi, ni + gi
-         nodes(i, j, k) = bmin + (i * Dx) * ex_R8P + (j * Dy) * ey_R8P + (k * Dz) * ez_R8P
-      enddo
-   enddo
-enddo
-
-do k=1 - gk, nk + gk
-   do j=1 - gj(1), nj + gj(2)
-      do i=1 - gi, ni + gi
-         centers(i, j, k) = (nodes(i-1,j-1,k-1) + nodes(i  ,j-1,k-1) + nodes(i-1,j  ,k-1) + nodes(i  ,j  ,k-1) + &
-                             nodes(i-1,j-1,k  ) + nodes(i  ,j-1,k  ) + nodes(i-1,j  ,k  ) + nodes(i  ,j  ,k  ))/8._R8P
-      enddo
-   enddo
-enddo
-
-! compute signed distance field in the body-close mesh
-call surface_stl%aabb%set_use_index(AABB_USE_INDEX)
-print '(A)', 'compute distances AABB'
-call system_clock(timing(3))
-do k=1 - gk, nk + gk
-   do j=1 - gj(1), nj + gj(2)
-      do i=1 - gi, ni + gi
-         distance(i, j, k) = surface_stl%distance(point=centers(i, j, k), is_signed=.not.unsigned, &
-                                                  sign_algorithm=sign_algorithm_code)
-      enddo
-   enddo
-enddo
-call system_clock(timing(4), timing(0))
-print '(A, F8.3)', 'AABB timing: ', real(timing(4) - timing(3))/ timing(0)
-distance = -distance
-
-! extrapolation of the body-close signed distance in the body-far mesh
-if (ei(1)>=2.or.ei(2)>=2.or.ej(1)>=2.or.ej(2)>=2.or.ek(1)>=2.or.ek(2)>=2) then
-   if (ei(1)>=2) then
-      if (allocated(nodes_ext))    deallocate(nodes_ext)
-      if (allocated(distance_ext)) deallocate(distance_ext)
-      allocate(nodes_ext(   size(nodes,    dim=1)+ei(1), size(nodes,    dim=2), size(nodes,    dim=3)))
-      allocate(distance_ext(size(distance, dim=1)+ei(1), size(distance, dim=2), size(distance, dim=3)))
-      nodes_ext(1:size(nodes, dim=1), :, :) = nodes
-      Dxyz_ext = Dx
-      do i=size(nodes, dim=1)+1, size(nodes, dim=1)+ei(1)
-         nodes_ext(i, :, :)%x = nodes_ext(i-1, :, :)%x + Dxyz_ext
-         nodes_ext(i, :, :)%y = nodes_ext(i-1, :, :)%y
-         nodes_ext(i, :, :)%z = nodes_ext(i-1, :, :)%z
-         if (i<size(nodes, dim=1)+ei(1)-2) Dxyz_ext = 1.1_R8P * Dxyz_ext
-      enddo
-      distance_ext(1:size(distance, dim=1), :, :) = distance
-      do i=size(distance, dim=1)+1, size(distance, dim=1)+ei(1)
-         distance_ext(i, :, :) = distance_ext(i-1, :, :)
-      enddo
-   endif
-   if (ei(2)>=2) then
-      call move_alloc(from=nodes_ext, to=nodes)
-      call move_alloc(from=distance_ext, to=distance)
-      allocate(nodes_ext(   size(nodes,    dim=1)+ei(2), size(nodes,    dim=2), size(nodes,    dim=3)))
-      allocate(distance_ext(size(distance, dim=1)+ei(2), size(distance, dim=2), size(distance, dim=3)))
-      nodes_ext(ei(2)+1:, :, :) = nodes
-      Dxyz_ext = Dx
-      do i=ei(2), 1, -1
-         nodes_ext(i, :, :)%x = nodes_ext(i+1, :, :)%x - Dxyz_ext
-         nodes_ext(i, :, :)%y = nodes_ext(i+1, :, :)%y
-         nodes_ext(i, :, :)%z = nodes_ext(i+1, :, :)%z
-         if (i>2) Dxyz_ext = 1.1_R8P * Dxyz_ext
-      enddo
-      distance_ext(ei(2)+1:, :, :) = distance
-      do i=ei(2), 1, -1
-         distance_ext(i, :, :) = distance_ext(i+1, :, :)
-      enddo
-   endif
-   if (ej(1)>=2) then
-      call move_alloc(from=nodes_ext, to=nodes)
-      call move_alloc(from=distance_ext, to=distance)
-      allocate(nodes_ext(   size(nodes,    dim=1), size(nodes,    dim=2)+ej(1), size(nodes,    dim=3)))
-      allocate(distance_ext(size(distance, dim=1), size(distance, dim=2)+ej(1), size(distance, dim=3)))
-      nodes_ext(:, 1:size(nodes, dim=2), :) = nodes
-      Dxyz_ext = Dy
-      do j=size(nodes, dim=2)+1, size(nodes, dim=2)+ej(1)
-         nodes_ext(:, j, :)%x = nodes_ext(:, j-1, :)%x
-         nodes_ext(:, j, :)%y = nodes_ext(:, j-1, :)%y + Dxyz_ext
-         nodes_ext(:, j, :)%z = nodes_ext(:, j-1, :)%z
-         if (j<size(nodes, dim=2)+ej(1)-2) Dxyz_ext = 1.1_R8P * Dxyz_ext
-      enddo
-      distance_ext(:, 1:size(distance, dim=2), :) = distance
-      do j=size(distance, dim=2)+1, size(distance, dim=2)+ej(1)
-         distance_ext(:, j, :) = distance_ext(:, j-1, :)
-      enddo
-   endif
-   if (ej(2)>=2) then
-      call move_alloc(from=nodes_ext, to=nodes)
-      call move_alloc(from=distance_ext, to=distance)
-      allocate(nodes_ext(   size(nodes,    dim=1), size(nodes,    dim=2)+ej(2), size(nodes,    dim=3)))
-      allocate(distance_ext(size(distance, dim=1), size(distance, dim=2)+ej(2), size(distance, dim=3)))
-      nodes_ext(:, ej(2)+1:, :) = nodes
-      Dxyz_ext = Dy
-      do j=ej(2), 1, -1
-         nodes_ext(:, j, :)%x = nodes_ext(:, j+1, :)%x
-         nodes_ext(:, j, :)%y = nodes_ext(:, j+1, :)%y - Dxyz_ext
-         nodes_ext(:, j, :)%z = nodes_ext(:, j+1, :)%z
-         if (j>2) Dxyz_ext = 1.1_R8P * Dxyz_ext
-      enddo
-      distance_ext(:, ej(2)+1:, :) = distance
-      do j=ej(2), 1, -1
-         distance_ext(:, j, :) = distance_ext(:, j+1, :)
-      enddo
-   endif
-   if (ek(1)>=2) then
-      call move_alloc(from=nodes_ext, to=nodes)
-      call move_alloc(from=distance_ext, to=distance)
-      allocate(nodes_ext(   size(nodes,    dim=1), size(nodes,    dim=2), size(nodes,    dim=3)+ek(1)))
-      allocate(distance_ext(size(distance, dim=1), size(distance, dim=2), size(distance, dim=3)+ek(1)))
-      nodes_ext(:, :, 1:size(nodes, dim=3)) = nodes
-      Dxyz_ext = Dz
-      do k=size(nodes, dim=3)+1, size(nodes, dim=3)+ek(1)
-         nodes_ext(:, :, k)%x = nodes_ext(:, :, k-1)%x
-         nodes_ext(:, :, k)%y = nodes_ext(:, :, k-1)%y
-         nodes_ext(:, :, k)%z = nodes_ext(:, :, k-1)%z + Dxyz_ext
-         if (k<size(nodes, dim=3)+ek(1)-2) Dxyz_ext = 1.1_R8P * Dxyz_ext
-      enddo
-      distance_ext(:, :, 1:size(distance, dim=3)) = distance
-      do k=size(distance, dim=3)+1, size(distance, dim=3)+ek(1)
-         distance_ext(:, :, k) = distance_ext(:, :, k-1)
-      enddo
-   endif
-   if (ek(2)>=2) then
-      call move_alloc(from=nodes_ext, to=nodes)
-      call move_alloc(from=distance_ext, to=distance)
-      allocate(nodes_ext(   size(nodes,    dim=1), size(nodes,    dim=2), size(nodes,    dim=3)+ek(2)))
-      allocate(distance_ext(size(distance, dim=1), size(distance, dim=2), size(distance, dim=3)+ek(2)))
-      nodes_ext(:, :, ek(2)+1:) = nodes
-      Dxyz_ext = Dz
-      do k=ek(2), 1, -1
-         nodes_ext(:, :, k)%x = nodes_ext(:, :, k+1)%x
-         nodes_ext(:, :, k)%y = nodes_ext(:, :, k+1)%y
-         nodes_ext(:, :, k)%z = nodes_ext(:, :, k+1)%z - Dxyz_ext
-         if (k>2) Dxyz_ext = 1.1_R8P * Dxyz_ext
-      enddo
-      distance_ext(:, :, ek(2)+1:) = distance
-      do k=ek(2), 1, -1
-         distance_ext(:, :, k) = distance_ext(:, :, k+1)
-      enddo
-   endif
-   print '(A)', 'save output'
-   call export_vtk_file(nodes_=nodes_ext, distance_=distance_ext, file_name=trim(output_base_name)//'.vts')
-   ! call export_xall_files(nodes_=nodes_ext, distance_=distance_ext, basename=trim(output_base_name))
+! signed-distance field: band, signs, fast sweeping
+print '(A)', 'compute distance field'
+call system_clock(timing(1))
+call field%initialize(x=xc, y=yc, z=zc, status=error)
+if (error /= STATUS_OK) error stop 'fossil_ib_generator: invalid grid'
+if (band > 0._R8P) then
+   call field%compute(surface=surface_stl, band=band, is_signed=.not.unsigned, sign_algorithm=sign_algorithm_code, &
+                      use_device=use_device, tol=sweep_tol, sweeps=sweeps, fallback_cells=fallback, status=error)
 else
-   print '(A)', 'save output'
-   call export_vtk_file(nodes_=nodes, distance_=distance, file_name=trim(output_base_name)//'.vts')
-   call export_xall_files(ni=ni,nj=nj,nk=nk,gi=gi,gj=gj,gk=gk,nodes_=nodes,distance_=distance,basename=trim(output_base_name))
+   call field%compute(surface=surface_stl, is_signed=.not.unsigned, sign_algorithm=sign_algorithm_code, &
+                      use_device=use_device, tol=sweep_tol, sweeps=sweeps, fallback_cells=fallback, status=error)
 endif
+if (error /= STATUS_OK) error stop 'fossil_ib_generator: distance field failed'
+call system_clock(timing(2), timing(0))
+print '(A,F8.3,A,I0,A,ES10.3,A,I0,A,I0)', 'distance field timing: ', real(timing(2) - timing(1)) / timing(0), &
+      ' s  band cells ', field%get_band_cells(), '  band ', field%get_band_width(), '  sweeps ', sweeps, &
+      '  fallback cells ', fallback
+
+! output, positive inside (Xall convention)
+allocate(distance(lbound(xc, 1):ubound(xc, 1), lbound(yc, 1):ubound(yc, 1), lbound(zc, 1):ubound(zc, 1)))
+distance = -field%phi
+allocate(nodes(lbound(xn, 1):ubound(xn, 1), lbound(yn, 1):ubound(yn, 1), lbound(zn, 1):ubound(zn, 1)))
+do k = lbound(zn, 1), ubound(zn, 1)
+   do j = lbound(yn, 1), ubound(yn, 1)
+      do i = lbound(xn, 1), ubound(xn, 1)
+         nodes(i, j, k)%x = xn(i) ; nodes(i, j, k)%y = yn(j) ; nodes(i, j, k)%z = zn(k)
+      enddo
+   enddo
+enddo
+print '(A)', 'save output'
+call export_vtk_file(nodes_=nodes, distance_=distance, file_name=trim(output_base_name)//'.vts')
+if (all([ei, ej, ek] < 2) .and. min(gi, gj(1), gj(2), gk) >= 2) &
+   call export_xall_files(ni=ni,nj=nj,nk=nk,gi=gi,gj=gj,gk=gk,nodes_=nodes,distance_=distance,basename=trim(output_base_name))
 
 contains
   subroutine cli_parse()
@@ -331,6 +227,24 @@ contains
                def='.false.',                    &
                act='store_true')
 
+  call cli%add(switch='--band',                                                              &
+               help='narrow-band half-width with exact distances (<= 0: twice the local spacing)', &
+               required=.false.,                                                             &
+               def='0.0',                                                                    &
+               act='store')
+
+  call cli%add(switch='--sweep_tol',                                               &
+               help='fast-sweeping tolerance, relative to the domain diagonal',    &
+               required=.false.,                                                   &
+               def='1.e-12',                                                       &
+               act='store')
+
+  call cli%add(switch='--device',                                                         &
+               help='narrow band on the GPU (nvfortran build; pseudo_normal or fast_winding_number)', &
+               required=.false.,                                                          &
+               def='.false.',                                                             &
+               act='store_true')
+
   call cli%parse(error=error) ; if (error/=0) stop
 
   call cli%get(switch='--stl',                     val=file_name_stl,     error=error) ; if (error/=0) stop
@@ -352,6 +266,9 @@ contains
   call cli%get(switch='--sign_algorithm',          val=sign_algorithm,    error=error) ; if (error/=0) stop
   sign_algorithm_code = sign_algorithm_from_string(trim(adjustl(sign_algorithm)))
   call cli%get(switch='--unsigned',                val=unsigned,          error=error) ; if (error/=0) stop
+  call cli%get(switch='--band',                    val=band,              error=error) ; if (error/=0) stop
+  call cli%get(switch='--sweep_tol',               val=sweep_tol,         error=error) ; if (error/=0) stop
+  call cli%get(switch='--device',                  val=use_device,        error=error) ; if (error/=0) stop
   endsubroutine cli_parse
 
   subroutine cli_print()
@@ -376,7 +293,51 @@ contains
   print  '(A)' ,'--ref_levels      '//trim(str(refinement_levels     ))
   print  '(A)' ,'--sign_algorithm  '//trim(    sign_algorithm         )
   print  '(A)' ,'--unsigned        '//trim(str(unsigned              ))
+  print  '(A)' ,'--band            '//trim(str(band                  ))
+  print  '(A)' ,'--sweep_tol       '//trim(str(sweep_tol             ))
+  print  '(A)' ,'--device          '//trim(str(use_device            ))
   endsubroutine cli_print
+
+   function node_axis(lo, hi, n, g_lo, g_hi, e) result(c)
+   !< Node coordinates of one axis, indexed from -g_lo - e_lo to n + g_hi + e_hi: n uniform cells
+   !< over [lo, hi], frames of g_lo / g_hi cells with the same spacing, then extension cells on
+   !< the high side (e(1)) and the low side (e(2)). The extension spacing starts at the uniform
+   !< one and grows by 1.1, except for the last cells, and a side with e < 2 gets none: the
+   !< spacing rules of the former generator, kept so grids are reproduced.
+   real(R8P),    intent(in) :: lo, hi     !< Body-close extent.
+   integer(I4P), intent(in) :: n          !< Body-close cells.
+   integer(I4P), intent(in) :: g_lo, g_hi !< Frame cells (low, high).
+   integer(I4P), intent(in) :: e(2)       !< Extension cells (high side, low side).
+   real(R8P), allocatable   :: c(:)       !< Nodes.
+   real(R8P)                :: dd, h      !< Uniform and extension spacing.
+   integer(I4P)             :: e_hi, e_lo, m
+
+   e_hi = 0 ; if (e(1) >= 2) e_hi = e(1)
+   e_lo = 0 ; if (e(2) >= 2) e_lo = e(2)
+   dd = (hi - lo) / n
+   allocate(c(-g_lo - e_lo:n + g_hi + e_hi))
+   do m = -g_lo, n + g_hi
+      c(m) = lo + m * dd
+   enddo
+   h = dd
+   do m = 1, e_hi
+      c(n + g_hi + m) = c(n + g_hi + m - 1) + h
+      if (m < e_hi - 2) h = 1.1_R8P * h
+   enddo
+   h = dd
+   do m = 1, e_lo
+      c(-g_lo - m) = c(-g_lo - m + 1) - h
+      if (m < e_lo - 1) h = 1.1_R8P * h
+   enddo
+   endfunction node_axis
+
+   function centres(c) result(x)
+   !< Cell centres of an axis: midpoints of consecutive nodes, cell i between nodes i-1 and i.
+   real(R8P), intent(in)  :: c(:) !< Nodes (assumed shape: indexed from 1 here).
+   real(R8P), allocatable :: x(:) !< Centres.
+
+   x = 0.5_R8P * (c(1:size(c) - 1) + c(2:size(c)))
+   endfunction centres
 
    subroutine export_vtk_file(nodes_, distance_, file_name)
    !< Export IB data into VTK file format.

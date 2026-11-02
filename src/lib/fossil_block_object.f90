@@ -33,7 +33,7 @@ type :: block_object
       procedure, pass(self) :: export_aabb_tecplot_ascii !< Export AABB boxes geometry into Tecplot ascii file.
       procedure, pass(self) :: export_vtk_file           !< Export block data into VTK file format.
       procedure, pass(self) :: export_xall_files         !< Export block data into XALL files format.
-      procedure, pass(self) :: extrapolate_distances     !< Extrapolate the body-close distances in the body-far mesh.
+      procedure, pass(self) :: extrapolate_distances     !< DEPRECATED (issue #32): copies boundary values; use distance_field_object.
       procedure, pass(self) :: get_closest_cells_indexes !< Get the closest cells indexes in the mesh given a point.
       procedure, pass(self) :: initialize                !< Initialize block.
       ! operators
@@ -190,6 +190,11 @@ contains
 
    subroutine extrapolate_distances(self)
    !< Extrapolate the body-close distances in the body-far mesh.
+   !<
+   !< @warning Deprecated (issue #32): the extension cells receive a copy of the boundary
+   !< layer's value, which is not a distance (off by several units in a far field a few body
+   !< lengths wide). Use `distance_field_object` (`fossil_distance_field`), which computes the
+   !< far field by fast sweeping; `fossil_ib_generator` now does.
    class(block_object), intent(inout) :: self                 !< Block.
    type(vector_R8P), allocatable      :: nodes_ext(:,:,:)     !< Grid nodes extrapolated.
    real(R8P),        allocatable      :: distances_ext(:,:,:) !< Distance of grid centers extrapolated.
