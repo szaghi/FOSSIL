@@ -251,10 +251,10 @@ matrix = mirror_matrix_R8P(normal=ex_R8P)
 call surface%mirror(matrix=matrix)
 ```
 
-A reflection does not reverse the facet winding, so the mirrored surface is
-inside-out (negative volume, inverted distance sign). Follow every `mirror`
-with `call surface%reverse_normals` and then `call surface%analyze`. The same
-applies to `resize` with an odd number of negative factors.
+The facet winding is reversed together with the reflection, so an outward
+surface stays outward (the same holds for `resize` with an odd number of
+negative factors). As for every transform, call `surface%analyze` before
+queries.
 
 ---
 

@@ -1003,17 +1003,11 @@ is then unnecessary. Pivots read the stored centroid too
 `resize`): after an earlier transform, call `analyze` first or the pivot is
 the old centroid.
 
-**Reflections turn the surface inside-out.** `mirror`, and `resize` with an
-odd number of negative factors, reflect the vertices without reversing the
-facet winding, so every normal ends up pointing inward: after `analyze` the
-volume is negative and the default pseudo-normal sign reports inside points
-as outside. Restore the orientation with:
-
-```fortran
-call surface%mirror(normal=ex_R8P)
-call surface%reverse_normals
-call surface%analyze
-```
+**Reflections keep the orientation.** `mirror`, and `resize` with an odd
+number of negative factors, are reflections: they reverse the handedness of
+each facet's vertex order. FOSSIL swaps two vertices of every facet in that
+case (`mirror` by `matrix` does it when `det(matrix) < 0`), so an outward
+surface stays outward and no `reverse_normals` is needed.
 
 ### `translate`
 
@@ -1132,9 +1126,10 @@ call surface%mirror(matrix=M)
 
 **Purpose.** Mirror the surface through a plane. The plane is specified
 either by its unit normal (passing through the origin) or by an explicit 3×3
-reflection matrix. Vertex winding is **not** reversed: the mirrored surface is
-inside-out until you call [`reverse_normals`](#reverse_normals) and
-[`analyze`](#analyze) (see [After a transform](#after-a-transform)).
+reflection matrix. The facet winding is reversed along with the reflection, so
+an outward-oriented surface stays outward; call [`analyze`](#analyze) before
+queries (see [After a transform](#after-a-transform)). A proper (det > 0)
+matrix is applied without reversing the winding.
 
 **Arguments.**
 
@@ -1156,8 +1151,7 @@ type(surface_stl_object) :: surface
 
 call surface%load_from_file(file_name='cube.stl', guess_format=.true.)
 call surface%mirror(normal=ex_R8P)
-call surface%reverse_normals   ! the reflection leaves every normal pointing inward
-call surface%analyze           ! rebuild volume, centroid, AABB tree, pseudo-normals
+call surface%analyze   ! rebuild volume, centroid, AABB tree, pseudo-normals
 end program ex_mirror
 ```
 
@@ -1216,10 +1210,9 @@ end program ex_resize
 
 - The method is called `resize` and not `scale` because `scale` is a Fortran
   intrinsic.
-- Negative factors mirror across the corresponding axis, and like
-  [`mirror`](#mirror) they do not reverse the winding: with an odd number of
-  negative factors the surface is inside-out until `reverse_normals` +
-  `analyze` (see [After a transform](#after-a-transform)).
+- Negative factors mirror across the corresponding axis. With an odd number of
+  them the facet winding is reversed as for [`mirror`](#mirror), so the
+  orientation is preserved.
 - The volume and centroid change with the scale but are only recomputed by
   [`analyze`](#analyze).
 
