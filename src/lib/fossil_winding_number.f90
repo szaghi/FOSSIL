@@ -46,6 +46,7 @@ use vecfor,                  only : vector_R8P
 implicit none
 private
 public :: winding_number
+public :: FOUR_PI, DEFAULT_BETA
 
 real(R8P),    parameter :: FOUR_PI      = 4._R8P * PI
 real(R8P),    parameter :: DEFAULT_BETA = 2._R8P

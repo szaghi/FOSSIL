@@ -6,7 +6,7 @@ module fossil_surface_stl_object
 use fossil_aabb_tree_object, only : aabb_tree_object, AABB_TREE_OCTREE, AABB_TREE_SAH_BVH,     &
                                     facet_distance_payload,                                    &
                                     bvh_distance_node_oac, bvh_distance_node_with_region_oac, &
-                                    wn_node_t
+                                    wn_node_t, bvh_winding_number_oac
 use fossil_aabb_node_object, only : aabb_node_object
 use fossil_facet_object, only : facet_object, pnormal_payload_t,                               &
                                 pnormal_x_oac, pnormal_y_oac, pnormal_z_oac,                   &
@@ -14,7 +14,7 @@ use fossil_facet_object, only : facet_object, pnormal_payload_t,                
 use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
-use fossil_winding_number, only : compute_winding_number => winding_number
+use fossil_winding_number, only : compute_winding_number => winding_number, WN_FOUR_PI => FOUR_PI, WN_DEFAULT_BETA => DEFAULT_BETA
 use fossil_hole_filling,   only : boundary_loop_t, extract_boundary_loops, triangulate_loop
 use fossil_self_intersection, only : intersection_pair_t, &
                                      compute_self_intersections => find_self_intersections
@@ -1421,8 +1421,9 @@ contains
 
    subroutine enter_device(self)
    !< Make the surface device-resident (issue #20 §Step 5). Performs `!$acc enter
-   !< data copyin` of the three flat arrays the GPU distance kernel reads:
-   !< `self%aabb%node`, `self%aabb%payload`, and `self%pnormal_payload`. Idempotent:
+   !< data copyin` of the four flat arrays the GPU distance kernel reads:
+   !< `self%aabb%node`, `self%aabb%payload`, `self%pnormal_payload` (pseudo-normal
+   !< sign) and `self%wn_payload` (fast-winding-number sign, issue #30). Idempotent:
    !< if `self%is_on_device` is already true, the call is a no-op (a second
    !< `enter data copyin` would create a refcount the user did not ask for).
    !<
@@ -1436,7 +1437,8 @@ contains
    !<    `AABB_TREE_OCTREE` would copy `node(:)` but the device traversal kernels
    !<    do not enumerate the octree's 8-way children. If the tree kind is octree,
    !<    the call refuses and writes a stderr diagnostic; the surface stays on host.
-   !<  - The surface must already be analyzed (BVH built, pnormal_payload populated).
+   !<  - The surface must already be analyzed (BVH built, pnormal_payload and
+   !<    wn_payload populated).
    !<    Called on an empty surface, the routine returns without touching the
    !<    device.
    class(surface_stl_object), intent(inout) :: self !< File STL.
@@ -1450,14 +1452,15 @@ contains
    if (.not. allocated(self%aabb%node))      return
    if (.not. allocated(self%aabb%payload))   return
    if (.not. allocated(self%pnormal_payload)) return
+   if (.not. allocated(self%wn_payload))      return
 
-   !$acc enter data copyin(self%aabb%node, self%aabb%payload, self%pnormal_payload)
+   !$acc enter data copyin(self%aabb%node, self%aabb%payload, self%pnormal_payload, self%wn_payload)
    self%is_on_device = .true.
    endsubroutine enter_device
 
    subroutine exit_device(self)
    !< Release the device-resident copy of the surface (issue #20 §Step 5).
-   !< Symmetric inverse of `enter_device`: `!$acc exit data delete` of the three
+   !< Symmetric inverse of `enter_device`: `!$acc exit data delete` of the four
    !< arrays previously copied in. Idempotent on `is_on_device=.false.`
    !< (returns without acting). NOT called by `destroy` (elemental, so it cannot
    !< hold `!$acc exit data`, see its @warning): the caller must call it before
@@ -1467,11 +1470,11 @@ contains
 
    if (.not. self%is_on_device) return
 
-   !$acc exit data delete(self%aabb%node, self%aabb%payload, self%pnormal_payload)
+   !$acc exit data delete(self%aabb%node, self%aabb%payload, self%pnormal_payload, self%wn_payload)
    self%is_on_device = .false.
    endsubroutine exit_device
 
-   subroutine distance_many_device(self, points, distances, is_signed, is_square_root, status)
+   subroutine distance_many_device(self, points, distances, is_signed, sign_algorithm, is_square_root, status)
    !< GPU-offloaded batch distance query (issue #20 §Step 5). Device analogue of
    !< `distance_many`. Same semantics on the output -- `distances(i)` is the
    !< distance from `points(i)` to the surface -- but the loop body executes on
@@ -1485,13 +1488,17 @@ contains
    !<    from the OpenACC runtime, which is the documented loud-failure mode.
    !<  - The tree kind is `AABB_TREE_SAH_BVH` (octree not supported on device).
    !<
-   !< Restrictions vs `distance_many`:
-   !<  - `sign_algorithm` is fixed to `SIGN_PSEUDO_NORMAL` (the only device-
-   !<    callable sign path). `SIGN_RAY_INTERSECTIONS` / `SIGN_SOLID_ANGLE`
-   !<    require a separate ray traversal that has not been device-ported.
-   !<  - The sign decision uses the flat `pnormal_payload(best_facet)` record
-   !<    and the rich `triangle_point_distance` recompute over
-   !<    `payload(best_payload_idx)`, both device-callable.
+   !< Sign algorithms (`sign_algorithm`, used only when `is_signed`):
+   !<  - `SIGN_PSEUDO_NORMAL` (default): the flat `pnormal_payload(best_facet)`
+   !<    record at the closest point, recomputed by `triangle_point_distance`
+   !<    over `payload(best_payload_idx)`.
+   !<  - `SIGN_FAST_WINDING_NUMBER` (issue #30): inside iff the fast winding
+   !<    number exceeds 0.5, from `bvh_winding_number_oac` over `wn_payload` with
+   !<    the CPU default beta, the routine and constants the CPU path uses.
+   !<    Robust on surfaces with holes; a second traversal per point.
+   !<  - Any other code (`SIGN_RAY_INTERSECTIONS`, `SIGN_SOLID_ANGLE`, ...) is
+   !<    refused with `STATUS_INVALID_INPUT` and a stderr message: those need a
+   !<    ray traversal or an O(N) sum that has not been device-ported.
    !<
    !< Numerical contract: bit-exact vs the CPU serial `compute_distance` path
    !< where the device libm and FMA contraction allow; documented-tolerance
@@ -1500,9 +1507,14 @@ contains
    type(vector_R8P),          intent(in)            :: points(:)      !< Query points (host).
    real(R8P),                 intent(out)           :: distances(:)   !< Per-point distances (host, caller-allocated).
    logical,                   intent(in),  optional :: is_signed      !< Trigger signed distance (default .false.).
+   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
    logical,                   intent(in),  optional :: is_square_root !< Trigger sqrt of d^2 (default .false.).
    integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    logical                                          :: is_signed_     !< Resolved signed sentinel.
+   logical                                          :: is_fwn_        !< Resolved sign algorithm: fast winding number.
+   integer(I4P)                                     :: algo           !< Resolved sign-algorithm code.
+   real(R8P)                                        :: beta2          !< Squared FWN admissibility ratio (CPU default).
+   real(R8P)                                        :: omega          !< Per-point total solid angle (FWN sign).
    logical                                          :: is_sqrt_       !< Resolved sqrt sentinel.
    integer(I4P)                                     :: n              !< Number of query points.
    integer(I4P)                                     :: i              !< Loop counter.
@@ -1528,6 +1540,7 @@ contains
    type(aabb_node_object),       pointer            :: node_p(:)      !< Alias of self%aabb%node.
    type(facet_distance_payload), pointer            :: payload_p(:)   !< Alias of self%aabb%payload.
    type(pnormal_payload_t),      pointer            :: pnormal_p(:)   !< Alias of self%pnormal_payload.
+   type(wn_node_t),              pointer            :: wn_p(:)        !< Alias of self%wn_payload (lower bound 0, kept by pointer assignment).
 
    if (present(status)) status = STATUS_OK
    n = size(points, kind=I4P)
@@ -1547,6 +1560,18 @@ contains
    is_signed_ = .false. ; if (present(is_signed))      is_signed_ = is_signed
    is_sqrt_   = .false. ; if (present(is_square_root)) is_sqrt_   = is_square_root
 
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   if (algo /= SIGN_PSEUDO_NORMAL .and. algo /= SIGN_FAST_WINDING_NUMBER) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_surface_stl_object%distance_many_device: refused -- sign_algorithm must be &
+                           &SIGN_PSEUDO_NORMAL or SIGN_FAST_WINDING_NUMBER on the device.'
+      return
+   endif
+   is_fwn_ = algo == SIGN_FAST_WINDING_NUMBER
+   ! Same expression as the CPU path (`winding_number` with its default beta), so
+   ! the admissibility test sees the same bits.
+   beta2   = WN_DEFAULT_BETA * WN_DEFAULT_BETA
+
    ! Alias the device arrays to top-level local pointers. The compute region
    ! references the aliases (`node_p`, `payload_p`, `pnormal_p`) rather than the
    ! nested `self%aabb%...` components -- see the alias declarations for why.
@@ -1555,13 +1580,14 @@ contains
    node_p    => self%aabb%node
    payload_p => self%aabb%payload
    pnormal_p => self%pnormal_payload
+   wn_p      => self%wn_payload
 
    !$acc parallel loop                                                                       &
-   !$acc&  present(node_p, payload_p, pnormal_p)                                             &
+   !$acc&  present(node_p, payload_p, pnormal_p, wn_p)                                       &
    !$acc&  copyin(points)                                                                    &
    !$acc&  copyout(distances)                                                                &
    !$acc&  private(point_i, d2, best_facet, best_payload, cx, cy, cz, region, nx, ny, nz,    &
-   !$acc&          dx, dy, dz, side, closest_v, v1_v, e12_v, e13_v)
+   !$acc&          dx, dy, dz, side, closest_v, v1_v, e12_v, e13_v, omega)
    do i = 1_I4P, n
       ! Component-wise set (NOT `point_i = vector_R8P(...)`): VecFor overloads
       ! assignment(=) as a type-bound generic, and nvfortran does not allow TBP
@@ -1605,14 +1631,21 @@ contains
                                       det=payload_p(best_payload)%det,                     &
                                       point=point_i, distance=d2,                          &
                                       closest=closest_v, region=region)
-         cx = closest_v%x ; cy = closest_v%y ; cz = closest_v%z
-         nx = pnormal_x_oac(pnormal_p(best_facet), region)
-         ny = pnormal_y_oac(pnormal_p(best_facet), region)
-         nz = pnormal_z_oac(pnormal_p(best_facet), region)
-         dx = points(i)%x - cx ; dy = points(i)%y - cy ; dz = points(i)%z - cz
-         side = dx * nx + dy * ny + dz * nz
          if (is_sqrt_) d2 = sqrt(d2)
-         if (side < 0._R8P) d2 = -d2
+         if (is_fwn_) then
+            ! Inside iff w = omega / (4 pi) > 0.5: the CPU test in `is_point_inside`,
+            ! written with the same division and constant so the decision matches.
+            omega = bvh_winding_number_oac(node_p, payload_p, wn_p, point_i%x, point_i%y, point_i%z, beta2)
+            if (omega / WN_FOUR_PI > 0.5_R8P) d2 = -d2
+         else
+            cx = closest_v%x ; cy = closest_v%y ; cz = closest_v%z
+            nx = pnormal_x_oac(pnormal_p(best_facet), region)
+            ny = pnormal_y_oac(pnormal_p(best_facet), region)
+            nz = pnormal_z_oac(pnormal_p(best_facet), region)
+            dx = points(i)%x - cx ; dy = points(i)%y - cy ; dz = points(i)%z - cz
+            side = dx * nx + dy * ny + dz * nz
+            if (side < 0._R8P) d2 = -d2
+         endif
       else
          if (is_sqrt_) d2 = sqrt(d2)
       endif

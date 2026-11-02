@@ -31,7 +31,8 @@
 
 program fossil_test_distance_bench
 
-use fossil,              only : surface_stl_object, SIGN_PSEUDO_NORMAL
+use fossil,              only : surface_stl_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, &
+                               SIGN_SOLID_ANGLE, STATUS_INVALID_INPUT
 use fossil_facet_object, only : facet_object
 use penf,                only : I4P, I8P, R8P
 use vecfor,              only : vector_R8P
@@ -42,18 +43,22 @@ type(surface_stl_object)      :: surface
 type(vector_R8P)              :: bmin, bmax, span, probe
 type(vector_R8P), allocatable :: points(:)
 real(R8P),        allocatable :: d_signed(:), d_unsigned(:), d_batch(:), d_device(:)
+real(R8P),        allocatable :: d_fwn(:), d_fwn_device(:)   !< FWN-signed serial / device results (issue #30).
 real(R8P)                     :: t0, t1, t_signed, t_unsigned
 real(R8P)                     :: lo(3), hi(3), frac
 real(R8P)                     :: d_tree, d_brute, max_abs_err, batch_abs_err
 real(R8P)                     :: t_serial_wall, t_batch_wall, t_device_wall
 real(R8P)                     :: device_abs_err
+real(R8P)                     :: t_fwn_serial_wall, t_fwn_device_wall, fwn_device_abs_err
+integer(I4P)                  :: fwn_sign_mismatch, fwn_inside, refuse_status
+real(R8P)                     :: d_probe(1)                !< Output of the refused call (must stay untouched).
 integer(I8P)                  :: clk0, clk1, clk_rate
 integer(I4P)                  :: grid_n, n_queries, nf
 integer(I4P)                  :: i, j, k, q
 integer(I4P)                  :: argc, n_sample, s, stride
 integer(I4P)                  :: n_threads
 character(len=512)            :: stl_path, arg2
-logical                       :: correctness_ok, batch_ok, device_ok
+logical                       :: correctness_ok, batch_ok, device_ok, fwn_ok, refuse_ok
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
 !$ integer, external          :: omp_get_max_threads       !< OpenMP runtime thread-count query (only declared under -fopenmp).
@@ -94,6 +99,8 @@ allocate(d_signed(n_queries))
 allocate(d_unsigned(n_queries))
 allocate(d_batch(n_queries))
 allocate(d_device(n_queries))
+allocate(d_fwn(n_queries))
+allocate(d_fwn_device(n_queries))
 
 q = 0_I4P
 do k = 1_I4P, grid_n
@@ -171,7 +178,44 @@ call surface%distance_many_device(points=points, distances=d_device, is_signed=.
                                   is_square_root=.true.)
 call system_clock(count=clk1)
 t_device_wall = real(clk1 - clk0, R8P) / real(clk_rate, R8P)
+
+! ---- FWN sign on the device (issue #30) --------------------------------------
+! Serial CPU reference first (one `distance` call per point, the FWN sign of
+! `is_point_inside`), then the device run with SIGN_FAST_WINDING_NUMBER. Gate:
+! bit-exact, like the pseudo-normal run above. The sign mismatch count is
+! reported separately so a magnitude-only difference is told apart from a
+! wrong inside/outside decision.
+call system_clock(count=clk0, count_rate=clk_rate)
+do q = 1_I4P, n_queries
+   d_fwn(q) = surface%distance(point=points(q), is_signed=.true., &
+                               sign_algorithm=SIGN_FAST_WINDING_NUMBER, is_square_root=.true.)
+enddo
+call system_clock(count=clk1)
+t_fwn_serial_wall = real(clk1 - clk0, R8P) / real(clk_rate, R8P)
+
+call system_clock(count=clk0, count_rate=clk_rate)
+call surface%distance_many_device(points=points, distances=d_fwn_device, is_signed=.true., &
+                                  sign_algorithm=SIGN_FAST_WINDING_NUMBER, is_square_root=.true.)
+call system_clock(count=clk1)
+t_fwn_device_wall = real(clk1 - clk0, R8P) / real(clk_rate, R8P)
+
+! An unsupported sign algorithm is refused, not run: STATUS_INVALID_INPUT and
+! the output left untouched (sentinel check).
+d_probe(1) = -12345._R8P
+call surface%distance_many_device(points=points(1:1), distances=d_probe, is_signed=.true., &
+                                  sign_algorithm=SIGN_SOLID_ANGLE, status=refuse_status)
+refuse_ok = (refuse_status == STATUS_INVALID_INPUT .and. d_probe(1) == -12345._R8P)
 call surface%exit_device
+
+fwn_device_abs_err = 0._R8P
+fwn_sign_mismatch  = 0_I4P
+fwn_inside         = 0_I4P
+do q = 1_I4P, n_queries
+   fwn_device_abs_err = max(fwn_device_abs_err, abs(d_fwn_device(q) - d_fwn(q)))
+   if ((d_fwn_device(q) < 0._R8P) .neqv. (d_fwn(q) < 0._R8P)) fwn_sign_mismatch = fwn_sign_mismatch + 1_I4P
+   if (d_fwn(q) < 0._R8P) fwn_inside = fwn_inside + 1_I4P
+enddo
+fwn_ok = (fwn_device_abs_err == 0._R8P)
 
 device_abs_err = 0._R8P
 do q = 1_I4P, n_queries
@@ -227,9 +271,19 @@ print '(A,F12.4,A)', '   mean per query:         ', 1.0e6_R8P * t_device_wall / 
 print '(A,F12.2,A)', '   speedup vs serial:      ', t_serial_wall / max(t_device_wall, tiny(1._R8P)), ' x'
 print '(A,ES10.3)',  '   device vs serial max |d| err: ', device_abs_err
 print '(A)',         ''
+print '(A)',         'distance_many_device (SIGN_FAST_WINDING_NUMBER, issue #30):'
+print '(A,F12.4,A)', '   serial FWN wall-clock:  ', 1000._R8P * t_fwn_serial_wall, ' ms'
+print '(A,F12.4,A)', '   device FWN wall-clock:  ', 1000._R8P * t_fwn_device_wall, ' ms'
+print '(A,F12.4,A)', '   mean per query:         ', 1.0e6_R8P * t_fwn_device_wall / real(n_queries, R8P), ' us'
+print '(A,F12.2,A)', '   speedup vs serial FWN:  ', t_fwn_serial_wall / max(t_fwn_device_wall, tiny(1._R8P)), ' x'
+print '(A,I0,A,I0)', '   inside (serial FWN):    ', fwn_inside, ' of ', n_queries
+print '(A,I0)',      '   sign mismatches:        ', fwn_sign_mismatch
+print '(A,ES10.3)',  '   fwn device vs serial max |d| err: ', fwn_device_abs_err
+print '(A,L1)',      '   unsupported sign refused:  ', refuse_ok
+print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
-print '(A,L1)',      'Are all tests passed? ', (correctness_ok .and. batch_ok .and. device_ok)
-if (.not. (correctness_ok .and. batch_ok .and. device_ok)) error stop 1
+print '(A,L1)',      'Are all tests passed? ', (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok)
+if (.not. (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok)) error stop 1
 
 endprogram fossil_test_distance_bench
