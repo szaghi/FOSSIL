@@ -32,7 +32,7 @@
 program fossil_test_distance_bench
 
 use fossil,              only : surface_stl_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, &
-                               SIGN_SOLID_ANGLE, STATUS_INVALID_INPUT
+                               SIGN_SOLID_ANGLE, STATUS_OK, STATUS_INVALID_INPUT
 use fossil_facet_object, only : facet_object
 use penf,                only : I4P, I8P, R8P
 use vecfor,              only : vector_R8P
@@ -58,7 +58,7 @@ integer(I4P)                  :: i, j, k, q
 integer(I4P)                  :: argc, n_sample, s, stride
 integer(I4P)                  :: n_threads
 character(len=512)            :: stl_path, arg2
-logical                       :: correctness_ok, batch_ok, device_ok, fwn_ok, refuse_ok
+logical                       :: correctness_ok, batch_ok, device_ok, fwn_ok, refuse_ok, holed_ok
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
 !$ integer, external          :: omp_get_max_threads       !< OpenMP runtime thread-count query (only declared under -fopenmp).
@@ -243,6 +243,9 @@ enddo
 call surface%aabb%set_use_index(.true.)    ! restore
 correctness_ok = (max_abs_err == 0._R8P)
 
+! ---- holed mesh on the device (issue #30) -----------------------------------
+call holed_device_case(ok=holed_ok)
+
 ! ---- report ------------------------------------------------------------------
 print '(A,A)',       '--- FOSSIL distance benchmark: ', trim(stl_path)
 print '(A,I0)',      'facets:                       ', nf
@@ -283,7 +286,77 @@ print '(A,L1)',      '   unsupported sign refused:  ', refuse_ok
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
-print '(A,L1)',      'Are all tests passed? ', (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok)
-if (.not. (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok)) error stop 1
+print '(A,L1)',      'Are all tests passed? ', (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok &
+                                                .and. holed_ok)
+if (.not. (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok .and. holed_ok)) error stop 1
 
+contains
+   subroutine holed_device_case(ok)
+   !< FWN sign on the device for a surface with a hole (issue #30): cube-02 with
+   !< its first facet removed, probed on a 16^3 grid spanning 1.5x its bbox.
+   !< Pass when the device FWN result is bit-exact against the serial CPU FWN
+   !< result and the case is not vacuous (some probes inside, the centroid
+   !< among them: seen from the centre the missing facet removes far less than
+   !< half of the 4 pi solid angle). The pseudo-normal sign mismatch count
+   !< against FWN is printed only as context, since PN is undefined on a hole.
+   logical, intent(out)            :: ok                  !< Pass flag.
+   type(surface_stl_object)        :: cube, holed         !< Source and holed surfaces.
+   type(facet_object), allocatable :: facets(:)           !< Facets minus the first.
+   type(facet_object), pointer     :: f                   !< Facet cursor.
+   type(vector_R8P), allocatable   :: pts(:)              !< Probe points (centroid first).
+   real(R8P),        allocatable   :: d_cpu(:), d_dev(:)  !< FWN serial / device.
+   real(R8P),        allocatable   :: d_pn(:)             !< PN device (context only).
+   type(vector_R8P)                :: c, lo_v, hi_v       !< Centroid and grid corners.
+   real(R8P)                       :: err                 !< Max |device - serial|.
+   integer(I4P), parameter         :: NG = 16_I4P         !< Grid size per axis.
+   integer(I4P)                    :: ii, jj, kk, m, n_in, n_pn_mis, st
+
+   call cube%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true.)
+   allocate(facets(cube%get_facets_number() - 1_I4P))
+   do ii = 2_I4P, cube%get_facets_number()
+      f => cube%facet_at(ii)
+      facets(ii - 1_I4P) = f
+   enddo
+   call holed%adopt_facets(facets=facets)
+
+   lo_v = holed%get_bmin() ; hi_v = holed%get_bmax()
+   c%x = 0.5_R8P * (lo_v%x + hi_v%x) ; c%y = 0.5_R8P * (lo_v%y + hi_v%y) ; c%z = 0.5_R8P * (lo_v%z + hi_v%z)
+   allocate(pts(1_I4P + NG * NG * NG), d_cpu(1_I4P + NG * NG * NG), d_dev(1_I4P + NG * NG * NG), d_pn(1_I4P + NG * NG * NG))
+   pts(1) = c
+   m = 1_I4P
+   do kk = 0_I4P, NG - 1_I4P
+      do jj = 0_I4P, NG - 1_I4P
+         do ii = 0_I4P, NG - 1_I4P
+            m = m + 1_I4P
+            pts(m)%x = c%x + 1.5_R8P * (hi_v%x - lo_v%x) * (real(ii, R8P) / real(NG - 1_I4P, R8P) - 0.5_R8P)
+            pts(m)%y = c%y + 1.5_R8P * (hi_v%y - lo_v%y) * (real(jj, R8P) / real(NG - 1_I4P, R8P) - 0.5_R8P)
+            pts(m)%z = c%z + 1.5_R8P * (hi_v%z - lo_v%z) * (real(kk, R8P) / real(NG - 1_I4P, R8P) - 0.5_R8P)
+         enddo
+      enddo
+   enddo
+
+   do m = 1_I4P, size(pts, kind=I4P)
+      d_cpu(m) = holed%distance(point=pts(m), is_signed=.true., sign_algorithm=SIGN_FAST_WINDING_NUMBER, &
+                                is_square_root=.true.)
+   enddo
+   call holed%enter_device
+   call holed%distance_many_device(points=pts, distances=d_dev, is_signed=.true., &
+                                   sign_algorithm=SIGN_FAST_WINDING_NUMBER, is_square_root=.true., status=st)
+   call holed%distance_many_device(points=pts, distances=d_pn, is_signed=.true., is_square_root=.true.)
+   call holed%exit_device
+
+   err = maxval(abs(d_dev - d_cpu))
+   n_in = count(d_cpu < 0._R8P)
+   n_pn_mis = count((d_pn < 0._R8P) .neqv. (d_cpu < 0._R8P))
+   ok = (st == STATUS_OK .and. err == 0._R8P .and. n_in > 0_I4P .and. d_cpu(1) < 0._R8P .and. d_dev(1) < 0._R8P)
+
+   print '(A)',         'holed mesh on the device (cube-02 minus one facet, FWN sign, issue #30):'
+   print '(A,L1)',      '   watertight:             ', holed%is_watertight()
+   print '(A,I0,A,I0)', '   inside (serial FWN):    ', n_in, ' of ', size(pts)
+   print '(A,L1)',      '   centroid inside:        ', d_dev(1) < 0._R8P
+   print '(A,ES10.3)',  '   fwn device vs serial max |d| err: ', err
+   print '(A,I0)',      '   PN sign mismatches vs FWN (context): ', n_pn_mis
+   print '(A,L1)',      '   holed case ok:          ', ok
+   print '(A)',         ''
+   endsubroutine holed_device_case
 endprogram fossil_test_distance_bench
