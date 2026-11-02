@@ -124,7 +124,7 @@ The public API is accessed via `use fossil`, which re-exports two types plus the
 
 `fossil.f90` also re-exports:
 
-- `SIGN_PSEUDO_NORMAL` (default), `SIGN_RAY_INTERSECTIONS`, `SIGN_SOLID_ANGLE` — sign algorithms for signed-distance queries.
+- `SIGN_PSEUDO_NORMAL` (default), `SIGN_RAY_INTERSECTIONS`, `SIGN_SOLID_ANGLE`, `SIGN_FAST_WINDING_NUMBER` — sign algorithms for signed-distance queries.
 - `AABB_TREE_SAH_BVH` (default), `AABB_TREE_OCTREE` — AABB tree kinds.
 - `AABB_AUTO_REFINEMENT` — sentinel for octree depth auto-tuning.
 - `STATUS_OK`, `STATUS_ALLOC_FAIL`, `STATUS_AMBIGUOUS_ARGS`, `STATUS_FILE_NOT_FOUND`, `STATUS_FILE_OPEN_FAIL`, `STATUS_INVALID_INPUT`.
@@ -167,7 +167,8 @@ Set via the optional `sign_algorithm` argument on `distance` / `compute_distance
 
 - **`SIGN_PSEUDO_NORMAL` (default)** — Bærentzen–Aanæs angle-weighted pseudo-normal at the closest point. Fused with the distance traversal (no second pass). Requires outward-oriented normals (produced by `sanitize`).
 - `SIGN_RAY_INTERSECTIONS` — ray casts in three fixed generic directions (majority vote); odd intersections = inside.
-- `SIGN_SOLID_ANGLE` — sum of projected solid angles ≈ ±4π.
+- `SIGN_SOLID_ANGLE` — sum of projected solid angles ≈ ±4π (exact, O(N) per query).
+- `SIGN_FAST_WINDING_NUMBER` — fast winding number > 0.5 over the per-node cache `wn_payload` built by `analyze`; robust on surfaces with holes.
 
 ### Third-party dependencies (`src/third_party/`)
 

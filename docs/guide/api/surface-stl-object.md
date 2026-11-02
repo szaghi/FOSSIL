@@ -615,7 +615,7 @@ for Euclidean distance and `is_signed=.true.` to apply one of the
 | ----------------- | ------------ | ------------------ | ---------------------------------------------------------------------------------------------- |
 | `point`           | `in`         | `type(vector_R8P)` | (required) Query point.                                                                        |
 | `is_signed`       | `in`, opt.   | `logical`          | Default `.false.` (unsigned).                                                                  |
-| `sign_algorithm`  | `in`, opt.   | `integer(I4P)`     | One of `SIGN_PSEUDO_NORMAL` (default), `SIGN_RAY_INTERSECTIONS`, `SIGN_SOLID_ANGLE`.            |
+| `sign_algorithm`  | `in`, opt.   | `integer(I4P)`     | `SIGN_PSEUDO_NORMAL` (default), `SIGN_RAY_INTERSECTIONS`, `SIGN_SOLID_ANGLE`, `SIGN_FAST_WINDING_NUMBER`. |
 | `is_square_root`  | `in`, opt.   | `logical`          | Default `.false.` — returns d². Set `.true.` for Euclidean distance.                          |
 
 **Returns.** `real(R8P)` — the distance.
@@ -723,8 +723,10 @@ end program ex_compute_distance
 - The `edge_index` / `vertex_index` outputs are mutually exclusive with
   "interior face": at most one of them is non-zero for a given query.
 - When `sign_algorithm = SIGN_PSEUDO_NORMAL`, sign and closest-feature are
-  computed in a single tree traversal; with `SIGN_RAY_INTERSECTIONS` or
-  `SIGN_SOLID_ANGLE` a second O(N) pass classifies the sign.
+  computed in a single tree traversal. With `SIGN_RAY_INTERSECTIONS` or
+  `SIGN_SOLID_ANGLE` a second O(N) pass classifies the sign; with
+  `SIGN_FAST_WINDING_NUMBER` a second, hierarchical (O(log N) amortized)
+  winding-number traversal does.
 
 **See also.** [`distance`](#distance),
 [`is_point_inside`](#is_point_inside),
@@ -776,8 +778,9 @@ end program ex_is_point_inside
   as meaningless when the query point is closer to the surface than the
   mesh's floating-point resolution.
 - On open shells, `SIGN_PSEUDO_NORMAL` returns a well-defined value but the
-  notion of "inside" is mesh-dependent. Prefer `SIGN_RAY_INTERSECTIONS` for
-  open shells if you trust their orientation.
+  notion of "inside" is mesh-dependent. Prefer `SIGN_FAST_WINDING_NUMBER` on
+  open or holed shells: the winding number degrades smoothly near a gap
+  instead of flipping.
 
 **See also.** [`distance`](#distance),
 [`compute_distance`](#compute_distance),

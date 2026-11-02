@@ -65,7 +65,7 @@ contains
    class(block_object),      intent(inout)        :: self           !< Block.
    type(surface_stl_object), intent(in)           :: surface_stl    !< STL surface.
    logical,                  intent(in)           :: is_signed      !< Signed distance or not.
-   integer(I4P),             intent(in)           :: sign_algorithm !< Algorithm code (SIGN_RAY_INTERSECTIONS or SIGN_SOLID_ANGLE).
+   integer(I4P),             intent(in)           :: sign_algorithm !< Algorithm code (SIGN_*).
    logical,                  intent(in), optional :: invert_sign    !< Invert sign of distances.
    logical                                        :: invert_sign_   !< Invert sign of distances, local variable.
    integer(I4P)                                   :: i, j, k, c, f  !< Counter.

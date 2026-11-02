@@ -44,17 +44,41 @@ For a query at $q$:
 
 1. **Brute force** (`beta ≤ 0`): evaluate the per-facet solid angle
    directly. O(N) per query, exact within floating-point precision.
-2. **Hierarchical Barnes-Hut** (default, `beta = 2.0`): for each AABB
-   tree node, precompute its **dipole moment**
-   $\sum_f \mathrm{area}_f \cdot \hat{n}_f$ and centroid. If the query
-   point is far from the node (distance > `beta` × node diagonal),
-   approximate the entire subtree's contribution with the dipole.
-   Otherwise recurse. Reduces a 70k-facet bunny query from ~70 µs to
-   ~5 µs without measurable accuracy loss.
+2. **Hierarchical Barnes-Hut** (default, `beta = 2.0`):
+   - Each AABB tree node carries its **dipole**
+     $D = \sum_f \mathrm{area}_f \, \hat{n}_f$ and **second moment**
+     $C = \sum_f \mathrm{area}_f \, \hat{n}_f \, (x_f - c)^T$ about the box
+     centre $c$.
+   - If the query point is far from the node (distance > `beta` × node
+     diagonal), the subtree contributes its Taylor expansion, with
+     $r' = c - q$:
+     $$\Omega \approx \frac{D \cdot r'}{|r'|^3} - \frac{3\, r'^T C\, r' - |r'|^2 \operatorname{tr} C}{|r'|^5}$$
+   - Otherwise the traversal descends, and leaves sum their facets'
+     exact solid angles.
 
-The same Barnes-Hut traversal works on both the SAH BVH and the octree
-(tree kind is irrelevant to the algorithm — child enumeration goes
-through `enumerate_children`).
+The per-node data is built **once**, by `analyze` (`surface%wn_payload`),
+and reused by every query.
+- **SAH BVH:** an iterative, GPU-ready traversal
+  (`bvh_winding_number_oac`).
+- **Octree:** the same expansion over up to 8 children. The octree stores
+  each facet once per level, so facets are summed at leaves only.
+
+On bunny (69451 facets) a query takes about 13 µs.
+
+| Mesh | β = 2 | β = 4 |
+|---|---|---|
+| bunny | 8.7e-3 | 1.7e-3 |
+| dragon-fine | 9.8e-4 | 7.2e-5 |
+
+*Measured max |w_fast − w_exact| on 12³ grids.*
+
+::: warning Fixed in issue #29
+Before issue #29 the fast path rebuilt its cache on every call: about 1.1 ms
+per query on bunny. It also had the far-field term's sign inverted, giving
+errors up to 2 wherever the far field was used, and on octrees it counted every
+facet once per tree level. Results from earlier versions that relied on
+`beta > 0` should be recomputed.
+:::
 
 ## API
 
@@ -151,10 +175,14 @@ singularity).
 
 ## Known limitations
 
-- **β tuning is empirical**. β = 2.0 is fine for typical CAD STL with
-  few thousand to ~100k facets. For dense meshes (~1M+ facets) where
-  query throughput matters, β = 1.5 trades a few percent accuracy for
-  ~2× speedup. For ground-truth tests, force exact (`beta ≤ 0`).
+- **The fast path is an approximation.** At β = 2 the error is up to about
+  1e-2 (table above): ample for the inside/outside decision at 0.5, which
+  is how `SIGN_FAST_WINDING_NUMBER` uses it, but not a substitute for the
+  exact value. Raise β to tighten it, or force the exact sum (`beta ≤ 0`)
+  for ground-truth tests.
+- **β is a per-call choice.** The per-node cache does not depend on it, so
+  `winding_number(point, beta)` can use any β without a rebuild. The
+  `SIGN_FAST_WINDING_NUMBER` sign algorithm always uses β = 2.
 - **At surface vertices and edges**, `w` returns the local solid-angle
   fraction (e.g. 1/8 at a cube corner), not 0 or 1. This is **the
   correct mathematical answer** — the "inside vs. outside" question is

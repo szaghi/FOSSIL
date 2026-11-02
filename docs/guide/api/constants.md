@@ -141,7 +141,59 @@ end program ex_sign_solid_angle
 ```
 
 **See also.** [`SIGN_PSEUDO_NORMAL`](#sign_pseudo_normal),
+[`SIGN_FAST_WINDING_NUMBER`](#sign_fast_winding_number),
 [`facet%solid_angle`](/guide/api/facet-object#solid_angle).
+
+---
+
+### `SIGN_FAST_WINDING_NUMBER`
+
+**Purpose.** Inside when the generalized winding number `w` of the point
+exceeds 0.5. `w` is evaluated by the hierarchical fast winding number (Barill
+et al. 2018) with a second-order far-field expansion, over a per-node cache
+that `analyze` builds once. See
+[Generalized winding number](/guide/advanced/winding-number).
+
+**When to use.** Surfaces that are not watertight: holes, gaps, small
+self-intersections. On a closed, consistently oriented surface it gives the
+same sign as `SIGN_PSEUDO_NORMAL`. On a surface with holes the pseudo-normal
+and ray-parity signs flip near the gap, while `w` degrades smoothly. On cube-02
+with 16 facets removed (729 test points), `SIGN_PSEUDO_NORMAL` gets 10 signs
+wrong, `SIGN_RAY_INTERSECTIONS` 15, `SIGN_FAST_WINDING_NUMBER` none.
+
+**Cost.**
+- About 13 µs per winding-number evaluation on bunny (69451 facets), on top of
+  the unsigned distance search.
+- Slower than `SIGN_PSEUDO_NORMAL`, whose sign comes free with the distance
+  traversal: the IB generator on cube-02 takes 14.1 s with this sign against
+  2.8 s with the pseudo-normal.
+- Much faster than `SIGN_SOLID_ANGLE`, which is O(N) per query.
+
+**Accuracy.** The expansion uses admissibility ratio β = 2. Measured
+|w_fast − w_exact|: up to 8.7e-3 on bunny and 9.8e-4 on dragon-fine. That is
+far below the 0.5 threshold, so the sign is decided exactly, except within the
+mesh-size band around a hole, where `w` itself is close to 0.5.
+
+**Example.**
+
+```fortran
+program ex_sign_fast_winding_number
+use fossil
+use penf, only : I4P, R8P
+use vecfor_R8P, only : vector_R8P, ex_R8P
+implicit none
+type(surface_stl_object) :: surface
+real(R8P)                :: d
+
+call surface%load_from_file(file_name='cube.stl', guess_format=.true.)
+d = surface%distance(point=2._R8P * ex_R8P, is_signed=.true., &
+                     sign_algorithm=SIGN_FAST_WINDING_NUMBER, is_square_root=.true.)
+print '(A, ES12.5)', 'signed distance (fast winding number) = ', d
+end program ex_sign_fast_winding_number
+```
+
+**See also.** [`surface%winding_number`](/guide/api/surface-stl-object#winding_number),
+[`SIGN_SOLID_ANGLE`](#sign_solid_angle).
 
 ---
 

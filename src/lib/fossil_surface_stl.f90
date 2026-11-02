@@ -815,8 +815,9 @@ contains
    !<  - `SIGN_PSEUDO_NORMAL` (default): one tree traversal yields both d^2 and
    !<    the closest facet+region; sign is read from
    !<    `dot(point - closest_point, pseudo_normal_at_closest)`. No second pass.
-   !<  - `SIGN_RAY_INTERSECTIONS` / `SIGN_SOLID_ANGLE`: legacy path — distance is
-   !<    computed first, then a separate O(N) inside-test flips the sign.
+   !<  - `SIGN_RAY_INTERSECTIONS` / `SIGN_SOLID_ANGLE` / `SIGN_FAST_WINDING_NUMBER`: the unsigned
+   !<    distance is computed first, then a separate inside test flips the sign (O(N) for ray
+   !<    parity and solid angle; a hierarchical traversal for the fast winding number).
    class(surface_stl_object), intent(in)            :: self            !< File STL.
    type(vector_R8P),          intent(in)            :: point           !< Point coordinates.
    real(R8P),                 intent(out)           :: distance        !< Minimum distance.
@@ -1317,7 +1318,7 @@ contains
    class(surface_stl_object), intent(in)           :: self            !< File STL.
    type(vector_R8P),          intent(in)           :: point           !< Point coordinates.
    logical,                   intent(in), optional :: is_signed       !< Sentinel to trigger signed distance.
-   integer(I4P),              intent(in), optional :: sign_algorithm  !< Algorithm code (SIGN_RAY_INTERSECTIONS or SIGN_SOLID_ANGLE).
+   integer(I4P),              intent(in), optional :: sign_algorithm  !< Algorithm code (SIGN_*; default SIGN_PSEUDO_NORMAL).
    logical,                   intent(in), optional :: is_square_root  !< Sentinel to trigger square-root distance.
    real(R8P)                                       :: distance        !< Minimum distance from point to the triangulated surface.
 

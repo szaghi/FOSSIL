@@ -4,7 +4,7 @@ title: Usage
 
 # Usage
 
-All examples use `use fossil` which re-exports `surface_stl_object` and `facet_object`, plus the constants for sign algorithms (`SIGN_PSEUDO_NORMAL`, `SIGN_RAY_INTERSECTIONS`, `SIGN_SOLID_ANGLE`), tree kinds (`AABB_TREE_SAH_BVH`, `AABB_TREE_OCTREE`), and status codes (`STATUS_OK`, `STATUS_INVALID_INPUT`, …).
+All examples use `use fossil` which re-exports `surface_stl_object` and `facet_object`, plus the constants for sign algorithms (`SIGN_PSEUDO_NORMAL`, `SIGN_RAY_INTERSECTIONS`, `SIGN_SOLID_ANGLE`, `SIGN_FAST_WINDING_NUMBER`), tree kinds (`AABB_TREE_SAH_BVH`, `AABB_TREE_OCTREE`), and status codes (`STATUS_OK`, `STATUS_INVALID_INPUT`, …).
 
 Numeric kinds (`I4P`, `R8P`) come from [PENF](https://github.com/szaghi/PENF); 3D vectors and unit versors (`ex_R8P`, `ey_R8P`, `ez_R8P`) come from [VecFor](https://github.com/szaghi/VecFor).
 
