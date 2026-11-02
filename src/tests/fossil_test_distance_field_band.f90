@@ -9,8 +9,12 @@ program fossil_test_distance_field_band
 !<  - band values are bit-exact against a per-cell `surface%distance` with the same options;
 !<  - halo and non-band cells hold FAR_VALUE.
 !< Invalid grids and a non-positive band return STATUS_INVALID_INPUT.
+!< `use_device=.true.` (host loop under gfortran, GPU under nvfortran) gives the host band bit
+!< for bit and leaves the surface's residency as it found it; an unsupported device sign
+!< algorithm is refused.
 
-use fossil, only : surface_stl_object, SIGN_PSEUDO_NORMAL, STATUS_OK, STATUS_INVALID_INPUT
+use fossil, only : surface_stl_object, SIGN_PSEUDO_NORMAL, SIGN_SOLID_ANGLE, SIGN_FAST_WINDING_NUMBER, STATUS_OK, &
+                  STATUS_INVALID_INPUT
 use fossil_distance_field, only : distance_field_object, FAR_VALUE
 use penf, only : I4P, R8P
 use vecfor, only : vector_R8P
@@ -50,10 +54,36 @@ call field%compute_band(surface=cube, band=0._R8P, status=st)
 ok = ok .and. st == STATUS_INVALID_INPUT
 print '(A,L1)', 'invalid inputs refused: ', ok
 
+call device_case
+
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
 contains
+   subroutine device_case
+   !< use_device band == host band bit for bit (PN and FWN); refusal of SIGN_SOLID_ANGLE.
+   type(distance_field_object) :: host, dev
+   integer(I4P)                :: st_h, st_d, st_r
+   logical                     :: case_ok
+
+   call host%initialize(x=xs, y=xs, z=xs, ng=2_I4P)
+   call dev%initialize(x=xs, y=xs, z=xs, ng=2_I4P)
+   call host%compute_band(surface=cube, sign_algorithm=SIGN_PSEUDO_NORMAL, status=st_h)
+   call dev%compute_band(surface=cube, sign_algorithm=SIGN_PSEUDO_NORMAL, use_device=.true., status=st_d)
+   case_ok = st_h == STATUS_OK .and. st_d == STATUS_OK .and. all(host%phi == dev%phi) .and. &
+             all(host%in_band .eqv. dev%in_band) .and. .not. cube%is_on_device
+   call host%compute_band(surface=cube, sign_algorithm=SIGN_FAST_WINDING_NUMBER, status=st_h)
+   call cube%enter_device   ! already resident: compute_band must leave it resident
+   call dev%compute_band(surface=cube, sign_algorithm=SIGN_FAST_WINDING_NUMBER, use_device=.true., status=st_d)
+   case_ok = case_ok .and. st_h == STATUS_OK .and. st_d == STATUS_OK .and. all(host%phi == dev%phi) .and. &
+             cube%is_on_device
+   call dev%compute_band(surface=cube, sign_algorithm=SIGN_SOLID_ANGLE, use_device=.true., status=st_r)
+   call cube%exit_device
+   case_ok = case_ok .and. st_r == STATUS_INVALID_INPUT .and. dev%get_band_cells() == 0
+   print '(A,L1)', 'device band == host band (PN, FWN), residency kept, SIGN_SOLID_ANGLE refused: ', case_ok
+   ok = ok .and. case_ok
+   endsubroutine device_case
+
    function stretched_axis() result(c)
    !< Uniform core on [-0.1, 1.1] (spacing 0.05) plus 10 points per side growing by 1.1.
    real(R8P), allocatable :: c(:)       !< Axis.

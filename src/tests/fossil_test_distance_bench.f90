@@ -36,6 +36,7 @@ use fossil,              only : surface_stl_object, SIGN_PSEUDO_NORMAL, SIGN_FAS
 use fossil_facet_object, only : facet_object
 use penf,                only : I4P, I8P, R8P
 use vecfor,              only : vector_R8P
+use fossil_distance_field, only : distance_field_object
 
 implicit none
 
@@ -58,7 +59,7 @@ integer(I4P)                  :: i, j, k, q
 integer(I4P)                  :: argc, n_sample, s, stride
 integer(I4P)                  :: n_threads
 character(len=512)            :: stl_path, arg2
-logical                       :: correctness_ok, batch_ok, device_ok, fwn_ok, refuse_ok, holed_ok
+logical                       :: correctness_ok, batch_ok, device_ok, fwn_ok, refuse_ok, holed_ok, field_ok
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
 !$ integer, external          :: omp_get_max_threads       !< OpenMP runtime thread-count query (only declared under -fopenmp).
@@ -246,6 +247,9 @@ correctness_ok = (max_abs_err == 0._R8P)
 ! ---- holed mesh on the device (issue #30) -----------------------------------
 call holed_device_case(ok=holed_ok)
 
+! ---- distance-field band on the device (issue #32) ---------------------------
+call field_band_case(ok=field_ok)
+
 ! ---- report ------------------------------------------------------------------
 print '(A,A)',       '--- FOSSIL distance benchmark: ', trim(stl_path)
 print '(A,I0)',      'facets:                       ', nf
@@ -287,10 +291,49 @@ print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
 print '(A,L1)',      'Are all tests passed? ', (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok &
-                                                .and. holed_ok)
-if (.not. (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok .and. holed_ok)) error stop 1
+                                                .and. holed_ok .and. field_ok)
+if (.not. (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok .and. holed_ok .and. field_ok)) &
+   error stop 1
 
 contains
+   subroutine field_band_case(ok)
+   !< Narrow band of a distance field over the probe box (grid_n^3 points, PN sign): the band
+   !< computed through distance_many_device must equal the host band bit for bit (issue #32).
+   !< Timings of both band batches printed (host: distance_many, OpenMP if enabled).
+   logical, intent(out)        :: ok              !< Pass flag.
+   type(distance_field_object) :: host, dev       !< Host and device fields.
+   real(R8P),    allocatable   :: gx(:), gy(:), gz(:)
+   integer(I4P)                :: m, st_h, st_d
+   integer(I8P)                :: c0, c1, rate
+   real(R8P)                   :: t_host, t_dev
+
+   allocate(gx(grid_n), gy(grid_n), gz(grid_n))
+   do m = 1_I4P, grid_n
+      frac  = real(m - 1_I4P, R8P) / real(grid_n - 1_I4P, R8P)
+      gx(m) = lo(1) + frac * (hi(1) - lo(1))
+      gy(m) = lo(2) + frac * (hi(2) - lo(2))
+      gz(m) = lo(3) + frac * (hi(3) - lo(3))
+   enddo
+   call host%initialize(x=gx, y=gy, z=gz)
+   call dev%initialize(x=gx, y=gy, z=gz)
+   call system_clock(c0, rate)
+   call host%compute_band(surface=surface, sign_algorithm=SIGN_PSEUDO_NORMAL, status=st_h)
+   call system_clock(c1)
+   t_host = real(c1 - c0, R8P) / real(rate, R8P)
+   call system_clock(c0, rate)
+   call dev%compute_band(surface=surface, sign_algorithm=SIGN_PSEUDO_NORMAL, use_device=.true., status=st_d)
+   call system_clock(c1)
+   t_dev = real(c1 - c0, R8P) / real(rate, R8P)
+   ok = st_h == STATUS_OK .and. st_d == STATUS_OK .and. host%get_band_cells() > 0_I4P .and. &
+        all(host%phi == dev%phi) .and. all(host%in_band .eqv. dev%in_band)
+   print '(A)',          'distance-field band (issue #32, PN sign, probe box):'
+   print '(A,I0,A,ES10.3)', '   band cells:             ', host%get_band_cells(), '   band ', host%get_band_width()
+   print '(A,F12.4,A)',  '   host band wall-clock:   ', 1000._R8P * t_host, ' ms'
+   print '(A,F12.4,A)',  '   device band wall-clock: ', 1000._R8P * t_dev, ' ms (incl. enter/exit_device)'
+   print '(A,L1)',       '   device band == host band: ', ok
+   print '(A)',          ''
+   endsubroutine field_band_case
+
    subroutine holed_device_case(ok)
    !< FWN sign on the device for a surface with a hole (issue #30): cube-02 with
    !< its first facet removed, probed on a 16^3 grid spanning 1.5x its bbox.

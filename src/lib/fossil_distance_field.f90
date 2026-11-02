@@ -9,7 +9,8 @@ module fossil_distance_field
 !<
 !< The field is built in stages:
 !<  1. **Band** (`compute_band`): the cells within `band` of the surface get the exact
-!<     signed distance, computed in one `surface%distance_many` batch. Candidates come from
+!<     signed distance, computed in one `surface%distance_many` batch, or on the GPU through
+!<     `surface%distance_many_device` with `use_device=.true.`. Candidates come from
 !<     rasterizing each facet's bounding box, inflated by `band`, onto the index space
 !<     (binary search on the 1D coordinates, so stretched grids cost the same).
 !<  2. **Signs** (`compute_signs`): the cells outside the band are grouped into 6-connected
@@ -169,7 +170,7 @@ contains
                        max_spacing(self%z, bmin%z, bmax%z))
    endfunction default_band
 
-   subroutine compute_band(self, surface, band, is_signed, sign_algorithm, status)
+   subroutine compute_band(self, surface, band, is_signed, sign_algorithm, use_device, status)
    !< Exact (signed) distances on the narrow band: the interior cells with |d| <= `band`.
    !<
    !< 1. Candidates: each facet's bounding box, inflated by `band`, is mapped to an index box
@@ -177,7 +178,12 @@ contains
    !<    Every cell within `band` of the surface is a candidate (it lies within `band` of some
    !<    facet, hence inside that facet's inflated box).
    !< 2. One `surface%distance_many` batch over the candidates (OpenMP-parallel when built
-   !<    with OpenMP), with the requested sign algorithm.
+   !<    with OpenMP), with the requested sign algorithm. With `use_device=.true.` the batch
+   !<    runs through `surface%distance_many_device` instead (bit-exact with the host batch
+   !<    where validated); the surface is made resident for the call and released after it,
+   !<    unless it was already resident, in which case residency is left to the caller.
+   !<    The device supports SIGN_PSEUDO_NORMAL and SIGN_FAST_WINDING_NUMBER only, on the SAH
+   !<    BVH; anything else is refused (STATUS_INVALID_INPUT, stderr message, band empty).
    !< 3. Candidates with |d| <= band become band cells: `phi = d`, `in_band = .true.`.
    !<    Every other cell is reset to FAR_VALUE.
    !<
@@ -191,8 +197,11 @@ contains
    real(R8P),                    intent(in),  optional :: band           !< Band half-width (default `default_band`).
    logical,                      intent(in),  optional :: is_signed      !< Signed distances (default .true.).
    integer(I4P),                 intent(in),  optional :: sign_algorithm !< SIGN_* code (default SIGN_PSEUDO_NORMAL).
+   logical,                      intent(in),  optional :: use_device     !< Band batch on the GPU (default .false.).
    integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    real(R8P)                                           :: band_          !< Resolved band.
+   logical                                             :: use_device_    !< Resolved device flag.
+   logical                                             :: was_resident   !< Surface already on the device.
    integer(I4P)                                        :: algo           !< Resolved sign algorithm.
    logical,                      allocatable           :: candidate(:,:,:) !< Candidate mask.
    type(vector_R8P),             allocatable           :: points(:)      !< Candidate points.
@@ -263,8 +272,17 @@ contains
          enddo
       enddo
    enddo
-   call surface%distance_many(points=points, distances=d, is_signed=self%is_signed, sign_algorithm=algo, &
-                              is_square_root=.true., status=st)
+   use_device_ = .false. ; if (present(use_device)) use_device_ = use_device
+   if (use_device_) then
+      was_resident = surface%is_on_device
+      if (.not. was_resident) call surface%enter_device
+      call surface%distance_many_device(points=points, distances=d, is_signed=self%is_signed, sign_algorithm=algo, &
+                                        is_square_root=.true., status=st)
+      if (.not. was_resident) call surface%exit_device
+   else
+      call surface%distance_many(points=points, distances=d, is_signed=self%is_signed, sign_algorithm=algo, &
+                                 is_square_root=.true., status=st)
+   endif
    if (st /= STATUS_OK) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
@@ -612,7 +630,8 @@ contains
    k = r / self%nj + 1_I4P
    endsubroutine unlinear
 
-   subroutine compute(self, surface, band, is_signed, sign_algorithm, tol, max_sweeps, sweeps, fallback_cells, status)
+   subroutine compute(self, surface, band, is_signed, sign_algorithm, use_device, tol, max_sweeps, sweeps, fallback_cells, &
+                      status)
    !< The whole field: `compute_band`, `compute_signs` (signed fields), `sweep`. See each one
    !< for the arguments; `sweeps` and `fallback_cells` report their counters.
    class(distance_field_object), intent(inout)         :: self           !< Distance field.
@@ -620,6 +639,7 @@ contains
    real(R8P),                    intent(in),  optional :: band           !< Band half-width (default `default_band`).
    logical,                      intent(in),  optional :: is_signed      !< Signed distances (default .true.).
    integer(I4P),                 intent(in),  optional :: sign_algorithm !< SIGN_* code (default SIGN_PSEUDO_NORMAL).
+   logical,                      intent(in),  optional :: use_device     !< Band batch on the GPU (default .false.).
    real(R8P),                    intent(in),  optional :: tol            !< Sweep tolerance (default 1e-12, relative).
    integer(I4P),                 intent(in),  optional :: max_sweeps     !< Maximum directional sweeps (default 400).
    integer(I4P),                 intent(out), optional :: sweeps         !< Directional sweeps done.
@@ -628,7 +648,8 @@ contains
    integer(I4P)                                        :: st             !< Stage status.
 
    if (present(status)) status = STATUS_OK
-   call self%compute_band(surface=surface, band=band, is_signed=is_signed, sign_algorithm=sign_algorithm, status=st)
+   call self%compute_band(surface=surface, band=band, is_signed=is_signed, sign_algorithm=sign_algorithm, &
+                          use_device=use_device, status=st)
    if (st == STATUS_OK) call self%compute_signs(surface=surface, fallback_cells=fallback_cells, status=st)
    if (st == STATUS_OK) call self%sweep(tol=tol, max_sweeps=max_sweeps, sweeps=sweeps, status=st)
    if (present(status)) status = st
