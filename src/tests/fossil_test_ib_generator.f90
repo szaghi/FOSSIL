@@ -11,6 +11,8 @@ program fossil_test_ib_generator
 !<    error measured on this case at h = 0.125 / 0.0625 / 0.03125 is 1.10 h / 1.44 h / 1.80 h
 !<    (fossil_test_distance_field_fsm); the former generator only reached cells it computed
 !<    exactly, and copied boundary values beyond.
+!< A second run with `--squared` must write sign(d) d**2 of the first run, bit for bit (the
+!< former generator's output quantity).
 !< The test needs the generator built in the same mode (it is, by every tests-* mode that
 !< builds src/app) and is run from the repository root, like every FOSSIL test.
 
@@ -21,9 +23,9 @@ implicit none
 character(*), parameter :: BASE = 'fossil_test_ibgen'
 integer(I4P), parameter :: N = 30
 real(R8P),    parameter :: H = 0.1_R8P
-real(R8P), allocatable  :: xn(:,:,:), yn(:,:,:), zn(:,:,:), ib(:,:,:)
+real(R8P), allocatable  :: xn(:,:,:), yn(:,:,:), zn(:,:,:), ib(:,:,:), ib2(:,:,:)
 real(R8P)               :: t, c(3), d, err
-integer(I4P)            :: exitstat, u, nb, n1, n2, n3, i, j, k, n_sign
+integer(I4P)            :: exitstat, exitstat2, u, nb, n1, n2, n3, i, j, k, n_sign
 logical                 :: ok
 
 call execute_command_line('exe/fossil_ib_generator --stl src/tests/cube-02.stl --out '//BASE// &
@@ -64,6 +66,23 @@ enddo
 ok = ok .and. n_sign == 0 .and. err < 2._R8P * H
 print '(A,I0,A,I0,A,ES10.3,A,F6.3,A)', 'generator exit ', exitstat, '  sign errors ', n_sign, '  max |err| ', err, &
       '  (', err / H, ' h)'
+
+! --squared: sign(d) d**2 of the same field
+call execute_command_line('exe/fossil_ib_generator --stl src/tests/cube-02.stl --out '//BASE// &
+                          ' --bmin -1 -1 -1 --bmax 2 2 2 --ni 30 --nj 30 --nk 30 --gi 2 --gj 2 2 --gk 2'// &
+                          ' --sign_algorithm pseudo_normal --squared > /dev/null', exitstat=exitstat2)
+allocate(ib2, mold=ib)
+open(newunit=u, file=BASE//'.ib', form='unformatted', action='read', status='old')
+read(u) t
+read(u) n1, n2, n3
+read(u) ib2
+close(u, status='delete')
+open(newunit=u, file=BASE//'.grd', status='old')
+close(u, status='delete')
+open(newunit=u, file=BASE//'.vts', status='old')
+close(u, status='delete')
+ok = ok .and. exitstat2 == 0 .and. all(ib2 == sign(ib * ib, ib))
+print '(A,I0,A,L1)', '--squared: exit ', exitstat2, '  ib == sign(d) d**2 of the first run: ', all(ib2 == sign(ib * ib, ib))
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 

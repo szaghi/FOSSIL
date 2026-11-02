@@ -15,6 +15,10 @@ program fossil_ib_generator
 !< included, holds a distance. `--device` computes the band on the GPU (nvfortran build;
 !< sign algorithm pseudo_normal or fast_winding_number). The written field is positive
 !< inside the body (Xall convention).
+!<
+!< The written value is the signed distance. The generator up to issue #32 wrote the signed
+!< *squared* distance (it called `surface%distance` without `is_square_root`); `--squared`
+!< writes that quantity, sign(d) d**2, for consumers that depend on it.
 
 use flap, only : command_line_interface
 use fossil, only : surface_stl_object, sign_algorithm_from_string, STATUS_OK, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
@@ -40,6 +44,7 @@ character(999)                 :: sign_algorithm       !< Algorithm name as type
 integer(I4P)                   :: sign_algorithm_code  !< Algorithm code derived from sign_algorithm.
 logical                        :: unsigned             !< Compute unsigned distance.
 logical                        :: use_device           !< Narrow band on the GPU.
+logical                        :: squared              !< Write sign(d) d**2 (former output) instead of d.
 real(R8P)                      :: band                 !< Band half-width (<= 0: default).
 real(R8P)                      :: sweep_tol            !< Fast-sweeping relative tolerance.
 integer(I4P)                   :: ni, nj, nk           !< Grid dimensions, close to STL.
@@ -99,6 +104,7 @@ print '(A,F8.3,A,I0,A,ES10.3,A,I0,A,I0)', 'distance field timing: ', real(timing
 ! output, positive inside (Xall convention)
 allocate(distance(lbound(xc, 1):ubound(xc, 1), lbound(yc, 1):ubound(yc, 1), lbound(zc, 1):ubound(zc, 1)))
 distance = -field%phi
+if (squared) distance = sign(distance * distance, distance)
 allocate(nodes(lbound(xn, 1):ubound(xn, 1), lbound(yn, 1):ubound(yn, 1), lbound(zn, 1):ubound(zn, 1)))
 do k = lbound(zn, 1), ubound(zn, 1)
    do j = lbound(yn, 1), ubound(yn, 1)
@@ -239,6 +245,12 @@ contains
                def='1.e-12',                                                       &
                act='store')
 
+  call cli%add(switch='--squared',                                                              &
+               help='write the signed squared distance (the output of the generator before issue #32)', &
+               required=.false.,                                                               &
+               def='.false.',                                                                  &
+               act='store_true')
+
   call cli%add(switch='--device',                                                         &
                help='narrow band on the GPU (nvfortran build; pseudo_normal or fast_winding_number)', &
                required=.false.,                                                          &
@@ -269,6 +281,7 @@ contains
   call cli%get(switch='--band',                    val=band,              error=error) ; if (error/=0) stop
   call cli%get(switch='--sweep_tol',               val=sweep_tol,         error=error) ; if (error/=0) stop
   call cli%get(switch='--device',                  val=use_device,        error=error) ; if (error/=0) stop
+  call cli%get(switch='--squared',                 val=squared,           error=error) ; if (error/=0) stop
   endsubroutine cli_parse
 
   subroutine cli_print()
@@ -296,6 +309,7 @@ contains
   print  '(A)' ,'--band            '//trim(str(band                  ))
   print  '(A)' ,'--sweep_tol       '//trim(str(sweep_tol             ))
   print  '(A)' ,'--device          '//trim(str(use_device            ))
+  print  '(A)' ,'--squared         '//trim(str(squared               ))
   endsubroutine cli_print
 
    function node_axis(lo, hi, n, g_lo, g_hi, e) result(c)
