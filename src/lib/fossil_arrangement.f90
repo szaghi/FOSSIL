@@ -49,6 +49,7 @@ use fossil_dt,               only : triangulation_t, cdt_build, &
                                     DT_STATUS_CROSSING_CONSTRAINTS
 use fossil_facet_object,     only : facet_object
 use fossil_list_id_object,   only : list_id_object
+use fossil_tritri_exact,     only : pair_classify, PAIR_CROSSING
 use fossil_utils,            only : EPS
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
@@ -181,19 +182,13 @@ contains
    !< O(nA * nB) fallback used only when trees are not initialized.
    type(arrangement_t), intent(inout) :: arr
    integer(I4P)                       :: i, j, gi, gj
-   type(vector_R8P)                   :: p, q
-   logical                            :: hit
 
    do i = 1, arr%n_a
       gi = i
       do j = 1, arr%n_b
          gj = arr%n_a + j
          if (.not. bboxes_overlap(arr%facet(gi), arr%facet(gj))) cycle
-         call arr%facet(gi)%intersect_facet(other=arr%facet(gj), p=p, q=q, intersects=hit)
-         if (hit) then
-            call append_segment(cut=arr%cut(gi), p=p, q=q)
-            call append_segment(cut=arr%cut(gj), p=p, q=q)
-         endif
+         call collect_pair(arr=arr, gi=gi, gj=gj)
       enddo
    enddo
    endsubroutine collect_brute_force
@@ -265,8 +260,6 @@ contains
    type(aabb_node_object), pointer    :: node_a, node_b
    type(list_id_object)               :: ids_a, ids_b
    integer(I4P)                       :: i, j, fa, fb, gi, gj
-   type(vector_R8P)                   :: p, q
-   logical                            :: hit
 
    node_a => arr%tree_a%node_at(i=na)
    node_b => arr%tree_b%node_at(i=nb)
@@ -284,14 +277,27 @@ contains
          if (fb < 1 .or. fb > arr%n_b) cycle
          gj = arr%n_a + fb
          if (.not. bboxes_overlap(arr%facet(gi), arr%facet(gj))) cycle
-         call arr%facet(gi)%intersect_facet(other=arr%facet(gj), p=p, q=q, intersects=hit)
-         if (hit) then
-            call append_segment(cut=arr%cut(gi), p=p, q=q)
-            call append_segment(cut=arr%cut(gj), p=p, q=q)
-         endif
+         call collect_pair(arr=arr, gi=gi, gj=gj)
       enddo
    enddo
    endsubroutine enumerate_leaf_cross_pair
+
+   subroutine collect_pair(arr, gi, gj)
+   !< Intersect facets gi (of A) and gj (of B) with the exact pair classification and append a
+   !< crossing segment to both facets' cut lists. The segment endpoints are canonical points
+   !< (`fossil_tritri_exact`), identical for every pair that produces them. Touching pairs (one
+   !< common point) add no cut; coplanar pairs are handled by the coplanar pass.
+   type(arrangement_t), intent(inout) :: arr    !< Arrangement.
+   integer(I4P),        intent(in)    :: gi, gj !< Global facet indices (A, B).
+   integer(I4P)                       :: kind   !< PAIR_* code.
+   type(vector_R8P)                   :: p, q   !< Common segment.
+
+   call pair_classify(ta=arr%facet(gi)%vertex, tb=arr%facet(gj)%vertex, kind=kind, p=p, q=q)
+   if (kind == PAIR_CROSSING) then
+      call append_segment(cut=arr%cut(gi), p=p, q=q)
+      call append_segment(cut=arr%cut(gj), p=p, q=q)
+   endif
+   endsubroutine collect_pair
 
    pure function bboxes_overlap(fa, fb) result(yes)
    !< Cheap AABB overlap test for two facet bounding boxes.
@@ -405,8 +411,8 @@ contains
    !<   3. Run cdt_build with the 2D points + segment constraints. Status
    !<      DT_STATUS_RECOVERY_FAILED bubbles up as ARR_STATUS_CDT_FAILED so
    !<      the boolean driver can decide how to handle it.
-   !<   4. For each output sub-triangle, lift its 3 vertices back to 3D via
-   !<      lift_from_plane, build a fresh facet_object, copy the parent's
+   !<   4. For each output sub-triangle, take its 3 vertices from the exact 3D
+   !<      points they were projected from (no lift: issue #33), build a fresh facet_object, copy the parent's
    !<      normal (the lift preserves the plane, so all sub-facets share the
    !<      parent's normal direction), call compute_metrix, append to output.
    !<
@@ -421,11 +427,13 @@ contains
    integer(I4P)                                           :: gi, i, k, n_total, n_pts, n_segs, n_cuts
    integer(I4P)                                           :: cdt_status, sub_v(3), n_sub
    real(R8P), allocatable                                 :: pts2d(:,:)
+   type(vector_R8P), allocatable                          :: pts3d(:)   !< Exact 3D point of each 2D point.
    integer(I4P), allocatable                              :: segs(:,:)
    type(triangulation_t)                                  :: tri
    type(vector_R8P)                                       :: p3d
    real(R8P)                                              :: u, v
    integer(I4P)                                           :: idx_p, idx_q
+   integer(I4P)                                           :: n_before   !< Points before a lookup.
    ! Output accumulator, doubled on demand.
    type(facet_object), allocatable                        :: buf_facet(:)
    integer(I4P),       allocatable                        :: buf_owner(:), buf_source(:)
@@ -454,24 +462,32 @@ contains
       ! Maximum points = 3 + 2 * n_cuts ; segments = n_cuts.
       n_pts = 0_I4P ; n_segs = 0_I4P
       if (allocated(pts2d)) deallocate(pts2d)
+      if (allocated(pts3d)) deallocate(pts3d)
       if (allocated(segs))  deallocate(segs)
       allocate(pts2d(2, 3 + 2 * n_cuts))
+      allocate(pts3d(3 + 2 * n_cuts))
       allocate(segs(2, n_cuts))
 
       ! Three facet vertices first (so they keep stable indices 1, 2, 3).
       do i = 1, 3
          call project_to_plane(facet=arr%facet(gi), p3d=arr%facet(gi)%vertex(i), &
                                u=pts2d(1, i), v=pts2d(2, i))
+         pts3d(i) = arr%facet(gi)%vertex(i)
       enddo
       n_pts = 3_I4P
 
       ! Cut endpoints: project, dedup against existing points (within EPS),
       ! record (start_idx, end_idx) as a constraint segment.
       do k = 1, n_cuts
+         ! a new 2D point keeps its exact 3D source; a deduplicated one keeps the first source
+         n_before = n_pts
          call project_to_plane(facet=arr%facet(gi), p3d=arr%cut(gi)%point(2*k - 1), u=u, v=v)
          idx_p = find_or_append_2d(pts2d=pts2d, n_pts=n_pts, x=u, y=v)
+         if (n_pts > n_before) pts3d(idx_p) = arr%cut(gi)%point(2*k - 1)
+         n_before = n_pts
          call project_to_plane(facet=arr%facet(gi), p3d=arr%cut(gi)%point(2*k), u=u, v=v)
          idx_q = find_or_append_2d(pts2d=pts2d, n_pts=n_pts, x=u, y=v)
+         if (n_pts > n_before) pts3d(idx_q) = arr%cut(gi)%point(2*k)
          if (idx_p == idx_q) cycle  ! degenerate zero-length cut after dedup
          n_segs = n_segs + 1
          segs(1, n_segs) = idx_p
@@ -493,7 +509,7 @@ contains
       n_sub = tri%num_triangles()
       do k = 1, n_sub
          call tri%triangle_vertices(k=k, v=sub_v)
-         call build_subfacet_from_uv(arr=arr, gi=gi, pts2d=pts2d, sub_v=sub_v, &
+         call build_subfacet_from_uv(arr=arr, gi=gi, pts3d=pts3d, sub_v=sub_v, &
                                      buf_facet=buf_facet, buf_owner=buf_owner, &
                                      buf_source=buf_source, used=used, cap=cap)
       enddo
@@ -540,26 +556,25 @@ contains
    idx = n_pts
    endfunction find_or_append_2d
 
-   subroutine build_subfacet_from_uv(arr, gi, pts2d, sub_v, buf_facet, buf_owner, &
+   subroutine build_subfacet_from_uv(arr, gi, pts3d, sub_v, buf_facet, buf_owner, &
                                      buf_source, used, cap)
-   !< Lift one CDT sub-triangle (vertex indices into pts2d) back to 3D as a
-   !< facet, inheriting the parent facet's normal, then push to the output
-   !< accumulator.
+   !< Build one CDT sub-triangle as a facet from the **exact 3D points** its 2D vertices came from
+   !< (the parent's vertices and the canonical cut endpoints, issue #33), not by lifting the 2D
+   !< coordinates back: a lift changes the last bits, and the vertices shared with neighbouring
+   !< sub-facets and with the other surface must be bit-identical to weld. The parent's normal
+   !< orientation is kept, then the result is pushed to the output accumulator.
    type(arrangement_t),             intent(in)    :: arr
    integer(I4P),                    intent(in)    :: gi
-   real(R8P),                       intent(in)    :: pts2d(:, :)
+   type(vector_R8P),                intent(in)    :: pts3d(:)
    integer(I4P),                    intent(in)    :: sub_v(3)
    type(facet_object), allocatable, intent(inout) :: buf_facet(:)
    integer(I4P),       allocatable, intent(inout) :: buf_owner(:), buf_source(:)
    integer(I4P),                    intent(inout) :: used, cap
    type(facet_object)                             :: f
-   type(vector_R8P)                               :: p3d
    integer(I4P)                                   :: i
 
    do i = 1, 3
-      call lift_from_plane(facet=arr%facet(gi), &
-                           u=pts2d(1, sub_v(i)), v=pts2d(2, sub_v(i)), p3d=p3d)
-      f%vertex(i) = p3d
+      f%vertex(i) = pts3d(sub_v(i))
    enddo
    ! Inherit parent's normal direction (the lift preserves the plane, so the
    ! geometric normal will be ±parent's normal; copying it sets the orientation
