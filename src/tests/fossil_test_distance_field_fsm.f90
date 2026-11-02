@@ -13,11 +13,13 @@ program fossil_test_distance_field_fsm
 !<  - the field is symmetric on the symmetric grid (to 1e-12);
 !<  - a 1.15-stretched grid: far-field max error below the largest spacing;
 !<  - two blocks with a one-cell halo, swept with caller-driven halo exchange, reproduce the
-!<    single-block field (to 1e-10).
+!<    single-block field (to 1e-10);
+!<  - OpenMP: the sweep with all threads equals the sweep with one thread bit for bit (97^3;
+!<    trivially true without OpenMP), timings printed.
 
 use fossil, only : surface_stl_object, SIGN_PSEUDO_NORMAL, STATUS_OK
 use fossil_distance_field, only : distance_field_object, FAR_VALUE
-use penf, only : I4P, R8P
+use penf, only : I4P, I8P, R8P
 
 implicit none
 
@@ -46,6 +48,7 @@ ok = ok .and. err(3) < err(2) .and. err(2) < err(1) .and. &
 
 call stretched_case
 call two_block_case
+call threads_case
 
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
@@ -205,4 +208,41 @@ contains
          '  -> ', case_ok
    ok = ok .and. case_ok
    endsubroutine two_block_case
+
+   subroutine threads_case
+   !< Sweep from the same signed band with 1 thread and with all threads: bit-exact.
+   type(distance_field_object) :: f1, fn
+   real(R8P),    allocatable   :: x(:)
+   integer(I4P), parameter     :: N = 97
+   integer(I4P)                :: i, nthreads
+   integer(I8P)                :: c0, c1, rate
+   real(R8P)                   :: t1, tn
+   logical                     :: case_ok
+   !$ integer, external        :: omp_get_max_threads
+
+   allocate(x(N))
+   do i = 1, N
+      x(i) = -1._R8P + 3._R8P * real(i - 1, R8P) / real(N - 1, R8P)
+   enddo
+   call f1%initialize(x=x, y=x, z=x)
+   call f1%compute_band(surface=cube)
+   call f1%compute_signs(surface=cube)
+   fn = f1
+   nthreads = 1
+   !$ nthreads = omp_get_max_threads()
+   !$ call omp_set_num_threads(1)
+   call system_clock(c0, rate)
+   call f1%sweep
+   call system_clock(c1)
+   t1 = real(c1 - c0, R8P) / real(rate, R8P)
+   !$ call omp_set_num_threads(nthreads)
+   call system_clock(c0, rate)
+   call fn%sweep
+   call system_clock(c1)
+   tn = real(c1 - c0, R8P) / real(rate, R8P)
+   case_ok = all(f1%phi == fn%phi)
+   print '(A,I0,A,F8.4,A,I0,A,F8.4,A,L1)', 'threads: 1 thread ', N, '^3 sweep ', t1, ' s,  ', nthreads, ' threads ', tn, &
+         ' s,  bit-exact -> ', case_ok
+   ok = ok .and. case_ok
+   endsubroutine threads_case
 endprogram fossil_test_distance_field_fsm

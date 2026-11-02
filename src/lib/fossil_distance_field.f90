@@ -18,7 +18,8 @@ module fossil_distance_field
 !<  3. **Far field** (`sweep`): the Fast Sweeping Method (Zhao 2005) solves |grad phi| = 1
 !<     outside the band, with the band values fixed. Godunov upwind update with the
 !<     non-uniform one-sided spacings of each axis; sweeps in hyperplane order (Detrixhe,
-!<     Gibou & Min 2013), so the cells of one plane are independent. First-order accurate.
+!<     Gibou & Min 2013), so the cells of one plane are independent and are updated in
+!<     parallel (OpenMP) with the serial result bit for bit. Far-field error O(h |log h|).
 !<  `compute` runs the three stages.
 !<
 !< Halo: the outer `ng` layers of cells on each side are halo cells. They are never
@@ -509,7 +510,13 @@ contains
    n3 = self%nk - 2_I4P * self%ng
    rx = btest(dir, 0) ; ry = btest(dir, 1) ; rz = btest(dir, 2)
    change = 0._R8P
+   ! One parallel region per sweep, one worksharing loop per plane (its implicit barrier
+   ! orders the planes). The cells of a plane are independent, so any thread split gives the
+   ! serial result bit for bit; max is an exact reduction.
+   !$omp parallel default(none) shared(self, n1, n2, n3, rx, ry, rz) private(s, kp, jp, ip, i, j, k, old, u) &
+   !$omp   reduction(max:change)
    do s = 0_I4P, n1 + n2 + n3 - 3_I4P
+      !$omp do schedule(static)
       do kp = max(0_I4P, s - (n1 - 1_I4P) - (n2 - 1_I4P)), min(n3 - 1_I4P, s)
          do jp = max(0_I4P, s - kp - (n1 - 1_I4P)), min(n2 - 1_I4P, s - kp)
             ip = s - kp - jp
@@ -525,7 +532,9 @@ contains
             endif
          enddo
       enddo
+      !$omp end do
    enddo
+   !$omp end parallel
    endsubroutine sweep_once
 
    pure function godunov(self, i, j, k) result(u)
