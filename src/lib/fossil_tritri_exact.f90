@@ -104,6 +104,9 @@ contains
    else
       q = xb(ib_hi)
    endif
+   ! vertex merging: a constructed endpoint within the snap of an input vertex is that vertex
+   p = snap_to_vertices(p, ta, tb, tol)
+   q = snap_to_vertices(q, ta, tb, tol)
    if (same_point(p, q)) then
       kind = PAIR_TOUCHING
       q = p
@@ -252,18 +255,20 @@ contains
    integer(I4P)                  :: nc, k, l, m, drop, axis, ilo, ihi
    integer(I4P)                  :: ori, su(3), sv(3), sk, sl
    real(R8P)                     :: par(9), dv(3)
+   real(R8P)                     :: tol    !< Vertex-merging distance.
 
    found = .false.
    p = u ; q = v
+   tol  = SNAP_REL * max(longest_edge(t), norm(v - u))
    nrm  = cross(t(2) - t(1), t(3) - t(1))
    drop = maxloc([abs(nrm%x), abs(nrm%y), abs(nrm%z)], dim=1)
-   ori  = orient_in_plane(t(1), t(2), t(3), drop)
+   ori  = orient_in_plane(t(1), t(2), t(3), drop, 0._R8P)
    if (ori == 0_I4P) return ! degenerate triangle
    nc = 0_I4P
    do k = 1, 3
       l = mod(k, 3) + 1
-      su(k) = ori * orient_in_plane(t(k), t(l), u, drop)
-      sv(k) = ori * orient_in_plane(t(k), t(l), v, drop)
+      su(k) = ori * orient_in_plane(t(k), t(l), u, drop, tol)
+      sv(k) = ori * orient_in_plane(t(k), t(l), v, drop, tol)
    enddo
    if (all(su >= 0_I4P)) call add(u)
    if (all(sv >= 0_I4P)) call add(v)
@@ -271,12 +276,12 @@ contains
    axis = maxloc(abs(dv), dim=1)
    do k = 1, 3
       ! vertex of t on the segment
-      if (orient_in_plane(u, v, t(k), drop) == 0_I4P .and. between(t(k), u, v, axis)) call add(t(k))
+      if (orient_in_plane(u, v, t(k), drop, tol) == 0_I4P .and. between(t(k), u, v, axis)) call add(t(k))
       ! proper crossing with edge (k, l)
       l = mod(k, 3) + 1
       if (su(k) * sv(k) < 0_I4P) then
-         sk = orient_in_plane(u, v, t(k), drop)
-         sl = orient_in_plane(u, v, t(l), drop)
+         sk = orient_in_plane(u, v, t(k), drop, tol)
+         sl = orient_in_plane(u, v, t(l), drop, tol)
          if (sk * sl < 0_I4P) call add(edge_edge_point(u, v, t(k), t(l)))
       endif
    enddo
@@ -286,8 +291,10 @@ contains
    enddo
    ilo = minloc(par(1:nc), dim=1)
    ihi = maxloc(par(1:nc), dim=1)
-   if (same_point(cand(ilo), cand(ihi))) return
-   p = cand(ilo) ; q = cand(ihi)
+   ! vertex merging (see snap_to_vertices)
+   p = snap_to_vertices(cand(ilo), [u, v, u], t, tol)
+   q = snap_to_vertices(cand(ihi), [u, v, u], t, tol)
+   if (same_point(p, q)) return
    found = .true.
    contains
       subroutine add(x)
@@ -303,15 +310,27 @@ contains
    endsubroutine coplanar_portion
 
    ! private helpers
-   function orient_in_plane(a, b, c, drop) result(s)
-   !< Exact sign of the 2D orientation of (a, b, c) in the coordinate plane obtained by dropping
-   !< axis `drop`: orient3d of the projected points (exact copies of two coordinates, z = 0) and
-   !< (0, 0, 1).
+   function orient_in_plane(a, b, c, drop, tol) result(s)
+   !< Sign of the 2D orientation of (a, b, c) in the coordinate plane obtained by dropping axis
+   !< `drop`: orient3d of the projected points (exact copies of two coordinates, z = 0) and
+   !< (0, 0, 1), exact; 0 when c is within `tol` of the line (a, b) (the snap of the module: a
+   !< vertex meant to lie on the other mesh's edge is off it by round-off once rotated, and an
+   !< exact sign would then call nearly collinear segments crossing and build a far-off point).
    type(vector_R8P), intent(in) :: a, b, c !< Points.
    integer(I4P),     intent(in) :: drop    !< Dropped axis (1, 2, 3).
+   real(R8P),        intent(in) :: tol     !< Snap distance (0: exact sign).
    integer(I4P)                 :: s       !< -1, 0, 1.
+   type(vector_R8P)             :: pa, pb, pc
+   real(R8P)                    :: det, len_ab
 
-   s = sgn(orient3d(proj(a, drop), proj(b, drop), proj(c, drop), vector_R8P(0._R8P, 0._R8P, 1._R8P)))
+   pa = proj(a, drop) ; pb = proj(b, drop) ; pc = proj(c, drop)
+   det = orient3d(pa, pb, pc, vector_R8P(0._R8P, 0._R8P, 1._R8P))
+   len_ab = sqrt((pb%x - pa%x)**2 + (pb%y - pa%y)**2)
+   if (abs(det) <= tol * len_ab) then
+      s = 0_I4P
+   else
+      s = sgn(det)
+   endif
    endfunction orient_in_plane
 
    pure function proj(a, drop) result(r)
@@ -371,6 +390,29 @@ contains
    if (lex_less(c, b)) then ; t = b ; b = c ; c = t ; endif
    if (lex_less(b, a)) then ; t = a ; a = b ; b = t ; endif
    endsubroutine sorted3
+
+   pure function snap_to_vertices(x, ta, tb, tol) result(y)
+   !< Vertex merging (issue #33): `x` replaced by the nearest vertex of `ta` or `tb` if that vertex
+   !< is within `tol`, else unchanged. A point that coincides with an input vertex up to round-off
+   !< (a vertex lying on the other mesh's edge, after a rotation) is otherwise built by one pair as
+   !< a copy of the vertex and by another as an edge-edge crossing, with different last bits, and
+   !< the exact-equality weld then leaves a crack.
+   type(vector_R8P), intent(in) :: x            !< Point.
+   type(vector_R8P), intent(in) :: ta(3), tb(3) !< Candidate vertices.
+   real(R8P),        intent(in) :: tol          !< Merging distance.
+   type(vector_R8P)             :: y            !< Merged point.
+   real(R8P)                    :: best, d
+   integer(I4P)                 :: i
+
+   y = x
+   best = tol
+   do i = 1, 3
+      d = norm(ta(i) - x)
+      if (d <= best) then ; best = d ; y = ta(i) ; endif
+      d = norm(tb(i) - x)
+      if (d <= best) then ; best = d ; y = tb(i) ; endif
+   enddo
+   endfunction snap_to_vertices
 
    pure function snapped_sign(det, area2, tol) result(s)
    !< Sign of an orient3d determinant, 0 when the point it measures is within `tol` of the plane:
