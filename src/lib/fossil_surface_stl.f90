@@ -1436,9 +1436,10 @@ contains
    !< Release the device-resident copy of the surface (issue #20 §Step 5).
    !< Symmetric inverse of `enter_device`: `!$acc exit data delete` of the three
    !< arrays previously copied in. Idempotent on `is_on_device=.false.`
-   !< (returns without acting). Called automatically by `destroy` to prevent
-   !< device-side leaks; user code may also call it explicitly between marker
-   !< passes on the same surface.
+   !< (returns without acting). NOT called by `destroy` (elemental, so it cannot
+   !< hold `!$acc exit data`, see its @warning): the caller must call it before
+   !< the surface is destroyed or goes out of scope, and before any operation
+   !< that rebuilds the tree (`analyze` and its callers).
    class(surface_stl_object), intent(inout) :: self !< File STL.
 
    if (.not. self%is_on_device) return
