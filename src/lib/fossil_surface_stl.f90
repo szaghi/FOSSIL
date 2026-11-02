@@ -2674,7 +2674,7 @@ contains
    if (present(open_edges))    open_edges    = n_open
    endsubroutine fill_holes
 
-   subroutine sanitize(self, do_analysis, status)
+   subroutine sanitize(self, do_analysis, status, fill_holes, max_hole_edges, max_hole_size)
    !< Sanitize STL — top-level orchestrator for the mesh-repair pipeline.
    !<
    !< Runs every repair pass in the correct order:
@@ -2686,6 +2686,8 @@ contains
    !<   4. `analyze` — rebuild connectivity / vertex pool / volume / centroid.
    !<   5. `remove_duplicate_facets` — drop literal duplicates (any winding); if
    !<      anything was removed, re-`analyze` so winding fixup sees a clean state.
+   !<   (7, optional, `fill_holes=.true.`) `fill_holes` after orientation, then orientation
+   !<      once more if anything was filled (a closed hole can create a closed shell).
    !<   6. `sanitize_normals` — BFS-propagate winding consistency, then global
    !<      flip if the volume sign indicates inward orientation. If any facet was
    !<      flipped, re-`analyze`: the pseudo-normals and the AABB distance payload
@@ -2700,9 +2702,14 @@ contains
    !< Post-sanitize, the composite predicates `is_watertight`, `is_manifold`, and
    !< `is_volume` summarise the mesh's repair state in one boolean each.
    class(surface_stl_object), intent(inout)        :: self        !< File STL.
-   logical,                   intent(in), optional :: do_analysis !< Sentil for performing a first analysis.
+   logical,                   intent(in), optional :: do_analysis    !< Sentil for performing a first analysis.
+   logical,                   intent(in), optional :: fill_holes     !< Close small holes (default .false.), see fill_holes.
+   integer(I4P),              intent(in), optional :: max_hole_edges !< Passed to fill_holes (default 200).
+   real(R8P),                 intent(in), optional :: max_hole_size  !< Passed to fill_holes (default 0.1).
    integer(I4P),              intent(out), optional :: status     !< 0=success (reserved for future use).
    integer(I4P)                                    :: flipped_count !< Facets reversed by sanitize_normals.
+   integer(I4P)                                    :: holes_filled, holes_skipped, open_edges !< fill_holes report.
+   logical                                         :: fill_holes_   !< Local copy of fill_holes.
 
    if (present(status)) status = STATUS_OK
    if (self%facets_number>0) then
@@ -2727,6 +2734,24 @@ contains
       ! Orientation-dependent derived data (pseudo-normals, pnormal_payload, AABB
       ! distance payload) still describes the pre-flip winding: rebuild it.
       if (flipped_count > 0) call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
+      ! Optional hole filling (issue #31), after orientation: loops are chained along consistently
+      ! wound boundaries. A filled hole can turn an open part into a closed shell, so orientation
+      ! runs once more (nesting parity) and the derived data is rebuilt if anything flipped.
+      fill_holes_ = .false. ; if (present(fill_holes)) fill_holes_ = fill_holes
+      holes_filled = 0_I4P ; holes_skipped = 0_I4P ; open_edges = 0_I4P
+      if (fill_holes_) then
+         call self%fill_holes(max_hole_edges=max_hole_edges, max_hole_size=max_hole_size, holes_filled=holes_filled, &
+                              holes_skipped=holes_skipped, open_edges=open_edges)
+         if (holes_filled > 0_I4P) then
+            call self%sanitize_normals(flipped_count=flipped_count)
+            if (flipped_count > 0) call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())
+         endif
+         if (holes_filled > 0) write(stderr,'(A,I0,A)') 'WARNING: sanitize: ', holes_filled, ' hole(s) filled'
+         if (holes_skipped > 0) write(stderr,'(A,I0,A)') 'WARNING: sanitize: ', holes_skipped, &
+                                                           ' hole(s) left open (over max_hole_edges / max_hole_size)'
+         if (open_edges > 0) write(stderr,'(A,I0,A)') 'WARNING: sanitize: ', open_edges, &
+                                                        ' boundary edge(s) not forming a closed loop'
+      endif
       if (self%degenerate_facets_removed > 0) &
          write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%degenerate_facets_removed, &
                                   ' degenerate facet(s) (zero-area / sliver) removed'
