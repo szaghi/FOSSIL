@@ -97,6 +97,7 @@ type :: curve_object
       procedure, pass(self) :: move                 !< Move rigidly by an in-plane pose, refit the tree (issue #41).
       procedure, pass(self) :: state_changes        !< Fresh and dead points between two poses (issue #41).
       procedure, pass(self) :: wall_distance_many   !< Wall distance, body id, cutoff (issue #42).
+      procedure, pass(self) :: curve_markers        !< Exact arc-length resampling: markers, lengths, normals (issue #42).
       procedure, pass(self) :: check_validity       !< First validity defect (CURVE_* code).
       procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
       procedure, pass(self) :: distance             !< (Signed) distance of a point.
@@ -831,6 +832,83 @@ contains
    if (l2 > 0._R8P) t = min(max(((cp(1) - self%u(sg)) * du + (cp(2) - self%v(sg)) * dv) / l2, 0._R8P), 1._R8P)
    kappa = (1._R8P - t) * vertex_curvature(self, sg) + t * vertex_curvature(self, j)
    endfunction foot_curvature_2d
+
+   subroutine curve_markers(self, dx, centroids, lengths, normals, spacing_fraction, spacings, status)
+   !< Grid-adapted curve markers (issue #42 step 4), the 2-D twin of `surface%surface_markers`.
+   !<
+   !< Each loop of length L is split exactly along the polyline into n = max(nint(L / dx), 1) pieces of
+   !< arc length h = L / n. Marker k sits at arc length (k - 1/2) h on the polyline (no chord error),
+   !< with length h and the outward normal of the segment it lies on. `spacings` is the chord distance
+   !< from each marker to the next one of its loop (to the first for a closed loop; 0 for the last
+   !< marker of an open loop), and `spacing_fraction` the fraction of those (excluding the zeros) in
+   !< [0.8, 1.2] dx. `status = STATUS_INVALID_INPUT` for dx <= 0 or an empty curve (empty outputs).
+   class(curve_object),    intent(in)            :: self             !< Curve.
+   real(R8P),              intent(in)            :: dx               !< Grid spacing.
+   real(R8P), allocatable, intent(out)           :: centroids(:,:)   !< Marker positions [2, m].
+   real(R8P), allocatable, intent(out)           :: lengths(:)       !< Marker lengths [m].
+   real(R8P), allocatable, intent(out)           :: normals(:,:)     !< Marker unit normals [2, m].
+   real(R8P),              intent(out), optional :: spacing_fraction !< Fraction of spacings in [0.8, 1.2] dx.
+   real(R8P), allocatable, intent(out), optional :: spacings(:)      !< Chord spacings [m].
+   integer(I4P),           intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P), allocatable                     :: nm(:)            !< Markers per loop.
+   real(R8P), allocatable                        :: ll(:), sp(:)     !< Loop lengths, spacings.
+   real(R8P)                                     :: h, sk, s0, t     !< Piece length, marker arc length, segment start, parameter.
+   integer(I4P)                                  :: l, i, j, k, m, m0, ns, nsp !< Counters.
+
+   if (present(status)) status = STATUS_OK
+   allocate(centroids(2, 0), lengths(0), normals(2, 0))
+   if (present(spacings)) allocate(spacings(0))
+   if (present(spacing_fraction)) spacing_fraction = 0._R8P
+   if (.not. (dx > 0._R8P) .or. self%nl == 0_I4P) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   allocate(nm(self%nl), ll(self%nl))
+   do l = 1_I4P, self%nl
+      ll(l) = 0._R8P
+      do i = self%loop_start(l), self%loop_start(l + 1) - 1_I4P
+         if (self%next(i) > 0_I4P) ll(l) = ll(l) + self%seg_len(i)
+      enddo
+      nm(l) = 0_I4P ; if (ll(l) > 0._R8P) nm(l) = max(nint(ll(l) / dx, I4P), 1_I4P)
+   enddo
+   m = sum(nm)
+   deallocate(centroids, lengths, normals)
+   allocate(centroids(2, m), lengths(m), normals(2, m), sp(m))
+   m0 = 0_I4P ; ns = 0_I4P ; nsp = 0_I4P
+   do l = 1_I4P, self%nl
+      if (nm(l) == 0_I4P) cycle
+      h = ll(l) / nm(l)
+      i = self%loop_start(l) ; s0 = 0._R8P
+      do k = 1_I4P, nm(l)
+         sk = (k - 0.5_R8P) * h
+         ! advance to the segment holding arc length sk (the last segment takes any round-off excess)
+         do while (s0 + self%seg_len(i) < sk .and. self%next(self%next(i)) > 0_I4P .and. self%next(i) /= self%loop_start(l))
+            s0 = s0 + self%seg_len(i) ; i = self%next(i)
+         enddo
+         j = self%next(i)
+         t = 0._R8P ; if (self%seg_len(i) > 0._R8P) t = min(max((sk - s0) / self%seg_len(i), 0._R8P), 1._R8P)
+         centroids(:, m0 + k) = [self%u(i) + t * (self%u(j) - self%u(i)), self%v(i) + t * (self%v(j) - self%v(i))]
+         normals(:, m0 + k) = [self%seg_nu(i), self%seg_nv(i)]
+         lengths(m0 + k) = h
+      enddo
+      do k = 1_I4P, nm(l)
+         j = k + 1_I4P
+         if (j > nm(l)) then
+            if (.not. self%loop_closed(l) .or. nm(l) == 1_I4P) then
+               sp(m0 + k) = 0._R8P
+               cycle
+            endif
+            j = 1_I4P
+         endif
+         sp(m0 + k) = hypot(centroids(1, m0 + j) - centroids(1, m0 + k), centroids(2, m0 + j) - centroids(2, m0 + k))
+         nsp = nsp + 1_I4P
+         if (sp(m0 + k) >= 0.8_R8P * dx .and. sp(m0 + k) <= 1.2_R8P * dx) ns = ns + 1_I4P
+      enddo
+      m0 = m0 + nm(l)
+   enddo
+   if (present(spacing_fraction) .and. nsp > 0_I4P) spacing_fraction = ns / real(nsp, R8P)
+   if (present(spacings)) call move_alloc(from=sp, to=spacings)
+   endsubroutine curve_markers
 
    recursive subroutine query_many_device(self, points, distances, closest_points, segments, vertices, normals, bodies, &
                                           is_signed, sign_algorithm, status, pose)

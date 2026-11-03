@@ -235,6 +235,7 @@ type :: surface_stl_object
       procedure, pass(self) :: state_changes                   !< Fresh and dead points between two poses (issue #41).
       procedure, pass(self) :: wall_distance_many              !< Wall distance, body id, early cutoff (issue #42).
       procedure, pass(self) :: wall_distance_many_device       !< wall_distance_many on the device (issue #42).
+      procedure, pass(self) :: surface_markers                 !< Grid-adapted markers: centroids, areas, normals (issue #42).
       ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
       procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
       procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
@@ -3635,6 +3636,84 @@ contains
    if (rem_status /= REM_STATUS_OK) return
    call self%adopt_facets(facets=working)
    endsubroutine isotropic_remesh
+
+   subroutine surface_markers(self, dx, centroids, areas, normals, spacing_fraction, spacings, iterations, preserve_features, &
+                              status)
+   !< Grid-adapted surface markers (issue #42 step 4), for wall models at surface points and force
+   !< integration with direct forcing.
+   !<
+   !< A copy of the surface is remeshed by `isotropic_remesh` to the target edge length sqrt(3) dx: the
+   !< centroids of two equilateral triangles sharing an edge are then dx apart. The markers are the
+   !< facet centroids, with the facet areas and unit normals. The surface itself is not changed.
+   !<
+   !< Spacing check: `spacings(k)` is the distance from marker k to the nearest centroid among its edge
+   !< neighbours (0 for a facet without one), and `spacing_fraction` the fraction of markers whose
+   !< spacing lies in [0.8, 1.2] dx, the window direct forcing needs (Cheylan et al. 2023).
+   !< `iterations` (default 5) and `preserve_features` (default .false.; .true. keeps sharp edges) go to
+   !< `isotropic_remesh`, with its limitations. `status = STATUS_INVALID_INPUT` for dx <= 0, an empty
+   !< surface or a failed remesh (the outputs are then empty).
+   class(surface_stl_object), intent(in)            :: self                !< Surface.
+   real(R8P),                 intent(in)            :: dx                  !< Grid spacing.
+   real(R8P), allocatable,    intent(out)           :: centroids(:,:)      !< Marker positions [3, m].
+   real(R8P), allocatable,    intent(out)           :: areas(:)            !< Marker areas [m].
+   real(R8P), allocatable,    intent(out)           :: normals(:,:)        !< Marker unit normals [3, m].
+   real(R8P),                 intent(out), optional :: spacing_fraction    !< Fraction of spacings in [0.8, 1.2] dx.
+   real(R8P), allocatable,    intent(out), optional :: spacings(:)         !< Nearest-neighbour spacings [m].
+   integer(I4P),              intent(in),  optional :: iterations          !< Remesh iterations (default 5).
+   logical,                   intent(in),  optional :: preserve_features   !< Keep sharp edges (default .false.).
+   integer(I4P),              intent(out), optional :: status              !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(surface_stl_object)                         :: work                !< Remeshed copy.
+   type(facet_object), allocatable                  :: fac(:)              !< Facets of the copy.
+   real(R8P), allocatable                           :: sp(:)               !< Spacings.
+   type(vector_R8P)                                 :: dc                  !< Centroid offset.
+   real(R8P)                                        :: target              !< Remesh edge length.
+   integer(I4P)                                     :: m, k, j, g, rs      !< Counters, remesh status.
+   integer                                          :: pass                !< Remesh pass.
+
+   if (present(status)) status = STATUS_OK
+   allocate(centroids(3, 0), areas(0), normals(3, 0))
+   if (present(spacings)) allocate(spacings(0))
+   if (present(spacing_fraction)) spacing_fraction = 0._R8P
+   if (.not. (dx > 0._R8P) .or. self%facets_number == 0_I4P) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   target = sqrt(3._R8P) * dx
+   do pass = 1, 2
+      allocate(fac(self%facets_number)) ; fac = self%facet(1:self%facets_number)
+      call work%adopt_facets(facets=fac)
+      call work%isotropic_remesh(target_length=target, iterations=iterations, preserve_features=preserve_features, status=rs)
+      if (rs /= REM_STATUS_OK .or. work%facets_number == 0_I4P) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+      m = work%facets_number
+      if (allocated(sp)) deallocate(sp)
+      allocate(sp(m))
+      do k = 1_I4P, m
+         sp(k) = huge(1._R8P)
+         do j = 1_I4P, 3_I4P
+            g = work%facet(k)%fcon_edge(j)
+            if (g <= 0_I4P .or. g > m) cycle
+            dc = work%facet(g)%centroid - work%facet(k)%centroid
+            sp(k) = min(sp(k), vnorm(dc))
+         enddo
+         if (sp(k) == huge(1._R8P)) sp(k) = 0._R8P
+      enddo
+      ! calibration: the remesher's edges come out shorter than the target and the nearest-neighbour
+      ! spacing is a minimum, so the first pass rescales the target by dx over the mean spacing
+      if (pass == 1 .and. count(sp > 0._R8P) > 0) target = target * dx / (sum(sp) / count(sp > 0._R8P))
+   enddo
+   deallocate(centroids, areas, normals)
+   allocate(centroids(3, m), areas(m), normals(3, m))
+   do k = 1_I4P, m
+      centroids(:, k) = [work%facet(k)%centroid%x, work%facet(k)%centroid%y, work%facet(k)%centroid%z]
+      normals(:, k) = [work%facet(k)%normal%x, work%facet(k)%normal%y, work%facet(k)%normal%z]
+      areas(k) = work%facet(k)%area()
+   enddo
+   if (present(spacing_fraction)) spacing_fraction = count(sp >= 0.8_R8P * dx .and. sp <= 1.2_R8P * dx) / real(m, R8P)
+   if (present(spacings)) call move_alloc(from=sp, to=spacings)
+   endsubroutine surface_markers
 
    subroutine intersect_ray_all(self, ray_origin, ray_direction, hits, status)
    !< Return every ray-facet intersection on this surface, sorted by `t` ascending
