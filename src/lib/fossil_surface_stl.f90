@@ -2722,7 +2722,7 @@ contains
    if (present(open_edges))    open_edges    = n_open
    endsubroutine fill_holes
 
-   subroutine sanitize(self, do_analysis, status, fill_holes, max_hole_edges, max_hole_size)
+   subroutine sanitize(self, do_analysis, status, fill_holes, max_hole_edges, max_hole_size, refine_holes, fair_holes)
    !< Sanitize STL — top-level orchestrator for the mesh-repair pipeline.
    !<
    !< Runs every repair pass in the correct order:
@@ -2754,6 +2754,8 @@ contains
    logical,                   intent(in), optional :: fill_holes     !< Close small holes (default .false.), see fill_holes.
    integer(I4P),              intent(in), optional :: max_hole_edges !< Passed to fill_holes (default 200).
    real(R8P),                 intent(in), optional :: max_hole_size  !< Passed to fill_holes (default 0.1).
+   logical,                   intent(in), optional :: refine_holes   !< Passed to fill_holes as `refine` (default .false.).
+   logical,                   intent(in), optional :: fair_holes     !< Passed to fill_holes as `fair` (default .false.).
    integer(I4P),              intent(out), optional :: status     !< 0=success (reserved for future use).
    integer(I4P)                                    :: flipped_count !< Facets reversed by sanitize_normals.
    integer(I4P)                                    :: holes_filled, holes_skipped, open_edges !< fill_holes report.
@@ -2789,7 +2791,7 @@ contains
       holes_filled = 0_I4P ; holes_skipped = 0_I4P ; open_edges = 0_I4P
       if (fill_holes_) then
          call self%fill_holes(max_hole_edges=max_hole_edges, max_hole_size=max_hole_size, holes_filled=holes_filled, &
-                              holes_skipped=holes_skipped, open_edges=open_edges)
+                              holes_skipped=holes_skipped, open_edges=open_edges, refine=refine_holes, fair=fair_holes)
          if (holes_filled > 0_I4P) then
             call self%sanitize_normals(flipped_count=flipped_count)
             if (flipped_count > 0) call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())

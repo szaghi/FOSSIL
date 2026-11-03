@@ -30,6 +30,8 @@ logical                               :: fill_holes                            !
 integer(I4P)                          :: max_hole_edges                        !< Largest hole to fill, in edges.
 real(R8P)                             :: max_hole_size                         !< Largest hole bbox diagonal / surface bbox diagonal.
 integer(I4P)                          :: holes_filled, holes_skipped           !< fill_holes report.
+logical                               :: refine_holes                          !< Refine hole patches (issue #31 step 5).
+logical                               :: fair_holes                            !< Fair hole patches (implies refine).
 type(vector_R8P)                      :: translate_delta                       !< Translate delta.
 real(R8P)                             :: translate_x, translate_y, translate_z !< Translate scalar deltas.
 
@@ -105,11 +107,12 @@ do s=1, stl_numbers
    endif
    if (sanitize) then
       print '(A)', 'sanitize STL'
-      call surface(s)%sanitize(fill_holes=fill_holes, max_hole_edges=max_hole_edges, max_hole_size=max_hole_size)
+      call surface(s)%sanitize(fill_holes=fill_holes, max_hole_edges=max_hole_edges, max_hole_size=max_hole_size, &
+                               refine_holes=refine_holes, fair_holes=fair_holes)
       print '(A)', surface(s)%statistics()
    elseif (fill_holes) then
       call surface(s)%fill_holes(max_hole_edges=max_hole_edges, max_hole_size=max_hole_size, &
-                                 holes_filled=holes_filled, holes_skipped=holes_skipped)
+                                 holes_filled=holes_filled, holes_skipped=holes_skipped, refine=refine_holes, fair=fair_holes)
       print '(A,I0,A,I0,A)', 'fill holes: ', holes_filled, ' filled, ', holes_skipped, ' left open'
    endif
    if (cli%is_passed(switch='--output')) then
@@ -235,6 +238,18 @@ contains
                def='0.1',                                                             &
                act='store')
 
+  call cli%add(switch='--refine_holes',                                         &
+               help='refine hole patches to the edge density of the hole boundary', &
+               required=.false.,                                                &
+               def='.false.',                                                   &
+               act='store_true')
+
+  call cli%add(switch='--fair_holes',                                                       &
+               help='fair hole patches (thin-plate, matching tangents; implies --refine_holes)', &
+               required=.false.,                                                            &
+               def='.false.',                                                               &
+               act='store_true')
+
   call cli%add(switch='--translate_delta', &
                help='translate delta',     &
                required=.false.,           &
@@ -278,6 +293,8 @@ contains
   call cli%get(        switch='--fill_holes',      val=fill_holes,          error=error) ; if (error/=0) stop
   call cli%get(        switch='--max_hole_edges',  val=max_hole_edges,      error=error) ; if (error/=0) stop
   call cli%get(        switch='--max_hole_size',   val=max_hole_size,       error=error) ; if (error/=0) stop
+  call cli%get(        switch='--refine_holes',    val=refine_holes,        error=error) ; if (error/=0) stop
+  call cli%get(        switch='--fair_holes',      val=fair_holes,          error=error) ; if (error/=0) stop
   call cli%get(        switch='--translate_delta', val=translate_delta_,    error=error) ; if (error/=0) stop
   call cli%get(        switch='--translate_x',     val=translate_x,         error=error) ; if (error/=0) stop
   call cli%get(        switch='--translate_y',     val=translate_y,         error=error) ; if (error/=0) stop
