@@ -94,6 +94,7 @@ type :: distance_field_object
       procedure, pass(self) :: get_band_cells !< Number of band cells.
       procedure, pass(self) :: get_is_2d      !< True for a 2-D field.
       procedure, pass(self) :: get_coordinates !< Coordinates of a cell.
+      procedure, pass(self) :: gradient_diagnostic !< Q = |1 - |grad phi|| per node, flags (issue #42).
       generic               :: default_band => default_band_surface, default_band_curve !< 2 x the local max spacing.
       procedure, pass(self) :: compute_band_surface  !< compute_band, surface source (3-D).
       procedure, pass(self) :: compute_band_curve    !< compute_band, curve source (2-D).
@@ -1196,4 +1197,79 @@ contains
       h = max(h, c(i + 1_I4P) - c(i))
    enddo
    endfunction max_spacing
+   subroutine gradient_diagnostic(self, q, flagged, threshold, status)
+   !< Eikonal diagnostic (issue #42): q = |1 - |grad phi|| at every node, grad phi by the three-point
+   !< non-uniform central difference (second order on stretched grids), one-sided at the grid ends;
+   !< q = -1 where a needed neighbour is unknown (FAR_VALUE). `flagged` counts the nodes with
+   !< q > threshold (default 0.05, Matsushita & Aoki). q is large by nature where phi has a kink (the
+   !< medial axis): mask it with the band or the ambiguous flags of query_many if needed. 2-D fields
+   !< use x and y only. `status = STATUS_INVALID_INPUT` if q does not match the grid or no field exists.
+   class(distance_field_object), intent(in)            :: self      !< Field.
+   real(R8P),                    intent(out)           :: q(:,:,:)  !< Diagnostic [ni, nj, nk].
+   integer(I4P),                 intent(out)           :: flagged   !< Nodes with q > threshold.
+   real(R8P),                    intent(in),  optional :: threshold !< Flag threshold (default 0.05).
+   integer(I4P),                 intent(out), optional :: status    !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)    :: thr, g(3) !< Threshold, gradient.
+   integer(I4P) :: i, j, k   !< Counters.
+   logical      :: ok        !< All neighbours known.
+
+   if (present(status)) status = STATUS_OK
+   flagged = 0_I4P
+   if (.not. allocated(self%phi)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (any(shape(q) /= shape(self%phi))) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   thr = 0.05_R8P ; if (present(threshold)) thr = threshold
+   !$omp parallel do default(shared) collapse(2) private(i, j, k, g, ok) reduction(+:flagged)
+   do k = 1_I4P, self%nk
+      do j = 1_I4P, self%nj
+         do i = 1_I4P, self%ni
+            ok = .true. ; g = 0._R8P
+            g(1) = d1(self%x, self%phi(:, j, k), i, ok)
+            g(2) = d1(self%y, self%phi(i, :, k), j, ok)
+            if (.not. self%is_2d) g(3) = d1(self%z, self%phi(i, j, :), k, ok)
+            if (ok) then
+               q(i, j, k) = abs(1._R8P - norm2(g))
+               if (q(i, j, k) > thr) flagged = flagged + 1_I4P
+            else
+               q(i, j, k) = -1._R8P
+            endif
+         enddo
+      enddo
+   enddo
+   !$omp end parallel do
+   contains
+      real(R8P) function d1(c, f, m, good)
+      !< First derivative of f at m on the coordinates c (three-point, one-sided at the ends).
+      real(R8P),    intent(in)    :: c(:), f(:) !< Coordinates, values.
+      integer(I4P), intent(in)    :: m          !< Node.
+      logical,      intent(inout) :: good       !< All values known.
+      real(R8P)                   :: hm, hp     !< Spacings.
+      integer(I4P)                :: n          !< Size.
+
+      n = size(c, kind=I4P) ; d1 = 0._R8P
+      if (n < 2) return
+      if (m == 1) then
+         if (abs(f(1)) >= FAR_VALUE .or. abs(f(2)) >= FAR_VALUE) then
+            good = .false. ; return
+         endif
+         d1 = (f(2) - f(1)) / (c(2) - c(1))
+      elseif (m == n) then
+         if (abs(f(n)) >= FAR_VALUE .or. abs(f(n - 1)) >= FAR_VALUE) then
+            good = .false. ; return
+         endif
+         d1 = (f(n) - f(n - 1)) / (c(n) - c(n - 1))
+      else
+         if (abs(f(m - 1)) >= FAR_VALUE .or. abs(f(m)) >= FAR_VALUE .or. abs(f(m + 1)) >= FAR_VALUE) then
+            good = .false. ; return
+         endif
+         hm = c(m) - c(m - 1) ; hp = c(m + 1) - c(m)
+         d1 = (hm * hm * (f(m + 1) - f(m)) + hp * hp * (f(m) - f(m - 1))) / (hm * hp * (hm + hp))
+      endif
+      endfunction d1
+   endsubroutine gradient_diagnostic
 endmodule fossil_distance_field
