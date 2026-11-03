@@ -28,6 +28,7 @@ module fossil_curve_object
 !< exact `orient2d_xy` crossing test, so every loop gets the same answer from every query.
 use fossil_box_query,          only : curve_box_contact_oac, cell_bands, cell_components, BOX_NONE, BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
 use fossil_line_query,         only : curve_line_crossings_oac
+use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
 use fossil_predicates,         only : orient2d_xy
 use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, segment_point_distance2, &
                                      segment_closest_oac, segment_winding_number_oac
@@ -39,6 +40,7 @@ use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 implicit none
 private
 public :: curve_object
+public :: cut_cells_2d_t
 public :: CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, CURVE_ZERO_AREA_LOOP, CURVE_WRONG_ORIENTATION
 public :: CURVE_OPEN_LOOP
 
@@ -90,6 +92,7 @@ type :: curve_object
       procedure, pass(self) :: cell_wall_fractions  !< Wall fractions along the grid lines of a block (issue #40).
       procedure, pass(self) :: line_crossings_many  !< Crossings of many parallel lines, fixed buffers (issue #40).
       procedure, pass(self) :: line_crossings_many_device !< line_crossings_many on the device (issue #40).
+      procedure, pass(self) :: cut_cells            !< Exact cut cells of a block (issue #40).
       procedure, pass(self) :: check_validity       !< First validity defect (CURVE_* code).
       procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
       procedure, pass(self) :: distance             !< (Signed) distance of a point.
@@ -487,6 +490,32 @@ contains
       enddo
       endsubroutine sweep
    endsubroutine cell_wall_fractions
+
+   subroutine cut_cells(self, x, y, cut, status)
+   !< Exact cut cells of the block with cell edges x(nx+1), y(ny+1) (u, v) (issue #40): fluid area
+   !< fraction, edge apertures, fluid centroid, wetted length, centroid and normal integral, and the
+   !< fluid pieces of every cell (`fossil_cut_cells_2d`; the fluid is outside the solid). Exact
+   !< topology with the symbolic tie-break of the line crossings; the measures are exact to round-off.
+   !< Cells whose boundary does not close (open loops) are flagged in `cut%closed` with no measures.
+   !< `status = STATUS_INVALID_INPUT` on bad edges.
+   class(curve_object),  intent(in)            :: self   !< Curve.
+   real(R8P),            intent(in)            :: x(:), y(:) !< Cell edges (u, v), strictly increasing.
+   type(cut_cells_2d_t), intent(out)           :: cut    !< Cut cells.
+   integer(I4P),         intent(out), optional :: status !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P)                                :: st     !< Module status.
+
+   if (present(status)) status = STATUS_OK
+   if (self%nv > 0_I4P) then
+      call compute_cut_cells_2d(self%u, self%v, self%next, x, y, cut, st)
+   else
+      block
+         real(R8P)    :: uu(0), vv(0)
+         integer(I4P) :: nn(0)
+         call compute_cut_cells_2d(uu, vv, nn, x, y, cut, st)
+      end block
+   endif
+   if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
+   endsubroutine cut_cells
 
    subroutine line_crossings_many(self, axis, a, t0, t1, t, segments, entering, counts, overflow, status)
    !< Crossings of the lines along `axis` (1: u, 2: v) at a(i), i = 1..n, with parameter in [t0, t1]
