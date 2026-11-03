@@ -185,6 +185,8 @@ Set via the optional `sign_algorithm` argument on `distance` / `compute_distance
 - `SIGN_SOLID_ANGLE` — sum of projected solid angles ≈ ±4π (exact, O(N) per query).
 - `SIGN_FAST_WINDING_NUMBER` — fast winding number > 0.5 over the per-node cache `wn_payload` built by `analyze`; robust on surfaces with holes.
 
+Measured by the issue #39 benchmark (`fossil_test_sign_bench`, `_2d`, `_device`; bodies in `src/tests/fossil_sign_bench_bodies.f90`, a test-side module): all four exact on watertight meshes down to 1e-12 L (pseudo-normal: 2 errors on needle triangles at 1e-10 L); FWN the most robust on dirty meshes. The point-triangle squared distance is the norm of the residual (`triangle_closest_st`), not the Eberly quadratic form: the latter is noise below ~1e-8 L and flipped pseudo-normal signs. Keep it that way (`fossil_test_distance_tiny` guards it).
+
 ### Third-party dependencies (`src/third_party/`)
 
 | Dependency | Key exports used in FOSSIL |

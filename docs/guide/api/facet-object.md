@@ -185,6 +185,11 @@ end program ex_compute_distance_with_region
 
 - Algorithm: David Eberly's *Distance Between Point and Triangle in 3D*
   (Geometric Tools).
+- The squared distance is the squared norm of the residual
+  `point - closest`, accurate to about ε times the size. The expanded
+  quadratic form of the Eberly solve, used before issue #39, was noise below
+  about 1e-8 of the size. See
+  [Sign algorithms at sharp features](/guide/advanced/sign-benchmark).
 - A region tag of `0` (interior face) is by far the most common; ties go to
   the highest-dimensional region (face beats edge beats vertex).
 

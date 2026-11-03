@@ -84,6 +84,7 @@ export default withMermaid({
             { text: '2-D geometry (curves)',      link: '/guide/advanced/2d-geometry' },
             { text: 'Immersed-boundary queries',  link: '/guide/advanced/ib-queries' },
             { text: 'AMR tagging',                link: '/guide/advanced/amr-tagging' },
+            { text: 'Sign algorithms benchmark',  link: '/guide/advanced/sign-benchmark' },
           ],
         },
         {
