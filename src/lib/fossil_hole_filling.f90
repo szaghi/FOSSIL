@@ -483,7 +483,12 @@ contains
    !< Unknowns: the patch vertices that are not loop vertices (refine_patch adds them; a plain
    !< patch has none and is returned unchanged). Fixed: the loop vertices and their 1-ring in the
    !< surface (the vertices of the mesh facets around each loop vertex), which carries the
-   !< tangent information. With the uniform (graph) Laplacian (L x)_v = sum_{u ~ v} (x_u - x_v),
+   !< tangent information. Feature-aware ring: at each loop vertex only the mesh facets whose
+   !< normal is within 60 degrees of the patch's own normal there (area-weighted normal of the
+   !< patch triangles at that vertex, before fairing) contribute. A hole along a sharp edge (a CAD
+   !< crease, the edge of a box) then keeps the crease instead of being bent toward the face
+   !< across it; the owners of the loop edges are no reference, since along a crease they are the
+   !< facets across it. With the uniform (graph) Laplacian (L x)_v = sum_{u ~ v} (x_u - x_v),
    !< the equations (L (L x))_i = 0 for the interior vertices i form a symmetric positive-definite
    !< system (L^2 restricted to the interior: each interior vertex reaches the fixed boundary), solved
    !< by `cg_solve` once per coordinate. Uniform weights suit a refined patch, whose edges are close
@@ -502,6 +507,7 @@ contains
    real(R8P),        allocatable :: b(:,:), sol(:)
    integer(I4P)                  :: nb, nn, ni, nr, k, j, f, i, kk, jj, c, st, n_unk
    real(R8P)                     :: lik, lkj
+   real(R8P),        allocatable :: pn(:,:)       !< Patch normal at each loop vertex.
 
    status = 0_I4P
    nb = size(loop%vid, kind=I4P)
@@ -521,6 +527,17 @@ contains
    enddo
    ni = nn - nb
    if (ni == 0_I4P) return
+   ! the patch's normal at each loop vertex (area-weighted, unnormalized cross products)
+   allocate(pn(3, nb)) ; pn = 0._R8P
+   do k = 1, size(patch)
+      do j = 1, 3
+         if (tri(j, k) <= nb) pn(:, tri(j, k)) = pn(:, tri(j, k)) + cross3(x(tri(1, k)), x(tri(2, k)), x(tri(3, k)))
+      enddo
+   enddo
+   do i = 1, nb
+      lik = sqrt(sum(pn(:, i)**2))
+      if (lik > 0._R8P) pn(:, i) = pn(:, i) / lik
+   enddo
    ! ring: the other vertices of the mesh facets around each loop vertex
    allocate(deg(nn), adj(16, nn)) ; deg = 0_I4P
    do k = 1, size(patch)
@@ -533,6 +550,7 @@ contains
       do j = 1, 3
          i = find_vid(facet(f)%vertex_id(j))
          if (i == 0_I4P .or. i > nb) cycle
+         if (.not. smooth_with_loop(f, i)) cycle ! across a sharp edge: not part of the ring
          do jj = 1, 3
             if (jj == j) cycle
             c = find_vid(facet(f)%vertex_id(jj))
@@ -593,6 +611,28 @@ contains
       call patch(k)%compute_metrix
    enddo
    contains
+      function smooth_with_loop(ff, li) result(yes)
+      !< Facet ff's normal is within 60 degrees of the patch's normal at loop vertex li.
+      integer(I4P), intent(in) :: ff, li
+      logical                  :: yes
+      real(R8P), parameter     :: COS_FEATURE = 0.5_R8P ! cos(60 deg)
+
+      associate(nf => facet(ff)%normal)
+         yes = pn(1, li) * nf%x + pn(2, li) * nf%y + pn(3, li) * nf%z >= COS_FEATURE
+      end associate
+      endfunction smooth_with_loop
+
+      pure function cross3(p1, p2, p3) result(w)
+      !< (p2 - p1) x (p3 - p1).
+      type(vector_R8P), intent(in) :: p1, p2, p3
+      real(R8P)                    :: w(3)
+      real(R8P)                    :: u(3), v(3)
+
+      u = [p2%x - p1%x, p2%y - p1%y, p2%z - p1%z]
+      v = [p3%x - p1%x, p3%y - p1%y, p3%z - p1%z]
+      w = [u(2) * v(3) - u(3) * v(2), u(3) * v(1) - u(1) * v(3), u(1) * v(2) - u(2) * v(1)]
+      endfunction cross3
+
       function find_vid(vid) result(idx)
       integer(I4P), intent(in) :: vid
       integer(I4P)             :: idx

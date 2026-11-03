@@ -11,6 +11,10 @@ program fossil_test_hole_fair
 !<    an edge, over the patch's facets) than the plain patch: it continues the surface with
 !<    matching tangents;
 !<  - the enclosed volume gets closer to the sphere's polyhedron volume than the plain fill.
+!< And a planar hole along two sharp edges: cube-02 with a 3 x 3 block of squares removed from
+!< the face z = 1 at the corner x = y = 0. The loop runs along the cube's edges, where the loop
+!< edges belong to the side faces; fairing must keep the 90-degree creases (feature-aware ring),
+!< so the faired patch stays in the plane z = 1 and the volume stays 1 (to 1e-12).
 
 use fossil, only : surface_stl_object, facet_object
 use penf,   only : I4P, R8P
@@ -37,10 +41,40 @@ print '(A,I6,L8,F14.6,F14.3,F16.6)', 'plain   ', n_patch(1), wt(1), rdev(1), dih
 print '(A,I6,L8,F14.6,F14.3,F16.6)', 'refine  ', n_patch(2), wt(2), rdev(2), dih(2), vol(2)
 print '(A,I6,L8,F14.6,F14.3,F16.6)', 'fair    ', n_patch(3), wt(3), rdev(3), dih(3), vol(3)
 ok = all(wt) .and. rdev(3) < rdev(1) .and. dih(3) < dih(1) .and. abs(vol(3) - vol_full) < abs(vol(1) - vol_full)
+call crease_case
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
 contains
+   subroutine crease_case
+   !< Planar hole along two cube edges, faired: must stay flat.
+   type(surface_stl_object)        :: cube, holed
+   type(facet_object), allocatable :: f(:)
+   type(facet_object), pointer     :: p
+   integer(I4P)                    :: i, n, filled, n_orig
+   logical                         :: flat, case_ok
+
+   call cube%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true.)
+   allocate(f(cube%get_facets_number())) ; n = 0
+   do i = 1, cube%get_facets_number()
+      p => cube%facet_at(i)
+      if (p%centroid%z > 1._R8P - 1.e-9_R8P .and. p%centroid%x < 0.75_R8P .and. p%centroid%y < 0.75_R8P) cycle
+      n = n + 1 ; f(n) = p ; f(n)%vertex_id = 0_I4P
+   enddo
+   f = f(1:n) ; n_orig = n
+   call holed%adopt_facets(facets=f)
+   call holed%fill_holes(max_hole_size=1._R8P, holes_filled=filled, fair=.true.)
+   flat = .true.
+   do i = n_orig + 1, holed%get_facets_number()
+      p => holed%facet_at(i)
+      flat = flat .and. all([p%vertex(1)%z, p%vertex(2)%z, p%vertex(3)%z] == 1._R8P)
+   enddo
+   case_ok = filled == 1 .and. holed%is_watertight() .and. abs(holed%get_volume() - 1._R8P) < 1.e-12_R8P .and. flat
+   print '(A,I0,A,L1,A,F16.12,A,L1)', 'crease hole, faired: patch ', holed%get_facets_number() - n_orig, '  flat ', flat, &
+         '  volume ', holed%get_volume(), '  -> ', case_ok
+   ok = ok .and. case_ok
+   endsubroutine crease_case
+
    subroutine run(mode, rdev, dih, vol, wt, n_patch)
    integer(I4P), intent(in)        :: mode
    real(R8P),    intent(out)       :: rdev, dih, vol
