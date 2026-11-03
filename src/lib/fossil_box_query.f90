@@ -13,6 +13,13 @@ module fossil_box_query
 !< The traversals are free `_oac` procedures (`!$acc routine seq`) on the flat tree arrays, shared
 !< by the CPU and the device paths (#20 rules: no type-bound calls, no `class` dummies). They prune
 !< a node when its box does not meet the query box inflated by the reach, and stop at the first cut.
+!<
+!< Tag bands (issue #38 step 4) on a block of cells: `cell_bands` is the Chebyshev cell distance to
+!< the nearest cut cell (breadth-first search over the 26 neighbours, capped), `cell_components`
+!< labels the 26-connected components of the cells that are not cut. Two closed cells that share a
+!< point and are both uncut lie on the same side of a closed surface (a path between their centres
+!< through the shared point stays in the two cells, which the surface does not meet), so one point
+!< query per component signs it. A 2-D block is a block with one cell in z.
 use fossil_aabb_node_object, only : aabb_node_object, bvh_bmin_x_oac, bvh_bmin_y_oac, bvh_bmin_z_oac, bvh_bmax_x_oac, &
                                     bvh_bmax_y_oac, bvh_bmax_z_oac, bvh_left_child_oac, bvh_right_child_oac, &
                                     bvh_payload_first_oac, bvh_payload_count_oac
@@ -24,6 +31,7 @@ implicit none
 private
 public :: BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 public :: bvh_box_contact_oac, curve_box_contact_oac, box_tolerance
+public :: cell_bands, cell_components
 
 integer(I4P), parameter :: BOX_NONE    = 0_I4P !< Contact result: neither cut nor near (inside/outside not decided).
 integer(I4P), parameter :: BOX_CUT     = 1_I4P !< The box meets the geometry.
@@ -138,4 +146,91 @@ contains
       endif
    enddo
    endfunction curve_box_contact_oac
+
+   pure subroutine cell_bands(cut, band, dist)
+   !< Chebyshev cell distance to the nearest cut cell, capped at band + 1 (also where no cell is cut).
+   logical,      intent(in)  :: cut(:,:,:)  !< Cut cells.
+   integer(I4P), intent(in)  :: band        !< Band width (>= 0).
+   integer(I4P), intent(out) :: dist(:,:,:) !< Distance [same shape], 0 on cut cells.
+   integer(I4P), allocatable :: q(:,:)      !< Queue of cells [3, cells].
+   integer(I4P)              :: n(3), head, tail, i, j, k, di, dj, dk, a, b, c, d !< Work.
+
+   n = shape(cut)
+   dist = band + 1_I4P
+   allocate(q(3, max(1, size(cut))))
+   tail = 0_I4P
+   do k = 1, n(3)
+      do j = 1, n(2)
+         do i = 1, n(1)
+            if (cut(i, j, k)) then
+               dist(i, j, k) = 0_I4P
+               tail = tail + 1_I4P ; q(:, tail) = [i, j, k]
+            endif
+         enddo
+      enddo
+   enddo
+   head = 0_I4P
+   do while (head < tail)
+      head = head + 1_I4P
+      i = q(1, head) ; j = q(2, head) ; k = q(3, head)
+      d = dist(i, j, k) + 1_I4P
+      if (d > band) cycle
+      do dk = -1, 1
+         c = k + dk ; if (c < 1 .or. c > n(3)) cycle
+         do dj = -1, 1
+            b = j + dj ; if (b < 1 .or. b > n(2)) cycle
+            do di = -1, 1
+               a = i + di ; if (a < 1 .or. a > n(1)) cycle
+               if (dist(a, b, c) > d) then
+                  dist(a, b, c) = d
+                  tail = tail + 1_I4P ; q(:, tail) = [a, b, c]
+               endif
+            enddo
+         enddo
+      enddo
+   enddo
+   endsubroutine cell_bands
+
+   pure subroutine cell_components(cut, comp, ncomp, seed)
+   !< 26-connected components of the cells that are not cut: comp = 0 on cut cells, 1..ncomp else;
+   !< seed(:, m) is the first cell (in storage order) of component m.
+   logical,      intent(in)               :: cut(:,:,:)  !< Cut cells.
+   integer(I4P), intent(out)              :: comp(:,:,:) !< Component labels [same shape].
+   integer(I4P), intent(out)              :: ncomp       !< Number of components.
+   integer(I4P), allocatable, intent(out) :: seed(:,:)   !< First cell of each component [3, ncomp].
+   integer(I4P), allocatable              :: q(:,:), sd(:,:) !< Queue, seeds buffer.
+   integer(I4P)                           :: n(3), head, tail, i, j, k, ii, jj, kk, di, dj, dk, a, b, c !< Work.
+
+   n = shape(cut)
+   comp = 0_I4P ; ncomp = 0_I4P
+   allocate(q(3, max(1, size(cut))), sd(3, max(1, size(cut))))
+   do k = 1, n(3)
+      do j = 1, n(2)
+         do i = 1, n(1)
+            if (cut(i, j, k) .or. comp(i, j, k) > 0_I4P) cycle
+            ncomp = ncomp + 1_I4P ; sd(:, ncomp) = [i, j, k]
+            comp(i, j, k) = ncomp
+            head = 0_I4P ; tail = 1_I4P ; q(:, 1) = [i, j, k]
+            do while (head < tail)
+               head = head + 1_I4P
+               ii = q(1, head) ; jj = q(2, head) ; kk = q(3, head)
+               do dk = -1, 1
+                  c = kk + dk ; if (c < 1 .or. c > n(3)) cycle
+                  do dj = -1, 1
+                     b = jj + dj ; if (b < 1 .or. b > n(2)) cycle
+                     do di = -1, 1
+                        a = ii + di ; if (a < 1 .or. a > n(1)) cycle
+                        if (cut(a, b, c) .or. comp(a, b, c) > 0_I4P) cycle
+                        comp(a, b, c) = ncomp
+                        tail = tail + 1_I4P ; q(:, tail) = [a, b, c]
+                     enddo
+                  enddo
+               enddo
+            enddo
+         enddo
+      enddo
+   enddo
+   allocate(seed(3, ncomp))
+   seed = sd(:, 1:ncomp)
+   endsubroutine cell_components
 endmodule fossil_box_query

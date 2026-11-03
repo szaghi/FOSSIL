@@ -26,7 +26,7 @@ module fossil_curve_object
 !<
 !< Exactness. Metrics are plain floating point. Nesting (and so orientation validity) uses the
 !< exact `orient2d_xy` crossing test, so every loop gets the same answer from every query.
-use fossil_box_query,          only : curve_box_contact_oac, BOX_NONE, BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
+use fossil_box_query,          only : curve_box_contact_oac, cell_bands, cell_components, BOX_NONE, BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
 use fossil_predicates,         only : orient2d_xy
 use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, segment_point_distance2, &
                                      segment_closest_oac, segment_winding_number_oac
@@ -84,6 +84,7 @@ type :: curve_object
       procedure, pass(self) :: box_classify_many    !< Classify boxes: cut, near, inside, outside (issue #38).
       procedure, pass(self) :: box_intersects_curve !< True if a box meets the curve (issue #38).
       procedure, pass(self) :: box_classify_many_device !< box_classify_many on the device (issue #38).
+      procedure, pass(self) :: tag_block            !< Signed tag bands on a block of cells (issue #38).
       procedure, pass(self) :: check_validity       !< First validity defect (CURVE_* code).
       procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
       procedure, pass(self) :: distance             !< (Signed) distance of a point.
@@ -313,6 +314,67 @@ contains
    codes = cl
    if (present(inside)) inside = il
    endsubroutine box_classify_many_device
+
+   subroutine tag_block(self, x, y, band, tags, sign_algorithm, status)
+   !< Signed tag bands on a rectilinear block of cells in the (u, v) plane (issue #38): the 2-D twin
+   !< of `surface_stl_object%tag_block`. `x(nx+1)`, `y(ny+1)` are the u and v cell edges; `tags(nx,
+   !< ny)`: 0 on a cut cell (exact), else the Chebyshev cell distance to the nearest cut cell of the
+   !< block capped at band + 1, negative inside; one `is_point_inside` per 8-connected component of
+   !< uncut cells (one for the whole block when it meets no segment). Distances see this block only.
+   !< `status = STATUS_INVALID_INPUT` on bad edges, shape or band.
+   class(curve_object), intent(in)            :: self           !< Curve.
+   real(R8P),           intent(in)            :: x(:), y(:)     !< Cell edges (u, v).
+   integer(I4P),        intent(in)            :: band           !< Band width (>= 0).
+   integer(I4P),        intent(out)           :: tags(:,:)      !< Tags [nx, ny].
+   integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_* (default SIGN_PSEUDO_NORMAL).
+   integer(I4P),        intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,      allocatable :: cut(:,:,:)  !< Cut cells.
+   integer(I4P), allocatable :: dist(:,:,:), comp(:,:,:), seed(:,:) !< Bands, components, seeds.
+   integer(I4P), allocatable :: sgn(:)      !< Sign of each component.
+   integer(I4P)              :: nx, ny, i, j, m, ncomp, algo !< Work.
+   logical                   :: bad         !< Size check.
+
+   if (present(status)) status = STATUS_OK
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
+   bad = nx < 1 .or. ny < 1 .or. band < 0_I4P
+   if (.not. bad) bad = any(x(2:) <= x(:nx)) .or. any(y(2:) <= y(:ny)) .or. size(tags, 1) /= nx .or. size(tags, 2) /= ny
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   if (.not. self%box_intersects_curve([x(1), y(1)], [x(nx+1), y(ny+1)])) then
+      tags = band + 1_I4P
+      if (self%bvh%nodes_number > 0_I4P) then
+         if (self%is_point_inside([0.5_R8P * (x(1) + x(nx+1)), 0.5_R8P * (y(1) + y(ny+1))], sign_algorithm=algo)) tags = -tags
+      endif
+      return
+   endif
+   allocate(cut(nx, ny, 1), dist(nx, ny, 1), comp(nx, ny, 1))
+   !$omp parallel do default(shared) schedule(dynamic) private(i, j)
+   do j = 1_I4P, ny
+      do i = 1_I4P, nx
+         cut(i, j, 1) = self%box_intersects_curve([x(i), y(j)], [x(i+1), y(j+1)])
+      enddo
+   enddo
+   !$omp end parallel do
+   call cell_bands(cut, band, dist)
+   call cell_components(cut, comp, ncomp, seed)
+   allocate(sgn(0:ncomp))
+   sgn(0) = 0_I4P
+   !$omp parallel do default(shared) schedule(dynamic) private(m, i, j)
+   do m = 1_I4P, ncomp
+      i = seed(1, m) ; j = seed(2, m)
+      sgn(m) = 1_I4P
+      if (self%is_point_inside([0.5_R8P * (x(i) + x(i+1)), 0.5_R8P * (y(j) + y(j+1))], sign_algorithm=algo)) sgn(m) = -1_I4P
+   enddo
+   !$omp end parallel do
+   do j = 1_I4P, ny
+      do i = 1_I4P, nx
+         tags(i, j) = sgn(comp(i, j, 1)) * dist(i, j, 1)
+      enddo
+   enddo
+   endsubroutine tag_block
 
    subroutine distance_many(self, points, distances, is_signed, sign_algorithm, status)
    !< Batched distances of the points (u, v) = points(:, i), CPU, OpenMP over the points.

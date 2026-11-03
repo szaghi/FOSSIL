@@ -13,7 +13,8 @@ use fossil_facet_object, only : facet_object, pnormal_payload_t,                
                                 pnormal_x_oac, pnormal_y_oac, pnormal_z_oac,                   &
                                 triangle_point_distance
 use fossil_list_id_object, only : list_id_object
-use fossil_box_query, only : bvh_box_contact_oac, box_tolerance, BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
+use fossil_box_query, only : bvh_box_contact_oac, box_tolerance, cell_bands, cell_components, &
+                             BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_box_predicates, only : box_triangle_overlap
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
@@ -222,6 +223,7 @@ type :: surface_stl_object
       procedure, pass(self) :: box_classify_many               !< Classify boxes: cut, near, inside, outside (issue #38).
       procedure, pass(self) :: box_intersects_surface          !< True if a box meets the surface (issue #38).
       procedure, pass(self) :: box_classify_many_device        !< box_classify_many on the device (issue #38).
+      procedure, pass(self) :: tag_block                       !< Signed tag bands on a block of cells (issue #38).
       ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
       procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
       procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
@@ -1876,6 +1878,79 @@ contains
    codes = cl
    if (present(inside)) inside = il
    endsubroutine box_classify_many_device
+
+   subroutine tag_block(self, x, y, z, band, tags, sign_algorithm, status)
+   !< Signed tag bands on a rectilinear block of cells (issue #38), for AMR tagging.
+   !<
+   !< `x(nx+1)`, `y(ny+1)`, `z(nz+1)` are the cell edges (strictly increasing, stretched allowed);
+   !< `tags(nx, ny, nz)`: 0 on a cut cell (`box_classify_many`'s BOX_CUT, conservative by
+   !< `box_tolerance`), else the Chebyshev cell distance d to the nearest cut cell of the block, capped
+   !< at band + 1, negative inside (-d) and positive outside (+d). A block that meets no facet is
+   !< ±(band + 1) everywhere, from one point query at its centre; otherwise each 26-connected
+   !< component of uncut cells is signed by one point query (`is_point_inside` with `sign_algorithm`,
+   !< default SIGN_PSEUDO_NORMAL) at the centre of its first cell. Distances count cells of this
+   !< block only: a cut cell in a neighbouring block is not seen (pad the block with ghost cells for
+   !< bands that cross block faces). `status = STATUS_INVALID_INPUT` on bad edges, shape or band.
+   class(surface_stl_object), intent(in)            :: self           !< Surface.
+   real(R8P),                 intent(in)            :: x(:), y(:), z(:) !< Cell edges.
+   integer(I4P),              intent(in)            :: band           !< Band width (>= 0).
+   integer(I4P),              intent(out)           :: tags(:,:,:)    !< Tags [nx, ny, nz].
+   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_* (default SIGN_PSEUDO_NORMAL).
+   integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,      allocatable :: cut(:,:,:)  !< Cut cells.
+   integer(I4P), allocatable :: dist(:,:,:), comp(:,:,:), seed(:,:) !< Bands, components, seeds.
+   integer(I4P), allocatable :: sgn(:)      !< Sign of each component.
+   integer(I4P)              :: nx, ny, nz, i, j, k, m, ncomp, algo !< Work.
+   real(R8P)                 :: tol         !< Box inflation.
+   logical                   :: bad         !< Size check.
+
+   if (present(status)) status = STATUS_OK
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   bad = nx < 1 .or. ny < 1 .or. nz < 1 .or. band < 0_I4P
+   if (.not. bad) bad = any(x(2:) <= x(:nx)) .or. any(y(2:) <= y(:ny)) .or. any(z(2:) <= z(:nz)) .or. &
+                        size(tags, 1) /= nx .or. size(tags, 2) /= ny .or. size(tags, 3) /= nz
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
+   if (box_contact(self, [x(1), y(1), z(1)], [x(nx+1), y(ny+1), z(nz+1)], tol, tol) /= BOX_CUT) then
+      tags = band + 1_I4P
+      if (self%is_point_inside(point=vector_R8P(0.5_R8P * (x(1) + x(nx+1)), 0.5_R8P * (y(1) + y(ny+1)), &
+                                                0.5_R8P * (z(1) + z(nz+1))), sign_algorithm=algo)) tags = -tags
+      return
+   endif
+   allocate(cut(nx, ny, nz), dist(nx, ny, nz), comp(nx, ny, nz))
+   !$omp parallel do default(shared) collapse(2) schedule(dynamic) private(i, j, k)
+   do k = 1_I4P, nz
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx
+            cut(i, j, k) = box_contact(self, [x(i), y(j), z(k)], [x(i+1), y(j+1), z(k+1)], tol, tol) == BOX_CUT
+         enddo
+      enddo
+   enddo
+   !$omp end parallel do
+   call cell_bands(cut, band, dist)
+   call cell_components(cut, comp, ncomp, seed)
+   allocate(sgn(0:ncomp))
+   sgn(0) = 0_I4P
+   !$omp parallel do default(shared) schedule(dynamic) private(m, i, j, k)
+   do m = 1_I4P, ncomp
+      i = seed(1, m) ; j = seed(2, m) ; k = seed(3, m)
+      sgn(m) = 1_I4P
+      if (self%is_point_inside(point=vector_R8P(0.5_R8P * (x(i) + x(i+1)), 0.5_R8P * (y(j) + y(j+1)), &
+                                                0.5_R8P * (z(k) + z(k+1))), sign_algorithm=algo)) sgn(m) = -1_I4P
+   enddo
+   !$omp end parallel do
+   do k = 1_I4P, nz
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx
+            tags(i, j, k) = sgn(comp(i, j, k)) * dist(i, j, k)
+         enddo
+      enddo
+   enddo
+   endsubroutine tag_block
 
    subroutine query_many_device(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
                                 is_signed, sign_algorithm, status)
