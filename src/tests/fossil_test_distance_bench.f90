@@ -60,6 +60,9 @@ integer(I4P)                  :: argc, n_sample, s, stride
 integer(I4P)                  :: n_threads
 character(len=512)            :: stl_path, arg2
 logical                       :: correctness_ok, batch_ok, device_ok, fwn_ok, refuse_ok, holed_ok, field_ok
+logical                       :: rich_ok                   !< Rich queries: device equals CPU (issue #37).
+real(R8P)                     :: rich_err                  !< Rich queries: max |device - CPU| over distance, closest point, normal.
+integer(I4P)                  :: rich_id_mismatch          !< Rich queries: facet/feature/index/body mismatches.
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
 !$ integer, external          :: omp_get_max_threads       !< OpenMP runtime thread-count query (only declared under -fopenmp).
@@ -206,6 +209,8 @@ d_probe(1) = -12345._R8P
 call surface%distance_many_device(points=points(1:1), distances=d_probe, is_signed=.true., &
                                   sign_algorithm=SIGN_SOLID_ANGLE, status=refuse_status)
 refuse_ok = (refuse_status == STATUS_INVALID_INPUT .and. d_probe(1) == -12345._R8P)
+call rich_device_case(err=rich_err, id_mismatch=rich_id_mismatch)
+rich_ok = rich_err == 0._R8P .and. rich_id_mismatch == 0_I4P
 call surface%exit_device
 
 fwn_device_abs_err = 0._R8P
@@ -288,14 +293,41 @@ print '(A,I0)',      '   sign mismatches:        ', fwn_sign_mismatch
 print '(A,ES10.3)',  '   fwn device vs serial max |d| err: ', fwn_device_abs_err
 print '(A,L1)',      '   unsupported sign refused:  ', refuse_ok
 print '(A)',         ''
+print '(A)',         'query_many_device vs query_many (issue #37: distance, closest point, normal, ids; both signs):'
+print '(A,ES10.3)',  '   rich device vs serial max err: ', rich_err
+print '(A,I0)',      '   rich id mismatches:      ', rich_id_mismatch
+print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
 print '(A,L1)',      'Are all tests passed? ', (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok &
-                                                .and. holed_ok .and. field_ok)
-if (.not. (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok .and. holed_ok .and. field_ok)) &
+                                                .and. holed_ok .and. field_ok .and. rich_ok)
+if (.not. (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refuse_ok .and. holed_ok .and. field_ok &
+           .and. rich_ok)) &
    error stop 1
 
 contains
+   subroutine rich_device_case(err, id_mismatch)
+   !< query_many_device against query_many on the bench points (surface entered), both signs.
+   real(R8P),    intent(out) :: err         !< Max |device - CPU| over distance, closest point, normal.
+   integer(I4P), intent(out) :: id_mismatch !< Facet, feature, index, body mismatches.
+   real(R8P),    allocatable :: d1(:), d2(:), c1(:,:), c2(:,:), n1(:,:), n2(:,:) !< Outputs.
+   integer(I4P), allocatable :: f1(:), f2(:), t1(:), t2(:), i1(:), i2(:), b1(:), b2(:) !< Outputs.
+   integer(I4P)              :: a, nq !< Work.
+   integer(I4P), parameter   :: ALGO(2) = [SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER] !< Signs.
+
+   nq = size(points, kind=I4P)
+   allocate(d1(nq), d2(nq), c1(3, nq), c2(3, nq), n1(3, nq), n2(3, nq))
+   allocate(f1(nq), f2(nq), t1(nq), t2(nq), i1(nq), i2(nq), b1(nq), b2(nq))
+   err = 0._R8P ; id_mismatch = 0_I4P
+   do a = 1, 2
+      call surface%query_many(points=points, distances=d1, closest_points=c1, facets=f1, features=t1, feature_indexes=i1, &
+                              normals=n1, bodies=b1, sign_algorithm=ALGO(a))
+      call surface%query_many_device(points=points, distances=d2, closest_points=c2, facets=f2, features=t2, &
+                                     feature_indexes=i2, normals=n2, bodies=b2, sign_algorithm=ALGO(a))
+      err = max(err, maxval(abs(d1 - d2)), maxval(abs(c1 - c2)), maxval(abs(n1 - n2)))
+      id_mismatch = id_mismatch + count(f1 /= f2 .or. t1 /= t2 .or. i1 /= i2 .or. b1 /= b2, kind=I4P)
+   enddo
+   endsubroutine rich_device_case
    subroutine field_band_case(ok)
    !< Narrow band and signs of a distance field over the probe box (grid_n^3 points, PN sign):
    !< band and sign point queries through distance_many_device must equal the host ones bit for
