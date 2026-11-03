@@ -72,24 +72,27 @@ every 2-D algorithm, and that naive closest-element sign.
 
 | Algorithm | face | flat edge | convex edge | reentrant edge | convex vertex | saddle vertex |
 |---|---|---|---|---|---|---|
-| `SIGN_PSEUDO_NORMAL` | 0 | 0 | 2 (at 10⁻¹⁰ and 10⁻¹¹ L) | 0 | 0 | 0 |
+| `SIGN_PSEUDO_NORMAL` | 0 | 0 | 0 | 0 | 0 | 0 |
 | `SIGN_RAY_INTERSECTIONS` | 0 | 0 | 0 | 0 | 0 | 0 |
 | `SIGN_SOLID_ANGLE` | 0 | 0 | 0 | 0 | 0 | 0 |
 | `SIGN_FAST_WINDING_NUMBER` | 0 | 0 | 0 | 0 | 0 | 0 |
-| naive closest-facet normal | 0 | 0 | 174 (every decade) | 11 | 398 (every decade) | 0 |
+| naive closest-facet normal | 0 | 0 | 173 (every decade) | 11 | 405 (every decade) | 0 |
 
 **Dirty variants**, errors near the defect / far from it:
 
 | Defect | pseudo-normal | ray | solid angle | fast winding |
 |---|---|---|---|---|
-| hole | 227 / 2 | 305 / 0 | 0 / 0 | 0 / 0 |
-| flipped facet | 932 / 2 | 0 / 0 | 830 / 0 | 819 / 0 |
-| duplicated facet | 112 / 3 | 305 / 0 | 0 / 0 | 0 / 0 |
-| needles | 0 / 2 | 0 / 0 | 0 / 0 | 0 / 0 |
-| T-junction | 0 / 2 | 0 / 0 | 0 / 0 | 0 / 0 |
+| hole | 227 / 0 | 305 / 0 | 0 / 0 | 0 / 0 |
+| flipped facet | 945 / 0 | 0 / 0 | 830 / 0 | 819 / 0 |
+| duplicated facet | 123 / 1 | 305 / 0 | 0 / 0 | 0 / 0 |
+| needles | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| T-junction | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
 
-The "far" pseudo-normal errors are its 2 clean-body errors, repeated in
-each variant.
+Before the needle fix (below) the pseudo-normal had 2 "far" errors in each
+variant, its 2 clean-body errors repeated. The fix also moved 14 errors near
+the defects of the plate: its defect facet is a needle, and the foot now lands
+on the flipped (or duplicated) needle itself, whose normal is wrong by
+construction.
 
 **Cost per query** on these small meshes. Only the ratios mean anything:
 the ray and solid-angle tests are O(N), the winding number O(log N).
@@ -128,11 +131,20 @@ corner), the 0.01° cusp included, and every decade down to 10⁻¹² L.
   - **Fix:** it is now the norm of the residual, accurate to about ε·L.
     The 2220 errors fell to 2 (`fossil_test_distance_tiny` guards it). This
     is the reason to measure before trusting a default.
-- **Needle triangles.** The 2 remaining pseudo-normal errors sit on the
-  1 × 10⁻³ side faces of the plate, at δ = 10⁻¹⁰ and 10⁻¹¹ L. There the
-  parametric solve picks a closest point at the edge, 1.41·10⁻¹⁰ away,
-  instead of the face point 10⁻¹⁰ away. It is a conditioning limit of the
-  solve on slivers, not of the pseudo-normal.
+- **Needle triangles (fixed).** The last 2 pseudo-normal errors sat on the
+  1 × 10⁻³ side faces of the plate, at δ = 10⁻¹⁰ and 10⁻¹¹ L.
+  - **Cause:** the Eberly solve goes through the Gram system, whose error
+    grows like ε/|n|² (n = e₁₂ × e₁₃). It put the foot on the edge,
+    1.41·10⁻¹⁰ away, instead of the face point 10⁻¹⁰ away. There the edge
+    pseudo-normal is orthogonal to p − foot, so the sign flipped.
+  - **Fix:** triangles of aspect above about 100 (det < 10⁻⁴ max(a, c)²)
+    get the foot from triple products with n, with error about ε/|n|. If
+    that foot lies outside the triangle, the nearest clamped edge projection
+    is used instead.
+  - Other triangles keep the Eberly solve, bit for bit: the robust path costs
+    20 % more per query on dragon-fine.
+  - Errors went from 2 to 0. `fossil_test_distance_tiny` now includes the
+    plate, which gives 2 sign errors with the old solve.
 - **The naive closest-facet normal is wrong at edges and vertices at every
   distance.** It fails at about 5 % of convex-edge points and 10 % of
   convex-vertex points, at every distance from the largest δ down. So the method as Mittal et al. describe it does
@@ -169,7 +181,7 @@ which has not run yet.
   - It comes free with the closest-point search, which these queries do
     anyway.
   - It is exact on watertight, oriented meshes down to 10⁻¹² L, needles
-    aside.
+    of aspect 10³ included.
   - On geometry that cannot be sanitized (holes, duplicates), pass
     `SIGN_FAST_WINDING_NUMBER`: it was right on every dirty variant except
     the flipped facet.
@@ -185,7 +197,5 @@ which has not run yet.
 
 - **Small meshes.** The cost figures are relative. The ray and solid-angle
   tests do not scale (O(N) per query).
-- **Needle triangles.** On slivers of aspect 10³, the pseudo-normal is
-  reliable only down to about 10⁻⁹ L.
 - **No GPU run yet.** The device = CPU result holds on the host only until
   the manual GPU gate runs.

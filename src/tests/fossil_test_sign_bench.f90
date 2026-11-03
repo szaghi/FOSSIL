@@ -36,11 +36,13 @@ integer(I4P), parameter :: ALGO(4) = [SIGN_PSEUDO_NORMAL, SIGN_RAY_INTERSECTIONS
 character(14), parameter :: ANAME(NA) = ['pseudo-normal ', 'ray           ', 'solid angle   ', 'fast winding  ', &
                                          'naive normal  ']
 character(10), parameter :: VNAME(NV) = ['hole      ', 'flipped   ', 'duplicate ', 'needles   ', 'T-junction']
-! upper bounds from the first run (issue #39 step 2, after the distance fix of step 1 of the night),
-! never relaxed: clean errors (pseudo-normal: 2 on the needle side faces of the plate at 1e-10 and
-! 1e-11 L), dirty errors per algorithm (pseudo-normal, ray, solid angle, fast winding)
-integer, parameter :: BOUND_CLEAN(4) = [2, 0, 0, 0]
-integer, parameter :: BOUND_DIRTY(4) = [1282, 610, 830, 819]
+! upper bounds: clean errors, dirty errors per algorithm (pseudo-normal, ray, solid angle, fast winding).
+! First run (issue #39 step 2): clean pseudo-normal 2 (needle side faces of the plate at 1e-10 and 1e-11 L),
+! dirty 1282. The needle-triangle path of triangle_closest_st (issue #39) made the clean count 0 and the far
+! dirty errors 11 -> 1, and moved 14 errors near the defects of the plate, whose defect facet is a needle:
+! the foot now lands on the flipped (or duplicated, non-manifold) needle itself, wrong by construction.
+integer, parameter :: BOUND_CLEAN(4) = [0, 0, 0, 0]
+integer, parameter :: BOUND_DIRTY(4) = [1296, 610, 830, 819]
 
 type(body_t), allocatable :: b(:)
 type(surface_stl_object)  :: s

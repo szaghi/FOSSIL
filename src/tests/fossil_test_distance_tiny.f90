@@ -4,11 +4,14 @@ program fossil_test_distance_tiny
 !<
 !< The squared distance used to be the expanded quadratic form of the Eberly solve, whose absolute
 !< error is ~eps L^2: below d ~ 1e-8 L it was noise, could be negative, and then flipped
-!< `is_point_inside(SIGN_PSEUDO_NORMAL)`. On the procedural cube and the 5-degree wedge of
-!< `fossil_sign_bench_bodies`, points at delta = 1e-6 ... 1e-12 L (side known by construction):
+!< `is_point_inside(SIGN_PSEUDO_NORMAL)`. On the procedural cube, the 5-degree wedge and the 1e-3 plate
+!< (side faces are needles of aspect 1e3) of `fossil_sign_bench_bodies`, points at delta = 1e-6 ... 1e-12 L
+!< (side known by construction):
 !< - the pseudo-normal inside test equals the constructed side on every point;
 !< - the squared distance is never negative, and it is never zero (no point lies on the surface);
 !< - on face points the distance equals delta to 1e-14 L.
+!< The plate guards the needle-triangle path of `triangle_closest_st` (issue #39): the Eberly solve put
+!< the foot of points 1e-10 L off a needle face on its edge, and 2 signs flipped.
 
 use fossil,                   only : surface_stl_object, SIGN_PSEUDO_NORMAL
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, to_surface, make_points, SB_FACE
@@ -26,7 +29,7 @@ integer,      allocatable :: dec(:), fid(:)
 integer                   :: i, m, k, nsign, nneg, nface, npts
 real(R8P)                 :: d2, d
 logical                   :: ok
-integer, parameter        :: BODY(2) = [1, 2] ! cube, wedge 5
+integer, parameter        :: BODY(3) = [1, 2, 5] ! cube, wedge 5, plate 1e-3 (needle side faces)
 
 nsign = 0 ; nneg = 0 ; nface = 0 ; npts = 0
 call bench_bodies(b)
