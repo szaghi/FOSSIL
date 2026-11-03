@@ -37,13 +37,14 @@ advanced-feature pages cross-link to both.
 
 ## Execution backends and grid fields
 
-Two pages cover something other than a surface TBP, so they are not counted
+Three pages cover something other than a surface TBP, so they are not counted
 among the primitives:
 
 | Page | Entry points | What it adds |
 |---|---|---|
 | [GPU distance queries](/guide/advanced/device-distance) | `surface%enter_device()` / `surface%distance_many_device(...)` / `surface%exit_device()` | Batch signed distance on the GPU via OpenACC (nvfortran), SAH BVH only, bit-exact vs the CPU path |
-| [Signed-distance field](/guide/advanced/distance-field) | `distance_field_object`: `initialize(x, y, z, ng)` / `compute(surface, ...)` | Signed distance of every cell of a stretched rectilinear grid: exact narrow band, flood-fill signs, fast sweeping (OpenMP, bit-exact); used by `fossil_ib_generator` |
+| [Signed-distance field](/guide/advanced/distance-field) | `distance_field_object`: `initialize(x, y, z, ng)` / `compute(surface, ...)` | Signed distance of every cell of a stretched rectilinear grid: exact narrow band, flood-fill signs, fast sweeping (OpenMP, bit-exact); used by `fossil_ib_generator`; 2-D fields from curves |
+| [2-D geometry (curves)](/guide/advanced/2d-geometry) | `curve_object`, `slice_surface(surface, normal_axis, level, curve)` | Closed polylines for quadtree solvers: segment BVH, signed distance, 2-D fast winding number, exact orient2d, STL slicing, repair, batched CPU/device queries |
 
 RANSAC shape detection was deliberately **not** shipped — see the
 [roadmap issue](https://github.com/szaghi/FOSSIL/issues/18) for the

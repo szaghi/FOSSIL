@@ -59,6 +59,7 @@ export default withMermaid({
             { text: 'surface_stl_object',   link: '/guide/api/surface-stl-object' },
             { text: 'facet_object',         link: '/guide/api/facet-object' },
             { text: 'aabb_tree_object',     link: '/guide/api/aabb-tree-object' },
+            { text: 'curve_object',         link: '/guide/api/curve-object' },
           ],
         },
         {
@@ -80,6 +81,7 @@ export default withMermaid({
             { text: 'Hole filling',               link: '/guide/advanced/hole-filling' },
             { text: 'Signed-distance field',      link: '/guide/advanced/distance-field' },
             { text: 'GPU distance queries',       link: '/guide/advanced/device-distance' },
+            { text: '2-D geometry (curves)',      link: '/guide/advanced/2d-geometry' },
           ],
         },
         {

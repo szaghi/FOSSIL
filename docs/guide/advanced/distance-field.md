@@ -25,6 +25,11 @@ where nothing needs the last digit. The field is built in three stages:
 Every cell ends up holding a distance, including the far field of a
 stretched grid. `fossil_ib_generator` is built on it.
 
+In 2-D, `initialize(x, y)` without `z` makes a field for a
+[`curve_object`](/guide/advanced/2d-geometry): `compute(curve=...)` runs the
+same three stages (4-connected flood fill, 4 sweep directions). A quadtree
+block that does not see the curve gets an empty band and one point query.
+
 ## Pipeline
 
 1. **Band** (`compute_band`). The candidates are found by rasterizing each

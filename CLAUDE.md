@@ -77,6 +77,11 @@ that exercises the distance kernel chain — not the full suite. Host-only tests
 tripped nvfortran 26.1 parser quirks unrelated to the device port (e.g. parser
 rejects `(expr) .cross. (expr)` in one strict-normal test).
 
+The `tests-nvidia-curve` mode is its 2-D twin (issue #36): it builds
+`fossil_test_curve_bench` only (segment BVH closest point, 2-D fast winding number on
+the device). Same clean-build rule (shared `exe/`), pass criterion
+`device vs serial max |d| err 0.000E+00`. Not yet validated on the GPU (pending).
+
 The device build scope is **BVH-only** (the octree stays CPU-only).
 
 ### Running tests
@@ -122,13 +127,14 @@ src/
 
 ### Core object hierarchy
 
-The public API is accessed via `use fossil`, which re-exports three types plus the named constants:
+The public API is accessed via `use fossil`, which re-exports four types plus the named constants:
 
 | Type | Module file | Purpose |
 |------|-------------|---------|
 | `surface_stl_object` | `fossil_surface_stl.f90` | Surface geometry: I/O, analysis, sanitization, manipulation, distance queries |
 | `facet_object` | `fossil_facet_object.f90` | Individual triangular facet — vertices, normal, connectivity, pseudo-normals |
-| `distance_field_object` | `fossil_distance_field.f90` | Signed-distance field on a rectilinear (stretched) grid: narrow band, flood-fill signs, fast sweeping |
+| `distance_field_object` | `fossil_distance_field.f90` | Signed-distance field on a rectilinear (stretched) grid: narrow band, flood-fill signs, fast sweeping; 2-D fields from curves |
+| `curve_object` | `fossil_curve_object.f90` | 2-D geometry (issue #36): closed/open polylines in an axis-aligned plane, segment BVH, signed distance, 2-D fast winding number, repair, batched CPU/device queries |
 
 `fossil.f90` also re-exports:
 
@@ -203,7 +209,8 @@ fobis fetch            # --update to re-fetch
 - `fossil_list_id_object.f90` — dynamic integer ID list used for connectivity tracking
 - `fossil_aabb_object.f90` / `fossil_aabb_node_object.f90` — AABB primitives
 - `fossil_block_object.f90` / `fossil_block_aabb_object.f90` — structured mesh block with AABB (`extrapolate_distances` deprecated, issue #32)
-- `fossil_distance_field.f90` — `distance_field_object` (re-exported by `fossil`, issue #32): signed-distance field on a rectilinear grid; narrow band via `distance_many(_device)`, flood-fill signs, fast sweeping in hyperplane order (OpenMP bit-exact). It imports the surface/facet modules, never `fossil` (circular). `fossil_ib_generator` is built on it.
+- `fossil_distance_field.f90` — `distance_field_object` (re-exported by `fossil`, issue #32): signed-distance field on a rectilinear grid; narrow band via `distance_many(_device)`, flood-fill signs, fast sweeping in hyperplane order (OpenMP bit-exact). It imports the surface/facet modules, never `fossil` (circular). `fossil_ib_generator` is built on it. `initialize` without `z` makes a 2-D field for a curve source; `compute_band` / `compute_signs` / `compute` / `default_band` are generics over `surface=` / `curve=`.
+- `fossil_curve_object.f90`, `fossil_segment_bvh.f90`, `fossil_curve_slice.f90` — 2-D geometry (issue #36): `curve_object` stores (u, v) as SoA arrays in the plane normal to `normal_axis` (u, v = the other axes in cyclic order); the solid is on the left of every segment (outer loops CCW, holes CW), signed distance negative inside; open loops allowed (`# open` in the ASCII format). The segment BVH's traversals are `_oac` kernels shared by the CPU and the device. `slice_surface` cuts an STL by an axis-aligned plane (canonical crossings, no tolerances). `fossil_predicates%orient2d` is exact (filter + exact expansion with a bit-mask split, safe under nvfortran FMA contraction); `orient3d` is still filter-only.
 
 ## Coding conventions
 

@@ -22,13 +22,14 @@ use fossil
 use penf, only : I4P, R8P
 ```
 
-That module re-exports three types and three families of named constants:
+That module re-exports four types and three families of named constants:
 
 | Symbol                | Kind     | Role                                                                                    |
 | --------------------- | -------- | --------------------------------------------------------------------------------------- |
 | `surface_stl_object`  | type     | A whole triangulated surface — I/O, repair, manipulation, distance and inside queries.  |
 | `facet_object`        | type     | A single triangular facet — vertices, normal, connectivity, pseudo-normals.             |
 | `aabb_tree_object`    | type     | The acceleration structure embedded inside every surface (SAH BVH or octree).           |
+| `curve_object`        | type     | 2-D geometry: closed polylines in a plane, for quadtree solvers ([page](/guide/api/curve-object)). |
 | `SIGN_*`              | constants| Sign algorithm for signed-distance queries (pseudo-normal / ray-cast / solid-angle).    |
 | `AABB_TREE_*`         | constants| Choice of acceleration structure when loading or analysing a surface.                   |
 | `STATUS_*`            | constants| Return codes from the optional `status` argument on mutating procedures.                |
