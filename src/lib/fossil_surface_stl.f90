@@ -57,6 +57,7 @@ private
 public :: surface_stl_object
 public :: intersection_pair_t
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
+public :: FEATURE_FACE, FEATURE_EDGE, FEATURE_VERTEX
 public :: sign_algorithm_from_string
 public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL
 public :: STATUS_INVALID_INPUT
@@ -93,6 +94,10 @@ integer(I4P), parameter :: SIGN_RAY_INTERSECTIONS = 1_I4P
 integer(I4P), parameter :: SIGN_SOLID_ANGLE       = 2_I4P
 integer(I4P), parameter :: SIGN_PSEUDO_NORMAL     = 3_I4P
 integer(I4P), parameter :: SIGN_FAST_WINDING_NUMBER = 4_I4P
+! Closest feature kinds of the rich queries (issue #37).
+integer(I4P), parameter :: FEATURE_FACE   = 1_I4P !< Closest point inside a facet.
+integer(I4P), parameter :: FEATURE_EDGE   = 2_I4P !< Closest point on a facet edge (local index 1-3).
+integer(I4P), parameter :: FEATURE_VERTEX = 3_I4P !< Closest point at a facet vertex (local index 1-3).
 ! Ray directions for SIGN_RAY_INTERSECTIONS (see is_point_inside_polyhedron_ri): generic,
 ! non-coplanar, none parallel to an axis or a coordinate plane, so a ray from a point of an
 ! axis-aligned lattice does not run exactly through a mesh edge or vertex.
@@ -205,6 +210,8 @@ type :: surface_stl_object
       procedure, pass(self) :: destroy                         !< Destroy file.
       procedure, pass(self) :: distance                        !< Return the (minimum) distance from point to triangulated surface.
       procedure, pass(self) :: distance_many                   !< Batch distance over a point array; OpenMP-parallel (issue #19 §B3).
+      procedure, pass(self) :: query_many                      !< Batch rich query: distance, closest point, facet, feature, normal, body (issue #37).
+      procedure, pass(self) :: query_point                     !< Rich query of one point (issue #37).
       ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
       procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
       procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
@@ -1022,7 +1029,7 @@ contains
    endsubroutine compute_centroid
 
    subroutine compute_distance(self, point, distance, is_signed, sign_algorithm, is_square_root, &
-                               facet_index, edge_index, vertex_index)
+                               facet_index, edge_index, vertex_index, closest_point, normal)
    !< Compute the (minimum) distance returning also the closest point.
    !<
    !< Signed-distance dispatch:
@@ -1041,6 +1048,8 @@ contains
    integer(I4P),              intent(out), optional :: facet_index     !< Index of facet containing the closest point.
    integer(I4P),              intent(out), optional :: edge_index      !< Local edge index on closest facet (0 if not on edge).
    integer(I4P),              intent(out), optional :: vertex_index    !< Local vertex index on closest facet (0 if not on vertex).
+   type(vector_R8P),          intent(out), optional :: closest_point   !< Closest point (issue #37; the point itself if the surface is empty).
+   type(vector_R8P),          intent(out), optional :: normal          !< Pseudo-normal of the closest feature (issue #37; zero if empty).
    logical                                          :: is_signed_      !< Local sentinel.
    integer(I4P)                                     :: algo            !< Resolved sign-algorithm code.
    real(R8P)                                        :: distance_       !< Minimum distance, temporary buffer.
@@ -1103,6 +1112,26 @@ contains
    case (-3_I4P:-1_I4P) ; vertex_index_ = -closest_region_
    end select
 
+   if (present(closest_point) .or. present(normal)) then
+      ! Rich outputs (issue #37): the region path, also when the distance took another path; it
+      ! does not change `distance`.
+      if (.not. (is_signed_ .and. algo == SIGN_PSEUDO_NORMAL) .and. self%facets_number > 0) then
+         block
+            real(R8P) :: d2_
+            call closest_with_region(self, point, d2_, facet_index_, closest_region_, closest_)
+         end block
+         edge_index_ = 0 ; vertex_index_ = 0
+         select case (closest_region_)
+         case (1_I4P:3_I4P) ; edge_index_   = closest_region_
+         case (-3_I4P:-1_I4P) ; vertex_index_ = -closest_region_
+         end select
+      endif
+      if (present(closest_point)) closest_point = closest_
+      if (present(normal)) then
+         normal = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+         if (facet_index_ > 0) normal = self%facet(facet_index_)%pseudo_normal_for_region(closest_region_)
+      endif
+   endif
    if (present(facet_index))  facet_index  = facet_index_
    if (present(edge_index))   edge_index   = edge_index_
    if (present(vertex_index)) vertex_index = vertex_index_
@@ -1131,29 +1160,6 @@ contains
                     &(valid: SIGN_RAY_INTERSECTIONS=1, SIGN_SOLID_ANGLE=2, SIGN_PSEUDO_NORMAL=3, SIGN_FAST_WINDING_NUMBER=4)'
       end select
    endif
-   contains
-      subroutine brute_force_with_region(s, p, d2, fid, region)
-      !< Brute-force fallback for the signed pseudo-normal path when the AABB is disabled —
-      !< returns d^2 along with the facet id and Voronoi region of the closest point.
-      class(surface_stl_object), intent(in)  :: s
-      type(vector_R8P),          intent(in)  :: p
-      real(R8P),                 intent(out) :: d2
-      integer(I4P),              intent(out) :: fid
-      integer(I4P),              intent(out) :: region
-      real(R8P)                              :: d2c
-      type(vector_R8P)                       :: cp
-      integer(I4P)                           :: rc, ff
-
-      d2 = MaxR8P; fid = 0; region = 0
-      do ff = 1, s%facets_number
-         call s%facet(ff)%compute_distance_with_region(point=p, distance=d2c, closest=cp, region=rc)
-         if (d2c < d2) then
-            d2     = d2c
-            fid    = s%facet(ff)%id
-            region = rc
-         endif
-      enddo
-      endsubroutine brute_force_with_region
    endsubroutine compute_distance
 
    pure subroutine compute_metrix(self)
@@ -1540,6 +1546,122 @@ contains
                               is_signed=is_signed, sign_algorithm=sign_algorithm, is_square_root=is_square_root)
    endfunction distance
 
+   subroutine query_point(self, point, distance, closest_point, facet, feature, feature_index, normal, body, &
+                          is_signed, sign_algorithm)
+   !< Rich query of one point (issue #37): distance (not squared), closest point, closest facet,
+   !< feature kind and local index, pseudo-normal of the closest feature, body of the facet.
+   !<
+   !< One traversal with the Voronoi region (`distance_tree_with_region`, or brute force when the
+   !< tree is disabled), then the closest point on the winning facet. Signed (default .true.):
+   !< SIGN_PSEUDO_NORMAL (default) from the region's pseudo-normal, other algorithms through
+   !< `is_point_inside`. Matches `compute_distance(is_signed=.true., is_square_root=.true.)` bit for
+   !< bit with the pseudo-normal sign (the same traversal and the same sign test). An empty surface
+   !< gives distance huge, the point itself as closest point, zeros elsewhere.
+   class(surface_stl_object), intent(in)            :: self           !< Surface.
+   type(vector_R8P),          intent(in)            :: point          !< Query point.
+   real(R8P),                 intent(out)           :: distance       !< Distance (negative inside when signed).
+   type(vector_R8P),          intent(out), optional :: closest_point  !< Closest point.
+   integer(I4P),              intent(out), optional :: facet          !< Closest facet.
+   integer(I4P),              intent(out), optional :: feature        !< FEATURE_FACE, FEATURE_EDGE or FEATURE_VERTEX.
+   integer(I4P),              intent(out), optional :: feature_index  !< Local edge or vertex index (0 for a face).
+   type(vector_R8P),          intent(out), optional :: normal         !< Pseudo-normal of the closest feature.
+   integer(I4P),              intent(out), optional :: body           !< Body of the closest facet.
+   logical,                   intent(in),  optional :: is_signed      !< Signed distance (default .true.).
+   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_* (default SIGN_PSEUDO_NORMAL).
+   real(R8P)                                        :: d2, side       !< Work.
+   integer(I4P)                                     :: f, region, algo !< Work.
+   type(vector_R8P)                                 :: cp, pn         !< Closest point, pseudo-normal.
+   logical                                          :: signed_        !< Resolved option.
+
+   signed_ = .true. ; if (present(is_signed)) signed_ = is_signed
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   cp = point ; f = 0_I4P ; region = 0_I4P ; pn = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+   if (self%facets_number == 0_I4P) then
+      distance = MaxR8P
+   else
+      call closest_with_region(self, point, d2, f, region, cp)
+      distance = sqrt(d2)
+      if (f > 0_I4P) pn = self%facet(f)%pseudo_normal_for_region(region)
+      if (signed_) then
+         if (algo == SIGN_PSEUDO_NORMAL) then
+            side = (point%x - cp%x) * pn%x + (point%y - cp%y) * pn%y + (point%z - cp%z) * pn%z
+            if (side < 0._R8P) distance = -distance
+         else
+            if (self%is_point_inside(point=point, sign_algorithm=algo)) distance = -distance
+         endif
+      endif
+   endif
+   if (present(closest_point)) closest_point = cp
+   if (present(facet)) facet = f
+   if (present(feature)) then
+      feature = 0_I4P
+      if (f > 0_I4P) then
+         feature = FEATURE_FACE
+         if (region >= 1_I4P .and. region <= 3_I4P) feature = FEATURE_EDGE
+         if (region <= -1_I4P .and. region >= -3_I4P) feature = FEATURE_VERTEX
+      endif
+   endif
+   if (present(feature_index)) feature_index = abs(region)
+   if (present(normal)) normal = pn
+   if (present(body)) then
+      body = 0_I4P
+      if (f > 0_I4P .and. allocated(self%facet_shell_)) body = self%shell_body(self%facet_shell_(f))
+   endif
+   endsubroutine query_point
+
+   subroutine query_many(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
+                         is_signed, sign_algorithm, status)
+   !< Batch rich query (issue #37): `query_point` for every point, OpenMP over the points.
+   !<
+   !< Every output after `distances` is optional (a caller pays only for what it asks); arrays are
+   !< caller-allocated: `closest_points(3, n)`, `normals(3, n)`, the others `(n)`. Bit-exact with
+   !< `query_point`. `status = STATUS_INVALID_INPUT` on a size mismatch.
+   class(surface_stl_object), intent(in)            :: self               !< Surface.
+   type(vector_R8P),          intent(in)            :: points(:)          !< Query points [n].
+   real(R8P),                 intent(out)           :: distances(:)       !< Distances [n].
+   real(R8P),                 intent(out), optional :: closest_points(:,:) !< Closest points [3, n].
+   integer(I4P),              intent(out), optional :: facets(:)          !< Closest facets [n].
+   integer(I4P),              intent(out), optional :: features(:)        !< FEATURE_* [n].
+   integer(I4P),              intent(out), optional :: feature_indexes(:) !< Local edge/vertex indexes [n].
+   real(R8P),                 intent(out), optional :: normals(:,:)       !< Pseudo-normals [3, n].
+   integer(I4P),              intent(out), optional :: bodies(:)          !< Bodies [n].
+   logical,                   intent(in),  optional :: is_signed          !< Signed (default .true.).
+   integer(I4P),              intent(in),  optional :: sign_algorithm     !< SIGN_* (default SIGN_PSEUDO_NORMAL).
+   integer(I4P),              intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(vector_R8P)                                 :: cp, pn             !< Per-point closest point, normal.
+   integer(I4P)                                     :: f, ft, fi, b, i, n !< Per-point outputs, counters.
+   logical                                          :: signed_, bad       !< Resolved option, size check.
+   integer(I4P)                                     :: algo               !< Resolved algorithm.
+
+   if (present(status)) status = STATUS_OK
+   n = size(points, kind=I4P)
+   bad = size(distances, kind=I4P) /= n
+   if (present(closest_points)) bad = bad .or. size(closest_points, 1) /= 3 .or. size(closest_points, 2) /= n
+   if (present(normals)) bad = bad .or. size(normals, 1) /= 3 .or. size(normals, 2) /= n
+   if (present(facets)) bad = bad .or. size(facets) /= n
+   if (present(features)) bad = bad .or. size(features) /= n
+   if (present(feature_indexes)) bad = bad .or. size(feature_indexes) /= n
+   if (present(bodies)) bad = bad .or. size(bodies) /= n
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   signed_ = .true. ; if (present(is_signed)) signed_ = is_signed
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   !$omp parallel do default(shared) schedule(static) private(i, cp, pn, f, ft, fi, b)
+   do i = 1_I4P, n
+      call self%query_point(point=points(i), distance=distances(i), closest_point=cp, facet=f, feature=ft, &
+                            feature_index=fi, normal=pn, body=b, is_signed=signed_, sign_algorithm=algo)
+      if (present(closest_points)) closest_points(:, i) = [cp%x, cp%y, cp%z]
+      if (present(facets)) facets(i) = f
+      if (present(features)) features(i) = ft
+      if (present(feature_indexes)) feature_indexes(i) = fi
+      if (present(normals)) normals(:, i) = [pn%x, pn%y, pn%z]
+      if (present(bodies)) bodies(i) = b
+   enddo
+   !$omp end parallel do
+   endsubroutine query_many
+
    subroutine distance_many(self, points, distances, is_signed, sign_algorithm, is_square_root, status)
    !< Batch distance query over a point array — the Adam/Xall embedded-boundary
    !< access pattern (one distance per Cartesian grid point against a static
@@ -1601,6 +1723,52 @@ contains
    enddo
    !$omp end parallel do
    endsubroutine distance_many
+
+   subroutine brute_force_with_region(s, p, d2, fid, region)
+   !< Brute-force fallback for the signed pseudo-normal path when the AABB is disabled —
+   !< returns d^2 along with the facet id and Voronoi region of the closest point.
+   class(surface_stl_object), intent(in)  :: s
+   type(vector_R8P),          intent(in)  :: p
+   real(R8P),                 intent(out) :: d2
+   integer(I4P),              intent(out) :: fid
+   integer(I4P),              intent(out) :: region
+   real(R8P)                              :: d2c
+   type(vector_R8P)                       :: cp
+   integer(I4P)                           :: rc, ff
+
+   d2 = MaxR8P; fid = 0; region = 0
+   do ff = 1, s%facets_number
+      call s%facet(ff)%compute_distance_with_region(point=p, distance=d2c, closest=cp, region=rc)
+      if (d2c < d2) then
+         d2     = d2c
+         fid    = s%facet(ff)%id
+         region = rc
+      endif
+   enddo
+   endsubroutine brute_force_with_region
+
+   subroutine closest_with_region(self, point, d2, facet, region, closest)
+   !< Squared distance, closest facet, Voronoi region and closest point (issue #37): the traversal
+   !< of the pseudo-normal path of `compute_distance` (tree, or brute force when disabled), then
+   !< the closest point on the winning facet. Non-empty surface.
+   type(surface_stl_object), intent(in)  :: self    !< Surface.
+   type(vector_R8P),         intent(in)  :: point   !< Query point.
+   real(R8P),                intent(out) :: d2      !< Squared distance.
+   integer(I4P),             intent(out) :: facet   !< Closest facet.
+   integer(I4P),             intent(out) :: region  !< Voronoi region tag.
+   type(vector_R8P),         intent(out) :: closest !< Closest point.
+   real(R8P)                             :: dd      !< Recomputed squared distance (discarded).
+
+   closest = point
+   if (self%aabb%get_is_initialized() .and. self%aabb%get_use_index()) then
+      call self%aabb%distance_tree_with_region(facet=self%facet, point=point, distance=d2, closest_facet=facet, &
+                                               closest_region=region)
+   else
+      call brute_force_with_region(self, point, d2, facet, region)
+   endif
+   if (facet > 0_I4P) call self%facet(facet)%compute_distance_with_region(point=point, distance=dd, closest=closest, &
+                                                                          region=region)
+   endsubroutine closest_with_region
 
    pure subroutine build_pnormal_payload(self)
    !< Build the flat per-facet pseudo-normal SoA for the device sign path
