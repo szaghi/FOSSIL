@@ -9,7 +9,9 @@ program fossil_test_pose
 !<   benchmark and the bunny, under rotations about several axes with large translations; a NACA 0012
 !<   and an annulus under in-plane poses: signed distances to 1e-14 (L + |t|), closest points to
 !<   1e-14 (L + |t|), normals to 1e-14 (L + |t|) / h (h the shortest edge: the reference normals are
-!<   rebuilt from moved, rounded vertices), inside flags equal at points farther than 1e-12 L.
+!<   rebuilt from moved, rounded vertices), inside flags equal at points farther than 1e-12 L. Closest
+!<   points and normals are compared where the foot point is unique (`ambiguous` with a 1e-9 relative
+!<   tolerance): at a near-tie either foot is a correct answer. The points are seeded (deterministic).
 
 use fossil,                   only : surface_stl_object, curve_object, facet_object, rigid_pose_t, rigid_pose_2d_t, &
                                      pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose, &
@@ -32,6 +34,8 @@ real(R8P)                 :: u(200), v(200), x(3), e
 integer(I4P)              :: k, f, m
 logical                   :: ok(4)
 
+call random_seed(size=k)
+call random_seed(put=[(4141 + m, m = 1, k)]) ! deterministic points
 ! 1. algebra
 p1 = pose_from_axis_angle([1._R8P, 2._R8P, 3._R8P], 0.7_R8P, [10._R8P, -3._R8P, 5._R8P])
 p2 = pose_from_quaternion([cos(0.35_R8P), sin(0.35_R8P) * [1._R8P, 2._R8P, 3._R8P] / sqrt(14._R8P)], [10._R8P, -3._R8P, 5._R8P])
@@ -109,7 +113,7 @@ contains
    type(vector_R8P)         :: q(N)    !< World points.
    real(R8P) :: lo(3), hi(3), r(3), w(3), l, scale, d1(N), d2(N), c1(3, N), c2(3, N), n1(3, N), n2(3, N), ed, ec, en, hmin !< Work.
    integer(I4P) :: i, ff, mm, nsign, ninc !< Work.
-   logical      :: in1, in2 !< Work.
+   logical      :: in1, in2, amb(N) !< Work.
 
    mv = sp
    do ff = 1, size(sp%v, 3)
@@ -126,14 +130,14 @@ contains
       q(i) = vector_R8P(w(1), w(2), w(3))
    enddo
    call sb%query_many(points=q, distances=d1, closest_points=c1, normals=n1, pose=pose)
-   call sm%query_many(points=q, distances=d2, closest_points=c2, normals=n2)
+   call sm%query_many(points=q, distances=d2, closest_points=c2, normals=n2, ambiguous=amb, rel_tolerance=1.e-9_R8P)
    ed = 0._R8P ; ec = 0._R8P ; en = 0._R8P ; nsign = 0 ; ninc = 0
    do i = 1, N
       ed = max(ed, abs(abs(d1(i)) - abs(d2(i))))
-      ec = max(ec, norm2(c1(:, i) - c2(:, i)))
+      if (.not. amb(i)) ec = max(ec, norm2(c1(:, i) - c2(:, i))) ! a near-tie may pick either foot
       if (abs(d2(i)) > 1.e-12_R8P * l) then
          if ((d1(i) < 0._R8P) .neqv. (d2(i) < 0._R8P)) nsign = nsign + 1
-         en = max(en, norm2(n1(:, i) - n2(:, i)))
+         if (.not. amb(i)) en = max(en, norm2(n1(:, i) - n2(:, i)))
          in1 = sb%is_point_inside(q(i), sign_algorithm=SIGN_FAST_WINDING_NUMBER, pose=pose)
          in2 = sm%is_point_inside(q(i), sign_algorithm=SIGN_FAST_WINDING_NUMBER)
          if (in1 .neqv. in2) ninc = ninc + 1
@@ -165,6 +169,7 @@ contains
    real(R8P) :: mu(size(uu)), mvv(size(uu)), w(2), lo(2), hi(2), r(2), q(2, N), d1(N), d2(N), c1(2, N), c2(2, N), n1(2, N), &
                 n2(2, N), l, scale, ed, ec, en, hmin !< Work.
    integer(I4P) :: i, nsign, ninc !< Work.
+   logical      :: amb(N) !< Ambiguous foot points of the reference.
 
    do i = 1, size(uu)
       w = to_world(pose, [uu(i), vv(i)]) ; mu(i) = w(1) ; mvv(i) = w(2)
@@ -175,13 +180,13 @@ contains
       call random_number(r) ; q(:, i) = lo - 0.2_R8P * (hi - lo) + 1.4_R8P * r * (hi - lo)
    enddo
    call cb%query_many(points=q, distances=d1, closest_points=c1, normals=n1, pose=pose)
-   call cm%query_many(points=q, distances=d2, closest_points=c2, normals=n2)
+   call cm%query_many(points=q, distances=d2, closest_points=c2, normals=n2, ambiguous=amb, rel_tolerance=1.e-9_R8P)
    ed = maxval(abs(abs(d1) - abs(d2))) ; ec = 0._R8P ; en = 0._R8P ; nsign = 0 ; ninc = 0
    do i = 1, N
-      ec = max(ec, norm2(c1(:, i) - c2(:, i)))
+      if (.not. amb(i)) ec = max(ec, norm2(c1(:, i) - c2(:, i))) ! a near-tie may pick either foot
       if (abs(d2(i)) > 1.e-12_R8P * l) then
          if ((d1(i) < 0._R8P) .neqv. (d2(i) < 0._R8P)) nsign = nsign + 1
-         en = max(en, norm2(n1(:, i) - n2(:, i)))
+         if (.not. amb(i)) en = max(en, norm2(n1(:, i) - n2(:, i)))
          if (cb%is_point_inside(q(:, i), pose=pose) .neqv. cm%is_point_inside(q(:, i))) ninc = ninc + 1
       endif
    enddo
