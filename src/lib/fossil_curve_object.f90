@@ -687,7 +687,8 @@ contains
    endsubroutine distance_many_device
 
    recursive subroutine query_many(self, points, distances, closest_points, segments, vertices, normals, bodies, is_signed, &
-                                   sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status, pose)
+                                   sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status, pose, &
+                                   curvatures)
    !< Batched rich query (issue #37), CPU, OpenMP over the points: distance (signed by default),
    !< closest point, closest segment, closest vertex (0 in a segment interior), pseudo-normal of the
    !< closest feature (segment normal or vertex bisector), body. Every output after `distances` is
@@ -698,6 +699,11 @@ contains
    !< closest point farther than `foot_tolerance` (default 1e-9 of the box diagonal) from the foot
    !< point within (1 + `rel_tolerance`) (default 1e-6) of the distance; `second_foot_points(:, i)` is
    !< the nearest such point (the foot point itself otherwise).
+   !< Curvature at the foot point (issue #42 step 3, CPU only): `curvatures(i)` is the vertex curvature
+   !< (turning angle over the mean length of the two segments) interpolated linearly along the closest
+   !< segment. Positive where the curve is convex seen from outside the solid (an outer loop turning
+   !< left), negative at concave walls and on holes; 0 at the ends of an open loop. A regular N-gon of
+   !< circumradius R gives (1/R) (pi/N) / sin(pi/N) = (1/R) (1 + O(h^2)).
    class(curve_object), intent(in)            :: self               !< Curve.
    real(R8P),           intent(in)            :: points(:,:)        !< Points [2, n].
    real(R8P),           intent(out)           :: distances(:)       !< Distances [n].
@@ -714,6 +720,7 @@ contains
    real(R8P),           intent(in),  optional :: foot_tolerance     !< Foot separation (default 1e-9 box diagonal).
    integer(I4P),        intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
    type(rigid_pose_2d_t), intent(in), optional :: pose              !< Pose of the curve (issue #41): world points, outputs.
+   real(R8P),           intent(out), optional :: curvatures(:)      !< Curvature at the foot point [n].
    real(R8P)                                  :: cp(2), nn(2), cp2(2), rel_, foot_ !< Per-point outputs, tolerances.
    logical                                    :: amb, want_amb      !< Ambiguity.
    integer(I4P)                               :: sg, vx, b, i, n    !< Per-point outputs, counters.
@@ -723,7 +730,7 @@ contains
       call self%query_many(points=body_points2(pose, points), distances=distances, closest_points=closest_points, &
                            segments=segments, vertices=vertices, normals=normals, bodies=bodies, is_signed=is_signed, &
                            sign_algorithm=sign_algorithm, ambiguous=ambiguous, second_foot_points=second_foot_points, &
-                           rel_tolerance=rel_tolerance, foot_tolerance=foot_tolerance, status=status)
+                           rel_tolerance=rel_tolerance, foot_tolerance=foot_tolerance, status=status, curvatures=curvatures)
       if (present(status)) then
          if (status /= STATUS_OK) return
       endif
@@ -742,6 +749,12 @@ contains
    endif
    if (present(ambiguous)) then
       if (size(ambiguous) /= size(distances)) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+   endif
+   if (present(curvatures)) then
+      if (size(curvatures) /= size(distances)) then
          if (present(status)) status = STATUS_INVALID_INPUT
          return
       endif
@@ -773,9 +786,51 @@ contains
          if (present(ambiguous)) ambiguous(i) = amb
          if (present(second_foot_points)) second_foot_points(:, i) = cp2
       endif
+      if (present(curvatures)) curvatures(i) = foot_curvature_2d(self, sg, cp)
    enddo
    !$omp end parallel do
    endsubroutine query_many
+
+   pure function vertex_curvature(self, i) result(kappa)
+   !< Discrete curvature at vertex i (issue #42 step 3): the turning angle between the incoming and
+   !< outgoing segments over the mean of their lengths; positive for a left turn (convex seen from
+   !< outside the solid). 0 at the ends of an open loop and at a degenerate vertex.
+   class(curve_object), intent(in) :: self  !< Curve.
+   integer(I4P),        intent(in) :: i     !< Vertex.
+   real(R8P)                       :: kappa !< Curvature.
+   real(R8P)                       :: au, av, bu, bv, la, lb !< Incoming, outgoing segments.
+   integer(I4P)                    :: ip, ix !< Neighbours.
+
+   kappa = 0._R8P
+   ip = self%prev(i) ; ix = self%next(i)
+   if (ip <= 0_I4P .or. ix <= 0_I4P) return
+   au = self%u(i) - self%u(ip) ; av = self%v(i) - self%v(ip)
+   bu = self%u(ix) - self%u(i) ; bv = self%v(ix) - self%v(i)
+   la = hypot(au, av) ; lb = hypot(bu, bv)
+   if (la <= 0._R8P .or. lb <= 0._R8P) return
+   kappa = atan2(au * bv - av * bu, au * bu + av * bv) / (0.5_R8P * (la + lb))
+   endfunction vertex_curvature
+
+   pure function foot_curvature_2d(self, sg, cp) result(kappa)
+   !< Curvature at a foot point on segment sg (issue #42 step 3): the two vertex curvatures
+   !< interpolated linearly in the foot's parameter along the segment (clamped to [0, 1]).
+   class(curve_object), intent(in) :: self  !< Curve.
+   integer(I4P),        intent(in) :: sg    !< Segment (its start vertex; 0: none).
+   real(R8P),           intent(in) :: cp(2) !< Foot point.
+   real(R8P)                       :: kappa !< Curvature.
+   real(R8P)                       :: du, dv, l2, t !< Segment, parameter.
+   integer(I4P)                    :: j     !< End vertex.
+
+   kappa = 0._R8P
+   if (sg <= 0_I4P) return
+   j = self%next(sg)
+   if (j <= 0_I4P) return
+   du = self%u(j) - self%u(sg) ; dv = self%v(j) - self%v(sg)
+   l2 = du * du + dv * dv
+   t = 0._R8P
+   if (l2 > 0._R8P) t = min(max(((cp(1) - self%u(sg)) * du + (cp(2) - self%v(sg)) * dv) / l2, 0._R8P), 1._R8P)
+   kappa = (1._R8P - t) * vertex_curvature(self, sg) + t * vertex_curvature(self, j)
+   endfunction foot_curvature_2d
 
    recursive subroutine query_many_device(self, points, distances, closest_points, segments, vertices, normals, bodies, &
                                           is_signed, sign_algorithm, status, pose)

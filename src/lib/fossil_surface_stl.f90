@@ -1656,7 +1656,7 @@ contains
 
    recursive subroutine query_many(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
                                    is_signed, sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, &
-                                   status, pose)
+                                   status, pose, curvatures)
    !< Batch rich query (issue #37): `query_point` for every point, OpenMP over the points.
    !<
    !< Every output after `distances` is optional (a caller pays only for what it asks); arrays are
@@ -1668,6 +1668,13 @@ contains
    !< foot point and its distance within (1 + `rel_tolerance`) (default 1e-6) of the minimum: a point
    !< on or near the medial axis, a thin gap. `second_foot_points(:, i)` is that facet's closest point
    !< (the nearest such; the foot point itself when not ambiguous). FOSSIL reports, the caller decides.
+   !<
+   !< Curvature at the foot point (issue #42 step 3, CPU only): `curvatures(:, i)` = (H, K), the mean
+   !< curvature (k1 + k2) / 2 and the Gaussian curvature k1 k2 interpolated with the foot's barycentric
+   !< weights from the per-vertex `mean_curvature` (cotangent Laplacian) and `gaussian_curvature` (angle
+   !< defect). Sign: H > 0 where the surface is convex seen from outside (from the side the normals point
+   !< to): a sphere has (1/R, 1/R^2), a cylinder (1/(2R), 0). The per-vertex fields are built once per
+   !< call, O(facets).
    class(surface_stl_object), intent(in)            :: self               !< Surface.
    type(vector_R8P),          intent(in)            :: points(:)          !< Query points [n].
    real(R8P),                 intent(out)           :: distances(:)       !< Distances [n].
@@ -1686,6 +1693,8 @@ contains
    integer(I4P),              intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
    type(rigid_pose_t),        intent(in),  optional :: pose               !< Pose of the body (issue #41): world-frame points
                                                                           !< and outputs.
+   real(R8P),                 intent(out), optional :: curvatures(:,:)    !< Mean and Gaussian curvature at the foot [2, n].
+   real(R8P), allocatable                           :: hv(:), kv(:)       !< Per-vertex mean and Gaussian curvature.
    type(vector_R8P)                                 :: cp, pn, cp2        !< Per-point closest point, normal, second foot.
    real(R8P)                                        :: rel_, foot_        !< Resolved tolerances.
    logical                                          :: amb, want_amb      !< Per-point flag, any ambiguity output.
@@ -1698,7 +1707,7 @@ contains
                            facets=facets, features=features, feature_indexes=feature_indexes, normals=normals, bodies=bodies, &
                            is_signed=is_signed, sign_algorithm=sign_algorithm, ambiguous=ambiguous, &
                            second_foot_points=second_foot_points, rel_tolerance=rel_tolerance, foot_tolerance=foot_tolerance, &
-                           status=status)
+                           status=status, curvatures=curvatures)
       if (present(status)) then
          if (status /= STATUS_OK) return
       endif
@@ -1720,6 +1729,7 @@ contains
    if (present(bodies)) bad = bad .or. size(bodies) /= n
    if (present(ambiguous)) bad = bad .or. size(ambiguous) /= n
    bad = bad .or. bad_shape3(second_foot_points, n)
+   if (present(curvatures)) bad = bad .or. size(curvatures, 1) /= 2 .or. size(curvatures, 2) /= n
    if (bad) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
@@ -1729,6 +1739,10 @@ contains
    want_amb = present(ambiguous) .or. present(second_foot_points)
    rel_ = 1.e-6_R8P ; if (present(rel_tolerance)) rel_ = rel_tolerance
    foot_ = 1.e-9_R8P * vnorm(self%bmax - self%bmin) ; if (present(foot_tolerance)) foot_ = foot_tolerance
+   if (present(curvatures)) then
+      call self%mean_curvature(H=hv)
+      call self%gaussian_curvature(K=kv)
+   endif
    !$omp parallel do default(shared) schedule(static) private(i, cp, pn, f, ft, fi, b, cp2, amb)
    do i = 1_I4P, n
       call self%query_point(point=points(i), distance=distances(i), closest_point=cp, facet=f, feature=ft, &
@@ -1744,9 +1758,45 @@ contains
       if (present(feature_indexes)) feature_indexes(i) = fi
       if (present(normals)) normals(:, i) = [pn%x, pn%y, pn%z]
       if (present(bodies)) bodies(i) = b
+      if (present(curvatures)) curvatures(:, i) = foot_curvature(self, f, cp, hv, kv)
    enddo
    !$omp end parallel do
    endsubroutine query_many
+
+   function foot_curvature(self, f, cp, hv, kv) result(c)
+   !< Mean and Gaussian curvature at a foot point on facet f (issue #42 step 3): the per-vertex values
+   !< weighted by the barycentric coordinates of the foot, clamped to the triangle (the foot lies in it
+   !< up to round-off). (0, 0) for no facet or a degenerate facet.
+   class(surface_stl_object), intent(in) :: self      !< Surface.
+   integer(I4P),              intent(in) :: f         !< Facet (0: none).
+   type(vector_R8P),          intent(in) :: cp        !< Foot point.
+   real(R8P),                 intent(in) :: hv(:), kv(:) !< Per-vertex mean and Gaussian curvature.
+   real(R8P)                             :: c(2)      !< (H, K).
+   type(vector_R8P)                      :: e1, e2, w !< Edges, foot offset.
+   real(R8P)                             :: d11, d12, d22, d1w, d2w, den, b(3) !< Gram system, weights.
+   integer(I4P)                          :: vid(3), k !< Pool vertices, counter.
+
+   c = 0._R8P
+   if (f <= 0_I4P .or. f > self%facets_number) return
+   do k = 1_I4P, 3_I4P
+      vid(k) = self%vertex_pool%facet_vid(f, k)
+   enddo
+   if (any(vid <= 0_I4P) .or. any(vid > size(hv, kind=I4P))) return
+   e1 = self%facet(f)%vertex(2) - self%facet(f)%vertex(1)
+   e2 = self%facet(f)%vertex(3) - self%facet(f)%vertex(1)
+   w  = cp - self%facet(f)%vertex(1)
+   d11 = e1%dotproduct(e1) ; d12 = e1%dotproduct(e2) ; d22 = e2%dotproduct(e2)
+   d1w = e1%dotproduct(w)  ; d2w = e2%dotproduct(w)
+   den = d11 * d22 - d12 * d12
+   if (den <= 0._R8P) return
+   b(2) = (d22 * d1w - d12 * d2w) / den
+   b(3) = (d11 * d2w - d12 * d1w) / den
+   b(2:3) = max(b(2:3), 0._R8P)
+   b(1) = max(1._R8P - b(2) - b(3), 0._R8P)
+   b = b / sum(b)
+   c(1) = sum(b * hv(vid))
+   c(2) = sum(b * kv(vid))
+   endfunction foot_curvature
 
    subroutine box_classify_many(self, lo, hi, codes, radius, sign_algorithm, inside, status)
    !< Classify boxes against the surface (issue #38): OpenMP over the boxes.
