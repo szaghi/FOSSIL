@@ -805,6 +805,24 @@ device after `enter_device`; pseudo-normal or fast-winding-number sign),
 
 ---
 
+### `move`
+
+```fortran
+call surface%move(pose)
+```
+
+**Purpose.** Move the surface rigidly by a `rigid_pose_t` and refit the tree
+(O(N)) instead of rebuilding it (issue #41): queries afterwards equal those
+on the mesh moved and analyzed from scratch.
+
+**Related.** The optional `pose` argument of `distance_many`, `query_many`,
+`is_point_inside`, `distance_many_device`, `query_many_device` (body-frame
+queries, no move); `state_changes(pose0, pose1, points, fresh, dead,
+sign_algorithm, checked, status)` (fresh and dead points between two poses).
+See [Moving bodies](/guide/advanced/moving-bodies).
+
+---
+
 ### `line_crossings`
 
 ```fortran

@@ -86,6 +86,7 @@ export default withMermaid({
             { text: 'AMR tagging',                link: '/guide/advanced/amr-tagging' },
             { text: 'Sign algorithms benchmark',  link: '/guide/advanced/sign-benchmark' },
             { text: 'Cut-cell geometry',          link: '/guide/advanced/cut-cells' },
+            { text: 'Moving bodies',              link: '/guide/advanced/moving-bodies' },
           ],
         },
         {
