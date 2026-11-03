@@ -23,7 +23,9 @@ module fossil_curve_slice
 !<
 !< The plane at a face that bounds the solid from below (e.g. z = 0 for the unit cube) gives an
 !< empty section: its vertices count as above, so nothing is below the plane. At a face bounding
-!< it from above (z = 1) the section is that face's outline.
+!< it from above (z = 1) the section is that face's outline. With `on_plane_low` (issue #40: the
+!< plane taken at level + eps, as the cut cells do) a vertex on the plane counts as below, and the
+!< roles swap: z = 0 gives the face outline, z = 1 an empty section.
 use fossil_curve_object,       only : curve_object
 use fossil_facet_object,       only : facet_object
 use fossil_predicates,         only : orient2d_xy
@@ -36,7 +38,7 @@ private
 public :: slice_surface
 
 contains
-   subroutine slice_surface(surface, normal_axis, level, curve, merge_collinear, open_loops, status)
+   subroutine slice_surface(surface, normal_axis, level, curve, merge_collinear, open_loops, on_plane_low, status)
    !< Section of `surface` by the plane x(normal_axis) = level, as a curve in that plane.
    !<
    !< `open_loops` returns the number of chains that did not close (0 for a watertight surface).
@@ -48,6 +50,7 @@ contains
    type(curve_object),       intent(inout)         :: curve           !< Section.
    logical,                  intent(in),  optional :: merge_collinear !< Remove collinear vertices (default .false.).
    integer(I4P),             intent(out), optional :: open_loops      !< Chains that did not close.
+   logical,                  intent(in),  optional :: on_plane_low    !< A vertex on the plane counts as below (default .false.).
    integer(I4P),             intent(out), optional :: status          !< STATUS_OK or STATUS_INVALID_INPUT.
    type(facet_object), pointer                     :: f               !< Facet cursor.
    real(R8P),    allocatable                       :: s(:,:)          !< Segments [su, sv, eu, ev; n].
@@ -56,7 +59,7 @@ contains
    logical,      allocatable                       :: closed(:)       !< Loop closed flags.
    real(R8P)                                       :: x(3,3), pa(2), pb(2) !< Facet vertices, crossings.
    integer(I4P)                                    :: n, i, e, en, nopen, ia, ib !< Work.
-   logical                                         :: above(3), merge_ !< Work.
+   logical                                         :: above(3), merge_, low_ !< Work.
 
    call curve%destroy
    if (present(status)) status = STATUS_OK
@@ -66,6 +69,7 @@ contains
       return
    endif
    merge_ = .false. ; if (present(merge_collinear)) merge_ = merge_collinear
+   low_ = .false. ; if (present(on_plane_low)) low_ = on_plane_low
    allocate(s(4, max(1, surface%get_facets_number())))
    n = 0_I4P
    do i = 1, surface%get_facets_number()
@@ -73,7 +77,11 @@ contains
       x(:, 1) = [f%vertex(1)%x, f%vertex(1)%y, f%vertex(1)%z]
       x(:, 2) = [f%vertex(2)%x, f%vertex(2)%y, f%vertex(2)%z]
       x(:, 3) = [f%vertex(3)%x, f%vertex(3)%y, f%vertex(3)%z]
-      above = x(normal_axis, :) >= level
+      if (low_) then
+         above = x(normal_axis, :) > level  ! plane at level + eps (the cut-cell rule, issue #40)
+      else
+         above = x(normal_axis, :) >= level ! plane at level - eps
+      endif
       if (all(above) .or. .not. any(above)) cycle
       ia = 0_I4P ; ib = 0_I4P
       do e = 1, 3

@@ -27,6 +27,7 @@ use fossil_marching_cubes, only : extract_isosurface, MC_STATUS_OK, MC_STATUS_BA
 use fossil_surface_stl_object
 use fossil_distance_field, only : distance_field_object, FAR_VALUE
 use fossil_curve_slice, only : slice_surface
+use fossil_cut_cells_3d, only : cut_cells_3d_t, cut_cells_3d
 use fossil_box_query, only : BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_curve_object, only : curve_object, cut_cells_2d_t, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, &
                                CURVE_ZERO_AREA_LOOP, CURVE_WRONG_ORIENTATION, CURVE_OPEN_LOOP
@@ -37,6 +38,7 @@ public :: facet_object
 public :: surface_stl_object
 public :: distance_field_object, FAR_VALUE
 public :: slice_surface
+public :: cut_cells_3d_t, cut_cells_3d
 public :: curve_object, cut_cells_2d_t, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, CURVE_ZERO_AREA_LOOP, &
           CURVE_WRONG_ORIENTATION, CURVE_OPEN_LOOP
 public :: intersection_pair_t
