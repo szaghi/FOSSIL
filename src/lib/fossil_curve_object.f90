@@ -27,7 +27,7 @@ module fossil_curve_object
 !< Exactness. Metrics are plain floating point. Nesting (and so orientation validity) uses the
 !< exact `orient2d_xy` crossing test, so every loop gets the same answer from every query.
 use fossil_predicates,         only : orient2d_xy
-use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, &
+use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, segment_point_distance2, &
                                      segment_closest_oac, segment_winding_number_oac
 use fossil_surface_stl_object, only : STATUS_OK, STATUS_INVALID_INPUT, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL, &
                                      SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
@@ -248,13 +248,17 @@ contains
    endsubroutine distance_many_device
 
    subroutine query_many(self, points, distances, closest_points, segments, vertices, normals, bodies, is_signed, &
-                         sign_algorithm, status)
+                         sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status)
    !< Batched rich query (issue #37), CPU, OpenMP over the points: distance (signed by default),
    !< closest point, closest segment, closest vertex (0 in a segment interior), pseudo-normal of the
    !< closest feature (segment normal or vertex bisector), body. Every output after `distances` is
    !< optional; `closest_points(2, n)`, `normals(2, n)`. Each point runs `curve_query_oac`, the kernel
    !< of `query_many_device`, and matches `compute_distance` bit for bit. Refusals as in
    !< `distance_many`.
+   !< Multiple foot points (issue #37 step 7, CPU only): `ambiguous(i)` when another segment has its
+   !< closest point farther than `foot_tolerance` (default 1e-9 of the box diagonal) from the foot
+   !< point within (1 + `rel_tolerance`) (default 1e-6) of the distance; `second_foot_points(:, i)` is
+   !< the nearest such point (the foot point itself otherwise).
    class(curve_object), intent(in)            :: self               !< Curve.
    real(R8P),           intent(in)            :: points(:,:)        !< Points [2, n].
    real(R8P),           intent(out)           :: distances(:)       !< Distances [n].
@@ -265,22 +269,38 @@ contains
    integer(I4P),        intent(out), optional :: bodies(:)          !< Bodies [n].
    logical,             intent(in),  optional :: is_signed          !< Signed (default .true.).
    integer(I4P),        intent(in),  optional :: sign_algorithm     !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
+   logical,             intent(out), optional :: ambiguous(:)       !< Another foot point within tolerance [n].
+   real(R8P),           intent(out), optional :: second_foot_points(:,:) !< Second foot points [2, n].
+   real(R8P),           intent(in),  optional :: rel_tolerance      !< Relative tolerance (default 1e-6).
+   real(R8P),           intent(in),  optional :: foot_tolerance     !< Foot separation (default 1e-9 box diagonal).
    integer(I4P),        intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
-   real(R8P)                                  :: cp(2), nn(2)       !< Per-point outputs.
+   real(R8P)                                  :: cp(2), nn(2), cp2(2), rel_, foot_ !< Per-point outputs, tolerances.
+   logical                                    :: amb, want_amb      !< Ambiguity.
    integer(I4P)                               :: sg, vx, b, i, n    !< Per-point outputs, counters.
    logical                                    :: signed_, fwn       !< Resolved options.
 
    if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
-   if (.not. rich_sizes_ok(size(distances, kind=I4P), closest_points, segments, vertices, normals, bodies)) then
+   if (.not. rich_sizes_ok(size(distances, kind=I4P), closest_points, segments, vertices, normals, bodies) .or. &
+       .not. rich_sizes_ok(size(distances, kind=I4P), closest_points=second_foot_points)) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
+   endif
+   if (present(ambiguous)) then
+      if (size(ambiguous) /= size(distances)) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
    endif
    n = size(distances, kind=I4P)
    if (self%bvh%nodes_number == 0_I4P) then
       distances = huge(1._R8P)
       return
    endif
-   !$omp parallel do default(shared) private(i, cp, nn, sg, vx, b) schedule(static)
+   want_amb = present(ambiguous) .or. present(second_foot_points)
+   rel_ = 1.e-6_R8P ; if (present(rel_tolerance)) rel_ = rel_tolerance
+   foot_ = 1.e-9_R8P * hypot(self%bmax(1) - self%bmin(1), self%bmax(2) - self%bmin(2))
+   if (present(foot_tolerance)) foot_ = foot_tolerance
+   !$omp parallel do default(shared) private(i, cp, nn, sg, vx, b, cp2, amb) schedule(static)
    do i = 1, n
       call curve_query_oac(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, self%bvh%right, &
                            self%bvh%first, self%bvh%last, self%bvh%a_u, self%bvh%a_v, self%bvh%d_u, self%bvh%d_v, &
@@ -293,6 +313,11 @@ contains
       if (present(vertices)) vertices(i) = vx
       if (present(normals)) normals(:, i) = nn
       if (present(bodies)) bodies(i) = b
+      if (want_amb) then
+         call second_foot_2d(self, points(:, i), cp, abs(distances(i)), rel_, foot_, amb, cp2)
+         if (present(ambiguous)) ambiguous(i) = amb
+         if (present(second_foot_points)) second_foot_points(:, i) = cp2
+      endif
    enddo
    !$omp end parallel do
    endsubroutine query_many
@@ -1411,6 +1436,36 @@ contains
    endif
    if (side < 0._R8P) d = -d
    endsubroutine curve_query_oac
+
+   pure subroutine second_foot_2d(self, p, cp1, d1, rel, foot_tol, found, cp2)
+   !< Nearest segment whose closest point is farther than foot_tol from cp1 within (1 + rel) d1
+   !< (issue #37): candidates from a box query of half-width (1 + rel) d1 around p.
+   type(curve_object), intent(in)  :: self     !< Curve.
+   real(R8P),          intent(in)  :: p(2)     !< Point.
+   real(R8P),          intent(in)  :: cp1(2)   !< First foot point.
+   real(R8P),          intent(in)  :: d1       !< Minimum distance.
+   real(R8P),          intent(in)  :: rel      !< Relative tolerance.
+   real(R8P),          intent(in)  :: foot_tol !< Foot separation.
+   logical,            intent(out) :: found    !< Second foot point found.
+   real(R8P),          intent(out) :: cp2(2)   !< Second foot point (cp1 if none).
+   integer(I4P), allocatable       :: ids(:)   !< Candidates.
+   real(R8P)                       :: r, bound, d2, t, c(2) !< Work.
+   integer(I4P)                    :: m, j, k, f !< Work.
+
+   found = .false. ; cp2 = cp1
+   r = (1._R8P + rel) * d1
+   bound = r * r
+   call self%bvh%segments_in_box(p(1) - r, p(2) - r, p(1) + r, p(2) + r, ids, m)
+   do j = 1, m
+      k = ids(j)
+      call segment_point_distance2(self%bvh%a_u(k), self%bvh%a_v(k), self%bvh%d_u(k), self%bvh%d_v(k), self%bvh%len2(k), &
+                                   p(1), p(2), d2, t, f)
+      if (d2 > bound) cycle
+      c = [self%bvh%a_u(k) + t * self%bvh%d_u(k), self%bvh%a_v(k) + t * self%bvh%d_v(k)]
+      if (hypot(c(1) - cp1(1), c(2) - cp1(2)) <= foot_tol) cycle
+      found = .true. ; cp2 = c ; bound = d2
+   enddo
+   endsubroutine second_foot_2d
 
    pure function path_clear(self, a, b, sg, vx) result(clear)
    !< True if the segment a-b crosses no segment of the curve except those containing the foot point

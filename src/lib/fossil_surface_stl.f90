@@ -7,7 +7,8 @@ use fossil_aabb_tree_object, only : aabb_tree_object, AABB_TREE_OCTREE, AABB_TRE
                                     facet_distance_payload,                                    &
                                     bvh_distance_node_oac, bvh_distance_node_with_region_oac, &
                                     wn_node_t, bvh_winding_number_oac
-use fossil_aabb_node_object, only : aabb_node_object
+use fossil_aabb_node_object, only : aabb_node_object, bvh_left_child_oac, bvh_right_child_oac, bvh_payload_first_oac, &
+                                    bvh_payload_count_oac, bvh_box_distance_sq_oac
 use fossil_facet_object, only : facet_object, pnormal_payload_t,                               &
                                 pnormal_x_oac, pnormal_y_oac, pnormal_z_oac,                   &
                                 triangle_point_distance
@@ -1623,12 +1624,18 @@ contains
    endsubroutine query_point
 
    subroutine query_many(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
-                         is_signed, sign_algorithm, status)
+                         is_signed, sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status)
    !< Batch rich query (issue #37): `query_point` for every point, OpenMP over the points.
    !<
    !< Every output after `distances` is optional (a caller pays only for what it asks); arrays are
    !< caller-allocated: `closest_points(3, n)`, `normals(3, n)`, the others `(n)`. Bit-exact with
    !< `query_point`. `status = STATUS_INVALID_INPUT` on a size mismatch.
+   !<
+   !< Multiple foot points (issue #37 step 7, CPU only): `ambiguous(i)` is true when another facet has
+   !< its closest point farther than `foot_tolerance` (default 1e-9 of the box diagonal) from the
+   !< foot point and its distance within (1 + `rel_tolerance`) (default 1e-6) of the minimum: a point
+   !< on or near the medial axis, a thin gap. `second_foot_points(:, i)` is that facet's closest point
+   !< (the nearest such; the foot point itself when not ambiguous). FOSSIL reports, the caller decides.
    class(surface_stl_object), intent(in)            :: self               !< Surface.
    type(vector_R8P),          intent(in)            :: points(:)          !< Query points [n].
    real(R8P),                 intent(out)           :: distances(:)       !< Distances [n].
@@ -1640,8 +1647,14 @@ contains
    integer(I4P),              intent(out), optional :: bodies(:)          !< Bodies [n].
    logical,                   intent(in),  optional :: is_signed          !< Signed (default .true.).
    integer(I4P),              intent(in),  optional :: sign_algorithm     !< SIGN_* (default SIGN_PSEUDO_NORMAL).
+   logical,                   intent(out), optional :: ambiguous(:)       !< Another foot point within tolerance [n].
+   real(R8P),                 intent(out), optional :: second_foot_points(:,:) !< Second foot points [3, n].
+   real(R8P),                 intent(in),  optional :: rel_tolerance      !< Relative distance tolerance (default 1e-6).
+   real(R8P),                 intent(in),  optional :: foot_tolerance     !< Foot separation (default 1e-9 box diagonal).
    integer(I4P),              intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
-   type(vector_R8P)                                 :: cp, pn             !< Per-point closest point, normal.
+   type(vector_R8P)                                 :: cp, pn, cp2        !< Per-point closest point, normal, second foot.
+   real(R8P)                                        :: rel_, foot_        !< Resolved tolerances.
+   logical                                          :: amb, want_amb      !< Per-point flag, any ambiguity output.
    integer(I4P)                                     :: f, ft, fi, b, i, n !< Per-point outputs, counters.
    logical                                          :: signed_, bad       !< Resolved option, size check.
    integer(I4P)                                     :: algo               !< Resolved algorithm.
@@ -1655,16 +1668,26 @@ contains
    if (present(features)) bad = bad .or. size(features) /= n
    if (present(feature_indexes)) bad = bad .or. size(feature_indexes) /= n
    if (present(bodies)) bad = bad .or. size(bodies) /= n
+   if (present(ambiguous)) bad = bad .or. size(ambiguous) /= n
+   bad = bad .or. bad_shape3(second_foot_points, n)
    if (bad) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
    signed_ = .true. ; if (present(is_signed)) signed_ = is_signed
    algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
-   !$omp parallel do default(shared) schedule(static) private(i, cp, pn, f, ft, fi, b)
+   want_amb = present(ambiguous) .or. present(second_foot_points)
+   rel_ = 1.e-6_R8P ; if (present(rel_tolerance)) rel_ = rel_tolerance
+   foot_ = 1.e-9_R8P * vnorm(self%bmax - self%bmin) ; if (present(foot_tolerance)) foot_ = foot_tolerance
+   !$omp parallel do default(shared) schedule(static) private(i, cp, pn, f, ft, fi, b, cp2, amb)
    do i = 1_I4P, n
       call self%query_point(point=points(i), distance=distances(i), closest_point=cp, facet=f, feature=ft, &
                             feature_index=fi, normal=pn, body=b, is_signed=signed_, sign_algorithm=algo)
+      if (want_amb) then
+         call second_foot(self, points(i), cp, distances(i)**2, rel_, foot_, amb, cp2)
+         if (present(ambiguous)) ambiguous(i) = amb
+         if (present(second_foot_points)) second_foot_points(:, i) = [cp2%x, cp2%y, cp2%z]
+      endif
       if (present(closest_points)) closest_points(:, i) = [cp%x, cp%y, cp%z]
       if (present(facets)) facets(i) = f
       if (present(features)) features(i) = ft
@@ -1976,6 +1999,67 @@ contains
       endif
    enddo
    endfunction segment_clear
+
+   subroutine second_foot(self, point, cp1, d1sq, rel, foot_tol, found, cp2)
+   !< Nearest facet whose closest point is farther than foot_tol from cp1, with a squared distance
+   !< within (1 + rel)^2 d1sq (issue #37). SAH BVH traversal on the flat node/payload arrays with
+   !< pruning on the relaxed bound, tightened by the best candidate; brute force otherwise.
+   type(surface_stl_object), intent(in)  :: self     !< Surface.
+   type(vector_R8P),         intent(in)  :: point    !< Query point.
+   type(vector_R8P),         intent(in)  :: cp1      !< First foot point.
+   real(R8P),                intent(in)  :: d1sq     !< Minimum squared distance.
+   real(R8P),                intent(in)  :: rel      !< Relative distance tolerance.
+   real(R8P),                intent(in)  :: foot_tol !< Foot separation.
+   logical,                  intent(out) :: found    !< A second foot point exists.
+   type(vector_R8P),         intent(out) :: cp2      !< Second foot point (cp1 if none).
+   integer(I4P)                          :: stack(256), sp, cur, lc, rc, k, idx, f, region !< Work.
+   real(R8P)                             :: bound, d2 !< Work.
+   type(vector_R8P)                      :: c, v1, e12, e13 !< Work.
+
+   found = .false. ; cp2 = cp1
+   if (self%facets_number == 0_I4P) return
+   bound = (1._R8P + rel)**2 * d1sq
+   if (self%aabb%get_tree_kind() == AABB_TREE_SAH_BVH .and. allocated(self%aabb%node) .and. &
+       allocated(self%aabb%payload)) then
+      sp = 1_I4P ; stack(1) = 0_I4P
+      do while (sp > 0_I4P)
+         cur = stack(sp) ; sp = sp - 1_I4P
+         if (bvh_box_distance_sq_oac(self%aabb%node(cur), point%x, point%y, point%z) > bound) cycle
+         do k = 0_I4P, bvh_payload_count_oac(self%aabb%node(cur)) - 1_I4P
+            idx = bvh_payload_first_oac(self%aabb%node(cur)) + k
+            v1  = vector_R8P(self%aabb%payload(idx)%v1(1),  self%aabb%payload(idx)%v1(2),  self%aabb%payload(idx)%v1(3))
+            e12 = vector_R8P(self%aabb%payload(idx)%e12(1), self%aabb%payload(idx)%e12(2), self%aabb%payload(idx)%e12(3))
+            e13 = vector_R8P(self%aabb%payload(idx)%e13(1), self%aabb%payload(idx)%e13(2), self%aabb%payload(idx)%e13(3))
+            call triangle_point_distance(v1=v1, e12=e12, e13=e13, a=self%aabb%payload(idx)%a, b=self%aabb%payload(idx)%b, &
+                                         c=self%aabb%payload(idx)%c, det=self%aabb%payload(idx)%det, point=point, &
+                                         distance=d2, closest=c, region=region)
+            call consider(d2, c)
+         enddo
+         lc = bvh_left_child_oac(self%aabb%node(cur)) ; rc = bvh_right_child_oac(self%aabb%node(cur))
+         if (rc > 0_I4P .and. sp < size(stack)) then
+            sp = sp + 1_I4P ; stack(sp) = rc
+         endif
+         if (lc > 0_I4P .and. sp < size(stack)) then
+            sp = sp + 1_I4P ; stack(sp) = lc
+         endif
+      enddo
+   else
+      do f = 1_I4P, self%facets_number
+         call self%facet(f)%compute_distance_with_region(point=point, distance=d2, closest=c, region=region)
+         call consider(d2, c)
+      enddo
+   endif
+   contains
+      subroutine consider(dd, cc)
+      !< Keep cc if its foot is separate from cp1 and dd is within the (tightening) bound.
+      real(R8P),        intent(in) :: dd !< Candidate squared distance.
+      type(vector_R8P), intent(in) :: cc !< Candidate closest point.
+
+      if (dd > bound) return
+      if (vnorm(cc - cp1) <= foot_tol) return
+      found = .true. ; cp2 = cc ; bound = dd
+      endsubroutine consider
+   endsubroutine second_foot
 
    pure function vnorm(a) result(r)
    !< Euclidean norm of a vector (plain components, no TBP).
