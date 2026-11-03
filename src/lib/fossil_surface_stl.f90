@@ -1804,7 +1804,7 @@ contains
    !<
    !< `codes(i)` is BOX_CUT if box i meets a facet, BOX_NEAR if not but a facet meets the box
    !< inflated by `radius` (default 0: no BOX_NEAR), else BOX_INSIDE or BOX_OUTSIDE from one point
-   !< query at the box centre with `sign_algorithm` (default SIGN_PSEUDO_NORMAL; a box that meets no
+   !< query at the box centre with `sign_algorithm` (default SIGN_FAST_WINDING_NUMBER; a box that meets no
    !< facet lies on one side of a closed surface, so its centre decides).
    !<
    !< The box-triangle test is the separating-axis test on the box inflated by `box_tolerance` (1e-12
@@ -1819,7 +1819,7 @@ contains
    real(R8P),                 intent(in)            :: hi(:,:)        !< Box maxima [3, n].
    integer(I4P),              intent(out)           :: codes(:)       !< BOX_* [n].
    real(R8P),                 intent(in),  optional :: radius         !< Near radius (default 0).
-   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_* for the centre query (default SIGN_PSEUDO_NORMAL).
+   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_* for the centre query (default SIGN_FAST_WINDING_NUMBER).
    logical,                   intent(out), optional :: inside(:)      !< Centre inside, for boxes not cut [n].
    integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    real(R8P)                                        :: tol, reach, r  !< Inflations.
@@ -1836,7 +1836,7 @@ contains
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
-   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   algo = SIGN_FAST_WINDING_NUMBER ; if (present(sign_algorithm)) algo = sign_algorithm
    tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
    reach = max(tol, r + tol)
    !$omp parallel do default(shared) schedule(dynamic, 16) private(i, c, ins, centre)
@@ -1884,7 +1884,7 @@ contains
    real(R8P),                 intent(in)            :: hi(:,:)        !< Box maxima [3, n].
    integer(I4P),              intent(out)           :: codes(:)       !< BOX_* [n].
    real(R8P),                 intent(in),  optional :: radius         !< Near radius (default 0).
-   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
+   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_FAST_WINDING_NUMBER (default) or SIGN_PSEUDO_NORMAL.
    logical,                   intent(out), optional :: inside(:)      !< Centre inside, for boxes not cut [n].
    integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    integer(I4P), allocatable :: cl(:)          !< Device-side codes.
@@ -1901,7 +1901,7 @@ contains
    if (present(status)) status = STATUS_OK
    n = size(codes, kind=I4P)
    r = 0._R8P ; if (present(radius)) r = radius
-   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   algo = SIGN_FAST_WINDING_NUMBER ; if (present(sign_algorithm)) algo = sign_algorithm
    bad = bad_shape3(lo, n) .or. bad_shape3(hi, n) .or. r < 0._R8P .or. &
          (algo /= SIGN_PSEUDO_NORMAL .and. algo /= SIGN_FAST_WINDING_NUMBER)
    if (present(inside)) bad = bad .or. size(inside) /= n
@@ -1982,14 +1982,14 @@ contains
    !< at band + 1, negative inside (-d) and positive outside (+d). A block that meets no facet is
    !< ±(band + 1) everywhere, from one point query at its centre; otherwise each 26-connected
    !< component of uncut cells is signed by one point query (`is_point_inside` with `sign_algorithm`,
-   !< default SIGN_PSEUDO_NORMAL) at the centre of its first cell. Distances count cells of this
+   !< default SIGN_FAST_WINDING_NUMBER) at the centre of its first cell. Distances count cells of this
    !< block only: a cut cell in a neighbouring block is not seen (pad the block with ghost cells for
    !< bands that cross block faces). `status = STATUS_INVALID_INPUT` on bad edges, shape or band.
    class(surface_stl_object), intent(in)            :: self           !< Surface.
    real(R8P),                 intent(in)            :: x(:), y(:), z(:) !< Cell edges.
    integer(I4P),              intent(in)            :: band           !< Band width (>= 0).
    integer(I4P),              intent(out)           :: tags(:,:,:)    !< Tags [nx, ny, nz].
-   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_* (default SIGN_PSEUDO_NORMAL).
+   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_* (default SIGN_FAST_WINDING_NUMBER).
    integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    logical,      allocatable :: cut(:,:,:)  !< Cut cells.
    integer(I4P), allocatable :: dist(:,:,:), comp(:,:,:), seed(:,:) !< Bands, components, seeds.
@@ -2007,7 +2007,7 @@ contains
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
-   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   algo = SIGN_FAST_WINDING_NUMBER ; if (present(sign_algorithm)) algo = sign_algorithm
    tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
    if (box_contact(self, [x(1), y(1), z(1)], [x(nx+1), y(ny+1), z(nz+1)], tol, tol) /= BOX_CUT) then
       tags = band + 1_I4P

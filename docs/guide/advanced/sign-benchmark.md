@@ -187,10 +187,9 @@ which has not run yet.
     the flipped facet.
 - **Inside/outside without a distance** (`box_classify_many`, `tag_block`):
   the sign costs one point query per block or connected component, so its
-  price does not matter. **Proposed:** default these to
-  `SIGN_FAST_WINDING_NUMBER`, for the robustness on dirty input. This would
-  change a default, so it waits for the owner's decision in issue #39.
-  Until then, pass `sign_algorithm=SIGN_FAST_WINDING_NUMBER` explicitly.
+  price does not matter. These default to `SIGN_FAST_WINDING_NUMBER`, for
+  the robustness on dirty input (decided in issue #39). Pass
+  `SIGN_PSEUDO_NORMAL` for the previous behaviour.
 - **2-D:** the same split. On curves, call `repair` before any query.
 
 ## Limitations

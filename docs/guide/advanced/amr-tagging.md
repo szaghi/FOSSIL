@@ -71,10 +71,14 @@ endprogram tag_blocks
   - **2-D:** the segment–box distance is at most the radius (the distance in
     floating point, the cut test still exact).
 - **Inside / outside.** A box that meets no facet lies on one side of a
-  closed surface, so one point query at its centre decides it, with the
-  surface's `sign_algorithm`. Use `SIGN_FAST_WINDING_NUMBER` for dirty
-  geometry. The optional `inside(:)` output also gives the centre sign of
-  near boxes.
+  closed surface, so one point query at its centre decides it, with
+  `sign_algorithm`.
+  - The default is `SIGN_FAST_WINDING_NUMBER` (issue #39): the benchmark
+    found it the most robust on dirty geometry.
+  - With one query per box or component, its cost does not matter.
+  - Pass `SIGN_PSEUDO_NORMAL` for the previous behaviour.
+  - The optional `inside(:)` output also gives the centre sign of near
+    boxes.
 - **Tag band.** On a rectilinear block given its cell edges (stretched
   allowed):
   - 0 on a cut cell;
@@ -133,8 +137,8 @@ endprogram tag_blocks
 - **Tag bands see one block.** A cut cell in a neighbouring block does not
   count, so bands that must cross block faces need the block padded with
   ghost cells.
-- **The sign needs a closed geometry.** On open or leaky geometry use
-  `SIGN_FAST_WINDING_NUMBER`. Even then, the one-query-per-component rule
+- **The sign needs a closed geometry.** The default fast winding number
+  tolerates holes and gaps. Even so, the one-query-per-component rule
   assumes the uncut cells of a component are on one side.
 - **No device `tag_block`.** The breadth-first search runs on the CPU, once
   per block; the per-cell cut tests can come from `box_classify_many_device`.

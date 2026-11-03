@@ -11,8 +11,10 @@ program fossil_test_tag_block
 !< - 2-D: NACA 0012 on a stretched 48 x 20 block, a 200-gon on a uniform 32 x 32 block, a block
 !<   inside the 200-gon, a block outside; band 3.
 !< - Refusals: non-increasing edges, wrong shape, negative band.
+!< - The default sign is the fast winding number (issue #39): every block gives the same tags with
+!<   `sign_algorithm=SIGN_FAST_WINDING_NUMBER`.
 
-use fossil, only : surface_stl_object, curve_object, BOX_CUT, STATUS_INVALID_INPUT
+use fossil, only : surface_stl_object, curve_object, BOX_CUT, STATUS_INVALID_INPUT, SIGN_FAST_WINDING_NUMBER
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
 
@@ -92,13 +94,16 @@ contains
    character(*),             intent(in)           :: label      !< Label.
    integer,                  intent(in), optional :: uniform    !< Expected uniform tag.
    logical                                        :: good       !< Result.
-   integer(I4P), allocatable :: tags(:,:,:), ref(:,:,:), codes(:), cuts(:,:) !< Work.
+   integer(I4P), allocatable :: tags(:,:,:), ref(:,:,:), codes(:), cuts(:,:), tf(:,:,:) !< Work.
    real(R8P),    allocatable :: lo(:,:), hi(:,:) !< Cell boxes.
    integer(I4P)              :: nx, ny, nz, i, j, k, m, d, ncut, st !< Work.
 
    nx = size(x) - 1 ; ny = size(y) - 1 ; nz = size(z) - 1
    allocate(tags(nx, ny, nz), ref(nx, ny, nz), codes(nx * ny * nz), lo(3, nx * ny * nz), hi(3, nx * ny * nz))
    call s%tag_block(x=x, y=y, z=z, band=band, tags=tags, status=st)
+   allocate(tf(nx, ny, nz)) ! the default sign is the fast winding number (issue #39)
+   call s%tag_block(x=x, y=y, z=z, band=band, tags=tf, sign_algorithm=SIGN_FAST_WINDING_NUMBER)
+   if (any(tf /= tags)) st = -1
    m = 0
    do k = 1, nz
       do j = 1, ny
@@ -152,13 +157,16 @@ contains
    character(*),       intent(in)           :: label     !< Label.
    integer,            intent(in), optional :: uniform   !< Expected uniform tag.
    logical                                  :: good      !< Result.
-   integer(I4P), allocatable :: tags(:,:), ref(:,:), codes(:), cuts(:,:) !< Work.
+   integer(I4P), allocatable :: tags(:,:), ref(:,:), codes(:), cuts(:,:), tf(:,:) !< Work.
    real(R8P),    allocatable :: lo(:,:), hi(:,:) !< Cell boxes.
    integer(I4P)              :: nx, ny, i, j, m, d, ncut, st !< Work.
 
    nx = size(x) - 1 ; ny = size(y) - 1
    allocate(tags(nx, ny), ref(nx, ny), codes(nx * ny), lo(2, nx * ny), hi(2, nx * ny))
    call cur%tag_block(x=x, y=y, band=band, tags=tags, status=st)
+   allocate(tf(nx, ny)) ! the default sign is the fast winding number (issue #39)
+   call cur%tag_block(x=x, y=y, band=band, tags=tf, sign_algorithm=SIGN_FAST_WINDING_NUMBER)
+   if (any(tf /= tags)) st = -1
    m = 0
    do j = 1, ny
       do i = 1, nx

@@ -74,8 +74,10 @@ endprogram curve_tour
 | `cut_cells(x, y, cut, status)` | Exact cut cells (`cut_cells_2d_t`): fractions, apertures, centroids, wetted boundary, pieces. See [Cut-cell geometry](/guide/advanced/cut-cells). |
 | `tag_block(x, y, band, tags, sign_algorithm, status)` | Signed tag bands on a block of cells given its edges. See [AMR tagging](/guide/advanced/amr-tagging). |
 
-`sign_algorithm` is `SIGN_PSEUDO_NORMAL` (default) or
-`SIGN_FAST_WINDING_NUMBER`; the latter is robust on open loops and gaps.
+`sign_algorithm` is `SIGN_PSEUDO_NORMAL` or `SIGN_FAST_WINDING_NUMBER`; the
+latter is robust on open loops and gaps. The point queries default to the
+pseudo-normal; `box_classify_many(_device)` and `tag_block` default to the fast
+winding number (issue #39).
 
 ## Related
 

@@ -17,7 +17,8 @@ program fossil_test_box_classify
 !< - touching: a box sharing the annulus outer side is cut, one ulp off it is not.
 !< Device (`box_classify_many_device`, step 3; on the host in tests-gnu): codes and `inside` equal the
 !< CPU ones on cube-02 and bunny (pseudo-normal and fast-winding-number signs) and on the NACA 0012
-!< and the annulus (both signs); use before `enter_device` is refused.
+!< and the annulus (both signs); use before `enter_device` is refused. With no `sign_algorithm` the codes
+!< and `inside` equal the explicit fast-winding-number ones, CPU and device (the default, issue #39).
 
 use fossil,                only : surface_stl_object, curve_object, facet_object, BOX_CUT, BOX_NEAR, BOX_INSIDE, &
                                   BOX_OUTSIDE, AABB_TREE_OCTREE, STATUS_INVALID_INPUT, STATUS_OK, &
@@ -275,6 +276,12 @@ contains
       print '(A,I0,A,I0,A,I0)', '   3-D sign ', ALGO(a), ': box device vs serial mismatches ', count(c1 /= c2), &
             '  inside mismatches ', count(i1 .neqv. i2)
    enddo
+   ! default sign (issue #39): the fast winding number, CPU and device (c1, i1: explicit FWN on the CPU)
+   call s%box_classify_many(lo=lo, hi=hi, codes=c2, radius=0.1_R8P * smax * diag, inside=i2)
+   same = same .and. all(c2 == c1) .and. all(i2 .eqv. i1)
+   call s%box_classify_many_device(lo=lo, hi=hi, codes=c2, radius=0.1_R8P * smax * diag, inside=i2, status=st)
+   same = same .and. st == STATUS_OK .and. all(c2 == c1) .and. all(i2 .eqv. i1)
+   print '(A,L1)', '   3-D default sign = fast winding number (CPU, device): ', all(c2 == c1) .and. all(i2 .eqv. i1)
    endfunction dev3
 
    function dev2(cur, blo, bhi) result(same)
@@ -303,6 +310,12 @@ contains
       print '(A,I0,A,I0,A,I0)', '   2-D sign ', ALGO(a), ': box device vs serial mismatches ', count(c1 /= c2), &
             '  inside mismatches ', count(i1 .neqv. i2)
    enddo
+   ! default sign (issue #39): the fast winding number, CPU and device (c1, i1: explicit FWN on the CPU)
+   call cur%box_classify_many(lo=lo, hi=hi, codes=c2, radius=rad, inside=i2)
+   same = same .and. all(c2 == c1) .and. all(i2 .eqv. i1)
+   call cur%box_classify_many_device(lo=lo, hi=hi, codes=c2, radius=rad, inside=i2, status=st)
+   same = same .and. st == STATUS_OK .and. all(c2 == c1) .and. all(i2 .eqv. i1)
+   print '(A,L1)', '   2-D default sign = fast winding number (CPU, device): ', all(c2 == c1) .and. all(i2 .eqv. i1)
    call cur%exit_device
    endfunction dev2
 

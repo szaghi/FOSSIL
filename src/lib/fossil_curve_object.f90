@@ -190,7 +190,7 @@ contains
    !< `codes(i)` is BOX_CUT if box i meets a segment (exact, `orient2d`), BOX_NEAR if not but a
    !< segment is within `radius` of it (default 0: no BOX_NEAR; floating-point segment-box distance),
    !< else BOX_INSIDE or BOX_OUTSIDE from `is_point_inside` at the box centre with `sign_algorithm`
-   !< (default SIGN_PSEUDO_NORMAL). `inside(i)` (optional): the centre sign of every box that is not
+   !< (default SIGN_FAST_WINDING_NUMBER). `inside(i)` (optional): the centre sign of every box that is not
    !< cut (false for cut boxes). Segment BVH traversal (`curve_box_contact_oac`, shared with the
    !< device). `lo(2, n)`, `hi(2, n)`; `status = STATUS_INVALID_INPUT` on a size mismatch or a
    !< negative radius. An empty curve: every box outside.
@@ -199,7 +199,7 @@ contains
    real(R8P),           intent(in)            :: hi(:,:)        !< Box maxima [2, n].
    integer(I4P),        intent(out)           :: codes(:)       !< BOX_* [n].
    real(R8P),           intent(in),  optional :: radius         !< Near radius (default 0).
-   integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_* for the centre query (default SIGN_PSEUDO_NORMAL).
+   integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_* for the centre query (default SIGN_FAST_WINDING_NUMBER).
    logical,             intent(out), optional :: inside(:)      !< Centre inside, for boxes not cut [n].
    integer(I4P),        intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    real(R8P)                                  :: r              !< Radius.
@@ -215,7 +215,7 @@ contains
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
-   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   algo = SIGN_FAST_WINDING_NUMBER ; if (present(sign_algorithm)) algo = sign_algorithm
    if (self%bvh%nodes_number == 0_I4P) then
       codes = BOX_OUTSIDE
       if (present(inside)) inside = .false.
@@ -264,7 +264,7 @@ contains
    real(R8P),           intent(in)            :: hi(:,:)        !< Box maxima [2, n].
    integer(I4P),        intent(out)           :: codes(:)       !< BOX_* [n].
    real(R8P),           intent(in),  optional :: radius         !< Near radius (default 0).
-   integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
+   integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_FAST_WINDING_NUMBER (default) or SIGN_PSEUDO_NORMAL.
    logical,             intent(out), optional :: inside(:)      !< Centre inside, for boxes not cut [n].
    integer(I4P),        intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    real(R8P)                                  :: r, blo(2), bhi(2) !< Radius, per-box work.
@@ -280,7 +280,7 @@ contains
    if (present(status)) status = STATUS_OK
    n = size(codes, kind=I4P)
    r = 0._R8P ; if (present(radius)) r = radius
-   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   algo = SIGN_FAST_WINDING_NUMBER ; if (present(sign_algorithm)) algo = sign_algorithm
    bad = size(lo, 1) /= 2 .or. size(lo, 2) /= n .or. size(hi, 1) /= 2 .or. size(hi, 2) /= n .or. r < 0._R8P .or. &
          (algo /= SIGN_PSEUDO_NORMAL .and. algo /= SIGN_FAST_WINDING_NUMBER)
    if (present(inside)) bad = bad .or. size(inside) /= n
@@ -339,7 +339,7 @@ contains
    real(R8P),           intent(in)            :: x(:), y(:)     !< Cell edges (u, v).
    integer(I4P),        intent(in)            :: band           !< Band width (>= 0).
    integer(I4P),        intent(out)           :: tags(:,:)      !< Tags [nx, ny].
-   integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_* (default SIGN_PSEUDO_NORMAL).
+   integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_* (default SIGN_FAST_WINDING_NUMBER).
    integer(I4P),        intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    logical,      allocatable :: cut(:,:,:)  !< Cut cells.
    integer(I4P), allocatable :: dist(:,:,:), comp(:,:,:), seed(:,:) !< Bands, components, seeds.
@@ -355,7 +355,7 @@ contains
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
-   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   algo = SIGN_FAST_WINDING_NUMBER ; if (present(sign_algorithm)) algo = sign_algorithm
    if (.not. self%box_intersects_curve([x(1), y(1)], [x(nx+1), y(ny+1)])) then
       tags = band + 1_I4P
       if (self%bvh%nodes_number > 0_I4P) then

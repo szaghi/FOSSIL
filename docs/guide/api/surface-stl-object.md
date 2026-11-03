@@ -890,7 +890,7 @@ the cut test is the separating-axis test on the box inflated by
 | `lo`, `hi`       | `in`        | `real(R8P)(3, n)` | Box corners.                                                           |
 | `codes`          | `out`       | `integer(I4P)(n)` | `BOX_*` codes.                                                         |
 | `radius`         | `in`, opt.  | `real(R8P)`       | Near radius, default 0 (no `BOX_NEAR`). Up to √3·radius at a corner.   |
-| `sign_algorithm` | `in`, opt.  | `integer(I4P)`    | Centre query of uncut boxes, default `SIGN_PSEUDO_NORMAL`.             |
+| `sign_algorithm` | `in`, opt.  | `integer(I4P)`    | Centre query of uncut boxes, default `SIGN_FAST_WINDING_NUMBER`.       |
 | `inside`         | `out`, opt. | `logical(n)`      | Centre sign of every box not cut (also near boxes).                    |
 | `status`         | `out`, opt. | `integer(I4P)`    | `STATUS_INVALID_INPUT` on a size mismatch or a negative radius.        |
 
@@ -900,7 +900,9 @@ the cut test is the separating-axis test on the box inflated by
 `tag_block(x, y, z, band, tags, sign_algorithm, status)`: signed tag bands on a
 block of cells given its edges `x(nx+1)`, `y(ny+1)`, `z(nz+1)`; `tags(nx, ny, nz)` is
 0 on cut cells, else the Chebyshev cell distance to the nearest cut cell
-capped at band + 1, negative inside.
+capped at band + 1, negative inside. Box classification and tag bands default
+to `SIGN_FAST_WINDING_NUMBER` (issue #39); the point queries keep
+`SIGN_PSEUDO_NORMAL`.
 
 ---
 
