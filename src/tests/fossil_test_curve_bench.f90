@@ -89,9 +89,33 @@ contains
       print '(A,A,A,ES10.3)', '   ', NAME(a), 'cpu batch vs serial max |d| err: ', err_cpu
       print '(A,A,A,ES10.3)', '   ', NAME(a), 'device vs serial max |d| err: ', err_dev
       ok = ok .and. err_cpu == 0._R8P .and. err_dev == 0._R8P
+      call rich(cur, p, ALGO(a), NAME(a))
    enddo
    call cur%exit_device
    endsubroutine bench
+
+   subroutine rich(cur, p, algo, nm)
+   !< query_many_device vs query_many (issue #37): distance, closest point, normal, ids.
+   type(curve_object), intent(inout) :: cur     !< Curve (on device).
+   real(R8P),          intent(in)    :: p(:,:)  !< Points [2, n].
+   integer(I4P),       intent(in)    :: algo    !< Sign algorithm.
+   character(*),       intent(in)    :: nm      !< Sign name.
+   real(R8P),    allocatable :: d1(:), d2(:), c1(:,:), c2(:,:), n1(:,:), n2(:,:) !< Outputs.
+   integer(I4P), allocatable :: s1(:), s2(:), x1(:), x2(:), b1(:), b2(:) !< Outputs.
+   real(R8P)                 :: err   !< Max error.
+   integer(I4P)              :: nq, ids !< Work.
+
+   nq = size(p, 2)
+   allocate(d1(nq), d2(nq), c1(2, nq), c2(2, nq), n1(2, nq), n2(2, nq), s1(nq), s2(nq), x1(nq), x2(nq), b1(nq), b2(nq))
+   call cur%query_many(points=p, distances=d1, closest_points=c1, segments=s1, vertices=x1, normals=n1, bodies=b1, &
+                       sign_algorithm=algo)
+   call cur%query_many_device(points=p, distances=d2, closest_points=c2, segments=s2, vertices=x2, normals=n2, bodies=b2, &
+                              sign_algorithm=algo)
+   err = max(maxval(abs(d1 - d2)), maxval(abs(c1 - c2)), maxval(abs(n1 - n2)))
+   ids = count(s1 /= s2 .or. x1 /= x2 .or. b1 /= b2)
+   print '(A,A,A,ES10.3,A,I0)', '   ', nm, 'rich device vs serial max err: ', err, '  id mismatches ', ids
+   ok = ok .and. err == 0._R8P .and. ids == 0
+   endsubroutine rich
 
    subroutine naca0012(m, x, y)
    !< NACA 0012 with a closed trailing edge, 2m vertices, cosine spacing, counter-clockwise.

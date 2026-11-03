@@ -68,6 +68,7 @@ type :: curve_object
    real(R8P),    allocatable :: pn_v(:)             !< Vertex pseudo-normals, v [nv].
    real(R8P),    allocatable :: loop_area(:)        !< Signed area of each loop [nl].
    integer(I4P), allocatable :: loop_body_(:)       !< Body of each loop [nl] (issue #37).
+   integer(I4P), allocatable :: vertex_body(:)      !< Body of each vertex/segment [nv] (device-mappable, issue #37).
    integer(I4P)              :: bodies_number = 0_I4P !< Number of bodies.
    real(R8P)                 :: bmin(2) = 0._R8P    !< Bounding box minimum (u, v).
    real(R8P)                 :: bmax(2) = 0._R8P    !< Bounding box maximum (u, v).
@@ -86,6 +87,8 @@ type :: curve_object
       procedure, pass(self) :: distance_many        !< Batched (signed) distances, CPU (OpenMP).
       procedure, pass(self) :: distance_many_device !< Batched (signed) distances on the device (OpenACC).
       procedure, pass(self) :: enter_device         !< Map the query arrays to the device.
+      procedure, pass(self) :: query_many           !< Batched rich query (issue #37), CPU (OpenMP).
+      procedure, pass(self) :: query_many_device    !< Batched rich query on the device (OpenACC).
       procedure, pass(self) :: exit_device          !< Release the device arrays.
       procedure, pass(self) :: get_area             !< Total signed area.
       procedure, pass(self) :: get_bmax             !< Bounding box maximum.
@@ -242,6 +245,121 @@ contains
    enddo
    endsubroutine distance_many_device
 
+   subroutine query_many(self, points, distances, closest_points, segments, vertices, normals, bodies, is_signed, &
+                         sign_algorithm, status)
+   !< Batched rich query (issue #37), CPU, OpenMP over the points: distance (signed by default),
+   !< closest point, closest segment, closest vertex (0 in a segment interior), pseudo-normal of the
+   !< closest feature (segment normal or vertex bisector), body. Every output after `distances` is
+   !< optional; `closest_points(2, n)`, `normals(2, n)`. Each point runs `curve_query_oac`, the kernel
+   !< of `query_many_device`, and matches `compute_distance` bit for bit. Refusals as in
+   !< `distance_many`.
+   class(curve_object), intent(in)            :: self               !< Curve.
+   real(R8P),           intent(in)            :: points(:,:)        !< Points [2, n].
+   real(R8P),           intent(out)           :: distances(:)       !< Distances [n].
+   real(R8P),           intent(out), optional :: closest_points(:,:) !< Closest points [2, n].
+   integer(I4P),        intent(out), optional :: segments(:)        !< Closest segments [n].
+   integer(I4P),        intent(out), optional :: vertices(:)        !< Closest vertices [n] (0: segment interior).
+   real(R8P),           intent(out), optional :: normals(:,:)       !< Pseudo-normals [2, n].
+   integer(I4P),        intent(out), optional :: bodies(:)          !< Bodies [n].
+   logical,             intent(in),  optional :: is_signed          !< Signed (default .true.).
+   integer(I4P),        intent(in),  optional :: sign_algorithm     !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
+   integer(I4P),        intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)                                  :: cp(2), nn(2)       !< Per-point outputs.
+   integer(I4P)                               :: sg, vx, b, i, n    !< Per-point outputs, counters.
+   logical                                    :: signed_, fwn       !< Resolved options.
+
+   if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
+   if (.not. rich_sizes_ok(size(distances, kind=I4P), closest_points, segments, vertices, normals, bodies)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   n = size(distances, kind=I4P)
+   if (self%bvh%nodes_number == 0_I4P) then
+      distances = huge(1._R8P)
+      return
+   endif
+   !$omp parallel do default(shared) private(i, cp, nn, sg, vx, b) schedule(static)
+   do i = 1, n
+      call curve_query_oac(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, self%bvh%right, &
+                           self%bvh%first, self%bvh%last, self%bvh%a_u, self%bvh%a_v, self%bvh%d_u, self%bvh%d_v, &
+                           self%bvh%len2, self%bvh%seg_id, self%next, self%u, self%v, self%pn_u, self%pn_v, &
+                           self%seg_nu, self%seg_nv, self%vertex_body, self%bvh%wn_cu, self%bvh%wn_cv, self%bvh%wn_du, &
+                           self%bvh%wn_dv, self%bvh%wn_c, self%bvh%wn_diag2, points(1, i), points(2, i), signed_, fwn, &
+                           distances(i), cp(1), cp(2), sg, vx, nn(1), nn(2), b)
+      if (present(closest_points)) closest_points(:, i) = cp
+      if (present(segments)) segments(i) = sg
+      if (present(vertices)) vertices(i) = vx
+      if (present(normals)) normals(:, i) = nn
+      if (present(bodies)) bodies(i) = b
+   enddo
+   !$omp end parallel do
+   endsubroutine query_many
+
+   subroutine query_many_device(self, points, distances, closest_points, segments, vertices, normals, bodies, is_signed, &
+                                sign_algorithm, status)
+   !< `query_many` on the device (issue #37): same contract and kernel. Requires `enter_device`.
+   !< Every output is computed into local arrays (no absent optional in device code), the
+   !< requested ones copied out on the host; #20 pointer aliases. GPU validation pending.
+   class(curve_object), intent(inout), target :: self               !< Curve.
+   real(R8P),           intent(in)            :: points(:,:)        !< Points [2, n].
+   real(R8P),           intent(out)           :: distances(:)       !< Distances [n].
+   real(R8P),           intent(out), optional :: closest_points(:,:) !< Closest points [2, n].
+   integer(I4P),        intent(out), optional :: segments(:)        !< Closest segments [n].
+   integer(I4P),        intent(out), optional :: vertices(:)        !< Closest vertices [n].
+   real(R8P),           intent(out), optional :: normals(:,:)       !< Pseudo-normals [2, n].
+   integer(I4P),        intent(out), optional :: bodies(:)          !< Bodies [n].
+   logical,             intent(in),  optional :: is_signed          !< Signed (default .true.).
+   integer(I4P),        intent(in),  optional :: sign_algorithm     !< Sign algorithm.
+   integer(I4P),        intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),    allocatable :: dd(:), cpl(:,:), nml(:,:) !< Device-side outputs.
+   integer(I4P), allocatable :: sgl(:), vxl(:), bdl(:)    !< Device-side outputs.
+   logical                   :: signed_, fwn              !< Resolved options.
+   integer(I4P)              :: i, n                      !< Work.
+   real(R8P),    pointer :: lo_u(:), lo_v(:), hi_u(:), hi_v(:), a_u(:), a_v(:), d_u(:), d_v(:), len2(:) !< Aliases.
+   real(R8P),    pointer :: u(:), v(:), pn_u(:), pn_v(:), seg_nu(:), seg_nv(:) !< Aliases.
+   real(R8P),    pointer :: wn_cu(:), wn_cv(:), wn_du(:), wn_dv(:), wn_diag2(:), wn_c(:,:) !< Aliases.
+   integer(I4P), pointer :: left(:), right(:), first(:), last(:), seg_id(:), next(:), vbody(:) !< Aliases.
+
+   if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
+   if (.not. rich_sizes_ok(size(distances, kind=I4P), closest_points, segments, vertices, normals, bodies)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   n = size(distances, kind=I4P)
+   if (self%bvh%nodes_number == 0_I4P) then
+      distances = huge(1._R8P)
+      return
+   endif
+   if (.not. self%is_on_device) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_curve_object%query_many_device: curve not on device -- call enter_device first.'
+      return
+   endif
+   allocate(dd(n), cpl(2, n), nml(2, n), sgl(n), vxl(n), bdl(n))
+   lo_u => self%bvh%lo_u ; lo_v => self%bvh%lo_v ; hi_u => self%bvh%hi_u ; hi_v => self%bvh%hi_v
+   left => self%bvh%left ; right => self%bvh%right ; first => self%bvh%first ; last => self%bvh%last
+   a_u => self%bvh%a_u ; a_v => self%bvh%a_v ; d_u => self%bvh%d_u ; d_v => self%bvh%d_v ; len2 => self%bvh%len2
+   seg_id => self%bvh%seg_id ; next => self%next ; u => self%u ; v => self%v ; pn_u => self%pn_u ; pn_v => self%pn_v
+   seg_nu => self%seg_nu ; seg_nv => self%seg_nv ; vbody => self%vertex_body
+   wn_cu => self%bvh%wn_cu ; wn_cv => self%bvh%wn_cv ; wn_du => self%bvh%wn_du ; wn_dv => self%bvh%wn_dv
+   wn_c => self%bvh%wn_c ; wn_diag2 => self%bvh%wn_diag2
+   !$acc parallel loop present(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, len2, seg_id, &
+   !$acc&                      next, u, v, pn_u, pn_v, seg_nu, seg_nv, vbody, wn_cu, wn_cv, wn_du, wn_dv, wn_c, wn_diag2) &
+   !$acc&                      copyin(points) copyout(dd, cpl, nml, sgl, vxl, bdl)
+   do i = 1, n
+      call curve_query_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, len2, seg_id, next, u, v, &
+                           pn_u, pn_v, seg_nu, seg_nv, vbody, wn_cu, wn_cv, wn_du, wn_dv, wn_c, wn_diag2, &
+                           points(1, i), points(2, i), signed_, fwn, dd(i), cpl(1, i), cpl(2, i), sgl(i), vxl(i), &
+                           nml(1, i), nml(2, i), bdl(i))
+   enddo
+   distances = dd
+   if (present(closest_points)) closest_points = cpl
+   if (present(segments)) segments = sgl
+   if (present(vertices)) vertices = vxl
+   if (present(normals)) normals = nml
+   if (present(bodies)) bodies = bdl
+   endsubroutine query_many_device
+
    subroutine enter_device(self)
    !< Map the query arrays (tree, payload, winding cache, topology, pseudo-normals) to the device.
    !< Member arrays only, never `self` (#20). No-op if already mapped or the curve is empty.
@@ -251,7 +369,8 @@ contains
    !$acc enter data copyin(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, self%bvh%right, &
    !$acc&                  self%bvh%first, self%bvh%last, self%bvh%a_u, self%bvh%a_v, self%bvh%d_u, self%bvh%d_v, &
    !$acc&                  self%bvh%len2, self%bvh%seg_id, self%next, self%u, self%v, self%pn_u, self%pn_v, &
-   !$acc&                  self%bvh%wn_cu, self%bvh%wn_cv, self%bvh%wn_du, self%bvh%wn_dv, self%bvh%wn_c, self%bvh%wn_diag2)
+   !$acc&                  self%bvh%wn_cu, self%bvh%wn_cv, self%bvh%wn_du, self%bvh%wn_dv, self%bvh%wn_c, self%bvh%wn_diag2, &
+   !$acc&                  self%seg_nu, self%seg_nv, self%vertex_body)
    self%is_on_device = .true.
    endsubroutine enter_device
 
@@ -263,7 +382,8 @@ contains
    !$acc exit data delete(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, self%bvh%right, &
    !$acc&                 self%bvh%first, self%bvh%last, self%bvh%a_u, self%bvh%a_v, self%bvh%d_u, self%bvh%d_v, &
    !$acc&                 self%bvh%len2, self%bvh%seg_id, self%next, self%u, self%v, self%pn_u, self%pn_v, &
-   !$acc&                 self%bvh%wn_cu, self%bvh%wn_cv, self%bvh%wn_du, self%bvh%wn_dv, self%bvh%wn_c, self%bvh%wn_diag2)
+   !$acc&                 self%bvh%wn_cu, self%bvh%wn_cv, self%bvh%wn_du, self%bvh%wn_dv, self%bvh%wn_c, self%bvh%wn_diag2, &
+   !$acc&                 self%seg_nu, self%seg_nv, self%vertex_body)
    self%is_on_device = .false.
    endsubroutine exit_device
 
@@ -445,7 +565,7 @@ contains
    endfunction get_vertices_number
 
    pure subroutine compute_distance(self, p, distance, closest_point, closest_segment, closest_vertex, is_signed, &
-                                    use_brute_force, sign_algorithm)
+                                    use_brute_force, sign_algorithm, normal, body)
    !< Distance of the point p = (u, v) from the curve, with its closest point, segment and vertex.
    !<
    !< `closest_vertex` is the curve vertex when the closest point is a vertex, else 0. Signed
@@ -463,6 +583,8 @@ contains
    logical,             intent(in),  optional :: is_signed        !< Signed distance (default .true.).
    logical,             intent(in),  optional :: use_brute_force  !< Brute force (default .false.).
    integer(I4P),        intent(in),  optional :: sign_algorithm   !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
+   real(R8P),           intent(out), optional :: normal(2)        !< Pseudo-normal of the closest feature (issue #37).
+   integer(I4P),        intent(out), optional :: body             !< Body of the closest segment (issue #37).
    real(R8P)                                  :: d2, t, side      !< Work.
    integer(I4P)                               :: k, feature, sg, vx !< Work.
    logical                                    :: brute, signed_   !< Resolved options.
@@ -479,6 +601,8 @@ contains
       if (present(closest_point)) closest_point = 0._R8P
       if (present(closest_segment)) closest_segment = 0_I4P
       if (present(closest_vertex)) closest_vertex = 0_I4P
+      if (present(normal)) normal = 0._R8P
+      if (present(body)) body = 0_I4P
       return
    endif
    distance = sqrt(d2)
@@ -517,6 +641,14 @@ contains
    endif
    if (present(closest_segment)) closest_segment = sg
    if (present(closest_vertex)) closest_vertex = vx
+   if (present(normal)) then
+      if (vx > 0_I4P) then
+         normal = [self%pn_u(vx), self%pn_v(vx)]
+      else
+         normal = [self%seg_nu(sg), self%seg_nv(sg)]
+      endif
+   endif
+   if (present(body)) body = self%vertex_body(sg)
    endsubroutine compute_distance
 
    pure function distance(self, p, is_signed, sign_algorithm) result(d)
@@ -1011,6 +1143,10 @@ contains
       self%bmin = 0._R8P ; self%bmax = 0._R8P
    endif
    call compute_bodies(self)
+   allocate(self%vertex_body(self%nv))
+   do i = 1, self%nv
+      self%vertex_body(i) = self%loop_body_(self%loop_of(i))
+   enddo
    ids = pack([(i, i = 1, self%nv)], self%next > 0_I4P)
    call self%bvh%build(self%u(ids), self%v(ids), self%u(self%next(ids)), self%v(self%next(ids)), ids=ids)
    endsubroutine analyze
@@ -1157,6 +1293,70 @@ contains
    endif
    if (side < 0._R8P) d = -d
    endfunction curve_signed_distance_oac
+
+   pure subroutine curve_query_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, len2, seg_id, &
+                                   next, u, v, pn_u, pn_v, seg_nu, seg_nv, vbody, wn_cu, wn_cv, wn_du, wn_dv, wn_c, wn_diag2, &
+                                   pu, pv, signed, fwn, d, cpu, cpv, sg, vx, nu, nv, b)
+   !< Rich query of (pu, pv) on the flat arrays of a non-empty curve (issue #37): the expressions of
+   !< `compute_distance`. CPU and device kernel.
+   !$acc routine seq
+   real(R8P),    intent(in)  :: lo_u(:), lo_v(:), hi_u(:), hi_v(:)  !< Node boxes.
+   integer(I4P), intent(in)  :: left(:), right(:), first(:), last(:) !< Children, leaf ranges.
+   real(R8P),    intent(in)  :: a_u(:), a_v(:), d_u(:), d_v(:), len2(:) !< Segment payload.
+   integer(I4P), intent(in)  :: seg_id(:), next(:)                   !< Payload -> segment, next vertex.
+   real(R8P),    intent(in)  :: u(:), v(:), pn_u(:), pn_v(:)         !< Vertices, vertex pseudo-normals.
+   real(R8P),    intent(in)  :: seg_nu(:), seg_nv(:)                 !< Segment normals.
+   integer(I4P), intent(in)  :: vbody(:)                             !< Body of each vertex/segment.
+   real(R8P),    intent(in)  :: wn_cu(:), wn_cv(:), wn_du(:), wn_dv(:), wn_c(:,:), wn_diag2(:) !< Winding cache.
+   real(R8P),    intent(in)  :: pu, pv                               !< Point.
+   logical,      intent(in)  :: signed, fwn                          !< Options.
+   real(R8P),    intent(out) :: d, cpu, cpv, nu, nv                  !< Distance, closest point, normal.
+   integer(I4P), intent(out) :: sg, vx, b                            !< Segment, vertex, body.
+   real(R8P)                 :: d2, t, side                          !< Work.
+   integer(I4P)              :: k, feature                           !< Work.
+
+   call segment_closest_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, len2, pu, pv, &
+                            d2, k, t, feature)
+   d = sqrt(d2)
+   sg = seg_id(k)
+   vx = 0_I4P
+   if (feature == FEATURE_VERTEX_START) vx = sg
+   if (feature == FEATURE_VERTEX_END) vx = next(sg)
+   if (vx > 0_I4P) then
+      cpu = u(vx) ; cpv = v(vx) ; nu = pn_u(vx) ; nv = pn_v(vx)
+   else
+      cpu = a_u(k) + t * d_u(k) ; cpv = a_v(k) + t * d_v(k) ; nu = seg_nu(sg) ; nv = seg_nv(sg)
+   endif
+   b = vbody(sg)
+   if (.not. signed) return
+   if (fwn) then
+      side = 0.5_R8P - segment_winding_number_oac(left, right, first, last, a_u, a_v, d_u, d_v, wn_cu, wn_cv, wn_du, wn_dv, &
+                                                  wn_c, wn_diag2, pu, pv, 4._R8P)
+   elseif (vx > 0_I4P) then
+      side = (pu - u(vx)) * pn_u(vx) + (pv - v(vx)) * pn_v(vx)
+   else
+      side = -(d_u(k) * (pv - a_v(k)) - d_v(k) * (pu - a_u(k)))
+   endif
+   if (side < 0._R8P) d = -d
+   endsubroutine curve_query_oac
+
+   pure function rich_sizes_ok(n, closest_points, segments, vertices, normals, bodies) result(good)
+   !< True if every present rich output has the right size for n points.
+   integer(I4P),           intent(in) :: n                   !< Points.
+   real(R8P),    optional, intent(in) :: closest_points(:,:) !< [2, n].
+   integer(I4P), optional, intent(in) :: segments(:)         !< [n].
+   integer(I4P), optional, intent(in) :: vertices(:)         !< [n].
+   real(R8P),    optional, intent(in) :: normals(:,:)        !< [2, n].
+   integer(I4P), optional, intent(in) :: bodies(:)           !< [n].
+   logical                            :: good                !< Result.
+
+   good = .true.
+   if (present(closest_points)) good = good .and. size(closest_points, 1) == 2 .and. size(closest_points, 2) == n
+   if (present(normals)) good = good .and. size(normals, 1) == 2 .and. size(normals, 2) == n
+   if (present(segments)) good = good .and. size(segments) == n
+   if (present(vertices)) good = good .and. size(vertices) == n
+   if (present(bodies)) good = good .and. size(bodies) == n
+   endfunction rich_sizes_ok
 
    function resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed, fwn) result(good)
    !< Check the batch arguments and resolve the options; false (status set) if invalid.
