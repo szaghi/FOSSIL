@@ -49,7 +49,27 @@ open by two size thresholds.
 
    Flat holes therefore get flat patches, and a hole wrapping an edge of the
    body follows that edge.
-4. **Re-analysis.** The patches are appended and the surface is re-analysed
+4. **Refinement** (optional, `refine=.true.`). The patch is refined to the
+   edge density of its loop (Liepa 2003):
+   - each loop vertex gets the mean length of its two loop edges as target
+     scale, a new vertex the mean scale of the triangle it splits;
+   - a triangle is split into three at its centroid c when √2 |c − v| exceeds
+     max(scale at c, scale at v) for each of its vertices v;
+   - interior edges are flipped when the two opposite angles sum to more than
+     π (not locally Delaunay), if the flip keeps the patch's orientation;
+   - split and relax alternate to a fixed point. Loop vertices never move.
+5. **Fairing** (optional, `fair=.true.`, implies refinement). The patch's
+   interior vertices move to the thin-plate surface spanned by the loop and
+   its 1-ring in the mesh: with the uniform Laplacian
+   (L x)ᵥ = Σ_{u∼v} (xᵤ − xᵥ), the equations (L (L x))ᵢ = 0 at the interior
+   vertices, with the loop and its ring fixed, form a symmetric
+   positive-definite system, solved by conjugate gradient
+   (`fossil_linear_solver`) once per coordinate. A hole in a curved surface
+   gets a curved patch with matching tangents. The ring is feature-aware:
+   only mesh facets within 60° of the patch's own normal at a loop vertex
+   carry tangents, so a hole along a sharp edge keeps the crease and a
+   planar hole stays planar.
+6. **Re-analysis.** The patches are appended and the surface is re-analysed
    with the same AABB tree kind and refinement.
 
 Inside `sanitize` (with `fill_holes=.true.`) the fill runs **after**
@@ -61,7 +81,7 @@ is then oriented by its nesting parity.
 ## API
 
 ```fortran
-call surface%fill_holes(max_hole_edges, max_hole_size, holes_filled, holes_skipped, open_edges, status)
+call surface%fill_holes(max_hole_edges, max_hole_size, holes_filled, holes_skipped, open_edges, status, refine, fair)
    class(surface_stl_object), intent(inout)         :: self
    integer(I4P),              intent(in),  optional :: max_hole_edges ! default 200
    real(R8P),                 intent(in),  optional :: max_hole_size  ! default 0.1 (of the bbox diagonal)
@@ -69,8 +89,10 @@ call surface%fill_holes(max_hole_edges, max_hole_size, holes_filled, holes_skipp
    integer(I4P),              intent(out), optional :: holes_skipped  ! loops over the thresholds
    integer(I4P),              intent(out), optional :: open_edges     ! boundary edges not forming a loop
    integer(I4P),              intent(out), optional :: status         ! STATUS_OK
+   logical,                   intent(in),  optional :: refine         ! default .false.
+   logical,                   intent(in),  optional :: fair           ! default .false.; implies refine
 
-call surface%sanitize(fill_holes=.true., max_hole_edges=..., max_hole_size=...)
+call surface%sanitize(fill_holes=.true., max_hole_edges=..., max_hole_size=..., refine_holes=..., fair_holes=...)
 ```
 
 The surface must be analysed: `load_from_file`, `adopt_facets` and
@@ -81,7 +103,11 @@ From the command line:
 
 ```bash
 fossilizer -i part.stl --sanitize --fill_holes --max_hole_size 0.05 --output part-closed
+fossilizer -i part.stl --sanitize --fill_holes --fair_holes --output part-closed   # refined and faired patches
 ```
+
+If the fairing solve fails (it should not on a valid patch), the refined
+patch is used unfaired and a warning is written to stderr.
 
 ## Example
 
@@ -118,10 +144,17 @@ end program ex_fill_holes
 - **O(n³) triangulation.** The dynamic program costs O(n³) time and O(n²)
   memory in the loop length, hence `max_hole_edges` (default 200). Larger
   holes are skipped, not triangulated badly.
-- **No refinement or fairing yet.** A patch uses only the loop's vertices. A
-  large curved hole gets a coarse patch made of long triangles rather than a
-  smooth one that matches the surrounding mesh density. Refinement and
-  Laplacian fairing are planned as a follow-up.
+- **Fairing approximates, it does not reconstruct.** The thin plate with
+  uniform weights is a smooth surface with matching tangents, not the shape
+  that was cut away: a sphere is not a thin plate. On a unit icosphere with
+  the cap z > 0.75 removed, the faired patch's largest distance from the
+  sphere is 0.100 (plain patch 0.141), its largest dihedral angle 30.5°
+  (plain 35.1°), and the enclosed volume 3.987 against 4.047 for the closed
+  polyhedron (plain 3.949). The patch is only as dense as its loop.
+- **Feature angle.** The 60° threshold decides which surrounding facets give
+  the tangents. A curved hole whose surroundings turn by more than that
+  relative to the patch (a hole covering most of a hemisphere) gets fewer
+  tangent constraints and a flatter patch.
 - **Orientation comes from the mesh.** Patches follow the winding of the
   surrounding facets. Around a hole whose neighbourhood is inconsistently
   wound, the loop does not close and is reported in `open_edges`. Run

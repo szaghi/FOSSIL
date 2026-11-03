@@ -112,7 +112,7 @@ code examples, known limitations) live under
 | Per-vertex Gaussian curvature | `surface%gaussian_curvature(K, status)` | [Curvature](/guide/advanced/curvature) |
 | Per-vertex signed mean curvature | `surface%mean_curvature(H, status)` | [Curvature](/guide/advanced/curvature) |
 | Mesh smoothing (explicit + Taubin) | `surface%smooth(method, lambda, mu, iterations, status)` | [Smoothing](/guide/advanced/smoothing) |
-| Hole filling (Liepa minimum-weight patches) | `surface%fill_holes(max_hole_edges, max_hole_size, ...)` | [Hole filling](/guide/advanced/hole-filling) |
+| Hole filling (Liepa minimum-weight patches, optional refinement and thin-plate fairing) | `surface%fill_holes(max_hole_edges, max_hole_size, ..., refine, fair)` | [Hole filling](/guide/advanced/hole-filling) |
 
 RANSAC shape detection was deliberately dropped from the roadmap; a few
 solver-dependent items (heat-method geodesics, implicit smoothing)

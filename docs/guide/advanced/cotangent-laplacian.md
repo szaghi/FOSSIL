@@ -33,7 +33,10 @@ A note on the dependency: `L` is a *populate*, not a *factorise*. A
 single per-triangle pass writes into CSR storage and the operator is
 ready to use. A sparse solver is only needed when you want to *invert*
 `L` (heat method, implicit smoothing). Everything that just
-*multiplies* by `L` and `M⁻¹` ships today.
+*multiplies* by `L` and `M⁻¹` ships today. A Jacobi-preconditioned
+conjugate gradient for symmetric positive-definite CSR systems now exists
+(`fossil_linear_solver%cg_solve`, used by the hole fairing); the heat
+method and implicit smoothing have not been built on it yet.
 
 ## Pipeline
 

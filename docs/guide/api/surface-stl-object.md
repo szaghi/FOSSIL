@@ -208,6 +208,8 @@ The fixed pipeline is:
 | `fill_holes`   | `in`, opt.   | `logical`      | Default `.false.`. Close small holes after orientation, see [`fill_holes`](#fill_holes); orientation runs once more if anything was filled. |
 | `max_hole_edges` | `in`, opt. | `integer(I4P)` | Passed to `fill_holes` (default 200).                                                 |
 | `max_hole_size`  | `in`, opt. | `real(R8P)`    | Passed to `fill_holes` (default 0.1 of the bounding-box diagonal).                    |
+| `refine_holes`   | `in`, opt. | `logical`      | Passed to `fill_holes` as `refine` (default `.false.`): patches refined to the loop's edge density. |
+| `fair_holes`     | `in`, opt. | `logical`      | Passed to `fill_holes` as `fair` (default `.false.`, implies refine): thin-plate fairing of the patches. |
 
 **Example.** Load a deliberately broken mesh and verify repair.
 
