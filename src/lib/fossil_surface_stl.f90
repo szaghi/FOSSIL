@@ -16,6 +16,7 @@ use fossil_list_id_object, only : list_id_object
 use fossil_box_query, only : bvh_box_contact_oac, box_tolerance, cell_bands, cell_components, &
                              BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_box_predicates, only : box_triangle_overlap
+use fossil_line_query, only : bvh_line_crossings_oac, tri_line_hit_oac, sort_crossings_oac
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil_winding_number, only : compute_winding_number => winding_number, WN_FOUR_PI => FOUR_PI, WN_DEFAULT_BETA => DEFAULT_BETA
@@ -165,6 +166,7 @@ type :: surface_stl_object
    type(pnormal_payload_t), allocatable, public :: pnormal_payload(:) !< Per-facet pseudo-normal SoA (Step 5). PUBLIC for !$acc directive access.
    type(wn_node_t),         allocatable, public :: wn_payload(:)      !< Per-node fast-winding-number cache, indexed like aabb%node (issue #29). PUBLIC for !$acc directive access.
    integer(I4P),            allocatable, public :: body_payload(:)    !< Body of each facet (issue #37), device-mappable. PUBLIC for !$acc directive access.
+   real(R8P),               allocatable, public :: tri_vertices(:,:)  !< Exact vertices of each facet [9, facets] (issue #40), device-mappable.
    logical, public                          :: is_on_device=.false. !< Sentinel: true between matched enter_device / exit_device calls.
    contains
       ! read-only accessors (pure, inlined at -O2, zero data copy for scalars)
@@ -224,6 +226,8 @@ type :: surface_stl_object
       procedure, pass(self) :: box_intersects_surface          !< True if a box meets the surface (issue #38).
       procedure, pass(self) :: box_classify_many_device        !< box_classify_many on the device (issue #38).
       procedure, pass(self) :: tag_block                       !< Signed tag bands on a block of cells (issue #38).
+      procedure, pass(self) :: line_crossings                  !< Exact crossings of an axis-aligned line (issue #40).
+      procedure, pass(self) :: cell_wall_fractions             !< Wall fractions along the grid lines of a block (issue #40).
       ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
       procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
       procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
@@ -610,6 +614,18 @@ contains
       ! Issue #29 -- persistent fast-winding-number cache, built once per analyze instead
       ! of on every winding_number call.
       call self%aabb%build_winding_payload(facet=self%facet, wn=self%wn_payload)
+      ! Issue #40 -- exact facet vertices as a flat array for the line-crossing kernels (the BVH
+      ! payload stores v1 + edges, whose sums are rounded and would break watertightness).
+      block
+         integer(I4P) :: ff
+         if (allocated(self%tri_vertices)) deallocate(self%tri_vertices)
+         allocate(self%tri_vertices(9, self%facets_number))
+         do ff = 1, self%facets_number
+            self%tri_vertices(:, ff) = [self%facet(ff)%vertex(1)%x, self%facet(ff)%vertex(1)%y, self%facet(ff)%vertex(1)%z, &
+                                        self%facet(ff)%vertex(2)%x, self%facet(ff)%vertex(2)%y, self%facet(ff)%vertex(2)%z, &
+                                        self%facet(ff)%vertex(3)%x, self%facet(ff)%vertex(3)%y, self%facet(ff)%vertex(3)%z]
+         enddo
+      end block
    else
       ! No facets (e.g. an empty boolean result, issue #33): reset what the branch above computes,
       ! so no query reads the values of the previous surface (the volume used to stay stale).
@@ -631,6 +647,7 @@ contains
       end block
       if (allocated(self%pnormal_payload)) deallocate(self%pnormal_payload)
       if (allocated(self%wn_payload))      deallocate(self%wn_payload)
+      if (allocated(self%tri_vertices))    deallocate(self%tri_vertices)
    endif
    endsubroutine analyze
 
@@ -1952,6 +1969,138 @@ contains
    enddo
    endsubroutine tag_block
 
+   subroutine line_crossings(self, axis, a, b, t0, t1, t, facets, entering, n, status)
+   !< Exact crossings of the line along `axis` (1, 2, 3) at (a, b) with the surface (issue #40).
+   !<
+   !< (a, b) are the two other coordinates in cyclic order (axis 1: y, z; 2: z, x; 3: x, y). Every
+   !< crossing with parameter (coordinate along the axis) in [t0, t1] is returned, sorted, with its
+   !< facet and whether the line, going in +axis, enters the solid there. The test is exact
+   !< (`fossil_line_query`: exact orient2d on the projected triangle with a symbolic tie-break), so
+   !< on a watertight surface a line through edges and vertices counts every crossing once and the
+   !< entering flags alternate; the parameters are rounded. SAH BVH traversal, brute force on an
+   !< octree. `status = STATUS_INVALID_INPUT` if axis is not 1-3 or t1 < t0.
+   class(surface_stl_object), intent(in)            :: self        !< Surface.
+   integer(I4P),              intent(in)            :: axis        !< Line axis.
+   real(R8P),                 intent(in)            :: a, b        !< Line position.
+   real(R8P),                 intent(in)            :: t0, t1      !< Parameter range.
+   real(R8P),    allocatable, intent(out)           :: t(:)        !< Crossing parameters [n].
+   integer(I4P), allocatable, intent(out)           :: facets(:)   !< Facets [n].
+   logical,      allocatable, intent(out)           :: entering(:) !< Entering flags [n].
+   integer(I4P),              intent(out)           :: n           !< Number of crossings.
+   integer(I4P),              intent(out), optional :: status      !< STATUS_OK or STATUS_INVALID_INPUT.
+
+   if (present(status)) status = STATUS_OK
+   n = 0_I4P
+   if (axis < 1_I4P .or. axis > 3_I4P .or. t1 < t0) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      allocate(t(0), facets(0), entering(0))
+      return
+   endif
+   call line_crossings_core(self, axis, a, b, t0, t1, t, facets, entering, n)
+   endsubroutine line_crossings
+
+   subroutine cell_wall_fractions(self, x, y, z, frac, inside, bad_lines, status)
+   !< Wall fractions along the grid lines through the cell centres of a block (issue #40).
+   !<
+   !< `x(nx)`, `y(ny)`, `z(nz)` are the cell-centre coordinates (strictly increasing). `frac(d, i, j, k)`
+   !< for d = 1..6 (-x, +x, -y, +y, -z, +z) is the fraction of the distance to the neighbouring
+   !< centre at which the grid line first meets the wall, in [0, 1], or -1 if it does not meet it
+   !< before that centre (also at the block ends: pad the block with ghost cells). `inside(i, j, k)`
+   !< is the parity of the crossings along the x line from outside the surface box: exact
+   !< topology (every crossing counted once on a watertight surface), so it equals the
+   !< point-in-solid test except for a centre within round-off of the wall. `bad_lines` (optional)
+   !< counts the lines whose entering/leaving flags do not alternate (open or non-manifold input).
+   !< `status = STATUS_INVALID_INPUT` on bad coordinates or shapes.
+   class(surface_stl_object), intent(in)            :: self            !< Surface.
+   real(R8P),                 intent(in)            :: x(:), y(:), z(:) !< Cell centres.
+   real(R8P),                 intent(out)           :: frac(:,:,:,:)   !< Fractions [6, nx, ny, nz].
+   logical,                   intent(out)           :: inside(:,:,:)   !< Centres inside [nx, ny, nz].
+   integer(I4P),              intent(out), optional :: bad_lines       !< Lines with non-alternating flags.
+   integer(I4P),              intent(out), optional :: status          !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P) :: nx, ny, nz, i, j, k, nbad !< Work.
+   logical      :: bad                       !< Size check.
+   real(R8P)    :: bl(3)                     !< Surface box minimum.
+
+   if (present(status)) status = STATUS_OK
+   nx = size(x, kind=I4P) ; ny = size(y, kind=I4P) ; nz = size(z, kind=I4P)
+   bad = nx < 1 .or. ny < 1 .or. nz < 1
+   if (.not. bad) bad = any(x(2:) <= x(:nx-1)) .or. any(y(2:) <= y(:ny-1)) .or. any(z(2:) <= z(:nz-1)) .or. &
+                        size(frac, 1) /= 6 .or. size(frac, 2) /= nx .or. size(frac, 3) /= ny .or. size(frac, 4) /= nz .or. &
+                        size(inside, 1) /= nx .or. size(inside, 2) /= ny .or. size(inside, 3) /= nz
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   frac = -1._R8P ; inside = .false. ; nbad = 0_I4P
+   if (self%facets_number == 0_I4P) then
+      if (present(bad_lines)) bad_lines = 0_I4P
+      return
+   endif
+   bl = [self%bmin%x, self%bmin%y, self%bmin%z]
+   !$omp parallel default(shared) private(i, j, k) reduction(+:nbad)
+   !$omp do collapse(2) schedule(dynamic)
+   do k = 1_I4P, nz
+      do j = 1_I4P, ny
+         call sweep(1_I4P, y(j), z(k), x, bl(1), frac(1:2, :, j, k), nbad, inside(:, j, k))
+      enddo
+   enddo
+   !$omp end do nowait
+   !$omp do collapse(2) schedule(dynamic)
+   do i = 1_I4P, nx
+      do k = 1_I4P, nz
+         call sweep(2_I4P, z(k), x(i), y, bl(2), frac(3:4, i, :, k), nbad)
+      enddo
+   enddo
+   !$omp end do nowait
+   !$omp do collapse(2) schedule(dynamic)
+   do j = 1_I4P, ny
+      do i = 1_I4P, nx
+         call sweep(3_I4P, x(i), y(j), z, bl(3), frac(5:6, i, j, :), nbad)
+      enddo
+   enddo
+   !$omp end do
+   !$omp end parallel
+   if (present(bad_lines)) bad_lines = nbad
+   contains
+      subroutine sweep(ax, a, b, c, cmin, fr, nb, ins)
+      !< One grid line along ax through the centres c: fractions toward both neighbours, parity.
+      integer(I4P), intent(in)              :: ax       !< Axis.
+      real(R8P),    intent(in)              :: a, b     !< Line position.
+      real(R8P),    intent(in)              :: c(:)     !< Centres along the line.
+      real(R8P),    intent(in)              :: cmin     !< Surface box minimum along the axis.
+      real(R8P),    intent(inout)           :: fr(:,:)  !< Fractions [2 (-, +), centres].
+      integer(I4P), intent(inout)           :: nb       !< Bad lines.
+      logical,      intent(inout), optional :: ins(:)   !< Parity inside flags.
+      real(R8P),    allocatable :: t(:)    !< Crossings.
+      integer(I4P), allocatable :: f(:)    !< Facets.
+      logical,      allocatable :: e(:)    !< Entering flags.
+      integer(I4P)              :: n, m, q, nc !< Work.
+
+      nc = size(c, kind=I4P)
+      call line_crossings_core(self, ax, a, b, min(c(1), cmin) - 1._R8P, c(nc), t, f, e, n)
+      do q = 1_I4P, n
+         if (e(q) .neqv. (mod(q, 2_I4P) == 1_I4P)) then
+            nb = nb + 1_I4P
+            exit
+         endif
+      enddo
+      m = 0_I4P ! crossings strictly before the current centre
+      do q = 1_I4P, nc
+         do while (m < n)
+            if (t(m + 1) >= c(q)) exit
+            m = m + 1_I4P
+         enddo
+         if (present(ins)) ins(q) = mod(m, 2_I4P) == 1_I4P
+         if (q > 1_I4P .and. m > 0_I4P) then ! last crossing in [c(q-1), c(q)]
+            if (t(m) >= c(q - 1)) fr(1, q) = (c(q) - t(m)) / (c(q) - c(q - 1))
+         endif
+         if (q < nc .and. m < n) then        ! first crossing in [c(q), c(q+1)]
+            if (t(m + 1) <= c(q + 1)) fr(2, q) = (t(m + 1) - c(q)) / (c(q + 1) - c(q))
+         endif
+      enddo
+      endsubroutine sweep
+   endsubroutine cell_wall_fractions
+
    subroutine query_many_device(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
                                 is_signed, sign_algorithm, status)
    !< `query_many` on the device (issue #37): same arguments, outputs and defaults.
@@ -2320,6 +2469,49 @@ contains
       found = .true. ; cp2 = cc ; bound = dd
       endsubroutine consider
    endsubroutine second_foot
+
+   subroutine line_crossings_core(self, axis, a, b, t0, t1, t, ids, es, n)
+   !< Sorted crossings of an axis-aligned line (issue #40): BVH kernel with a growing buffer, or brute
+   !< force over the facets (same kernel per triangle, same sort).
+   type(surface_stl_object),  intent(in)  :: self   !< Surface.
+   integer(I4P),              intent(in)  :: axis   !< Axis.
+   real(R8P),                 intent(in)  :: a, b   !< Line position.
+   real(R8P),                 intent(in)  :: t0, t1 !< Parameter range.
+   real(R8P),    allocatable, intent(out) :: t(:)   !< Parameters.
+   integer(I4P), allocatable, intent(out) :: ids(:) !< Facets.
+   logical,      allocatable, intent(out) :: es(:)  !< Entering flags.
+   integer(I4P),              intent(out) :: n      !< Count.
+   integer(I4P) :: nmax, f !< Work.
+   logical      :: overflow, hit, enter !< Work.
+   real(R8P)    :: tt !< Work.
+
+   n = 0_I4P
+   if (self%facets_number == 0_I4P) then
+      allocate(t(0), ids(0), es(0))
+      return
+   endif
+   if (self%aabb%get_tree_kind() == AABB_TREE_SAH_BVH .and. allocated(self%aabb%node) .and. &
+       allocated(self%aabb%payload)) then
+      nmax = 64_I4P
+      do
+         if (allocated(t)) deallocate(t, ids, es)
+         allocate(t(nmax), ids(nmax), es(nmax))
+         call bvh_line_crossings_oac(self%aabb%node, self%aabb%payload, self%tri_vertices, axis, a, b, t0, t1, t, ids, es, &
+                                     n, overflow)
+         if (.not. overflow) exit
+         nmax = 4_I4P * nmax
+      enddo
+   else
+      allocate(t(self%facets_number), ids(self%facets_number), es(self%facets_number))
+      do f = 1_I4P, self%facets_number
+         call tri_line_hit_oac(self%tri_vertices(:, f), axis, a, b, hit, tt, enter)
+         if (.not. hit .or. tt < t0 .or. tt > t1) cycle
+         n = n + 1_I4P ; t(n) = tt ; ids(n) = f ; es(n) = enter
+      enddo
+      call sort_crossings_oac(t, ids, es, n)
+   endif
+   t = t(1:n) ; ids = ids(1:n) ; es = es(1:n)
+   endsubroutine line_crossings_core
 
    function box_contact(self, lo, hi, tol, reach) result(code)
    !< BOX_CUT, BOX_NEAR or BOX_NONE of the box [lo, hi] (issue #38): SAH BVH traversal

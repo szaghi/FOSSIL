@@ -27,6 +27,7 @@ module fossil_curve_object
 !< Exactness. Metrics are plain floating point. Nesting (and so orientation validity) uses the
 !< exact `orient2d_xy` crossing test, so every loop gets the same answer from every query.
 use fossil_box_query,          only : curve_box_contact_oac, cell_bands, cell_components, BOX_NONE, BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
+use fossil_line_query,         only : curve_line_crossings_oac
 use fossil_predicates,         only : orient2d_xy
 use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, segment_point_distance2, &
                                      segment_closest_oac, segment_winding_number_oac
@@ -85,6 +86,8 @@ type :: curve_object
       procedure, pass(self) :: box_intersects_curve !< True if a box meets the curve (issue #38).
       procedure, pass(self) :: box_classify_many_device !< box_classify_many on the device (issue #38).
       procedure, pass(self) :: tag_block            !< Signed tag bands on a block of cells (issue #38).
+      procedure, pass(self) :: line_crossings       !< Exact crossings of an axis-aligned line (issue #40).
+      procedure, pass(self) :: cell_wall_fractions  !< Wall fractions along the grid lines of a block (issue #40).
       procedure, pass(self) :: check_validity       !< First validity defect (CURVE_* code).
       procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
       procedure, pass(self) :: distance             !< (Signed) distance of a point.
@@ -375,6 +378,113 @@ contains
       enddo
    enddo
    endsubroutine tag_block
+
+   subroutine line_crossings(self, axis, a, t0, t1, t, segments, entering, n, status)
+   !< Exact crossings of the line along `axis` (1: along u at v = a; 2: along v at u = a) with the
+   !< curve (issue #40): every crossing with parameter in [t0, t1], sorted, with its segment and
+   !< whether the line (in +axis) enters the solid. Exact side test with a symbolic tie-break
+   !< (`fossil_line_query`), so on closed loops every crossing is counted once; the parameters are
+   !< rounded. `status = STATUS_INVALID_INPUT` if axis is not 1 or 2, or t1 < t0.
+   class(curve_object),       intent(in)            :: self        !< Curve.
+   integer(I4P),              intent(in)            :: axis        !< 1 (u) or 2 (v).
+   real(R8P),                 intent(in)            :: a           !< Line position.
+   real(R8P),                 intent(in)            :: t0, t1      !< Parameter range.
+   real(R8P),    allocatable, intent(out)           :: t(:)        !< Crossing parameters [n].
+   integer(I4P), allocatable, intent(out)           :: segments(:) !< Segments [n].
+   logical,      allocatable, intent(out)           :: entering(:) !< Entering flags [n].
+   integer(I4P),              intent(out)           :: n           !< Number of crossings.
+   integer(I4P),              intent(out), optional :: status      !< STATUS_OK or STATUS_INVALID_INPUT.
+
+   if (present(status)) status = STATUS_OK
+   n = 0_I4P
+   if (axis < 1_I4P .or. axis > 2_I4P .or. t1 < t0) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      allocate(t(0), segments(0), entering(0))
+      return
+   endif
+   call curve_crossings_core(self, axis, a, t0, t1, t, segments, entering, n)
+   endsubroutine line_crossings
+
+   subroutine cell_wall_fractions(self, x, y, frac, inside, bad_lines, status)
+   !< Wall fractions along the grid lines through the cell centres x(nx), y(ny) (u, v) of a block
+   !< (issue #40): `frac(d, i, j)` for d = 1..4 (-u, +u, -v, +v) as in the surface twin (-1: no
+   !< crossing before the neighbouring centre, or a block end); `inside(i, j)` by the parity along the
+   !< u line from outside the curve box; `bad_lines` counts lines whose flags do not alternate.
+   class(curve_object), intent(in)            :: self          !< Curve.
+   real(R8P),           intent(in)            :: x(:), y(:)    !< Cell centres (u, v).
+   real(R8P),           intent(out)           :: frac(:,:,:)   !< Fractions [4, nx, ny].
+   logical,             intent(out)           :: inside(:,:)   !< Centres inside [nx, ny].
+   integer(I4P),        intent(out), optional :: bad_lines     !< Lines with non-alternating flags.
+   integer(I4P),        intent(out), optional :: status        !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P) :: nx, ny, i, j, nbad !< Work.
+   logical      :: bad                !< Size check.
+
+   if (present(status)) status = STATUS_OK
+   nx = size(x, kind=I4P) ; ny = size(y, kind=I4P)
+   bad = nx < 1 .or. ny < 1
+   if (.not. bad) bad = any(x(2:) <= x(:nx-1)) .or. any(y(2:) <= y(:ny-1)) .or. size(frac, 1) /= 4 .or. &
+                        size(frac, 2) /= nx .or. size(frac, 3) /= ny .or. size(inside, 1) /= nx .or. size(inside, 2) /= ny
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   frac = -1._R8P ; inside = .false. ; nbad = 0_I4P
+   if (self%bvh%nodes_number == 0_I4P) then
+      if (present(bad_lines)) bad_lines = 0_I4P
+      return
+   endif
+   !$omp parallel default(shared) private(i, j) reduction(+:nbad)
+   !$omp do schedule(dynamic)
+   do j = 1_I4P, ny
+      call sweep(1_I4P, y(j), x, self%bmin(1), frac(1:2, :, j), nbad, inside(:, j))
+   enddo
+   !$omp end do nowait
+   !$omp do schedule(dynamic)
+   do i = 1_I4P, nx
+      call sweep(2_I4P, x(i), y, self%bmin(2), frac(3:4, i, :), nbad)
+   enddo
+   !$omp end do
+   !$omp end parallel
+   if (present(bad_lines)) bad_lines = nbad
+   contains
+      subroutine sweep(ax, a, c, cmin, fr, nb, ins)
+      !< One grid line: fractions toward both neighbours, parity.
+      integer(I4P), intent(in)              :: ax      !< Axis.
+      real(R8P),    intent(in)              :: a       !< Line position.
+      real(R8P),    intent(in)              :: c(:)    !< Centres along the line.
+      real(R8P),    intent(in)              :: cmin    !< Curve box minimum along the axis.
+      real(R8P),    intent(inout)           :: fr(:,:) !< Fractions [2, centres].
+      integer(I4P), intent(inout)           :: nb      !< Bad lines.
+      logical,      intent(inout), optional :: ins(:)  !< Parity inside flags.
+      real(R8P),    allocatable :: t(:)   !< Crossings.
+      integer(I4P), allocatable :: g(:)   !< Segments.
+      logical,      allocatable :: e(:)   !< Entering flags.
+      integer(I4P)              :: n, m, q, nc !< Work.
+
+      nc = size(c, kind=I4P)
+      call curve_crossings_core(self, ax, a, min(c(1), cmin) - 1._R8P, c(nc), t, g, e, n)
+      do q = 1_I4P, n
+         if (e(q) .neqv. (mod(q, 2_I4P) == 1_I4P)) then
+            nb = nb + 1_I4P
+            exit
+         endif
+      enddo
+      m = 0_I4P
+      do q = 1_I4P, nc
+         do while (m < n)
+            if (t(m + 1) >= c(q)) exit
+            m = m + 1_I4P
+         enddo
+         if (present(ins)) ins(q) = mod(m, 2_I4P) == 1_I4P
+         if (q > 1_I4P .and. m > 0_I4P) then
+            if (t(m) >= c(q - 1)) fr(1, q) = (c(q) - t(m)) / (c(q) - c(q - 1))
+         endif
+         if (q < nc .and. m < n) then
+            if (t(m + 1) <= c(q + 1)) fr(2, q) = (t(m + 1) - c(q)) / (c(q + 1) - c(q))
+         endif
+      enddo
+      endsubroutine sweep
+   endsubroutine cell_wall_fractions
 
    subroutine distance_many(self, points, distances, is_signed, sign_algorithm, status)
    !< Batched distances of the points (u, v) = points(:, i), CPU, OpenMP over the points.
@@ -1719,6 +1829,38 @@ contains
    if (present(vertices)) good = good .and. size(vertices) == n
    if (present(bodies)) good = good .and. size(bodies) == n
    endfunction rich_sizes_ok
+
+   subroutine curve_crossings_core(self, axis, a, t0, t1, t, ids, es, n)
+   !< Sorted crossings of an axis-aligned line with the curve (issue #40): segment-BVH kernel with a
+   !< growing buffer.
+   type(curve_object),        intent(in)  :: self   !< Curve.
+   integer(I4P),              intent(in)  :: axis   !< 1 or 2.
+   real(R8P),                 intent(in)  :: a      !< Line position.
+   real(R8P),                 intent(in)  :: t0, t1 !< Parameter range.
+   real(R8P),    allocatable, intent(out) :: t(:)   !< Parameters.
+   integer(I4P), allocatable, intent(out) :: ids(:) !< Segments.
+   logical,      allocatable, intent(out) :: es(:)  !< Entering flags.
+   integer(I4P),              intent(out) :: n      !< Count.
+   integer(I4P) :: nmax     !< Buffer size.
+   logical      :: overflow !< Buffer too small.
+
+   n = 0_I4P
+   if (self%bvh%nodes_number == 0_I4P) then
+      allocate(t(0), ids(0), es(0))
+      return
+   endif
+   nmax = 64_I4P
+   do
+      if (allocated(t)) deallocate(t, ids, es)
+      allocate(t(nmax), ids(nmax), es(nmax))
+      call curve_line_crossings_oac(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, &
+                                    self%bvh%right, self%bvh%first, self%bvh%last, self%bvh%seg_id, self%next, self%u, &
+                                    self%v, axis, a, t0, t1, t, ids, es, n, overflow)
+      if (.not. overflow) exit
+      nmax = 4_I4P * nmax
+   enddo
+   t = t(1:n) ; ids = ids(1:n) ; es = es(1:n)
+   endsubroutine curve_crossings_core
 
    function resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed, fwn) result(good)
    !< Check the batch arguments and resolve the options; false (status set) if invalid.
