@@ -26,12 +26,16 @@ use fossil_facet_object
 use fossil_marching_cubes, only : extract_isosurface, MC_STATUS_OK, MC_STATUS_BAD_DIMENSIONS
 use fossil_surface_stl_object
 use fossil_distance_field, only : distance_field_object, FAR_VALUE
+use fossil_curve_object, only : curve_object, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, &
+                               CURVE_ZERO_AREA_LOOP, CURVE_WRONG_ORIENTATION
 
 implicit none
 private
 public :: facet_object
 public :: surface_stl_object
 public :: distance_field_object, FAR_VALUE
+public :: curve_object, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, CURVE_ZERO_AREA_LOOP, &
+          CURVE_WRONG_ORIENTATION
 public :: intersection_pair_t
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 public :: sign_algorithm_from_string
