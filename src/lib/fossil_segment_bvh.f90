@@ -21,6 +21,11 @@ module fossil_segment_bvh
 !< (1/2pi) integral n . (x - p) / |x - p|^2 ds about its box centre c, from its dipole moment
 !< D = sum length * n and second moment C(i,k) = sum length * n(i) * (m - c)(k) (m segment
 !< midpoint; both exact for straight segments); other nodes recurse, leaves sum exact angles.
+!<
+!< Device (issue #36 step 7). The traversals are free `_oac` procedures (`!$acc routine seq`) on
+!< the flat arrays, and the type-bound `closest` and `winding_number` call them: the CPU and the
+!< device run the same code, as the 3-D `bvh_winding_number_oac` does (#20 rules: no type-bound
+!< calls or `class` dummies in device code).
 use penf, only : I4P, R8P, MaxR8P
 
 implicit none
@@ -28,6 +33,7 @@ private
 public :: segment_bvh
 public :: FEATURE_NONE, FEATURE_SEGMENT, FEATURE_VERTEX_START, FEATURE_VERTEX_END
 public :: segment_point_distance2, segment_winding
+public :: segment_closest_oac, segment_winding_number_oac, STACK_SIZE
 
 integer(I4P), parameter :: LEAF_SIZE     = 4_I4P   !< Maximum segments per leaf.
 integer(I4P), parameter :: BUCKETS       = 16_I4P  !< SAH buckets per axis.
@@ -136,32 +142,56 @@ contains
    !<
    !< `k` indexes the payload (`seg_id(k)` is the curve segment); `t` in [0, 1] is the parameter
    !< of the closest point a + t d (exactly 0 or 1 at a vertex). With an empty tree: d2 = huge,
-   !< k = 0, feature = FEATURE_NONE.
+   !< k = 0, feature = FEATURE_NONE. Runs `segment_closest_oac`, the device kernel.
    class(segment_bvh), intent(in)  :: self    !< Tree.
    real(R8P),          intent(in)  :: pu, pv  !< Query point.
    real(R8P),          intent(out) :: d2      !< Squared distance.
    integer(I4P),       intent(out) :: k       !< Payload index of the closest segment.
    real(R8P),          intent(out) :: t       !< Parameter of the closest point.
    integer(I4P),       intent(out) :: feature !< FEATURE_* of the closest point.
-   integer(I4P)                    :: stack(STACK_SIZE), top, node, c1, c2, j, f !< Work.
-   real(R8P)                       :: b1, b2, dj, tj !< Work.
+
+   if (self%nodes_number == 0_I4P) then
+      d2 = MaxR8P ; k = 0_I4P ; t = 0._R8P ; feature = FEATURE_NONE
+      return
+   endif
+   call segment_closest_oac(self%lo_u, self%lo_v, self%hi_u, self%hi_v, self%left, self%right, self%first, self%last, &
+                            self%a_u, self%a_v, self%d_u, self%d_v, self%len2, pu, pv, d2, k, t, feature)
+   endsubroutine closest
+
+   pure subroutine segment_closest_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, len2, &
+                                       pu, pv, d2, k, t, feature)
+   !< Closest segment to (pu, pv) on the flat tree arrays (root = node 1, non-empty tree).
+   !<
+   !< Nearer child first, pruning on squared box distance, a candidate wins only if strictly
+   !< closer. CPU and device kernel.
+   !$acc routine seq
+   real(R8P),    intent(in)  :: lo_u(:), lo_v(:), hi_u(:), hi_v(:) !< Node boxes.
+   integer(I4P), intent(in)  :: left(:), right(:), first(:), last(:) !< Children, leaf ranges.
+   real(R8P),    intent(in)  :: a_u(:), a_v(:), d_u(:), d_v(:), len2(:) !< Segment payload.
+   real(R8P),    intent(in)  :: pu, pv  !< Query point.
+   real(R8P),    intent(out) :: d2      !< Squared distance.
+   integer(I4P), intent(out) :: k       !< Payload index.
+   real(R8P),    intent(out) :: t       !< Parameter.
+   integer(I4P), intent(out) :: feature !< FEATURE_*.
+   integer(I4P)              :: stack(STACK_SIZE), top, node, c1, c2, j, f !< Work.
+   real(R8P)                 :: b1, b2, dj, tj !< Work.
 
    d2 = MaxR8P ; k = 0_I4P ; t = 0._R8P ; feature = FEATURE_NONE
-   if (self%nodes_number == 0_I4P) return
    top = 1_I4P ; stack(1) = 1_I4P
    do while (top > 0_I4P)
       node = stack(top) ; top = top - 1_I4P
-      if (box_distance2(self, node, pu, pv) >= d2) cycle
-      if (self%left(node) == 0_I4P) then
-         do j = self%first(node), self%last(node)
-            call segment_point_distance2(self%a_u(j), self%a_v(j), self%d_u(j), self%d_v(j), self%len2(j), pu, pv, dj, tj, f)
+      if (box_d2_oac(lo_u(node), lo_v(node), hi_u(node), hi_v(node), pu, pv) >= d2) cycle
+      if (left(node) == 0_I4P) then
+         do j = first(node), last(node)
+            call segment_point_distance2(a_u(j), a_v(j), d_u(j), d_v(j), len2(j), pu, pv, dj, tj, f)
             if (dj < d2) then
                d2 = dj ; k = j ; t = tj ; feature = f
             endif
          enddo
       else
-         c1 = self%left(node) ; c2 = self%right(node)
-         b1 = box_distance2(self, c1, pu, pv) ; b2 = box_distance2(self, c2, pu, pv)
+         c1 = left(node) ; c2 = right(node)
+         b1 = box_d2_oac(lo_u(c1), lo_v(c1), hi_u(c1), hi_v(c1), pu, pv)
+         b2 = box_d2_oac(lo_u(c2), lo_v(c2), hi_u(c2), hi_v(c2), pu, pv)
          if (b1 <= b2) then ! push the farther child first, visit the nearer one next
             top = top + 1_I4P ; stack(top) = c2
             top = top + 1_I4P ; stack(top) = c1
@@ -171,7 +201,7 @@ contains
          endif
       endif
    enddo
-   endsubroutine closest
+   endsubroutine segment_closest_oac
 
    pure subroutine closest_brute(self, pu, pv, d2, k, t, feature)
    !< Same as `closest`, by brute force over the payload in payload order (reference for tests).
@@ -245,46 +275,64 @@ contains
 
    pure function winding_number(self, pu, pv, beta) result(w)
    !< Fast generalized winding number of (pu, pv) (see the module notes); beta default 2.
+   !< Runs `segment_winding_number_oac`, the device kernel.
    class(segment_bvh), intent(in)           :: self   !< Tree.
    real(R8P),          intent(in)           :: pu, pv !< Point.
    real(R8P),          intent(in), optional :: beta   !< Admissibility (default 2, as in 3-D).
    real(R8P)                                :: w      !< Winding number.
-   real(R8P), parameter :: TWO_PI = 2._R8P * acos(-1._R8P) !< 2 pi.
-   integer(I4P)                             :: stack(STACK_SIZE), top, node, j !< Work.
-   real(R8P)                                :: b2, ru, rv, r2, omega, tr, rcr !< Work.
+   real(R8P)                                :: b2     !< Squared admissibility.
 
    w = 0._R8P
    if (self%nodes_number == 0_I4P) return
    b2 = 4._R8P ; if (present(beta)) b2 = beta * beta
+   w = segment_winding_number_oac(self%left, self%right, self%first, self%last, self%a_u, self%a_v, self%d_u, self%d_v, &
+                                  self%wn_cu, self%wn_cv, self%wn_du, self%wn_dv, self%wn_c, self%wn_diag2, pu, pv, b2)
+   endfunction winding_number
+
+   pure function segment_winding_number_oac(left, right, first, last, a_u, a_v, d_u, d_v, wn_cu, wn_cv, wn_du, wn_dv, &
+                                            wn_c, wn_diag2, pu, pv, b2) result(w)
+   !< Fast generalized winding number on the flat tree arrays (non-empty tree). CPU and device.
+   !$acc routine seq
+   integer(I4P), intent(in) :: left(:), right(:), first(:), last(:) !< Children, leaf ranges.
+   real(R8P),    intent(in) :: a_u(:), a_v(:), d_u(:), d_v(:)       !< Segment payload.
+   real(R8P),    intent(in) :: wn_cu(:), wn_cv(:), wn_du(:), wn_dv(:) !< Winding cache: centre, dipole.
+   real(R8P),    intent(in) :: wn_c(:,:), wn_diag2(:)               !< Winding cache: second moment, diagonal.
+   real(R8P),    intent(in) :: pu, pv                               !< Point.
+   real(R8P),    intent(in) :: b2                                   !< Squared admissibility.
+   real(R8P)                :: w                                    !< Winding number.
+   real(R8P), parameter     :: TWO_PI = 2._R8P * 3.14159265358979323846264338327950288_R8P !< 2 pi.
+   integer(I4P)             :: stack(STACK_SIZE), top, node, j       !< Work.
+   real(R8P)                :: ru, rv, r2, omega, tr, rcr            !< Work.
+
    omega = 0._R8P
    top = 1_I4P ; stack(1) = 1_I4P
    do while (top > 0_I4P)
       node = stack(top) ; top = top - 1_I4P
-      ru = self%wn_cu(node) - pu ; rv = self%wn_cv(node) - pv
+      ru = wn_cu(node) - pu ; rv = wn_cv(node) - pv
       r2 = ru * ru + rv * rv
-      if (r2 > b2 * self%wn_diag2(node) .and. self%wn_diag2(node) > 0._R8P) then
+      if (r2 > b2 * wn_diag2(node) .and. wn_diag2(node) > 0._R8P) then
          ! n . r / r^2 + trace(C) / r^2 - 2 r^T C r / r^4
-         tr  = self%wn_c(1, node) + self%wn_c(4, node)
-         rcr = ru * (self%wn_c(1, node) * ru + self%wn_c(3, node) * rv) + rv * (self%wn_c(2, node) * ru + self%wn_c(4, node) * rv)
-         omega = omega + (self%wn_du(node) * ru + self%wn_dv(node) * rv) / r2 + tr / r2 - 2._R8P * rcr / (r2 * r2)
-      elseif (self%left(node) == 0_I4P) then
-         do j = self%first(node), self%last(node)
-            omega = omega + segment_winding(self%a_u(j), self%a_v(j), self%d_u(j), self%d_v(j), pu, pv)
+         tr  = wn_c(1, node) + wn_c(4, node)
+         rcr = ru * (wn_c(1, node) * ru + wn_c(3, node) * rv) + rv * (wn_c(2, node) * ru + wn_c(4, node) * rv)
+         omega = omega + (wn_du(node) * ru + wn_dv(node) * rv) / r2 + tr / r2 - 2._R8P * rcr / (r2 * r2)
+      elseif (left(node) == 0_I4P) then
+         do j = first(node), last(node)
+            omega = omega + segment_winding(a_u(j), a_v(j), d_u(j), d_v(j), pu, pv)
          enddo
       else
-         top = top + 1_I4P ; stack(top) = self%right(node)
-         top = top + 1_I4P ; stack(top) = self%left(node)
+         top = top + 1_I4P ; stack(top) = right(node)
+         top = top + 1_I4P ; stack(top) = left(node)
       endif
    enddo
    w = omega / TWO_PI
-   endfunction winding_number
+   endfunction segment_winding_number_oac
 
    pure function winding_number_brute(self, pu, pv) result(w)
    !< Generalized winding number of (pu, pv): exact sum of the subtended angles / 2 pi (reference).
    class(segment_bvh), intent(in) :: self   !< Tree.
    real(R8P),          intent(in) :: pu, pv !< Point.
    real(R8P)                      :: w      !< Winding number.
-   real(R8P), parameter :: TWO_PI = 2._R8P * acos(-1._R8P) !< 2 pi.
+   real(R8P), parameter :: TWO_PI = 2._R8P * 3.14159265358979323846264338327950288_R8P !< 2 pi.
    integer(I4P)                   :: j      !< Counter.
 
    w = 0._R8P
@@ -296,6 +344,7 @@ contains
 
    pure function segment_winding(au, av, du, dv, pu, pv) result(theta)
    !< Signed angle subtended at p by the segment a -> a + d (positive counter-clockwise).
+   !$acc routine seq
    real(R8P), intent(in) :: au, av, du, dv !< Segment.
    real(R8P), intent(in) :: pu, pv         !< Point.
    real(R8P)             :: theta          !< Angle in (-pi, pi].
@@ -312,6 +361,7 @@ contains
    !< At a vertex the distance is computed from the vertex itself (not from a + t d), so the two
    !< segments sharing a vertex give the same bits there. In the interior, d2 = cross^2 / len2,
    !< accurate close to the segment.
+   !$acc routine seq
    real(R8P),    intent(in)  :: au, av   !< Segment start.
    real(R8P),    intent(in)  :: du, dv   !< Segment direction.
    real(R8P),    intent(in)  :: len2     !< Squared length.
@@ -335,18 +385,18 @@ contains
    endsubroutine segment_point_distance2
 
    ! private
-   pure function box_distance2(self, node, pu, pv) result(d2)
-   !< Squared distance from (pu, pv) to the box of a node (0 inside).
-   type(segment_bvh), intent(in) :: self   !< Tree.
-   integer(I4P),      intent(in) :: node   !< Node.
-   real(R8P),         intent(in) :: pu, pv !< Point.
-   real(R8P)                     :: d2     !< Squared distance.
-   real(R8P)                     :: eu, ev !< Excess per axis.
+   pure function box_d2_oac(lo_u, lo_v, hi_u, hi_v, pu, pv) result(d2)
+   !< Squared distance from (pu, pv) to the box [lo, hi] (0 inside). CPU and device.
+   !$acc routine seq
+   real(R8P), intent(in) :: lo_u, lo_v, hi_u, hi_v !< Box.
+   real(R8P), intent(in) :: pu, pv                 !< Point.
+   real(R8P)             :: d2                     !< Squared distance.
+   real(R8P)             :: eu, ev                 !< Excess per axis.
 
-   eu = max(self%lo_u(node) - pu, 0._R8P, pu - self%hi_u(node))
-   ev = max(self%lo_v(node) - pv, 0._R8P, pv - self%hi_v(node))
+   eu = max(lo_u - pu, 0._R8P, pu - hi_u)
+   ev = max(lo_v - pv, 0._R8P, pv - hi_v)
    d2 = eu * eu + ev * ev
-   endfunction box_distance2
+   endfunction box_d2_oac
 
    pure subroutine build_winding_cache(self)
    !< Per-node expansion centre (box centre), dipole and second moments, squared box diagonal.

@@ -23,7 +23,7 @@ modes = shared-gnu static-gnu shared-gnu-debug static-gnu-debug
         shared-intel static-intel shared-intel-debug static-intel-debug
         tests-gnu tests-gnu-debug tests-gnu-openmp
         tests-intel tests-intel-debug
-        static-nvidia tests-nvidia
+        static-nvidia tests-nvidia tests-nvidia-curve
 
 # Variable sets. The nvidia modes (static-nvidia / tests-nvidia, issue #20
 # Step 0) need nvfortran and a GPU compute-capability target ($NVF_CC). They
@@ -178,6 +178,14 @@ mklib     = static
 # quirks (e.g. `(expr) .cross. (expr)`) unrelated to the device port. They stay
 # in tests-gnu / tests-intel.
 target    = src/tests/fossil_test_distance_bench.f90
+template  = template-static-nvidia
+build_dir = ./exe/
+
+[tests-nvidia-curve]
+# 2-D twin of tests-nvidia (issue #36 step 7): builds the curve bench only, so the 2-D device
+# kernels (segment BVH closest point, 2-D fast winding number) compile for the GPU and can be
+# checked against the serial path. Manual, like tests-nvidia (clean build, local_nvf varset).
+target    = src/tests/fossil_test_curve_bench.f90
 template  = template-static-nvidia
 build_dir = ./exe/
 

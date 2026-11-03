@@ -27,10 +27,12 @@ module fossil_curve_object
 !< Exactness. Metrics are plain floating point. Nesting (and so orientation validity) uses the
 !< exact `orient2d_xy` crossing test, so every loop gets the same answer from every query.
 use fossil_predicates,         only : orient2d_xy
-use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END
+use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, &
+                                     segment_closest_oac, segment_winding_number_oac
 use fossil_surface_stl_object, only : STATUS_OK, STATUS_INVALID_INPUT, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL, &
                                      SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 use penf,                      only : I4P, R8P
+use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 
 implicit none
 private
@@ -71,6 +73,7 @@ type :: curve_object
    real(R8P)                 :: perimeter = 0._R8P  !< Total length.
    real(R8P)                 :: centroid(2) = 0._R8P !< Centroid of the solid region (u, v).
    type(segment_bvh)         :: bvh                 !< SAH BVH over the segments.
+   logical                   :: is_on_device = .false. !< Arrays mapped by enter_device.
    contains
       ! public methods
       procedure, pass(self) :: adopt_loops          !< Build the curve from vertex arrays and loop sizes.
@@ -78,6 +81,10 @@ type :: curve_object
       procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
       procedure, pass(self) :: distance             !< (Signed) distance of a point.
       procedure, pass(self) :: destroy              !< Reset to an empty curve.
+      procedure, pass(self) :: distance_many        !< Batched (signed) distances, CPU (OpenMP).
+      procedure, pass(self) :: distance_many_device !< Batched (signed) distances on the device (OpenACC).
+      procedure, pass(self) :: enter_device         !< Map the query arrays to the device.
+      procedure, pass(self) :: exit_device          !< Release the device arrays.
       procedure, pass(self) :: get_area             !< Total signed area.
       procedure, pass(self) :: get_bmax             !< Bounding box maximum.
       procedure, pass(self) :: get_bmin             !< Bounding box minimum.
@@ -148,6 +155,112 @@ contains
    enddo
    call self%analyze
    endsubroutine adopt_loops
+
+   subroutine distance_many(self, points, distances, is_signed, sign_algorithm, status)
+   !< Batched distances of the points (u, v) = points(:, i), CPU, OpenMP over the points.
+   !<
+   !< Each point runs `curve_signed_distance_oac`, the same kernel as `distance_many_device`, and
+   !< matches `compute_distance` bit for bit. Signed by default (negative inside), sign by the
+   !< pseudo-normal (default) or the fast winding number. `status = STATUS_INVALID_INPUT` if the
+   !< sizes do not match or the sign algorithm is neither of the two.
+   class(curve_object), intent(in)            :: self           !< Curve.
+   real(R8P),           intent(in)            :: points(:,:)    !< Points [2, n] (u, v).
+   real(R8P),           intent(out)           :: distances(:)   !< Distances [n].
+   logical,             intent(in),  optional :: is_signed      !< Signed (default .true.).
+   integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
+   integer(I4P),        intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical                                    :: signed_, fwn   !< Resolved options.
+   integer(I4P)                               :: i, n           !< Work.
+
+   if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
+   n = size(distances, kind=I4P)
+   if (self%bvh%nodes_number == 0_I4P) then
+      distances = huge(1._R8P)
+      return
+   endif
+   !$omp parallel do default(shared) private(i) schedule(static)
+   do i = 1, n
+      distances(i) = curve_signed_distance_oac(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, &
+                     self%bvh%left, self%bvh%right, self%bvh%first, self%bvh%last, self%bvh%a_u, self%bvh%a_v, &
+                     self%bvh%d_u, self%bvh%d_v, self%bvh%len2, self%bvh%seg_id, self%next, self%u, self%v, &
+                     self%pn_u, self%pn_v, self%bvh%wn_cu, self%bvh%wn_cv, self%bvh%wn_du, self%bvh%wn_dv, &
+                     self%bvh%wn_c, self%bvh%wn_diag2, points(1, i), points(2, i), signed_, fwn)
+   enddo
+   !$omp end parallel do
+   endsubroutine distance_many
+
+   subroutine distance_many_device(self, points, distances, is_signed, sign_algorithm, status)
+   !< Batched distances on the device (OpenACC): same contract and kernel as `distance_many`.
+   !<
+   !< Requires `enter_device` (else STATUS_INVALID_INPUT and a stderr message). The compute region
+   !< references top-level pointer aliases of the mapped member arrays, never `self%...`
+   !< components (#20: an aggregate without a data clause is copied with host addresses).
+   !< Validation on the GPU is pending (issue #36 step 7: the GPU was busy); the CPU path runs the
+   !< same kernel.
+   class(curve_object), intent(inout), target :: self           !< Curve (target: device aliases).
+   real(R8P),           intent(in)            :: points(:,:)    !< Points [2, n] (u, v), host.
+   real(R8P),           intent(out)           :: distances(:)   !< Distances [n], host.
+   logical,             intent(in),  optional :: is_signed      !< Signed (default .true.).
+   integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
+   integer(I4P),        intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical                                    :: signed_, fwn   !< Resolved options.
+   integer(I4P)                               :: i, n           !< Work.
+   real(R8P),    pointer :: lo_u(:), lo_v(:), hi_u(:), hi_v(:), a_u(:), a_v(:), d_u(:), d_v(:), len2(:) !< Aliases.
+   real(R8P),    pointer :: u(:), v(:), pn_u(:), pn_v(:), wn_cu(:), wn_cv(:), wn_du(:), wn_dv(:), wn_diag2(:) !< Aliases.
+   real(R8P),    pointer :: wn_c(:,:) !< Alias.
+   integer(I4P), pointer :: left(:), right(:), first(:), last(:), seg_id(:), next(:) !< Aliases.
+
+   if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
+   n = size(distances, kind=I4P)
+   if (self%bvh%nodes_number == 0_I4P) then
+      distances = huge(1._R8P)
+      return
+   endif
+   if (.not. self%is_on_device) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_curve_object%distance_many_device: curve not on device -- call enter_device first.'
+      return
+   endif
+   lo_u => self%bvh%lo_u ; lo_v => self%bvh%lo_v ; hi_u => self%bvh%hi_u ; hi_v => self%bvh%hi_v
+   left => self%bvh%left ; right => self%bvh%right ; first => self%bvh%first ; last => self%bvh%last
+   a_u => self%bvh%a_u ; a_v => self%bvh%a_v ; d_u => self%bvh%d_u ; d_v => self%bvh%d_v ; len2 => self%bvh%len2
+   seg_id => self%bvh%seg_id ; next => self%next ; u => self%u ; v => self%v ; pn_u => self%pn_u ; pn_v => self%pn_v
+   wn_cu => self%bvh%wn_cu ; wn_cv => self%bvh%wn_cv ; wn_du => self%bvh%wn_du ; wn_dv => self%bvh%wn_dv
+   wn_c => self%bvh%wn_c ; wn_diag2 => self%bvh%wn_diag2
+   !$acc parallel loop present(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, len2, seg_id, &
+   !$acc&                      next, u, v, pn_u, pn_v, wn_cu, wn_cv, wn_du, wn_dv, wn_c, wn_diag2) &
+   !$acc&                      copyin(points) copyout(distances)
+   do i = 1, n
+      distances(i) = curve_signed_distance_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, &
+                     len2, seg_id, next, u, v, pn_u, pn_v, wn_cu, wn_cv, wn_du, wn_dv, wn_c, wn_diag2, &
+                     points(1, i), points(2, i), signed_, fwn)
+   enddo
+   endsubroutine distance_many_device
+
+   subroutine enter_device(self)
+   !< Map the query arrays (tree, payload, winding cache, topology, pseudo-normals) to the device.
+   !< Member arrays only, never `self` (#20). No-op if already mapped or the curve is empty.
+   class(curve_object), intent(inout) :: self !< Curve.
+
+   if (self%is_on_device .or. self%bvh%nodes_number == 0_I4P) return
+   !$acc enter data copyin(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, self%bvh%right, &
+   !$acc&                  self%bvh%first, self%bvh%last, self%bvh%a_u, self%bvh%a_v, self%bvh%d_u, self%bvh%d_v, &
+   !$acc&                  self%bvh%len2, self%bvh%seg_id, self%next, self%u, self%v, self%pn_u, self%pn_v, &
+   !$acc&                  self%bvh%wn_cu, self%bvh%wn_cv, self%bvh%wn_du, self%bvh%wn_dv, self%bvh%wn_c, self%bvh%wn_diag2)
+   self%is_on_device = .true.
+   endsubroutine enter_device
+
+   subroutine exit_device(self)
+   !< Release the device arrays mapped by `enter_device`. No-op if not mapped.
+   class(curve_object), intent(inout) :: self !< Curve.
+
+   if (.not. self%is_on_device) return
+   !$acc exit data delete(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, self%bvh%right, &
+   !$acc&                 self%bvh%first, self%bvh%last, self%bvh%a_u, self%bvh%a_v, self%bvh%d_u, self%bvh%d_v, &
+   !$acc&                 self%bvh%len2, self%bvh%seg_id, self%next, self%u, self%v, self%pn_u, self%pn_v, &
+   !$acc&                 self%bvh%wn_cu, self%bvh%wn_cv, self%bvh%wn_du, self%bvh%wn_dv, self%bvh%wn_c, self%bvh%wn_diag2)
+   self%is_on_device = .false.
+   endsubroutine exit_device
 
    function check_validity(self, loop) result(defect)
    !< First validity defect of the curve (CURVE_VALID if none), and the loop it was found in.
@@ -909,6 +1022,69 @@ contains
       a = a + 0.5_R8P * (u(i) * v(j) - u(j) * v(i))
    enddo
    endfunction shoelace
+
+   pure function curve_signed_distance_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, len2, &
+                                           seg_id, next, u, v, pn_u, pn_v, wn_cu, wn_cv, wn_du, wn_dv, wn_c, wn_diag2, &
+                                           pu, pv, signed, fwn) result(d)
+   !< Distance of (pu, pv) on the flat arrays of a non-empty curve, signed by the pseudo-normal of
+   !< the closest feature or (fwn) by the fast winding number with beta = 2. The same expressions
+   !< as `compute_distance`. CPU and device kernel.
+   !$acc routine seq
+   real(R8P),    intent(in) :: lo_u(:), lo_v(:), hi_u(:), hi_v(:)  !< Node boxes.
+   integer(I4P), intent(in) :: left(:), right(:), first(:), last(:) !< Children, leaf ranges.
+   real(R8P),    intent(in) :: a_u(:), a_v(:), d_u(:), d_v(:), len2(:) !< Segment payload.
+   integer(I4P), intent(in) :: seg_id(:), next(:)                   !< Payload -> segment, next vertex.
+   real(R8P),    intent(in) :: u(:), v(:), pn_u(:), pn_v(:)         !< Vertices, vertex pseudo-normals.
+   real(R8P),    intent(in) :: wn_cu(:), wn_cv(:), wn_du(:), wn_dv(:), wn_c(:,:), wn_diag2(:) !< Winding cache.
+   real(R8P),    intent(in) :: pu, pv                               !< Point.
+   logical,      intent(in) :: signed                               !< Signed distance.
+   logical,      intent(in) :: fwn                                  !< Sign by the fast winding number.
+   real(R8P)                :: d                                    !< Distance.
+   real(R8P)                :: d2, t, side                          !< Work.
+   integer(I4P)             :: k, feature, sg, vx                   !< Work.
+
+   call segment_closest_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, len2, pu, pv, &
+                            d2, k, t, feature)
+   d = sqrt(d2)
+   if (.not. signed) return
+   if (fwn) then
+      side = 0.5_R8P - segment_winding_number_oac(left, right, first, last, a_u, a_v, d_u, d_v, wn_cu, wn_cv, wn_du, wn_dv, &
+                                                  wn_c, wn_diag2, pu, pv, 4._R8P)
+   else
+      sg = seg_id(k)
+      vx = 0_I4P
+      if (feature == FEATURE_VERTEX_START) vx = sg
+      if (feature == FEATURE_VERTEX_END) vx = next(sg)
+      if (vx > 0_I4P) then
+         side = (pu - u(vx)) * pn_u(vx) + (pv - v(vx)) * pn_v(vx)
+      else
+         side = -(d_u(k) * (pv - a_v(k)) - d_v(k) * (pu - a_u(k)))
+      endif
+   endif
+   if (side < 0._R8P) d = -d
+   endfunction curve_signed_distance_oac
+
+   function resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed, fwn) result(good)
+   !< Check the batch arguments and resolve the options; false (status set) if invalid.
+   type(curve_object), intent(in)            :: self           !< Curve (unused: kept for the call symmetry).
+   real(R8P),          intent(in)            :: points(:,:)    !< Points [2, n].
+   real(R8P),          intent(in)            :: distances(:)   !< Distances [n].
+   logical,            intent(in),  optional :: is_signed      !< Signed.
+   integer(I4P),       intent(in),  optional :: sign_algorithm !< Sign algorithm.
+   integer(I4P),       intent(out), optional :: status         !< Status.
+   logical,            intent(out)           :: signed         !< Resolved signed.
+   logical,            intent(out)           :: fwn            !< Resolved FWN sign.
+   logical                                   :: good           !< Arguments valid.
+   integer(I4P)                              :: algo           !< Resolved algorithm.
+
+   if (present(status)) status = STATUS_OK
+   signed = .true. ; if (present(is_signed)) signed = is_signed
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   fwn = algo == SIGN_FAST_WINDING_NUMBER
+   good = size(points, dim=1) == 2 .and. size(points, dim=2) == size(distances) .and. &
+          (algo == SIGN_PSEUDO_NORMAL .or. algo == SIGN_FAST_WINDING_NUMBER)
+   if (.not. good .and. present(status)) status = STATUS_INVALID_INPUT
+   endfunction resolve_batch_options
 
    pure function segments_intersect(p1u, p1v, p2u, p2v, q1u, q1v, q2u, q2v) result(hit)
    !< True if the closed segments p1p2 and q1q2 share a point (exact).
