@@ -43,7 +43,8 @@ integer(I4P) :: n_sharp_after_cube, nm_after_tbp
 real(R8P)    :: med_cube, vol_before_sphere, vol_after_sphere
 real(R8P)    :: vol_relaxed, dot_n
 real(R8P)    :: x, y, z, dx
-logical      :: are_tests_passed(7)
+logical      :: are_tests_passed(8)
+real(R8P)    :: vol_cube0
 real(R8P), parameter :: SHARP_DIHEDRAL_DEG = 60._R8P  ! cube edges (90°) above this threshold; smooth regions below
 logical      :: all_facets_valid
 real(R8P)    :: expected_x(3), got_x(3)
@@ -231,7 +232,17 @@ print '(A,I0,A,I0,A,F8.4,A,I0)', 'sphere TBP: status=', status, ' nf=', sphere_t
       ' vol=', sphere_tbp%get_volume(), ' nm=', nm_after_tbp
 are_tests_passed(7) = (status == REM_STATUS_OK .and. nm_after_tbp == 0_I4P)
 
-print '(A,7L2)', 'per-case results: ', are_tests_passed
+! Step 7c (issue #42): a fine target on the cube with preserve_features. Midpoints split on a sharp edge
+! must be locked too, or the relax pass pulls them off the crease and chamfers every edge (the cube kept
+! its 12 sharp edges but lost 3 % of its volume and 6 % of its area before the fix).
+call cube_features%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+vol_cube0 = cube_features%get_volume()
+call cube_features%isotropic_remesh(target_length=0.17_R8P, preserve_features=.true., status=status)
+print '(A,I0,A,I0,A,F12.9,A,F12.9,A)', 'cube fine features: status=', status, ' nf=', cube_features%get_facets_number(), &
+      ' vol=', cube_features%get_volume(), ' (input ', vol_cube0, ')'
+are_tests_passed(8) = status == REM_STATUS_OK .and. abs(cube_features%get_volume() - vol_cube0) < 1.e-9_R8P * vol_cube0
+
+print '(A,8L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)',  'Are all tests passed? ', all(are_tests_passed)
 if (.not. all(are_tests_passed)) error stop 1
 

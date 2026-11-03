@@ -76,6 +76,7 @@ contains
    real(R8P),    allocatable                                        :: vcoord(:, :)
    logical,      allocatable                                        :: facet_alive(:)
    logical,      allocatable                                        :: vertex_locked(:)
+   logical,      allocatable                                        :: new_lock(:)
    real(R8P)                                                        :: L
 
    if (present(status)) status = REM_STATUS_OK
@@ -120,10 +121,16 @@ contains
    do it = 1, iterations
       call apply_split_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                             nv=nv, nf_alive=nf_alive)
-      ! Grow vertex_locked to match the new nv (new midpoint vertices are
-      ! always unlocked). Skipping is harmless (collapse/flip/relax check
-      ! `i <= size(vertex_locked)` before reading).
+      ! Grow vertex_locked to match the new nv. Midpoints inserted on a sharp
+      ! edge lie on the crease too: re-detect the features on the split mesh
+      ! and lock them, or the relax pass pulls them off the crease and chamfers
+      ! every sharp edge (a cube lost 6 % of its area, issue #42).
       call grow_lock(vertex_locked=vertex_locked, new_size=nv)
+      if (preserve_features) then
+         call build_vertex_lock(f_v=f_v, vcoord=vcoord, nv=nv, preserve_features=.true., &
+                                vertex_locked=new_lock, alive=facet_alive)
+         vertex_locked = vertex_locked .or. new_lock(1:size(vertex_locked))
+      endif
       call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                                nf_alive=nf_alive, vertex_locked=vertex_locked)
       call apply_flip_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
@@ -477,7 +484,7 @@ contains
    ! Step 7: feature lock helpers
    ! ===========================================================================
 
-   subroutine build_vertex_lock(f_v, vcoord, nv, preserve_features, vertex_locked)
+   subroutine build_vertex_lock(f_v, vcoord, nv, preserve_features, vertex_locked, alive)
    !< Allocate `vertex_locked(nv)` and populate it. When `preserve_features
    !< = .false.`, every entry stays `.false.` (no locks; the lock-aware
    !< checks downstream are no-ops). When `.true.`, walk every interior
@@ -491,6 +498,7 @@ contains
    integer(I4P),              intent(in)  :: nv
    logical,                   intent(in)  :: preserve_features
    logical,      allocatable, intent(out) :: vertex_locked(:)
+   logical,      optional,    intent(in)  :: alive(:) !< Live facets (default: all; set after the first pass).
    integer(I4P), allocatable              :: e_v(:, :), e_facets(:, :)
    integer(I4P)                           :: ne, e
    real(R8P)                              :: cos_thr, dot_n
@@ -500,8 +508,9 @@ contains
    allocate(vertex_locked(nv), source=.false.)
    if (.not. preserve_features) return
 
-   ! All input facets are alive at this point (no passes have run yet).
+   ! All input facets are alive before the first pass; later calls pass the live set.
    allocate(facet_alive(size(f_v, dim=2)), source=.true.)
+   if (present(alive)) facet_alive = alive(1:size(f_v, dim=2))
    call build_edges_with_facets(f_v=f_v, facet_alive=facet_alive, &
                                  e_v=e_v, e_facets=e_facets, ne=ne)
 

@@ -45,9 +45,13 @@ incremental design produced uncatchable heap corruption; the
 **Feature preservation** is optional and off by default. When enabled,
 edges with dihedral angle > 30° are flagged as **sharp**, and their
 endpoint vertices are **locked**: collapse skips them, flip skips any
-edge with a locked vertex, relaxation skips them entirely. This is what
-keeps the 12 edges of a cube sharp through remeshing — without it, the
-cube rounds out into a ball over a few iterations.
+edge with a locked vertex, relaxation skips them entirely. The features
+are detected again after every split pass, so the midpoints inserted on a
+sharp edge are locked like its endpoints (before issue #42 they were not,
+and relaxation chamfered every edge: a unit cube remeshed to edge 0.17
+lost 10 % of its volume). This is what keeps the 12 edges of a cube sharp
+through remeshing, with volume and area unchanged to round-off; without
+it, the cube rounds out into a ball over a few iterations.
 
 ## API
 
