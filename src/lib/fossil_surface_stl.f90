@@ -13,6 +13,8 @@ use fossil_facet_object, only : facet_object, pnormal_payload_t,                
                                 pnormal_x_oac, pnormal_y_oac, pnormal_z_oac,                   &
                                 triangle_point_distance
 use fossil_list_id_object, only : list_id_object
+use fossil_box_query, only : bvh_box_contact_oac, box_tolerance, BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
+use fossil_box_predicates, only : box_triangle_overlap
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil_winding_number, only : compute_winding_number => winding_number, WN_FOUR_PI => FOUR_PI, WN_DEFAULT_BETA => DEFAULT_BETA
@@ -217,6 +219,8 @@ type :: surface_stl_object
       procedure, pass(self) :: query_many_device               !< query_many on the device (issue #37).
       procedure, pass(self) :: probe_many                      !< Probe points along the normal, with visibility (issue #37).
       procedure, pass(self) :: image_points                    !< Mirror points through the closest point, with visibility (issue #37).
+      procedure, pass(self) :: box_classify_many               !< Classify boxes: cut, near, inside, outside (issue #38).
+      procedure, pass(self) :: box_intersects_surface          !< True if a box meets the surface (issue #38).
       ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
       procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
       procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
@@ -1698,6 +1702,77 @@ contains
    !$omp end parallel do
    endsubroutine query_many
 
+   subroutine box_classify_many(self, lo, hi, codes, radius, sign_algorithm, inside, status)
+   !< Classify boxes against the surface (issue #38): OpenMP over the boxes.
+   !<
+   !< `codes(i)` is BOX_CUT if box i meets a facet, BOX_NEAR if not but a facet meets the box
+   !< inflated by `radius` (default 0: no BOX_NEAR), else BOX_INSIDE or BOX_OUTSIDE from one point
+   !< query at the box centre with `sign_algorithm` (default SIGN_PSEUDO_NORMAL; a box that meets no
+   !< facet lies on one side of a closed surface, so its centre decides).
+   !<
+   !< The box-triangle test is the separating-axis test on the box inflated by `box_tolerance` (1e-12
+   !< of the problem size): it never misses a contact, and may call a box closer than that cut.
+   !< BOX_NEAR is likewise conservative: a facet within `radius` of the box is never missed, one up to
+   !< sqrt(3) `radius` away (beyond a box corner) may be reported. `inside(i)` (optional) is the centre
+   !< sign of every box that is not cut (also BOX_NEAR boxes; false for cut boxes). SAH BVH traversal
+   !< with box pruning (`bvh_box_contact_oac`, shared with the device), brute force on an octree.
+   !< `lo(3, n)`, `hi(3, n)`; `status = STATUS_INVALID_INPUT` on a size mismatch or a negative radius.
+   class(surface_stl_object), intent(in)            :: self           !< Surface.
+   real(R8P),                 intent(in)            :: lo(:,:)        !< Box minima [3, n].
+   real(R8P),                 intent(in)            :: hi(:,:)        !< Box maxima [3, n].
+   integer(I4P),              intent(out)           :: codes(:)       !< BOX_* [n].
+   real(R8P),                 intent(in),  optional :: radius         !< Near radius (default 0).
+   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_* for the centre query (default SIGN_PSEUDO_NORMAL).
+   logical,                   intent(out), optional :: inside(:)      !< Centre inside, for boxes not cut [n].
+   integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)                                        :: tol, reach, r  !< Inflations.
+   integer(I4P)                                     :: algo, i, n, c  !< Work.
+   logical                                          :: bad, ins       !< Work.
+   type(vector_R8P)                                 :: centre         !< Box centre.
+
+   if (present(status)) status = STATUS_OK
+   n = size(codes, kind=I4P)
+   r = 0._R8P ; if (present(radius)) r = radius
+   bad = bad_shape3(lo, n) .or. bad_shape3(hi, n) .or. r < 0._R8P
+   if (present(inside)) bad = bad .or. size(inside) /= n
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
+   reach = max(tol, r + tol)
+   !$omp parallel do default(shared) schedule(dynamic, 16) private(i, c, ins, centre)
+   do i = 1_I4P, n
+      c = box_contact(self, lo(:, i), hi(:, i), tol, reach)
+      ins = .false.
+      if (c /= BOX_CUT .and. (c == BOX_NONE .or. present(inside))) then
+         centre%x = 0.5_R8P * (lo(1, i) + hi(1, i))
+         centre%y = 0.5_R8P * (lo(2, i) + hi(2, i))
+         centre%z = 0.5_R8P * (lo(3, i) + hi(3, i))
+         ins = self%is_point_inside(point=centre, sign_algorithm=algo)
+      endif
+      if (c == BOX_NONE) then
+         c = BOX_OUTSIDE ; if (ins) c = BOX_INSIDE
+      endif
+      codes(i) = c
+      if (present(inside)) inside(i) = ins
+   enddo
+   !$omp end parallel do
+   endsubroutine box_classify_many
+
+   function box_intersects_surface(self, lo, hi) result(cut)
+   !< True if the box [lo, hi] meets the surface (issue #38): the separating-axis test, conservative
+   !< by `box_tolerance` (never misses a contact).
+   class(surface_stl_object), intent(in) :: self         !< Surface.
+   real(R8P),                 intent(in) :: lo(3), hi(3) !< Box.
+   logical                               :: cut          !< Result.
+   real(R8P)                             :: tol          !< Inflation.
+
+   tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
+   cut = box_contact(self, lo, hi, tol, tol) == BOX_CUT
+   endfunction box_intersects_surface
+
    subroutine query_many_device(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
                                 is_signed, sign_algorithm, status)
    !< `query_many` on the device (issue #37): same arguments, outputs and defaults.
@@ -2066,6 +2141,46 @@ contains
       found = .true. ; cp2 = cc ; bound = dd
       endsubroutine consider
    endsubroutine second_foot
+
+   function box_contact(self, lo, hi, tol, reach) result(code)
+   !< BOX_CUT, BOX_NEAR or BOX_NONE of the box [lo, hi] (issue #38): SAH BVH traversal
+   !< (`bvh_box_contact_oac`), brute force over the facets otherwise (same tests, same result).
+   type(surface_stl_object), intent(in) :: self         !< Surface.
+   real(R8P),                intent(in) :: lo(3), hi(3) !< Box.
+   real(R8P),                intent(in) :: tol, reach   !< Cut and near inflations.
+   integer(I4P)                         :: code         !< Result.
+
+   code = BOX_NONE
+   if (self%facets_number == 0_I4P) return
+   if (self%aabb%get_tree_kind() == AABB_TREE_SAH_BVH .and. allocated(self%aabb%node) .and. &
+       allocated(self%aabb%payload)) then
+      code = bvh_box_contact_oac(self%aabb%node, self%aabb%payload, lo, hi, tol, reach)
+   else
+      code = box_contact_brute(self, lo, hi, tol, reach)
+   endif
+   endfunction box_contact
+
+   function box_contact_brute(self, lo, hi, tol, reach) result(code)
+   !< `box_contact` by brute force over the facets (the octree fallback and the test reference).
+   type(surface_stl_object), intent(in) :: self         !< Surface.
+   real(R8P),                intent(in) :: lo(3), hi(3) !< Box.
+   real(R8P),                intent(in) :: tol, reach   !< Cut and near inflations.
+   integer(I4P)                         :: code         !< Result.
+   real(R8P)                            :: v1(3), v2(3), v3(3) !< Triangle.
+   integer(I4P)                         :: f            !< Counter.
+
+   code = BOX_NONE
+   do f = 1_I4P, self%facets_number
+      v1 = [self%facet(f)%vertex(1)%x, self%facet(f)%vertex(1)%y, self%facet(f)%vertex(1)%z]
+      v2 = [self%facet(f)%vertex(2)%x, self%facet(f)%vertex(2)%y, self%facet(f)%vertex(2)%z]
+      v3 = [self%facet(f)%vertex(3)%x, self%facet(f)%vertex(3)%y, self%facet(f)%vertex(3)%z]
+      if (box_triangle_overlap(lo, hi, v1, v2, v3, tol)) then
+         code = BOX_CUT
+         return
+      endif
+      if (box_triangle_overlap(lo, hi, v1, v2, v3, reach)) code = BOX_NEAR
+   enddo
+   endfunction box_contact_brute
 
    pure function vnorm(a) result(r)
    !< Euclidean norm of a vector (plain components, no TBP).

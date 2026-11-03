@@ -26,6 +26,7 @@ module fossil_curve_object
 !<
 !< Exactness. Metrics are plain floating point. Nesting (and so orientation validity) uses the
 !< exact `orient2d_xy` crossing test, so every loop gets the same answer from every query.
+use fossil_box_query,          only : curve_box_contact_oac, BOX_NONE, BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
 use fossil_predicates,         only : orient2d_xy
 use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, segment_point_distance2, &
                                      segment_closest_oac, segment_winding_number_oac
@@ -80,6 +81,8 @@ type :: curve_object
    contains
       ! public methods
       procedure, pass(self) :: adopt_loops          !< Build the curve from vertex arrays and loop sizes.
+      procedure, pass(self) :: box_classify_many    !< Classify boxes: cut, near, inside, outside (issue #38).
+      procedure, pass(self) :: box_intersects_curve !< True if a box meets the curve (issue #38).
       procedure, pass(self) :: check_validity       !< First validity defect (CURVE_* code).
       procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
       procedure, pass(self) :: distance             !< (Signed) distance of a point.
@@ -165,6 +168,73 @@ contains
    enddo
    call self%analyze
    endsubroutine adopt_loops
+
+   subroutine box_classify_many(self, lo, hi, codes, radius, sign_algorithm, inside, status)
+   !< Classify boxes (u, v) against the curve (issue #38), OpenMP over the boxes.
+   !<
+   !< `codes(i)` is BOX_CUT if box i meets a segment (exact, `orient2d`), BOX_NEAR if not but a
+   !< segment is within `radius` of it (default 0: no BOX_NEAR; floating-point segment-box distance),
+   !< else BOX_INSIDE or BOX_OUTSIDE from `is_point_inside` at the box centre with `sign_algorithm`
+   !< (default SIGN_PSEUDO_NORMAL). `inside(i)` (optional): the centre sign of every box that is not
+   !< cut (false for cut boxes). Segment BVH traversal (`curve_box_contact_oac`, shared with the
+   !< device). `lo(2, n)`, `hi(2, n)`; `status = STATUS_INVALID_INPUT` on a size mismatch or a
+   !< negative radius. An empty curve: every box outside.
+   class(curve_object), intent(in)            :: self           !< Curve.
+   real(R8P),           intent(in)            :: lo(:,:)        !< Box minima [2, n].
+   real(R8P),           intent(in)            :: hi(:,:)        !< Box maxima [2, n].
+   integer(I4P),        intent(out)           :: codes(:)       !< BOX_* [n].
+   real(R8P),           intent(in),  optional :: radius         !< Near radius (default 0).
+   integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_* for the centre query (default SIGN_PSEUDO_NORMAL).
+   logical,             intent(out), optional :: inside(:)      !< Centre inside, for boxes not cut [n].
+   integer(I4P),        intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)                                  :: r              !< Radius.
+   integer(I4P)                               :: algo, i, n, c  !< Work.
+   logical                                    :: bad, ins       !< Work.
+
+   if (present(status)) status = STATUS_OK
+   n = size(codes, kind=I4P)
+   r = 0._R8P ; if (present(radius)) r = radius
+   bad = size(lo, 1) /= 2 .or. size(lo, 2) /= n .or. size(hi, 1) /= 2 .or. size(hi, 2) /= n .or. r < 0._R8P
+   if (present(inside)) bad = bad .or. size(inside) /= n
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   if (self%bvh%nodes_number == 0_I4P) then
+      codes = BOX_OUTSIDE
+      if (present(inside)) inside = .false.
+      return
+   endif
+   !$omp parallel do default(shared) schedule(dynamic, 16) private(i, c, ins)
+   do i = 1_I4P, n
+      c = curve_box_contact_oac(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, &
+                                self%bvh%right, self%bvh%first, self%bvh%last, self%bvh%seg_id, self%next, self%u, &
+                                self%v, lo(:, i), hi(:, i), r)
+      ins = .false.
+      if (c /= BOX_CUT .and. (c == BOX_NONE .or. present(inside))) &
+         ins = self%is_point_inside(0.5_R8P * (lo(:, i) + hi(:, i)), sign_algorithm=algo)
+      if (c == BOX_NONE) then
+         c = BOX_OUTSIDE ; if (ins) c = BOX_INSIDE
+      endif
+      codes(i) = c
+      if (present(inside)) inside(i) = ins
+   enddo
+   !$omp end parallel do
+   endsubroutine box_classify_many
+
+   pure function box_intersects_curve(self, lo, hi) result(cut)
+   !< True if the closed box [lo, hi] (u, v) meets the curve (issue #38, exact).
+   class(curve_object), intent(in) :: self         !< Curve.
+   real(R8P),           intent(in) :: lo(2), hi(2) !< Box.
+   logical                         :: cut          !< Result.
+
+   cut = .false.
+   if (self%bvh%nodes_number == 0_I4P) return
+   cut = curve_box_contact_oac(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, self%bvh%right, &
+                               self%bvh%first, self%bvh%last, self%bvh%seg_id, self%next, self%u, self%v, lo, hi, &
+                               0._R8P) == BOX_CUT
+   endfunction box_intersects_curve
 
    subroutine distance_many(self, points, distances, is_signed, sign_algorithm, status)
    !< Batched distances of the points (u, v) = points(:, i), CPU, OpenMP over the points.

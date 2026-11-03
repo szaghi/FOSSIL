@@ -27,6 +27,7 @@ use fossil_marching_cubes, only : extract_isosurface, MC_STATUS_OK, MC_STATUS_BA
 use fossil_surface_stl_object
 use fossil_distance_field, only : distance_field_object, FAR_VALUE
 use fossil_curve_slice, only : slice_surface
+use fossil_box_query, only : BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_curve_object, only : curve_object, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, &
                                CURVE_ZERO_AREA_LOOP, CURVE_WRONG_ORIENTATION, CURVE_OPEN_LOOP
 
@@ -41,6 +42,7 @@ public :: curve_object, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_S
 public :: intersection_pair_t
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 public :: FEATURE_FACE, FEATURE_EDGE, FEATURE_VERTEX
+public :: BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 public :: sign_algorithm_from_string
 public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL
 public :: STATUS_INVALID_INPUT
