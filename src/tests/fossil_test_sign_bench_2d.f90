@@ -139,7 +139,8 @@ contains
    call set(cv(1), 'square', [0._R8P, 1._R8P, 1._R8P, 0._R8P], [0._R8P, 0._R8P, 1._R8P, 1._R8P], [4])
    call wedge(cv(2), 1._R8P) ; call wedge(cv(3), 5._R8P) ; call wedge(cv(4), 30._R8P)
    call wedge(cv(5), 90._R8P) ; call wedge(cv(6), 150._R8P)
-   call set(cv(7), 'L-shape', [1._R8P, 1._R8P, 0._R8P, 0._R8P, 2._R8P, 2._R8P], [1._R8P, 2._R8P, 2._R8P, 0._R8P, 0._R8P, 1._R8P], [6])
+   call set(cv(7), 'L-shape', [1._R8P, 1._R8P, 0._R8P, 0._R8P, 2._R8P, 2._R8P], &
+           [1._R8P, 2._R8P, 2._R8P, 0._R8P, 0._R8P, 1._R8P], [6])
    ! cusp: lower arc (circle of radius 1 tangent to the u axis at the origin), upper arc (radius 0.5),
    ! u in [0, 0.4] with quadratic spacing, so the first segments are short and the corner very sharp
    do k = 1, 33
