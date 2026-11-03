@@ -33,9 +33,11 @@ p(1) = vector_R8P(0.55_R8P, 0.4_R8P, 2._R8P) ! inside a facet (cube-02 has grid 
 p(2) = vector_R8P(2._R8P, 2._R8P, 0.6_R8P)  ! mid-edge, between grid vertices
 p(3) = vector_R8P(2._R8P, 2._R8P, 2._R8P)
 call cube%query_many(points=p, distances=d, closest_points=cp, features=ft, feature_indexes=fi, normals=nrm)
-ok(1) = abs(d(1) - 1._R8P) < 1.e-15_R8P .and. all(abs(cp(:, 1) - [0.55_R8P, 0.4_R8P, 1._R8P]) < 1.e-15_R8P) .and. ft(1) == FEATURE_FACE .and. &
+ok(1) = abs(d(1) - 1._R8P) < 1.e-15_R8P .and. all(abs(cp(:, 1) - [0.55_R8P, 0.4_R8P, 1._R8P]) < 1.e-15_R8P) .and. &
+        ft(1) == FEATURE_FACE .and. &
         all(abs(nrm(:, 1) - [0._R8P, 0._R8P, 1._R8P]) < 1.e-15_R8P) .and. &
-        abs(d(2) - sqrt(2._R8P)) < 1.e-15_R8P .and. all(abs(cp(:, 2) - [1._R8P, 1._R8P, 0.6_R8P]) < 1.e-15_R8P) .and. ft(2) == FEATURE_EDGE .and. &
+        abs(d(2) - sqrt(2._R8P)) < 1.e-15_R8P .and. all(abs(cp(:, 2) - [1._R8P, 1._R8P, 0.6_R8P]) < 1.e-15_R8P) .and. &
+        ft(2) == FEATURE_EDGE .and. &
         all(abs(nrm(:, 2) - [1._R8P, 1._R8P, 0._R8P] / sqrt(2._R8P)) < 1.e-12_R8P) .and. &
         abs(d(3) - sqrt(3._R8P)) < 1.e-15_R8P .and. all(cp(:, 3) == [1._R8P, 1._R8P, 1._R8P]) .and. ft(3) == FEATURE_VERTEX .and. &
         all(abs(nrm(:, 3) - [1._R8P, 1._R8P, 1._R8P] / sqrt(3._R8P)) < 1.e-12_R8P) .and. all(fi(2:3) >= 1) .and. fi(1) == 0

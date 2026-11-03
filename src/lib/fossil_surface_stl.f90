@@ -1773,9 +1773,15 @@ contains
                                              best_facet=best_facet, best_payload_idx=best_payload)
       nx = 0._R8P ; ny = 0._R8P ; nz = 0._R8P
       if (best_facet > 0_I4P) then
-         v1_v%x  = payload_p(best_payload)%v1(1)  ; v1_v%y  = payload_p(best_payload)%v1(2)  ; v1_v%z  = payload_p(best_payload)%v1(3)
-         e12_v%x = payload_p(best_payload)%e12(1) ; e12_v%y = payload_p(best_payload)%e12(2) ; e12_v%z = payload_p(best_payload)%e12(3)
-         e13_v%x = payload_p(best_payload)%e13(1) ; e13_v%y = payload_p(best_payload)%e13(2) ; e13_v%z = payload_p(best_payload)%e13(3)
+         v1_v%x = payload_p(best_payload)%v1(1)
+         v1_v%y = payload_p(best_payload)%v1(2)
+         v1_v%z = payload_p(best_payload)%v1(3)
+         e12_v%x = payload_p(best_payload)%e12(1)
+         e12_v%y = payload_p(best_payload)%e12(2)
+         e12_v%z = payload_p(best_payload)%e12(3)
+         e13_v%x = payload_p(best_payload)%e13(1)
+         e13_v%y = payload_p(best_payload)%e13(2)
+         e13_v%z = payload_p(best_payload)%e13(3)
          call triangle_point_distance(v1=v1_v, e12=e12_v, e13=e13_v, a=payload_p(best_payload)%a, b=payload_p(best_payload)%b, &
                                       c=payload_p(best_payload)%c, det=payload_p(best_payload)%det, point=point_i, &
                                       distance=d2, closest=closest_v, region=region)
