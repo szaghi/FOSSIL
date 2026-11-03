@@ -23,6 +23,7 @@ module fossil_curve_object
 !< Exactness. Metrics are plain floating point. Nesting (and so orientation validity) uses the
 !< exact `orient2d_xy` crossing test, so every loop gets the same answer from every query.
 use fossil_predicates,         only : orient2d_xy
+use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END
 use fossil_surface_stl_object, only : STATUS_OK, STATUS_INVALID_INPUT, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL
 use penf,                      only : I4P, R8P
 
@@ -61,10 +62,13 @@ type :: curve_object
    real(R8P)                 :: area = 0._R8P       !< Total signed area (solid area for a valid curve).
    real(R8P)                 :: perimeter = 0._R8P  !< Total length.
    real(R8P)                 :: centroid(2) = 0._R8P !< Centroid of the solid region (u, v).
+   type(segment_bvh)         :: bvh                 !< SAH BVH over the segments.
    contains
       ! public methods
       procedure, pass(self) :: adopt_loops          !< Build the curve from vertex arrays and loop sizes.
       procedure, pass(self) :: check_validity       !< First validity defect (CURVE_* code).
+      procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
+      procedure, pass(self) :: distance             !< (Signed) distance of a point.
       procedure, pass(self) :: destroy              !< Reset to an empty curve.
       procedure, pass(self) :: get_area             !< Total signed area.
       procedure, pass(self) :: get_bmax             !< Bounding box maximum.
@@ -80,6 +84,7 @@ type :: curve_object
       procedure, pass(self) :: load_from_file       !< Load from the ASCII loop format.
       procedure, pass(self) :: nesting_depth        !< Nesting depth of a loop (exact).
       procedure, pass(self) :: save_into_file       !< Save into the ASCII loop format.
+      procedure, pass(self) :: self_intersections   !< Pairs of segments that cross, touch or overlap (exact).
       procedure, pass(self) :: winding_number_exact !< Exact integer winding number of a point (brute force).
       ! private methods
       procedure, pass(self), private :: analyze     !< Derived data: topology, metrics, normals.
@@ -129,8 +134,8 @@ contains
    !< Checked loop by loop: at least 3 vertices; no zero-length segment (exactly coincident
    !< consecutive vertices); nonzero signed area; orientation matching the nesting depth (depth
    !< even = outer or island: counter-clockwise, positive area; odd = hole: clockwise). The
-   !< nesting depth is exact (`nesting_depth`). Self-intersections are checked by the segment
-   !< BVH (step 3), not here.
+   !< nesting depth is exact (`nesting_depth`). Self-intersections are checked separately, by
+   !< `self_intersections`.
    class(curve_object), intent(in)            :: self   !< Curve.
    integer(I4P),        intent(out), optional :: loop   !< Loop of the defect (0 if valid).
    integer(I4P)                               :: defect !< CURVE_* code.
@@ -271,6 +276,80 @@ contains
    n = self%nv
    endfunction get_vertices_number
 
+   pure subroutine compute_distance(self, p, distance, closest_point, closest_segment, closest_vertex, is_signed, &
+                                    use_brute_force)
+   !< Distance of the point p = (u, v) from the curve, with its closest point, segment and vertex.
+   !<
+   !< `closest_vertex` is the curve vertex when the closest point is a vertex, else 0. Signed
+   !< (default): negative inside the solid. The sign comes from the closest feature: the side of
+   !< the segment, or the vertex pseudo-normal (a point on the curve has distance 0, so the side
+   !< test needs no exact predicate). `use_brute_force` scans every segment (reference). An empty
+   !< curve gives distance = huge and zero indices.
+   class(curve_object), intent(in)            :: self             !< Curve.
+   real(R8P),           intent(in)            :: p(2)             !< Point (u, v).
+   real(R8P),           intent(out)           :: distance         !< Distance.
+   real(R8P),           intent(out), optional :: closest_point(2) !< Closest point (u, v).
+   integer(I4P),        intent(out), optional :: closest_segment  !< Closest segment.
+   integer(I4P),        intent(out), optional :: closest_vertex   !< Closest vertex (0 in a segment interior).
+   logical,             intent(in),  optional :: is_signed        !< Signed distance (default .true.).
+   logical,             intent(in),  optional :: use_brute_force  !< Brute force (default .false.).
+   real(R8P)                                  :: d2, t, side      !< Work.
+   integer(I4P)                               :: k, feature, sg, vx !< Work.
+   logical                                    :: brute, signed_   !< Resolved options.
+
+   brute = .false. ; if (present(use_brute_force)) brute = use_brute_force
+   signed_ = .true. ; if (present(is_signed)) signed_ = is_signed
+   if (brute) then
+      call self%bvh%closest_brute(p(1), p(2), d2, k, t, feature)
+   else
+      call self%bvh%closest(p(1), p(2), d2, k, t, feature)
+   endif
+   if (k == 0_I4P) then
+      distance = huge(1._R8P)
+      if (present(closest_point)) closest_point = 0._R8P
+      if (present(closest_segment)) closest_segment = 0_I4P
+      if (present(closest_vertex)) closest_vertex = 0_I4P
+      return
+   endif
+   distance = sqrt(d2)
+   sg = self%bvh%seg_id(k)
+   select case (feature)
+   case (FEATURE_VERTEX_START)
+      vx = sg
+   case (FEATURE_VERTEX_END)
+      vx = self%next(sg)
+   case default
+      vx = 0_I4P
+   endselect
+   if (signed_) then
+      if (vx > 0_I4P) then
+         side = (p(1) - self%u(vx)) * self%pn_u(vx) + (p(2) - self%v(vx)) * self%pn_v(vx)
+      else ! outward normal (dv, -du): side = -cross(d, p - a)
+         side = -(self%bvh%d_u(k) * (p(2) - self%bvh%a_v(k)) - self%bvh%d_v(k) * (p(1) - self%bvh%a_u(k)))
+      endif
+      if (side < 0._R8P) distance = -distance
+   endif
+   if (present(closest_point)) then
+      if (vx > 0_I4P) then
+         closest_point = [self%u(vx), self%v(vx)]
+      else
+         closest_point = [self%bvh%a_u(k) + t * self%bvh%d_u(k), self%bvh%a_v(k) + t * self%bvh%d_v(k)]
+      endif
+   endif
+   if (present(closest_segment)) closest_segment = sg
+   if (present(closest_vertex)) closest_vertex = vx
+   endsubroutine compute_distance
+
+   pure function distance(self, p, is_signed) result(d)
+   !< (Signed) distance of the point p = (u, v) from the curve; negative inside (default signed).
+   class(curve_object), intent(in)           :: self      !< Curve.
+   real(R8P),           intent(in)           :: p(2)      !< Point (u, v).
+   logical,             intent(in), optional :: is_signed !< Signed distance (default .true.).
+   real(R8P)                                 :: d         !< Distance.
+
+   call self%compute_distance(p=p, distance=d, is_signed=is_signed)
+   endfunction distance
+
    subroutine load_from_file(self, file_name, normal_axis, status)
    !< Load the curve from the ASCII loop format.
    !<
@@ -386,6 +465,54 @@ contains
    close(unit)
    endsubroutine save_into_file
 
+   pure subroutine self_intersections(self, pairs, n)
+   !< Pairs of segments (i < j) that cross, touch or overlap, decided exactly (`orient2d_xy`).
+   !<
+   !< Adjacent segments (sharing a vertex) are reported only if they overlap beyond the shared
+   !< vertex (a collinear fold-back). Candidates come from the BVH; `pairs(1:2, 1:n)` is
+   !< (re)allocated, in increasing i, then traversal order.
+   class(curve_object),       intent(in)    :: self       !< Curve.
+   integer(I4P), allocatable, intent(inout) :: pairs(:,:) !< Segment pairs [2, n].
+   integer(I4P),              intent(out)   :: n          !< Number of pairs.
+   integer(I4P), allocatable                :: ids(:), buf(:,:), tmp(:,:) !< Candidates, buffers.
+   integer(I4P)                             :: i, j, c, m, q1, q2 !< Work.
+   logical                                  :: hit        !< Pair intersects.
+
+   n = 0_I4P
+   allocate(buf(2, 16))
+   do i = 1, self%nv
+      j = self%next(i)
+      call self%bvh%segments_in_box(min(self%u(i), self%u(j)), min(self%v(i), self%v(j)), &
+                                    max(self%u(i), self%u(j)), max(self%v(i), self%v(j)), ids, m)
+      do c = 1, m
+         q1 = self%bvh%seg_id(ids(c))
+         if (q1 <= i) cycle
+         q2 = self%next(q1)
+         if (q1 == j .and. q2 == i) then ! a 2-vertex loop: the two segments coincide
+            hit = .true.
+         elseif (q1 == j) then         ! adjacent, sharing j: fold-back only
+            hit = folds_back(self%u(i), self%v(i), self%u(j), self%v(j), self%u(q2), self%v(q2))
+         elseif (q2 == i) then         ! adjacent, sharing i
+            hit = folds_back(self%u(j), self%v(j), self%u(i), self%v(i), self%u(q1), self%v(q1))
+         else
+            hit = segments_intersect(self%u(i), self%v(i), self%u(j), self%v(j), &
+                                     self%u(q1), self%v(q1), self%u(q2), self%v(q2))
+         endif
+         if (hit) then
+            if (n == size(buf, dim=2)) then
+               allocate(tmp(2, 2 * n))
+               tmp(:, 1:n) = buf(:, 1:n)
+               call move_alloc(from=tmp, to=buf)
+            endif
+            n = n + 1_I4P ; buf(:, n) = [i, q1]
+         endif
+      enddo
+   enddo
+   if (allocated(pairs)) deallocate(pairs)
+   allocate(pairs(2, n))
+   pairs(:, 1:n) = buf(:, 1:n)
+   endsubroutine self_intersections
+
    pure function winding_number_exact(self, p) result(w)
    !< Exact integer winding number of the point p = (u, v) with respect to the whole curve.
    !<
@@ -470,6 +597,7 @@ contains
    else
       self%bmin = 0._R8P ; self%bmax = 0._R8P
    endif
+   call self%bvh%build(self%u, self%v, self%u(self%next), self%v(self%next))
    endsubroutine analyze
 
    ! private non type-bound procedures
@@ -499,4 +627,48 @@ contains
       endif
    enddo
    endfunction loop_winding
+
+   pure function segments_intersect(p1u, p1v, p2u, p2v, q1u, q1v, q2u, q2v) result(hit)
+   !< True if the closed segments p1p2 and q1q2 share a point (exact).
+   real(R8P), intent(in) :: p1u, p1v, p2u, p2v, q1u, q1v, q2u, q2v !< Endpoints.
+   logical               :: hit                                     !< Result.
+   real(R8P)             :: o1, o2, o3, o4                           !< Orientations.
+
+   o1 = orient2d_xy(p1u, p1v, p2u, p2v, q1u, q1v)
+   o2 = orient2d_xy(p1u, p1v, p2u, p2v, q2u, q2v)
+   o3 = orient2d_xy(q1u, q1v, q2u, q2v, p1u, p1v)
+   o4 = orient2d_xy(q1u, q1v, q2u, q2v, p2u, p2v)
+   hit = opposite(o1, o2) .and. opposite(o3, o4)
+   if (hit) return
+   hit = (o1 == 0._R8P .and. on_box(q1u, q1v, p1u, p1v, p2u, p2v)) .or. &
+         (o2 == 0._R8P .and. on_box(q2u, q2v, p1u, p1v, p2u, p2v)) .or. &
+         (o3 == 0._R8P .and. on_box(p1u, p1v, q1u, q1v, q2u, q2v)) .or. &
+         (o4 == 0._R8P .and. on_box(p2u, p2v, q1u, q1v, q2u, q2v))
+   endfunction segments_intersect
+
+   pure function folds_back(au, av, bu, bv, cu, cv) result(hit)
+   !< For adjacent segments ab and bc: true if c is collinear with ab and bc runs back along ab.
+   real(R8P), intent(in) :: au, av, bu, bv, cu, cv !< Points.
+   logical               :: hit                    !< Result.
+
+   hit = .false.
+   if (orient2d_xy(au, av, bu, bv, cu, cv) /= 0._R8P) return
+   hit = (cu - bu) * (au - bu) + (cv - bv) * (av - bv) > 0._R8P
+   endfunction folds_back
+
+   pure function opposite(a, b) result(yes)
+   !< True if a and b are nonzero with opposite signs.
+   real(R8P), intent(in) :: a, b !< Values.
+   logical               :: yes  !< Result.
+
+   yes = (a > 0._R8P .and. b < 0._R8P) .or. (a < 0._R8P .and. b > 0._R8P)
+   endfunction opposite
+
+   pure function on_box(pu, pv, au, av, bu, bv) result(yes)
+   !< True if p lies in the closed bounding box of segment ab (p collinear with ab: then on ab).
+   real(R8P), intent(in) :: pu, pv, au, av, bu, bv !< Points.
+   logical               :: yes                    !< Result.
+
+   yes = pu >= min(au, bu) .and. pu <= max(au, bu) .and. pv >= min(av, bv) .and. pv <= max(av, bv)
+   endfunction on_box
 endmodule fossil_curve_object
