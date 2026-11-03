@@ -11,10 +11,12 @@ program fossil_test_curve_bench
 !< #20 / #36 requires 0.000E+00). Built by `tests-gnu` it runs the device routine's loop on the
 !< host (no OpenACC); built by the `tests-nvidia-curve` mode it runs on the GPU.
 !< Also `rich ... id mismatches` (query_many_device, issue #37) and `box device vs serial mismatches`
-!< (box_classify_many_device on a box around every grid point, issue #38): both must be 0.
+!< (box_classify_many_device on a box around every grid point, issue #38), and `sign bench device vs
+!< serial mismatches` (sections of the issue #39 benchmark bodies): all must be 0.
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 use penf,   only : I4P, I8P, R8P
+use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d
 
 implicit none
 
@@ -47,6 +49,7 @@ enddo
 call c%adopt_loops(u=u, v=v, loop_sizes=[1000_I4P, 100_I4P])
 call bench(c, [-1.5_R8P, -1.5_R8P], [1.5_R8P, 1.5_R8P], 'disc with a hole (1100 vertices)')
 
+call sign_bench
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
@@ -119,6 +122,17 @@ contains
    print '(A,A,A,ES10.3,A,I0)', '   ', nm, 'rich device vs serial max err: ', err, '  id mismatches ', ids
    ok = ok .and. err == 0._R8P .and. ids == 0
    endsubroutine rich
+
+   subroutine sign_bench
+   !< Device vs serial signed distances near the sections of the issue #39 benchmark bodies.
+   type(body_t), allocatable :: bb(:) !< Bodies.
+   integer                   :: nbad  !< Mismatches.
+
+   call bench_bodies(bb)
+   nbad = device_sign_mismatches_2d(bb)
+   print '(A,I0)', 'sign bench device vs serial mismatches: ', nbad
+   ok = ok .and. nbad == 0
+   endsubroutine sign_bench
 
    subroutine box(cur, p, h, algo, nm)
    !< box_classify_many_device vs box_classify_many (issue #38): a box of half-size h around every

@@ -22,7 +22,8 @@
 !<      changes land — any step that perturbs a distance value fails here.
 !<
 !<   5. Device lines (issues #20, #37, #38): `device`, `rich` and `box device vs serial mismatches`
-!<      (box_classify_many_device on a box of half-size diagonal/64 around every probe) must be 0.
+!<      (box_classify_many_device on a box of half-size diagonal/64 around every probe) and
+!<      `sign bench device vs serial mismatches` (the issue #39 benchmark points) must be 0.
 !<
 !< Usage: fossil_test_distance_bench [<stl_path> [<grid_n>]]
 !<        default <stl_path> = src/tests/dragon-fine.stl
@@ -40,6 +41,7 @@ use fossil_facet_object, only : facet_object
 use penf,                only : I4P, I8P, R8P
 use vecfor,              only : vector_R8P
 use fossil_distance_field, only : distance_field_object
+use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_3d
 
 implicit none
 
@@ -67,6 +69,8 @@ logical                       :: rich_ok                   !< Rich queries: devi
 real(R8P)                     :: rich_err                  !< Rich queries: max |device - CPU| over distance, closest point, normal.
 integer(I4P)                  :: rich_id_mismatch          !< Rich queries: facet/feature/index/body mismatches.
 integer(I4P)                  :: box_mismatch              !< Box classification: device vs CPU code/inside mismatches (issue #38).
+integer                       :: sign_mismatch             !< Sign benchmark: device vs CPU signed-distance mismatches (issue #39).
+type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
 !$ integer, external          :: omp_get_max_threads       !< OpenMP runtime thread-count query (only declared under -fopenmp).
@@ -218,6 +222,9 @@ rich_ok = rich_err == 0._R8P .and. rich_id_mismatch == 0_I4P
 call box_device_case(mismatch=box_mismatch)
 rich_ok = rich_ok .and. box_mismatch == 0_I4P
 call surface%exit_device
+call bench_bodies(sign_bodies)
+sign_mismatch = device_sign_mismatches_3d(sign_bodies)
+rich_ok = rich_ok .and. sign_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -303,6 +310,7 @@ print '(A)',         'query_many_device vs query_many (issue #37: distance, clos
 print '(A,ES10.3)',  '   rich device vs serial max err: ', rich_err
 print '(A,I0)',      '   rich id mismatches:      ', rich_id_mismatch
 print '(A,I0)',      '   box device vs serial mismatches: ', box_mismatch
+print '(A,I0)',      '   sign bench device vs serial mismatches: ', sign_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''

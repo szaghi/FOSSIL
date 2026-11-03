@@ -27,7 +27,13 @@ module fossil_sign_bench_bodies
 !<
 !< Dirty variants (decision 4): `soup_remove` (a hole), `soup_flip`, `soup_duplicate`,
 !< `soup_split_edge` (needle triangles along an edge, kept watertight), `soup_tjunction`.
-use fossil, only : surface_stl_object, facet_object
+!<
+!< Device checks (issue #39 step 4): `device_sign_mismatches_3d` / `_2d` count the benchmark points
+!< whose device distance (`distance_many_device`, `query_many_device`) differs from the CPU one
+!< (`distance_many`, `query_many`), bit for bit, signed, with the pseudo-normal and the
+!< fast-winding-number signs. In 2-D the curves are the mid-height sections of the bodies and the
+!< points their vertices offset by 1e-1 ... 1e-12 L along the four diagonals.
+use fossil, only : surface_stl_object, facet_object, curve_object, slice_surface, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
 
@@ -37,6 +43,7 @@ public :: soup_t, feature_t, body_t
 public :: SB_FACE, SB_FLAT_EDGE, SB_EDGE_CONVEX, SB_EDGE_REENTRANT, SB_VERTEX_CONVEX, SB_VERTEX_SADDLE, SB_KIND_NAME
 public :: bench_bodies, make_prism, make_apex_body, to_surface, make_points
 public :: soup_remove, soup_flip, soup_duplicate, soup_split_edge, soup_tjunction
+public :: device_sign_mismatches_3d, device_sign_mismatches_2d
 
 integer(I4P), parameter :: SB_FACE           = 1_I4P !< Face interior.
 integer(I4P), parameter :: SB_FLAT_EDGE      = 2_I4P !< Diagonal between two coplanar triangles.
@@ -480,6 +487,86 @@ contains
    w(:, :, size(w, 3)) = reshape([q, v(:, 2), v(:, 3)], [3, 3])
    call move_alloc(w, s%v)
    endsubroutine soup_tjunction
+
+   function device_sign_mismatches_3d(b) result(nbad)
+   !< Benchmark points (all bodies, all decades) whose device signed distance differs from the CPU one.
+   type(body_t), intent(in) :: b(:) !< Bodies.
+   integer                  :: nbad !< Mismatches (distance_many and query_many, both signs).
+   integer(I4P), parameter       :: ALGO(2) = [SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER] !< Signs.
+   type(surface_stl_object)      :: s    !< Surface.
+   type(vector_R8P), allocatable :: q(:) !< Points.
+   real(R8P),    allocatable     :: p(:,:), ang(:), d1(:), d2(:) !< Work.
+   logical,      allocatable     :: ins(:)  !< Work.
+   integer(I4P), allocatable     :: knd(:)  !< Work.
+   integer,      allocatable     :: dec(:), fid(:) !< Work.
+   integer                       :: i, m, a, k !< Counters.
+
+   nbad = 0
+   do i = 1, size(b)
+      call to_surface(b(i)%soup, s)
+      call make_points(b(i), [(k, k = 1, 12)], p, ins, knd, dec, ang, fid)
+      allocate(q(size(ins)), d1(size(ins)), d2(size(ins)))
+      do m = 1, size(ins)
+         q(m) = vector_R8P(p(1, m), p(2, m), p(3, m))
+      enddo
+      call s%enter_device
+      do a = 1, 2
+         call s%distance_many(points=q, distances=d1, is_signed=.true., sign_algorithm=ALGO(a), is_square_root=.true.)
+         call s%distance_many_device(points=q, distances=d2, is_signed=.true., sign_algorithm=ALGO(a), is_square_root=.true.)
+         nbad = nbad + count(d1 /= d2)
+         call s%query_many(points=q, distances=d1, sign_algorithm=ALGO(a))
+         call s%query_many_device(points=q, distances=d2, sign_algorithm=ALGO(a))
+         nbad = nbad + count(d1 /= d2)
+      enddo
+      call s%exit_device
+      deallocate(q, d1, d2)
+   enddo
+   endfunction device_sign_mismatches_3d
+
+   function device_sign_mismatches_2d(b) result(nbad)
+   !< Points near the mid-height sections of the bodies whose device signed distance differs from the
+   !< CPU one.
+   type(body_t), intent(in) :: b(:) !< Bodies.
+   integer                  :: nbad !< Mismatches (distance_many and query_many, both signs).
+   integer(I4P), parameter  :: ALGO(2) = [SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER] !< Signs.
+   type(surface_stl_object) :: s    !< Surface.
+   type(curve_object)       :: c    !< Section.
+   real(R8P), allocatable   :: p(:,:), d1(:), d2(:) !< Work.
+   real(R8P)                :: zmin, zmax, uv(2), dl, sq !< Work.
+   integer                  :: i, j, k, a, m, nv !< Counters.
+
+   nbad = 0
+   sq = 1._R8P / sqrt(2._R8P)
+   do i = 1, size(b)
+      call to_surface(b(i)%soup, s)
+      zmin = minval(b(i)%soup%v(3, :, :)) ; zmax = maxval(b(i)%soup%v(3, :, :))
+      call slice_surface(surface=s, normal_axis=3_I4P, level=0.5_R8P * (zmin + zmax), curve=c)
+      nv = c%get_vertices_number()
+      if (nv == 0) cycle
+      allocate(p(2, nv * 12 * 4), d1(nv * 12 * 4), d2(nv * 12 * 4))
+      m = 0
+      do j = 1, nv
+         uv = c%get_vertex(j)
+         do k = 1, 12
+            dl = 10._R8P**(-k) * b(i)%diag * sq
+            p(:, m + 1) = uv + [dl, dl] ; p(:, m + 2) = uv + [-dl, dl]
+            p(:, m + 3) = uv + [dl, -dl] ; p(:, m + 4) = uv + [-dl, -dl]
+            m = m + 4
+         enddo
+      enddo
+      call c%enter_device
+      do a = 1, 2
+         call c%distance_many(points=p, distances=d1, sign_algorithm=ALGO(a))
+         call c%distance_many_device(points=p, distances=d2, sign_algorithm=ALGO(a))
+         nbad = nbad + count(d1 /= d2)
+         call c%query_many(points=p, distances=d1, sign_algorithm=ALGO(a))
+         call c%query_many_device(points=p, distances=d2, sign_algorithm=ALGO(a))
+         nbad = nbad + count(d1 /= d2)
+      enddo
+      call c%exit_device
+      deallocate(p, d1, d2)
+   enddo
+   endfunction device_sign_mismatches_2d
 
    pure function cross(a, b) result(c)
    !< Cross product.
