@@ -805,6 +805,38 @@ device after `enter_device`; pseudo-normal or fast-winding-number sign),
 
 ---
 
+### `box_classify_many`
+
+```fortran
+call surface%box_classify_many(lo=lo, hi=hi, codes=codes, radius=r)
+```
+
+**Purpose.** Classify boxes (AMR blocks or cells) against the surface
+(issue #38): `BOX_CUT`, `BOX_NEAR` (within `radius`), `BOX_INSIDE` or
+`BOX_OUTSIDE`. SAH BVH traversal with box pruning, OpenMP over the boxes;
+the cut test is the separating-axis test on the box inflated by
+`box_tolerance`, so it never misses a contact. See
+[AMR tagging](/guide/advanced/amr-tagging).
+
+| Argument         | Intent      | Type              | Notes                                                                  |
+| ---------------- | ----------- | ----------------- | ---------------------------------------------------------------------- |
+| `lo`, `hi`       | `in`        | `real(R8P)(3, n)` | Box corners.                                                           |
+| `codes`          | `out`       | `integer(I4P)(n)` | `BOX_*` codes.                                                         |
+| `radius`         | `in`, opt.  | `real(R8P)`       | Near radius, default 0 (no `BOX_NEAR`). Up to √3·radius at a corner.   |
+| `sign_algorithm` | `in`, opt.  | `integer(I4P)`    | Centre query of uncut boxes, default `SIGN_PSEUDO_NORMAL`.             |
+| `inside`         | `out`, opt. | `logical(n)`      | Centre sign of every box not cut (also near boxes).                    |
+| `status`         | `out`, opt. | `integer(I4P)`    | `STATUS_INVALID_INPUT` on a size mismatch or a negative radius.        |
+
+**Related.** `box_classify_many_device` (same, on the device after
+`enter_device`; pseudo-normal or fast-winding-number sign),
+`box_intersects_surface(lo, hi)` (one box, cut only),
+`tag_block(x, y, z, band, tags, sign_algorithm, status)`: signed tag bands on a
+block of cells given its edges `x(nx+1)`, `y(ny+1)`, `z(nz+1)`; `tags(nx, ny, nz)` is
+0 on cut cells, else the Chebyshev cell distance to the nearest cut cell
+capped at band + 1, negative inside.
+
+---
+
 ### `is_point_inside`
 
 ```fortran

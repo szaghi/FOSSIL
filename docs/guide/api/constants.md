@@ -280,6 +280,21 @@ ignores it).
 
 ---
 
+## Box classification codes
+
+Returned in `codes(:)` by `box_classify_many` and `box_classify_many_device`
+on `surface_stl_object` and `curve_object` (issue #38). See
+[AMR tagging](/guide/advanced/amr-tagging).
+
+| Constant      | Meaning                                                                                   |
+| ------------- | ----------------------------------------------------------------------------------------- |
+| `BOX_CUT`     | The box meets the geometry (3-D: conservative by `box_tolerance`; 2-D: exact).            |
+| `BOX_NEAR`    | Not cut, but the geometry comes within `radius` (3-D: within the box inflated by it).     |
+| `BOX_INSIDE`  | Neither; the box centre is inside the solid.                                              |
+| `BOX_OUTSIDE` | Neither; the box centre is outside the solid.                                             |
+
+---
+
 ## Status codes
 
 Every mutating procedure on `surface_stl_object` and a few on `facet_object`

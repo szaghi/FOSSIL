@@ -83,6 +83,7 @@ export default withMermaid({
             { text: 'GPU distance queries',       link: '/guide/advanced/device-distance' },
             { text: '2-D geometry (curves)',      link: '/guide/advanced/2d-geometry' },
             { text: 'Immersed-boundary queries',  link: '/guide/advanced/ib-queries' },
+            { text: 'AMR tagging',                link: '/guide/advanced/amr-tagging' },
           ],
         },
         {

@@ -80,7 +80,7 @@ rejects `(expr) .cross. (expr)` in one strict-normal test).
 The `tests-nvidia-curve` mode is its 2-D twin (issue #36): it builds
 `fossil_test_curve_bench` only (segment BVH closest point, 2-D fast winding number on
 the device). Same clean-build rule (shared `exe/`), pass criterion
-`device vs serial max |d| err 0.000E+00`. Not yet validated on the GPU (pending).
+`device vs serial max |d| err 0.000E+00`; the `rich` and `box device vs serial mismatches` lines must be 0 too (the 3-D bench prints the same lines). Not yet validated on the GPU (pending).
 
 The device build scope is **BVH-only** (the octree stays CPU-only).
 
@@ -141,6 +141,7 @@ The public API is accessed via `use fossil`, which re-exports four types plus th
 - `SIGN_PSEUDO_NORMAL` (default), `SIGN_RAY_INTERSECTIONS`, `SIGN_SOLID_ANGLE`, `SIGN_FAST_WINDING_NUMBER` — sign algorithms for signed-distance queries.
 - `AABB_TREE_SAH_BVH` (default), `AABB_TREE_OCTREE` — AABB tree kinds.
 - `AABB_AUTO_REFINEMENT` — sentinel for octree depth auto-tuning.
+- `BOX_CUT`, `BOX_NEAR`, `BOX_INSIDE`, `BOX_OUTSIDE` — box classification codes (issue #38).
 - `STATUS_OK`, `STATUS_ALLOC_FAIL`, `STATUS_AMBIGUOUS_ARGS`, `STATUS_FILE_NOT_FOUND`, `STATUS_FILE_OPEN_FAIL`, `STATUS_INVALID_INPUT`.
 
 `file_stl_object` was deleted in commit `7ffe7f8` — all I/O is now type-bound on `surface_stl_object` (`load_from_file`, `save_into_file`).
@@ -160,7 +161,7 @@ call surface%save_into_file(file_name='out.stl')
 2. `surface%sanitize` — orchestrator: `remove_degenerate_facets` → (`connect_nearby_vertices` if needed) → `analyze` → `remove_duplicate_facets` → `analyze` → `sanitize_normals` → (optional `fill_holes`, with `fill_holes=.true.`; `refine_holes` / `fair_holes` refine and thin-plate-fair the patches, fairing solved by `fossil_linear_solver%cg_solve`). Emits one stderr warning per defect class.
 3. `surface%analyze(aabb_refinement_levels=, aabb_tree_kind=)` — invoked automatically by load/sanitize/clip. Rebuilds connectivity and the AABB tree. The optional args are passed through to `aabb%initialize`.
 4. Manipulation: `clip`, `rotate`, `translate`, `mirror`, `resize`, `merge_solids`.
-5. Queries: `distance`, `is_point_inside`, plus `compute_distance` (richer form with closest facet/edge/vertex, closest point and normal outputs). IB queries (issue #37): `query_point` / `query_many` / `query_many_device` (closest point, facet, `FEATURE_FACE/EDGE/VERTEX`, pseudo-normal, body; optional `ambiguous` / `second_foot_points` on the CPU), `probe_many`, `image_points`; shells and bodies from `analyze` (`facet_shell`, `facet_body`; `body_payload` is device-mapped). Curves have the same set. `distance_field_object%compute(store_closest=.true.)` keeps `closest`, `closest_id`, `closest_normal` on band cells.
+5. Queries: `distance`, `is_point_inside`, plus `compute_distance` (richer form with closest facet/edge/vertex, closest point and normal outputs). IB queries (issue #37): `query_point` / `query_many` / `query_many_device` (closest point, facet, `FEATURE_FACE/EDGE/VERTEX`, pseudo-normal, body; optional `ambiguous` / `second_foot_points` on the CPU), `probe_many`, `image_points`; shells and bodies from `analyze` (`facet_shell`, `facet_body`; `body_payload` is device-mapped). Curves have the same set. `distance_field_object%compute(store_closest=.true.)` keeps `closest`, `closest_id`, `closest_normal` on band cells. AMR tagging (issue #38): `box_classify_many` / `box_classify_many_device` (`BOX_CUT/NEAR/INSIDE/OUTSIDE`), `box_intersects_surface`, `tag_block` (signed Chebyshev tag bands on a block); curve twins.
 6. Validity predicates: `is_watertight()`, `is_manifold()`, `is_volume()`.
 7. `surface%save_into_file(file_name=, is_ascii=, status=)` — writes result.
 
@@ -211,6 +212,7 @@ fobis fetch            # --update to re-fetch
 - `fossil_block_object.f90` / `fossil_block_aabb_object.f90` — structured mesh block with AABB (`extrapolate_distances` deprecated, issue #32)
 - `fossil_distance_field.f90` — `distance_field_object` (re-exported by `fossil`, issue #32): signed-distance field on a rectilinear grid; narrow band via `distance_many(_device)`, flood-fill signs, fast sweeping in hyperplane order (OpenMP bit-exact). It imports the surface/facet modules, never `fossil` (circular). `fossil_ib_generator` is built on it. `initialize` without `z` makes a 2-D field for a curve source; `compute_band` / `compute_signs` / `compute` / `default_band` are generics over `surface=` / `curve=`.
 - `fossil_curve_object.f90`, `fossil_segment_bvh.f90`, `fossil_curve_slice.f90` — 2-D geometry (issue #36): `curve_object` stores (u, v) as SoA arrays in the plane normal to `normal_axis` (u, v = the other axes in cyclic order); the solid is on the left of every segment (outer loops CCW, holes CW), signed distance negative inside; open loops allowed (`# open` in the ASCII format). The segment BVH's traversals are `_oac` kernels shared by the CPU and the device. `slice_surface` cuts an STL by an axis-aligned plane (canonical crossings, no tolerances). `fossil_predicates%orient2d` is exact (filter + exact expansion with a bit-mask split, safe under nvfortran FMA contraction); `orient3d` is still filter-only.
+- `fossil_box_predicates.f90`, `fossil_box_query.f90` — AMR tagging (issue #38): box-triangle separating-axis test (conservative: run on the box inflated by `box_tolerance`, 1e-12 of the problem size, never misses a contact), exact 2-D box-segment test; `bvh_box_contact_oac` / `curve_box_contact_oac` (shared CPU/device traversals), `cell_bands` / `cell_components` (tag-band BFS, 26-connected components). The device box path follows the #20 rules and needs no new device arrays.
 
 ## Coding conventions
 

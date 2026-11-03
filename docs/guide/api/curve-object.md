@@ -64,6 +64,9 @@ endprogram curve_tour
 | `probe_many(points, lengths, probe_points, visible, foot_points, normals, status)` | Probe points along the normal; exact visibility. |
 | `image_points(points, images, visible, foot_points, status)` | Mirror through the closest point; exact visibility. |
 | `get_bodies_number`, `loop_body(l)` | Bodies: outer loops with their holes; islands and open loops are their own. |
+| `box_classify_many(lo, hi, codes, radius, sign_algorithm, inside, status)` | Classify boxes `lo(2, n)`, `hi(2, n)`: `BOX_CUT` (exact), `BOX_NEAR`, `BOX_INSIDE`, `BOX_OUTSIDE` (issue #38); `box_classify_many_device` on the device. |
+| `box_intersects_curve(lo, hi)` | True if the closed box meets the curve (exact). |
+| `tag_block(x, y, band, tags, sign_algorithm, status)` | Signed tag bands on a block of cells given its edges. See [AMR tagging](/guide/advanced/amr-tagging). |
 
 `sign_algorithm` is `SIGN_PSEUDO_NORMAL` (default) or
 `SIGN_FAST_WINDING_NUMBER`; the latter is robust on open loops and gaps.
