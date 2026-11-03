@@ -28,11 +28,19 @@ module fossil_distance_field
 !< `phi` is public for that reason. FOSSIL itself stays MPI-free.
 !<
 !< Sign convention: negative inside, positive outside, as `surface%distance`.
+!<
+!< 2-D (issue #36 step 8): `initialize` without `z` makes a 2-D field (nk = 1, no halo along k)
+!< for a `curve_object` source: `compute_band`, `compute_signs`, `compute` and `default_band` are
+!< generic over the source (`surface=` or `curve=`), and the far field sweeps in 4 directions.
+!< A 2-D field takes a curve and a 3-D field a surface; the other pairings are refused. On one
+!< block of a quadtree that does not see the curve the band is empty and the whole block is one
+!< component, signed by a single point query: the field works block by block.
 
 ! The surface and facet modules, not `fossil`: `fossil` re-exports this module, so it is built
 ! into the library.
 use fossil_surface_stl_object, only : surface_stl_object, SIGN_PSEUDO_NORMAL, STATUS_OK, STATUS_INVALID_INPUT
 use fossil_facet_object, only : facet_object
+use fossil_curve_object, only : curve_object
 use penf, only : I4P, I8P, R8P, MaxR8P
 use vecfor, only : vector_R8P
 
@@ -50,6 +58,8 @@ type :: distance_field_object
    integer(I4P)                       :: nj = 0_I4P          !< Points along y (halo included).
    integer(I4P)                       :: nk = 0_I4P          !< Points along z (halo included).
    integer(I4P)                       :: ng = 0_I4P          !< Halo layers on each side.
+   integer(I4P)                       :: ngk = 0_I4P         !< Halo layers along k (ng in 3-D, 0 in 2-D).
+   logical                            :: is_2d = .false.     !< 2-D field (nk = 1, curve source).
    real(R8P),             allocatable :: x(:)                !< x coordinates, strictly increasing.
    real(R8P),             allocatable :: y(:)                !< y coordinates, strictly increasing.
    real(R8P),             allocatable :: z(:)                !< z coordinates, strictly increasing.
@@ -64,14 +74,25 @@ type :: distance_field_object
    contains
       procedure, pass(self) :: initialize     !< Set the grid; reset the field.
       procedure, pass(self) :: destroy        !< Free the field.
-      procedure, pass(self) :: compute_band   !< Exact signed distances in the narrow band.
-      procedure, pass(self) :: compute_signs  !< Signs outside the band by flood fill.
+      generic               :: compute_band => compute_band_surface, compute_band_curve !< Exact distances in the band.
+      generic               :: compute_signs => compute_signs_surface, compute_signs_curve !< Signs by flood fill.
       procedure, pass(self) :: sweep          !< Far-field magnitudes by fast sweeping.
-      procedure, pass(self) :: compute        !< compute_band + compute_signs + sweep.
+      generic               :: compute => compute_surface, compute_curve !< compute_band + compute_signs + sweep.
       procedure, pass(self) :: get_dims       !< Points per axis and halo width.
       procedure, pass(self) :: get_band_width !< Band half-width of the last compute_band.
       procedure, pass(self) :: get_band_cells !< Number of band cells.
-      procedure, pass(self) :: default_band   !< Default band for a surface: 2 x the local max spacing.
+      procedure, pass(self) :: get_is_2d      !< True for a 2-D field.
+      generic               :: default_band => default_band_surface, default_band_curve !< 2 x the local max spacing.
+      procedure, pass(self) :: compute_band_surface  !< compute_band, surface source (3-D).
+      procedure, pass(self) :: compute_band_curve    !< compute_band, curve source (2-D).
+      procedure, pass(self) :: compute_signs_surface !< compute_signs, surface source.
+      procedure, pass(self) :: compute_signs_curve   !< compute_signs, curve source.
+      procedure, pass(self) :: compute_surface       !< compute, surface source.
+      procedure, pass(self) :: compute_curve         !< compute, curve source.
+      procedure, pass(self) :: default_band_surface  !< default_band, surface source.
+      procedure, pass(self) :: default_band_curve    !< default_band, curve source.
+      procedure, pass(self), private :: keep_band    !< Store the band cells of a candidate batch.
+      procedure, pass(self), private :: signs_core   !< compute_signs for either source.
       procedure, pass(self), private :: linear   !< Linear index of a cell.
       procedure, pass(self), private :: sweep_once !< One directional sweep.
       procedure, pass(self), private :: godunov  !< Godunov update of one cell.
@@ -82,12 +103,13 @@ contains
    subroutine initialize(self, x, y, z, ng, status)
    !< Set the grid and reset the field (every interior and halo cell at FAR_VALUE, no band).
    !<
-   !< `status = STATUS_INVALID_INPUT` (field left empty) if an axis has no point, is not
-   !< strictly increasing, or leaves no interior point after removing `2 * ng` halo layers.
+   !< Without `z` the field is 2-D (nk = 1, z = 0, halo layers along x and y only), for a
+   !< curve source. `status = STATUS_INVALID_INPUT` (field left empty) if an axis has no point,
+   !< is not strictly increasing, or leaves no interior point after removing `2 * ng` halo layers.
    class(distance_field_object), intent(inout)         :: self   !< Distance field.
    real(R8P),                    intent(in)            :: x(:)   !< x coordinates (halo included).
    real(R8P),                    intent(in)            :: y(:)   !< y coordinates (halo included).
-   real(R8P),                    intent(in)            :: z(:)   !< z coordinates (halo included).
+   real(R8P),                    intent(in),  optional :: z(:)   !< z coordinates (halo included); absent: 2-D.
    integer(I4P),                 intent(in),  optional :: ng     !< Halo layers per side (default 0).
    integer(I4P),                 intent(out), optional :: status !< STATUS_OK or STATUS_INVALID_INPUT.
    integer(I4P)                                        :: ng_    !< Resolved halo width.
@@ -95,17 +117,33 @@ contains
    call self%destroy
    if (present(status)) status = STATUS_OK
    ng_ = 0_I4P ; if (present(ng)) ng_ = ng
-   if (ng_ < 0_I4P .or. .not. (is_valid_axis(x, ng_) .and. is_valid_axis(y, ng_) .and. is_valid_axis(z, ng_))) then
+   if (ng_ < 0_I4P .or. .not. (is_valid_axis(x, ng_) .and. is_valid_axis(y, ng_))) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
+   if (present(z)) then
+      if (.not. is_valid_axis(z, ng_)) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+   endif
    self%ni = size(x, kind=I4P)
    self%nj = size(y, kind=I4P)
-   self%nk = size(z, kind=I4P)
    self%ng = ng_
    allocate(self%x, source=x)
    allocate(self%y, source=y)
-   allocate(self%z, source=z)
+   if (present(z)) then
+      self%nk = size(z, kind=I4P)
+      self%ngk = ng_
+      self%is_2d = .false.
+      allocate(self%z, source=z)
+   else
+      self%nk = 1_I4P
+      self%ngk = 0_I4P
+      self%is_2d = .true.
+      allocate(self%z(1))
+      self%z = 0._R8P
+   endif
    allocate(self%phi(self%ni, self%nj, self%nk))
    allocate(self%in_band(self%ni, self%nj, self%nk))
    self%phi     = FAR_VALUE
@@ -121,7 +159,7 @@ contains
    if (allocated(self%z))       deallocate(self%z)
    if (allocated(self%phi))     deallocate(self%phi)
    if (allocated(self%in_band)) deallocate(self%in_band)
-   self%ni = 0_I4P ; self%nj = 0_I4P ; self%nk = 0_I4P ; self%ng = 0_I4P
+   self%ni = 0_I4P ; self%nj = 0_I4P ; self%nk = 0_I4P ; self%ng = 0_I4P ; self%ngk = 0_I4P ; self%is_2d = .false.
    self%band_width = 0._R8P
    self%local_spacing = 0._R8P
    self%sign_algorithm = SIGN_PSEUDO_NORMAL
@@ -156,7 +194,15 @@ contains
    n = self%band_cells
    endfunction get_band_cells
 
-   function default_band(self, surface) result(band)
+   pure function get_is_2d(self) result(yes)
+   !< True for a 2-D field (initialized without z).
+   class(distance_field_object), intent(in) :: self !< Distance field.
+   logical                                  :: yes  !< Result.
+
+   yes = self%is_2d
+   endfunction get_is_2d
+
+   function default_band_surface(self, surface) result(band)
    !< Default band half-width: twice the largest grid spacing over the index box that covers
    !< the surface bounding box (one extra point per side). Two spacings guarantee that the two
    !< ends of any grid edge crossing the surface are band cells, which is what the sign flood
@@ -173,9 +219,22 @@ contains
    band = 2._R8P * max(max_spacing(self%x, bmin%x, bmax%x), &
                        max_spacing(self%y, bmin%y, bmax%y), &
                        max_spacing(self%z, bmin%z, bmax%z))
-   endfunction default_band
+   endfunction default_band_surface
 
-   subroutine compute_band(self, surface, band, is_signed, sign_algorithm, use_device, status)
+   function default_band_curve(self, curve) result(band)
+   !< Default band half-width for a curve (2-D field): twice the largest grid spacing over the
+   !< index box covering the curve bounding box (see `default_band_surface`).
+   class(distance_field_object), intent(in) :: self  !< Distance field.
+   type(curve_object),           intent(in) :: curve !< Curve.
+   real(R8P)                                :: band  !< Band half-width.
+   real(R8P)                                :: bmin(2), bmax(2) !< Curve bbox.
+
+   bmin = curve%get_bmin()
+   bmax = curve%get_bmax()
+   band = 2._R8P * max(max_spacing(self%x, bmin(1), bmax(1)), max_spacing(self%y, bmin(2), bmax(2)))
+   endfunction default_band_curve
+
+   subroutine compute_band_surface(self, surface, band, is_signed, sign_algorithm, use_device, status)
    !< Exact (signed) distances on the narrow band: the interior cells with |d| <= `band`.
    !<
    !< 1. Candidates: each facet's bounding box, inflated by `band`, is mapped to an index box
@@ -195,8 +254,8 @@ contains
    !< The band values are bit-exact against a per-cell `surface%distance` call with the same
    !< options. The surface must be analysed (`load_from_file`, `sanitize`, `adopt_facets`).
    !<
-   !< `status = STATUS_INVALID_INPUT` if the field is not initialized, `band <= 0`, or
-   !< `distance_many` refuses (it never does for a consistent call).
+   !< `status = STATUS_INVALID_INPUT` if the field is not initialized or is 2-D, `band <= 0`,
+   !< or `distance_many` refuses (it never does for a consistent call).
    class(distance_field_object), intent(inout)         :: self           !< Distance field.
    type(surface_stl_object),     intent(inout), target :: surface        !< Surface (inout/target: device path).
    real(R8P),                    intent(in),  optional :: band           !< Band half-width (default `default_band`).
@@ -217,6 +276,10 @@ contains
 
    if (present(status)) status = STATUS_OK
    if (.not. allocated(self%phi)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (self%is_2d) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
@@ -284,16 +347,136 @@ contains
    endif
 
    ! 3. keep |d| <= band
-   do m = 1_I4P, n
-      if (abs(d(m)) <= band_) then
+   call self%keep_band(cell, d, band_)
+   endsubroutine compute_band_surface
+
+   subroutine compute_band_curve(self, curve, band, is_signed, sign_algorithm, use_device, status)
+   !< Exact (signed) distances on the narrow band of a 2-D field from a curve: as
+   !< `compute_band_surface`, with each segment's bounding box inflated by `band` as candidate
+   !< box and one `curve%distance_many` (or `distance_many_device`) batch. The curve supports
+   !< SIGN_PSEUDO_NORMAL and SIGN_FAST_WINDING_NUMBER. The band values are bit-exact against a
+   !< per-cell `curve%distance` call with the same options.
+   !< `status = STATUS_INVALID_INPUT` if the field is not initialized or is 3-D, `band <= 0`, or
+   !< the curve refuses the sign algorithm.
+   class(distance_field_object), intent(inout)         :: self           !< Distance field.
+   type(curve_object),           intent(inout), target :: curve          !< Curve.
+   real(R8P),                    intent(in),  optional :: band           !< Band half-width (default `default_band`).
+   logical,                      intent(in),  optional :: is_signed      !< Signed distances (default .true.).
+   integer(I4P),                 intent(in),  optional :: sign_algorithm !< SIGN_* code (default SIGN_PSEUDO_NORMAL).
+   logical,                      intent(in),  optional :: use_device     !< Band batch on the GPU (default .false.).
+   integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)                                           :: band_          !< Resolved band.
+   logical,                      allocatable           :: candidate(:,:) !< Candidate mask.
+   real(R8P),                    allocatable           :: points(:,:)    !< Candidate points (2, n).
+   real(R8P),                    allocatable           :: d(:)           !< Candidate distances.
+   integer(I4P),                 allocatable           :: cell(:,:)      !< Candidate indices (3, n).
+   integer(I4P)                                        :: i, j, l, m, n, st, first, last
+   integer(I4P)                                        :: ilo, ihi, jlo, jhi
+   real(R8P)                                           :: a(2), b(2)     !< Segment ends.
+
+   if (present(status)) status = STATUS_OK
+   if (.not. allocated(self%phi)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (.not. self%is_2d) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (present(band)) then
+      band_ = band
+   else
+      band_ = self%default_band(curve)
+   endif
+   if (.not. (band_ > 0._R8P)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   self%is_signed = .true. ; if (present(is_signed)) self%is_signed = is_signed
+   self%sign_algorithm = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) self%sign_algorithm = sign_algorithm
+   self%use_device = .false. ; if (present(use_device)) self%use_device = use_device
+   self%local_spacing = 0.5_R8P * self%default_band(curve)
+   self%phi        = FAR_VALUE
+   self%in_band    = .false.
+   self%band_width = band_
+   self%band_cells = 0_I4P
+
+   ! 1. candidates: each segment's box inflated by the band, interior cells only
+   allocate(candidate(self%ni, self%nj))
+   candidate = .false.
+   do l = 1_I4P, curve%get_loops_number()
+      call curve%get_loop_range(l, first, last)
+      do m = first, last
+         if (m == last .and. .not. curve%is_loop_closed(l)) exit ! the last vertex of an open loop starts no segment
+         a = curve%get_vertex(m)
+         b = curve%get_vertex(merge(first, m + 1_I4P, m == last))
+         call index_range(self%x, self%ng, min(a(1), b(1)) - band_, max(a(1), b(1)) + band_, ilo, ihi)
+         call index_range(self%y, self%ng, min(a(2), b(2)) - band_, max(a(2), b(2)) + band_, jlo, jhi)
+         if (ilo > ihi .or. jlo > jhi) cycle
+         candidate(ilo:ihi, jlo:jhi) = .true.
+      enddo
+   enddo
+   ! 2. one batch over the candidates
+   n = count(candidate, kind=I4P)
+   if (n == 0_I4P) return
+   allocate(points(2, n), d(n), cell(3, n))
+   m = 0_I4P
+   do j = 1_I4P, self%nj
+      do i = 1_I4P, self%ni
+         if (.not. candidate(i, j)) cycle
+         m = m + 1_I4P
+         points(:, m) = [self%x(i), self%y(j)]
+         cell(:, m) = [i, j, 1_I4P]
+      enddo
+   enddo
+   call batch_curve(curve=curve, points=points, d=d, is_signed=self%is_signed, sign_algorithm=self%sign_algorithm, &
+                    use_device=self%use_device, status=st)
+   if (st /= STATUS_OK) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   ! 3. keep |d| <= band
+   call self%keep_band(cell, d, band_)
+   endsubroutine compute_band_curve
+
+   pure subroutine keep_band(self, cell, d, band)
+   !< Store the candidates with |d| <= band as band cells.
+   class(distance_field_object), intent(inout) :: self      !< Distance field.
+   integer(I4P),                 intent(in)    :: cell(:,:) !< Candidate indices (3, n).
+   real(R8P),                    intent(in)    :: d(:)      !< Candidate distances.
+   real(R8P),                    intent(in)    :: band      !< Band half-width.
+   integer(I4P)                                :: m         !< Counter.
+
+   do m = 1_I4P, size(d, kind=I4P)
+      if (abs(d(m)) <= band) then
          self%phi(cell(1, m), cell(2, m), cell(3, m))     = d(m)
          self%in_band(cell(1, m), cell(2, m), cell(3, m)) = .true.
          self%band_cells = self%band_cells + 1_I4P
       endif
    enddo
-   endsubroutine compute_band
+   endsubroutine keep_band
 
-   subroutine compute_signs(self, surface, fallback_cells, status)
+   subroutine compute_signs_surface(self, surface, fallback_cells, status)
+   !< Signs of the cells outside the band from a surface (see `signs_core`).
+   class(distance_field_object), intent(inout)         :: self           !< Distance field.
+   type(surface_stl_object),     intent(inout), target :: surface        !< Surface.
+   integer(I4P),                 intent(out), optional :: fallback_cells !< Cells signed by a point query.
+   integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+
+   call self%signs_core(surface=surface, fallback_cells=fallback_cells, status=status)
+   endsubroutine compute_signs_surface
+
+   subroutine compute_signs_curve(self, curve, fallback_cells, status)
+   !< Signs of the cells outside the band from a curve, 2-D field (see `signs_core`).
+   class(distance_field_object), intent(inout)         :: self           !< Distance field.
+   type(curve_object),           intent(inout), target :: curve          !< Curve.
+   integer(I4P),                 intent(out), optional :: fallback_cells !< Cells signed by a point query.
+   integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+
+   call self%signs_core(curve=curve, fallback_cells=fallback_cells, status=status)
+   endsubroutine compute_signs_curve
+
+   subroutine signs_core(self, surface, curve, fallback_cells, status)
    !< Signs of the cells outside the band (call after `compute_band`, before `sweep`).
    !<
    !< The non-band interior cells are split into 6-connected components (halo cells take no
@@ -310,19 +493,23 @@ contains
    !< across the surface while touching band cells of one sign only, so every non-band cell
    !< gets a point query instead: correct, at the cost of one distance query per cell.
    !<
-   !< Point queries use `surface%distance_many` with the sign algorithm of `compute_band`, or
-   !< `surface%distance_many_device` if `compute_band` ran with `use_device=.true.` (bit-exact
-   !< with the host queries where validated).
+   !< Point queries use `distance_many` of the source (surface, or curve for a 2-D field) with
+   !< the sign algorithm of `compute_band`, or `distance_many_device` if `compute_band` ran with
+   !< `use_device=.true.` (bit-exact with the host queries where validated). In 2-D the
+   !< components are 4-connected (no neighbour along k). Exactly one of surface and curve is
+   !< given, matching the field's dimension (else STATUS_INVALID_INPUT).
    !< Magnitudes are kept (`phi = sign(|phi|, s)`). No-op on an unsigned field.
    class(distance_field_object), intent(inout)         :: self           !< Distance field.
-   type(surface_stl_object),     intent(inout), target :: surface        !< Surface.
+   type(surface_stl_object),     intent(inout), target, optional :: surface !< Surface (3-D field).
+   type(curve_object),           intent(inout), target, optional :: curve   !< Curve (2-D field).
    integer(I4P),                 intent(out), optional :: fallback_cells !< Cells signed by a point query.
    integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    integer(I4P),                 allocatable           :: label(:,:,:)   !< Component id; 0 unvisited, -1 band/halo.
    integer(I4P),                 allocatable           :: queue(:)       !< BFS queue (linear indices).
    integer(I4P),                 allocatable           :: comp_sign(:)   !< Per component: +1, -1, 0 (query each cell), 2 (query one).
    integer(I4P),                 allocatable           :: comp_first(:)  !< Per component: first cell (linear index).
-   type(vector_R8P),             allocatable           :: points(:)      !< Query points.
+   type(vector_R8P),             allocatable           :: points(:)      !< Query points (surface).
+   real(R8P),                    allocatable           :: points2(:,:)   !< Query points (curve).
    real(R8P),                    allocatable           :: d(:)           !< Query results.
    integer(I4P),                 allocatable           :: qcell(:)       !< Query cells (linear indices) or components.
    integer(I4P)                                        :: i, j, k, l, m, c, n_comp, head, tail, nb
@@ -337,12 +524,16 @@ contains
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
+   if (present(surface) .eqv. present(curve) .or. (present(curve) .neqv. self%is_2d)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
    if (.not. self%is_signed) return
    thin = self%band_width < self%local_spacing
 
    allocate(label(self%ni, self%nj, self%nk))
    label = -1_I4P
-   label(self%ng + 1:self%ni - self%ng, self%ng + 1:self%nj - self%ng, self%ng + 1:self%nk - self%ng) = 0_I4P
+   label(self%ng + 1:self%ni - self%ng, self%ng + 1:self%nj - self%ng, self%ngk + 1:self%nk - self%ngk) = 0_I4P
    where (self%in_band) label = -1_I4P
    allocate(queue(count(label == 0_I4P, kind=I4P)))
    allocate(comp_sign(size(queue)), comp_first(size(queue)))
@@ -398,7 +589,7 @@ contains
          enddo
       enddo
    enddo
-   allocate(points(n_query), d(n_query), qcell(n_query))
+   allocate(points(n_query), points2(2, n_query), d(n_query), qcell(n_query))
    m = 0_I4P
    do c = 1_I4P, n_comp
       if (comp_sign(c) /= 2_I4P) cycle
@@ -406,6 +597,7 @@ contains
       qcell(m) = comp_first(c)
       call self%unlinear(comp_first(c), ii, jj, kk)
       points(m)%x = self%x(ii) ; points(m)%y = self%y(jj) ; points(m)%z = self%z(kk)
+      points2(:, m) = [self%x(ii), self%y(jj)]
    enddo
    do k = 1_I4P, self%nk
       do j = 1_I4P, self%nj
@@ -415,12 +607,18 @@ contains
             m = m + 1_I4P
             qcell(m) = self%linear(i, j, k)
             points(m)%x = self%x(i) ; points(m)%y = self%y(j) ; points(m)%z = self%z(k)
+            points2(:, m) = [self%x(i), self%y(j)]
          enddo
       enddo
    enddo
    if (n_query > 0_I4P) then
-      call batch_distances(surface=surface, points=points, d=d, is_signed=.true., sign_algorithm=self%sign_algorithm, &
-                           use_device=self%use_device, status=st)
+      if (present(surface)) then
+         call batch_distances(surface=surface, points=points, d=d, is_signed=.true., sign_algorithm=self%sign_algorithm, &
+                              use_device=self%use_device, status=st)
+      else
+         call batch_curve(curve=curve, points=points2, d=d, is_signed=.true., sign_algorithm=self%sign_algorithm, &
+                          use_device=self%use_device, status=st)
+      endif
       if (st /= STATUS_OK) then
          if (present(status)) status = STATUS_INVALID_INPUT
          return
@@ -449,7 +647,7 @@ contains
          enddo
       enddo
    enddo
-   endsubroutine compute_signs
+   endsubroutine signs_core
 
    subroutine sweep(self, tol, max_sweeps, sweeps, max_change, status)
    !< Far-field magnitudes by the Fast Sweeping Method (call after `compute_band` and, for a
@@ -460,7 +658,7 @@ contains
    !< where (i', j', k') are the interior indices counted from the corner the sweep starts at;
    !< a cell's six neighbours lie on the planes s - 1 and s + 1, so the cells of one plane are
    !< independent and the result does not depend on the order inside a plane. The 8 sweep
-   !< directions alternate; after each full cycle of 8 the largest change of |phi| is
+   !< directions alternate (4 in 2-D); after each full cycle the largest change of |phi| is
    !< compared with `tol` times the diagonal of the interior box.
    !<
    !< The update of a cell takes, per axis, the neighbour that gives the larger one-sided slope
@@ -477,7 +675,7 @@ contains
    real(R8P),                    intent(out), optional :: max_change !< Largest |phi| change of the last cycle.
    integer(I4P),                 intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
    real(R8P)                                           :: tol_       !< Absolute tolerance.
-   integer(I4P)                                        :: max_sweeps_, n_sweeps, dir
+   integer(I4P)                                        :: max_sweeps_, n_sweeps, dir, ndir
    real(R8P)                                           :: cycle_change, change
 
    if (present(status)) status = STATUS_OK
@@ -490,17 +688,18 @@ contains
    tol_ = 1.e-12_R8P ; if (present(tol)) tol_ = tol
    tol_ = tol_ * sqrt((self%x(self%ni - self%ng) - self%x(self%ng + 1_I4P))**2 + &
                       (self%y(self%nj - self%ng) - self%y(self%ng + 1_I4P))**2 + &
-                      (self%z(self%nk - self%ng) - self%z(self%ng + 1_I4P))**2)
+                      (self%z(self%nk - self%ngk) - self%z(self%ngk + 1_I4P))**2)
    max_sweeps_ = 400_I4P ; if (present(max_sweeps)) max_sweeps_ = max_sweeps
 
    n_sweeps     = 0_I4P
    cycle_change = 0._R8P
+   ndir = 8_I4P ; if (self%is_2d) ndir = 4_I4P ! in 2-D the z direction bit is idle
    do while (n_sweeps < max_sweeps_)
-      dir = mod(n_sweeps, 8_I4P)
+      dir = mod(n_sweeps, ndir)
       call self%sweep_once(dir=dir, change=change)
       n_sweeps = n_sweeps + 1_I4P
       cycle_change = max(cycle_change, change)
-      if (dir == 7_I4P) then
+      if (dir == ndir - 1_I4P) then
          if (cycle_change <= tol_) exit
          if (n_sweeps < max_sweeps_) cycle_change = 0._R8P
       endif
@@ -522,7 +721,7 @@ contains
 
    n1 = self%ni - 2_I4P * self%ng
    n2 = self%nj - 2_I4P * self%ng
-   n3 = self%nk - 2_I4P * self%ng
+   n3 = self%nk - 2_I4P * self%ngk
    rx = btest(dir, 0) ; ry = btest(dir, 1) ; rz = btest(dir, 2)
    change = 0._R8P
    ! One parallel region per sweep, one worksharing loop per plane (its implicit barrier
@@ -537,7 +736,7 @@ contains
             ip = s - kp - jp
             i = self%ng + 1_I4P + ip ; if (rx) i = self%ni - self%ng - ip
             j = self%ng + 1_I4P + jp ; if (ry) j = self%nj - self%ng - jp
-            k = self%ng + 1_I4P + kp ; if (rz) k = self%nk - self%ng - kp
+            k = self%ngk + 1_I4P + kp ; if (rz) k = self%nk - self%ngk - kp
             if (self%in_band(i, j, k)) cycle
             old = abs(self%phi(i, j, k))
             u   = self%godunov(i, j, k)
@@ -627,8 +826,8 @@ contains
    k = r / self%nj + 1_I4P
    endsubroutine unlinear
 
-   subroutine compute(self, surface, band, is_signed, sign_algorithm, use_device, tol, max_sweeps, sweeps, fallback_cells, &
-                      status)
+   subroutine compute_surface(self, surface, band, is_signed, sign_algorithm, use_device, tol, max_sweeps, sweeps, &
+                              fallback_cells, status)
    !< The whole field: `compute_band`, `compute_signs` (signed fields), `sweep`. See each one
    !< for the arguments; `sweeps` and `fallback_cells` report their counters.
    class(distance_field_object), intent(inout)         :: self           !< Distance field.
@@ -650,7 +849,31 @@ contains
    if (st == STATUS_OK) call self%compute_signs(surface=surface, fallback_cells=fallback_cells, status=st)
    if (st == STATUS_OK) call self%sweep(tol=tol, max_sweeps=max_sweeps, sweeps=sweeps, status=st)
    if (present(status)) status = st
-   endsubroutine compute
+   endsubroutine compute_surface
+
+   subroutine compute_curve(self, curve, band, is_signed, sign_algorithm, use_device, tol, max_sweeps, sweeps, &
+                            fallback_cells, status)
+   !< The whole 2-D field from a curve: `compute_band`, `compute_signs` (signed fields), `sweep`.
+   class(distance_field_object), intent(inout)         :: self           !< Distance field.
+   type(curve_object),           intent(inout), target :: curve          !< Curve.
+   real(R8P),                    intent(in),  optional :: band           !< Band half-width (default `default_band`).
+   logical,                      intent(in),  optional :: is_signed      !< Signed distances (default .true.).
+   integer(I4P),                 intent(in),  optional :: sign_algorithm !< SIGN_* code (default SIGN_PSEUDO_NORMAL).
+   logical,                      intent(in),  optional :: use_device     !< Band batch on the GPU (default .false.).
+   real(R8P),                    intent(in),  optional :: tol            !< Sweep tolerance (default 1e-12, relative).
+   integer(I4P),                 intent(in),  optional :: max_sweeps     !< Maximum directional sweeps (default 400).
+   integer(I4P),                 intent(out), optional :: sweeps         !< Directional sweeps done.
+   integer(I4P),                 intent(out), optional :: fallback_cells !< Cells signed by a point query.
+   integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P)                                        :: st             !< Stage status.
+
+   if (present(status)) status = STATUS_OK
+   call self%compute_band(curve=curve, band=band, is_signed=is_signed, sign_algorithm=sign_algorithm, &
+                          use_device=use_device, status=st)
+   if (st == STATUS_OK) call self%compute_signs(curve=curve, fallback_cells=fallback_cells, status=st)
+   if (st == STATUS_OK) call self%sweep(tol=tol, max_sweeps=max_sweeps, sweeps=sweeps, status=st)
+   if (present(status)) status = st
+   endsubroutine compute_curve
 
    ! private helpers
    subroutine batch_distances(surface, points, d, is_signed, sign_algorithm, use_device, status)
@@ -677,6 +900,29 @@ contains
                                  is_square_root=.true., status=status)
    endif
    endsubroutine batch_distances
+
+   subroutine batch_curve(curve, points, d, is_signed, sign_algorithm, use_device, status)
+   !< One batch of curve distance queries, on the host or on the device (the curve made resident
+   !< for the call and released after, unless it was already resident).
+   type(curve_object), intent(inout), target :: curve          !< Curve.
+   real(R8P),          intent(in)            :: points(:,:)    !< Query points (2, n).
+   real(R8P),          intent(out)           :: d(:)           !< Distances.
+   logical,            intent(in)            :: is_signed      !< Signed distances.
+   integer(I4P),       intent(in)            :: sign_algorithm !< SIGN_* code.
+   logical,            intent(in)            :: use_device     !< Device batch.
+   integer(I4P),       intent(out)           :: status         !< distance_many(_device) status.
+   logical                                   :: was_resident   !< Curve already on the device.
+
+   if (use_device) then
+      was_resident = curve%get_is_on_device()
+      if (.not. was_resident) call curve%enter_device
+      call curve%distance_many_device(points=points, distances=d, is_signed=is_signed, sign_algorithm=sign_algorithm, &
+                                      status=status)
+      if (.not. was_resident) call curve%exit_device
+   else
+      call curve%distance_many(points=points, distances=d, is_signed=is_signed, sign_algorithm=sign_algorithm, status=status)
+   endif
+   endsubroutine batch_curve
 
    pure function solve_quadratic(a, h) result(u)
    !< Solution of sum over the active axes of ((u - a(d)) / h(d))**2 = 1, where an axis is

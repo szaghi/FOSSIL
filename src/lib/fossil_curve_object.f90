@@ -89,6 +89,7 @@ type :: curve_object
       procedure, pass(self) :: get_bmax             !< Bounding box maximum.
       procedure, pass(self) :: get_bmin             !< Bounding box minimum.
       procedure, pass(self) :: get_centroid         !< Centroid of the solid region.
+      procedure, pass(self) :: get_is_on_device     !< True if enter_device mapped the arrays.
       procedure, pass(self) :: get_loop_area        !< Signed area of a loop.
       procedure, pass(self) :: get_loop_range       !< First and last vertex of a loop.
       procedure, pass(self) :: get_loops_number     !< Number of loops.
@@ -346,6 +347,14 @@ contains
 
    c = self%centroid
    endfunction get_centroid
+
+   pure function get_is_on_device(self) result(yes)
+   !< True if `enter_device` mapped the query arrays.
+   class(curve_object), intent(in) :: self !< Curve.
+   logical                         :: yes  !< Result.
+
+   yes = self%is_on_device
+   endfunction get_is_on_device
 
    pure function get_loop_area(self, l) result(a)
    !< Signed area of loop l (0 if out of range).
