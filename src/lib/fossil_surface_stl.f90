@@ -2195,8 +2195,8 @@ contains
    t = tl ; facets = fl ; entering = el ; counts = cl ; overflow = ol
    endsubroutine line_crossings_many_device
 
-   subroutine query_many_device(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
-                                is_signed, sign_algorithm, status)
+   recursive subroutine query_many_device(self, points, distances, closest_points, facets, features, feature_indexes, &
+                                          normals, bodies, is_signed, sign_algorithm, status, pose)
    !< `query_many` on the device (issue #37): same arguments, outputs and defaults.
    !<
    !< Requires `enter_device` (else STATUS_INVALID_INPUT and a stderr message). The kernel always
@@ -2219,6 +2219,7 @@ contains
    logical,                   intent(in),  optional :: is_signed          !< Signed (default .true.).
    integer(I4P),              intent(in),  optional :: sign_algorithm     !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
    integer(I4P),              intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_t),        intent(in),  optional :: pose               !< Pose of the body (issue #41).
    real(R8P),    allocatable :: dd(:), cpl(:,:), nml(:,:) !< Device-side outputs.
    integer(I4P), allocatable :: fcl(:), ftl(:), fil(:), bdl(:) !< Device-side outputs.
    type(aabb_node_object),       pointer :: node_p(:)    !< Alias of self%aabb%node.
@@ -2231,6 +2232,19 @@ contains
    integer(I4P)     :: best_facet, best_payload, region, n, i, algo !< Per-point work.
    logical          :: signed_, fwn, bad                       !< Options.
 
+   if (present(pose)) then ! body-frame query (issue #41), outputs mapped back on the host
+      call self%query_many_device(points=body_points(pose, points), distances=distances, closest_points=closest_points, &
+                                  facets=facets, features=features, feature_indexes=feature_indexes, normals=normals, &
+                                  bodies=bodies, is_signed=is_signed, sign_algorithm=sign_algorithm, status=status)
+      if (present(status)) then
+         if (status /= STATUS_OK) return
+      endif
+      do i = 1_I4P, size(points, kind=I4P)
+         if (present(closest_points)) closest_points(:, i) = to_world(pose, closest_points(:, i))
+         if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
+      enddo
+      return
+   endif
    if (present(status)) status = STATUS_OK
    n = size(points, kind=I4P)
    bad = size(distances, kind=I4P) /= n
@@ -2825,7 +2839,8 @@ contains
    self%is_on_device = .false.
    endsubroutine exit_device
 
-   subroutine distance_many_device(self, points, distances, is_signed, sign_algorithm, is_square_root, status)
+   recursive subroutine distance_many_device(self, points, distances, is_signed, sign_algorithm, is_square_root, status, &
+                                             pose)
    !< GPU-offloaded batch distance query (issue #20 §Step 5). Device analogue of
    !< `distance_many`. Same semantics on the output -- `distances(i)` is the
    !< distance from `points(i)` to the surface -- but the loop body executes on
@@ -2861,6 +2876,7 @@ contains
    integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
    logical,                   intent(in),  optional :: is_square_root !< Trigger sqrt of d^2 (default .false.).
    integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_t),        intent(in),  optional :: pose            !< Pose of the body (issue #41): world-frame points.
    logical                                          :: is_signed_     !< Resolved signed sentinel.
    logical                                          :: is_fwn_        !< Resolved sign algorithm: fast winding number.
    integer(I4P)                                     :: algo           !< Resolved sign-algorithm code.
@@ -2893,6 +2909,11 @@ contains
    type(pnormal_payload_t),      pointer            :: pnormal_p(:)   !< Alias of self%pnormal_payload.
    type(wn_node_t),              pointer            :: wn_p(:)        !< Alias of self%wn_payload (lower bound 0, kept by pointer assignment).
 
+   if (present(pose)) then ! body-frame query (issue #41): the transform of the CPU path, on the host
+      call self%distance_many_device(points=body_points(pose, points), distances=distances, is_signed=is_signed, &
+                                     sign_algorithm=sign_algorithm, is_square_root=is_square_root, status=status)
+      return
+   endif
    if (present(status)) status = STATUS_OK
    n = size(points, kind=I4P)
    if (size(distances, kind=I4P) /= n) then

@@ -43,6 +43,7 @@ use penf,                only : I4P, I8P, R8P
 use vecfor,              only : vector_R8P
 use fossil_distance_field, only : distance_field_object
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_3d, device_line_mismatches_3d
+use fossil,              only : rigid_pose_t, pose_from_axis_angle, to_world
 
 implicit none
 
@@ -72,6 +73,7 @@ integer(I4P)                  :: rich_id_mismatch          !< Rich queries: face
 integer(I4P)                  :: box_mismatch              !< Box classification: device vs CPU code/inside mismatches (issue #38).
 integer                       :: sign_mismatch             !< Sign benchmark: device vs CPU signed-distance mismatches (issue #39).
 integer                       :: line_mismatch             !< Grid-line crossings: device vs CPU mismatches (issue #40).
+integer                       :: posed_mismatch            !< Posed queries: device vs CPU mismatches (issue #41).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -229,6 +231,8 @@ sign_mismatch = device_sign_mismatches_3d(sign_bodies)
 rich_ok = rich_ok .and. sign_mismatch == 0
 line_mismatch = device_line_mismatches_3d(sign_bodies)
 rich_ok = rich_ok .and. line_mismatch == 0
+call posed_case(mismatch=posed_mismatch)
+rich_ok = rich_ok .and. posed_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -316,6 +320,7 @@ print '(A,I0)',      '   rich id mismatches:      ', rich_id_mismatch
 print '(A,I0)',      '   box device vs serial mismatches: ', box_mismatch
 print '(A,I0)',      '   sign bench device vs serial mismatches: ', sign_mismatch
 print '(A,I0)',      '   line crossings device vs serial mismatches: ', line_mismatch
+print '(A,I0)',      '   posed device vs serial mismatches: ', posed_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -348,6 +353,29 @@ contains
       id_mismatch = id_mismatch + count(f1 /= f2 .or. t1 /= t2 .or. i1 /= i2 .or. b1 /= b2, kind=I4P)
    enddo
    endsubroutine rich_device_case
+
+   subroutine posed_case(mismatch)
+   !< query_many_device vs query_many with a pose (issue #41) on the bench points moved by that pose.
+   integer, intent(out)          :: mismatch !< Mismatches over distance, closest point, normal, facet.
+   type(rigid_pose_t)            :: pose     !< Pose.
+   type(vector_R8P), allocatable :: q(:)     !< Moved points.
+   real(R8P),        allocatable :: d1(:), d2(:), c1(:,:), c2(:,:), n1(:,:), n2(:,:) !< Outputs.
+   integer(I4P),     allocatable :: f1(:), f2(:) !< Outputs.
+   real(R8P)                     :: w(3)     !< Work.
+   integer(I4P)                  :: m, nq    !< Work.
+
+   pose = pose_from_axis_angle([1._R8P, -2._R8P, 0.5_R8P], 1.1_R8P, [20._R8P, 3._R8P, -7._R8P])
+   nq = size(points, kind=I4P)
+   allocate(q(nq), d1(nq), d2(nq), c1(3, nq), c2(3, nq), n1(3, nq), n2(3, nq), f1(nq), f2(nq))
+   do m = 1, nq
+      w = to_world(pose, [points(m)%x, points(m)%y, points(m)%z]) ; q(m) = vector_R8P(w(1), w(2), w(3))
+   enddo
+   call surface%enter_device
+   call surface%query_many(points=q, distances=d1, closest_points=c1, normals=n1, facets=f1, pose=pose)
+   call surface%query_many_device(points=q, distances=d2, closest_points=c2, normals=n2, facets=f2, pose=pose)
+   call surface%exit_device
+   mismatch = count(d1 /= d2) + count(c1 /= c2) + count(n1 /= n2) + count(f1 /= f2)
+   endsubroutine posed_case
 
    subroutine box_device_case(mismatch)
    !< box_classify_many_device against box_classify_many (issue #38): a box of half-size 1/64 of the

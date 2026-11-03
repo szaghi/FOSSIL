@@ -18,6 +18,7 @@ program fossil_test_curve_bench
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 use penf,   only : I4P, I8P, R8P
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d, device_line_mismatches_2d
+use fossil, only : rigid_pose_2d_t, pose_2d, to_world
 
 implicit none
 
@@ -97,6 +98,7 @@ contains
       ok = ok .and. err_cpu == 0._R8P .and. err_dev == 0._R8P
       call rich(cur, p, ALGO(a), NAME(a))
       call box(cur, p, (hi - lo) / real(max(n, 1), R8P), ALGO(a), NAME(a))
+      call posed(cur, p, ALGO(a), NAME(a))
    enddo
    call cur%exit_device
    endsubroutine bench
@@ -137,6 +139,29 @@ contains
    print '(A,I0)', 'line crossings device vs serial mismatches: ', nbad
    ok = ok .and. nbad == 0
    endsubroutine sign_bench
+
+   subroutine posed(cur, p, algo, nm)
+   !< query_many_device vs query_many with an in-plane pose (issue #41), the grid points moved by it.
+   type(curve_object), intent(inout) :: cur    !< Curve (on device).
+   real(R8P),          intent(in)    :: p(:,:) !< Points [2, n].
+   integer(I4P),       intent(in)    :: algo   !< Sign algorithm.
+   character(*),       intent(in)    :: nm     !< Sign name.
+   type(rigid_pose_2d_t)     :: pose !< Pose.
+   real(R8P),    allocatable :: q(:,:), d1(:), d2(:), c1(:,:), c2(:,:) !< Work.
+   integer(I4P)              :: nq, m, bad !< Work.
+
+   pose = pose_2d(0.9_R8P, [5._R8P, -2._R8P])
+   nq = size(p, 2)
+   allocate(q(2, nq), d1(nq), d2(nq), c1(2, nq), c2(2, nq))
+   do m = 1, nq
+      q(:, m) = to_world(pose, p(:, m))
+   enddo
+   call cur%query_many(points=q, distances=d1, closest_points=c1, sign_algorithm=algo, pose=pose)
+   call cur%query_many_device(points=q, distances=d2, closest_points=c2, sign_algorithm=algo, pose=pose)
+   bad = count(d1 /= d2) + count(c1 /= c2)
+   print '(A,A,A,I0)', '   ', nm, 'posed device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0
+   endsubroutine posed
 
    subroutine box(cur, p, h, algo, nm)
    !< box_classify_many_device vs box_classify_many (issue #38): a box of half-size h around every

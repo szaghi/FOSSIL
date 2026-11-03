@@ -629,7 +629,7 @@ contains
    !$omp end parallel do
    endsubroutine distance_many
 
-   subroutine distance_many_device(self, points, distances, is_signed, sign_algorithm, status)
+   recursive subroutine distance_many_device(self, points, distances, is_signed, sign_algorithm, status, pose)
    !< Batched distances on the device (OpenACC): same contract and kernel as `distance_many`.
    !<
    !< Requires `enter_device` (else STATUS_INVALID_INPUT and a stderr message). The compute region
@@ -643,6 +643,7 @@ contains
    logical,             intent(in),  optional :: is_signed      !< Signed (default .true.).
    integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
    integer(I4P),        intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_2d_t), intent(in), optional :: pose          !< Pose of the curve (issue #41): world-frame points.
    logical                                    :: signed_, fwn   !< Resolved options.
    integer(I4P)                               :: i, n           !< Work.
    real(R8P),    pointer :: lo_u(:), lo_v(:), hi_u(:), hi_v(:), a_u(:), a_v(:), d_u(:), d_v(:), len2(:) !< Aliases.
@@ -650,6 +651,11 @@ contains
    real(R8P),    pointer :: wn_c(:,:) !< Alias.
    integer(I4P), pointer :: left(:), right(:), first(:), last(:), seg_id(:), next(:) !< Aliases.
 
+   if (present(pose)) then ! body-frame query (issue #41): the transform of the CPU path, on the host
+      call self%distance_many_device(points=body_points2(pose, points), distances=distances, is_signed=is_signed, &
+                                     sign_algorithm=sign_algorithm, status=status)
+      return
+   endif
    if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
    n = size(distances, kind=I4P)
    if (self%bvh%nodes_number == 0_I4P) then
@@ -768,8 +774,8 @@ contains
    !$omp end parallel do
    endsubroutine query_many
 
-   subroutine query_many_device(self, points, distances, closest_points, segments, vertices, normals, bodies, is_signed, &
-                                sign_algorithm, status)
+   recursive subroutine query_many_device(self, points, distances, closest_points, segments, vertices, normals, bodies, &
+                                          is_signed, sign_algorithm, status, pose)
    !< `query_many` on the device (issue #37): same contract and kernel. Requires `enter_device`.
    !< Every output is computed into local arrays (no absent optional in device code), the
    !< requested ones copied out on the host; #20 pointer aliases. GPU validation pending.
@@ -784,6 +790,7 @@ contains
    logical,             intent(in),  optional :: is_signed          !< Signed (default .true.).
    integer(I4P),        intent(in),  optional :: sign_algorithm     !< Sign algorithm.
    integer(I4P),        intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_2d_t), intent(in), optional :: pose              !< Pose of the curve (issue #41).
    real(R8P),    allocatable :: dd(:), cpl(:,:), nml(:,:) !< Device-side outputs.
    integer(I4P), allocatable :: sgl(:), vxl(:), bdl(:)    !< Device-side outputs.
    logical                   :: signed_, fwn              !< Resolved options.
@@ -793,6 +800,19 @@ contains
    real(R8P),    pointer :: wn_cu(:), wn_cv(:), wn_du(:), wn_dv(:), wn_diag2(:), wn_c(:,:) !< Aliases.
    integer(I4P), pointer :: left(:), right(:), first(:), last(:), seg_id(:), next(:), vbody(:) !< Aliases.
 
+   if (present(pose)) then ! body-frame query (issue #41), outputs mapped back on the host
+      call self%query_many_device(points=body_points2(pose, points), distances=distances, closest_points=closest_points, &
+                                  segments=segments, vertices=vertices, normals=normals, bodies=bodies, is_signed=is_signed, &
+                                  sign_algorithm=sign_algorithm, status=status)
+      if (present(status)) then
+         if (status /= STATUS_OK) return
+      endif
+      do i = 1_I4P, size(points, 2, kind=I4P)
+         if (present(closest_points)) closest_points(:, i) = to_world(pose, closest_points(:, i))
+         if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
+      enddo
+      return
+   endif
    if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
    if (.not. rich_sizes_ok(size(distances, kind=I4P), closest_points, segments, vertices, normals, bodies)) then
       if (present(status)) status = STATUS_INVALID_INPUT
