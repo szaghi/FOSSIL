@@ -12,11 +12,12 @@ program fossil_test_curve_bench
 !< host (no OpenACC); built by the `tests-nvidia-curve` mode it runs on the GPU.
 !< Also `rich ... id mismatches` (query_many_device, issue #37) and `box device vs serial mismatches`
 !< (box_classify_many_device on a box around every grid point, issue #38), and `sign bench device vs
-!< serial mismatches` (sections of the issue #39 benchmark bodies): all must be 0.
+!< serial mismatches` (sections of the issue #39 benchmark bodies) and `line crossings device vs serial
+!< mismatches` (issue #40): all must be 0.
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 use penf,   only : I4P, I8P, R8P
-use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d
+use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d, device_line_mismatches_2d
 
 implicit none
 
@@ -131,6 +132,9 @@ contains
    call bench_bodies(bb)
    nbad = device_sign_mismatches_2d(bb)
    print '(A,I0)', 'sign bench device vs serial mismatches: ', nbad
+   ok = ok .and. nbad == 0
+   nbad = device_line_mismatches_2d(bb)
+   print '(A,I0)', 'line crossings device vs serial mismatches: ', nbad
    ok = ok .and. nbad == 0
    endsubroutine sign_bench
 

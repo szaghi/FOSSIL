@@ -88,6 +88,8 @@ type :: curve_object
       procedure, pass(self) :: tag_block            !< Signed tag bands on a block of cells (issue #38).
       procedure, pass(self) :: line_crossings       !< Exact crossings of an axis-aligned line (issue #40).
       procedure, pass(self) :: cell_wall_fractions  !< Wall fractions along the grid lines of a block (issue #40).
+      procedure, pass(self) :: line_crossings_many  !< Crossings of many parallel lines, fixed buffers (issue #40).
+      procedure, pass(self) :: line_crossings_many_device !< line_crossings_many on the device (issue #40).
       procedure, pass(self) :: check_validity       !< First validity defect (CURVE_* code).
       procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
       procedure, pass(self) :: distance             !< (Signed) distance of a point.
@@ -485,6 +487,78 @@ contains
       enddo
       endsubroutine sweep
    endsubroutine cell_wall_fractions
+
+   subroutine line_crossings_many(self, axis, a, t0, t1, t, segments, entering, counts, overflow, status)
+   !< Crossings of the lines along `axis` (1: u, 2: v) at a(i), i = 1..n, with parameter in [t0, t1]
+   !< (issue #40), into fixed buffers t(nmax, n), segments(nmax, n), entering(nmax, n), sorted;
+   !< counts(i), overflow(i) as in the surface twin (on overflow, re-run with a larger buffer). OpenMP over the lines; the kernel of the device
+   !< twin. `status = STATUS_INVALID_INPUT` on a bad axis, range or shape, or an empty curve.
+   class(curve_object), intent(in)            :: self          !< Curve.
+   integer(I4P),        intent(in)            :: axis          !< 1 or 2.
+   real(R8P),           intent(in)            :: a(:)          !< Line positions [n].
+   real(R8P),           intent(in)            :: t0, t1        !< Parameter range.
+   real(R8P),           intent(out)           :: t(:,:)        !< Parameters [nmax, n].
+   integer(I4P),        intent(out)           :: segments(:,:) !< Segments [nmax, n].
+   logical,             intent(out)           :: entering(:,:) !< Entering flags [nmax, n].
+   integer(I4P),        intent(out)           :: counts(:)     !< Crossings per line [n].
+   logical,             intent(out)           :: overflow(:)   !< Buffer overflow per line [n].
+   integer(I4P),        intent(out), optional :: status        !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P) :: i !< Counter.
+
+   if (.not. curve_many_ok(self, axis, a, t0, t1, t, segments, entering, counts, overflow, status)) return
+   !$omp parallel do default(shared) schedule(dynamic)
+   do i = 1_I4P, size(a, kind=I4P)
+      call curve_line_crossings_oac(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, &
+                                    self%bvh%right, self%bvh%first, self%bvh%last, self%bvh%seg_id, self%next, self%u, &
+                                    self%v, axis, a(i), t0, t1, t(:, i), segments(:, i), entering(:, i), counts(i), &
+                                    overflow(i))
+   enddo
+   !$omp end parallel do
+   endsubroutine line_crossings_many
+
+   subroutine line_crossings_many_device(self, axis, a, t0, t1, t, segments, entering, counts, overflow, status)
+   !< `line_crossings_many` on the device (OpenACC, issue #40): same results bit for bit. Requires
+   !< `enter_device`. #20 rules (pointer aliases). Validated on the host; the GPU gate is pending.
+   class(curve_object), intent(inout), target :: self          !< Curve (target: device aliases).
+   integer(I4P),        intent(in)            :: axis          !< 1 or 2.
+   real(R8P),           intent(in)            :: a(:)          !< Line positions [n].
+   real(R8P),           intent(in)            :: t0, t1        !< Parameter range.
+   real(R8P),           intent(out)           :: t(:,:)        !< Parameters [nmax, n].
+   integer(I4P),        intent(out)           :: segments(:,:) !< Segments [nmax, n].
+   logical,             intent(out)           :: entering(:,:) !< Entering flags [nmax, n].
+   integer(I4P),        intent(out)           :: counts(:)     !< Crossings per line [n].
+   logical,             intent(out)           :: overflow(:)   !< Buffer overflow per line [n].
+   integer(I4P),        intent(out), optional :: status        !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),    pointer :: lo_u(:), lo_v(:), hi_u(:), hi_v(:), u(:), v(:) !< Aliases.
+   integer(I4P), pointer :: left(:), right(:), first(:), last(:), seg_id(:), next(:) !< Aliases.
+   real(R8P),    allocatable :: tl(:,:) !< Device-side parameters.
+   integer(I4P), allocatable :: sl(:,:) !< Device-side segments.
+   logical,      allocatable :: el(:,:) !< Device-side flags.
+   integer(I4P), allocatable :: cl(:)   !< Device-side counts.
+   logical,      allocatable :: ol(:)   !< Device-side overflow.
+   integer(I4P)              :: i, n, nmax !< Work.
+
+   if (.not. curve_many_ok(self, axis, a, t0, t1, t, segments, entering, counts, overflow, status)) return
+   if (.not. self%is_on_device) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_curve_object%line_crossings_many_device: curve not on device -- call enter_device first.'
+      return
+   endif
+   n = size(a, kind=I4P) ; nmax = size(t, 1, kind=I4P)
+   if (n == 0_I4P) return
+   allocate(tl(nmax, n), sl(nmax, n), el(nmax, n), cl(n), ol(n))
+   tl = 0._R8P ; sl = 0_I4P ; el = .false.
+   lo_u => self%bvh%lo_u ; lo_v => self%bvh%lo_v ; hi_u => self%bvh%hi_u ; hi_v => self%bvh%hi_v
+   left => self%bvh%left ; right => self%bvh%right ; first => self%bvh%first ; last => self%bvh%last
+   seg_id => self%bvh%seg_id ; next => self%next ; u => self%u ; v => self%v
+   !$acc parallel loop present(lo_u, lo_v, hi_u, hi_v, left, right, first, last, seg_id, next, u, v) copyin(a) &
+   !$acc&              copy(tl, sl, el) copyout(cl, ol)
+   do i = 1_I4P, n
+      call curve_line_crossings_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, seg_id, next, u, v, axis, a(i), &
+                                    t0, t1, tl(:, i), sl(:, i), el(:, i), cl(i), ol(i))
+   enddo
+   t = tl ; segments = sl ; entering = el ; counts = cl ; overflow = ol
+   endsubroutine line_crossings_many_device
 
    subroutine distance_many(self, points, distances, is_signed, sign_algorithm, status)
    !< Batched distances of the points (u, v) = points(:, i), CPU, OpenMP over the points.
@@ -1829,6 +1903,33 @@ contains
    if (present(vertices)) good = good .and. size(vertices) == n
    if (present(bodies)) good = good .and. size(bodies) == n
    endfunction rich_sizes_ok
+
+   function curve_many_ok(self, axis, a, t0, t1, t, segments, entering, counts, overflow, status) result(good)
+   !< Argument check of `line_crossings_many(_device)` (issue #40); outputs zeroed when good.
+   type(curve_object), intent(in)            :: self          !< Curve.
+   integer(I4P),       intent(in)            :: axis          !< 1 or 2.
+   real(R8P),          intent(in)            :: a(:)          !< Line positions.
+   real(R8P),          intent(in)            :: t0, t1        !< Parameter range.
+   real(R8P),          intent(inout)         :: t(:,:)        !< Parameters.
+   integer(I4P),       intent(inout)         :: segments(:,:) !< Segments.
+   logical,            intent(inout)         :: entering(:,:) !< Entering flags.
+   integer(I4P),       intent(inout)         :: counts(:)     !< Counts.
+   logical,            intent(inout)         :: overflow(:)   !< Overflow.
+   integer(I4P),       intent(out), optional :: status        !< Status.
+   logical                                   :: good          !< Arguments valid.
+   integer(I4P)                              :: n             !< Lines.
+
+   if (present(status)) status = STATUS_OK
+   n = size(a, kind=I4P)
+   good = (axis == 1_I4P .or. axis == 2_I4P) .and. t1 >= t0 .and. size(t, 2) == n .and. size(segments, 2) == n .and. &
+          size(entering, 2) == n .and. size(counts) == n .and. size(overflow) == n .and. size(segments, 1) == size(t, 1) &
+          .and. size(entering, 1) == size(t, 1) .and. size(t, 1) > 0 .and. self%bvh%nodes_number > 0_I4P
+   if (.not. good) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   t = 0._R8P ; segments = 0_I4P ; entering = .false. ; counts = 0_I4P ; overflow = .false.
+   endfunction curve_many_ok
 
    subroutine curve_crossings_core(self, axis, a, t0, t1, t, ids, es, n)
    !< Sorted crossings of an axis-aligned line with the curve (issue #40): segment-BVH kernel with a

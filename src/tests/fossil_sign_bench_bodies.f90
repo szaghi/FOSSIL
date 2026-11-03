@@ -33,6 +33,9 @@ module fossil_sign_bench_bodies
 !< (`distance_many`, `query_many`), bit for bit, signed, with the pseudo-normal and the
 !< fast-winding-number signs. In 2-D the curves are the mid-height sections of the bodies and the
 !< points their vertices offset by 1e-1 ... 1e-12 L along the four diagonals.
+!< `device_line_mismatches_3d` / `_2d` (issue #40): `line_crossings_many_device` against
+!< `line_crossings_many` on 17 x 17 lines per axis over each body (and 33 lines per axis over each
+!< section), every output bit for bit.
 use fossil, only : surface_stl_object, facet_object, curve_object, slice_surface, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
@@ -43,7 +46,7 @@ public :: soup_t, feature_t, body_t
 public :: SB_FACE, SB_FLAT_EDGE, SB_EDGE_CONVEX, SB_EDGE_REENTRANT, SB_VERTEX_CONVEX, SB_VERTEX_SADDLE, SB_KIND_NAME
 public :: bench_bodies, make_prism, make_apex_body, to_surface, make_points
 public :: soup_remove, soup_flip, soup_duplicate, soup_split_edge, soup_tjunction
-public :: device_sign_mismatches_3d, device_sign_mismatches_2d
+public :: device_sign_mismatches_3d, device_sign_mismatches_2d, device_line_mismatches_3d, device_line_mismatches_2d
 
 integer(I4P), parameter :: SB_FACE           = 1_I4P !< Face interior.
 integer(I4P), parameter :: SB_FLAT_EDGE      = 2_I4P !< Diagonal between two coplanar triangles.
@@ -567,6 +570,74 @@ contains
       deallocate(p, d1, d2)
    enddo
    endfunction device_sign_mismatches_2d
+
+   function device_line_mismatches_3d(b) result(nbad)
+   !< Grid-line crossings: device vs CPU on 17 x 17 lines per axis over every body.
+   type(body_t), intent(in) :: b(:) !< Bodies.
+   integer                  :: nbad !< Mismatching entries.
+   integer, parameter       :: NL = 17 * 17, NMAX = 16 !< Lines, buffer.
+   type(surface_stl_object) :: s    !< Surface.
+   real(R8P)    :: a(NL), bb(NL), lo(3), hi(3), tc(NMAX, NL), td(NMAX, NL) !< Work.
+   integer(I4P) :: fc(NMAX, NL), fd(NMAX, NL), cc(NL), cd(NL), ax, i1, i2, i, j, k, m !< Work.
+   logical      :: ec(NMAX, NL), ed(NMAX, NL), oc(NL), od(NL) !< Work.
+
+   nbad = 0
+   do i = 1, size(b)
+      call to_surface(b(i)%soup, s)
+      lo = [minval(b(i)%soup%v(1, :, :)), minval(b(i)%soup%v(2, :, :)), minval(b(i)%soup%v(3, :, :))]
+      hi = [maxval(b(i)%soup%v(1, :, :)), maxval(b(i)%soup%v(2, :, :)), maxval(b(i)%soup%v(3, :, :))]
+      call s%enter_device
+      do ax = 1, 3
+         i1 = mod(ax, 3) + 1 ; i2 = mod(ax + 1, 3) + 1
+         m = 0
+         do k = 0, 16
+            do j = 0, 16
+               m = m + 1
+               a(m) = lo(i1) + (hi(i1) - lo(i1)) * j / 16._R8P ; bb(m) = lo(i2) + (hi(i2) - lo(i2)) * k / 16._R8P
+            enddo
+         enddo
+         call s%line_crossings_many(axis=int(ax, I4P), a=a, b=bb, t0=lo(ax) - 1._R8P, t1=hi(ax) + 1._R8P, t=tc, facets=fc, &
+                                    entering=ec, counts=cc, overflow=oc)
+         call s%line_crossings_many_device(axis=int(ax, I4P), a=a, b=bb, t0=lo(ax) - 1._R8P, t1=hi(ax) + 1._R8P, t=td, &
+                                           facets=fd, entering=ed, counts=cd, overflow=od)
+         nbad = nbad + count(tc /= td) + count(fc /= fd) + count(ec .neqv. ed) + count(cc /= cd) + count(oc .neqv. od)
+      enddo
+      call s%exit_device
+   enddo
+   endfunction device_line_mismatches_3d
+
+   function device_line_mismatches_2d(b) result(nbad)
+   !< Grid-line crossings: device vs CPU on 33 lines per axis over the mid-height section of every body.
+   type(body_t), intent(in) :: b(:) !< Bodies.
+   integer                  :: nbad !< Mismatching entries.
+   integer, parameter       :: NL = 33, NMAX = 16 !< Lines, buffer.
+   type(surface_stl_object) :: s    !< Surface.
+   type(curve_object)       :: c    !< Section.
+   real(R8P)    :: a(NL), lo(2), hi(2), tc(NMAX, NL), td(NMAX, NL), zmin, zmax !< Work.
+   integer(I4P) :: fc(NMAX, NL), fd(NMAX, NL), cc(NL), cd(NL), ax, i, m !< Work.
+   logical      :: ec(NMAX, NL), ed(NMAX, NL), oc(NL), od(NL) !< Work.
+
+   nbad = 0
+   do i = 1, size(b)
+      call to_surface(b(i)%soup, s)
+      zmin = minval(b(i)%soup%v(3, :, :)) ; zmax = maxval(b(i)%soup%v(3, :, :))
+      call slice_surface(surface=s, normal_axis=3_I4P, level=0.5_R8P * (zmin + zmax), curve=c)
+      if (c%get_vertices_number() == 0) cycle
+      lo = c%get_bmin() ; hi = c%get_bmax()
+      call c%enter_device
+      do ax = 1, 2
+         do m = 1, NL
+            a(m) = lo(3 - ax) + (hi(3 - ax) - lo(3 - ax)) * (m - 1) / real(NL - 1, R8P)
+         enddo
+         call c%line_crossings_many(axis=int(ax, I4P), a=a, t0=lo(ax) - 1._R8P, t1=hi(ax) + 1._R8P, t=tc, segments=fc, &
+                                    entering=ec, counts=cc, overflow=oc)
+         call c%line_crossings_many_device(axis=int(ax, I4P), a=a, t0=lo(ax) - 1._R8P, t1=hi(ax) + 1._R8P, t=td, &
+                                           segments=fd, entering=ed, counts=cd, overflow=od)
+         nbad = nbad + count(tc /= td) + count(fc /= fd) + count(ec .neqv. ed) + count(cc /= cd) + count(oc .neqv. od)
+      enddo
+      call c%exit_device
+   enddo
+   endfunction device_line_mismatches_2d
 
    pure function cross(a, b) result(c)
    !< Cross product.

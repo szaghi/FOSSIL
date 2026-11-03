@@ -228,6 +228,8 @@ type :: surface_stl_object
       procedure, pass(self) :: tag_block                       !< Signed tag bands on a block of cells (issue #38).
       procedure, pass(self) :: line_crossings                  !< Exact crossings of an axis-aligned line (issue #40).
       procedure, pass(self) :: cell_wall_fractions             !< Wall fractions along the grid lines of a block (issue #40).
+      procedure, pass(self) :: line_crossings_many             !< Crossings of many parallel lines, fixed buffers (issue #40).
+      procedure, pass(self) :: line_crossings_many_device      !< line_crossings_many on the device (issue #40).
       ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
       procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
       procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
@@ -2101,6 +2103,78 @@ contains
       endsubroutine sweep
    endsubroutine cell_wall_fractions
 
+   subroutine line_crossings_many(self, axis, a, b, t0, t1, t, facets, entering, counts, overflow, status)
+   !< Crossings of the lines along `axis` at (a(i), b(i)), i = 1..n, with parameter in [t0, t1] (issue
+   !< #40): `line_crossings` for every line into fixed buffers t(nmax, n), facets(nmax, n),
+   !< entering(nmax, n), sorted; counts(i) crossings (at most nmax); overflow(i) if line i has more
+   !< than nmax: its kept crossings are then not the first ones (traversal order), so re-run it with
+   !< a larger buffer. OpenMP over the lines; the kernel of `line_crossings_many_device`. SAH BVH only.
+   !< `status = STATUS_INVALID_INPUT` on a bad axis, range, shape, or a non-BVH tree.
+   class(surface_stl_object), intent(in)            :: self          !< Surface.
+   integer(I4P),              intent(in)            :: axis          !< Line axis.
+   real(R8P),                 intent(in)            :: a(:), b(:)    !< Line positions [n].
+   real(R8P),                 intent(in)            :: t0, t1        !< Parameter range.
+   real(R8P),                 intent(out)           :: t(:,:)        !< Parameters [nmax, n].
+   integer(I4P),              intent(out)           :: facets(:,:)   !< Facets [nmax, n].
+   logical,                   intent(out)           :: entering(:,:) !< Entering flags [nmax, n].
+   integer(I4P),              intent(out)           :: counts(:)     !< Crossings per line [n].
+   logical,                   intent(out)           :: overflow(:)   !< Buffer overflow per line [n].
+   integer(I4P),              intent(out), optional :: status        !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P) :: i, n !< Work.
+
+   if (.not. many_args_ok(self, axis, a, b, t0, t1, t, facets, entering, counts, overflow, status)) return
+   n = size(a, kind=I4P)
+   !$omp parallel do default(shared) schedule(dynamic)
+   do i = 1_I4P, n
+      call bvh_line_crossings_oac(self%aabb%node, self%aabb%payload, self%tri_vertices, axis, a(i), b(i), t0, t1, t(:, i), &
+                                  facets(:, i), entering(:, i), counts(i), overflow(i))
+   enddo
+   !$omp end parallel do
+   endsubroutine line_crossings_many
+
+   subroutine line_crossings_many_device(self, axis, a, b, t0, t1, t, facets, entering, counts, overflow, status)
+   !< `line_crossings_many` on the device (OpenACC, issue #40): same arguments and results, bit for bit.
+   !< Requires `enter_device` (else STATUS_INVALID_INPUT and a stderr message). #20 rules: pointer
+   !< aliases of the mapped arrays (`tri_vertices` is mapped by `enter_device`). Validated on the host
+   !< (tests-gnu); the GPU validation is pending.
+   class(surface_stl_object), intent(inout), target :: self          !< Surface (target: device aliases).
+   integer(I4P),              intent(in)            :: axis          !< Line axis.
+   real(R8P),                 intent(in)            :: a(:), b(:)    !< Line positions [n].
+   real(R8P),                 intent(in)            :: t0, t1        !< Parameter range.
+   real(R8P),                 intent(out)           :: t(:,:)        !< Parameters [nmax, n].
+   integer(I4P),              intent(out)           :: facets(:,:)   !< Facets [nmax, n].
+   logical,                   intent(out)           :: entering(:,:) !< Entering flags [nmax, n].
+   integer(I4P),              intent(out)           :: counts(:)     !< Crossings per line [n].
+   logical,                   intent(out)           :: overflow(:)   !< Buffer overflow per line [n].
+   integer(I4P),              intent(out), optional :: status        !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(aabb_node_object),       pointer :: node_p(:)    !< Alias of self%aabb%node.
+   type(facet_distance_payload), pointer :: payload_p(:) !< Alias of self%aabb%payload.
+   real(R8P),                    pointer :: tv_p(:,:)    !< Alias of self%tri_vertices.
+   real(R8P),    allocatable :: tl(:,:)   !< Device-side parameters.
+   integer(I4P), allocatable :: fl(:,:)   !< Device-side facets.
+   logical,      allocatable :: el(:,:)   !< Device-side flags.
+   integer(I4P), allocatable :: cl(:)     !< Device-side counts.
+   logical,      allocatable :: ol(:)     !< Device-side overflow.
+   integer(I4P)              :: i, n, nmax !< Work.
+
+   if (.not. many_args_ok(self, axis, a, b, t0, t1, t, facets, entering, counts, overflow, status)) return
+   if (.not. self%is_on_device) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_surface_stl_object%line_crossings_many_device: surface not on device -- call enter_device first.'
+      return
+   endif
+   n = size(a, kind=I4P) ; nmax = size(t, 1, kind=I4P)
+   if (n == 0_I4P) return
+   allocate(tl(nmax, n), fl(nmax, n), el(nmax, n), cl(n), ol(n))
+   tl = 0._R8P ; fl = 0_I4P ; el = .false. ! entries past counts(i) as on the CPU path
+   node_p => self%aabb%node ; payload_p => self%aabb%payload ; tv_p => self%tri_vertices
+   !$acc parallel loop present(node_p, payload_p, tv_p) copyin(a, b) copy(tl, fl, el) copyout(cl, ol)
+   do i = 1_I4P, n
+      call bvh_line_crossings_oac(node_p, payload_p, tv_p, axis, a(i), b(i), t0, t1, tl(:, i), fl(:, i), el(:, i), cl(i), ol(i))
+   enddo
+   t = tl ; facets = fl ; entering = el ; counts = cl ; overflow = ol
+   endsubroutine line_crossings_many_device
+
    subroutine query_many_device(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
                                 is_signed, sign_algorithm, status)
    !< `query_many` on the device (issue #37): same arguments, outputs and defaults.
@@ -2470,6 +2544,35 @@ contains
       endsubroutine consider
    endsubroutine second_foot
 
+   function many_args_ok(self, axis, a, b, t0, t1, t, facets, entering, counts, overflow, status) result(good)
+   !< Argument check of `line_crossings_many(_device)` (issue #40); outputs zeroed when good.
+   type(surface_stl_object), intent(in)            :: self          !< Surface.
+   integer(I4P),             intent(in)            :: axis          !< Line axis.
+   real(R8P),                intent(in)            :: a(:), b(:)    !< Line positions.
+   real(R8P),                intent(in)            :: t0, t1        !< Parameter range.
+   real(R8P),                intent(inout)         :: t(:,:)        !< Parameters.
+   integer(I4P),             intent(inout)         :: facets(:,:)   !< Facets.
+   logical,                  intent(inout)         :: entering(:,:) !< Entering flags.
+   integer(I4P),             intent(inout)         :: counts(:)     !< Counts.
+   logical,                  intent(inout)         :: overflow(:)   !< Overflow.
+   integer(I4P),             intent(out), optional :: status        !< Status.
+   logical                                         :: good          !< Arguments valid.
+   integer(I4P)                                    :: n             !< Lines.
+
+   if (present(status)) status = STATUS_OK
+   n = size(a, kind=I4P)
+   good = axis >= 1_I4P .and. axis <= 3_I4P .and. t1 >= t0 .and. size(b) == n .and. size(t, 2) == n .and. &
+          size(facets, 2) == n .and. size(entering, 2) == n .and. size(counts) == n .and. size(overflow) == n .and. &
+          size(facets, 1) == size(t, 1) .and. size(entering, 1) == size(t, 1) .and. size(t, 1) > 0
+   good = good .and. self%facets_number > 0_I4P .and. self%aabb%get_tree_kind() == AABB_TREE_SAH_BVH .and. &
+          allocated(self%aabb%node) .and. allocated(self%aabb%payload) .and. allocated(self%tri_vertices)
+   if (.not. good) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   t = 0._R8P ; facets = 0_I4P ; entering = .false. ; counts = 0_I4P ; overflow = .false.
+   endfunction many_args_ok
+
    subroutine line_crossings_core(self, axis, a, b, t0, t1, t, ids, es, n)
    !< Sorted crossings of an axis-aligned line (issue #40): BVH kernel with a growing buffer, or brute
    !< force over the facets (same kernel per triangle, same sort).
@@ -2658,8 +2761,10 @@ contains
    if (.not. allocated(self%pnormal_payload)) return
    if (.not. allocated(self%wn_payload))      return
    if (.not. allocated(self%body_payload))    return
+   if (.not. allocated(self%tri_vertices))    return
 
-   !$acc enter data copyin(self%aabb%node, self%aabb%payload, self%pnormal_payload, self%wn_payload, self%body_payload)
+   !$acc enter data copyin(self%aabb%node, self%aabb%payload, self%pnormal_payload, self%wn_payload, self%body_payload, &
+   !$acc&                  self%tri_vertices)
    self%is_on_device = .true.
    endsubroutine enter_device
 
@@ -2675,7 +2780,8 @@ contains
 
    if (.not. self%is_on_device) return
 
-   !$acc exit data delete(self%aabb%node, self%aabb%payload, self%pnormal_payload, self%wn_payload, self%body_payload)
+   !$acc exit data delete(self%aabb%node, self%aabb%payload, self%pnormal_payload, self%wn_payload, self%body_payload, &
+   !$acc&                 self%tri_vertices)
    self%is_on_device = .false.
    endsubroutine exit_device
 
