@@ -13,6 +13,7 @@ use fossil_facet_object, only : facet_object, pnormal_payload_t,                
                                 pnormal_x_oac, pnormal_y_oac, pnormal_z_oac,                   &
                                 triangle_point_distance
 use fossil_list_id_object, only : list_id_object
+use fossil_rigid_pose, only : rigid_pose_t, to_body, to_world, rotate
 use fossil_box_query, only : bvh_box_contact_oac, box_tolerance, cell_bands, cell_components, &
                              BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_box_predicates, only : box_triangle_overlap
@@ -1649,8 +1650,9 @@ contains
    endif
    endsubroutine query_point
 
-   subroutine query_many(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
-                         is_signed, sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status)
+   recursive subroutine query_many(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
+                                   is_signed, sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, &
+                                   status, pose)
    !< Batch rich query (issue #37): `query_point` for every point, OpenMP over the points.
    !<
    !< Every output after `distances` is optional (a caller pays only for what it asks); arrays are
@@ -1678,6 +1680,8 @@ contains
    real(R8P),                 intent(in),  optional :: rel_tolerance      !< Relative distance tolerance (default 1e-6).
    real(R8P),                 intent(in),  optional :: foot_tolerance     !< Foot separation (default 1e-9 box diagonal).
    integer(I4P),              intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_t),        intent(in),  optional :: pose               !< Pose of the body (issue #41): world-frame points
+                                                                          !< and outputs.
    type(vector_R8P)                                 :: cp, pn, cp2        !< Per-point closest point, normal, second foot.
    real(R8P)                                        :: rel_, foot_        !< Resolved tolerances.
    logical                                          :: amb, want_amb      !< Per-point flag, any ambiguity output.
@@ -1685,6 +1689,22 @@ contains
    logical                                          :: signed_, bad       !< Resolved option, size check.
    integer(I4P)                                     :: algo               !< Resolved algorithm.
 
+   if (present(pose)) then ! body-frame query (issue #41), outputs mapped back to the world frame
+      call self%query_many(points=body_points(pose, points), distances=distances, closest_points=closest_points, &
+                           facets=facets, features=features, feature_indexes=feature_indexes, normals=normals, bodies=bodies, &
+                           is_signed=is_signed, sign_algorithm=sign_algorithm, ambiguous=ambiguous, &
+                           second_foot_points=second_foot_points, rel_tolerance=rel_tolerance, foot_tolerance=foot_tolerance, &
+                           status=status)
+      if (present(status)) then
+         if (status /= STATUS_OK) return
+      endif
+      do i = 1_I4P, size(points, kind=I4P)
+         if (present(closest_points)) closest_points(:, i) = to_world(pose, closest_points(:, i))
+         if (present(second_foot_points)) second_foot_points(:, i) = to_world(pose, second_foot_points(:, i))
+         if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
+      enddo
+      return
+   endif
    if (present(status)) status = STATUS_OK
    n = size(points, kind=I4P)
    bad = size(distances, kind=I4P) /= n
@@ -2374,7 +2394,7 @@ contains
    !$omp end parallel do
    endsubroutine image_points
 
-   subroutine distance_many(self, points, distances, is_signed, sign_algorithm, is_square_root, status)
+   recursive subroutine distance_many(self, points, distances, is_signed, sign_algorithm, is_square_root, status, pose)
    !< Batch distance query over a point array — the Adam/Xall embedded-boundary
    !< access pattern (one distance per Cartesian grid point against a static
    !< surface). Issue #19 §B3.
@@ -2404,12 +2424,18 @@ contains
    integer(I4P),              intent(in),  optional :: sign_algorithm  !< Algorithm code (SIGN_*).
    logical,                   intent(in),  optional :: is_square_root  !< Sentinel to trigger square-root distance.
    integer(I4P),              intent(out), optional :: status          !< STATUS_OK or STATUS_INVALID_INPUT (size mismatch).
+   type(rigid_pose_t),        intent(in),  optional :: pose            !< Pose of the body (issue #41): points are in the world frame.
    logical                                          :: is_signed_      !< Resolved signed sentinel.
    integer(I4P)                                     :: algo            !< Resolved sign-algorithm code.
    logical                                          :: is_sqrt_        !< Resolved square-root sentinel.
    integer(I4P)                                     :: n               !< Number of query points.
    integer(I4P)                                     :: i               !< Loop counter.
 
+   if (present(pose)) then ! body-frame query (issue #41): distances are invariant
+      call self%distance_many(points=body_points(pose, points), distances=distances, is_signed=is_signed, &
+                              sign_algorithm=sign_algorithm, is_square_root=is_square_root, status=status)
+      return
+   endif
    if (present(status)) status = STATUS_OK
    n = size(points, kind=I4P)
    if (size(distances, kind=I4P) /= n) then
@@ -2615,6 +2641,20 @@ contains
    endif
    t = t(1:n) ; ids = ids(1:n) ; es = es(1:n)
    endsubroutine line_crossings_core
+
+   function body_points(pose, points) result(bp)
+   !< World-frame points mapped to the body frame of `pose` (issue #41).
+   type(rigid_pose_t), intent(in) :: pose      !< Pose.
+   type(vector_R8P),   intent(in) :: points(:) !< World points.
+   type(vector_R8P)               :: bp(size(points)) !< Body points.
+   real(R8P)                      :: q(3)      !< Work.
+   integer(I4P)                   :: i         !< Counter.
+
+   do i = 1_I4P, size(points, kind=I4P)
+      q = to_body(pose, [points(i)%x, points(i)%y, points(i)%z])
+      bp(i)%x = q(1) ; bp(i)%y = q(2) ; bp(i)%z = q(3)
+   enddo
+   endfunction body_points
 
    function box_contact(self, lo, hi, tol, reach) result(code)
    !< BOX_CUT, BOX_NEAR or BOX_NONE of the box [lo, hi] (issue #38): SAH BVH traversal
@@ -2966,7 +3006,7 @@ contains
 
    endsubroutine distance_many_device
 
-   function is_point_inside(self, point, sign_algorithm) result(is_inside)
+   recursive function is_point_inside(self, point, sign_algorithm, pose) result(is_inside)
    !< Compute sign.
    !<
    !< `sign_algorithm` selects the point-in-polyhedron test:
@@ -2980,9 +3020,16 @@ contains
    type(vector_R8P),          intent(in)           :: point           !< Point coordinates.
    logical                                         :: is_inside       !< Return true if point is inside surface.
    integer(I4P),              intent(in), optional :: sign_algorithm  !< Algorithm code (SIGN_*).
+   type(rigid_pose_t),        intent(in), optional :: pose            !< Pose of the body (issue #41): world-frame point.
    integer(I4P)                                    :: algo            !< Effective algorithm code.
    real(R8P)                                       :: signed_d        !< Signed distance (pseudo-normal path).
+   real(R8P)                                       :: pb(3)           !< Body-frame point.
 
+   if (present(pose)) then
+      pb = to_body(pose, [point%x, point%y, point%z])
+      is_inside = self%is_point_inside(point=vector_R8P(pb(1), pb(2), pb(3)), sign_algorithm=sign_algorithm)
+      return
+   endif
    algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
    select case(algo)
    case(SIGN_PSEUDO_NORMAL)

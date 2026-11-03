@@ -29,6 +29,7 @@ module fossil_curve_object
 use fossil_box_query,          only : curve_box_contact_oac, cell_bands, cell_components, BOX_NONE, BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
 use fossil_line_query,         only : curve_line_crossings_oac
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
+use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate
 use fossil_predicates,         only : orient2d_xy
 use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, segment_point_distance2, &
                                      segment_closest_oac, segment_winding_number_oac
@@ -589,7 +590,7 @@ contains
    t = tl ; segments = sl ; entering = el ; counts = cl ; overflow = ol
    endsubroutine line_crossings_many_device
 
-   subroutine distance_many(self, points, distances, is_signed, sign_algorithm, status)
+   recursive subroutine distance_many(self, points, distances, is_signed, sign_algorithm, status, pose)
    !< Batched distances of the points (u, v) = points(:, i), CPU, OpenMP over the points.
    !<
    !< Each point runs `curve_signed_distance_oac`, the same kernel as `distance_many_device`, and
@@ -602,9 +603,15 @@ contains
    logical,             intent(in),  optional :: is_signed      !< Signed (default .true.).
    integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
    integer(I4P),        intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_2d_t), intent(in), optional :: pose          !< Pose of the curve (issue #41): world-frame points.
    logical                                    :: signed_, fwn   !< Resolved options.
    integer(I4P)                               :: i, n           !< Work.
 
+   if (present(pose)) then ! body-frame query (issue #41): distances are invariant
+      call self%distance_many(points=body_points2(pose, points), distances=distances, is_signed=is_signed, &
+                              sign_algorithm=sign_algorithm, status=status)
+      return
+   endif
    if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
    n = size(distances, kind=I4P)
    if (self%bvh%nodes_number == 0_I4P) then
@@ -670,8 +677,8 @@ contains
    enddo
    endsubroutine distance_many_device
 
-   subroutine query_many(self, points, distances, closest_points, segments, vertices, normals, bodies, is_signed, &
-                         sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status)
+   recursive subroutine query_many(self, points, distances, closest_points, segments, vertices, normals, bodies, is_signed, &
+                                   sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status, pose)
    !< Batched rich query (issue #37), CPU, OpenMP over the points: distance (signed by default),
    !< closest point, closest segment, closest vertex (0 in a segment interior), pseudo-normal of the
    !< closest feature (segment normal or vertex bisector), body. Every output after `distances` is
@@ -697,11 +704,27 @@ contains
    real(R8P),           intent(in),  optional :: rel_tolerance      !< Relative tolerance (default 1e-6).
    real(R8P),           intent(in),  optional :: foot_tolerance     !< Foot separation (default 1e-9 box diagonal).
    integer(I4P),        intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_2d_t), intent(in), optional :: pose              !< Pose of the curve (issue #41): world points, outputs.
    real(R8P)                                  :: cp(2), nn(2), cp2(2), rel_, foot_ !< Per-point outputs, tolerances.
    logical                                    :: amb, want_amb      !< Ambiguity.
    integer(I4P)                               :: sg, vx, b, i, n    !< Per-point outputs, counters.
    logical                                    :: signed_, fwn       !< Resolved options.
 
+   if (present(pose)) then ! body-frame query (issue #41), outputs mapped back to the world frame
+      call self%query_many(points=body_points2(pose, points), distances=distances, closest_points=closest_points, &
+                           segments=segments, vertices=vertices, normals=normals, bodies=bodies, is_signed=is_signed, &
+                           sign_algorithm=sign_algorithm, ambiguous=ambiguous, second_foot_points=second_foot_points, &
+                           rel_tolerance=rel_tolerance, foot_tolerance=foot_tolerance, status=status)
+      if (present(status)) then
+         if (status /= STATUS_OK) return
+      endif
+      do i = 1_I4P, size(points, 2, kind=I4P)
+         if (present(closest_points)) closest_points(:, i) = to_world(pose, closest_points(:, i))
+         if (present(second_foot_points)) second_foot_points(:, i) = to_world(pose, second_foot_points(:, i))
+         if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
+      enddo
+      return
+   endif
    if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
    if (.not. rich_sizes_ok(size(distances, kind=I4P), closest_points, segments, vertices, normals, bodies) .or. &
        .not. rich_sizes_ok(size(distances, kind=I4P), closest_points=second_foot_points)) then
@@ -1192,14 +1215,19 @@ contains
    if (l >= 1_I4P .and. l <= self%nl) closed = self%loop_closed(l)
    endfunction is_loop_closed
 
-   pure function is_point_inside(self, p, sign_algorithm) result(inside)
+   pure recursive function is_point_inside(self, p, sign_algorithm, pose) result(inside)
    !< True if p = (u, v) is inside the solid: signed distance < 0 with the pseudo-normal sign
    !< (default), or generalized winding number > 0.5 with SIGN_FAST_WINDING_NUMBER.
    class(curve_object), intent(in)           :: self           !< Curve.
    real(R8P),           intent(in)           :: p(2)           !< Point (u, v).
    integer(I4P),        intent(in), optional :: sign_algorithm !< Sign algorithm.
+   type(rigid_pose_2d_t), intent(in), optional :: pose         !< Pose of the curve (issue #41): world-frame point.
    logical                                   :: inside         !< Result.
 
+   if (present(pose)) then
+      inside = self%is_point_inside(to_body(pose, p), sign_algorithm=sign_algorithm)
+      return
+   endif
    if (present(sign_algorithm)) then
       if (sign_algorithm == SIGN_FAST_WINDING_NUMBER) then
          inside = self%winding_number(p) > 0.5_R8P
@@ -1991,6 +2019,18 @@ contains
    enddo
    t = t(1:n) ; ids = ids(1:n) ; es = es(1:n)
    endsubroutine curve_crossings_core
+
+   pure function body_points2(pose, points) result(bp)
+   !< World-frame points (u, v) mapped to the body frame of `pose` (issue #41).
+   type(rigid_pose_2d_t), intent(in) :: pose        !< Pose.
+   real(R8P),             intent(in) :: points(:,:) !< World points [2, n].
+   real(R8P)                         :: bp(2, size(points, 2)) !< Body points.
+   integer(I4P)                      :: i           !< Counter.
+
+   do i = 1_I4P, size(points, 2, kind=I4P)
+      bp(:, i) = to_body(pose, points(:, i))
+   enddo
+   endfunction body_points2
 
    function resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed, fwn) result(good)
    !< Check the batch arguments and resolve the options; false (status set) if invalid.
