@@ -133,6 +133,10 @@ type :: surface_stl_object
    integer(I4P),                    private :: non_manifold_edges_number=0 !< Number of edges with 3+ incident facets.
    integer(I4P),                    private :: degenerate_facets_removed=0 !< Number of facets removed by the last degenerate-removal pass.
    integer(I4P),                    private :: duplicate_facets_removed=0  !< Number of facets removed by the last duplicate-removal pass.
+   integer(I4P),                    private :: shells_number=0  !< Edge-connected shells (issue #37).
+   integer(I4P),                    private :: bodies_number=0  !< Bodies: outer shells with their cavities (issue #37).
+   integer(I4P), allocatable,       private :: facet_shell_(:)  !< Shell of each facet.
+   integer(I4P), allocatable,       private :: shell_body(:)    !< Body of each shell.
    type(aabb_tree_object)                   :: aabb            !< AABB tree handle (its own state is private).
    type(vector_R8P),                private :: bmin            !< Bounding-box min.
    type(vector_R8P),                private :: bmax            !< Bounding-box max.
@@ -158,6 +162,10 @@ type :: surface_stl_object
       procedure, pass(self) :: get_bmin          !< Return bmin (bounding-box minimum).
       procedure, pass(self) :: get_bmax          !< Return bmax (bounding-box maximum).
       procedure, pass(self) :: get_volume        !< Return volume.
+      procedure, pass(self) :: get_shells_number !< Return the number of edge-connected shells.
+      procedure, pass(self) :: get_bodies_number !< Return the number of bodies (outer shells with their cavities).
+      procedure, pass(self) :: facet_shell       !< Return the shell of a facet.
+      procedure, pass(self) :: facet_body        !< Return the body of a facet.
       procedure, pass(self) :: get_area          !< Return total surface area (issue #7).
       procedure, pass(self) :: get_centroid      !< Return centroid.
       procedure, pass(self) :: get_header        !< Return STL header.
@@ -183,6 +191,7 @@ type :: surface_stl_object
       procedure, pass(self) :: allocate_facets                 !< Allocate facets.
       procedure, pass(self) :: analyze                         !< Analize STL.
       procedure, pass(self) :: build_connectivity              !< Build facets connectivity.
+      procedure, pass(self), private :: compute_bodies !< Shells (edge-connected) and bodies (issue #37).
       procedure, pass(self) :: clip                            !< Clip triangulated surface given an AABB.
       procedure, pass(self) :: compute_centroid                !< Compute centroid of STL surface.
       procedure, pass(self) :: compute_distance                !< Compute the (minimum) distance returning also the closest point.
@@ -272,6 +281,44 @@ contains
 
    b = self%bmax
    endfunction get_bmax
+
+   pure function get_shells_number(self) result(n)
+   !< Return the number of edge-connected shells (computed by `analyze`).
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   integer(I4P)                          :: n    !< Shells.
+
+   n = self%shells_number
+   endfunction get_shells_number
+
+   pure function get_bodies_number(self) result(n)
+   !< Return the number of bodies (computed by `analyze`): see `compute_bodies`.
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   integer(I4P)                          :: n    !< Bodies.
+
+   n = self%bodies_number
+   endfunction get_bodies_number
+
+   pure function facet_shell(self, i) result(sh)
+   !< Return the shell of facet i (0 if out of range).
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   integer(I4P),              intent(in) :: i    !< Facet index.
+   integer(I4P)                          :: sh   !< Shell.
+
+   sh = 0_I4P
+   if (.not. allocated(self%facet_shell_)) return
+   if (i >= 1_I4P .and. i <= size(self%facet_shell_, kind=I4P)) sh = self%facet_shell_(i)
+   endfunction facet_shell
+
+   pure function facet_body(self, i) result(b)
+   !< Return the body of facet i (0 if out of range).
+   class(surface_stl_object), intent(in) :: self !< File STL.
+   integer(I4P),              intent(in) :: i    !< Facet index.
+   integer(I4P)                          :: b    !< Body.
+
+   b = 0_I4P
+   if (.not. allocated(self%facet_shell_)) return
+   if (i >= 1_I4P .and. i <= size(self%facet_shell_, kind=I4P)) b = self%shell_body(self%facet_shell_(i))
+   endfunction facet_body
 
    pure function get_volume(self) result(v)
    !< Return volume bounded by STL surface.
@@ -513,6 +560,7 @@ contains
          enddo
       end block
       call self%build_connectivity
+      call self%compute_bodies
       call self%compute_facets_disconnected
       call self%compute_area
       call self%compute_volume
@@ -544,6 +592,9 @@ contains
       self%bmin     = vector_R8P(0._R8P, 0._R8P, 0._R8P)
       self%bmax     = vector_R8P(0._R8P, 0._R8P, 0._R8P)
       self%non_manifold_edges_number = 0_I4P
+      self%shells_number = 0_I4P ; self%bodies_number = 0_I4P
+      if (allocated(self%facet_shell_)) deallocate(self%facet_shell_)
+      if (allocated(self%shell_body))   deallocate(self%shell_body)
       block
          integer(I4P) :: kind
          kind = self%aabb%get_tree_kind()
@@ -554,6 +605,150 @@ contains
       if (allocated(self%wn_payload))      deallocate(self%wn_payload)
    endif
    endsubroutine analyze
+
+   subroutine compute_bodies(self)
+   !< Shells and bodies (issue #37), after `build_connectivity`.
+   !<
+   !< A shell is a set of facets connected through shared edges (`fcon_edge`, union-find); shells
+   !< are numbered in the order of their first facet. A body is an outer shell with the cavities
+   !< it contains: the nesting depth of a shell is the number of other shells containing it, and a
+   !< shell at even depth starts a body while a shell at odd depth (a cavity) joins its immediate
+   !< container. An island inside a cavity is a body of its own. Containment of shell A in shell B
+   !< is tested only when B's bounding box contains A's: |sum of B's facet solid angles seen from a
+   !< vertex of A| / 4 pi > 0.5 (orientation-independent). Scattered shells (particles) cost no
+   !< solid-angle sum.
+   class(surface_stl_object), intent(inout) :: self !< File STL.
+   integer(I4P), allocatable                :: parent(:), root_shell(:), first(:), order(:), cnt(:) !< Work.
+   integer(I4P), allocatable                :: depth(:), container(:), body_of_root(:) !< Nesting.
+   real(R8P),    allocatable                :: lo(:,:), hi(:,:) !< Shell boxes.
+   type(vector_R8P)                         :: p                !< Probe vertex.
+   real(R8P)                                :: omega            !< Solid-angle sum.
+   real(R8P), parameter                     :: FOUR_PI_ = 4._R8P * acos(-1._R8P) !< 4 pi.
+   integer(I4P)                             :: n, f, e, g, a, b, r, k, ns, nb, ka, kb !< Work.
+
+   if (allocated(self%facet_shell_)) deallocate(self%facet_shell_)
+   if (allocated(self%shell_body))   deallocate(self%shell_body)
+   n = self%facets_number
+   allocate(parent(n))
+   parent = [(f, f = 1, n)]
+   do f = 1, n
+      do e = 1, 3
+         g = self%facet(f)%fcon_edge(e)
+         if (g > 0_I4P .and. g <= n) call unite(f, g)
+      enddo
+   enddo
+   ! shells numbered by first facet
+   allocate(root_shell(n), self%facet_shell_(n))
+   root_shell = 0_I4P ; ns = 0_I4P
+   do f = 1, n
+      r = find(f)
+      if (root_shell(r) == 0_I4P) then
+         ns = ns + 1_I4P ; root_shell(r) = ns
+      endif
+      self%facet_shell_(f) = root_shell(r)
+   enddo
+   self%shells_number = ns
+   ! facets grouped by shell (counting sort), shell boxes
+   allocate(cnt(ns + 1), first(ns + 1), order(n), lo(3, ns), hi(3, ns))
+   cnt = 0_I4P
+   do f = 1, n
+      cnt(self%facet_shell_(f)) = cnt(self%facet_shell_(f)) + 1_I4P
+   enddo
+   first(1) = 1_I4P
+   do a = 1, ns
+      first(a + 1) = first(a) + cnt(a)
+   enddo
+   cnt = 0_I4P
+   lo = huge(1._R8P) ; hi = -huge(1._R8P)
+   do f = 1, n
+      a = self%facet_shell_(f)
+      order(first(a) + cnt(a)) = f ; cnt(a) = cnt(a) + 1_I4P
+      do k = 1, 3
+         lo(:, a) = min(lo(:, a), [self%facet(f)%vertex(k)%x, self%facet(f)%vertex(k)%y, self%facet(f)%vertex(k)%z])
+         hi(:, a) = max(hi(:, a), [self%facet(f)%vertex(k)%x, self%facet(f)%vertex(k)%y, self%facet(f)%vertex(k)%z])
+      enddo
+   enddo
+   ! nesting: depth and immediate container (the containing shell of largest depth)
+   allocate(depth(ns), container(ns))
+   depth = 0_I4P ; container = 0_I4P
+   do a = 1, ns
+      p = self%facet(order(first(a)))%vertex(1)
+      do b = 1, ns
+         if (b == a) cycle
+         if (any(lo(:, b) > lo(:, a)) .or. any(hi(:, b) < hi(:, a))) cycle
+         if (all(lo(:, b) == lo(:, a)) .and. all(hi(:, b) == hi(:, a))) cycle ! same box: not nested
+         omega = 0._R8P
+         do k = first(b), first(b + 1) - 1
+            omega = omega + self%facet(order(k))%solid_angle(p)
+         enddo
+         if (abs(omega) / FOUR_PI_ > 0.5_R8P) then
+            depth(a) = depth(a) + 1_I4P
+            if (container(a) == 0_I4P) then
+               container(a) = b
+            elseif (box_volume(b) < box_volume(container(a))) then
+               container(a) = b ! the innermost container has the smallest box
+            endif
+         endif
+      enddo
+   enddo
+   ! bodies: even-depth shells start one, odd-depth shells join their immediate container
+   allocate(self%shell_body(ns), body_of_root(ns))
+   body_of_root = 0_I4P ; nb = 0_I4P
+   do a = 1, ns
+      if (mod(depth(a), 2_I4P) == 0_I4P) then
+         nb = nb + 1_I4P ; body_of_root(a) = nb
+      endif
+   enddo
+   do a = 1, ns
+      if (mod(depth(a), 2_I4P) == 0_I4P) then
+         self%shell_body(a) = body_of_root(a)
+      else
+         ka = container(a)
+         kb = 0_I4P ; if (ka > 0_I4P) kb = body_of_root(ka)
+         if (kb == 0_I4P) then ! defensive: inconsistent nesting, keep the shell a body of its own
+            nb = nb + 1_I4P ; kb = nb
+         endif
+         self%shell_body(a) = kb
+      endif
+   enddo
+   self%bodies_number = nb
+   contains
+      function find(x) result(rt)
+      !< Root of x with path halving.
+      integer(I4P), intent(in) :: x  !< Element.
+      integer(I4P)             :: rt !< Root.
+      integer(I4P)             :: y  !< Cursor.
+
+      y = x
+      do while (parent(y) /= y)
+         parent(y) = parent(parent(y))
+         y = parent(y)
+      enddo
+      rt = y
+      endfunction find
+
+      subroutine unite(x, y)
+      !< Union by smaller root index (deterministic).
+      integer(I4P), intent(in) :: x, y !< Elements.
+      integer(I4P)             :: rx, ry !< Roots.
+
+      rx = find(x) ; ry = find(y)
+      if (rx == ry) return
+      if (rx < ry) then
+         parent(ry) = rx
+      else
+         parent(rx) = ry
+      endif
+      endsubroutine unite
+
+      pure function box_volume(c) result(vol)
+      !< Volume of shell c's box.
+      integer(I4P), intent(in) :: c   !< Shell.
+      real(R8P)                :: vol !< Volume.
+
+      vol = product(hi(:, c) - lo(:, c))
+      endfunction box_volume
+   endsubroutine compute_bodies
 
    subroutine build_connectivity(self)
    !< Build facets connectivity via the sort-and-pair algorithm used by trimesh,

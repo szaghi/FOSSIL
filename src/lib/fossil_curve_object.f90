@@ -67,6 +67,8 @@ type :: curve_object
    real(R8P),    allocatable :: pn_u(:)             !< Vertex pseudo-normals, u [nv].
    real(R8P),    allocatable :: pn_v(:)             !< Vertex pseudo-normals, v [nv].
    real(R8P),    allocatable :: loop_area(:)        !< Signed area of each loop [nl].
+   integer(I4P), allocatable :: loop_body_(:)       !< Body of each loop [nl] (issue #37).
+   integer(I4P)              :: bodies_number = 0_I4P !< Number of bodies.
    real(R8P)                 :: bmin(2) = 0._R8P    !< Bounding box minimum (u, v).
    real(R8P)                 :: bmax(2) = 0._R8P    !< Bounding box maximum (u, v).
    real(R8P)                 :: area = 0._R8P       !< Total signed area (solid area for a valid curve).
@@ -88,7 +90,9 @@ type :: curve_object
       procedure, pass(self) :: get_area             !< Total signed area.
       procedure, pass(self) :: get_bmax             !< Bounding box maximum.
       procedure, pass(self) :: get_bmin             !< Bounding box minimum.
+      procedure, pass(self) :: get_bodies_number    !< Number of bodies (outer loops with their holes).
       procedure, pass(self) :: get_centroid         !< Centroid of the solid region.
+      procedure, pass(self) :: loop_body            !< Body of a loop.
       procedure, pass(self) :: get_is_on_device     !< True if enter_device mapped the arrays.
       procedure, pass(self) :: get_loop_area        !< Signed area of a loop.
       procedure, pass(self) :: get_loop_range       !< First and last vertex of a loop.
@@ -347,6 +351,25 @@ contains
 
    c = self%centroid
    endfunction get_centroid
+
+   pure function get_bodies_number(self) result(n)
+   !< Number of bodies: closed loops at even nesting depth (with the holes they contain) and open
+   !< loops (see `analyze`).
+   class(curve_object), intent(in) :: self !< Curve.
+   integer(I4P)                    :: n    !< Bodies.
+
+   n = self%bodies_number
+   endfunction get_bodies_number
+
+   pure function loop_body(self, l) result(b)
+   !< Body of loop l (0 if out of range).
+   class(curve_object), intent(in) :: self !< Curve.
+   integer(I4P),        intent(in) :: l    !< Loop index.
+   integer(I4P)                    :: b    !< Body.
+
+   b = 0_I4P
+   if (l >= 1_I4P .and. l <= self%nl) b = self%loop_body_(l)
+   endfunction loop_body
 
    pure function get_is_on_device(self) result(yes)
    !< True if `enter_device` mapped the query arrays.
@@ -987,6 +1010,7 @@ contains
    else
       self%bmin = 0._R8P ; self%bmax = 0._R8P
    endif
+   call compute_bodies(self)
    ids = pack([(i, i = 1, self%nv)], self%next > 0_I4P)
    call self%bvh%build(self%u(ids), self%v(ids), self%u(self%next(ids)), self%v(self%next(ids)), ids=ids)
    endsubroutine analyze
@@ -1018,6 +1042,67 @@ contains
       endif
    enddo
    endfunction loop_winding
+
+   pure subroutine compute_bodies(self)
+   !< Bodies (issue #37): a closed loop at even nesting depth starts a body, one at odd depth (a
+   !< hole) joins its immediate container, an open loop is a body of its own; an island inside a
+   !< hole is a body of its own. Containment is tested (exact winding of the loop's first vertex)
+   !< only when the container's box contains the loop's box.
+   type(curve_object), intent(inout) :: self !< Curve.
+   real(R8P),    allocatable         :: lo(:,:), hi(:,:) !< Loop boxes.
+   integer(I4P), allocatable         :: depth(:), container(:), body_of(:) !< Nesting.
+   integer(I4P)                      :: l, m, i, nb, f, la !< Work.
+
+   allocate(lo(2, self%nl), hi(2, self%nl), depth(self%nl), container(self%nl), body_of(self%nl))
+   allocate(self%loop_body_(self%nl))
+   do l = 1, self%nl
+      f = self%loop_start(l) ; la = self%loop_start(l + 1) - 1_I4P
+      if (la < f) then
+         lo(:, l) = 0._R8P ; hi(:, l) = 0._R8P
+      else
+         lo(:, l) = [minval(self%u(f:la)), minval(self%v(f:la))]
+         hi(:, l) = [maxval(self%u(f:la)), maxval(self%v(f:la))]
+      endif
+   enddo
+   depth = 0_I4P ; container = 0_I4P
+   do l = 1, self%nl
+      if (.not. self%loop_closed(l) .or. self%loop_start(l + 1) <= self%loop_start(l)) cycle
+      i = self%loop_start(l)
+      do m = 1, self%nl
+         if (m == l .or. .not. self%loop_closed(m)) cycle
+         if (any(lo(:, m) > lo(:, l)) .or. any(hi(:, m) < hi(:, l))) cycle
+         if (loop_winding(self, m, self%u(i), self%v(i)) == 0_I4P) cycle
+         depth(l) = depth(l) + 1_I4P
+         if (container(l) == 0_I4P) then
+            container(l) = m
+         elseif (product(hi(:, m) - lo(:, m)) < product(hi(:, container(l)) - lo(:, container(l)))) then
+            container(l) = m
+         endif
+      enddo
+   enddo
+   body_of = 0_I4P ; nb = 0_I4P
+   do l = 1, self%nl
+      if (mod(depth(l), 2_I4P) == 0_I4P) then
+         nb = nb + 1_I4P ; body_of(l) = nb
+      endif
+   enddo
+   do l = 1, self%nl
+      if (body_of(l) > 0_I4P) then
+         self%loop_body_(l) = body_of(l)
+      else
+         m = container(l)
+         if (m > 0_I4P) then
+            self%loop_body_(l) = body_of(m)
+         else
+            self%loop_body_(l) = 0_I4P
+         endif
+         if (self%loop_body_(l) == 0_I4P) then ! defensive: inconsistent nesting
+            nb = nb + 1_I4P ; self%loop_body_(l) = nb
+         endif
+      endif
+   enddo
+   self%bodies_number = nb
+   endsubroutine compute_bodies
 
    pure function shoelace(u, v) result(a)
    !< Signed area of the closed polygon (u, v).
