@@ -16,6 +16,8 @@ module fossil_hole_filling
 !< without heuristics: boundary edges are chained greedily into closed walks, and every closed
 !< walk is split into simple loops at its repeated vertices.
 use fossil_facet_object, only : facet_object
+use fossil_csr_matrix,   only : csr_matrix_t
+use fossil_linear_solver, only : cg_solve, CG_STATUS_OK
 use penf,                only : I4P, R8P
 use vecfor,              only : vector_R8P
 
@@ -25,6 +27,7 @@ public :: boundary_loop_t
 public :: extract_boundary_loops
 public :: triangulate_loop
 public :: refine_patch
+public :: fair_patch
 
 type :: boundary_loop_t
    !< One closed boundary loop, in patch orientation.
@@ -471,6 +474,178 @@ contains
       dd = sqrt((p1(1) - p2%x)**2 + (p1(2) - p2%y)**2 + (p1(3) - p2%z)**2)
       endfunction dist3
    endsubroutine refine_patch
+
+   subroutine fair_patch(loop, patch, facet, status)
+   !< Fair a refined hole patch (issue #31 step 5): move its interior vertices to the thin-plate
+   !< (bi-Laplacian) surface spanned by the loop, so the patch continues the surrounding surface
+   !< with matching tangents instead of lying flat.
+   !<
+   !< Unknowns: the patch vertices that are not loop vertices (refine_patch adds them; a plain
+   !< patch has none and is returned unchanged). Fixed: the loop vertices and their 1-ring in the
+   !< surface (the vertices of the mesh facets around each loop vertex), which carries the
+   !< tangent information. With the uniform (graph) Laplacian (L x)_v = sum_{u ~ v} (x_u - x_v),
+   !< the equations (L (L x))_i = 0 for the interior vertices i form a symmetric positive-definite
+   !< system (L^2 restricted to the interior: each interior vertex reaches the fixed boundary), solved
+   !< by `cg_solve` once per coordinate. Uniform weights suit a refined patch, whose edges are close
+   !< to uniform by construction, and need no cotangent of a possibly degenerate initial triangle.
+   !< Loop vertices are copied, so the patch still welds to the mesh bit for bit.
+   type(boundary_loop_t),           intent(in)    :: loop     !< Loop the patch fills.
+   type(facet_object), allocatable, intent(inout) :: patch(:) !< Refined patch triangles.
+   type(facet_object),              intent(in)    :: facet(:) !< Mesh facets (with pool vertex ids).
+   integer(I4P),                    intent(out)   :: status   !< 0 = ok (or nothing to do); CG status otherwise.
+   type(vector_R8P), allocatable :: x(:)          !< Graph nodes: 1:nb loop, then interior, then ring.
+   integer(I4P),     allocatable :: node_vid(:)   !< Pool id of loop and ring nodes (0 for interior).
+   integer(I4P),     allocatable :: tri(:,:)      !< Patch triangles as node indices.
+   integer(I4P),     allocatable :: adj(:,:), deg(:) !< Adjacency lists (capacity grows) and degrees.
+   integer(I4P),     allocatable :: unk(:)        !< Unknown index of a node (0 = fixed).
+   type(csr_matrix_t)            :: a
+   real(R8P),        allocatable :: b(:,:), sol(:)
+   integer(I4P)                  :: nb, nn, ni, nr, k, j, f, i, kk, jj, c, st, n_unk
+   real(R8P)                     :: lik, lkj
+
+   status = 0_I4P
+   nb = size(loop%vid, kind=I4P)
+   if (nb < 3_I4P .or. size(patch) == 0) return
+   ! nodes: loop vertices, then the patch's interior vertices (id 0, matched by coordinates)
+   allocate(x(nb), node_vid(nb), tri(3, size(patch)))
+   x = loop%x ; node_vid = loop%vid ; nn = nb
+   do k = 1, size(patch)
+      do j = 1, 3
+         if (patch(k)%vertex_id(j) > 0_I4P) then
+            tri(j, k) = find_vid(patch(k)%vertex_id(j))
+         else
+            tri(j, k) = find_or_add_coord(patch(k)%vertex(j))
+         endif
+         if (tri(j, k) == 0_I4P) return ! a patch vertex outside the loop: leave the patch untouched
+      enddo
+   enddo
+   ni = nn - nb
+   if (ni == 0_I4P) return
+   ! ring: the other vertices of the mesh facets around each loop vertex
+   allocate(deg(nn), adj(16, nn)) ; deg = 0_I4P
+   do k = 1, size(patch)
+      do j = 1, 3
+         call link(tri(j, k), tri(mod(j, 3) + 1, k))
+      enddo
+   enddo
+   nr = 0_I4P
+   do f = 1, size(facet)
+      do j = 1, 3
+         i = find_vid(facet(f)%vertex_id(j))
+         if (i == 0_I4P .or. i > nb) cycle
+         do jj = 1, 3
+            if (jj == j) cycle
+            c = find_vid(facet(f)%vertex_id(jj))
+            if (c == 0_I4P) then
+               c = add_ring(facet(f)%vertex(jj), facet(f)%vertex_id(jj))
+               nr = nr + 1_I4P
+            endif
+            call link(i, c)
+         enddo
+      enddo
+   enddo
+   ! unknowns: interior nodes nb+1 .. nb+ni
+   allocate(unk(nn)) ; unk = 0_I4P
+   n_unk = 0_I4P
+   do i = nb + 1, nb + ni
+      n_unk = n_unk + 1_I4P ; unk(i) = n_unk
+   enddo
+   ! A = (L^2) restricted to the unknowns; b = - (L^2) applied to the fixed values
+   call a%initialize(n_unk, n_unk)
+   allocate(b(n_unk, 3), sol(n_unk)) ; b = 0._R8P
+   do i = nb + 1, nb + ni
+      do kk = 0, deg(i)
+         k = i ; if (kk > 0) k = adj(kk, i)
+         lik = 1._R8P ; if (k == i) lik = -real(deg(i), R8P)
+         do jj = 0, deg(k)
+            j = k ; if (jj > 0) j = adj(jj, k)
+            lkj = 1._R8P ; if (j == k) lkj = -real(deg(k), R8P)
+            if (unk(j) > 0_I4P) then
+               call a%append(unk(i), unk(j), lik * lkj)
+            else
+               b(unk(i), :) = b(unk(i), :) - lik * lkj * [x(j)%x, x(j)%y, x(j)%z]
+            endif
+         enddo
+      enddo
+   enddo
+   call a%finalize
+   do c = 1, 3
+      do i = nb + 1, nb + ni ! initial guess: current position
+         sol(unk(i)) = merge(x(i)%x, merge(x(i)%y, x(i)%z, c == 2), c == 1)
+      enddo
+      call cg_solve(a, b(:, c), sol, tol=1.e-12_R8P, status=st)
+      if (st /= CG_STATUS_OK) then
+         status = st
+         return
+      endif
+      do i = nb + 1, nb + ni
+         select case (c)
+         case (1) ; x(i)%x = sol(unk(i))
+         case (2) ; x(i)%y = sol(unk(i))
+         case (3) ; x(i)%z = sol(unk(i))
+         endselect
+      enddo
+   enddo
+   do k = 1, size(patch)
+      do j = 1, 3
+         if (tri(j, k) > nb) patch(k)%vertex(j) = x(tri(j, k))
+      enddo
+      call patch(k)%compute_metrix
+   enddo
+   contains
+      function find_vid(vid) result(idx)
+      integer(I4P), intent(in) :: vid
+      integer(I4P)             :: idx
+
+      idx = 0_I4P
+      if (vid <= 0_I4P) return
+      do idx = 1, size(node_vid)
+         if (node_vid(idx) == vid) return
+      enddo
+      idx = 0_I4P
+      endfunction find_vid
+
+      function find_or_add_coord(p) result(idx)
+      type(vector_R8P), intent(in) :: p
+      integer(I4P)                 :: idx
+
+      do idx = nb + 1, nn
+         if (x(idx)%x == p%x .and. x(idx)%y == p%y .and. x(idx)%z == p%z) return
+      enddo
+      x = [x, p] ; node_vid = [node_vid, 0_I4P] ; nn = nn + 1_I4P
+      idx = nn
+      endfunction find_or_add_coord
+
+      function add_ring(p, vid) result(idx)
+      type(vector_R8P), intent(in) :: p
+      integer(I4P),     intent(in) :: vid
+      integer(I4P)                 :: idx
+      integer(I4P), allocatable    :: tmp(:,:)
+
+      x = [x, p] ; node_vid = [node_vid, vid] ; nn = nn + 1_I4P
+      deg = [deg, 0_I4P]
+      allocate(tmp(size(adj, dim=1), nn)) ; tmp = 0_I4P
+      tmp(:, 1:nn - 1) = adj
+      call move_alloc(from=tmp, to=adj)
+      idx = nn
+      endfunction add_ring
+
+      subroutine link(p, q)
+      !< Undirected edge p - q in the adjacency lists (no duplicates).
+      integer(I4P), intent(in)  :: p, q
+      integer(I4P), allocatable :: tmp(:,:)
+
+      if (p == q) return
+      if (any(adj(1:deg(p), p) == q)) return
+      if (deg(p) == size(adj, dim=1) .or. deg(q) == size(adj, dim=1)) then
+         allocate(tmp(2 * size(adj, dim=1), size(adj, dim=2))) ; tmp = 0_I4P
+         tmp(1:size(adj, dim=1), :) = adj
+         call move_alloc(from=tmp, to=adj)
+      endif
+      deg(p) = deg(p) + 1_I4P ; adj(deg(p), p) = q
+      deg(q) = deg(q) + 1_I4P ; adj(deg(q), q) = p
+      endsubroutine link
+   endsubroutine fair_patch
 
    pure subroutine tri_normal(a, b, c, nrm, area)
    !< Unit normal and area of triangle (a, b, c); area 0 and normal 0 if degenerate.
