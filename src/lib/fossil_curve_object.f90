@@ -93,6 +93,7 @@ type :: curve_object
       procedure, pass(self) :: is_point_inside      !< Inside test.
       procedure, pass(self) :: load_from_file       !< Load from the ASCII loop format.
       procedure, pass(self) :: nesting_depth        !< Nesting depth of a loop (exact).
+      procedure, pass(self) :: repair               !< Join/close chains, merge vertices, drop degenerate loops, orient.
       procedure, pass(self) :: save_into_file       !< Save into the ASCII loop format.
       procedure, pass(self) :: self_intersections   !< Pairs of segments that cross, touch or overlap (exact).
       procedure, pass(self) :: winding_number       !< Generalized winding number (fast or brute force).
@@ -532,6 +533,170 @@ contains
    enddo
    endfunction nesting_depth
 
+   subroutine repair(self, tolerance, gaps_closed, vertices_merged, loops_removed, loops_reversed, loops_open)
+   !< Repair the curve: join and close open chains, merge vertices, drop degenerate loops, orient.
+   !<
+   !< 1. Open chains: the end of an open chain is joined to the nearest start or end of another
+   !<    open chain within `tolerance` (that chain reversed if matched by its end), or closed onto
+   !<    its own start, whichever is nearest (ties: own start, then lower loop index, start before
+   !<    end); repeated until nothing changes. The gap becomes a segment of length <= tolerance.
+   !< 2. Consecutive vertices of a loop within `tolerance` of the last kept one are merged (the
+   !<    later dropped); a closed loop also merges its last vertex into its first.
+   !< 3. Closed loops with fewer than 3 vertices or zero signed area are removed; open loops with
+   !<    fewer than 2 vertices too.
+   !< 4. Closed loops are reversed where their orientation does not match their exact nesting
+   !<    depth (outer and islands counter-clockwise, holes clockwise).
+   !< `tolerance = 0` merges exact duplicates only. Each count is optional.
+   class(curve_object), intent(inout)         :: self            !< Curve.
+   real(R8P),           intent(in)            :: tolerance       !< Distance tolerance (>= 0).
+   integer(I4P),        intent(out), optional :: gaps_closed     !< Gaps closed (joins and self-closures).
+   integer(I4P),        intent(out), optional :: vertices_merged !< Vertices merged.
+   integer(I4P),        intent(out), optional :: loops_removed   !< Degenerate loops removed.
+   integer(I4P),        intent(out), optional :: loops_reversed  !< Loops reversed.
+   integer(I4P),        intent(out), optional :: loops_open      !< Loops still open after repair.
+   type :: chain_t
+      real(R8P), allocatable :: u(:), v(:) !< Vertices.
+      logical                :: closed     !< Closed.
+      logical                :: alive      !< Not merged into another chain.
+   endtype chain_t
+   type(chain_t), allocatable :: ch(:)        !< Loops as chains.
+   real(R8P),     allocatable :: nu(:), nv(:) !< Rebuilt vertices.
+   integer(I4P),  allocatable :: sizes(:)     !< Rebuilt loop sizes.
+   logical,       allocatable :: closed(:)    !< Rebuilt closed flags.
+   real(R8P),     allocatable :: tu(:), tv(:) !< Work vertices.
+   type(curve_object)         :: tmp          !< Curve after steps 1-3, for the nesting depths.
+   integer(I4P)               :: l, m, i, k, best, best_end, gaps, merged, removed, reversed, first, last, n, axis !< Work.
+   real(R8P)                  :: d, dbest     !< Distances.
+   logical                    :: changed      !< Join loop flag.
+
+   gaps = 0_I4P ; merged = 0_I4P ; removed = 0_I4P ; reversed = 0_I4P
+   axis = self%normal_axis
+   allocate(ch(self%nl))
+   do l = 1, self%nl
+      ch(l)%u = self%u(self%loop_start(l):self%loop_start(l + 1) - 1)
+      ch(l)%v = self%v(self%loop_start(l):self%loop_start(l + 1) - 1)
+      ch(l)%closed = self%loop_closed(l)
+      ch(l)%alive = .true.
+   enddo
+   ! 1. join and close open chains
+   changed = .true.
+   do while (changed)
+      changed = .false.
+      do l = 1, size(ch)
+         if (.not. ch(l)%alive .or. ch(l)%closed .or. size(ch(l)%u) == 0) cycle
+         n = size(ch(l)%u)
+         best = 0_I4P ; best_end = 0_I4P ; dbest = huge(1._R8P)
+         if (n > 2) then ! closing onto itself
+            d = hypot(ch(l)%u(n) - ch(l)%u(1), ch(l)%v(n) - ch(l)%v(1))
+            if (d <= tolerance) then
+               best = l ; dbest = d
+            endif
+         endif
+         do m = 1, size(ch)
+            if (m == l .or. .not. ch(m)%alive .or. ch(m)%closed .or. size(ch(m)%u) == 0) cycle
+            d = hypot(ch(l)%u(n) - ch(m)%u(1), ch(l)%v(n) - ch(m)%v(1))
+            if (d <= tolerance .and. d < dbest) then
+               best = m ; best_end = 0_I4P ; dbest = d
+            endif
+            k = size(ch(m)%u)
+            d = hypot(ch(l)%u(n) - ch(m)%u(k), ch(l)%v(n) - ch(m)%v(k))
+            if (d <= tolerance .and. d < dbest) then
+               best = m ; best_end = 1_I4P ; dbest = d
+            endif
+         enddo
+         if (best == 0_I4P) cycle
+         gaps = gaps + 1_I4P ; changed = .true.
+         if (best == l) then
+            ch(l)%closed = .true.
+         else
+            if (best_end == 1_I4P) then
+               ch(best)%u = ch(best)%u(size(ch(best)%u):1:-1) ; ch(best)%v = ch(best)%v(size(ch(best)%v):1:-1)
+            endif
+            ch(l)%u = [ch(l)%u, ch(best)%u] ; ch(l)%v = [ch(l)%v, ch(best)%v]
+            ch(best)%alive = .false.
+         endif
+         exit ! restart the scan: chain indices and ends changed
+      enddo
+   enddo
+   ! 2. merge consecutive vertices
+   do l = 1, size(ch)
+      if (.not. ch(l)%alive) cycle
+      n = size(ch(l)%u)
+      if (n == 0) cycle
+      allocate(tu(n), tv(n))
+      k = 1_I4P ; tu(1) = ch(l)%u(1) ; tv(1) = ch(l)%v(1)
+      do i = 2, n
+         if (hypot(ch(l)%u(i) - tu(k), ch(l)%v(i) - tv(k)) <= tolerance) then
+            merged = merged + 1_I4P
+         else
+            k = k + 1_I4P ; tu(k) = ch(l)%u(i) ; tv(k) = ch(l)%v(i)
+         endif
+      enddo
+      if (ch(l)%closed .and. k > 1_I4P) then
+         if (hypot(tu(k) - tu(1), tv(k) - tv(1)) <= tolerance) then
+            merged = merged + 1_I4P ; k = k - 1_I4P
+         endif
+      endif
+      ch(l)%u = tu(1:k) ; ch(l)%v = tv(1:k)
+      deallocate(tu, tv)
+   enddo
+   ! 3. drop degenerate loops
+   do l = 1, size(ch)
+      if (.not. ch(l)%alive) cycle
+      n = size(ch(l)%u)
+      if (ch(l)%closed) then
+         if (n < 3) then
+            ch(l)%alive = .false.
+         elseif (shoelace(ch(l)%u, ch(l)%v) == 0._R8P) then
+            ch(l)%alive = .false.
+         endif
+      elseif (n < 2) then
+         ch(l)%alive = .false.
+      endif
+      if (.not. ch(l)%alive) removed = removed + 1_I4P
+   enddo
+   call pack_chains
+   ! 4. orient closed loops by nesting depth
+   call tmp%adopt_loops(u=nu, v=nv, loop_sizes=sizes, normal_axis=axis, closed=closed)
+   first = 1_I4P
+   do l = 1, size(sizes)
+      last = first + sizes(l) - 1_I4P
+      if (closed(l)) then
+         if ((mod(tmp%nesting_depth(l), 2_I4P) == 0_I4P) .neqv. (tmp%loop_area(l) > 0._R8P)) then
+            nu(first:last) = nu(last:first:-1) ; nv(first:last) = nv(last:first:-1)
+            reversed = reversed + 1_I4P
+         endif
+      endif
+      first = last + 1_I4P
+   enddo
+   call self%adopt_loops(u=nu, v=nv, loop_sizes=sizes, normal_axis=axis, closed=closed)
+   if (present(gaps_closed)) gaps_closed = gaps
+   if (present(vertices_merged)) vertices_merged = merged
+   if (present(loops_removed)) loops_removed = removed
+   if (present(loops_reversed)) loops_reversed = reversed
+   if (present(loops_open)) loops_open = count(.not. closed)
+   contains
+      subroutine pack_chains
+      !< Rebuild the vertex arrays, sizes and closed flags from the alive chains.
+      integer(I4P) :: q, nt, nl2 !< Work.
+
+      nt = 0_I4P ; nl2 = 0_I4P
+      do q = 1, size(ch)
+         if (.not. ch(q)%alive) cycle
+         nt = nt + size(ch(q)%u, kind=I4P) ; nl2 = nl2 + 1_I4P
+      enddo
+      allocate(nu(nt), nv(nt), sizes(nl2), closed(nl2))
+      nt = 0_I4P ; nl2 = 0_I4P
+      do q = 1, size(ch)
+         if (.not. ch(q)%alive) cycle
+         nl2 = nl2 + 1_I4P
+         sizes(nl2) = size(ch(q)%u, kind=I4P) ; closed(nl2) = ch(q)%closed
+         nu(nt + 1:nt + sizes(nl2)) = ch(q)%u ; nv(nt + 1:nt + sizes(nl2)) = ch(q)%v
+         nt = nt + sizes(nl2)
+      enddo
+      endsubroutine pack_chains
+   endsubroutine repair
+
    subroutine save_into_file(self, file_name, status)
    !< Save the curve into the ASCII loop format (see `load_from_file`), bit-exact on reload.
    class(curve_object), intent(in)            :: self      !< Curve.
@@ -731,6 +896,19 @@ contains
       endif
    enddo
    endfunction loop_winding
+
+   pure function shoelace(u, v) result(a)
+   !< Signed area of the closed polygon (u, v).
+   real(R8P), intent(in) :: u(:), v(:) !< Vertices.
+   real(R8P)             :: a          !< Signed area.
+   integer(I4P)          :: i, j       !< Counters.
+
+   a = 0._R8P
+   do i = 1, size(u)
+      j = mod(i, size(u)) + 1
+      a = a + 0.5_R8P * (u(i) * v(j) - u(j) * v(i))
+   enddo
+   endfunction shoelace
 
    pure function segments_intersect(p1u, p1v, p2u, p2v, q1u, q1v, q2u, q2v) result(hit)
    !< True if the closed segments p1p2 and q1q2 share a point (exact).
