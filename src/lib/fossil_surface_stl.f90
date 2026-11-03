@@ -233,6 +233,8 @@ type :: surface_stl_object
       procedure, pass(self) :: line_crossings_many_device      !< line_crossings_many on the device (issue #40).
       procedure, pass(self) :: move                            !< Move rigidly by a pose, refit the tree (issue #41).
       procedure, pass(self) :: state_changes                   !< Fresh and dead points between two poses (issue #41).
+      procedure, pass(self) :: wall_distance_many              !< Wall distance, body id, early cutoff (issue #42).
+      procedure, pass(self) :: wall_distance_many_device       !< wall_distance_many on the device (issue #42).
       ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
       procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
       procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
@@ -3028,6 +3030,98 @@ contains
    !$acc end parallel loop
 
    endsubroutine distance_many_device
+
+   subroutine wall_distance_many(self, points, distances, bodies, cutoff, status)
+   !< Unsigned distance to the nearest wall and its body, with an early cutoff (issue #42): the SAH BVH
+   !< traversal starts with the best squared distance at cutoff^2, so every node farther than the
+   !< cutoff is pruned; a point with no wall closer than `cutoff` gets distance = cutoff and body 0
+   !< (default cutoff: none). Same kernel as `wall_distance_many_device`; an octree falls back to
+   !< `query_point`. OpenMP over the points. `status = STATUS_INVALID_INPUT` on a size mismatch.
+   class(surface_stl_object), intent(in)            :: self         !< Surface.
+   type(vector_R8P),          intent(in)            :: points(:)    !< Points [n].
+   real(R8P),                 intent(out)           :: distances(:) !< Distances [n] (cutoff if none closer).
+   integer(I4P),              intent(out)           :: bodies(:)    !< Bodies [n] (0 if none closer).
+   real(R8P),                 intent(in),  optional :: cutoff       !< Cutoff distance (default: none).
+   integer(I4P),              intent(out), optional :: status       !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)    :: co, d2 !< Cutoff, squared distance.
+   integer(I4P) :: i, n, bf, bp !< Work.
+
+   if (present(status)) status = STATUS_OK
+   n = size(points, kind=I4P)
+   if (size(distances) /= n .or. size(bodies) /= n) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   co = huge(1._R8P) ; if (present(cutoff)) co = cutoff
+   if (self%facets_number == 0_I4P) then
+      distances = co ; bodies = 0_I4P
+      return
+   endif
+   !$omp parallel do default(shared) schedule(static) private(i, d2, bf, bp)
+   do i = 1_I4P, n
+      bf = 0_I4P ; bp = 0_I4P
+      if (self%aabb%get_tree_kind() == AABB_TREE_SAH_BVH .and. allocated(self%aabb%payload)) then
+         d2 = co * co ; if (co >= huge(1._R8P)) d2 = huge(1._R8P)
+         call bvh_distance_node_with_region_oac(node=self%aabb%node, payload=self%aabb%payload, n=0_I4P, point=points(i), &
+                                                best=d2, best_facet=bf, best_payload_idx=bp)
+      else
+         call self%query_point(point=points(i), distance=d2, facet=bf, is_signed=.false.)
+         d2 = d2 * d2
+         if (d2 >= co * co) bf = 0_I4P
+      endif
+      if (bf > 0_I4P) then
+         distances(i) = sqrt(d2) ; bodies(i) = self%body_payload(bf)
+      else
+         distances(i) = co ; bodies(i) = 0_I4P
+      endif
+   enddo
+   !$omp end parallel do
+   endsubroutine wall_distance_many
+
+   subroutine wall_distance_many_device(self, points, distances, bodies, cutoff, status)
+   !< `wall_distance_many` on the device (OpenACC, issue #42): the same kernel and early cutoff, bit
+   !< for bit. Requires `enter_device`; SAH BVH. #20 rules (pointer aliases). GPU gate pending.
+   class(surface_stl_object), intent(inout), target :: self         !< Surface (target: device aliases).
+   type(vector_R8P),          intent(in)            :: points(:)    !< Points [n].
+   real(R8P),                 intent(out)           :: distances(:) !< Distances [n].
+   integer(I4P),              intent(out)           :: bodies(:)    !< Bodies [n].
+   real(R8P),                 intent(in),  optional :: cutoff       !< Cutoff (default: none).
+   integer(I4P),              intent(out), optional :: status       !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(aabb_node_object),       pointer :: node_p(:)    !< Alias.
+   type(facet_distance_payload), pointer :: payload_p(:) !< Alias.
+   integer(I4P),                 pointer :: body_p(:)    !< Alias.
+   type(vector_R8P) :: point_i !< Work.
+   real(R8P)        :: co, d2, d0 !< Work.
+   integer(I4P)     :: i, n, bf, bp !< Work.
+   real(R8P),    allocatable :: dl(:) !< Device-side distances.
+   integer(I4P), allocatable :: bl(:) !< Device-side bodies.
+
+   if (present(status)) status = STATUS_OK
+   n = size(points, kind=I4P)
+   if (size(distances) /= n .or. size(bodies) /= n .or. .not. self%is_on_device) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      if (.not. self%is_on_device) write(stderr, '(A)') 'wall_distance_many_device: surface not on device.'
+      return
+   endif
+   co = huge(1._R8P) ; if (present(cutoff)) co = cutoff
+   d0 = co * co ; if (co >= huge(1._R8P)) d0 = huge(1._R8P)
+   if (n == 0_I4P) return
+   allocate(dl(n), bl(n))
+   node_p => self%aabb%node ; payload_p => self%aabb%payload ; body_p => self%body_payload
+   !$acc parallel loop present(node_p, payload_p, body_p) copyin(points) copyout(dl, bl) private(point_i, d2, bf, bp)
+   do i = 1_I4P, n
+      point_i%x = points(i)%x ; point_i%y = points(i)%y ; point_i%z = points(i)%z
+      d2 = d0 ; bf = 0_I4P ; bp = 0_I4P
+      call bvh_distance_node_with_region_oac(node=node_p, payload=payload_p, n=0_I4P, point=point_i, best=d2, &
+                                             best_facet=bf, best_payload_idx=bp)
+      if (bf > 0_I4P) then
+         dl(i) = sqrt(d2) ; bl(i) = body_p(bf)
+      else
+         dl(i) = co ; bl(i) = 0_I4P
+      endif
+   enddo
+   distances = dl ; bodies = bl
+   endsubroutine wall_distance_many_device
 
    subroutine state_changes(self, pose0, pose1, points, fresh, dead, sign_algorithm, checked, status)
    !< Fresh (solid at pose0, fluid at pose1) and dead (fluid at pose0, solid at pose1) points, e.g.

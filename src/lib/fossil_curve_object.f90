@@ -96,6 +96,7 @@ type :: curve_object
       procedure, pass(self) :: cut_cells            !< Exact cut cells of a block (issue #40).
       procedure, pass(self) :: move                 !< Move rigidly by an in-plane pose, refit the tree (issue #41).
       procedure, pass(self) :: state_changes        !< Fresh and dead points between two poses (issue #41).
+      procedure, pass(self) :: wall_distance_many   !< Wall distance, body id, cutoff (issue #42).
       procedure, pass(self) :: check_validity       !< First validity defect (CURVE_* code).
       procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
       procedure, pass(self) :: distance             !< (Signed) distance of a point.
@@ -1636,6 +1637,27 @@ contains
    endfunction winding_number_exact
 
    ! private methods
+   subroutine wall_distance_many(self, points, distances, bodies, cutoff, status)
+   !< Unsigned distance to the nearest wall and its body, with a cutoff (issue #42): the surface twin
+   !< (distance = cutoff, body 0 beyond it), from `query_many` (no early exit in 2-D: cheap).
+   class(curve_object), intent(in)            :: self         !< Curve.
+   real(R8P),           intent(in)            :: points(:,:)  !< Points [2, n].
+   real(R8P),           intent(out)           :: distances(:) !< Distances [n].
+   integer(I4P),        intent(out)           :: bodies(:)    !< Bodies [n].
+   real(R8P),           intent(in),  optional :: cutoff       !< Cutoff (default: none).
+   integer(I4P),        intent(out), optional :: status       !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P) :: co !< Cutoff.
+
+   co = huge(1._R8P) ; if (present(cutoff)) co = cutoff
+   call self%query_many(points=points, distances=distances, bodies=bodies, is_signed=.false., status=status)
+   if (present(status)) then
+      if (status /= STATUS_OK) return
+   endif
+   where (distances >= co)
+      distances = co ; bodies = 0_I4P
+   endwhere
+   endsubroutine wall_distance_many
+
    subroutine state_changes(self, pose0, pose1, points, fresh, dead, sign_algorithm, checked, status)
    !< Fresh (solid -> fluid) and dead (fluid -> solid) points (u, v) between two in-plane poses (issue
    !< #41): the surface twin, with the same band filter (|d(b0)| > |b0 - b1|: no change).
