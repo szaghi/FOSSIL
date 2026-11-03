@@ -100,6 +100,25 @@ endprogram ghost_points
   FOSSIL reports the second foot point and the caller decides; the
   literature gives no rule.
 
+## Wall distance and field diagnostic
+
+- **`wall_distance_many(points, distances, bodies, cutoff)`** (surface, with
+  a device twin; curve) returns the unsigned distance to the nearest wall
+  and the body it belongs to (issue #42). Turbulence models and overset
+  assembly need it (Oh et al. 2024).
+  - The tree traversal starts at the cutoff, so every node farther away is
+    pruned.
+  - Points with no wall closer than the cutoff get the cutoff and body 0.
+  - CPU and device give the same results bit for bit.
+- **`distance_field_object%gradient_diagnostic(q, flagged, threshold)`**
+  returns q = |1 − |∇φ|| per node.
+  - ∇φ is the three-point non-uniform difference, exact on linear fields on
+    stretched grids.
+  - Nodes with an unknown neighbour get q = −1.
+  - `flagged` counts the nodes above the threshold (default 0.05, Matsushita
+    & Aoki).
+  - q is large by nature on the medial axis.
+
 ## Placement rules from the literature
 
 All of them are lengths for `probe_many`:
