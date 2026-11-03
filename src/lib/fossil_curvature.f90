@@ -50,6 +50,7 @@ private
 
 public :: build_gaussian_curvature
 public :: build_mean_curvature
+public :: build_jet_curvature
 public :: CURV_STATUS_OK, CURV_STATUS_BAD_INPUT, CURV_STATUS_DEGENERATE_TRIANGLE
 
 integer(I4P), parameter :: CURV_STATUS_OK                   = 0_I4P
@@ -324,6 +325,193 @@ contains
    deallocate(LV, area_third, pnormal_at, pnormal_set)
    if (had_degenerate .and. present(status)) status = CURV_STATUS_DEGENERATE_TRIANGLE
    endsubroutine build_mean_curvature
+
+   subroutine build_jet_curvature(facet, pool, H, K, status)
+   !< Per-vertex mean and Gaussian curvature by a local polynomial fit (osculating jet, Cazals &
+   !< Pouget 2005; issue #42).
+   !<
+   !< At each vertex p, in the frame (t1, t2, n) of its angle-weighted pseudo-normal n, the 2-ring
+   !< vertices are fitted in the least-squares sense by the height function
+   !<   z = d x + e y + a x^2 + b x y + c y^2 [+ cubic terms]
+   !< (cubic terms when the 2-ring has >= 12 vertices, else quadratic; Householder QR on coordinates
+   !< scaled by the RMS neighbour distance). The curvatures are those of the graph at the origin (the
+   !< linear terms absorb a tilted n): with W = sqrt(1 + d^2 + e^2), the second fundamental form
+   !< (2a, b, 2c) / W over the first (1 + d^2, d e, 1 + e^2).
+   !<
+   !< Accuracy: the cubic jet gives curvatures with error O(h^2) on any sampling, the quadratic O(h);
+   !< unlike the cotangent / angle-defect operators of `build_mean_curvature` /
+   !< `build_gaussian_curvature`, which do not converge pointwise on irregular meshes (on icospheres
+   !< their maximum error stays near 15 % at the valence-5 vertices). A vertex with fewer than 6
+   !< 2-ring vertices takes the cotangent / angle-defect value. Flat neighbourhoods give 0 exactly.
+   !<
+   !< Sign convention as `build_mean_curvature`: H > 0 where the surface is convex seen from the side
+   !< the normals point to (sphere: H = 1/R, K = 1/R^2).
+   type(facet_object),       intent(in)            :: facet(:) !< Facets.
+   type(vertex_pool_object), intent(in)            :: pool     !< Vertex pool.
+   real(R8P), allocatable,   intent(out)           :: H(:)     !< Mean curvature per pool vertex.
+   real(R8P), allocatable,   intent(out)           :: K(:)     !< Gaussian curvature per pool vertex.
+   integer(I4P),             intent(out), optional :: status   !< CURV_STATUS_*.
+   integer(I4P), parameter       :: MAXN = 256_I4P              !< Neighbour cap per vertex (2-ring).
+   real(R8P),    allocatable     :: hc(:), kc(:)                !< Fallback curvatures.
+   real(R8P),    allocatable     :: xyz(:,:), pn(:,:)           !< Coordinates, pseudo-normals.
+   logical,      allocatable     :: pn_set(:)                   !< Pseudo-normal captured.
+   integer(I4P), allocatable     :: deg(:), off(:), adj(:), stamp(:) !< One-ring CSR, dedup stamps.
+   integer(I4P), allocatable     :: fill(:)                     !< CSR fill pointers.
+   integer(I4P)                  :: ring(MAXN)                  !< 2-ring of the current vertex.
+   real(R8P)                     :: a(MAXN, 9), rhs(MAXN), coef(9) !< Least-squares system.
+   real(R8P)                     :: t1(3), t2(3), nn(3), q(3), x, y, z, hs, w2, eg, hh, kk !< Frame, work.
+   integer(I4P)                  :: nv, nf, f, i, j, m, v(3), l, ii, jj, np, nr !< Counters.
+   logical                       :: ok                          !< Fit succeeded.
+   integer(I4P)                  :: st                          !< Builder status.
+   type(vector_R8P)              :: pv                          !< Pool vertex.
+
+   if (present(status)) status = CURV_STATUS_OK
+   nf = size(facet, kind=I4P)
+   if (nf == 0_I4P .or. .not. pool%get_is_initialized()) then
+      allocate(H(0), K(0))
+      if (present(status)) status = CURV_STATUS_BAD_INPUT
+      return
+   endif
+   call build_mean_curvature(facet=facet, pool=pool, H=hc, status=st)
+   call build_gaussian_curvature(facet=facet, pool=pool, K=kc)
+   if (present(status)) status = st
+   nv = pool%vertex_count()
+   allocate(H(nv), K(nv), xyz(3, nv), pn(3, nv), pn_set(nv), deg(nv), off(nv + 1), stamp(nv), fill(nv))
+   H = hc ; K = kc
+   do i = 1_I4P, nv
+      pv = pool%coord(i) ; xyz(:, i) = [pv%x, pv%y, pv%z]
+   enddo
+   pn = 0._R8P ; pn_set = .false. ; deg = 0_I4P
+   do f = 1_I4P, nf ! one-ring with duplicates (each edge from both facets), pseudo-normals
+      do l = 1_I4P, 3_I4P
+         v(l) = pool%facet_vid(facet_id=f, local_v=l)
+      enddo
+      if (any(v <= 0_I4P)) cycle
+      do l = 1_I4P, 3_I4P
+         deg(v(l)) = deg(v(l)) + 2_I4P
+         if (.not. pn_set(v(l))) then
+            pn(:, v(l)) = [facet(f)%vertex_pnormal(l)%x, facet(f)%vertex_pnormal(l)%y, facet(f)%vertex_pnormal(l)%z]
+            pn_set(v(l)) = .true.
+         endif
+      enddo
+   enddo
+   off(1) = 1_I4P
+   do i = 1_I4P, nv
+      off(i + 1) = off(i) + deg(i)
+   enddo
+   allocate(adj(off(nv + 1) - 1_I4P))
+   fill = off(1:nv)
+   do f = 1_I4P, nf
+      do l = 1_I4P, 3_I4P
+         v(l) = pool%facet_vid(facet_id=f, local_v=l)
+      enddo
+      if (any(v <= 0_I4P)) cycle
+      do l = 1_I4P, 3_I4P
+         adj(fill(v(l))) = v(mod(l, 3_I4P) + 1_I4P) ; adj(fill(v(l)) + 1_I4P) = v(mod(l + 1_I4P, 3_I4P) + 1_I4P)
+         fill(v(l)) = fill(v(l)) + 2_I4P
+      enddo
+   enddo
+   stamp = 0_I4P
+   do i = 1_I4P, nv
+      if (.not. pn_set(i)) cycle
+      nn = pn(:, i) ; hs = norm2(nn)
+      if (hs <= 0._R8P) cycle
+      nn = nn / hs
+      ! 2-ring, deduplicated with stamps (the vertex itself excluded)
+      nr = 0_I4P ; stamp(i) = i
+      do ii = off(i), off(i + 1) - 1_I4P
+         j = adj(ii)
+         if (stamp(j) /= i .and. nr < MAXN) then
+            stamp(j) = i ; nr = nr + 1_I4P ; ring(nr) = j
+         endif
+      enddo
+      m = nr
+      do ii = 1_I4P, m
+         do jj = off(ring(ii)), off(ring(ii) + 1) - 1_I4P
+            j = adj(jj)
+            if (stamp(j) /= i .and. nr < MAXN) then
+               stamp(j) = i ; nr = nr + 1_I4P ; ring(nr) = j
+            endif
+         enddo
+      enddo
+      if (nr < 6_I4P) cycle ! keep the fallback
+      ! tangent frame
+      if (abs(nn(1)) < 0.9_R8P) then
+         t1 = [0._R8P, -nn(3), nn(2)] ! e_x x n
+      else
+         t1 = [nn(3), 0._R8P, -nn(1)] ! e_y x n
+      endif
+      t1 = t1 / norm2(t1)
+      t2 = [nn(2) * t1(3) - nn(3) * t1(2), nn(3) * t1(1) - nn(1) * t1(3), nn(1) * t1(2) - nn(2) * t1(1)]
+      hs = 0._R8P
+      do ii = 1_I4P, nr
+         hs = hs + sum((xyz(:, ring(ii)) - xyz(:, i))**2)
+      enddo
+      hs = sqrt(hs / nr)
+      if (hs <= 0._R8P) cycle
+      np = 5_I4P ; if (nr >= 12_I4P) np = 9_I4P
+      do ! cubic jet if the 2-ring allows it, else (or if rank deficient) quadratic
+         do ii = 1_I4P, nr
+            q = (xyz(:, ring(ii)) - xyz(:, i)) / hs
+            x = dot_product(q, t1) ; y = dot_product(q, t2) ; z = dot_product(q, nn)
+            a(ii, 1:5) = [x, y, x * x, x * y, y * y]
+            if (np == 9_I4P) a(ii, 6:9) = [x**3, x * x * y, x * y * y, y**3]
+            rhs(ii) = z
+         enddo
+         call householder_lsq(a, rhs, nr, np, coef, ok)
+         if (ok .or. np == 5_I4P) exit
+         np = 5_I4P
+      enddo
+      if (.not. ok) cycle
+      ! graph z = f(x, y) at the origin: f_x = d, f_y = e, f_xx = 2a, f_xy = b, f_yy = 2c
+      w2 = 1._R8P + coef(1)**2 + coef(2)**2
+      eg = w2 ! (1 + d^2)(1 + e^2) - (d e)^2
+      kk = (4._R8P * coef(3) * coef(5) - coef(4)**2) / (w2 * eg)
+      hh = ((1._R8P + coef(2)**2) * 2._R8P * coef(3) - 2._R8P * coef(1) * coef(2) * coef(4) + &
+            (1._R8P + coef(1)**2) * 2._R8P * coef(5)) / (2._R8P * sqrt(w2) * eg)
+      ! z points along the outward normal: a convex surface bends away from it (hh < 0), so H = -hh
+      H(i) = -hh / hs
+      K(i) = kk / (hs * hs)
+   enddo
+   endsubroutine build_jet_curvature
+
+   pure subroutine householder_lsq(a, b, m, n, x, ok)
+   !< Least-squares solution of a(1:m, 1:n) x = b(1:m) by Householder QR (m >= n, n <= 9). `ok` is false
+   !< if m < n or the system is rank deficient (a diagonal of R below 1e-12 of the largest).
+   real(R8P),    intent(inout) :: a(:,:) !< Matrix (overwritten).
+   real(R8P),    intent(inout) :: b(:)   !< Right-hand side (overwritten).
+   integer(I4P), intent(in)    :: m, n   !< Rows, columns.
+   real(R8P),    intent(out)   :: x(:)   !< Solution [n].
+   logical,      intent(out)   :: ok     !< Success.
+   real(R8P)                   :: alpha, vnorm2, s, rmax !< Work.
+   real(R8P)                   :: v(size(a, 1))           !< Householder vector.
+   integer(I4P)                :: j, k                    !< Counters.
+
+   x = 0._R8P ; ok = .false.
+   if (m < n) return
+   rmax = 0._R8P
+   do k = 1_I4P, n
+      alpha = -sign(norm2(a(k:m, k)), a(k, k))
+      v(k:m) = a(k:m, k) ; v(k) = v(k) - alpha
+      vnorm2 = dot_product(v(k:m), v(k:m))
+      if (vnorm2 > 0._R8P) then
+         do j = k, n
+            s = 2._R8P * dot_product(v(k:m), a(k:m, j)) / vnorm2
+            a(k:m, j) = a(k:m, j) - s * v(k:m)
+         enddo
+         s = 2._R8P * dot_product(v(k:m), b(k:m)) / vnorm2
+         b(k:m) = b(k:m) - s * v(k:m)
+      endif
+      rmax = max(rmax, abs(a(k, k)))
+   enddo
+   do k = 1_I4P, n
+      if (abs(a(k, k)) <= 1.e-12_R8P * rmax) return
+   enddo
+   do k = n, 1_I4P, -1_I4P
+      x(k) = (b(k) - dot_product(a(k, k + 1:n), x(k + 1:n))) / a(k, k)
+   enddo
+   ok = .true.
+   endsubroutine householder_lsq
 
    pure function angle_at(u, v) result(theta)
    !< Angle between vectors u and v via atan2(|u x v|, u . v). Well-

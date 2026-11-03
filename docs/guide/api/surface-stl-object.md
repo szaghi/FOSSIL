@@ -2212,8 +2212,35 @@ endprogram ex_mean_curvature_api
 **See also.**
 [§2.4 feature page](/guide/advanced/curvature),
 [`gaussian_curvature`](#gaussian_curvature),
+[`jet_curvature`](#jet_curvature),
 [`cotangent_laplacian`](#cotangent_laplacian),
 [`smooth`](#smooth).
+
+---
+
+### `jet_curvature`
+
+```fortran
+call surface%jet_curvature(H=H, K=K, status=status)
+```
+
+**Purpose.** Per-vertex mean and Gaussian curvature by a local polynomial
+fit (issue #42).
+- In the frame of each vertex's pseudo-normal, a cubic height function is
+  fitted to the 2-ring by Householder least squares (Cazals & Pouget 2005).
+  A quadratic fit is used below 12 neighbours, and the cotangent /
+  angle-defect value below 6.
+- The error is O(h²) pointwise on any sampling. `mean_curvature` and
+  `gaussian_curvature` stall near 15 % at the valence-5 vertices of an
+  icosphere.
+- Sign as `mean_curvature`: a sphere gives (1/R, 1/R²). Flat
+  neighbourhoods give 0 exactly. `query_many(curvatures=)` uses it.
+
+| Argument | Intent      | Type                  | Notes                                               |
+| -------- | ----------- | --------------------- | --------------------------------------------------- |
+| `H`      | `out`       | `real(R8P), alloc(:)` | Mean curvature, indexed by pool vertex id.          |
+| `K`      | `out`       | `real(R8P), alloc(:)` | Gaussian curvature, indexed by pool vertex id.      |
+| `status` | `out`, opt. | `integer(I4P)`        | `CURV_STATUS_*` (as `mean_curvature`).              |
 
 ---
 

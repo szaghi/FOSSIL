@@ -127,9 +127,11 @@ returns it as an optional output (issue #42, CPU):
 
 - **Surfaces: `curvatures(2, n)` = (H, K).** These are the mean curvature
   (k₁ + k₂)/2 and the Gaussian curvature k₁k₂.
-  - Both are the per-vertex `mean_curvature` (cotangent Laplacian) and
-    `gaussian_curvature` (angle defect), interpolated with the foot's
-    barycentric weights. They are rebuilt once per call, at O(facets) cost.
+  - Both come from the per-vertex `jet_curvature`, interpolated with the
+    foot's barycentric weights. `jet_curvature` fits a cubic height
+    function over each vertex's 2-ring (Cazals & Pouget 2005). It is
+    rebuilt once per call, at O(facets) cost.
+  - The error is O(h²) pointwise, on any sampling.
   - H > 0 where the surface is convex seen from the side the normals point
     to: a sphere gives (1/R, 1/R²), a cylinder (1/(2R), 0).
 - **Curves: `curvatures(n)`.** Each vertex gets its turning angle over the
@@ -184,8 +186,9 @@ All of them are lengths for `probe_many`:
 | cube ghost points in face regions (1100) | closest + \|φ\| n = 2·closest − x |
 | two cubes 0.2 apart | a probe into the other cube, or an image inside it, is reported not visible |
 | cube centre, diagonal plane, mid-gap, L-shape medial points | flagged; generic points not |
-| foot curvature, icospheres R = 2 (2, 3, 4 subdivisions) | RMS error of H 1.45e-2, 8.8e-3, 5.6e-3; of K 8.9e-3, 4.6e-3, 2.8e-3; maximum relative error 0.12–0.15 |
-| foot curvature, cylinder and flat faces | exact to round-off |
+| foot curvature, icospheres R = 2 (2, 3, 4 subdivisions) | maximum relative error 0.183, 0.043, 0.012 (cotangent / angle-defect operators: 0.154, 0.148, 0.124) |
+| foot curvature, cylinder R = 1/2 (16, 32, 64 sectors) | maximum error 0.21, 0.046, 0.011 |
+| foot curvature, flat faces | 0 exactly |
 | foot curvature, regular N-gons R = 1 | (π/N)/sin(π/N) exactly: the error against 1/R falls by 4.0 per halving of h |
 | markers, unit icosphere, Δx = 0.06 | 1962 markers, area within 0.6 %, 91 % of spacings in [0.8, 1.2] Δx |
 | markers, unit cube, Δx = 0.1, features kept | area 6 to round-off, 72 % of spacings in the window |
@@ -198,10 +201,10 @@ All of them are lengths for `probe_many`:
   `rich device vs serial max err` and `rich id mismatches` for the manual
   gate, which has not run yet.
 - **Multiple foot points and foot curvature are CPU only.**
-- **3-D foot curvature does not converge pointwise.** The per-vertex
-  operators use barycentric areas. On icospheres the RMS error decreases
-  with refinement, but the maximum stays near 15 %, at the valence-5
-  vertices. Cylinders and planes are exact.
+- **3-D foot curvature needs a resolved surface.** The cubic fit spans the
+  2-ring, so the surface must be smooth over about two edge lengths. On
+  coarse meshes the error is large: 18 % on an icosphere with 320 facets.
+  Across sharp edges the value is meaningless.
 - **Marker spacing follows the remesher.** Most spacings land inside
   [0.8, 1.2] Δx (91 % on a sphere, 72 % on a cube), but not all.
   `spacing_fraction` reports how many do.

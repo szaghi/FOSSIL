@@ -31,7 +31,7 @@ advanced-feature pages cross-link to both.
 | [SDF segmentation](/guide/advanced/sdf-segmentation) | `surface%segment_sdf(...)` | Shapira, Shamir & Cohen-Or (Vis. Comp. 2008) |
 | [Ray-mesh intersection queries](/guide/advanced/ray-queries) | `surface%intersect_ray_first/_all/_any(...)` | Möller-Trumbore |
 | [Cotangent Laplacian + barycentric mass](/guide/advanced/cotangent-laplacian) | `surface%cotangent_laplacian(L, M, status)` | Pinkall & Polthier 1993; Meyer et al. 2003 |
-| [Per-vertex Gaussian + mean curvature](/guide/advanced/curvature) | `surface%gaussian_curvature(K, status)` / `surface%mean_curvature(H, status)` | Meyer et al. 2003 |
+| [Per-vertex Gaussian + mean curvature](/guide/advanced/curvature) | `surface%gaussian_curvature(K, status)` / `surface%mean_curvature(H, status)` / `surface%jet_curvature(H, K, status)` | Meyer et al. 2003; Cazals & Pouget 2005 |
 | [Mesh smoothing (explicit + Taubin)](/guide/advanced/smoothing) | `surface%smooth(method, lambda, mu, iterations, status)` | Taubin (SIGGRAPH 1995) |
 | [Hole filling](/guide/advanced/hole-filling) | `surface%fill_holes(max_hole_edges, max_hole_size, ...)` | Liepa (SGP 2003) |
 

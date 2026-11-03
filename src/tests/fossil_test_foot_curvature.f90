@@ -2,13 +2,15 @@
 program fossil_test_foot_curvature
 !< FOSSIL test: curvature at the foot point (issue #42 step 3).
 !<
+!< The per-vertex values come from `jet_curvature` (cubic fit over the 2-ring, issue #42).
 !< - Icospheres of radius 2 (2, 3, 4 subdivisions): (H, K) at the feet of points at radius 3 tend to
-!<   (1/2, 1/4) in the RMS over the feet; the maximum relative error stays near 0.1-0.15 (the
-!<   barycentric-area operators of #18 do not converge pointwise at the 12 valence-5 vertices). The
-!<   same sphere with the facets reversed (a cavity seen from the fluid): H changes sign, K does not.
-!< - A closed cylinder of radius 1/2 (feet away from the caps): H = 1/(2R) = 1 and K = 0 to round-off
-!<   (each ring vertex sees a circle through three points).
-!< - A box with subdivided faces: feet in the face interiors give (0, 0) to round-off.
+!<   (1/2, 1/4) pointwise at second order: the maximum relative error falls by more than 3 per level
+!<   (0.183, 0.043, 0.012 on the first run; the cotangent / angle-defect operators of #18 stalled at
+!<   0.15, 0.15, 0.12). The same sphere with the facets reversed (a cavity seen from the fluid): H
+!<   changes sign, K does not.
+!< - A closed cylinder of radius 1/2 (feet away from the caps; 16, 32, 64 sectors): H -> 1/(2R) = 1,
+!<   K -> 0, the maximum error falling by more than 3 per level (0.21, 0.046, 0.011 on the first run).
+!< - A box with 8 x 8 subdivided faces: feet in the face interiors give (0, 0) exactly.
 !< - The posed query returns the curvatures of the body-frame query bit for bit; a wrong output size
 !<   is refused (negative control).
 !< - Regular N-gons of circumradius 1 (N = 16, 32, 64): every foot gives (pi/N)/sin(pi/N), the error
@@ -46,7 +48,8 @@ do lev = 2, 4
    eh(lev - 1) = sqrt(sum((cv(1, :) - 0.5_R8P)**2) / NP) ; ek(lev - 1) = sqrt(sum((cv(2, :) - 0.25_R8P)**2) / NP)
    mx(lev - 1) = max(maxval(abs(cv(1, :) - 0.5_R8P)) / 0.5_R8P, maxval(abs(cv(2, :) - 0.25_R8P)) / 0.25_R8P)
 enddo
-ok(1) = eh(3) < eh(2) .and. eh(2) < eh(1) .and. ek(3) < ek(2) .and. ek(2) < ek(1) .and. maxval(mx) < 0.2_R8P
+ok(1) = eh(3) < eh(2) .and. eh(2) < eh(1) .and. ek(3) < ek(2) .and. ek(2) < ek(1) .and. mx(1) / mx(2) > 3._R8P .and. &
+        mx(2) / mx(3) > 3._R8P .and. mx(3) < 0.02_R8P
 print '(A,3ES10.2,A,3ES10.2,A,3F6.3,A,L1)', 'sphere R=2, rms |H - 1/2| ', eh, '  rms |K - 1/4| ', ek, &
       '  max relative ', mx, '  ok ', ok(1)
 call icosphere(4_I4P, 2._R8P, .true., f) ; call s%adopt_facets(facets=f)
@@ -65,13 +68,13 @@ do lev = 1, 3
    call s%query_many(points=q, distances=d, curvatures=cv)
    e2(lev) = max(maxval(abs(cv(1, :) - 1._R8P)), maxval(abs(cv(2, :))))
 enddo
-call box(4_I4P, f) ; call s%adopt_facets(facets=f)
+call box(8_I4P, f) ; call s%adopt_facets(facets=f)
 do i = 1, NP
    call random_number(r) ; r(1:2) = 0.3_R8P + 0.4_R8P * r(1:2)
    q(i) = vector_R8P(r(1), r(2), 1.2_R8P) ; if (i > NP / 2) q(i) = vector_R8P(-0.2_R8P, r(1), r(2))
 enddo
 call s%query_many(points=q, distances=d, curvatures=cv)
-ok(3) = maxval(e2) < 1.e-12_R8P .and. maxval(abs(cv)) < 1.e-12_R8P
+ok(3) = e2(1) / e2(2) > 3._R8P .and. e2(2) / e2(3) > 3._R8P .and. e2(3) < 0.02_R8P .and. maxval(abs(cv)) == 0._R8P
 print '(A,3ES10.2,A,ES9.1,A,L1)', 'cylinder R=1/2, max err (H, K) ', e2, '  flat faces max |(H, K)| ', maxval(abs(cv)), &
       '  ok ', ok(3)
 ! pose and refusal

@@ -38,7 +38,7 @@ use fossil_csr_matrix, only : csr_matrix_t
 use fossil_laplacian, only : build_cotangent_laplacian, &
                              LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
                              LAPL_STATUS_DEGENERATE_TRIANGLE
-use fossil_curvature, only : build_gaussian_curvature, build_mean_curvature, &
+use fossil_curvature, only : build_gaussian_curvature, build_mean_curvature, build_jet_curvature, &
                              CURV_STATUS_OK, CURV_STATUS_BAD_INPUT, &
                              CURV_STATUS_DEGENERATE_TRIANGLE
 use fossil_smoothing, only : do_smooth_mesh => smooth_mesh, &
@@ -259,6 +259,7 @@ type :: surface_stl_object
       procedure, pass(self) :: alpha_wrap                       !< Watertight surrogate from broken triangle soup (issue #18 §1.6).
       procedure, pass(self) :: cotangent_laplacian              !< Cotangent Laplacian + barycentric mass (issue #18 §2.1).
       procedure, pass(self) :: gaussian_curvature                !< Per-vertex Gaussian curvature via angle defect (issue #18 §2.4).
+      procedure, pass(self) :: jet_curvature                     !< Per-vertex H and K by a local polynomial fit (issue #42).
       procedure, pass(self) :: mean_curvature                    !< Per-vertex signed mean curvature H = (1/2)||M^-1 L V|| (issue #18 §2.4).
       procedure, pass(self) :: smooth                            !< Mesh smoothing (explicit Laplacian or Taubin lambda|mu) (issue #18 §2.3).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
@@ -1670,12 +1671,11 @@ contains
    !< on or near the medial axis, a thin gap. `second_foot_points(:, i)` is that facet's closest point
    !< (the nearest such; the foot point itself when not ambiguous). FOSSIL reports, the caller decides.
    !<
-   !< Curvature at the foot point (issue #42 step 3, CPU only): `curvatures(:, i)` = (H, K), the mean
+   !< Curvature at the foot point (issue #42, CPU only): `curvatures(:, i)` = (H, K), the mean
    !< curvature (k1 + k2) / 2 and the Gaussian curvature k1 k2 interpolated with the foot's barycentric
-   !< weights from the per-vertex `mean_curvature` (cotangent Laplacian) and `gaussian_curvature` (angle
-   !< defect). Sign: H > 0 where the surface is convex seen from outside (from the side the normals point
-   !< to): a sphere has (1/R, 1/R^2), a cylinder (1/(2R), 0). The per-vertex fields are built once per
-   !< call, O(facets).
+   !< weights from the per-vertex `jet_curvature` (cubic fit over the 2-ring, error O(h^2)). Sign: H > 0
+   !< where the surface is convex seen from outside (from the side the normals point to): a sphere has
+   !< (1/R, 1/R^2), a cylinder (1/(2R), 0). The per-vertex fields are built once per call, O(facets).
    class(surface_stl_object), intent(in)            :: self               !< Surface.
    type(vector_R8P),          intent(in)            :: points(:)          !< Query points [n].
    real(R8P),                 intent(out)           :: distances(:)       !< Distances [n].
@@ -1740,10 +1740,7 @@ contains
    want_amb = present(ambiguous) .or. present(second_foot_points)
    rel_ = 1.e-6_R8P ; if (present(rel_tolerance)) rel_ = rel_tolerance
    foot_ = 1.e-9_R8P * vnorm(self%bmax - self%bmin) ; if (present(foot_tolerance)) foot_ = foot_tolerance
-   if (present(curvatures)) then
-      call self%mean_curvature(H=hv)
-      call self%gaussian_curvature(K=kv)
-   endif
+   if (present(curvatures)) call self%jet_curvature(H=hv, K=kv)
    !$omp parallel do default(shared) schedule(static) private(i, cp, pn, f, ft, fi, b, cp2, amb)
    do i = 1_I4P, n
       call self%query_point(point=points(i), distance=distances(i), closest_point=cp, facet=f, feature=ft, &
@@ -4047,6 +4044,25 @@ contains
    call build_gaussian_curvature(facet=self%facet, pool=self%vertex_pool, &
                                   K=K, status=status)
    endsubroutine gaussian_curvature
+
+   subroutine jet_curvature(self, H, K, status)
+   !< Per-vertex mean and Gaussian curvature by a local polynomial fit over the 2-ring (osculating
+   !< jet, Cazals & Pouget 2005; issue #42): cubic jet, error O(h^2) on any sampling, unlike
+   !< `mean_curvature` / `gaussian_curvature`, which do not converge pointwise on irregular meshes.
+   !< Sign as `mean_curvature` (H > 0 convex seen from the normals' side; sphere (1/R, 1/R^2)).
+   !< See `fossil_curvature%build_jet_curvature`.
+   class(surface_stl_object), intent(in)            :: self   !< Surface.
+   real(R8P), allocatable,    intent(out)           :: H(:)   !< Mean curvature per pool vertex.
+   real(R8P), allocatable,    intent(out)           :: K(:)   !< Gaussian curvature per pool vertex.
+   integer(I4P),              intent(out), optional :: status !< CURV_STATUS_*.
+
+   if (self%facets_number == 0_I4P) then
+      allocate(H(0), K(0))
+      if (present(status)) status = CURV_STATUS_BAD_INPUT
+      return
+   endif
+   call build_jet_curvature(facet=self%facet, pool=self%vertex_pool, H=H, K=K, status=status)
+   endsubroutine jet_curvature
 
    subroutine mean_curvature(self, H, status)
    !< Per-vertex signed mean curvature `H` via `H_i n_i = (1/2) M^-1 L V`,

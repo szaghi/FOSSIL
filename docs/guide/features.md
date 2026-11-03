@@ -118,6 +118,7 @@ code examples, known limitations) live under
 | Cotangent Laplacian + barycentric mass | `surface%cotangent_laplacian(L, M, status)` | [Cotangent Laplacian](/guide/advanced/cotangent-laplacian) |
 | Per-vertex Gaussian curvature | `surface%gaussian_curvature(K, status)` | [Curvature](/guide/advanced/curvature) |
 | Per-vertex signed mean curvature | `surface%mean_curvature(H, status)` | [Curvature](/guide/advanced/curvature) |
+| Per-vertex H and K by a cubic jet fit (pointwise O(h²)) | `surface%jet_curvature(H, K, status)` | [Curvature](/guide/advanced/curvature) |
 | Mesh smoothing (explicit + Taubin) | `surface%smooth(method, lambda, mu, iterations, status)` | [Smoothing](/guide/advanced/smoothing) |
 | Hole filling (Liepa minimum-weight patches, optional refinement and thin-plate fairing) | `surface%fill_holes(max_hole_edges, max_hole_size, ..., refine, fair)` | [Hole filling](/guide/advanced/hole-filling) |
 

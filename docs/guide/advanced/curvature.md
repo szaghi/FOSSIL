@@ -19,7 +19,17 @@ the surface:
   `H > 0` on outward-convex regions (sphere surface, cube corners),
   `H < 0` on saddles / concave-outward regions, `H ≈ 0` on flat regions.
 
-Both build on [cotangent Laplacian + barycentric mass](/guide/advanced/cotangent-laplacian).
+- **`jet_curvature(H, K, status)`** (issue #42) — both, by a local
+  polynomial fit: in the frame of the vertex pseudo-normal, a cubic height
+  function is fitted to the 2-ring (Cazals & Pouget 2005), and H and K are
+  those of the fitted graph.
+  - The error is O(h²) pointwise on any sampling: on icospheres the
+    maximum relative error falls 0.183 → 0.043 → 0.012 per subdivision.
+  - The two operators above stall near 15 % at the valence-5 vertices.
+  - Use it when pointwise values matter, as for the wall curvature at a
+    foot point (`query_many(curvatures=)`).
+
+The first two build on [cotangent Laplacian + barycentric mass](/guide/advanced/cotangent-laplacian).
 The mean variant in particular is a one-liner on top of `(L, M)`:
 `L V` is the per-vertex mean-curvature normal scaled by `2 M_ii`;
 inverting the diagonal mass and halving gives `H n`.
@@ -269,6 +279,12 @@ field looks this noisy. The fixtures and renders are reproducible via
 
 ## Known limitations
 
+- **The cotangent / angle-defect operators do not converge pointwise on
+  irregular meshes.** On icospheres the maximum relative error stays near
+  15 % (0.154, 0.148, 0.124 at 2, 3, 4 subdivisions) at the valence-5
+  vertices, although the RMS error decreases. They are exact on some
+  structured meshes (a cylinder's rings). `jet_curvature` converges at
+  second order everywhere.
 - **Discrete curvature is noisy on coarse triangulations.** Both
   formulae carry an `O(h)` discretisation error where `h` is the local
   edge length; on very-coarse meshes (cube with 12 facets, low-res MC)
