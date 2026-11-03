@@ -58,8 +58,9 @@ contains
    real(R8P),        intent(out) :: tq                               !< Parametric coordinate along `e13`.
    real(R8P),        intent(out) :: distance                         !< Closest squared distance from point to the triangle.
    type(vector_R8P)              :: V1P                              !< `v1 - point`.
-   real(R8P)                     :: d, e, f, s, t                    !< Plane equation coefficients.
+   real(R8P)                     :: d, e, s, t                       !< Plane equation coefficients.
    real(R8P)                     :: tmp0, tmp1, numer, denom, invdet !< Temporary.
+   real(R8P)                     :: rx, ry, rz                       !< Residual point - closest.
 
    ! Device-callable VecFor `_oac` API (issue #20 §Step 4): `vector - vector` and
    ! `.dot.` lower to TBP-generic operator dispatch, and nvfortran does not
@@ -68,7 +69,6 @@ contains
    call vector_sub_vector_R8P_oac(v1, point, V1P)
    d = dotproduct_R8P_oac(e12, V1P)
    e = dotproduct_R8P_oac(e13, V1P)
-   f = dotproduct_R8P_oac(V1P, V1P)
    s = b * e - c * d
    t = b * d - a * e
    if (s+t <= det) then
@@ -189,9 +189,14 @@ contains
          tq = 1._R8P - sq
       endif
    endif
-   ! Quadratic form Q(sq, tq) = ||point - (v1 + sq*e12 + tq*e13)||^2. Non-negative
-   ! by construction (it is a squared norm); no defensive abs() needed — issue #19
-   ! §B5 dropped the abs that the original Eberly port carried.
-   distance = a * sq * sq + 2._R8P * b * sq * tq + c * tq * tq + 2._R8P * d * sq + 2._R8P * e * tq + f
+   ! Squared norm of the residual (v1 - point) + sq*e12 + tq*e13 (issue #39). The expanded
+   ! quadratic form a sq^2 + 2b sq tq + c tq^2 + 2d sq + 2e tq + f, used before, cancels terms
+   ! of size |v1 - point|^2: its absolute error is ~eps L^2, so it was noise (and could be
+   ! negative, flipping the pseudo-normal sign of is_point_inside) below d ~ sqrt(eps) L ~ 1e-8 L.
+   ! The residual form has an absolute error ~eps L in d: accurate down to d ~ 1e-14 L.
+   rx = V1P%x + sq * e12%x + tq * e13%x
+   ry = V1P%y + sq * e12%y + tq * e13%y
+   rz = V1P%z + sq * e12%z + tq * e13%z
+   distance = rx * rx + ry * ry + rz * rz
    endsubroutine triangle_closest_st
 endmodule fossil_triangle_closest
