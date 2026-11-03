@@ -26,6 +26,7 @@ use fossil_facet_object
 use fossil_marching_cubes, only : extract_isosurface, MC_STATUS_OK, MC_STATUS_BAD_DIMENSIONS
 use fossil_surface_stl_object
 use fossil_distance_field, only : distance_field_object, FAR_VALUE
+use fossil_curve_slice, only : slice_surface
 use fossil_curve_object, only : curve_object, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, &
                                CURVE_ZERO_AREA_LOOP, CURVE_WRONG_ORIENTATION, CURVE_OPEN_LOOP
 
@@ -34,6 +35,7 @@ private
 public :: facet_object
 public :: surface_stl_object
 public :: distance_field_object, FAR_VALUE
+public :: slice_surface
 public :: curve_object, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, CURVE_ZERO_AREA_LOOP, &
           CURVE_WRONG_ORIENTATION, CURVE_OPEN_LOOP
 public :: intersection_pair_t
