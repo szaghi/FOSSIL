@@ -10,7 +10,7 @@ use fossil_utils, only : EPS, FRLEN
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use penf, only : FR4P, I2P, I4P, R4P, R8P, str, ZeroR8P
 use vecfor, only : angle_R8P, face_normal3_R8P, mirror_matrix_R8P, normL2_R8P, rotation_matrix_R8P, vector_R8P, &
-                   assign_vector_R8P_oac, R8P_mul_vector_R8P_oac, vector_sum_vector_R8P_oac
+                   assign_vector_R8P_dev, R8P_mul_vector_R8P_dev, vector_sum_vector_R8P_dev
 
 implicit none
 private
@@ -247,11 +247,11 @@ contains
    ! TBP-generic `+`/`*` and the user-defined `vector = vector` assignment all
    ! lower to vtable dispatch / NVFORTRAN-F-1252, both rejected inside
    ! `!$acc routine seq`. The `_oac` subroutines write into intent(out) temps and
-   ! `assign_vector_R8P_oac` bypasses the assignment overload.
-   call R8P_mul_vector_R8P_oac(sq, e12, sq_e12)
-   call R8P_mul_vector_R8P_oac(tq, e13, tq_e13)
-   call vector_sum_vector_R8P_oac(v1, sq_e12, sum_v1)
-   call vector_sum_vector_R8P_oac(sum_v1, tq_e13, closest)
+   ! `assign_vector_R8P_dev` bypasses the assignment overload.
+   call R8P_mul_vector_R8P_dev(sq, e12, sq_e12)
+   call R8P_mul_vector_R8P_dev(tq, e13, tq_e13)
+   call vector_sum_vector_R8P_dev(v1, sq_e12, sum_v1)
+   call vector_sum_vector_R8P_dev(sum_v1, tq_e13, closest)
    ! Region classification from (sq, tq) barycentric-style coordinates.
    ! Vertex correspondence: V1 ↔ (0,0), V2 ↔ (1,0), V3 ↔ (0,1).
    ! Edge correspondence:   EDGE_12 (V1→V2) ↔ tq=0; EDGE_23 (V2→V3) ↔ sq+tq=1; EDGE_31 (V3→V1) ↔ sq=0.

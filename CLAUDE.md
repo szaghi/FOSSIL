@@ -50,8 +50,9 @@ In a non-interactive shell `module load` may not populate `PATH`; export the SDK
 Device-code rules (issue #20; see the comments in the named files):
 
 - No type-bound procedure calls or `class(...)` dummies in device code: use the
-  `_oac` free procedures (FOSSIL and VecFor). This includes VecFor's overloaded
-  `=`, so set `vector_R8P` components directly (or call `assign_vector_R8P_oac`).
+  free procedures: FOSSIL's `_oac` ones and VecFor's `_dev` ones (VecFor >= 1.9.0
+  renamed its `_oac` suffix to `_dev`, no aliases). This includes VecFor's overloaded
+  `=`, so set `vector_R8P` components directly (or call `assign_vector_R8P_dev`).
 - A `!$acc routine seq` procedure that uses `vector_R8P` must not be added to
   `fossil_facet_object`: it triggers an nvfortran NVVM duplicate-type bug (still
   present in 26.9). Put it in its own module, like `fossil_triangle_closest`.

@@ -24,7 +24,7 @@ module fossil_triangle_closest
 !< live in their own module, like this one.
 
 use penf, only : I4P, R8P
-use vecfor, only : vector_R8P, dotproduct_R8P_oac, vector_sub_vector_R8P_oac
+use vecfor, only : vector_R8P, dotproduct_R8P_dev, vector_sub_vector_R8P_dev
 
 implicit none
 private
@@ -66,9 +66,9 @@ contains
    ! `.dot.` lower to TBP-generic operator dispatch, and nvfortran does not
    ! support type-bound procedure calls inside `!$acc routine seq`. The `_oac` free subroutines take `type(...)` (not
    ! `class`) and are device-safe. Bit-exact vs the operator form on CPU.
-   call vector_sub_vector_R8P_oac(v1, point, V1P)
-   d = dotproduct_R8P_oac(e12, V1P)
-   e = dotproduct_R8P_oac(e13, V1P)
+   call vector_sub_vector_R8P_dev(v1, point, V1P)
+   d = dotproduct_R8P_dev(e12, V1P)
+   e = dotproduct_R8P_dev(e13, V1P)
    s = b * e - c * d
    t = b * d - a * e
    if (s+t <= det) then
