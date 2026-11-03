@@ -30,12 +30,13 @@ module fossil_predicates
 !<     the only predicate the boolean codepath actually hot-paths through
 !<     (tri-tri sign tests, inside/outside-of-tetrahedron classification).
 !<
-!<   - `orient2d`, `incircle`, `insphere` — declared in the public API but
-!<     implemented in plain doubles. They are **not** used by the §1.1 MVP
-!<     codepath (the triangulator we ship is fan-from-Steiner-point, not
-!<     Delaunay), so the slowdown they would cause from being non-adaptive
-!<     is moot. The stubs exist so a future Delaunay PR can upgrade them in
-!<     place without changing the API surface.
+!<   - `orient2d` (and `orient2d_xy`, the same on plain reals) — exact sign
+!<     (issue #36 step 1): a floating-point filter, then an exact fall-back
+!<     when the filter cannot decide. It needs no `predicates_initialize`.
+!<
+!<   - `incircle`, `insphere` — declared in the public API but implemented in
+!<     plain doubles. The stubs exist so a future PR can upgrade them in place
+!<     without changing the API surface.
 !<
 !< @note Constants computed on first call via `exactinit` (not the equivalent
 !<       compile-time approach Shewchuk uses in C, since Fortran lacks the
@@ -43,12 +44,12 @@ module fossil_predicates
 !<       thread-safe under read-after-write semantics; the values it computes
 !<       depend only on the host's IEEE 754 round-to-nearest mode.
 
-use penf,   only : I4P, R8P
+use penf,   only : I4P, I8P, R8P
 use vecfor, only : vector_R8P
 
 implicit none
 private
-public :: orient2d, orient3d, incircle, insphere
+public :: orient2d, orient2d_xy, orient3d, incircle, insphere
 public :: predicates_initialize
 
 ! Splitter constant and error bounds — populated by `predicates_initialize`.
@@ -171,19 +172,157 @@ contains
    endfunction orient3d
 
    pure function orient2d(a, b, c) result(sign_area)
-   !< Sign of the signed area of triangle (a, b, c) in the XY plane (z is
-   !< ignored). Stub: plain double-precision implementation, **not** adaptive.
-   !< The §1.1 MVP boolean codepath does not invoke this predicate; it is
-   !< exposed for symmetry with `orient3d` and so a future Delaunay PR can
-   !< upgrade it in place. See module docstring.
-   type(vector_R8P), intent(in) :: a, b, c
-   real(R8P)                    :: sign_area
-   real(R8P)                    :: acx, bcx, acy, bcy
+   !< Exact sign of the signed area of triangle (a, b, c) in the XY plane (z is ignored).
+   !<
+   !< Positive if a, b, c run counter-clockwise, negative if clockwise, zero if they are
+   !< exactly collinear. See `orient2d_xy`.
+   type(vector_R8P), intent(in) :: a, b, c  !< Triangle vertices.
+   real(R8P)                    :: sign_area !< Its sign is exact; its magnitude approximates twice the area.
 
-   acx = a%x - c%x ; bcx = b%x - c%x
-   acy = a%y - c%y ; bcy = b%y - c%y
-   sign_area = acx * bcy - acy * bcx
+   sign_area = orient2d_xy(a%x, a%y, b%x, b%y, c%x, c%y)
    endfunction orient2d
+
+   pure function orient2d_xy(ax, ay, bx, by, cx, cy) result(sign_area)
+   !< Exact sign of (a - c) x (b - c) for the points (ax, ay), (bx, by), (cx, cy).
+   !<
+   !< Positive if a, b, c run counter-clockwise, negative if clockwise, zero if they are
+   !< exactly collinear. The **sign** is exact for any finite inputs (barring underflow of
+   !< products of coordinates below ~1e-150, and overflow); the magnitude approximates twice
+   !< the signed area.
+   !<
+   !< Stage 1, the filter (Shewchuk 1997): the determinant in doubles with the a priori bound
+   !< `(3 + 16 eps) eps |permanent|`. Conclusive for all but near-collinear inputs, at the
+   !< cost of the naive test.
+   !<
+   !< Stage 2, exact: the determinant expands to six products of input coordinates,
+   !< ax*by - ax*cy - cx*by - ay*bx + ay*cx + cy*bx. Each coordinate is split by bit masks
+   !< into three pieces of at most 18 significant bits (`split3`), so every piece product
+   !< is exact (at most 36 bits); the 54 exact products are summed into a nonoverlapping
+   !< expansion with error-free sums (`grow_expansion`), whose largest component carries the
+   !< exact sign. The split uses no multiplication on purpose: Dekker's multiplicative split
+   !< is not safe under the FMA contraction nvfortran applies by default, while contracting
+   !< a product that is already exact changes nothing.
+   real(R8P), intent(in) :: ax, ay, bx, by, cx, cy !< Point coordinates.
+   real(R8P)             :: sign_area              !< Its sign is exact.
+   real(R8P), parameter  :: EPS_HALF = epsilon(1._R8P) / 2._R8P             !< Unit roundoff.
+   real(R8P), parameter  :: CCW_BOUND = (3._R8P + 16._R8P * EPS_HALF) * EPS_HALF !< Filter bound.
+   real(R8P)             :: detleft, detright, det  !< Filter terms.
+   real(R8P)             :: e(64)                   !< Exact expansion of the determinant.
+   integer(I4P)          :: n                       !< Expansion length.
+   integer(I4P)          :: i                       !< Counter.
+
+   detleft  = (ax - cx) * (by - cy)
+   detright = (ay - cy) * (bx - cx)
+   det = detleft - detright
+   if (abs(det) > CCW_BOUND * (abs(detleft) + abs(detright))) then
+      sign_area = det
+      return
+   endif
+
+   n = 0_I4P
+   call add_product(ax, by, 1._R8P, e, n)
+   call add_product(ax, cy, -1._R8P, e, n)
+   call add_product(cx, by, -1._R8P, e, n)
+   call add_product(ay, bx, -1._R8P, e, n)
+   call add_product(ay, cx, 1._R8P, e, n)
+   call add_product(cy, bx, 1._R8P, e, n)
+   sign_area = 0._R8P
+   do i = n, 1_I4P, -1_I4P ! components in increasing magnitude: the last nonzero one is the largest
+      if (e(i) /= 0._R8P) then
+         sign_area = e(i)
+         exit
+      endif
+   enddo
+   contains
+      pure subroutine add_product(p, q, s, e, n)
+      !< Add s * p * q (s = +-1) to the expansion e(1:n), exactly.
+      real(R8P),    intent(in)    :: p, q, s !< Factors and sign.
+      real(R8P),    intent(inout) :: e(:)    !< Expansion.
+      integer(I4P), intent(inout) :: n       !< Its length.
+      real(R8P)                   :: pp(3), qq(3) !< Pieces.
+      integer(I4P)                :: k, l         !< Counters.
+
+      call split3(p, pp)
+      call split3(q, qq)
+      do k = 1, 3
+         do l = 1, 3
+            call grow_expansion(e, n, s * (pp(k) * qq(l)))
+         enddo
+      enddo
+      endsubroutine add_product
+   endfunction orient2d_xy
+
+   pure subroutine split3(x, piece)
+   !< Split x exactly into three pieces of at most 18 significant bits, x = sum(piece).
+   !<
+   !< Bit masks only, no multiplication (see `orient2d_xy`): the high piece keeps the top 18
+   !< significant bits of x (17 explicit + the implicit one), the remainder x - high is exact,
+   !< and the remainder is split the same way. Subnormal inputs are returned as one piece.
+   real(R8P), intent(in)  :: x        !< Value.
+   real(R8P), intent(out) :: piece(3) !< Pieces, x = piece(1) + piece(2) + piece(3) exactly.
+   real(R8P)              :: r        !< Remainder.
+
+   piece(1) = truncate18(x)
+   r = x - piece(1)
+   piece(2) = truncate18(r)
+   piece(3) = r - piece(2)
+   endsubroutine split3
+
+   pure function truncate18(x) result(t)
+   !< x with all but its top 18 significant bits cleared (sign and exponent kept).
+   real(R8P), intent(in) :: x !< Value.
+   real(R8P)             :: t !< Truncated value.
+   integer(I8P), parameter :: LOW35 = 34359738367_I8P !< 2^35 - 1: the low 35 mantissa bits.
+   integer(I8P)          :: bits !< Bit pattern.
+
+   bits = transfer(x, bits)
+   if (iand(ishft(bits, -52), 2047_I8P) == 0_I8P) then ! zero or subnormal: no implicit bit, keep whole
+      t = x
+      return
+   endif
+   bits = iand(bits, not(LOW35))
+   t = transfer(bits, t)
+   endfunction truncate18
+
+   pure subroutine grow_expansion(e, n, b)
+   !< e = e + b exactly (Shewchuk's Grow-Expansion with zero elimination).
+   !<
+   !< e(1:n) is a nonoverlapping expansion in increasing magnitude; so is the result.
+   real(R8P),    intent(inout) :: e(:) !< Expansion.
+   integer(I4P), intent(inout) :: n    !< Its length.
+   real(R8P),    intent(in)    :: b    !< Value to add.
+   real(R8P)                   :: q, qn, h, w(size(e)) !< Running sum (old, new), error, new components.
+   integer(I4P)                :: i, m                 !< Counters.
+
+   q = b
+   m = 0_I4P
+   do i = 1, n
+      call two_sum(q, e(i), qn, h) ! no aliasing of the in and out arguments
+      q = qn
+      if (h /= 0._R8P) then
+         m = m + 1_I4P
+         w(m) = h
+      endif
+   enddo
+   if (q /= 0._R8P) then
+      m = m + 1_I4P
+      w(m) = q
+   endif
+   e(1:m) = w(1:m)
+   n = m
+   endsubroutine grow_expansion
+
+   pure subroutine two_sum(a, b, s, err)
+   !< s + err = a + b exactly, s = fl(a + b) (Knuth's TwoSum, no ordering assumption).
+   real(R8P), intent(in)  :: a, b   !< Addends.
+   real(R8P), intent(out) :: s, err !< Rounded sum and its exact error.
+   real(R8P)              :: bv, av !< Virtual addends.
+
+   s  = a + b
+   bv = s - a
+   av = s - bv
+   err = (a - av) + (b - bv)
+   endsubroutine two_sum
 
    pure function incircle(a, b, c, d) result(in_or_out)
    !< Sign of (point d) with respect to the circle through (a, b, c) in the

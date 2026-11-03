@@ -42,11 +42,10 @@ module fossil_dt
 !<     edge 3 connects v(1) and v(2).
 !<   - `t%nbr(i)` is the triangle index sharing edge `i`, or 0 if boundary.
 !<
-!< Numeric robustness: predicates are called via `fossil_predicates`, which
-!< currently provides `orient2d` and `incircle` as plain double-precision
-!< stubs (Phase-1 acceptable per §1.1 stage 1's deferral). Upgrading those
-!< predicates to adaptive Shewchuk later improves CDT robustness for free
-!< through this module's existing call sites.
+!< Numeric robustness: predicates are called via `fossil_predicates`. Its
+!< `orient2d` is exact (issue #36); `incircle` is still a plain
+!< double-precision stub. Upgrading it to adaptive Shewchuk later improves CDT
+!< robustness for free through this module's existing call sites.
 
 use fossil_predicates, only : orient2d, incircle
 use penf,              only : I4P, R8P
