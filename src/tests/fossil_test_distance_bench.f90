@@ -21,6 +21,9 @@
 !<      harness double as a regression guard while the issue #19 layout
 !<      changes land — any step that perturbs a distance value fails here.
 !<
+!<   5. Device lines (issues #20, #37, #38): `device`, `rich` and `box device vs serial mismatches`
+!<      (box_classify_many_device on a box of half-size diagonal/64 around every probe) must be 0.
+!<
 !< Usage: fossil_test_distance_bench [<stl_path> [<grid_n>]]
 !<        default <stl_path> = src/tests/dragon-fine.stl
 !<        default <grid_n>   = 40
@@ -63,6 +66,7 @@ logical                       :: correctness_ok, batch_ok, device_ok, fwn_ok, re
 logical                       :: rich_ok                   !< Rich queries: device equals CPU (issue #37).
 real(R8P)                     :: rich_err                  !< Rich queries: max |device - CPU| over distance, closest point, normal.
 integer(I4P)                  :: rich_id_mismatch          !< Rich queries: facet/feature/index/body mismatches.
+integer(I4P)                  :: box_mismatch              !< Box classification: device vs CPU code/inside mismatches (issue #38).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
 !$ integer, external          :: omp_get_max_threads       !< OpenMP runtime thread-count query (only declared under -fopenmp).
@@ -211,6 +215,8 @@ call surface%distance_many_device(points=points(1:1), distances=d_probe, is_sign
 refuse_ok = (refuse_status == STATUS_INVALID_INPUT .and. d_probe(1) == -12345._R8P)
 call rich_device_case(err=rich_err, id_mismatch=rich_id_mismatch)
 rich_ok = rich_err == 0._R8P .and. rich_id_mismatch == 0_I4P
+call box_device_case(mismatch=box_mismatch)
+rich_ok = rich_ok .and. box_mismatch == 0_I4P
 call surface%exit_device
 
 fwn_device_abs_err = 0._R8P
@@ -296,6 +302,7 @@ print '(A)',         ''
 print '(A)',         'query_many_device vs query_many (issue #37: distance, closest point, normal, ids; both signs):'
 print '(A,ES10.3)',  '   rich device vs serial max err: ', rich_err
 print '(A,I0)',      '   rich id mismatches:      ', rich_id_mismatch
+print '(A,I0)',      '   box device vs serial mismatches: ', box_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -328,6 +335,34 @@ contains
       id_mismatch = id_mismatch + count(f1 /= f2 .or. t1 /= t2 .or. i1 /= i2 .or. b1 /= b2, kind=I4P)
    enddo
    endsubroutine rich_device_case
+
+   subroutine box_device_case(mismatch)
+   !< box_classify_many_device against box_classify_many (issue #38): a box of half-size 1/64 of the
+   !< surface diagonal around every bench point, near radius of the same size, both signs.
+   integer(I4P), intent(out) :: mismatch !< Code or inside-flag mismatches.
+   real(R8P),    allocatable :: lo(:,:), hi(:,:) !< Boxes.
+   integer(I4P), allocatable :: c1(:), c2(:) !< Codes.
+   logical,      allocatable :: i1(:), i2(:) !< Inside flags.
+   type(vector_R8P)          :: bmin, bmax   !< Surface box.
+   real(R8P)                 :: h            !< Half-size.
+   integer(I4P)              :: a, nq, m     !< Work.
+   integer(I4P), parameter   :: ALGO(2) = [SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER] !< Signs.
+
+   nq = size(points, kind=I4P)
+   allocate(lo(3, nq), hi(3, nq), c1(nq), c2(nq), i1(nq), i2(nq))
+   bmin = surface%get_bmin() ; bmax = surface%get_bmax()
+   h = sqrt((bmax%x - bmin%x)**2 + (bmax%y - bmin%y)**2 + (bmax%z - bmin%z)**2) / 64._R8P
+   do m = 1, nq
+      lo(:, m) = [points(m)%x, points(m)%y, points(m)%z] - h
+      hi(:, m) = [points(m)%x, points(m)%y, points(m)%z] + h
+   enddo
+   mismatch = 0_I4P
+   do a = 1, 2
+      call surface%box_classify_many(lo=lo, hi=hi, codes=c1, radius=h, sign_algorithm=ALGO(a), inside=i1)
+      call surface%box_classify_many_device(lo=lo, hi=hi, codes=c2, radius=h, sign_algorithm=ALGO(a), inside=i2)
+      mismatch = mismatch + count(c1 /= c2 .or. (i1 .neqv. i2), kind=I4P)
+   enddo
+   endsubroutine box_device_case
    subroutine field_band_case(ok)
    !< Narrow band and signs of a distance field over the probe box (grid_n^3 points, PN sign):
    !< band and sign point queries through distance_many_device must equal the host ones bit for

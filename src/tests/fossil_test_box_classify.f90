@@ -1,6 +1,6 @@
 !< FOSSIL test: box classification on the trees (issue #38 step 2).
 program fossil_test_box_classify
-!< FOSSIL test: box classification on the trees (issue #38 step 2).
+!< FOSSIL test: box classification on the trees (issue #38 steps 2 and 3).
 !<
 !< 3-D (`surface%box_classify_many`, `box_intersects_surface`):
 !< - cube-02 and bunny, random boxes (sizes 1-30% and 1-5% of the diagonal) with a near radius: the BVH codes
@@ -15,9 +15,13 @@ program fossil_test_box_classify
 !< - NACA 0012 and an annulus with an island, random boxes: codes equal a brute-force reference
 !<   over all segments (exact cut, distance for near), all codes occur, corner consistency;
 !< - touching: a box sharing the annulus outer side is cut, one ulp off it is not.
+!< Device (`box_classify_many_device`, step 3; on the host in tests-gnu): codes and `inside` equal the
+!< CPU ones on cube-02 and bunny (pseudo-normal and fast-winding-number signs) and on the NACA 0012
+!< and the annulus (both signs); use before `enter_device` is refused.
 
 use fossil,                only : surface_stl_object, curve_object, facet_object, BOX_CUT, BOX_NEAR, BOX_INSIDE, &
-                                  BOX_OUTSIDE, AABB_TREE_OCTREE, STATUS_INVALID_INPUT, STATUS_OK
+                                  BOX_OUTSIDE, AABB_TREE_OCTREE, STATUS_INVALID_INPUT, STATUS_OK, &
+                                  SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 use fossil_box_predicates, only : box_triangle_overlap, box_segment_overlap_2d, box_segment_distance2_2d
 use fossil_box_query,      only : box_tolerance
 use penf,                  only : I4P, R8P
@@ -30,7 +34,7 @@ type(surface_stl_object) :: cube, bunny, cube_oct
 type(curve_object)       :: c
 real(R8P)                :: u(200), v(200), b0(3), b1(3)
 integer(I4P)             :: k, st, st2, code(1)
-logical                  :: ok(8)
+logical                  :: ok(10)
 
 call cube%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true.)
 call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
@@ -80,6 +84,19 @@ call c%box_classify_many(lo=reshape([0._R8P, 0._R8P], [2, 1]), hi=reshape([1._R8
                          radius=-1._R8P, status=st)
 ok(8) = st == STATUS_INVALID_INPUT
 print '(A,L1)', '2-D refusal: ', ok(8)
+
+! device paths (step 3)
+call cube_oct%box_classify_many_device(lo=reshape(b0, [3, 1]), hi=reshape(b1, [3, 1]), codes=code, status=st)
+call cube%enter_device
+call bunny%enter_device
+ok(9) = st == STATUS_INVALID_INPUT .and. dev3(cube, 0.3_R8P) .and. dev3(bunny, 0.05_R8P)
+print '(A,L1)', '3-D device = CPU codes (pseudo-normal, FWN), refusal before enter_device: ', ok(9)
+call c%box_classify_many_device(lo=reshape([0._R8P, 0._R8P], [2, 1]), hi=reshape([1._R8P, 1._R8P], [2, 1]), codes=code, &
+                                status=st)
+ok(10) = st == STATUS_INVALID_INPUT .and. dev2(c, [-1._R8P, -1._R8P], [7._R8P, 7._R8P])
+call c%adopt_loops(u=u, v=v, loop_sizes=[200_I4P])
+ok(10) = ok(10) .and. dev2(c, [-0.3_R8P, -0.3_R8P], [1.3_R8P, 0.3_R8P])
+print '(A,L1)', '2-D device = CPU codes (pseudo-normal, FWN), refusal before enter_device: ', ok(10)
 
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
@@ -231,6 +248,63 @@ contains
    print '(A,I0,A,4(I0,1X),A,I0,A,I0,A,I0)', label//': ', N, ' boxes, cut/near/in/out ', cnt, &
          ' mismatches vs brute ', mism, ' inside errors ', ibad, ' corner errors ', cbad
    endfunction check2
+
+   function dev3(s, smax) result(same)
+   !< Device codes and inside flags equal the CPU ones, both device signs.
+   type(surface_stl_object), intent(inout) :: s    !< Surface (on the device).
+   real(R8P),                intent(in)    :: smax !< Largest box size (fraction of the diagonal).
+   logical                                 :: same !< Result.
+   integer, parameter :: N = 1500 !< Boxes.
+   integer(I4P), parameter :: ALGO(2) = [SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER] !< Signs.
+   real(R8P)    :: lo(3, N), hi(3, N), r(6), bmin(3), bmax(3), diag !< Work.
+   integer(I4P) :: c1(N), c2(N), m, a, st !< Work.
+   logical      :: i1(N), i2(N) !< Work.
+
+   call bbox(s, bmin, bmax) ; diag = norm2(bmax - bmin)
+   do m = 1, N
+      call random_number(r)
+      lo(:, m) = bmin - 0.2_R8P * (bmax - bmin) + 1.4_R8P * r(1:3) * (bmax - bmin)
+      hi(:, m) = lo(:, m) + (0.01_R8P + (smax - 0.01_R8P) * r(4:6)) * diag
+   enddo
+   same = .true.
+   do a = 1, 2
+      call s%box_classify_many(lo=lo, hi=hi, codes=c1, radius=0.1_R8P * smax * diag, sign_algorithm=ALGO(a), inside=i1)
+      call s%box_classify_many_device(lo=lo, hi=hi, codes=c2, radius=0.1_R8P * smax * diag, sign_algorithm=ALGO(a), &
+                                      inside=i2, status=st)
+      same = same .and. st == STATUS_OK .and. all(c1 == c2) .and. all(i1 .eqv. i2)
+      print '(A,I0,A,I0,A,I0)', '   3-D sign ', ALGO(a), ': box device vs serial mismatches ', count(c1 /= c2), &
+            '  inside mismatches ', count(i1 .neqv. i2)
+   enddo
+   endfunction dev3
+
+   function dev2(cur, blo, bhi) result(same)
+   !< Device codes and inside flags equal the CPU ones, both signs.
+   type(curve_object), intent(inout) :: cur            !< Curve.
+   real(R8P),          intent(in)    :: blo(2), bhi(2) !< Sampling region.
+   logical                           :: same           !< Result.
+   integer, parameter :: N = 2000 !< Boxes.
+   integer(I4P), parameter :: ALGO(2) = [SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER] !< Signs.
+   real(R8P)    :: lo(2, N), hi(2, N), r(4), rad !< Work.
+   integer(I4P) :: c1(N), c2(N), m, a, st !< Work.
+   logical      :: i1(N), i2(N) !< Work.
+
+   rad = 0.02_R8P * norm2(bhi - blo)
+   do m = 1, N
+      call random_number(r)
+      lo(:, m) = blo + r(1:2) * (bhi - blo)
+      hi(:, m) = lo(:, m) + (0.005_R8P + 0.15_R8P * r(3:4)) * (bhi - blo)
+   enddo
+   call cur%enter_device
+   same = .true.
+   do a = 1, 2
+      call cur%box_classify_many(lo=lo, hi=hi, codes=c1, radius=rad, sign_algorithm=ALGO(a), inside=i1)
+      call cur%box_classify_many_device(lo=lo, hi=hi, codes=c2, radius=rad, sign_algorithm=ALGO(a), inside=i2, status=st)
+      same = same .and. st == STATUS_OK .and. all(c1 == c2) .and. all(i1 .eqv. i2)
+      print '(A,I0,A,I0,A,I0)', '   2-D sign ', ALGO(a), ': box device vs serial mismatches ', count(c1 /= c2), &
+            '  inside mismatches ', count(i1 .neqv. i2)
+   enddo
+   call cur%exit_device
+   endfunction dev2
 
    subroutine bbox(s, bmin, bmax)
    !< Bounding box of a surface as arrays.

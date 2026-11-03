@@ -221,6 +221,7 @@ type :: surface_stl_object
       procedure, pass(self) :: image_points                    !< Mirror points through the closest point, with visibility (issue #37).
       procedure, pass(self) :: box_classify_many               !< Classify boxes: cut, near, inside, outside (issue #38).
       procedure, pass(self) :: box_intersects_surface          !< True if a box meets the surface (issue #38).
+      procedure, pass(self) :: box_classify_many_device        !< box_classify_many on the device (issue #38).
       ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
       procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
       procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
@@ -1772,6 +1773,109 @@ contains
    tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
    cut = box_contact(self, lo, hi, tol, tol) == BOX_CUT
    endfunction box_intersects_surface
+
+   subroutine box_classify_many_device(self, lo, hi, codes, radius, sign_algorithm, inside, status)
+   !< `box_classify_many` on the device (OpenACC, issue #38): same arguments, codes and defaults.
+   !<
+   !< Requires `enter_device` (else STATUS_INVALID_INPUT and a stderr message). Each box runs
+   !< `bvh_box_contact_oac` (the CPU kernel) and, when not cut, the centre sign of
+   !< `query_many_device`: closest facet with region and pseudo-normal side (SIGN_PSEUDO_NORMAL), or
+   !< `bvh_winding_number_oac` > 0.5 (SIGN_FAST_WINDING_NUMBER); only these two. SAH BVH only (the
+   !< device scope). #20 rules: pointer aliases, `_oac` routines, component-wise vector stores.
+   !< Validated on the host (tests-gnu, directives inert); the GPU validation is pending.
+   class(surface_stl_object), intent(inout), target :: self           !< Surface (target: device aliases).
+   real(R8P),                 intent(in)            :: lo(:,:)        !< Box minima [3, n].
+   real(R8P),                 intent(in)            :: hi(:,:)        !< Box maxima [3, n].
+   integer(I4P),              intent(out)           :: codes(:)       !< BOX_* [n].
+   real(R8P),                 intent(in),  optional :: radius         !< Near radius (default 0).
+   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
+   logical,                   intent(out), optional :: inside(:)      !< Centre inside, for boxes not cut [n].
+   integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P), allocatable :: cl(:)          !< Device-side codes.
+   logical,      allocatable :: il(:)          !< Device-side inside flags.
+   type(aabb_node_object),       pointer :: node_p(:)    !< Alias of self%aabb%node.
+   type(facet_distance_payload), pointer :: payload_p(:) !< Alias of self%aabb%payload.
+   type(pnormal_payload_t),      pointer :: pnormal_p(:) !< Alias of self%pnormal_payload.
+   type(wn_node_t),              pointer :: wn_p(:)      !< Alias of self%wn_payload.
+   type(vector_R8P) :: point_i, closest_v, v1_v, e12_v, e13_v !< Per-box work (component-wise stores, #20).
+   real(R8P)        :: blo(3), bhi(3), d2, nx, ny, nz, omega, beta2, tol, reach, r !< Per-box work, inflations.
+   integer(I4P)     :: best_facet, best_payload, region, n, i, algo, c !< Per-box work.
+   logical          :: fwn, bad, want_in, ins            !< Options, flags.
+
+   if (present(status)) status = STATUS_OK
+   n = size(codes, kind=I4P)
+   r = 0._R8P ; if (present(radius)) r = radius
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   bad = bad_shape3(lo, n) .or. bad_shape3(hi, n) .or. r < 0._R8P .or. &
+         (algo /= SIGN_PSEUDO_NORMAL .and. algo /= SIGN_FAST_WINDING_NUMBER)
+   if (present(inside)) bad = bad .or. size(inside) /= n
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (n == 0_I4P) return
+   if (.not. self%is_on_device) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_surface_stl_object%box_classify_many_device: surface not on device -- call enter_device first.'
+      return
+   endif
+   fwn = algo == SIGN_FAST_WINDING_NUMBER
+   want_in = present(inside)
+   beta2 = WN_DEFAULT_BETA * WN_DEFAULT_BETA
+   tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
+   reach = max(tol, r + tol)
+   allocate(cl(n), il(n))
+   node_p => self%aabb%node ; payload_p => self%aabb%payload ; pnormal_p => self%pnormal_payload
+   wn_p => self%wn_payload
+
+   !$acc parallel loop present(node_p, payload_p, pnormal_p, wn_p) copyin(lo, hi) copyout(cl, il) &
+   !$acc&  private(blo, bhi, c, ins, point_i, closest_v, v1_v, e12_v, e13_v, d2, nx, ny, nz, omega, best_facet, &
+   !$acc&          best_payload, region)
+   do i = 1_I4P, n
+      blo(1) = lo(1, i) ; blo(2) = lo(2, i) ; blo(3) = lo(3, i)
+      bhi(1) = hi(1, i) ; bhi(2) = hi(2, i) ; bhi(3) = hi(3, i)
+      c = bvh_box_contact_oac(node_p, payload_p, blo, bhi, tol, reach)
+      ins = .false.
+      if (c /= BOX_CUT .and. (c == BOX_NONE .or. want_in)) then
+         point_i%x = 0.5_R8P * (blo(1) + bhi(1))
+         point_i%y = 0.5_R8P * (blo(2) + bhi(2))
+         point_i%z = 0.5_R8P * (blo(3) + bhi(3))
+         if (fwn) then
+            omega = bvh_winding_number_oac(node_p, payload_p, wn_p, point_i%x, point_i%y, point_i%z, beta2)
+            ins = omega / WN_FOUR_PI > 0.5_R8P
+         else
+            d2 = huge(0._R8P) ; best_facet = 0_I4P ; best_payload = 0_I4P ; region = 0_I4P
+            call bvh_distance_node_with_region_oac(node=node_p, payload=payload_p, n=0_I4P, point=point_i, best=d2, &
+                                                   best_facet=best_facet, best_payload_idx=best_payload)
+            if (best_facet > 0_I4P) then
+               v1_v%x  = payload_p(best_payload)%v1(1)
+               v1_v%y  = payload_p(best_payload)%v1(2)
+               v1_v%z  = payload_p(best_payload)%v1(3)
+               e12_v%x = payload_p(best_payload)%e12(1)
+               e12_v%y = payload_p(best_payload)%e12(2)
+               e12_v%z = payload_p(best_payload)%e12(3)
+               e13_v%x = payload_p(best_payload)%e13(1)
+               e13_v%y = payload_p(best_payload)%e13(2)
+               e13_v%z = payload_p(best_payload)%e13(3)
+               call triangle_point_distance(v1=v1_v, e12=e12_v, e13=e13_v, a=payload_p(best_payload)%a, &
+                                            b=payload_p(best_payload)%b, c=payload_p(best_payload)%c, &
+                                            det=payload_p(best_payload)%det, point=point_i, distance=d2, &
+                                            closest=closest_v, region=region)
+               nx = pnormal_x_oac(pnormal_p(best_facet), region)
+               ny = pnormal_y_oac(pnormal_p(best_facet), region)
+               nz = pnormal_z_oac(pnormal_p(best_facet), region)
+               ins = (point_i%x - closest_v%x) * nx + (point_i%y - closest_v%y) * ny + (point_i%z - closest_v%z) * nz < 0._R8P
+            endif
+         endif
+      endif
+      if (c == BOX_NONE) then
+         c = BOX_OUTSIDE ; if (ins) c = BOX_INSIDE
+      endif
+      cl(i) = c ; il(i) = ins
+   enddo
+   codes = cl
+   if (present(inside)) inside = il
+   endsubroutine box_classify_many_device
 
    subroutine query_many_device(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
                                 is_signed, sign_algorithm, status)

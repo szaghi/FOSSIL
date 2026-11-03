@@ -10,6 +10,8 @@ program fossil_test_curve_bench
 !< number signs. Prints the timings and `device vs serial max |d| err` (the manual GPU gate of
 !< #20 / #36 requires 0.000E+00). Built by `tests-gnu` it runs the device routine's loop on the
 !< host (no OpenACC); built by the `tests-nvidia-curve` mode it runs on the GPU.
+!< Also `rich ... id mismatches` (query_many_device, issue #37) and `box device vs serial mismatches`
+!< (box_classify_many_device on a box around every grid point, issue #38): both must be 0.
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 use penf,   only : I4P, I8P, R8P
@@ -90,6 +92,7 @@ contains
       print '(A,A,A,ES10.3)', '   ', NAME(a), 'device vs serial max |d| err: ', err_dev
       ok = ok .and. err_cpu == 0._R8P .and. err_dev == 0._R8P
       call rich(cur, p, ALGO(a), NAME(a))
+      call box(cur, p, (hi - lo) / real(max(n, 1), R8P), ALGO(a), NAME(a))
    enddo
    call cur%exit_device
    endsubroutine bench
@@ -116,6 +119,31 @@ contains
    print '(A,A,A,ES10.3,A,I0)', '   ', nm, 'rich device vs serial max err: ', err, '  id mismatches ', ids
    ok = ok .and. err == 0._R8P .and. ids == 0
    endsubroutine rich
+
+   subroutine box(cur, p, h, algo, nm)
+   !< box_classify_many_device vs box_classify_many (issue #38): a box of half-size h around every
+   !< grid point, near radius |h|.
+   type(curve_object), intent(inout) :: cur    !< Curve (on device).
+   real(R8P),          intent(in)    :: p(:,:) !< Points [2, n].
+   real(R8P),          intent(in)    :: h(2)   !< Half-sizes.
+   integer(I4P),       intent(in)    :: algo   !< Sign algorithm.
+   character(*),       intent(in)    :: nm     !< Sign name.
+   real(R8P),    allocatable :: lo(:,:), hi(:,:) !< Boxes.
+   integer(I4P), allocatable :: c1(:), c2(:) !< Codes.
+   logical,      allocatable :: i1(:), i2(:) !< Inside flags.
+   integer(I4P)              :: nq, m, bad !< Work.
+
+   nq = size(p, 2)
+   allocate(lo(2, nq), hi(2, nq), c1(nq), c2(nq), i1(nq), i2(nq))
+   do m = 1, nq
+      lo(:, m) = p(:, m) - h ; hi(:, m) = p(:, m) + h
+   enddo
+   call cur%box_classify_many(lo=lo, hi=hi, codes=c1, radius=norm2(h), sign_algorithm=algo, inside=i1)
+   call cur%box_classify_many_device(lo=lo, hi=hi, codes=c2, radius=norm2(h), sign_algorithm=algo, inside=i2)
+   bad = count(c1 /= c2 .or. (i1 .neqv. i2))
+   print '(A,A,A,I0)', '   ', nm, 'box device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0
+   endsubroutine box
 
    subroutine naca0012(m, x, y)
    !< NACA 0012 with a closed trailing edge, 2m vertices, cosine spacing, counter-clockwise.

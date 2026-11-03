@@ -83,6 +83,7 @@ type :: curve_object
       procedure, pass(self) :: adopt_loops          !< Build the curve from vertex arrays and loop sizes.
       procedure, pass(self) :: box_classify_many    !< Classify boxes: cut, near, inside, outside (issue #38).
       procedure, pass(self) :: box_intersects_curve !< True if a box meets the curve (issue #38).
+      procedure, pass(self) :: box_classify_many_device !< box_classify_many on the device (issue #38).
       procedure, pass(self) :: check_validity       !< First validity defect (CURVE_* code).
       procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
       procedure, pass(self) :: distance             !< (Signed) distance of a point.
@@ -235,6 +236,83 @@ contains
                                self%bvh%first, self%bvh%last, self%bvh%seg_id, self%next, self%u, self%v, lo, hi, &
                                0._R8P) == BOX_CUT
    endfunction box_intersects_curve
+
+   subroutine box_classify_many_device(self, lo, hi, codes, radius, sign_algorithm, inside, status)
+   !< `box_classify_many` on the device (OpenACC, issue #38): same arguments, codes and defaults.
+   !<
+   !< Requires `enter_device` (else STATUS_INVALID_INPUT and a stderr message). Each box runs
+   !< `curve_box_contact_oac` and, when not cut, `curve_signed_distance_oac` at the centre (sign < 0:
+   !< inside), the kernels of the CPU path (`is_point_inside` takes the same sign). SIGN_PSEUDO_NORMAL
+   !< or SIGN_FAST_WINDING_NUMBER only. #20 rules: top-level pointer aliases of the mapped arrays.
+   !< Validated on the host (tests-gnu, directives inert); the GPU validation is pending.
+   class(curve_object), intent(inout), target :: self           !< Curve (target: device aliases).
+   real(R8P),           intent(in)            :: lo(:,:)        !< Box minima [2, n].
+   real(R8P),           intent(in)            :: hi(:,:)        !< Box maxima [2, n].
+   integer(I4P),        intent(out)           :: codes(:)       !< BOX_* [n].
+   real(R8P),           intent(in),  optional :: radius         !< Near radius (default 0).
+   integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
+   logical,             intent(out), optional :: inside(:)      !< Centre inside, for boxes not cut [n].
+   integer(I4P),        intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)                                  :: r, blo(2), bhi(2) !< Radius, per-box work.
+   integer(I4P)                               :: algo, i, n, c  !< Work.
+   logical                                    :: bad, fwn, want_in, ins !< Work.
+   integer(I4P), allocatable                  :: cl(:)          !< Device-side codes.
+   logical,      allocatable                  :: il(:)          !< Device-side inside flags.
+   real(R8P),    pointer :: lo_u(:), lo_v(:), hi_u(:), hi_v(:), a_u(:), a_v(:), d_u(:), d_v(:), len2(:) !< Aliases.
+   real(R8P),    pointer :: u(:), v(:), pn_u(:), pn_v(:), wn_cu(:), wn_cv(:), wn_du(:), wn_dv(:), wn_diag2(:) !< Aliases.
+   real(R8P),    pointer :: wn_c(:,:) !< Alias.
+   integer(I4P), pointer :: left(:), right(:), first(:), last(:), seg_id(:), next(:) !< Aliases.
+
+   if (present(status)) status = STATUS_OK
+   n = size(codes, kind=I4P)
+   r = 0._R8P ; if (present(radius)) r = radius
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   bad = size(lo, 1) /= 2 .or. size(lo, 2) /= n .or. size(hi, 1) /= 2 .or. size(hi, 2) /= n .or. r < 0._R8P .or. &
+         (algo /= SIGN_PSEUDO_NORMAL .and. algo /= SIGN_FAST_WINDING_NUMBER)
+   if (present(inside)) bad = bad .or. size(inside) /= n
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (self%bvh%nodes_number == 0_I4P) then
+      codes = BOX_OUTSIDE
+      if (present(inside)) inside = .false.
+      return
+   endif
+   if (.not. self%is_on_device) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_curve_object%box_classify_many_device: curve not on device -- call enter_device first.'
+      return
+   endif
+   if (n == 0_I4P) return
+   fwn = algo == SIGN_FAST_WINDING_NUMBER
+   want_in = present(inside)
+   allocate(cl(n), il(n))
+   lo_u => self%bvh%lo_u ; lo_v => self%bvh%lo_v ; hi_u => self%bvh%hi_u ; hi_v => self%bvh%hi_v
+   left => self%bvh%left ; right => self%bvh%right ; first => self%bvh%first ; last => self%bvh%last
+   a_u => self%bvh%a_u ; a_v => self%bvh%a_v ; d_u => self%bvh%d_u ; d_v => self%bvh%d_v ; len2 => self%bvh%len2
+   seg_id => self%bvh%seg_id ; next => self%next ; u => self%u ; v => self%v ; pn_u => self%pn_u ; pn_v => self%pn_v
+   wn_cu => self%bvh%wn_cu ; wn_cv => self%bvh%wn_cv ; wn_du => self%bvh%wn_du ; wn_dv => self%bvh%wn_dv
+   wn_c => self%bvh%wn_c ; wn_diag2 => self%bvh%wn_diag2
+   !$acc parallel loop present(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, len2, seg_id, &
+   !$acc&                      next, u, v, pn_u, pn_v, wn_cu, wn_cv, wn_du, wn_dv, wn_c, wn_diag2) &
+   !$acc&                      copyin(lo, hi) copyout(cl, il) private(blo, bhi, c, ins)
+   do i = 1_I4P, n
+      blo(1) = lo(1, i) ; blo(2) = lo(2, i) ; bhi(1) = hi(1, i) ; bhi(2) = hi(2, i)
+      c = curve_box_contact_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, seg_id, next, u, v, blo, bhi, r)
+      ins = .false.
+      if (c /= BOX_CUT .and. (c == BOX_NONE .or. want_in)) &
+         ins = curve_signed_distance_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, len2, &
+                                         seg_id, next, u, v, pn_u, pn_v, wn_cu, wn_cv, wn_du, wn_dv, wn_c, wn_diag2, &
+                                         0.5_R8P * (blo(1) + bhi(1)), 0.5_R8P * (blo(2) + bhi(2)), .true., fwn) < 0._R8P
+      if (c == BOX_NONE) then
+         c = BOX_OUTSIDE ; if (ins) c = BOX_INSIDE
+      endif
+      cl(i) = c ; il(i) = ins
+   enddo
+   codes = cl
+   if (present(inside)) inside = il
+   endsubroutine box_classify_many_device
 
    subroutine distance_many(self, points, distances, is_signed, sign_algorithm, status)
    !< Batched distances of the points (u, v) = points(:, i), CPU, OpenMP over the points.
