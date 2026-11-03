@@ -15,7 +15,7 @@ use fossil_list_id_object, only : list_id_object
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil_winding_number, only : compute_winding_number => winding_number, WN_FOUR_PI => FOUR_PI, WN_DEFAULT_BETA => DEFAULT_BETA
-use fossil_hole_filling,   only : boundary_loop_t, extract_boundary_loops, triangulate_loop
+use fossil_hole_filling,   only : boundary_loop_t, extract_boundary_loops, triangulate_loop, refine_patch
 use fossil_self_intersection, only : intersection_pair_t, &
                                      compute_self_intersections => find_self_intersections
 use fossil_marching_cubes, only : compute_isosurface => extract_isosurface, MC_STATUS_OK
@@ -2638,7 +2638,7 @@ contains
    endsubroutine reverse_normals
 
    ! pure subroutine sanitize(self, do_analysis)
-   subroutine fill_holes(self, max_hole_edges, max_hole_size, holes_filled, holes_skipped, open_edges, status)
+   subroutine fill_holes(self, max_hole_edges, max_hole_size, holes_filled, holes_skipped, open_edges, status, refine)
    !< Close small holes: boundary loops filled with Liepa minimum-weight patches (issue #31).
    !<
    !< Every closed loop of boundary edges (facet edges without a neighbour) is a candidate. A loop
@@ -2649,6 +2649,9 @@ contains
    !< `analyze` (same tree kind and refinement) the filled surface is connected across them.
    !< Boundary edges that do not close into a loop (inconsistent orientation, non-manifold
    !< boundaries) are reported in `open_edges` and left alone.
+   !<
+   !< `refine=.true.` refines each patch to the edge density of its loop (`refine_patch`, Liepa
+   !< 2003: centroid splits plus Delaunay edge flips, loop vertices fixed).
    class(surface_stl_object), intent(inout)         :: self           !< Surface (analyzed).
    integer(I4P),              intent(in),  optional :: max_hole_edges !< Largest loop to fill, in edges (default 200).
    real(R8P),                 intent(in),  optional :: max_hole_size  !< Largest loop bbox diagonal / surface bbox diagonal (default 0.1).
@@ -2656,7 +2659,9 @@ contains
    integer(I4P),              intent(out), optional :: holes_skipped  !< Loops left open by the thresholds.
    integer(I4P),              intent(out), optional :: open_edges     !< Boundary edges not forming a closed loop.
    integer(I4P),              intent(out), optional :: status         !< STATUS_OK.
+   logical,                   intent(in),  optional :: refine         !< Refine patches to the loop's edge density (default .false.).
    type(boundary_loop_t), allocatable :: loops(:)
+   logical                            :: refine_ !< Resolved refine flag.
    type(facet_object),    allocatable :: patch(:), merged(:)
    integer(I4P)                       :: max_edges_, n_filled, n_skipped, n_open, k, ist, n_new, cursor
    real(R8P)                          :: max_size_, diag, loop_diag
@@ -2664,6 +2669,7 @@ contains
 
    max_edges_ = 200_I4P   ; if (present(max_hole_edges)) max_edges_ = max_hole_edges
    max_size_  = 0.1_R8P   ; if (present(max_hole_size))  max_size_  = max_hole_size
+   refine_    = .false.   ; if (present(refine))         refine_    = refine
    n_filled = 0_I4P ; n_skipped = 0_I4P ; n_open = 0_I4P
    if (present(status)) status = STATUS_OK
    if (self%facets_number > 0_I4P) then
@@ -2683,6 +2689,7 @@ contains
             n_skipped = n_skipped + 1_I4P
             cycle
          endif
+         if (refine_) call refine_patch(loop=loops(k), patch=patch)
          patches = [patches, patch]
          n_filled = n_filled + 1_I4P
       enddo

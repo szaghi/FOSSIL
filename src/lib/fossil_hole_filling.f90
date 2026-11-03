@@ -24,6 +24,7 @@ private
 public :: boundary_loop_t
 public :: extract_boundary_loops
 public :: triangulate_loop
+public :: refine_patch
 
 type :: boundary_loop_t
    !< One closed boundary loop, in patch orientation.
@@ -251,6 +252,225 @@ contains
       ang = acos(max(-1._R8P, min(1._R8P, v%x * nt(1) + v%y * nt(2) + v%z * nt(3))))
       endfunction angle_to
    endsubroutine triangulate_loop
+
+   subroutine refine_patch(loop, patch)
+   !< Refine a hole patch so its triangles match the density of the surrounding mesh (Liepa 2003,
+   !< issue #31 step 5). The loop vertices never move and no triangle is added outside the patch.
+   !<
+   !<  - Scale: each loop vertex gets the mean length of its two loop edges; a new vertex gets the
+   !<    mean scale of the triangle it splits.
+   !<  - Split: a triangle with centroid c and centroid scale s_c is split into three at c when
+   !<    sqrt(2) |c - v| > max(s_c, s_v) for each of its vertices v.
+   !<  - Relax: an interior edge (any patch edge but a loop edge) shared by triangles (a, b, c) and
+   !<    (b, a, d) is flipped to (c, d) when the angles at c and d sum to more than pi (the edge is not
+   !<    locally Delaunay), provided both new triangles keep the patch's orientation.
+   !< Split and relax alternate until no triangle splits (at most 50 rounds, 20000 vertices).
+   !< On return `patch` holds the refined triangles; loop vertices keep their pool ids, new vertices
+   !< have id 0 and identical coordinates in every triangle that shares them.
+   type(boundary_loop_t),           intent(in)    :: loop     !< Loop the patch fills.
+   type(facet_object), allocatable, intent(inout) :: patch(:) !< Patch triangles (from triangulate_loop).
+   type(vector_R8P), allocatable :: x(:)        !< Patch vertices (1:nb are the loop's).
+   real(R8P),        allocatable :: sc(:)       !< Vertex scales.
+   integer(I4P),     allocatable :: t(:,:)      !< Triangles (3, nt), patch orientation.
+   integer(I4P)                  :: nb, nv, nt, i, k, round, j, m
+   logical                       :: split
+   real(R8P)                     :: c(3), s_c
+   integer(I4P), parameter       :: MAX_ROUNDS = 50_I4P, MAX_VERTICES = 20000_I4P
+
+   nb = size(loop%vid, kind=I4P)
+   if (nb < 3_I4P .or. size(patch) == 0) return
+   allocate(x(nb), sc(nb), t(3, size(patch)))
+   x = loop%x
+   do i = 1, nb
+      sc(i) = 0.5_R8P * (dist(x(i), x(prev(i))) + dist(x(i), x(next(i))))
+   enddo
+   nv = nb ; nt = size(patch, kind=I4P)
+   do k = 1, nt
+      do j = 1, 3
+         t(j, k) = loop_index(patch(k)%vertex_id(j))
+         if (t(j, k) == 0_I4P) return ! not a loop patch: leave it untouched
+      enddo
+   enddo
+
+   do round = 1, MAX_ROUNDS
+      split = .false.
+      m = nt
+      do k = 1, m
+         c = ([x(t(1, k))%x, x(t(1, k))%y, x(t(1, k))%z] + [x(t(2, k))%x, x(t(2, k))%y, x(t(2, k))%z] + &
+              [x(t(3, k))%x, x(t(3, k))%y, x(t(3, k))%z]) / 3._R8P
+         s_c = (sc(t(1, k)) + sc(t(2, k)) + sc(t(3, k))) / 3._R8P
+         if (all([(sqrt(2._R8P) * dist3(c, x(t(j, k))) > max(s_c, sc(t(j, k))), j = 1, 3)])) then
+            if (nv >= MAX_VERTICES) exit
+            call push_vertex(c, s_c)
+            call push_triangle(t(2, k), t(3, k), nv)
+            call push_triangle(t(3, k), t(1, k), nv)
+            t(3, k) = nv
+            split = .true.
+         endif
+      enddo
+      call relax
+      if (.not. split) exit
+   enddo
+
+   deallocate(patch) ; allocate(patch(nt))
+   do k = 1, nt
+      do j = 1, 3
+         patch(k)%vertex(j) = x(t(j, k))
+         patch(k)%vertex_id(j) = 0_I4P
+         if (t(j, k) <= nb) patch(k)%vertex_id(j) = loop%vid(t(j, k))
+      enddo
+      call patch(k)%compute_metrix
+   enddo
+   contains
+      pure function prev(i) result(j)
+      integer(I4P), intent(in) :: i
+      integer(I4P)             :: j
+
+      j = i - 1_I4P ; if (j < 1_I4P) j = nb
+      endfunction prev
+
+      pure function next(i) result(j)
+      integer(I4P), intent(in) :: i
+      integer(I4P)             :: j
+
+      j = i + 1_I4P ; if (j > nb) j = 1_I4P
+      endfunction next
+
+      pure function loop_index(vid) result(i)
+      integer(I4P), intent(in) :: vid
+      integer(I4P)             :: i
+
+      do i = 1, nb
+         if (loop%vid(i) == vid) return
+      enddo
+      i = 0_I4P
+      endfunction loop_index
+
+      pure function is_loop_edge(a, b) result(yes)
+      integer(I4P), intent(in) :: a, b
+      logical                  :: yes
+
+      yes = a <= nb .and. b <= nb .and. (next(a) == b .or. next(b) == a)
+      endfunction is_loop_edge
+
+      subroutine push_vertex(p, s)
+      real(R8P), intent(in)         :: p(3), s
+      type(vector_R8P), allocatable :: xt(:)
+      real(R8P),        allocatable :: st(:)
+
+      if (nv == size(x)) then
+         allocate(xt(2 * nv), st(2 * nv))
+         xt(1:nv) = x(1:nv) ; st(1:nv) = sc(1:nv)
+         call move_alloc(from=xt, to=x) ; call move_alloc(from=st, to=sc)
+      endif
+      nv = nv + 1_I4P
+      x(nv)%x = p(1) ; x(nv)%y = p(2) ; x(nv)%z = p(3)
+      sc(nv) = s
+      endsubroutine push_vertex
+
+      subroutine push_triangle(a, b, cc)
+      integer(I4P), intent(in)  :: a, b, cc
+      integer(I4P), allocatable :: tt(:,:)
+
+      if (nt == size(t, dim=2)) then
+         allocate(tt(3, 2 * nt))
+         tt(:, 1:nt) = t(:, 1:nt)
+         call move_alloc(from=tt, to=t)
+      endif
+      nt = nt + 1_I4P
+      t(:, nt) = [a, b, cc]
+      endsubroutine push_triangle
+
+      subroutine relax
+      !< Flip non-locally-Delaunay interior edges, sweep after sweep, until a sweep flips none (at
+      !< most 100 sweeps). After a flip the scan moves on to the next triangle.
+      integer(I4P) :: sweep, k1, k2, e1, e2, a, b, cc, dd
+      logical      :: flipped, done_k1
+      real(R8P)    :: n_old(3), n1(3), n2(3), ar, a1, a2
+
+      do sweep = 1, 100
+         flipped = .false.
+         do k1 = 1, nt
+            done_k1 = .false.
+            do e1 = 1, 3
+               a = t(e1, k1) ; b = t(mod(e1, 3) + 1, k1) ; cc = t(mod(e1 + 1, 3) + 1, k1)
+               if (is_loop_edge(a, b)) cycle
+               ! the triangle across (a, b) runs it as (b, a)
+               do k2 = 1, nt
+                  if (k2 == k1) cycle
+                  do e2 = 1, 3
+                     if (t(e2, k2) == b .and. t(mod(e2, 3) + 1, k2) == a) then
+                        dd = t(mod(e2 + 1, 3) + 1, k2)
+                        if (angle_at(cc, a, b) + angle_at(dd, a, b) > acos(-1._R8P) + 1.e-12_R8P .and. &
+                            .not. has_edge(cc, dd)) then
+                           call tri_normal(x(a), x(b), x(cc), n_old, ar)
+                           call tri_normal(x(a), x(dd), x(cc), n1, a1)
+                           call tri_normal(x(dd), x(b), x(cc), n2, a2)
+                           if (a1 > 0._R8P .and. a2 > 0._R8P .and. sum(n1 * n_old) > 0._R8P .and. &
+                               sum(n2 * n_old) > 0._R8P) then
+                              t(:, k1) = [a, dd, cc]
+                              t(:, k2) = [dd, b, cc]
+                              flipped = .true. ; done_k1 = .true.
+                           endif
+                        endif
+                        exit
+                     endif
+                  enddo
+                  if (done_k1 .or. e2 <= 3) exit ! the neighbour across (a, b) was found
+               enddo
+               if (done_k1) exit
+            enddo
+         enddo
+         if (.not. flipped) exit
+      enddo
+      endsubroutine relax
+
+      pure function has_edge(a, b) result(yes)
+      integer(I4P), intent(in) :: a, b
+      logical                  :: yes
+      integer(I4P)             :: kk, ee
+
+      yes = .false.
+      do kk = 1, nt
+         do ee = 1, 3
+            if ((t(ee, kk) == a .and. t(mod(ee, 3) + 1, kk) == b) .or. (t(ee, kk) == b .and. t(mod(ee, 3) + 1, kk) == a)) then
+               yes = .true. ; return
+            endif
+         enddo
+      enddo
+      endfunction has_edge
+
+      pure function angle_at(apex, a, b) result(ang)
+      !< Angle at `apex` of the triangle (apex, a, b).
+      integer(I4P), intent(in) :: apex, a, b
+      real(R8P)                :: ang
+      real(R8P)                :: u(3), v(3), nu, nv_
+
+      u = [x(a)%x - x(apex)%x, x(a)%y - x(apex)%y, x(a)%z - x(apex)%z]
+      v = [x(b)%x - x(apex)%x, x(b)%y - x(apex)%y, x(b)%z - x(apex)%z]
+      nu = sqrt(sum(u * u)) ; nv_ = sqrt(sum(v * v))
+      if (nu * nv_ <= 0._R8P) then
+         ang = 0._R8P
+      else
+         ang = acos(max(-1._R8P, min(1._R8P, sum(u * v) / (nu * nv_))))
+      endif
+      endfunction angle_at
+
+      pure function dist(p1, p2) result(dd)
+      type(vector_R8P), intent(in) :: p1, p2
+      real(R8P)                    :: dd
+
+      dd = sqrt((p1%x - p2%x)**2 + (p1%y - p2%y)**2 + (p1%z - p2%z)**2)
+      endfunction dist
+
+      pure function dist3(p1, p2) result(dd)
+      real(R8P),        intent(in) :: p1(3)
+      type(vector_R8P), intent(in) :: p2
+      real(R8P)                    :: dd
+
+      dd = sqrt((p1(1) - p2%x)**2 + (p1(2) - p2%y)**2 + (p1(3) - p2%z)**2)
+      endfunction dist3
+   endsubroutine refine_patch
 
    pure subroutine tri_normal(a, b, c, nrm, area)
    !< Unit normal and area of triangle (a, b, c); area 0 and normal 0 if degenerate.
