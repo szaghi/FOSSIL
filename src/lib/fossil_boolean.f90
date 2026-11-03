@@ -25,9 +25,10 @@ module fossil_boolean
 !< into A). Flipping the normal points it into A's exterior, which is the
 !< new outside of the result.
 !<
-!< Stage 1 of this PR ships only `BOOL_DIFFERENCE` end-to-end and tested.
-!< The other ops have parameter constants exposed for API stability but
-!< return STATUS_BOOL_NOT_IMPLEMENTED at present.
+!< All four ops are implemented. Coplanar overlaps, shared edges and
+!< contacts are handled since issue #33 (shared-boundary sub-triangles,
+!< see `apply_selection`). `BOOL_STATUS_NOT_IMPLEMENTED` is returned only
+!< for an op code that is none of the four.
 
 use fossil_arrangement,    only : arrangement_t, arrangement_initialize, &
                                   arrangement_collect_intersections, &
@@ -48,13 +49,13 @@ public :: boolean_compute
 ! Op codes — the API surface for `surface%boolean(other, op, status)`.
 integer(I4P), parameter :: BOOL_UNION      = 1_I4P  !< A ∪ B  : keep everything that is inside A or inside B.
 integer(I4P), parameter :: BOOL_INTERSECT  = 2_I4P  !< A ∩ B  : keep only what is inside both.
-integer(I4P), parameter :: BOOL_DIFFERENCE = 3_I4P  !< A \ B  : keep what is inside A but not inside B (this PR's MVP).
+integer(I4P), parameter :: BOOL_DIFFERENCE = 3_I4P  !< A \ B  : keep what is inside A but not inside B.
 integer(I4P), parameter :: BOOL_SYMDIFF    = 4_I4P  !< A △ B  : keep what is inside exactly one of A, B.
 
 ! Status codes.
 integer(I4P), parameter :: BOOL_STATUS_OK              = 0_I4P
 integer(I4P), parameter :: BOOL_STATUS_CDT_FAILED      = 1_I4P  !< Retriangulation could not recover a cut segment.
-integer(I4P), parameter :: BOOL_STATUS_NOT_IMPLEMENTED = 2_I4P  !< Op other than DIFFERENCE in this PR.
+integer(I4P), parameter :: BOOL_STATUS_NOT_IMPLEMENTED = 2_I4P  !< Op code is none of BOOL_UNION/INTERSECT/DIFFERENCE/SYMDIFF.
 integer(I4P), parameter :: BOOL_STATUS_EMPTY_INPUT     = 3_I4P  !< One of the input surfaces has zero facets.
 
 ! Three-state classification thresholds for the WN test:
