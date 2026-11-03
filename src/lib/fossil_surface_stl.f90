@@ -232,6 +232,7 @@ type :: surface_stl_object
       procedure, pass(self) :: line_crossings_many             !< Crossings of many parallel lines, fixed buffers (issue #40).
       procedure, pass(self) :: line_crossings_many_device      !< line_crossings_many on the device (issue #40).
       procedure, pass(self) :: move                            !< Move rigidly by a pose, refit the tree (issue #41).
+      procedure, pass(self) :: state_changes                   !< Fresh and dead points between two poses (issue #41).
       ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
       procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
       procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
@@ -3027,6 +3028,56 @@ contains
    !$acc end parallel loop
 
    endsubroutine distance_many_device
+
+   subroutine state_changes(self, pose0, pose1, points, fresh, dead, sign_algorithm, checked, status)
+   !< Fresh (solid at pose0, fluid at pose1) and dead (fluid at pose0, solid at pose1) points, e.g.
+   !< cell centres, between two poses of the body (issue #41).
+   !<
+   !< Each point goes to the body frame at both poses, b0 and b1. Its state can change only if the
+   !< segment b0 b1 reaches the surface, so when the distance at b0 exceeds |b0 - b1| the point keeps
+   !< its state and the second query is skipped (the band of decision 4, exact as a filter). The
+   !< states come from the signed distance with `sign_algorithm` (default SIGN_PSEUDO_NORMAL; the
+   !< fast winding number for dirty geometry). `checked` (optional) counts the points that needed
+   !< the second query. OpenMP over the points. `status = STATUS_INVALID_INPUT` on a size mismatch.
+   class(surface_stl_object), intent(in)            :: self           !< Surface (body frame).
+   type(rigid_pose_t),        intent(in)            :: pose0, pose1   !< Poses.
+   type(vector_R8P),          intent(in)            :: points(:)      !< World points [n].
+   logical,                   intent(out)           :: fresh(:)       !< Solid -> fluid [n].
+   logical,                   intent(out)           :: dead(:)        !< Fluid -> solid [n].
+   integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_* (default SIGN_PSEUDO_NORMAL).
+   integer(I4P),              intent(out), optional :: checked        !< Points that needed the second query.
+   integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P)     :: i, n, algo, nchk !< Work.
+   real(R8P)        :: b0(3), b1(3), d0, d1 !< Body points, signed distances.
+   logical          :: in0, in1 !< States.
+
+   if (present(status)) status = STATUS_OK
+   n = size(points, kind=I4P)
+   if (size(fresh) /= n .or. size(dead) /= n) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
+   nchk = 0_I4P
+   !$omp parallel do default(shared) schedule(dynamic, 64) private(i, b0, b1, d0, d1, in0, in1) reduction(+:nchk)
+   do i = 1_I4P, n
+      b0 = to_body(pose0, [points(i)%x, points(i)%y, points(i)%z])
+      b1 = to_body(pose1, [points(i)%x, points(i)%y, points(i)%z])
+      call self%compute_distance(point=vector_R8P(b0(1), b0(2), b0(3)), distance=d0, is_signed=.true., sign_algorithm=algo, &
+                                 is_square_root=.true.)
+      in0 = d0 < 0._R8P
+      fresh(i) = .false. ; dead(i) = .false.
+      if (abs(d0) > norm2(b1 - b0)) cycle ! the segment b0 b1 cannot reach the surface
+      nchk = nchk + 1_I4P
+      call self%compute_distance(point=vector_R8P(b1(1), b1(2), b1(3)), distance=d1, is_signed=.true., sign_algorithm=algo, &
+                                 is_square_root=.true.)
+      in1 = d1 < 0._R8P
+      fresh(i) = in0 .and. .not. in1
+      dead(i) = in1 .and. .not. in0
+   enddo
+   !$omp end parallel do
+   if (present(checked)) checked = nchk
+   endsubroutine state_changes
 
    subroutine move(self, pose)
    !< Move the surface rigidly by `pose` (x <- R x + t) and refit the tree instead of rebuilding it

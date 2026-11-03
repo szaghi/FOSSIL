@@ -95,6 +95,7 @@ type :: curve_object
       procedure, pass(self) :: line_crossings_many_device !< line_crossings_many on the device (issue #40).
       procedure, pass(self) :: cut_cells            !< Exact cut cells of a block (issue #40).
       procedure, pass(self) :: move                 !< Move rigidly by an in-plane pose, refit the tree (issue #41).
+      procedure, pass(self) :: state_changes        !< Fresh and dead points between two poses (issue #41).
       procedure, pass(self) :: check_validity       !< First validity defect (CURVE_* code).
       procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
       procedure, pass(self) :: distance             !< (Signed) distance of a point.
@@ -1635,6 +1636,44 @@ contains
    endfunction winding_number_exact
 
    ! private methods
+   subroutine state_changes(self, pose0, pose1, points, fresh, dead, sign_algorithm, checked, status)
+   !< Fresh (solid -> fluid) and dead (fluid -> solid) points (u, v) between two in-plane poses (issue
+   !< #41): the surface twin, with the same band filter (|d(b0)| > |b0 - b1|: no change).
+   class(curve_object),   intent(in)            :: self           !< Curve (body frame).
+   type(rigid_pose_2d_t), intent(in)            :: pose0, pose1   !< Poses.
+   real(R8P),             intent(in)            :: points(:,:)    !< World points [2, n].
+   logical,               intent(out)           :: fresh(:)       !< Solid -> fluid [n].
+   logical,               intent(out)           :: dead(:)        !< Fluid -> solid [n].
+   integer(I4P),          intent(in),  optional :: sign_algorithm !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
+   integer(I4P),          intent(out), optional :: checked        !< Points that needed the second query.
+   integer(I4P),          intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P) :: i, n, nchk !< Work.
+   real(R8P)    :: b0(2), b1(2), d0 !< Body points, signed distance.
+   logical      :: in0, in1 !< States.
+
+   if (present(status)) status = STATUS_OK
+   n = size(points, 2, kind=I4P)
+   if (size(points, 1) /= 2 .or. size(fresh) /= n .or. size(dead) /= n) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   nchk = 0_I4P
+   !$omp parallel do default(shared) schedule(dynamic, 64) private(i, b0, b1, d0, in0, in1) reduction(+:nchk)
+   do i = 1_I4P, n
+      b0 = to_body(pose0, points(:, i)) ; b1 = to_body(pose1, points(:, i))
+      d0 = self%distance(b0, sign_algorithm=sign_algorithm)
+      in0 = d0 < 0._R8P
+      fresh(i) = .false. ; dead(i) = .false.
+      if (abs(d0) > norm2(b1 - b0)) cycle
+      nchk = nchk + 1_I4P
+      in1 = self%distance(b1, sign_algorithm=sign_algorithm) < 0._R8P
+      fresh(i) = in0 .and. .not. in1
+      dead(i) = in1 .and. .not. in0
+   enddo
+   !$omp end parallel do
+   if (present(checked)) checked = nchk
+   endsubroutine state_changes
+
    subroutine move(self, pose)
    !< Move the curve rigidly by the in-plane `pose` ((u, v) <- R (u, v) + t) and refit its segment
    !< tree instead of rebuilding it (issue #41): the coordinate-derived data are recomputed as
