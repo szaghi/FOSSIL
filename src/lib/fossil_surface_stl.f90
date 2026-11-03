@@ -214,6 +214,8 @@ type :: surface_stl_object
       procedure, pass(self) :: query_many                      !< Batch rich query: distance, closest point, facet, feature, normal, body (issue #37).
       procedure, pass(self) :: query_point                     !< Rich query of one point (issue #37).
       procedure, pass(self) :: query_many_device               !< query_many on the device (issue #37).
+      procedure, pass(self) :: probe_many                      !< Probe points along the normal, with visibility (issue #37).
+      procedure, pass(self) :: image_points                    !< Mirror points through the closest point, with visibility (issue #37).
       ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
       procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
       procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
@@ -1790,6 +1792,82 @@ contains
    if (present(bodies)) bodies = bdl
    endsubroutine query_many_device
 
+   subroutine probe_many(self, points, lengths, probe_points, visible, foot_points, normals, status)
+   !< Probe points (issue #37): for each point, the point at distance lengths(i) along the
+   !< pseudo-normal of its closest feature, from its foot point (closest point): positive lengths go
+   !< outward, negative inward. `visible(i)` is true when the open segment from the foot point to
+   !< the probe point crosses no facet: hits of a ray from the foot point (along +-n) with
+   !< tol < t <= |length|, tol = 1e-9 times the box diagonal (the facets containing the foot point
+   !< are hit at t ~ 0). Supports the placement rules of image points at sqrt(2) dx, image lines,
+   !< second image layers and fixed-distance probes; `status = STATUS_INVALID_INPUT` on a size
+   !< mismatch. OpenMP over the points.
+   class(surface_stl_object), intent(in)            :: self              !< Surface.
+   type(vector_R8P),          intent(in)            :: points(:)         !< Query points [n].
+   real(R8P),                 intent(in)            :: lengths(:)        !< Probe lengths [n] (+ outward).
+   real(R8P),                 intent(out)           :: probe_points(:,:) !< Probe points [3, n].
+   logical,                   intent(out)           :: visible(:)        !< Segment foot-probe crosses no facet [n].
+   real(R8P),                 intent(out), optional :: foot_points(:,:)  !< Foot (closest) points [3, n].
+   real(R8P),                 intent(out), optional :: normals(:,:)      !< Pseudo-normals [3, n].
+   integer(I4P),              intent(out), optional :: status            !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(vector_R8P)                                 :: cp, pn, tip       !< Per-point work.
+   real(R8P)                                        :: d, tol            !< Work.
+   integer(I4P)                                     :: i, n              !< Counters.
+
+   if (present(status)) status = STATUS_OK
+   n = size(points, kind=I4P)
+   if (size(lengths) /= n .or. size(probe_points, 1) /= 3 .or. size(probe_points, 2) /= n .or. size(visible) /= n .or. &
+       bad_shape3(foot_points, n) .or. bad_shape3(normals, n)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   tol = 1.e-9_R8P * vnorm(self%bmax - self%bmin)
+   !$omp parallel do default(shared) schedule(static) private(i, cp, pn, tip, d)
+   do i = 1_I4P, n
+      call self%query_point(point=points(i), distance=d, closest_point=cp, normal=pn)
+      tip = cp + lengths(i) * pn
+      probe_points(:, i) = [tip%x, tip%y, tip%z]
+      visible(i) = segment_clear(self, cp, tip, tol)
+      if (present(foot_points)) foot_points(:, i) = [cp%x, cp%y, cp%z]
+      if (present(normals)) normals(:, i) = [pn%x, pn%y, pn%z]
+   enddo
+   !$omp end parallel do
+   endsubroutine probe_many
+
+   subroutine image_points(self, points, images, visible, foot_points, status)
+   !< Image points (issue #37): the mirror of each point through its closest point, 2 foot - x
+   !< (the ghost-point image of an IB closure), and whether the open segment from the foot point to
+   !< the image crosses no facet (see `probe_many`). OpenMP over the points.
+   class(surface_stl_object), intent(in)            :: self             !< Surface.
+   type(vector_R8P),          intent(in)            :: points(:)        !< Query points [n].
+   real(R8P),                 intent(out)           :: images(:,:)      !< Image points [3, n].
+   logical,                   intent(out), optional :: visible(:)       !< Segment foot-image crosses no facet [n].
+   real(R8P),                 intent(out), optional :: foot_points(:,:) !< Foot points [3, n].
+   integer(I4P),              intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(vector_R8P)                                 :: cp, img          !< Per-point work.
+   real(R8P)                                        :: d, tol           !< Work.
+   integer(I4P)                                     :: i, n             !< Counters.
+   logical                                          :: bad              !< Size check.
+
+   if (present(status)) status = STATUS_OK
+   n = size(points, kind=I4P)
+   bad = size(images, 1) /= 3 .or. size(images, 2) /= n .or. bad_shape3(foot_points, n)
+   if (present(visible)) bad = bad .or. size(visible) /= n
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   tol = 1.e-9_R8P * vnorm(self%bmax - self%bmin)
+   !$omp parallel do default(shared) schedule(static) private(i, cp, img, d)
+   do i = 1_I4P, n
+      call self%query_point(point=points(i), distance=d, closest_point=cp)
+      img%x = 2._R8P * cp%x - points(i)%x ; img%y = 2._R8P * cp%y - points(i)%y ; img%z = 2._R8P * cp%z - points(i)%z
+      images(:, i) = [img%x, img%y, img%z]
+      if (present(visible)) visible(i) = segment_clear(self, cp, img, tol)
+      if (present(foot_points)) foot_points(:, i) = [cp%x, cp%y, cp%z]
+   enddo
+   !$omp end parallel do
+   endsubroutine image_points
+
    subroutine distance_many(self, points, distances, is_signed, sign_algorithm, is_square_root, status)
    !< Batch distance query over a point array — the Adam/Xall embedded-boundary
    !< access pattern (one distance per Cartesian grid point against a static
@@ -1874,6 +1952,48 @@ contains
       endif
    enddo
    endsubroutine brute_force_with_region
+
+   function segment_clear(self, a, b, tol) result(clear)
+   !< True if the open segment from a (on the surface) to b crosses no facet beyond tol from a.
+   type(surface_stl_object), intent(in) :: self  !< Surface.
+   type(vector_R8P),         intent(in) :: a, b  !< Segment ends.
+   real(R8P),                intent(in) :: tol   !< Hits with t <= tol (the facets at a) are ignored.
+   logical                              :: clear !< Result.
+   type(ray_hit_t), allocatable         :: hits(:) !< Ray hits.
+   type(vector_R8P)                     :: dir   !< Unit direction.
+   real(R8P)                            :: len   !< Segment length.
+   integer(I4P)                         :: h     !< Counter.
+
+   clear = .true.
+   len = vnorm(b - a)
+   if (len <= tol) return
+   dir = (b - a) / len
+   call self%intersect_ray_all(ray_origin=a, ray_direction=dir, hits=hits)
+   do h = 1, size(hits)
+      if (hits(h)%t > tol .and. hits(h)%t <= len) then
+         clear = .false.
+         return
+      endif
+   enddo
+   endfunction segment_clear
+
+   pure function vnorm(a) result(r)
+   !< Euclidean norm of a vector (plain components, no TBP).
+   type(vector_R8P), intent(in) :: a !< Vector.
+   real(R8P)                    :: r !< Norm.
+
+   r = sqrt(a%x * a%x + a%y * a%y + a%z * a%z)
+   endfunction vnorm
+
+   pure function bad_shape3(a, n) result(bad)
+   !< True if the optional array a is present and not [3, n].
+   real(R8P), optional, intent(in) :: a(:,:) !< Array.
+   integer(I4P),        intent(in) :: n      !< Columns.
+   logical                         :: bad    !< Result.
+
+   bad = .false.
+   if (present(a)) bad = size(a, 1) /= 3 .or. size(a, 2) /= n
+   endfunction bad_shape3
 
    subroutine closest_with_region(self, point, d2, facet, region, closest)
    !< Squared distance, closest facet, Voronoi region and closest point (issue #37): the traversal

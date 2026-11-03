@@ -89,6 +89,8 @@ type :: curve_object
       procedure, pass(self) :: enter_device         !< Map the query arrays to the device.
       procedure, pass(self) :: query_many           !< Batched rich query (issue #37), CPU (OpenMP).
       procedure, pass(self) :: query_many_device    !< Batched rich query on the device (OpenACC).
+      procedure, pass(self) :: probe_many           !< Probe points along the normal, with exact visibility (issue #37).
+      procedure, pass(self) :: image_points         !< Mirror points through the closest point, with visibility (issue #37).
       procedure, pass(self) :: exit_device          !< Release the device arrays.
       procedure, pass(self) :: get_area             !< Total signed area.
       procedure, pass(self) :: get_bmax             !< Bounding box maximum.
@@ -359,6 +361,76 @@ contains
    if (present(normals)) normals = nml
    if (present(bodies)) bodies = bdl
    endsubroutine query_many_device
+
+   subroutine probe_many(self, points, lengths, probe_points, visible, foot_points, normals, status)
+   !< Probe points (issue #37): for each point (u, v), the point at distance lengths(i) along the
+   !< pseudo-normal of its closest feature from its foot point (+ outward, - inward), and whether
+   !< the segment from the foot point to the probe point crosses no segment of the curve other than
+   !< those containing the foot point (the closest segment, or the two at the closest vertex). The
+   !< crossing test is exact (`orient2d_xy`, candidates from the BVH). OpenMP over the points.
+   class(curve_object), intent(in)            :: self              !< Curve.
+   real(R8P),           intent(in)            :: points(:,:)       !< Points [2, n].
+   real(R8P),           intent(in)            :: lengths(:)        !< Probe lengths [n].
+   real(R8P),           intent(out)           :: probe_points(:,:) !< Probe points [2, n].
+   logical,             intent(out)           :: visible(:)        !< Segment foot-probe crosses nothing [n].
+   real(R8P),           intent(out), optional :: foot_points(:,:)  !< Foot points [2, n].
+   real(R8P),           intent(out), optional :: normals(:,:)      !< Pseudo-normals [2, n].
+   integer(I4P),        intent(out), optional :: status            !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)                                  :: d, cp(2), nn(2), tip(2) !< Per-point work.
+   integer(I4P)                               :: i, n, sg, vx      !< Work.
+
+   if (present(status)) status = STATUS_OK
+   n = size(points, 2, kind=I4P)
+   if (size(points, 1) /= 2 .or. size(lengths) /= n .or. size(probe_points, 1) /= 2 .or. size(probe_points, 2) /= n .or. &
+       size(visible) /= n .or. .not. rich_sizes_ok(n, closest_points=foot_points, normals=normals)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   !$omp parallel do default(shared) schedule(static) private(i, d, cp, nn, tip, sg, vx)
+   do i = 1, n
+      call self%compute_distance(p=points(:, i), distance=d, closest_point=cp, closest_segment=sg, closest_vertex=vx, &
+                                 normal=nn)
+      tip = cp + lengths(i) * nn
+      probe_points(:, i) = tip
+      visible(i) = path_clear(self, cp, tip, sg, vx)
+      if (present(foot_points)) foot_points(:, i) = cp
+      if (present(normals)) normals(:, i) = nn
+   enddo
+   !$omp end parallel do
+   endsubroutine probe_many
+
+   subroutine image_points(self, points, images, visible, foot_points, status)
+   !< Image points (issue #37): the mirror of each point through its closest point, 2 foot - x, and
+   !< whether the segment foot-image crosses no other segment (exact, see `probe_many`).
+   class(curve_object), intent(in)            :: self             !< Curve.
+   real(R8P),           intent(in)            :: points(:,:)      !< Points [2, n].
+   real(R8P),           intent(out)           :: images(:,:)      !< Image points [2, n].
+   logical,             intent(out), optional :: visible(:)       !< Segment foot-image crosses nothing [n].
+   real(R8P),           intent(out), optional :: foot_points(:,:) !< Foot points [2, n].
+   integer(I4P),        intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)                                  :: d, cp(2), img(2) !< Per-point work.
+   integer(I4P)                               :: i, n, sg, vx     !< Work.
+   logical                                    :: bad              !< Size check.
+
+   if (present(status)) status = STATUS_OK
+   n = size(points, 2, kind=I4P)
+   bad = size(points, 1) /= 2 .or. size(images, 1) /= 2 .or. size(images, 2) /= n .or. &
+         .not. rich_sizes_ok(n, closest_points=foot_points)
+   if (present(visible)) bad = bad .or. size(visible) /= n
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   !$omp parallel do default(shared) schedule(static) private(i, d, cp, img, sg, vx)
+   do i = 1, n
+      call self%compute_distance(p=points(:, i), distance=d, closest_point=cp, closest_segment=sg, closest_vertex=vx)
+      img = 2._R8P * cp - points(:, i)
+      images(:, i) = img
+      if (present(visible)) visible(i) = path_clear(self, cp, img, sg, vx)
+      if (present(foot_points)) foot_points(:, i) = cp
+   enddo
+   !$omp end parallel do
+   endsubroutine image_points
 
    subroutine enter_device(self)
    !< Map the query arrays (tree, payload, winding cache, topology, pseudo-normals) to the device.
@@ -1339,6 +1411,31 @@ contains
    endif
    if (side < 0._R8P) d = -d
    endsubroutine curve_query_oac
+
+   pure function path_clear(self, a, b, sg, vx) result(clear)
+   !< True if the segment a-b crosses no segment of the curve except those containing the foot point
+   !< a: the closest segment sg (vx = 0) or the segments at the closest vertex vx. Exact.
+   type(curve_object), intent(in) :: self  !< Curve.
+   real(R8P),          intent(in) :: a(2)  !< Foot point.
+   real(R8P),          intent(in) :: b(2)  !< Probe / image point.
+   integer(I4P),       intent(in) :: sg    !< Closest segment.
+   integer(I4P),       intent(in) :: vx    !< Closest vertex (0: segment interior).
+   logical                        :: clear !< Result.
+   integer(I4P), allocatable      :: ids(:) !< Candidates.
+   integer(I4P)                   :: m, c, q1, q2 !< Work.
+
+   clear = .true.
+   call self%bvh%segments_in_box(min(a(1), b(1)), min(a(2), b(2)), max(a(1), b(1)), max(a(2), b(2)), ids, m)
+   do c = 1, m
+      q1 = self%bvh%seg_id(ids(c)) ; q2 = self%next(q1)
+      if (vx == 0_I4P .and. q1 == sg) cycle
+      if (vx > 0_I4P .and. (q1 == vx .or. q2 == vx)) cycle
+      if (segments_intersect(a(1), a(2), b(1), b(2), self%u(q1), self%v(q1), self%u(q2), self%v(q2))) then
+         clear = .false.
+         return
+      endif
+   enddo
+   endfunction path_clear
 
    pure function rich_sizes_ok(n, closest_points, segments, vertices, normals, bodies) result(good)
    !< True if every present rich output has the right size for n points.
