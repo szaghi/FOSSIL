@@ -66,6 +66,9 @@ endprogram curve_tour
 | `get_bodies_number`, `loop_body(l)` | Bodies: outer loops with their holes; islands and open loops are their own. |
 | `box_classify_many(lo, hi, codes, radius, sign_algorithm, inside, status)` | Classify boxes `lo(2, n)`, `hi(2, n)`: `BOX_CUT` (exact), `BOX_NEAR`, `BOX_INSIDE`, `BOX_OUTSIDE` (issue #38); `box_classify_many_device` on the device. |
 | `box_intersects_curve(lo, hi)` | True if the closed box meets the curve (exact). |
+| `line_crossings(axis, a, t0, t1, t, segments, entering, n, status)` | Exact crossings of an axis-aligned line (issue #40); `line_crossings_many(_device)` for many lines into fixed buffers. |
+| `cell_wall_fractions(x, y, frac, inside, bad_lines, status)` | Wall fractions toward the four neighbours of every cell centre, parity inside flags. |
+| `cut_cells(x, y, cut, status)` | Exact cut cells (`cut_cells_2d_t`): fractions, apertures, centroids, wetted boundary, pieces. See [Cut-cell geometry](/guide/advanced/cut-cells). |
 | `tag_block(x, y, band, tags, sign_algorithm, status)` | Signed tag bands on a block of cells given its edges. See [AMR tagging](/guide/advanced/amr-tagging). |
 
 `sign_algorithm` is `SIGN_PSEUDO_NORMAL` (default) or

@@ -85,6 +85,7 @@ export default withMermaid({
             { text: 'Immersed-boundary queries',  link: '/guide/advanced/ib-queries' },
             { text: 'AMR tagging',                link: '/guide/advanced/amr-tagging' },
             { text: 'Sign algorithms benchmark',  link: '/guide/advanced/sign-benchmark' },
+            { text: 'Cut-cell geometry',          link: '/guide/advanced/cut-cells' },
           ],
         },
         {

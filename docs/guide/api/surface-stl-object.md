@@ -805,6 +805,27 @@ device after `enter_device`; pseudo-normal or fast-winding-number sign),
 
 ---
 
+### `line_crossings`
+
+```fortran
+call surface%line_crossings(axis=1_I4P, a=y0, b=z0, t0=xmin, t1=xmax, t=t, facets=f, entering=e, n=n)
+```
+
+**Purpose.** Every crossing of the line along `axis` at (a, b) (the other two
+coordinates in cyclic order) with the surface, with parameter in [t0, t1],
+sorted, with its facet and whether the line, going in +axis, enters the solid
+(issue #40). Exact test (exact orient2d on the projected triangle with a
+symbolic tie-break): on a watertight surface every crossing is counted once.
+
+**Related.** `line_crossings_many(axis, a, b, t0, t1, t, facets, entering, counts, overflow)`
+and its device twin (fixed buffers, bit-exact);
+`cell_wall_fractions(x, y, z, frac, inside, bad_lines)`: the fraction toward each of
+the six neighbours of every cell centre and the parity inside flags;
+`cut_cells_3d(surface, x, y, z, cut)` (module procedure): face fractions and cell
+volumes. See [Cut-cell geometry](/guide/advanced/cut-cells).
+
+---
+
 ### `box_classify_many`
 
 ```fortran
