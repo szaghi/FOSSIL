@@ -119,6 +119,49 @@ endprogram ghost_points
     & Aoki).
   - q is large by nature on the medial axis.
 
+## Curvature at the foot point
+
+Curved slip walls need the wall curvature where the image point projects
+(∂ₙv_t = v_t / R_c; Funada & Imamura, Ciallella et al.). `query_many`
+returns it as an optional output (issue #42, CPU):
+
+- **Surfaces: `curvatures(2, n)` = (H, K).** These are the mean curvature
+  (k₁ + k₂)/2 and the Gaussian curvature k₁k₂.
+  - Both are the per-vertex `mean_curvature` (cotangent Laplacian) and
+    `gaussian_curvature` (angle defect), interpolated with the foot's
+    barycentric weights. They are rebuilt once per call, at O(facets) cost.
+  - H > 0 where the surface is convex seen from the side the normals point
+    to: a sphere gives (1/R, 1/R²), a cylinder (1/(2R), 0).
+- **Curves: `curvatures(n)`.** Each vertex gets its turning angle over the
+  mean length of its two segments, and the value is interpolated along the
+  segment.
+  - It is positive on outer loops and negative on holes.
+  - It is 0 at the ends of an open loop.
+
+Both work with `pose=`, since curvature is invariant under rigid motion.
+
+## Grid-adapted markers
+
+Wall models evaluated at surface points (van Noordt et al.) and
+direct-forcing force integration need markers spaced like the grid. Direct
+forcing needs a spacing of 0.8–1.2 Δx (Cheylan et al. 2023).
+
+- **`surface%surface_markers(dx, centroids, areas, normals, spacing_fraction,
+  spacings, iterations, preserve_features)`** remeshes a copy of the
+  surface with `isotropic_remesh` and returns the facet centroids, areas
+  and unit normals. The surface itself is not changed.
+  - The target edge is √3 Δx: centroids of two equilateral neighbours are
+    then Δx apart.
+  - One calibration pass rescales that target by Δx over the measured mean
+    spacing, because the remesher's edges come out short.
+  - `spacing_fraction` reports the fraction of nearest-neighbour spacings
+    inside the window.
+  - Pass `preserve_features=.true.` on bodies with sharp edges.
+- **`curve%curve_markers(dx, centroids, lengths, normals, spacing_fraction,
+  spacings)`** resamples every loop exactly along the polyline into
+  nint(L/Δx) pieces of equal arc length. The markers sit at the piece
+  midpoints, on the polyline.
+
 ## Placement rules from the literature
 
 All of them are lengths for `probe_many`:
@@ -141,6 +184,12 @@ All of them are lengths for `probe_many`:
 | cube ghost points in face regions (1100) | closest + \|φ\| n = 2·closest − x |
 | two cubes 0.2 apart | a probe into the other cube, or an image inside it, is reported not visible |
 | cube centre, diagonal plane, mid-gap, L-shape medial points | flagged; generic points not |
+| foot curvature, icospheres R = 2 (2, 3, 4 subdivisions) | RMS error of H 1.45e-2, 8.8e-3, 5.6e-3; of K 8.9e-3, 4.6e-3, 2.8e-3; maximum relative error 0.12–0.15 |
+| foot curvature, cylinder and flat faces | exact to round-off |
+| foot curvature, regular N-gons R = 1 | (π/N)/sin(π/N) exactly: the error against 1/R falls by 4.0 per halving of h |
+| markers, unit icosphere, Δx = 0.06 | 1962 markers, area within 0.6 %, 91 % of spacings in [0.8, 1.2] Δx |
+| markers, unit cube, Δx = 0.1, features kept | area 6 to round-off, 72 % of spacings in the window |
+| curve markers, square and 64-gon | on the polyline (distance ≤ 6.6e-17), equal lengths summing to the perimeter |
 
 ## Limitations
 
@@ -148,6 +197,13 @@ All of them are lengths for `probe_many`:
   2-D) run bit-exact on the host in `tests-gnu`. The GPU benches print
   `rich device vs serial max err` and `rich id mismatches` for the manual
   gate, which has not run yet.
-- **Multiple foot points are CPU only.**
+- **Multiple foot points and foot curvature are CPU only.**
+- **3-D foot curvature does not converge pointwise.** The per-vertex
+  operators use barycentric areas. On icospheres the RMS error decreases
+  with refinement, but the maximum stays near 15 %, at the valence-5
+  vertices. Cylinders and planes are exact.
+- **Marker spacing follows the remesher.** Most spacings land inside
+  [0.8, 1.2] Δx (91 % on a sphere, 72 % on a cube), but not all.
+  `spacing_fraction` reports how many do.
 - **3-D visibility uses ray casting.** A ray grazing an edge exactly may
   count or miss a hit, as in any ray caster. The 2-D test is exact.

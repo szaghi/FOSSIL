@@ -60,7 +60,7 @@ endprogram curve_tour
 | `is_point_inside(p, sign_algorithm)` | Inside test: pseudo-normal sign (default) or winding number > 0.5. |
 | `distance_many(points, distances, is_signed, sign_algorithm, status)` | Batch over `points(2, n)`, OpenMP; bit-exact with `compute_distance`. |
 | `enter_device`, `exit_device`, `distance_many_device(...)`, `get_is_on_device` | The same batch on the device (OpenACC). |
-| `query_many(points, distances, closest_points, segments, vertices, normals, bodies, is_signed, sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status)` | Rich batch (issue #37); `query_many_device` on the device. |
+| `query_many(points, distances, closest_points, segments, vertices, normals, bodies, is_signed, sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status, pose, curvatures)` | Rich batch (issue #37); `query_many_device` on the device. `curvatures`: curvature at the foot point (issue #42, CPU). |
 | `probe_many(points, lengths, probe_points, visible, foot_points, normals, status)` | Probe points along the normal; exact visibility. |
 | `image_points(points, images, visible, foot_points, status)` | Mirror through the closest point; exact visibility. |
 | `get_bodies_number`, `loop_body(l)` | Bodies: outer loops with their holes; islands and open loops are their own. |
@@ -70,6 +70,7 @@ endprogram curve_tour
 | `cell_wall_fractions(x, y, frac, inside, bad_lines, status)` | Wall fractions toward the four neighbours of every cell centre, parity inside flags. |
 | `move(pose)`, `state_changes(pose0, pose1, points, fresh, dead, sign_algorithm, checked, status)` | Rigid in-plane move with a tree refit; fresh and dead points between two poses (issue #41). `distance_many`, `query_many`, `is_point_inside` and the device twins take an optional `pose` (`rigid_pose_2d_t`). See [Moving bodies](/guide/advanced/moving-bodies). |
 | `wall_distance_many(points, distances, bodies, cutoff, status)` | Unsigned wall distance and body, (cutoff, 0) beyond the cutoff (issue #42). |
+| `curve_markers(dx, centroids, lengths, normals, spacing_fraction, spacings, status)` | Exact arc-length resampling into nint(L/dx) pieces per loop: markers on the polyline, lengths, normals (issue #42). |
 | `cut_cells(x, y, cut, status)` | Exact cut cells (`cut_cells_2d_t`): fractions, apertures, centroids, wetted boundary, pieces. See [Cut-cell geometry](/guide/advanced/cut-cells). |
 | `tag_block(x, y, band, tags, sign_algorithm, status)` | Signed tag bands on a block of cells given its edges. See [AMR tagging](/guide/advanced/amr-tagging). |
 

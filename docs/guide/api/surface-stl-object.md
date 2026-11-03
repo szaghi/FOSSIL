@@ -796,6 +796,8 @@ and body. OpenMP over the points; bit-exact with `compute_distance`. See
 | `rel_tolerance`      | `in`, opt.  | `real(R8P)`           | Default 1e-6.                                                         |
 | `foot_tolerance`     | `in`, opt.  | `real(R8P)`           | Default 1e-9 of the box diagonal.                                     |
 | `status`             | `out`, opt. | `integer(I4P)`        | `STATUS_INVALID_INPUT` on a size mismatch.                            |
+| `pose`               | `in`, opt.  | `rigid_pose_t`        | Body pose: world-frame points and outputs (issue #41).                |
+| `curvatures`         | `out`, opt. | `real(R8P)(2, n)`     | Mean and Gaussian curvature at the foot point (issue #42, CPU only).  |
 
 **Related.** `query_point` (one point), `query_many_device` (same, on the
 device after `enter_device`; pseudo-normal or fast-winding-number sign),
@@ -805,6 +807,32 @@ device after `enter_device`; pseudo-normal or fast-winding-number sign),
 
 ---
 
+
+### `surface_markers`
+
+```fortran
+call surface%surface_markers(dx=0.05_R8P, centroids=c, areas=a, normals=n, spacing_fraction=f)
+```
+
+**Purpose.** Grid-adapted surface markers for wall models and force
+integration (issue #42). A copy of the surface is remeshed so that the
+centroids of neighbouring facets lie about `dx` apart (target edge √3 dx,
+plus one calibration pass). The surface itself is not changed. See
+[Immersed-boundary queries](/guide/advanced/ib-queries).
+
+| Argument            | Intent      | Type                         | Notes                                                        |
+| ------------------- | ----------- | ---------------------------- | ------------------------------------------------------------ |
+| `dx`                | `in`        | `real(R8P)`                  | Grid spacing (> 0).                                          |
+| `centroids`         | `out`       | `real(R8P), allocatable(3, m)` | Marker positions (facet centroids).                        |
+| `areas`             | `out`       | `real(R8P), allocatable(m)`  | Marker areas.                                                |
+| `normals`           | `out`       | `real(R8P), allocatable(3, m)` | Unit outward normals.                                      |
+| `spacing_fraction`  | `out`, opt. | `real(R8P)`                  | Fraction of nearest-neighbour spacings in [0.8, 1.2] dx.     |
+| `spacings`          | `out`, opt. | `real(R8P), allocatable(m)`  | Distance to the nearest edge-neighbour centroid.             |
+| `iterations`        | `in`, opt.  | `integer(I4P)`               | Remesh iterations (default 5).                               |
+| `preserve_features` | `in`, opt.  | `logical`                    | Keep sharp edges (default `.false.`).                        |
+| `status`            | `out`, opt. | `integer(I4P)`               | `STATUS_INVALID_INPUT` for dx <= 0, an empty surface or a failed remesh. |
+
+**Related.** `curve%curve_markers` (exact 2-D resampling), `isotropic_remesh`.
 ### `move`
 
 ```fortran
