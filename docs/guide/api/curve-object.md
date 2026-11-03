@@ -54,12 +54,16 @@ endprogram curve_tour
 | Method | Purpose |
 |---|---|
 | `distance(p, is_signed, sign_algorithm)` | (Signed) distance of p = [u, v]; negative inside. |
-| `compute_distance(p, distance, closest_point, closest_segment, closest_vertex, is_signed, use_brute_force, sign_algorithm)` | Distance with the closest point, segment and vertex (0 in a segment interior). |
+| `compute_distance(p, distance, closest_point, closest_segment, closest_vertex, is_signed, use_brute_force, sign_algorithm, normal, body)` | Distance with the closest point, segment and vertex (0 in a segment interior), normal and body. |
 | `winding_number(p, use_brute_force, beta)` | Generalized winding number: fast hierarchical, or the exact angle sum. |
 | `winding_number_exact(p)` | Exact integer winding number over the closed loops. |
 | `is_point_inside(p, sign_algorithm)` | Inside test: pseudo-normal sign (default) or winding number > 0.5. |
 | `distance_many(points, distances, is_signed, sign_algorithm, status)` | Batch over `points(2, n)`, OpenMP; bit-exact with `compute_distance`. |
 | `enter_device`, `exit_device`, `distance_many_device(...)`, `get_is_on_device` | The same batch on the device (OpenACC). |
+| `query_many(points, distances, closest_points, segments, vertices, normals, bodies, is_signed, sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status)` | Rich batch (issue #37); `query_many_device` on the device. |
+| `probe_many(points, lengths, probe_points, visible, foot_points, normals, status)` | Probe points along the normal; exact visibility. |
+| `image_points(points, images, visible, foot_points, status)` | Mirror through the closest point; exact visibility. |
+| `get_bodies_number`, `loop_body(l)` | Bodies: outer loops with their holes; islands and open loops are their own. |
 
 `sign_algorithm` is `SIGN_PSEUDO_NORMAL` (default) or
 `SIGN_FAST_WINDING_NUMBER`; the latter is robust on open loops and gaps.

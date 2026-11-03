@@ -718,6 +718,8 @@ projection.
 | `facet_index`     | `out`, opt.  | `integer(I4P)`     | 1-based index of the facet holding the closest point. 0 if the surface has no facets.                 |
 | `edge_index`      | `out`, opt.  | `integer(I4P)`     | Local edge id (1, 2, or 3) when the closest point lies on an edge interior; 0 otherwise.              |
 | `vertex_index`    | `out`, opt.  | `integer(I4P)`     | Local vertex id (1, 2, or 3) when the closest point coincides with a vertex; 0 otherwise.             |
+| `closest_point`   | `out`, opt.  | `type(vector_R8P)` | Closest point on the surface (issue #37). Does not change `distance`.                                 |
+| `normal`          | `out`, opt.  | `type(vector_R8P)` | Pseudo-normal of the closest feature (facet, edge or vertex; issue #37).                              |
 
 **Example.** Identify the closest feature class on every query.
 
@@ -763,6 +765,43 @@ end program ex_compute_distance
 **See also.** [`distance`](#distance),
 [`is_point_inside`](#is_point_inside),
 [`facet%compute_distance_with_region`](/guide/api/facet-object#compute_distance_with_region).
+
+---
+
+### `query_many`
+
+```fortran
+call surface%query_many(points=p, distances=d, closest_points=cp, facets=f, features=ft, normals=n, bodies=b)
+```
+
+**Purpose.** Batch rich query for immersed-boundary closures (issue #37):
+per point the distance, closest point, closest facet, feature, pseudo-normal
+and body. OpenMP over the points; bit-exact with `compute_distance`. See
+[Immersed-boundary queries](/guide/advanced/ib-queries).
+
+| Argument             | Intent      | Type                  | Notes                                                                 |
+| -------------------- | ----------- | --------------------- | --------------------------------------------------------------------- |
+| `points`             | `in`        | `type(vector_R8P)(n)` | Query points.                                                         |
+| `distances`          | `out`       | `real(R8P)(n)`        | Distances, signed by default (negative inside), not squared.          |
+| `closest_points`     | `out`, opt. | `real(R8P)(3, n)`     | Closest points.                                                       |
+| `facets`             | `out`, opt. | `integer(I4P)(n)`     | Closest facets.                                                       |
+| `features`           | `out`, opt. | `integer(I4P)(n)`     | `FEATURE_FACE`, `FEATURE_EDGE`, `FEATURE_VERTEX`.                     |
+| `feature_indexes`    | `out`, opt. | `integer(I4P)(n)`     | Local edge or vertex index (0 for a face).                            |
+| `normals`            | `out`, opt. | `real(R8P)(3, n)`     | Pseudo-normals of the closest features.                               |
+| `bodies`             | `out`, opt. | `integer(I4P)(n)`     | Bodies (`facet_body`).                                                |
+| `is_signed`          | `in`, opt.  | `logical`             | Default `.true.`.                                                     |
+| `sign_algorithm`     | `in`, opt.  | `integer(I4P)`        | Default `SIGN_PSEUDO_NORMAL`.                                         |
+| `ambiguous`          | `out`, opt. | `logical(n)`          | Another foot point within the tolerances (CPU only).                  |
+| `second_foot_points` | `out`, opt. | `real(R8P)(3, n)`     | The nearest other foot point (the foot point if none).                |
+| `rel_tolerance`      | `in`, opt.  | `real(R8P)`           | Default 1e-6.                                                         |
+| `foot_tolerance`     | `in`, opt.  | `real(R8P)`           | Default 1e-9 of the box diagonal.                                     |
+| `status`             | `out`, opt. | `integer(I4P)`        | `STATUS_INVALID_INPUT` on a size mismatch.                            |
+
+**Related.** `query_point` (one point), `query_many_device` (same, on the
+device after `enter_device`; pseudo-normal or fast-winding-number sign),
+`probe_many(points, lengths, probe_points, visible, foot_points, normals)`,
+`image_points(points, images, visible, foot_points)`,
+`get_shells_number`, `get_bodies_number`, `facet_shell(i)`, `facet_body(i)`.
 
 ---
 

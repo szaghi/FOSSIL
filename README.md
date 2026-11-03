@@ -40,6 +40,7 @@ FOSSIL ships a focused subset of the libigl / CGAL geometry-processing toolkit, 
 | [Per-vertex Gaussian + mean curvature](https://szaghi.github.io/FOSSIL/guide/advanced/curvature) — angle-defect Gaussian and signed mean curvature from `H n = (1/2) M⁻¹ L V` | Meyer et al. 2003 |
 | [Mesh smoothing (explicit + Taubin λ\|μ)](https://szaghi.github.io/FOSSIL/guide/advanced/smoothing) — production-grade denoiser for CFD-grade STL | Taubin 1995 |
 | [Hole filling](https://szaghi.github.io/FOSSIL/guide/advanced/hole-filling) — boundary loops closed by minimum-weight patches, oriented like the surface | Liepa 2003 |
+| [Immersed-boundary queries](https://szaghi.github.io/FOSSIL/guide/advanced/ib-queries) — closest point, pseudo-normal, feature and body per point on CPU/GPU, probe and image points with visibility, ambiguous foot points, vector level set | Bærentzen & Aanæs 2005 |
 | [2-D geometry (curves)](https://szaghi.github.io/FOSSIL/guide/advanced/2d-geometry) — `curve_object` for quadtree solvers: segment BVH, signed distance, 2-D fast winding number, exact `orient2d`, STL slicing, repair, 2-D distance fields | Barill et al. 2018, Shewchuk 1997 |
 
 ---

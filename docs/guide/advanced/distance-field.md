@@ -30,6 +30,10 @@ In 2-D, `initialize(x, y)` without `z` makes a field for a
 same three stages (4-connected flood fill, 4 sweep directions). A quadtree
 block that does not see the curve gets an empty band and one point query.
 
+With `store_closest=.true.` the band batch runs through `query_many` and the
+field keeps `closest`, `closest_id` and `closest_normal` on band cells: a
+[vector level set](/guide/advanced/ib-queries), exact image points without ∇φ.
+
 ## Pipeline
 
 1. **Band** (`compute_band`). The candidates are found by rasterizing each

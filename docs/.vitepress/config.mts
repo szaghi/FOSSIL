@@ -82,6 +82,7 @@ export default withMermaid({
             { text: 'Signed-distance field',      link: '/guide/advanced/distance-field' },
             { text: 'GPU distance queries',       link: '/guide/advanced/device-distance' },
             { text: '2-D geometry (curves)',      link: '/guide/advanced/2d-geometry' },
+            { text: 'Immersed-boundary queries',  link: '/guide/advanced/ib-queries' },
           ],
         },
         {
