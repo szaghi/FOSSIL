@@ -35,6 +35,14 @@ module fossil_distance_field
 !< A 2-D field takes a curve and a 3-D field a surface; the other pairings are refused. On one
 !< block of a quadtree that does not see the curve the band is empty and the whole block is one
 !< component, signed by a single point query: the field works block by block.
+!<
+!< Vector level set (issue #37 step 5): `compute_band(..., store_closest=.true.)` (and `compute`)
+!< run the band batch through `query_many` and keep, on band cells, the closest point
+!< `closest(1:3, i, j, k)` (2-D: components 1-2, the third 0), the closest facet or segment
+!< `closest_id(i, j, k)` and the pseudo-normal of the closest feature `closest_normal(1:3, i, j, k)`.
+!< With them the image point of a cell is exact (closest + |phi| * normal side), with no grad(phi).
+!< Non-band cells hold closest = FAR_VALUE, closest_id = 0, closest_normal = 0. The band values are
+!< then those of `query_many` (bit-exact with `compute_distance` for signed fields).
 
 ! The surface and facet modules, not `fossil`: `fossil` re-exports this module, so it is built
 ! into the library.
@@ -71,6 +79,9 @@ type :: distance_field_object
    logical                            :: is_signed = .true.  !< Signed field (else unsigned distance).
    real(R8P),    allocatable, public  :: phi(:,:,:)          !< Signed distance; FAR_VALUE where unknown. PUBLIC for halo exchange.
    logical,      allocatable, public  :: in_band(:,:,:)      !< True on band cells (exact distance). PUBLIC, read-only.
+   real(R8P),    allocatable, public  :: closest(:,:,:,:)    !< Closest point on band cells [3, ni, nj, nk] (store_closest).
+   integer(I4P), allocatable, public  :: closest_id(:,:,:)   !< Closest facet / segment on band cells (store_closest).
+   real(R8P),    allocatable, public  :: closest_normal(:,:,:,:) !< Pseudo-normal of the closest feature [3, ...] (store_closest).
    contains
       procedure, pass(self) :: initialize     !< Set the grid; reset the field.
       procedure, pass(self) :: destroy        !< Free the field.
@@ -82,6 +93,7 @@ type :: distance_field_object
       procedure, pass(self) :: get_band_width !< Band half-width of the last compute_band.
       procedure, pass(self) :: get_band_cells !< Number of band cells.
       procedure, pass(self) :: get_is_2d      !< True for a 2-D field.
+      procedure, pass(self) :: get_coordinates !< Coordinates of a cell.
       generic               :: default_band => default_band_surface, default_band_curve !< 2 x the local max spacing.
       procedure, pass(self) :: compute_band_surface  !< compute_band, surface source (3-D).
       procedure, pass(self) :: compute_band_curve    !< compute_band, curve source (2-D).
@@ -159,6 +171,9 @@ contains
    if (allocated(self%z))       deallocate(self%z)
    if (allocated(self%phi))     deallocate(self%phi)
    if (allocated(self%in_band)) deallocate(self%in_band)
+   if (allocated(self%closest))        deallocate(self%closest)
+   if (allocated(self%closest_id))     deallocate(self%closest_id)
+   if (allocated(self%closest_normal)) deallocate(self%closest_normal)
    self%ni = 0_I4P ; self%nj = 0_I4P ; self%nk = 0_I4P ; self%ng = 0_I4P ; self%ngk = 0_I4P ; self%is_2d = .false.
    self%band_width = 0._R8P
    self%local_spacing = 0._R8P
@@ -193,6 +208,17 @@ contains
 
    n = self%band_cells
    endfunction get_band_cells
+
+   pure subroutine get_coordinates(self, i, j, k, c)
+   !< Coordinates (x(i), y(j), z(k)) of cell (i, j, k); z = 0 in 2-D. Out-of-range indexes are clamped.
+   class(distance_field_object), intent(in)  :: self    !< Distance field.
+   integer(I4P),                 intent(in)  :: i, j, k !< Cell.
+   real(R8P),                    intent(out) :: c(3)    !< Coordinates.
+
+   c = 0._R8P
+   if (.not. allocated(self%x)) return
+   c = [self%x(min(max(i, 1_I4P), self%ni)), self%y(min(max(j, 1_I4P), self%nj)), self%z(min(max(k, 1_I4P), self%nk))]
+   endsubroutine get_coordinates
 
    pure function get_is_2d(self) result(yes)
    !< True for a 2-D field (initialized without z).
@@ -234,7 +260,7 @@ contains
    band = 2._R8P * max(max_spacing(self%x, bmin(1), bmax(1)), max_spacing(self%y, bmin(2), bmax(2)))
    endfunction default_band_curve
 
-   subroutine compute_band_surface(self, surface, band, is_signed, sign_algorithm, use_device, status)
+   subroutine compute_band_surface(self, surface, band, is_signed, sign_algorithm, use_device, store_closest, status)
    !< Exact (signed) distances on the narrow band: the interior cells with |d| <= `band`.
    !<
    !< 1. Candidates: each facet's bounding box, inflated by `band`, is mapped to an index box
@@ -262,9 +288,13 @@ contains
    logical,                      intent(in),  optional :: is_signed      !< Signed distances (default .true.).
    integer(I4P),                 intent(in),  optional :: sign_algorithm !< SIGN_* code (default SIGN_PSEUDO_NORMAL).
    logical,                      intent(in),  optional :: use_device     !< Band batch on the GPU (default .false.).
+   logical,                      intent(in),  optional :: store_closest  !< Keep closest point, id, normal (default .false.).
    integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    real(R8P)                                           :: band_          !< Resolved band.
    integer(I4P)                                        :: algo           !< Resolved sign algorithm.
+   real(R8P),                    allocatable           :: cq(:,:), nq(:,:) !< Closest points, normals (store_closest).
+   integer(I4P),                 allocatable           :: fq(:)          !< Closest facets (store_closest).
+   logical                                             :: store_         !< Resolved store_closest.
    logical,                      allocatable           :: candidate(:,:,:) !< Candidate mask.
    type(vector_R8P),             allocatable           :: points(:)      !< Candidate points.
    real(R8P),                    allocatable           :: d(:)           !< Candidate distances.
@@ -303,6 +333,8 @@ contains
    self%in_band    = .false.
    self%band_width = band_
    self%band_cells = 0_I4P
+   store_ = .false. ; if (present(store_closest)) store_ = store_closest
+   call reset_closest(self, store_)
 
    ! 1. candidates, restricted to the interior (halo cells are the caller's)
    allocate(candidate(self%ni, self%nj, self%nk))
@@ -339,8 +371,14 @@ contains
          enddo
       enddo
    enddo
-   call batch_distances(surface=surface, points=points, d=d, is_signed=self%is_signed, sign_algorithm=algo, &
-                        use_device=self%use_device, status=st)
+   if (store_) then
+      allocate(cq(3, n), nq(3, n), fq(n))
+      call batch_query_surface(surface=surface, points=points, d=d, cp=cq, id=fq, nrm=nq, is_signed=self%is_signed, &
+                               sign_algorithm=algo, use_device=self%use_device, status=st)
+   else
+      call batch_distances(surface=surface, points=points, d=d, is_signed=self%is_signed, sign_algorithm=algo, &
+                           use_device=self%use_device, status=st)
+   endif
    if (st /= STATUS_OK) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
@@ -348,9 +386,10 @@ contains
 
    ! 3. keep |d| <= band
    call self%keep_band(cell, d, band_)
+   if (store_) call keep_closest(self, cell, d, band_, cq, fq, nq)
    endsubroutine compute_band_surface
 
-   subroutine compute_band_curve(self, curve, band, is_signed, sign_algorithm, use_device, status)
+   subroutine compute_band_curve(self, curve, band, is_signed, sign_algorithm, use_device, store_closest, status)
    !< Exact (signed) distances on the narrow band of a 2-D field from a curve: as
    !< `compute_band_surface`, with each segment's bounding box inflated by `band` as candidate
    !< box and one `curve%distance_many` (or `distance_many_device`) batch. The curve supports
@@ -364,9 +403,13 @@ contains
    logical,                      intent(in),  optional :: is_signed      !< Signed distances (default .true.).
    integer(I4P),                 intent(in),  optional :: sign_algorithm !< SIGN_* code (default SIGN_PSEUDO_NORMAL).
    logical,                      intent(in),  optional :: use_device     !< Band batch on the GPU (default .false.).
+   logical,                      intent(in),  optional :: store_closest  !< Keep closest point, id, normal (default .false.).
    integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    real(R8P)                                           :: band_          !< Resolved band.
    logical,                      allocatable           :: candidate(:,:) !< Candidate mask.
+   real(R8P),                    allocatable           :: cq(:,:), nq(:,:), c3(:,:), n3(:,:) !< Closest points, normals.
+   integer(I4P),                 allocatable           :: fq(:)          !< Closest segments.
+   logical                                             :: store_         !< Resolved store_closest.
    real(R8P),                    allocatable           :: points(:,:)    !< Candidate points (2, n).
    real(R8P),                    allocatable           :: d(:)           !< Candidate distances.
    integer(I4P),                 allocatable           :: cell(:,:)      !< Candidate indices (3, n).
@@ -400,6 +443,8 @@ contains
    self%in_band    = .false.
    self%band_width = band_
    self%band_cells = 0_I4P
+   store_ = .false. ; if (present(store_closest)) store_ = store_closest
+   call reset_closest(self, store_)
 
    ! 1. candidates: each segment's box inflated by the band, interior cells only
    allocate(candidate(self%ni, self%nj))
@@ -429,14 +474,26 @@ contains
          cell(:, m) = [i, j, 1_I4P]
       enddo
    enddo
-   call batch_curve(curve=curve, points=points, d=d, is_signed=self%is_signed, sign_algorithm=self%sign_algorithm, &
-                    use_device=self%use_device, status=st)
+   if (store_) then
+      allocate(cq(2, n), nq(2, n), fq(n))
+      call batch_query_curve(curve=curve, points=points, d=d, cp=cq, id=fq, nrm=nq, is_signed=self%is_signed, &
+                             sign_algorithm=self%sign_algorithm, use_device=self%use_device, status=st)
+   else
+      call batch_curve(curve=curve, points=points, d=d, is_signed=self%is_signed, sign_algorithm=self%sign_algorithm, &
+                       use_device=self%use_device, status=st)
+   endif
    if (st /= STATUS_OK) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
    ! 3. keep |d| <= band
    call self%keep_band(cell, d, band_)
+   if (store_) then
+      allocate(c3(3, n), n3(3, n))
+      c3(1:2, :) = cq ; c3(3, :) = 0._R8P
+      n3(1:2, :) = nq ; n3(3, :) = 0._R8P
+      call keep_closest(self, cell, d, band_, c3, fq, n3)
+   endif
    endsubroutine compute_band_curve
 
    pure subroutine keep_band(self, cell, d, band)
@@ -827,7 +884,7 @@ contains
    endsubroutine unlinear
 
    subroutine compute_surface(self, surface, band, is_signed, sign_algorithm, use_device, tol, max_sweeps, sweeps, &
-                              fallback_cells, status)
+                              fallback_cells, store_closest, status)
    !< The whole field: `compute_band`, `compute_signs` (signed fields), `sweep`. See each one
    !< for the arguments; `sweeps` and `fallback_cells` report their counters.
    class(distance_field_object), intent(inout)         :: self           !< Distance field.
@@ -840,19 +897,20 @@ contains
    integer(I4P),                 intent(in),  optional :: max_sweeps     !< Maximum directional sweeps (default 400).
    integer(I4P),                 intent(out), optional :: sweeps         !< Directional sweeps done.
    integer(I4P),                 intent(out), optional :: fallback_cells !< Cells signed by a point query.
+   logical,                      intent(in),  optional :: store_closest  !< Keep closest point, id, normal (vector level set).
    integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    integer(I4P)                                        :: st             !< Stage status.
 
    if (present(status)) status = STATUS_OK
    call self%compute_band(surface=surface, band=band, is_signed=is_signed, sign_algorithm=sign_algorithm, &
-                          use_device=use_device, status=st)
+                          use_device=use_device, store_closest=store_closest, status=st)
    if (st == STATUS_OK) call self%compute_signs(surface=surface, fallback_cells=fallback_cells, status=st)
    if (st == STATUS_OK) call self%sweep(tol=tol, max_sweeps=max_sweeps, sweeps=sweeps, status=st)
    if (present(status)) status = st
    endsubroutine compute_surface
 
    subroutine compute_curve(self, curve, band, is_signed, sign_algorithm, use_device, tol, max_sweeps, sweeps, &
-                            fallback_cells, status)
+                            fallback_cells, store_closest, status)
    !< The whole 2-D field from a curve: `compute_band`, `compute_signs` (signed fields), `sweep`.
    class(distance_field_object), intent(inout)         :: self           !< Distance field.
    type(curve_object),           intent(inout), target :: curve          !< Curve.
@@ -864,12 +922,13 @@ contains
    integer(I4P),                 intent(in),  optional :: max_sweeps     !< Maximum directional sweeps (default 400).
    integer(I4P),                 intent(out), optional :: sweeps         !< Directional sweeps done.
    integer(I4P),                 intent(out), optional :: fallback_cells !< Cells signed by a point query.
+   logical,                      intent(in),  optional :: store_closest  !< Keep closest point, id, normal (vector level set).
    integer(I4P),                 intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    integer(I4P)                                        :: st             !< Stage status.
 
    if (present(status)) status = STATUS_OK
    call self%compute_band(curve=curve, band=band, is_signed=is_signed, sign_algorithm=sign_algorithm, &
-                          use_device=use_device, status=st)
+                          use_device=use_device, store_closest=store_closest, status=st)
    if (st == STATUS_OK) call self%compute_signs(curve=curve, fallback_cells=fallback_cells, status=st)
    if (st == STATUS_OK) call self%sweep(tol=tol, max_sweeps=max_sweeps, sweeps=sweeps, status=st)
    if (present(status)) status = st
@@ -923,6 +982,92 @@ contains
       call curve%distance_many(points=points, distances=d, is_signed=is_signed, sign_algorithm=sign_algorithm, status=status)
    endif
    endsubroutine batch_curve
+
+   subroutine batch_query_surface(surface, points, d, cp, id, nrm, is_signed, sign_algorithm, use_device, status)
+   !< One batch of rich surface queries (vector level set), on the host or the device.
+   type(surface_stl_object), intent(inout), target :: surface        !< Surface.
+   type(vector_R8P),         intent(in)            :: points(:)      !< Query points.
+   real(R8P),                intent(out)           :: d(:)           !< Distances.
+   real(R8P),                intent(out)           :: cp(:,:)        !< Closest points [3, n].
+   integer(I4P),             intent(out)           :: id(:)          !< Closest facets.
+   real(R8P),                intent(out)           :: nrm(:,:)       !< Normals [3, n].
+   logical,                  intent(in)            :: is_signed      !< Signed distances.
+   integer(I4P),             intent(in)            :: sign_algorithm !< SIGN_* code.
+   logical,                  intent(in)            :: use_device     !< Device batch.
+   integer(I4P),             intent(out)           :: status         !< query_many(_device) status.
+   logical                                         :: was_resident   !< Surface already on the device.
+
+   if (use_device) then
+      was_resident = surface%is_on_device
+      if (.not. was_resident) call surface%enter_device
+      call surface%query_many_device(points=points, distances=d, closest_points=cp, facets=id, normals=nrm, &
+                                     is_signed=is_signed, sign_algorithm=sign_algorithm, status=status)
+      if (.not. was_resident) call surface%exit_device
+   else
+      call surface%query_many(points=points, distances=d, closest_points=cp, facets=id, normals=nrm, is_signed=is_signed, &
+                              sign_algorithm=sign_algorithm, status=status)
+   endif
+   endsubroutine batch_query_surface
+
+   subroutine batch_query_curve(curve, points, d, cp, id, nrm, is_signed, sign_algorithm, use_device, status)
+   !< One batch of rich curve queries (vector level set), on the host or the device.
+   type(curve_object), intent(inout), target :: curve          !< Curve.
+   real(R8P),          intent(in)            :: points(:,:)    !< Query points (2, n).
+   real(R8P),          intent(out)           :: d(:)           !< Distances.
+   real(R8P),          intent(out)           :: cp(:,:)        !< Closest points [2, n].
+   integer(I4P),       intent(out)           :: id(:)          !< Closest segments.
+   real(R8P),          intent(out)           :: nrm(:,:)       !< Normals [2, n].
+   logical,            intent(in)            :: is_signed      !< Signed distances.
+   integer(I4P),       intent(in)            :: sign_algorithm !< SIGN_* code.
+   logical,            intent(in)            :: use_device     !< Device batch.
+   integer(I4P),       intent(out)           :: status         !< query_many(_device) status.
+   logical                                   :: was_resident   !< Curve already on the device.
+
+   if (use_device) then
+      was_resident = curve%get_is_on_device()
+      if (.not. was_resident) call curve%enter_device
+      call curve%query_many_device(points=points, distances=d, closest_points=cp, segments=id, normals=nrm, &
+                                   is_signed=is_signed, sign_algorithm=sign_algorithm, status=status)
+      if (.not. was_resident) call curve%exit_device
+   else
+      call curve%query_many(points=points, distances=d, closest_points=cp, segments=id, normals=nrm, is_signed=is_signed, &
+                            sign_algorithm=sign_algorithm, status=status)
+   endif
+   endsubroutine batch_query_curve
+
+   pure subroutine reset_closest(self, store)
+   !< Allocate (store) or free the vector-level-set arrays, set to the non-band sentinel.
+   type(distance_field_object), intent(inout) :: self  !< Distance field.
+   logical,                     intent(in)    :: store !< Keep the arrays.
+
+   if (allocated(self%closest))        deallocate(self%closest)
+   if (allocated(self%closest_id))     deallocate(self%closest_id)
+   if (allocated(self%closest_normal)) deallocate(self%closest_normal)
+   if (.not. store) return
+   allocate(self%closest(3, self%ni, self%nj, self%nk), self%closest_id(self%ni, self%nj, self%nk))
+   allocate(self%closest_normal(3, self%ni, self%nj, self%nk))
+   self%closest = FAR_VALUE ; self%closest_id = 0_I4P ; self%closest_normal = 0._R8P
+   endsubroutine reset_closest
+
+   pure subroutine keep_closest(self, cell, d, band, cp, id, nrm)
+   !< Store closest point, id and normal of the candidates kept in the band (same test as keep_band).
+   type(distance_field_object), intent(inout) :: self      !< Distance field.
+   integer(I4P),                intent(in)    :: cell(:,:) !< Candidate indices (3, n).
+   real(R8P),                   intent(in)    :: d(:)      !< Candidate distances.
+   real(R8P),                   intent(in)    :: band      !< Band half-width.
+   real(R8P),                   intent(in)    :: cp(:,:)   !< Closest points [3, n].
+   integer(I4P),                intent(in)    :: id(:)     !< Closest ids.
+   real(R8P),                   intent(in)    :: nrm(:,:)  !< Normals [3, n].
+   integer(I4P)                               :: m         !< Counter.
+
+   do m = 1_I4P, size(d, kind=I4P)
+      if (abs(d(m)) <= band) then
+         self%closest(:, cell(1, m), cell(2, m), cell(3, m))        = cp(:, m)
+         self%closest_id(cell(1, m), cell(2, m), cell(3, m))        = id(m)
+         self%closest_normal(:, cell(1, m), cell(2, m), cell(3, m)) = nrm(:, m)
+      endif
+   enddo
+   endsubroutine keep_closest
 
    pure function solve_quadratic(a, h) result(u)
    !< Solution of sum over the active axes of ((u - a(d)) / h(d))**2 = 1, where an axis is
