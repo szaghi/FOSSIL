@@ -65,6 +65,7 @@ type :: aabb_node_object
       procedure, pass(self) :: get_payload_first           !< Return payload_first (BVH distance payload slice start).
       procedure, pass(self) :: get_payload_count           !< Return payload_count (BVH distance payload slice length).
       procedure, pass(self) :: set_children                !< Set (left_child, right_child) — BVH builder.
+      procedure, pass(self) :: set_box                     !< Set the box only, keeping children and facets (issue #41 refit).
       procedure, pass(self) :: set_payload_slice           !< Set (payload_first, payload_count) — BVH distance-payload builder.
       procedure, pass(self) :: set_facet_ids               !< Bulk-load the leaf's facet_id list (BVH builder).
       procedure, pass(self) :: bmin                        !< Return AABB bmin.
@@ -550,6 +551,14 @@ contains
    has_facets = self%is_present
    if (has_facets) has_facets = self%aabb%has_facets()
    endfunction has_facets
+
+   pure subroutine set_box(self, bmin, bmax)
+   !< Set the node box only, keeping children, facet list and payload slice (issue #41: BVH refit).
+   class(aabb_node_object), intent(inout) :: self       !< AABB node.
+   type(vector_R8P),        intent(in)    :: bmin, bmax !< Box.
+
+   self%aabb%bmin = bmin ; self%aabb%bmax = bmax
+   endsubroutine set_box
 
    pure subroutine initialize(self, facet, bmin, bmax)
    !< Initialize AABB.

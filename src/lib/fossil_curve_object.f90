@@ -94,6 +94,7 @@ type :: curve_object
       procedure, pass(self) :: line_crossings_many  !< Crossings of many parallel lines, fixed buffers (issue #40).
       procedure, pass(self) :: line_crossings_many_device !< line_crossings_many on the device (issue #40).
       procedure, pass(self) :: cut_cells            !< Exact cut cells of a block (issue #40).
+      procedure, pass(self) :: move                 !< Move rigidly by an in-plane pose, refit the tree (issue #41).
       procedure, pass(self) :: check_validity       !< First validity defect (CURVE_* code).
       procedure, pass(self) :: compute_distance     !< Distance with closest point, segment and vertex.
       procedure, pass(self) :: distance             !< (Signed) distance of a point.
@@ -1634,39 +1635,36 @@ contains
    endfunction winding_number_exact
 
    ! private methods
-   pure subroutine analyze(self)
-   !< Derived data: loop topology, segment lengths and normals, vertex pseudo-normals, metrics.
-   !<
-   !< Vertex pseudo-normal: the normalized sum of the incident segment normals (in 2-D the
-   !< angle-weighted pseudo-normal of Baerentzen and Aanaes reduces to this bisector, both
-   !< incident "angles" being equal; at the end of an open loop, the one segment normal). With
-   !< it, the sign of (p - x) . n at the closest feature x is the inside/outside sign. Open loops
-   !< have no closing segment and contribute no area.
-   class(curve_object), intent(inout) :: self !< Curve.
-   integer(I4P), allocatable          :: ids(:) !< Vertices that start a segment.
-   integer(I4P)                       :: l, i, j, first, last !< Counters.
-   real(R8P)                          :: du, dv, cross, cu, cv, s !< Work.
+   subroutine move(self, pose)
+   !< Move the curve rigidly by the in-plane `pose` ((u, v) <- R (u, v) + t) and refit its segment
+   !< tree instead of rebuilding it (issue #41): the coordinate-derived data are recomputed as
+   !< `analyze` does (`curve_metrics`), the topology and the bodies are kept, the tree is refitted
+   !< (`refit_vertices`, O(N)). Queries then equal those on the same curve moved and rebuilt. A device
+   !< copy is refreshed.
+   class(curve_object),   intent(inout) :: self !< Curve.
+   type(rigid_pose_2d_t), intent(in)    :: pose !< Pose.
+   integer(I4P)                         :: i    !< Counter.
+   real(R8P)                            :: w(2) !< Moved vertex.
+   logical                              :: was_on_device !< Device copy to refresh.
 
-   allocate(self%loop_of(self%nv), self%next(self%nv), self%prev(self%nv))
-   allocate(self%seg_len(self%nv), self%seg_nu(self%nv), self%seg_nv(self%nv))
-   allocate(self%pn_u(self%nv), self%pn_v(self%nv), self%loop_area(self%nl))
-   do l = 1, self%nl
-      first = self%loop_start(l) ; last = self%loop_start(l + 1) - 1_I4P
-      do i = first, last
-         self%loop_of(i) = l
-         self%next(i) = i + 1_I4P
-         self%prev(i) = i - 1_I4P
-      enddo
-      if (last >= first) then
-         if (self%loop_closed(l)) then
-            self%next(last) = first
-            self%prev(first) = last
-         else
-            self%next(last) = 0_I4P
-            self%prev(first) = 0_I4P
-         endif
-      endif
+   if (self%nv == 0_I4P) return
+   was_on_device = self%is_on_device
+   if (was_on_device) call self%exit_device
+   do i = 1_I4P, self%nv
+      w = to_world(pose, [self%u(i), self%v(i)]) ; self%u(i) = w(1) ; self%v(i) = w(2)
    enddo
+   call curve_metrics(self)
+   call self%bvh%refit_vertices(self%u, self%v, self%next)
+   if (was_on_device) call self%enter_device
+   endsubroutine move
+
+   pure subroutine curve_metrics(self)
+   !< Coordinate-derived data of `analyze`: segment lengths and normals, vertex pseudo-normals,
+   !< perimeter, loop areas, centroid, bounding box (also used by `move`, issue #41).
+   type(curve_object), intent(inout) :: self !< Curve.
+   integer(I4P)                      :: i, j !< Counters.
+   real(R8P)                         :: du, dv, cross, cu, cv, s !< Work.
+
    self%perimeter = 0._R8P
    cu = 0._R8P ; cv = 0._R8P
    self%loop_area = 0._R8P
@@ -1710,6 +1708,41 @@ contains
    else
       self%bmin = 0._R8P ; self%bmax = 0._R8P
    endif
+   endsubroutine curve_metrics
+
+   pure subroutine analyze(self)
+   !< Derived data: loop topology, segment lengths and normals, vertex pseudo-normals, metrics.
+   !<
+   !< Vertex pseudo-normal: the normalized sum of the incident segment normals (in 2-D the
+   !< angle-weighted pseudo-normal of Baerentzen and Aanaes reduces to this bisector, both
+   !< incident "angles" being equal; at the end of an open loop, the one segment normal). With
+   !< it, the sign of (p - x) . n at the closest feature x is the inside/outside sign. Open loops
+   !< have no closing segment and contribute no area.
+   class(curve_object), intent(inout) :: self !< Curve.
+   integer(I4P), allocatable          :: ids(:) !< Vertices that start a segment.
+   integer(I4P)                       :: l, i, first, last !< Counters.
+
+   allocate(self%loop_of(self%nv), self%next(self%nv), self%prev(self%nv))
+   allocate(self%seg_len(self%nv), self%seg_nu(self%nv), self%seg_nv(self%nv))
+   allocate(self%pn_u(self%nv), self%pn_v(self%nv), self%loop_area(self%nl))
+   do l = 1, self%nl
+      first = self%loop_start(l) ; last = self%loop_start(l + 1) - 1_I4P
+      do i = first, last
+         self%loop_of(i) = l
+         self%next(i) = i + 1_I4P
+         self%prev(i) = i - 1_I4P
+      enddo
+      if (last >= first) then
+         if (self%loop_closed(l)) then
+            self%next(last) = first
+            self%prev(first) = last
+         else
+            self%next(last) = 0_I4P
+            self%prev(first) = 0_I4P
+         endif
+      endif
+   enddo
+   call curve_metrics(self)
    call compute_bodies(self)
    allocate(self%vertex_body(self%nv))
    do i = 1, self%nv

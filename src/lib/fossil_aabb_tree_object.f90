@@ -221,6 +221,7 @@ type :: aabb_tree_object
       procedure, pass(self), private :: build_bvh_sah                 !< Build a SAH BVH over the given facet list.
       procedure, pass(self), private :: build_distance_payload        !< Flatten BVH leaf facets into the contiguous distance SoA (issue #19 §B1).
       procedure, pass(self) :: build_winding_payload !< Build the per-node fast-winding-number cache (issue #29).
+      procedure, pass(self) :: refit                 !< Refit the SAH BVH to moved facets, same topology (issue #41).
       procedure, pass(self) :: enumerate_children                    !< List the allocated children of a node (octree or BVH).
       procedure, pass(self), private :: distance_node                 !< Update best squared distance by iterative explicit-stack traversal from a node (issue #20 §Step 3).
       procedure, pass(self), private :: distance_node_with_region     !< Update (best d^2, best facet id, best region) by iterative explicit-stack traversal (issue #20 §Step 3).
@@ -748,6 +749,40 @@ contains
 
    self%is_initialized = .true.
    endsubroutine build_bvh_sah
+
+   pure subroutine refit(self, facet)
+   !< Refit the SAH BVH to facets that moved rigidly (issue #41): the tree topology and the leaf
+   !< facet lists are kept; every node box is recomputed bottom-up (children have larger indices than
+   !< their parent, so a reverse sweep sees them first) as the union of its facets' boxes (only the box
+   !< fields are written: `node%initialize` would wipe the children), and the distance payload is
+   !< rebuilt in the same leaf order.
+   !< The boxes are then those a rebuild would give its own leaves (min/max are exact), and every
+   !< distance query returns the same minimum. SAH BVH only: an octree must be rebuilt.
+   class(aabb_tree_object), intent(inout) :: self     !< AABB tree.
+   type(facet_object),      intent(in)    :: facet(:) !< Moved facets (metrix computed).
+   integer(I4P)                           :: n, k, lc, rc, fid !< Work.
+   type(vector_R8P)                       :: lo, hi, b1, b2 !< Boxes.
+
+   if (self%tree_kind /= AABB_TREE_SAH_BVH .or. self%nodes_number <= 0_I4P) return
+   do n = self%nodes_number - 1_I4P, 0_I4P, -1_I4P
+      lc = self%node(n)%get_left_child() ; rc = self%node(n)%get_right_child()
+      if (lc == 0_I4P .and. rc == 0_I4P) then
+         lo = vector_R8P(huge(1._R8P), huge(1._R8P), huge(1._R8P)) ; hi = -lo
+         do k = 1_I4P, self%node(n)%facet_id_count()
+            fid = self%node(n)%facet_id_at(k)
+            lo%x = min(lo%x, facet(fid)%bb(1)%x) ; lo%y = min(lo%y, facet(fid)%bb(1)%y) ; lo%z = min(lo%z, facet(fid)%bb(1)%z)
+            hi%x = max(hi%x, facet(fid)%bb(2)%x) ; hi%y = max(hi%y, facet(fid)%bb(2)%y) ; hi%z = max(hi%z, facet(fid)%bb(2)%z)
+         enddo
+      else
+         b1 = self%node(lc)%bmin() ; b2 = self%node(rc)%bmin()
+         lo%x = min(b1%x, b2%x) ; lo%y = min(b1%y, b2%y) ; lo%z = min(b1%z, b2%z)
+         b1 = self%node(lc)%bmax() ; b2 = self%node(rc)%bmax()
+         hi%x = max(b1%x, b2%x) ; hi%y = max(b1%y, b2%y) ; hi%z = max(b1%z, b2%z)
+      endif
+      call self%node(n)%set_box(lo, hi) ! box only: children and facet lists kept
+   enddo
+   call self%build_distance_payload(facet)
+   endsubroutine refit
 
    pure subroutine build_distance_payload(self, facet)
    !< Flatten every BVH leaf's facets into the tree's contiguous

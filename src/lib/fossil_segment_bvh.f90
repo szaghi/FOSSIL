@@ -69,6 +69,7 @@ type :: segment_bvh
       procedure, pass(self) :: closest_brute     !< Same, brute force (reference).
       procedure, pass(self) :: destroy           !< Reset.
       procedure, pass(self) :: segments_in_box   !< Segments whose box overlaps a box.
+      procedure, pass(self) :: refit_vertices    !< Refit to moved vertices, same topology (issue #41).
       procedure, pass(self) :: winding_number    !< Fast (hierarchical) winding number.
       procedure, pass(self) :: winding_number_brute !< Exact sum of the subtended angles.
 endtype segment_bvh
@@ -233,6 +234,42 @@ contains
       self = fresh
    endselect
    endsubroutine destroy
+
+   pure subroutine refit_vertices(self, u, v, next)
+   !< Refit the tree to moved vertices (issue #41): segment seg_id(k) runs from vertex seg_id(k) to
+   !< next(seg_id(k)) (the numbering `curve_object` builds with). The payload is recomputed in the same
+   !< leaf order, the node boxes bottom-up (the builder's min/max over the leaf ranges, so the same
+   !< values a rebuild gives its leaves), and the winding cache rebuilt.
+   class(segment_bvh), intent(inout) :: self       !< Tree.
+   real(R8P),          intent(in)    :: u(:), v(:) !< Moved vertices.
+   integer(I4P),       intent(in)    :: next(:)    !< Next vertex.
+   integer(I4P)                      :: k, s, node, c1, c2 !< Work.
+
+   if (self%nodes_number == 0_I4P) return
+   do k = 1, self%segments_number
+      s = self%seg_id(k)
+      self%a_u(k) = u(s) ; self%a_v(k) = v(s)
+      self%d_u(k) = u(next(s)) - u(s) ; self%d_v(k) = v(next(s)) - v(s)
+      self%len2(k) = self%d_u(k)**2 + self%d_v(k)**2
+   enddo
+   do node = self%nodes_number, 1, -1
+      if (self%left(node) == 0_I4P) then
+         self%lo_u(node) = huge(1._R8P) ; self%lo_v(node) = huge(1._R8P)
+         self%hi_u(node) = -huge(1._R8P) ; self%hi_v(node) = -huge(1._R8P)
+         do k = self%first(node), self%last(node)
+            s = self%seg_id(k)
+            self%lo_u(node) = min(self%lo_u(node), u(s), u(next(s))) ; self%hi_u(node) = max(self%hi_u(node), u(s), u(next(s)))
+            self%lo_v(node) = min(self%lo_v(node), v(s), v(next(s))) ; self%hi_v(node) = max(self%hi_v(node), v(s), v(next(s)))
+         enddo
+      else
+         c1 = self%left(node) ; c2 = self%right(node)
+         self%lo_u(node) = min(self%lo_u(c1), self%lo_u(c2)) ; self%hi_u(node) = max(self%hi_u(c1), self%hi_u(c2))
+         self%lo_v(node) = min(self%lo_v(c1), self%lo_v(c2)) ; self%hi_v(node) = max(self%hi_v(c1), self%hi_v(c2))
+      endif
+   enddo
+   deallocate(self%wn_cu, self%wn_cv, self%wn_du, self%wn_dv, self%wn_c, self%wn_diag2)
+   call build_winding_cache(self)
+   endsubroutine refit_vertices
 
    pure subroutine segments_in_box(self, lo_u, lo_v, hi_u, hi_v, ids, n)
    !< Payload indices of the segments whose bounding box overlaps the box [lo, hi] (closed).

@@ -231,6 +231,7 @@ type :: surface_stl_object
       procedure, pass(self) :: cell_wall_fractions             !< Wall fractions along the grid lines of a block (issue #40).
       procedure, pass(self) :: line_crossings_many             !< Crossings of many parallel lines, fixed buffers (issue #40).
       procedure, pass(self) :: line_crossings_many_device      !< line_crossings_many on the device (issue #40).
+      procedure, pass(self) :: move                            !< Move rigidly by a pose, refit the tree (issue #41).
       ! Issue #20 §Step 5 -- GPU-offloadable distance path (BVH only).
       procedure, pass(self) :: enter_device                    !< !$acc enter data copyin of BVH arrays + pnormal_payload.
       procedure, pass(self) :: exit_device                     !< !$acc exit data delete of BVH arrays + pnormal_payload.
@@ -3026,6 +3027,60 @@ contains
    !$acc end parallel loop
 
    endsubroutine distance_many_device
+
+   subroutine move(self, pose)
+   !< Move the surface rigidly by `pose` (x <- R x + t) and refit the tree instead of rebuilding it
+   !< (issue #41, decision 2b).
+   !<
+   !< The facet vertices move; what `analyze` derives from the coordinates is recomputed the same way
+   !< (facet metrix, bounding box, vertex pool, area, volume, centroid, pseudo-normals and their
+   !< payload, the winding cache, `tri_vertices`); the topology is kept (connectivity, shells,
+   !< bodies). The SAH BVH keeps its topology and is refitted (`aabb%refit`, O(N)); an octree is
+   !< spatial and is rebuilt. The facets are those of the same mesh moved and analyzed from scratch,
+   !< so every query gives the same results (bit for bit; at an exact tie between facets either may
+   !< be reported). A device copy (`enter_device`) is refreshed.
+   class(surface_stl_object), intent(inout) :: self !< Surface.
+   type(rigid_pose_t),        intent(in)    :: pose !< Pose.
+   integer(I4P)                             :: f, k, ff !< Counters.
+   real(R8P)                                :: w(3) !< Moved vertex.
+   logical                                  :: was_on_device !< Device copy to refresh.
+
+   if (self%facets_number == 0_I4P) return
+   was_on_device = self%is_on_device
+   if (was_on_device) call self%exit_device
+   do f = 1_I4P, self%facets_number
+      do k = 1, 3
+         w = to_world(pose, [self%facet(f)%vertex(k)%x, self%facet(f)%vertex(k)%y, self%facet(f)%vertex(k)%z])
+         self%facet(f)%vertex(k)%x = w(1) ; self%facet(f)%vertex(k)%y = w(2) ; self%facet(f)%vertex(k)%z = w(3)
+      enddo
+   enddo
+   call self%compute_metrix
+   call self%vertex_pool%initialize_from_facets(facet=self%facet)
+   do ff = 1, self%facets_number
+      call self%facet(ff)%set_vertex_ids(vid1=self%vertex_pool%facet_vid(ff, 1_I4P), &
+                                         vid2=self%vertex_pool%facet_vid(ff, 2_I4P), &
+                                         vid3=self%vertex_pool%facet_vid(ff, 3_I4P))
+   enddo
+   if (self%aabb%get_tree_kind() == AABB_TREE_SAH_BVH) then
+      call self%aabb%refit(facet=self%facet)
+   else
+      call self%aabb%initialize(facet=self%facet, largest_edge_len=self%largest_edge_len())
+   endif
+   call self%compute_area
+   call self%compute_volume
+   call self%compute_centroid
+   do ff = 1, self%facets_number
+      call compute_pseudo_normals_via_pool(self%facet(ff), self%facet, self%vertex_pool)
+   enddo
+   call self%build_pnormal_payload
+   call self%aabb%build_winding_payload(facet=self%facet, wn=self%wn_payload)
+   do ff = 1, self%facets_number
+      self%tri_vertices(:, ff) = [self%facet(ff)%vertex(1)%x, self%facet(ff)%vertex(1)%y, self%facet(ff)%vertex(1)%z, &
+                                  self%facet(ff)%vertex(2)%x, self%facet(ff)%vertex(2)%y, self%facet(ff)%vertex(2)%z, &
+                                  self%facet(ff)%vertex(3)%x, self%facet(ff)%vertex(3)%y, self%facet(ff)%vertex(3)%z]
+   enddo
+   if (was_on_device) call self%enter_device
+   endsubroutine move
 
    recursive function is_point_inside(self, point, sign_algorithm, pose) result(is_inside)
    !< Compute sign.
