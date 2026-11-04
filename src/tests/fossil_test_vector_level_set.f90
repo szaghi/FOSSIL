@@ -2,7 +2,8 @@
 program fossil_test_vector_level_set
 !< FOSSIL test: vector level set, closest point / id / normal stored in the field (issue #37 step 5).
 !<
-!< 3-D (bunny, 20^3 grid) and 2-D (256-gon of radius 0.5, 64^2 grid), `compute(store_closest=.true.)`:
+!< 3-D (faceted cone `make_apex_body(256, 15)`: clean, closed, curved; 20^3 grid) and 2-D (256-gon of
+!< radius 0.5, 64^2 grid), `compute(store_closest=.true.)`:
 !< - on every band cell: phi, closest point, id and normal equal query_many at that cell, bit for
 !<   bit; |phi| = |x - closest| to 1e-12 relative; the sign of phi is the side of x along the normal;
 !< - every non-band cell holds the sentinel (closest = FAR_VALUE, id 0, normal 0);
@@ -13,20 +14,23 @@ program fossil_test_vector_level_set
 use fossil, only : surface_stl_object, curve_object, distance_field_object, FAR_VALUE, FEATURE_FACE
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
+use fossil_sign_bench_bodies, only : body_t, make_apex_body, to_surface
 
 implicit none
 
 real(R8P), parameter        :: PI = acos(-1._R8P)
-type(surface_stl_object)    :: bunny, cube
+type(surface_stl_object)    :: cone, cube
+type(body_t)                :: cb
 type(curve_object)          :: circle
 type(distance_field_object) :: f
 real(R8P)                   :: x(64), u(256), v(256)
 integer(I4P)                :: k, st
 logical                     :: ok(4)
 
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-call grid3(bunny, 20_I4P)
-ok(1) = check3(bunny, 'bunny')
+call make_apex_body(256, 15._R8P, 'cone 15 (256)', cb)
+call to_surface(cb%soup, cone)
+call grid3(cone, 20_I4P)
+ok(1) = check3(cone, 'cone 15 (256)')
 
 call cube%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true.)
 call grid3(cube, 16_I4P)

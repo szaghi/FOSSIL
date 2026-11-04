@@ -8,13 +8,13 @@
 !< `is_point_inside` false). Cases:
 !<   1. Fully inside-out cube (global flip).
 !<   2. Cube with only some facets reversed (BFS flips, no global flip needed).
-!<   3. Inside-out dragon-fine vs the outward original on a point grid: same sign at
+!<   3. Inside-out dragon (it replaced dragon-fine, issue #45) vs the outward original on a point grid: same sign at
 !<      every point, same |d| to a relative 1e-12 (the flipped winding stores the
 !<      vertices in another order, so the last bits of |d| may move).
 
 program fossil_test_sanitize_inside_out
 
-use fossil, only : surface_stl_object, SIGN_PSEUDO_NORMAL
+use fossil, only : surface_stl_object, facet_object, SIGN_PSEUDO_NORMAL
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
 
@@ -81,7 +81,7 @@ contains
    endsubroutine reverse_one
 
    function check_dragon() result(ok)
-   !< Outward dragon-fine vs an inside-out copy put through sanitize, on a 12^3 grid
+   !< Outward dragon vs an inside-out copy put through sanitize, on a 12^3 grid
    !< spanning the bounding box grown by 10%.
    logical                  :: ok              !< Check result.
    type(surface_stl_object) :: good, bad       !< Outward reference and inside-out copy.
@@ -90,11 +90,17 @@ contains
    integer(I4P), parameter  :: N = 12_I4P      !< Grid points per direction.
    integer(I4P)             :: i, j, k         !< Counters.
    integer(I4P)             :: n_sign, n_mag, n_inside !< Mismatch counters.
+   type(facet_object), allocatable :: fs(:)    !< Copy of the sanitized facets.
+   type(facet_object), pointer     :: fp       !< Facet.
 
-   call good%load_from_file(file_name='src/tests/dragon-fine.stl', guess_format=.true.)
+   call good%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
    call good%sanitize
-   call bad%load_from_file(file_name='src/tests/dragon-fine.stl', guess_format=.true.)
-   call bad%sanitize
+   allocate(fs(good%get_facets_number())) ! the sanitized dragon, copied (cheaper than a second load + sanitize)
+   do i = 1, size(fs)
+      fp => good%facet_at(i)
+      fs(i) = fp
+   enddo
+   call bad%adopt_facets(facets=fs)
    call bad%reverse_normals
    call bad%analyze               ! fully analyzed inside-out dragon
    call bad%sanitize
@@ -120,7 +126,7 @@ contains
       enddo
    enddo
    ok = (n_sign == 0) .and. (n_mag == 0) .and. (n_inside == 0)
-   print '(A,I0,A,I0,A,I0,A,I0,A,L1)', 'dragon-fine inside-out vs outward on ', N**3, ' points: sign mismatches=', n_sign, &
+   print '(A,I0,A,I0,A,I0,A,I0,A,L1)', 'dragon inside-out vs outward on ', N**3, ' points: sign mismatches=', n_sign, &
                                        ' |d| mismatches=', n_mag, ' inside mismatches=', n_inside, ' ok=', ok
    endfunction check_dragon
 endprogram fossil_test_sanitize_inside_out

@@ -1,17 +1,21 @@
 !< FOSSIL test: explicit + Taubin mesh smoothing (issue #18 §2.3).
 !<
+!< Regression variant (issue #45): invariants 1-3 on dragon.stl (6588 facets) instead of bunny, same thresholds
+!< (measured on dragon: volume drift 0.22 %, area drop 7.2 %, explicit loss 78.0 vs Taubin 1.04). The full bunny
+!< version is src/tests/validation/fossil_val_smoothing.f90.
+!<
 !< Four invariants on the public contract of `surface%smooth`:
 !<
-!<   1. **Taubin volume preservation on bunny**: |Δvolume/volume| ≤
-!<      5% after 5 Taubin pairs. The bunny has real high-frequency
+!<   1. **Taubin volume preservation on dragon**: |Δvolume/volume| ≤
+!<      5% after 5 Taubin pairs. The dragon has real high-frequency
 !<      surface variation that Taubin is designed to smooth without
 !<      shrinking. This is the headline guarantee.
-!<   2. **Taubin reduces surface area on bunny**: Taubin smoothing
+!<   2. **Taubin reduces surface area on dragon**: Taubin smoothing
 !<      attenuates high-frequency surface "wiggle", which lowers the
 !<      total surface area. Assert post-smooth area < pre-smooth area
 !<      by at least 0.1% (a small but nonzero drop confirms the
 !<      smoother is doing visible work).
-!<   3. **Explicit shrinks the bunny more than Taubin**: with the
+!<   3. **Explicit shrinks the dragon more than Taubin**: with the
 !<      same lambda and iteration count, explicit Laplacian (no
 !<      counter-shrinking) should lose more volume than Taubin. This
 !<      is the "wrong tool for the job" comparison: catches a
@@ -34,7 +38,7 @@ use penf, only : I4P, R8P
 
 implicit none
 
-type(surface_stl_object) :: bunny_taubin, bunny_explicit, cube
+type(surface_stl_object) :: dragon_taubin, dragon_explicit, cube
 real(R8P) :: vol_before, vol_taubin_after, vol_explicit_after
 real(R8P) :: area_before, area_taubin_after
 integer(I4P) :: status
@@ -44,16 +48,16 @@ logical :: are_tests_passed(4)
 
 are_tests_passed = .false.
 
-! ---- Inv 1 & 2: Taubin on bunny.
-call bunny_taubin%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-vol_before  = bunny_taubin%get_volume()
-area_before = bunny_taubin%get_area()
-print '(A,F12.6,A,F12.6)', 'bunny before: vol=', vol_before, '  area=', area_before
+! ---- Inv 1 & 2: Taubin on dragon.
+call dragon_taubin%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+vol_before  = dragon_taubin%get_volume()
+area_before = dragon_taubin%get_area()
+print '(A,F12.6,A,F12.6)', 'dragon before: vol=', vol_before, '  area=', area_before
 
-call bunny_taubin%smooth(method=SMOOTH_METHOD_TAUBIN, iterations=5_I4P, status=status)
-vol_taubin_after  = bunny_taubin%get_volume()
-area_taubin_after = bunny_taubin%get_area()
-print '(A,F12.6,A,F12.6,A,I0)', 'bunny Taubin: vol=', vol_taubin_after, &
+call dragon_taubin%smooth(method=SMOOTH_METHOD_TAUBIN, iterations=5_I4P, status=status)
+vol_taubin_after  = dragon_taubin%get_volume()
+area_taubin_after = dragon_taubin%get_area()
+print '(A,F12.6,A,F12.6,A,I0)', 'dragon Taubin: vol=', vol_taubin_after, &
       '  area=', area_taubin_after, '  status=', status
 
 print '(A,F8.4,A)', 'inv 1 (Taubin vol): rel change = ', &
@@ -66,10 +70,10 @@ print '(A,F8.4,A,F8.4)', 'inv 2 (area drop): rel drop = ', &
 are_tests_passed(2) = ((area_before - area_taubin_after) / area_before >= AREA_DROP_MIN_REL)
 
 ! ---- Inv 3: Explicit shrinks more than Taubin.
-call bunny_explicit%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-call bunny_explicit%smooth(method=SMOOTH_METHOD_EXPLICIT, lambda=0.5_R8P, &
+call dragon_explicit%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+call dragon_explicit%smooth(method=SMOOTH_METHOD_EXPLICIT, lambda=0.5_R8P, &
                             iterations=5_I4P, status=status)
-vol_explicit_after = bunny_explicit%get_volume()
+vol_explicit_after = dragon_explicit%get_volume()
 print '(A,F12.6,A,F12.6,A,F12.6)', 'inv 3 (explicit vs Taubin): explicit_vol=', vol_explicit_after, &
       '  Taubin_vol=', vol_taubin_after, '  explicit_loss=', (vol_before - vol_explicit_after)
 are_tests_passed(3) = (status == SMOOTH_STATUS_OK) .and. &

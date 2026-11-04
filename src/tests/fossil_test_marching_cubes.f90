@@ -10,7 +10,7 @@
 !<   3. Off-iso sphere — same sphere SDF, extract at iso=0.3. The level
 !<      surface is at radius 0.7, so volume should equal 4/3 π * 0.7^3.
 !<   4. Roundtrip via distance field — load cube.stl, call
-!<      `surface%resample_via_distance_field(64)`, assert the resulting
+!<      `surface%resample_via_distance_field(32)`, assert the resulting
 !<      surface has volume ≈ 1.0. Tests integration with the existing
 !<      `distance` API and the §1.5 step 5 helper.
 
@@ -121,7 +121,7 @@ deallocate(values)
 ! ----- 4. Roundtrip: cube.stl → distance field → MC at iso=0 → cube_resampled.
 call cube_surface%destroy
 call cube_surface%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-call cube_surface%resample_via_distance_field(resolution=64_I4P, surface_out=resampled, status=status)
+call cube_surface%resample_via_distance_field(resolution=32_I4P, surface_out=resampled, status=status)
 vol = resampled%get_volume()
 vol_target = 1._R8P
 are_tests_passed(4) = (status == MC_STATUS_OK .and. &

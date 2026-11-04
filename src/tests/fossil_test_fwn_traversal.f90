@@ -1,12 +1,17 @@
 !< FOSSIL, test the iterative fast-winding-number traversal `bvh_winding_number_oac` (issue #29, step 3).
 !<
-!< On 12^3 grids over the bounding box grown by 10%:
+!< Regression variant (issue #45): dragon.stl (6588 facets) and cube-05. The full version (bunny and dragon-fine) is
+!< src/tests/validation/fossil_val_fwn_traversal.f90.
+!<
+!< On grids over the bounding box grown by 10%:
 !<   1. exact path (beta2 <= 0) equals the per-facet sum of `facet%solid_angle` to 1e-10 in w
-!<      (the traversal rebuilds vertices as v1 + e12, v1 + e13 from the payload);
-!<   2. fast path vs exact: |w_fast - w_exact| < 1e-2 at beta = 2 and < 2e-3 at beta = 4, and
-!<      the error decreases with beta, on bunny and dragon-fine (measured with the second-order
-!<      expansion: bunny 8.7e-3 / 1.7e-3, dragon-fine 9.8e-4 / 7.2e-5). The bound also catches
-!<      the far-field sign error of the former implementation (error ~2.0 on bunny);
+!<      (the traversal rebuilds vertices as v1 + e12, v1 + e13 from the payload), on a 4^3 grid
+!<      (measured on dragon: 2.3e-15);
+!<   2. fast path vs exact on a 12^3 grid: |w_fast - w_exact| < 1e-2 at beta = 2 and < 2e-3 at
+!<      beta = 4, and the error decreases with beta, on dragon (bounds set on bunny with the
+!<      second-order expansion: bunny 8.7e-3 / 1.7e-3, dragon-fine 9.8e-4 / 7.2e-5; measured on
+!<      dragon: 5.3e-4 / 3.8e-5). The bound also catches the far-field sign error of the former
+!<      implementation (error ~2.0 on bunny);
 !<   3. watertight cube-05 (12288 facets): w within 1e-2 of 1 at interior points and of 0 at
 !<      exterior points, with the far field active.
 
@@ -20,13 +25,11 @@ use vecfor,                  only : vector_R8P
 implicit none
 
 real(R8P), parameter :: FOURPI = 4._R8P * acos(-1._R8P)
-logical              :: ok(5)
+logical              :: ok(3)
 
-ok(1) = check_exact('src/tests/bunny.stl',       'bunny      ')
-ok(2) = check_exact('src/tests/dragon-fine.stl', 'dragon-fine')
-ok(3) = check_fast('src/tests/bunny.stl',        'bunny      ')
-ok(4) = check_fast('src/tests/dragon-fine.stl',  'dragon-fine')
-ok(5) = check_cube()
+ok(1) = check_exact('src/tests/dragon.stl', 'dragon')
+ok(2) = check_fast('src/tests/dragon.stl',  'dragon')
+ok(3) = check_cube()
 
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1

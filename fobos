@@ -204,7 +204,7 @@ mklib     = static
 # etc.) and have no business going through nvfortran -- some trip vendor parser
 # quirks (e.g. `(expr) .cross. (expr)`) unrelated to the device port. They stay
 # in tests-gnu / tests-intel.
-target    = src/tests/fossil_test_distance_bench.f90
+target    = src/tests/validation/fossil_test_distance_bench.f90
 template  = template-static-nvidia
 build_dir = ./exe/
 

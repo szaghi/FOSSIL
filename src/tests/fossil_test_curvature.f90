@@ -19,19 +19,14 @@
 !<      MC-generated unit sphere. Tessellation noise inflates outliers,
 !<      so use median + loose tolerance.
 !<
-!<   4. **Bunny finiteness**: on the bunny fixture (~70k facets), every
+!<   4. **Dragon finiteness**: on dragon.stl (6588 facets, dirty: non-manifold,
+!<      self-intersecting; it replaced the 70k-facet bunny, issue #45), every
 !<      computed `K(i)` is finite (no NaN, no Inf). This is the basic
 !<      "did the algorithm run without arithmetic disasters on a
-!<      large real-world mesh" sanity test.
-!<      (Gauss-Bonnet on the bunny would be the natural sphere-genus
-!<      check but the bunny fixture turns out to NOT be watertight —
-!<      `is_watertight() = .false.` — even though it passes the
-!<      §1.4 winding-number test on dirty input. Same situation for
-!<      the MC sphere via §1.5: documented Lorensen-Cline 105/150
-!<      ambiguity leaves ~200 disconnected edges. Neither closed-
-!<      manifold fixture is available in the test suite, so the cube
-!<      test alone covers Gauss-Bonnet; the bunny test instead
-!<      validates "didn't blow up on a large dense input.")
+!<      real-world mesh" sanity test. Gauss-Bonnet needs a closed manifold:
+!<      the dragon is not one, and the MC sphere via §1.5 is not either
+!<      (documented Lorensen-Cline 105/150 ambiguity leaves ~200
+!<      disconnected edges), so the cube test alone covers Gauss-Bonnet.
 
 program fossil_test_curvature
 
@@ -43,7 +38,7 @@ use vecfor, only : vector_R8P
 
 implicit none
 
-type(surface_stl_object) :: cube, sphere, bunny
+type(surface_stl_object) :: cube, sphere, dragon
 type(facet_object), allocatable :: sphere_facets(:)
 type(vertex_pool_object), pointer :: pool
 real(R8P), allocatable :: K(:), area_third(:), values(:,:,:)
@@ -135,9 +130,9 @@ are_tests_passed(3) = (status == CURV_STATUS_OK) .and. &
                       (abs(K_median - 1._R8P) < TOL_SPHERE_REL)
 deallocate(K)
 
-! ---- Invariant 4: bunny finiteness — every K(i) is a finite real.
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-call bunny%gaussian_curvature(K=K, status=status)
+! ---- Invariant 4: dragon finiteness — every K(i) is a finite real.
+call dragon%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+call dragon%gaussian_curvature(K=K, status=status)
 n_vertices = size(K, kind=I4P)
 block
    integer(I4P) :: n_bad
@@ -146,7 +141,7 @@ block
       if (K(i) /= K(i)) n_bad = n_bad + 1_I4P  ! NaN check
       if (abs(K(i)) > huge(1._R8P) * 0.5_R8P) n_bad = n_bad + 1_I4P  ! Inf check
    enddo
-   print '(A,I0,A,I0,A,I0)', 'inv 4 (bunny finite): nf=', bunny%get_facets_number(), &
+   print '(A,I0,A,I0,A,I0)', 'inv 4 (dragon finite): nf=', dragon%get_facets_number(), &
          '  nv=', n_vertices, '  n_bad=', n_bad
    are_tests_passed(4) = (status == CURV_STATUS_OK) .and. (n_bad == 0_I4P)
 endblock

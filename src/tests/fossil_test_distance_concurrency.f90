@@ -1,5 +1,8 @@
 !< FOSSIL test: concurrency-safety of the distance query path.
 !<
+!< Regression variant (issue #45): a 10^3 probe grid and 4 parallel sweeps on dragon.stl. The full version (20^3 grid,
+!< 8 sweeps) is src/tests/validation/fossil_val_distance_concurrency.f90.
+!<
 !< Pins the contract that the ADAM immersed-boundary AMR-marker pass depends
 !< on: many threads may call `surface%distance` / `surface%compute_distance`
 !< concurrently on a single, **shared, read-only** `surface_stl_object` and
@@ -66,8 +69,8 @@ integer(I4P)                  :: mism_unsigned, mism_pseudo, mism_ray, mism_sa
 character(len=512)            :: stl_path
 logical                       :: are_tests_passed(4)
 real(R8P), parameter          :: BBOX_INFLATE  = 1.5_R8P !< Probe grid spans 1.5x the surface bbox.
-integer(I4P), parameter       :: GRID_EDGE     = 20_I4P  !< 20^3 = 8000 queries — enough contention, fast enough to repeat.
-integer(I4P), parameter       :: N_SWEEPS      = 8_I4P   !< Parallel sweeps; races are nondeterministic, so repeat.
+integer(I4P), parameter       :: GRID_EDGE     = 10_I4P  !< 10^3 = 1000 queries (validation copy: 20^3, 8 sweeps).
+integer(I4P), parameter       :: N_SWEEPS      = 4_I4P   !< Parallel sweeps; races are nondeterministic, so repeat.
 !$ integer, external          :: omp_get_max_threads
 
 ! ---- arguments ---------------------------------------------------------------

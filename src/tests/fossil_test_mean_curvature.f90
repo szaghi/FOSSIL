@@ -14,15 +14,16 @@
 !<      (convex-outward sphere). The positive sign comes from the
 !<      H*n vector projecting onto the per-vertex pseudo-normal;
 !<      this catches a regression where the sign convention flips.
-!<   3. **Bunny finiteness**: 70k facets, 35k vertices, no NaN /
-!<      Inf in any H value. Same large-real-world sanity check as
+!<   3. **Dragon finiteness**: dragon.stl (6588 facets, dirty: non-manifold,
+!<      self-intersecting; it replaced the 70k-facet bunny, issue #45),
+!<      no NaN / Inf in any H value. Same real-world sanity check as
 !<      the Gaussian test.
 !<
 !< Cube is a poor fixture for mean-curvature testing — its 8 corners
 !< are sharp features where H is dominated by the discretization
 !< artifact rather than by smooth curvature, and cube has no
 !< flat-region interior vertices to test "H ≈ 0 on flat regions".
-!< Sphere + bunny are sufficient.
+!< Sphere + dragon are sufficient.
 
 program fossil_test_mean_curvature
 
@@ -33,7 +34,7 @@ use vecfor, only : vector_R8P
 
 implicit none
 
-type(surface_stl_object) :: sphere, bunny
+type(surface_stl_object) :: sphere, dragon
 type(facet_object), allocatable :: sphere_facets(:)
 real(R8P), allocatable :: H(:), values(:,:,:)
 type(vector_R8P) :: bmin, bmax
@@ -82,15 +83,15 @@ print '(A,I0,A,I0,A,F6.3)', 'inv 2 (sphere sign): n_positive=', n_pos, ' / ', n_
 are_tests_passed(2) = (real(n_pos, R8P) / real(n_total, R8P) >= SIGN_FRACTION_MIN)
 deallocate(H)
 
-! ---- Inv 3: bunny finiteness.
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-call bunny%mean_curvature(H=H, status=status)
+! ---- Inv 3: dragon finiteness.
+call dragon%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+call dragon%mean_curvature(H=H, status=status)
 n_bad = 0_I4P
 do i = 1_I4P, size(H, kind=I4P)
    if (H(i) /= H(i)) n_bad = n_bad + 1_I4P                   ! NaN
    if (abs(H(i)) > huge(1._R8P) * 0.5_R8P) n_bad = n_bad + 1_I4P  ! Inf
 enddo
-print '(A,I0,A,I0,A,I0)', 'inv 3 (bunny finite): nf=', bunny%get_facets_number(), &
+print '(A,I0,A,I0,A,I0)', 'inv 3 (dragon finite): nf=', dragon%get_facets_number(), &
       '  nv=', size(H), '  n_bad=', n_bad
 are_tests_passed(3) = (status == CURV_STATUS_OK) .and. (n_bad == 0_I4P)
 

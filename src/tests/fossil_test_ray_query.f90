@@ -9,12 +9,14 @@
 !<
 !< Step 1 covers invariants 1..4 (cube-only sanity). Step 2 adds 5..7 for the
 !< tree-accelerated path. Step 3 adds 8..9 for the any-hit early-exit query:
-!<   5. Tree-vs-flat parity on bunny.stl. 100 deterministic random rays:
+!<   5. Tree-vs-flat parity on dragon.stl. 100 deterministic random rays:
 !<      `intersect_ray_all` (which now goes through the AABB tree) must produce
 !<      hit lists bit-identical to the flat O(n) reference oracle
 !<      `ray_intersect_all_flat`. Identical = same hit count, same per-hit
-!<      `t` and `facet_id`. The fixture is non-trivial (bunny ~ 70k facets,
-!<      tree depth ~5), so any traversal bug shows up.
+!<      `t` and `facet_id`. The fixture is non-trivial (dragon, 6588 facets,
+!<      dirty; it replaced the 70k-facet bunny, issue #45), and the rays aim
+!<      at random points of its bounding box so that most of them hit it
+!<      (the printed hit count), so any traversal bug shows up.
 !<   6. Sphere from §1.5 marching cubes, radial outward ray from center.
 !<      Exactly one hit at t ~= R. Sphere has no flat-face degeneracies, so
 !<      this validates the curved-mesh path independently of axis alignment.
@@ -26,7 +28,7 @@
 !<      The exactly-on-boundary case `max_t = 1.0` should also be `.true.`
 !<      because the contract is `t <= max_t`.
 !<   9. `intersect_ray_any` ≡ `size(intersect_ray_all%hits) > 0` over the
-!<      same 100 random bunny rays from invariant 5. Cross-check between the
+!<      same 100 random dragon rays from invariant 5. Cross-check between the
 !<      two query types — protects against a divergence where one accepts a
 !<      hit the other rejects (e.g. different `t < 0` filtering).
 !<
@@ -48,7 +50,7 @@ use vecfor, only : vector_R8P, ex_R8P, ey_R8P, ez_R8P
 
 implicit none
 
-type(surface_stl_object) :: cube, bunny, sphere
+type(surface_stl_object) :: cube, dragon, sphere
 type(facet_object), allocatable :: sphere_facets(:)
 type(ray_hit_t), allocatable :: hits(:), hits_flat(:)
 type(ray_hit_t) :: best_hit
@@ -59,7 +61,7 @@ real(R8P) :: sqrt3
 real(R8P) :: x, y, z, dx
 integer(I4P) :: status
 integer(I4P) :: i, j, k, r
-integer(I4P) :: n_diff, n_any_diff
+integer(I4P) :: n_diff, n_any_diff, n_hit
 logical :: has_hit, found_below, found_at, found_above
 logical :: any_tree, any_all
 logical :: are_tests_passed(9)
@@ -126,22 +128,26 @@ call cube%intersect_ray_all(ray_origin=origin, ray_direction=direction, hits=hit
 print '(A,I0,A,I0)', 'inv 4 (miss): status=', status, ' n_hits=', size(hits)
 are_tests_passed(4) = (status == RAY_STATUS_OK) .and. (size(hits) == 0)
 
-! ---- Invariant 5: tree vs flat parity on bunny.stl, deterministic random rays.
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
+! ---- Invariant 5: tree vs flat parity on dragon.stl, deterministic random rays.
+call dragon%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+bmin = dragon%get_bmin() ; bmax = dragon%get_bmax()
 n_diff = 0_I4P
+n_hit = 0_I4P
 do r = 1_I4P, N_RANDOM_RAYS
    ! Cheap LCG-like PRNG seeded by `r`. No need for randomness across runs;
    ! reproducibility wins so a regression bisects cleanly.
-   call cheap_random_origin_dir(seed=r, origin=origin, direction=direction)
-   call bunny%intersect_ray_all(ray_origin=origin, ray_direction=direction, hits=hits, status=status)
-   call ray_intersect_all_flat(facet=bunny_facets_ref(), ray_origin=origin, &
+   call cheap_random_origin_dir(seed=r, lo=bmin, hi=bmax, origin=origin, direction=direction)
+   call dragon%intersect_ray_all(ray_origin=origin, ray_direction=direction, hits=hits, status=status)
+   call ray_intersect_all_flat(facet=dragon_facets_ref(), ray_origin=origin, &
                                ray_direction=direction, hits=hits_flat, status=status)
+   if (size(hits_flat) > 0) n_hit = n_hit + 1_I4P
    if (.not. hit_lists_match(hits_a=hits, hits_b=hits_flat, tol=TOL_FP)) then
       n_diff = n_diff + 1_I4P
       if (n_diff <= 3_I4P) print '(A,I0,A,I0,A,I0)', '   ray ', r, ' MISMATCH tree=', size(hits), ' flat=', size(hits_flat)
    endif
 enddo
-print '(A,I0,A,I0,A)', 'inv 5 (bunny tree=flat): ', N_RANDOM_RAYS - n_diff, '/', N_RANDOM_RAYS, ' rays match'
+print '(A,I0,A,I0,A,I0,A)', 'inv 5 (dragon tree=flat): ', N_RANDOM_RAYS - n_diff, '/', N_RANDOM_RAYS, ' rays match, ', &
+      n_hit, ' hit the mesh'
 are_tests_passed(5) = (n_diff == 0_I4P)
 
 ! ---- Invariant 6: sphere from MC, radial outward ray from center → 1 hit.
@@ -202,13 +208,13 @@ call cube%intersect_ray_any(ray_origin=origin, ray_direction=direction, max_t=1.
 print '(A,3L2)', 'inv 8 (any max_t toggle): below/at/above = ', found_below, found_at, found_above
 are_tests_passed(8) = (.not. found_below) .and. found_at .and. found_above
 
-! ---- Invariant 9: any-hit ≡ (size(all-hits) > 0) over the same 100 bunny rays.
+! ---- Invariant 9: any-hit ≡ (size(all-hits) > 0) over the same 100 dragon rays.
 n_any_diff = 0_I4P
 do r = 1_I4P, N_RANDOM_RAYS
-   call cheap_random_origin_dir(seed=r, origin=origin, direction=direction)
-   call bunny%intersect_ray_any(ray_origin=origin, ray_direction=direction, &
+   call cheap_random_origin_dir(seed=r, lo=bmin, hi=bmax, origin=origin, direction=direction)
+   call dragon%intersect_ray_any(ray_origin=origin, ray_direction=direction, &
                                 found=any_tree, status=status)
-   call bunny%intersect_ray_all(ray_origin=origin, ray_direction=direction, &
+   call dragon%intersect_ray_all(ray_origin=origin, ray_direction=direction, &
                                 hits=hits, status=status)
    any_all = (size(hits, kind=I4P) > 0_I4P)
    if (any_tree .neqv. any_all) then
@@ -225,24 +231,26 @@ if (.not. (all(are_tests_passed))) error stop 1
 
 contains
 
-   function bunny_facets_ref() result(arr)
-   !< Read-only handle to bunny's facet array — passes the surface's pointer
+   function dragon_facets_ref() result(arr)
+   !< Read-only handle to dragon's facet array — passes the surface's pointer
    !< through unchanged. Local helper to keep the call site at invariant 5
    !< readable.
    type(facet_object), pointer :: arr(:)
 
-   arr => bunny%facets_ref()
-   endfunction bunny_facets_ref
+   arr => dragon%facets_ref()
+   endfunction dragon_facets_ref
 
-   subroutine cheap_random_origin_dir(seed, origin, direction)
-   !< Deterministic pseudo-random ray, parameterized by `seed`. Origin lies on a
-   !< sphere of radius 5 around the bunny's bounding-box center; direction
-   !< points toward a random point inside the bbox. Designed so most rays
-   !< actually hit the model — to exercise the all-hits accumulator and
-   !< mid-traversal pruning, not just the trivial-miss path.
+   subroutine cheap_random_origin_dir(seed, lo, hi, origin, direction)
+   !< Deterministic pseudo-random ray, parameterized by `seed`. Origin lies in the box of 5 times the
+   !< mesh bounding box [lo, hi], same centre; direction points toward a random point inside [lo, hi].
+   !< Designed so most rays actually hit the model — to exercise the all-hits accumulator and
+   !< mid-traversal pruning, not just the trivial-miss path. (Until issue #45 the target was a random
+   !< point of [-1, 1]^3, far larger than the bunny: 0 of the 100 rays hit it.)
    integer(I4P),     intent(in)  :: seed
+   type(vector_R8P), intent(in)  :: lo, hi
    type(vector_R8P), intent(out) :: origin
    type(vector_R8P), intent(out) :: direction
+   type(vector_R8P)              :: centre, ext
    real(R8P)                     :: a, b, c, d, e, f
    ! Six independent pseudo-random reals in [0, 1) from a Wang-style hash.
    call hashed_uniform(seed=seed, k=1_I4P, x=a)
@@ -251,14 +259,14 @@ contains
    call hashed_uniform(seed=seed, k=4_I4P, x=d)
    call hashed_uniform(seed=seed, k=5_I4P, x=e)
    call hashed_uniform(seed=seed, k=6_I4P, x=f)
-   ! Origin: scatter on a 5-radius shell around centroid (0, 0, 0 for bunny).
-   origin = vector_R8P((a - 0.5_R8P) * 10._R8P, &
-                       (b - 0.5_R8P) * 10._R8P, &
-                       (c - 0.5_R8P) * 10._R8P)
-   ! Direction: aim toward a random point in [-1, 1]^3 (bunny lives in there).
-   direction = vector_R8P((d - 0.5_R8P) * 2._R8P - origin%x, &
-                          (e - 0.5_R8P) * 2._R8P - origin%y, &
-                          (f - 0.5_R8P) * 2._R8P - origin%z)
+   centre = (lo + hi) * 0.5_R8P
+   ext = hi - lo
+   origin = vector_R8P(centre%x + (a - 0.5_R8P) * 5._R8P * ext%x, &
+                       centre%y + (b - 0.5_R8P) * 5._R8P * ext%y, &
+                       centre%z + (c - 0.5_R8P) * 5._R8P * ext%z)
+   direction = vector_R8P(lo%x + d * ext%x - origin%x, &
+                          lo%y + e * ext%y - origin%y, &
+                          lo%z + f * ext%z - origin%z)
    endsubroutine cheap_random_origin_dir
 
    pure subroutine hashed_uniform(seed, k, x)

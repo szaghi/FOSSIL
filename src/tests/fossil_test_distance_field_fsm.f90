@@ -2,10 +2,13 @@
 program fossil_test_distance_field_fsm
 !< FOSSIL test: far field of `distance_field_object` by fast sweeping (issue #32, step 4).
 !<
+!< Regression variant (issue #45): the 25^3 and 49^3 grids (coarse-pair order) and the threads check at 49^3. The full
+!< version (97^3 grid, fine-pair order, threads at 97^3) is src/tests/validation/fossil_val_distance_field_fsm.f90.
+!<
 !< Against the analytic signed distance of the unit cube [0, 1]^3 (cube-02):
-!<  - uniform grids on [-1, 2]^3 with 25, 49, 97 points per axis: the far-field max error
+!<  - uniform grids on [-1, 2]^3 with 25, 49 points per axis: the far-field max error
 !<    falls like h |log h|, the FSM bound near point-like features (the cube's corners and
-!<    edges; Zhao 2005): observed order against h |log h| in [0.8, 1.2] for both pairs. The
+!<    edges; Zhao 2005): observed order against h |log h| in [0.8, 1.2] for the pair. The
 !<    order against h alone is printed too (about 0.6-0.7 for that reason), and the mean
 !<    error's order against h;
 !<  - the band cells keep their exact values bit for bit through the sweeps;
@@ -14,7 +17,7 @@ program fossil_test_distance_field_fsm
 !<  - a 1.15-stretched grid: far-field max error below the largest spacing;
 !<  - two blocks with a one-cell halo, swept with caller-driven halo exchange, reproduce the
 !<    single-block field (to 1e-10);
-!<  - OpenMP: the sweep with all threads equals the sweep with one thread bit for bit (97^3;
+!<  - OpenMP: the sweep with all threads equals the sweep with one thread bit for bit (49^3;
 !<    trivially true without OpenMP), timings printed.
 
 use fossil, only : surface_stl_object, SIGN_PSEUDO_NORMAL, STATUS_OK
@@ -24,27 +27,23 @@ use penf, only : I4P, I8P, R8P
 implicit none
 
 type(surface_stl_object)    :: cube                !< Unit cube.
-real(R8P)                   :: err(3), h(3), order !< Errors, spacings, observed order.
-real(R8P)                   :: mean(3), order_c   !< Mean errors, coarse-pair order.
-integer(I4P), parameter     :: NS(3) = [25, 49, 97]
+real(R8P)                   :: err(2), h(2)      !< Errors, spacings.
+real(R8P)                   :: mean(2), order_c  !< Mean errors, coarse-pair order.
+integer(I4P), parameter     :: NS(2) = [25, 49]
 logical                     :: ok
 integer(I4P)                :: r
 
 ok = .true.
 call cube%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true.)
 
-do r = 1, 3
+do r = 1, 2
    call uniform_case(n=NS(r), err=err(r), mean=mean(r), h=h(r))
 enddo
 order_c = log(err(1) / err(2)) / log(hlogh(h(1)) / hlogh(h(2)))
-order   = log(err(2) / err(3)) / log(hlogh(h(2)) / hlogh(h(3)))
-print '(A,F6.3,A,F6.3)', 'max error, observed order vs h |log h|: coarse pair ', order_c, '  fine pair ', order
-print '(A,F6.3,A,F6.3)', 'max error, observed order vs h:         coarse pair ', log(err(1) / err(2)) / log(h(1) / h(2)), &
-                         '  fine pair ', log(err(2) / err(3)) / log(h(2) / h(3))
-print '(A,F6.3,A,F6.3)', 'mean error, observed order vs h:        coarse pair ', log(mean(1) / mean(2)) / log(h(1) / h(2)), &
-                         '  fine pair ', log(mean(2) / mean(3)) / log(h(2) / h(3))
-ok = ok .and. err(3) < err(2) .and. err(2) < err(1) .and. &
-     order_c >= 0.8_R8P .and. order_c <= 1.2_R8P .and. order >= 0.8_R8P .and. order <= 1.2_R8P
+print '(A,F6.3)', 'max error, observed order vs h |log h|: coarse pair ', order_c
+print '(A,F6.3)', 'max error, observed order vs h:         coarse pair ', log(err(1) / err(2)) / log(h(1) / h(2))
+print '(A,F6.3)', 'mean error, observed order vs h:        coarse pair ', log(mean(1) / mean(2)) / log(h(1) / h(2))
+ok = ok .and. err(2) < err(1) .and. order_c >= 0.8_R8P .and. order_c <= 1.2_R8P
 
 call stretched_case
 call two_block_case
@@ -213,7 +212,7 @@ contains
    !< Sweep from the same signed band with 1 thread and with all threads: bit-exact.
    type(distance_field_object) :: f1, fn
    real(R8P),    allocatable   :: x(:)
-   integer(I4P), parameter     :: N = 97
+   integer(I4P), parameter     :: N = 49
    integer(I4P)                :: i, nthreads
    integer(I8P)                :: c0, c1, rate
    real(R8P)                   :: t1, tn

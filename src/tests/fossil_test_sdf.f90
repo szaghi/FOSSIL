@@ -1,5 +1,9 @@
 !< FOSSIL test: per-facet Shape Diameter Function (issue #18 §1.9, step 1).
 !<
+!< Regression variant (issue #45): no bunny. Invariant 4 smooths the sphere SDF of invariant 2 (measured: stddev
+!< 0.0091 raw -> 0.0042 smoothed, mean 1.4945 unchanged), invariant 6 segments the two-cube composite of invariant 3.
+!< The full bunny version is src/tests/validation/fossil_val_sdf.f90.
+!<
 !< Public contract for `compute_sdf` that step-N implementations must honour:
 !<   - returns `sdf(1:nf)` aligned to `facet(1:nf)`,
 !<   - facets with too few cone-ray hits get `SDF_SENTINEL = -1`,
@@ -21,7 +25,7 @@
 !<      bimodal SDF distribution: small-cube facets cluster near 0.3, big-cube
 !<      facets cluster near 1.0. Assert: at least 80% of facets are within
 !<      ±20% of one of the two expected values.
-!<   4. Smoothing reduces variance. On the bunny.stl SDF, two passes of
+!<   4. Smoothing reduces variance. On the sphere SDF of invariant 2, two passes of
 !<      Laplacian smoothing (lambda = 0.5, the default) must strictly reduce
 !<      the per-facet variance — the whole point of the pass is to attenuate
 !<      cone-ray Monte-Carlo noise without erasing real geometric structure.
@@ -36,8 +40,8 @@
 !<      into two near-identical components if asked. That's intended GMM
 !<      behaviour, not a bug, and a graph-cut post-pass would be needed to
 !<      enforce true cluster collapse — see the deferred §1.9b follow-up.)
-!<   6. Bunny + k=4 capstone via `surface%segment_sdf`. Asserts: status OK,
-!<      all labels in [0, 4], no surprise sentinels (bunny is closed so the
+!<   6. Composite + k=4 capstone via `surface%segment_sdf`. Asserts: status OK,
+!<      all labels in [0, 4], no surprise sentinels (both cubes are closed so the
 !<      cone-ray hit rate should be ~100%; a high sentinel fraction would
 !<      indicate something broken in the ray cast). Verifies the public TBP
 !<      end-to-end (compute_sdf → smooth_sdf → GMM → labels).
@@ -53,9 +57,9 @@ use vecfor, only : vector_R8P
 
 implicit none
 
-type(surface_stl_object) :: cube, sphere, composite, small_cube, bunny
+type(surface_stl_object) :: cube, sphere, composite, small_cube
 type(facet_object), allocatable :: sphere_facets(:)
-real(R8P), allocatable :: sdf(:), sdf_smoothed(:), values(:,:,:)
+real(R8P), allocatable :: sdf(:), sdf_sphere(:), sdf_smoothed(:), values(:,:,:)
 integer(I4P), allocatable :: labels(:)
 type(vector_R8P) :: bmin, bmax
 real(R8P) :: x, y, z, dx
@@ -120,6 +124,7 @@ are_tests_passed(2) = (status == SDF_STATUS_OK)              .and. &
                       (mean_sdf > 1.0_R8P)                   .and. &
                       (mean_sdf < 2.1_R8P)                   .and. &
                       (stddev_sdf / mean_sdf < 0.40_R8P)
+sdf_sphere = sdf  ! raw sphere SDF, reused by invariant 4
 
 ! ---- Invariant 3: two-scale composite (big cube + far-translated small cube).
 !      Two disjoint solids in one surface. SDF queries on big-cube facets
@@ -151,15 +156,11 @@ are_tests_passed(3) = (status == SDF_STATUS_OK) .and. &
                       (frac_in_cluster_a > 0._R8P) .and. &
                       (frac_in_cluster_b > 0._R8P)
 
-! ---- Invariant 4: smoothing strictly reduces variance on bunny.
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-call compute_sdf(facet=ref_facets(bunny), tree=bunny%aabb, &
-                 bmin=bunny%get_bmin(), bmax=bunny%get_bmax(), &
-                 sdf=sdf, status=status)
-allocate(sdf_smoothed(size(sdf, kind=I4P)))
-sdf_smoothed = sdf
-call smooth_sdf(facet=ref_facets(bunny), sdf=sdf_smoothed, status=status)
-call summary(sdf=sdf,          mean=mean_raw,    stddev=stddev_raw,    n_sentinel=n_dummy)
+! ---- Invariant 4: smoothing strictly reduces variance on the sphere (raw SDF of invariant 2).
+allocate(sdf_smoothed(size(sdf_sphere, kind=I4P)))
+sdf_smoothed = sdf_sphere
+call smooth_sdf(facet=ref_facets(sphere), sdf=sdf_smoothed, status=status)
+call summary(sdf=sdf_sphere,   mean=mean_raw,    stddev=stddev_raw,    n_sentinel=n_dummy)
 call summary(sdf=sdf_smoothed, mean=mean_smooth, stddev=stddev_smooth, n_sentinel=n_dummy)
 print '(A,F8.4,A,F8.4,A,F8.4,A,F8.4)', &
       'inv 4 (smoothing): raw mean=', mean_raw, ' stddev=', stddev_raw, &
@@ -181,13 +182,13 @@ are_tests_passed(5) = (status == SDF_STATUS_OK) .and. &
                       (n_a + n_unassigned == nf) .and. &
                       (n_a > 0_I4P)
 
-! ---- Invariant 6: bunny + k=4 capstone via TBP, all labels in [0, 4].
-call bunny%segment_sdf(facet_labels=labels, num_clusters=4_I4P, status=status)
+! ---- Invariant 6: composite + k=4 capstone via TBP, all labels in [0, 4].
+call composite%segment_sdf(facet_labels=labels, num_clusters=4_I4P, status=status)
 nf = size(labels, kind=I4P)
 lab_min = minval(labels)
 lab_max = maxval(labels)
 n_unassigned = count(labels == SDF_LABEL_UNASSIGNED)
-print '(A,I0,A,I0,A,I0,A,I0)', 'inv 6 (bunny k=4): nf=', nf, ' lab_min=', lab_min, &
+print '(A,I0,A,I0,A,I0,A,I0)', 'inv 6 (composite k=4): nf=', nf, ' lab_min=', lab_min, &
       ' lab_max=', lab_max, ' n_unassigned=', n_unassigned
 are_tests_passed(6) = (status == SDF_STATUS_OK)             .and. &
                       (lab_min >= 0_I4P)                    .and. &

@@ -7,7 +7,8 @@ program fossil_test_tag_block
 !< `is_point_inside` at the centre of *every* uncut cell (not one per component, so the component
 !< argument is checked too). `tag_block` must equal it cell by cell.
 !< - 3-D: cube-02 on a uniform 16^3 block straddling a corner, on a stretched 12^3 block, a block
-!<   inside (all -(band + 1)), a block outside (all band + 1); bunny on a 12^3 block; band 4.
+!<   inside (all -(band + 1)), a block outside (all band + 1); a faceted cone (`make_apex_body(256, 15)`: clean,
+!<   closed, curved) on a 12^3 block; band 4.
 !< - 2-D: NACA 0012 on a stretched 48 x 20 block, a 200-gon on a uniform 32 x 32 block, a block
 !<   inside the 200-gon, a block outside; band 3.
 !< - Refusals: non-increasing edges, wrong shape, negative band.
@@ -17,18 +18,21 @@ program fossil_test_tag_block
 use fossil, only : surface_stl_object, curve_object, BOX_CUT, STATUS_INVALID_INPUT, SIGN_FAST_WINDING_NUMBER
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
+use fossil_sign_bench_bodies, only : body_t, make_apex_body, to_surface
 
 implicit none
 
 real(R8P), parameter     :: PI = acos(-1._R8P)
-type(surface_stl_object) :: cube, bunny
+type(surface_stl_object) :: cube, cone
+type(body_t)             :: cb
 type(curve_object)       :: c
 real(R8P)                :: e16(17), s12(13), u(200), v(200), g(33), sx(49), sy(21), bmin(3), bmax(3)
 integer(I4P)             :: k, st, st2, st3, t3(2, 2, 2), t2(2, 2)
 logical                  :: ok(5)
 
 call cube%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true.)
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
+call make_apex_body(256, 15._R8P, 'cone 15 (256)', cb)
+call to_surface(cb%soup, cone)
 call bbox(cube, bmin, bmax)
 ! uniform block over the corner region of the cube, stretched block across the whole cube
 do k = 1, 17
@@ -42,9 +46,9 @@ ok(1) = ok(1) .and. check3(cube, lin(bmin(1), bmax(1), 0.3_R8P, 0.6_R8P, 7), lin
                            lin(bmin(3), bmax(3), 0.3_R8P, 0.6_R8P, 7), 4, 'cube-02 block inside', -5)
 ok(1) = ok(1) .and. check3(cube, lin(bmin(1), bmax(1), 1.2_R8P, 1.5_R8P, 7), lin(bmin(2), bmax(2), 0._R8P, 1._R8P, 7), &
                            lin(bmin(3), bmax(3), 0._R8P, 1._R8P, 7), 4, 'cube-02 block outside', 5)
-call bbox(bunny, bmin, bmax)
-ok(2) = check3(bunny, lin(bmin(1), bmax(1), -0.1_R8P, 1.1_R8P, 13), lin(bmin(2), bmax(2), -0.1_R8P, 1.1_R8P, 13), &
-               lin(bmin(3), bmax(3), -0.1_R8P, 1.1_R8P, 13), 4, 'bunny 12^3')
+call bbox(cone, bmin, bmax)
+ok(2) = check3(cone, lin(bmin(1), bmax(1), -0.1_R8P, 1.1_R8P, 13), lin(bmin(2), bmax(2), -0.1_R8P, 1.1_R8P, 13), &
+               lin(bmin(3), bmax(3), -0.1_R8P, 1.1_R8P, 13), 4, 'cone 12^3')
 
 ! 2-D
 do k = 0, 99

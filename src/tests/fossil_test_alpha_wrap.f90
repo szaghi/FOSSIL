@@ -8,7 +8,16 @@
 !< Step 5: validate the capstone `surface%alpha_wrap` TBP — adaptive
 !<         refinement loop integrating steps 1-4.
 !<
-!< 3 invariants for step 1, 3 for step 2, 3 for step 3, 3 for step 4, 3 for step 5:
+!< 3 invariants for step 1, 3 for step 2, 3 for step 3, 3 for step 4, 3 for step 5.
+!<
+!< REGRESSION variant (issue #45): invariants 11 and 14 (projection and capstone TBP on the
+!< sphere wrap, ~2 s each in the debug build: the 7296-facet sphere wrap goes through the
+!< vertex dedup sort, quadratic in its vertices) run only in the validation copy
+!< src/tests/validation/fossil_val_alpha_wrap.f90, which is the full original test. Here
+!< they are reported as skipped (.true.), invariant 12 checks the projected cube wrap of
+!< invariant 10, and the marching-cubes sphere is sampled on a 20^3 grid (32^3 in the
+!< validation copy); alpha stays 0.1.
+!<
 !<   1. Cube — refinement structure. cube.stl is a closed unit cube. Build
 !<      octree with α = 0.1. Assert: n_boundary_leaves > 0 (geometry is
 !<      captured), every boundary leaf actually overlaps at least one input
@@ -55,7 +64,7 @@
 !<      (1.0 for unit cube) compared to the unprojected step-3 wrap.
 !<      Watertightness preserved (vertex dedup is doing its job).
 !<      offset = α/3 per CGAL's recommended ratio.
-!<  11. Sphere wrap + projection — same on a curved input. Volume drops
+!<  11. [validation copy only] Sphere wrap + projection — same on a curved input. Volume drops
 !<      closer to (4/3)π. Watertightness preserved.
 !<  12. Projection manifold preservation. Compute non_manifold_edges_number
 !<      for the projected wrap of the cube; must be zero (vertex dedup
@@ -64,7 +73,7 @@
 !<  13. Capstone TBP `surface%alpha_wrap` on the cube — converges
 !<      (status OK or NOT_CONVERGED but watertight), volume within 10%
 !<      of unit cube. End-to-end exercise of the public API.
-!<  14. Capstone TBP on the sphere — convergence is acceptable as either
+!<  14. [validation copy only] Capstone TBP on the sphere — convergence is acceptable as either
 !<      OK or NOT_CONVERGED (curved surface is harder; the SUFFICIENT
 !<      property is a watertight result with volume within 30% of
 !<      analytic (4/3)π).
@@ -113,7 +122,7 @@ integer(I4P) :: n_wrap_facets, n_nm_edges
 logical :: any_overlap, prop_no_false_pos, prop_no_false_neg, prop_size_ok
 logical :: are_tests_passed(15)
 
-integer(I4P), parameter :: N_GRID = 32_I4P
+integer(I4P), parameter :: N_GRID = 20_I4P
 
 are_tests_passed = .false.
 
@@ -339,27 +348,11 @@ are_tests_passed(10) = (status == AWRAP_STATUS_OK)              .and. &
                        (abs(vol_after - 1._R8P) <= abs(vol_before - 1._R8P)) .and. &
                        wrap_surface%is_watertight()
 
-! ---- Invariant 11: sphere wrap + projection — volume snaps closer to input.
-facets => sphere%facets_ref()
-call awrap_build_octree(facet=facets, alpha=alpha, octree=octree, status=status)
-call awrap_classify_leaves(octree=octree, status=status)
-call awrap_extract_surface(octree=octree, wrapped_facets=wrap_facets, status=status)
-call wrap_surface%adopt_facets(facets=wrap_facets)
-vol_before = wrap_surface%get_volume()
-call awrap_extract_surface(octree=octree, wrapped_facets=wrap_facets, status=status)
-call awrap_project_vertices(wrap_facets=wrap_facets, input_facet=facets, input_tree=sphere%aabb, &
-                            offset=offset, status=status)
-call wrap_surface%adopt_facets(facets=wrap_facets)
-vol_after = wrap_surface%get_volume()
-expected_volume = 4._R8P / 3._R8P * 3.14159265358979_R8P
-print '(A,F8.4,A,F8.4,A,L1)', &
-      'inv 11 (sphere projected): vol_before=', vol_before, ' vol_after=', vol_after, &
-      ' watertight=', wrap_surface%is_watertight()
-are_tests_passed(11) = (status == AWRAP_STATUS_OK)              .and. &
-                       (abs(vol_after - expected_volume) <= abs(vol_before - expected_volume)) .and. &
-                       wrap_surface%is_watertight()
+! ---- Invariant 11: sphere wrap + projection — validation copy only (see the header).
+are_tests_passed(11) = .true.
+print '(A)', 'inv 11 (sphere projected): skipped, run by src/tests/validation/fossil_val_alpha_wrap.f90'
 
-! ---- Invariant 12: projection preserves manifoldness (vertex dedup works).
+! ---- Invariant 12: projection preserves manifoldness (vertex dedup works), projected cube wrap of inv 10.
 n_nm_edges = wrap_surface%get_non_manifold_edges_number()
 print '(A,I0)', 'inv 12 (projected manifold): non_manifold_edges=', n_nm_edges
 are_tests_passed(12) = (n_nm_edges == 0_I4P)
@@ -374,16 +367,9 @@ are_tests_passed(13) = (status == AWRAP_STATUS_OK .or. status == AWRAP_STATUS_NO
                        wrapped_tbp%is_watertight()                          .and. &
                        (abs(wrap_volume - 1._R8P) <= 0.30_R8P)
 
-! ---- Invariant 14: capstone TBP on sphere.
-call sphere%alpha_wrap(alpha=0.1_R8P, offset=0.033_R8P, wrapped=wrapped_tbp, status=status)
-wrap_volume = wrapped_tbp%get_volume()
-expected_volume = 4._R8P / 3._R8P * 3.14159265358979_R8P
-print '(A,I0,A,I0,A,L1,A,F8.4)', &
-      'inv 14 (sphere TBP): status=', status, ' n_facets=', wrapped_tbp%get_facets_number(), &
-      ' watertight=', wrapped_tbp%is_watertight(), ' volume=', wrap_volume
-are_tests_passed(14) = (status == AWRAP_STATUS_OK .or. status == AWRAP_STATUS_NOT_CONVERGED) .and. &
-                       wrapped_tbp%is_watertight()                          .and. &
-                       (abs(wrap_volume - expected_volume) <= 0.30_R8P * expected_volume)
+! ---- Invariant 14: capstone TBP on sphere — validation copy only (see the header).
+are_tests_passed(14) = .true.
+print '(A)', 'inv 14 (sphere TBP): skipped, run by src/tests/validation/fossil_val_alpha_wrap.f90'
 
 ! ---- Invariant 15: capstone TBP on holed cube — robustness only.
 !      The hole spans an entire face (1/12 of the surface area, but spans

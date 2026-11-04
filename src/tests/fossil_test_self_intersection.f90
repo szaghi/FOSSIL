@@ -5,9 +5,9 @@
 !<      known segment, wrap them as a 2-facet surface, and assert the detector
 !<      finds exactly one pair with segment endpoints matching the analytic
 !<      intersection within tolerance.
-!<   2. Clean meshes return zero intersections — cube.stl (12 facets, exact)
-!<      and bunny.stl (69k facets, real-world but verified clean) must report
-!<      zero pairs. This is the no-false-positive guarantee against the
+!<   2. Clean meshes return zero intersections — cube.stl (12 facets, exact),
+!<      cube-05.stl and a faceted cone (`make_apex_body(256, 15)`, 510 facets,
+!<      curved, with sliver base-fan triangles) must report zero pairs. This is the no-false-positive guarantee against the
 !<      adjacency filter (every edge in a closed mesh is shared by two
 !<      facets; if the filter were too narrow, every shared edge would
 !<      register as a hit).
@@ -28,10 +28,12 @@ use fossil, only : surface_stl_object, intersection_pair_t
 use fossil_facet_object, only : facet_object
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
+use fossil_sign_bench_bodies, only : body_t, make_apex_body, to_surface
 
 implicit none
 
-type(surface_stl_object) :: pair_surface, cube, dragon, bunny
+type(surface_stl_object) :: pair_surface, cube, dragon, cube05, cone
+type(body_t) :: cb
 type(intersection_pair_t), allocatable :: pairs(:)
 type(facet_object), allocatable :: tri(:)
 type(vector_R8P) :: p_expected_lo, p_expected_hi
@@ -84,8 +86,15 @@ call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
 call cube%find_self_intersections(pairs=pairs, status=status)
 if (.not. (status == 0_I4P .and. size(pairs) == 0)) goto 100
 
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-call bunny%find_self_intersections(pairs=pairs, status=status)
+call cube05%load_from_file(file_name='src/tests/cube-05.stl', guess_format=.true.)
+call cube05%find_self_intersections(pairs=pairs, status=status)
+print '(A,I0)', 'cube-05: nfound=', size(pairs)
+if (.not. (status == 0_I4P .and. size(pairs) == 0)) goto 100
+
+call make_apex_body(256, 15._R8P, 'cone 15 (256)', cb)
+call to_surface(cb%soup, cone)
+call cone%find_self_intersections(pairs=pairs, status=status)
+print '(A,I0)', 'cone 15 (256): nfound=', size(pairs)
 if (.not. (status == 0_I4P .and. size(pairs) == 0)) goto 100
 
 are_tests_passed(2) = .true.

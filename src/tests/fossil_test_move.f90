@@ -3,14 +3,14 @@ program fossil_test_move
 !< FOSSIL test: rigid move with tree refit (issue #41 step 3).
 !<
 !< `surface%move(pose)` (refit) against the same mesh moved and analyzed from scratch (rebuild): the
-!< cube, the cone and the L-prism of the sign benchmark and the bunny, under a rotation with a large
-!< translation:
+!< cube, the cone and the L-prism of the sign benchmark and dragon.stl (it replaced the bunny, issue #45),
+!< under a rotation with a large translation:
 !< - every facet vertex, volume, area, centroid and box bit for bit;
 !< - signed distances (pseudo-normal and fast winding number), inside flags, box classification codes,
 !<   line crossings and cut-cell fractions bit for bit; closest points and normals bit for bit at face
 !<   feet, within 4 ulps at edge and vertex feet (the facets tied there parametrize the point
 !<   differently, and which one is reported depends on the tree);
-!< - the refit is faster than the rebuild (printed ratio, bunny);
+!< - the refit is faster than the rebuild (printed ratio, dragon);
 !< - two moves p then q equal one move q o p to round-off;
 !< - an octree surface is rebuilt by move and agrees too.
 !< `curve%move(pose)` against the curve moved and rebuilt: a NACA 0012 and an annulus, distances,
@@ -28,7 +28,7 @@ implicit none
 
 real(R8P), parameter        :: PI = acos(-1._R8P)
 type(body_t), allocatable   :: b(:)
-type(soup_t)                :: bun
+type(soup_t)                :: drg
 type(surface_stl_object)    :: s
 type(curve_object)          :: c
 type(rigid_pose_t)          :: p, q
@@ -40,18 +40,18 @@ logical                     :: ok(4)
 call random_seed(size=k)
 call random_seed(put=[(777 + m, m = 1, k)])
 call bench_bodies(b)
-call s%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-allocate(bun%v(3, 3, s%get_facets_number()))
+call s%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+allocate(drg%v(3, 3, s%get_facets_number()))
 do f = 1, s%get_facets_number()
    fp => s%facet_at(f)
    do m = 1, 3
-      bun%v(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
+      drg%v(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
    enddo
 enddo
 p = pose_from_axis_angle([1._R8P, -2._R8P, 0.5_R8P], 1.1_R8P, [20._R8P, 3._R8P, -7._R8P])
 q = pose_from_axis_angle([0._R8P, 1._R8P, 1._R8P], -0.6_R8P, [-1._R8P, 2._R8P, 0.5_R8P])
 ok(1) = same3(b(1)%soup, p, 'cube', .false.) .and. same3(b(7)%soup, p, 'cone', .false.) .and. &
-        same3(b(8)%soup, p, 'L-prism', .false.) .and. same3(bun, p, 'bunny', .false.) .and. &
+        same3(b(8)%soup, p, 'L-prism', .false.) .and. same3(drg, p, 'dragon', .false.) .and. &
         same3(b(1)%soup, p, 'cube on an octree', .true.)
 ok(2) = two_moves(b(8)%soup, p, q)
 do k = 0, 99

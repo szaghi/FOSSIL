@@ -3,9 +3,10 @@ program fossil_test_box_classify
 !< FOSSIL test: box classification on the trees (issue #38 steps 2 and 3).
 !<
 !< 3-D (`surface%box_classify_many`, `box_intersects_surface`):
-!< - cube-02 and bunny, random boxes (sizes 1-30% and 1-5% of the diagonal) with a near radius: the BVH codes
-!<   equal a brute-force reference over all facets (same predicate, cut/near/centre sign); all four
-!<   codes occur; `inside` equals `is_point_inside` at the centre for every box not cut;
+!< - cube-02 and a faceted cone (`make_apex_body(256, 15)`: clean, closed, curved), random boxes
+!<   (sizes 1-30% and 1-5% of the diagonal) with a near radius: the BVH codes equal a brute-force
+!<   reference over all facets (same predicate, cut/near/centre sign); all four codes occur;
+!<   `inside` equals `is_point_inside` at the centre for every box not cut;
 !< - cube-02: every box not cut has its 8 corners on the side of its centre (closed surface);
 !< - cube-02 on the octree (brute-force fallback) gives the BVH codes;
 !< - touching: a box sharing the face plane of the cube is cut; moved off by 1e-6 it is not, it is
@@ -16,7 +17,7 @@ program fossil_test_box_classify
 !<   over all segments (exact cut, distance for near), all codes occur, corner consistency;
 !< - touching: a box sharing the annulus outer side is cut, one ulp off it is not.
 !< Device (`box_classify_many_device`, step 3; on the host in tests-gnu): codes and `inside` equal the
-!< CPU ones on cube-02 and bunny (pseudo-normal and fast-winding-number signs) and on the NACA 0012
+!< CPU ones on cube-02 and the cone (pseudo-normal and fast-winding-number signs) and on the NACA 0012
 !< and the annulus (both signs); use before `enter_device` is refused. With no `sign_algorithm` the codes
 !< and `inside` equal the explicit fast-winding-number ones, CPU and device (the default, issue #39).
 
@@ -25,24 +26,27 @@ use fossil,                only : surface_stl_object, curve_object, facet_object
                                   SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 use fossil_box_predicates, only : box_triangle_overlap, box_segment_overlap_2d, box_segment_distance2_2d
 use fossil_box_query,      only : box_tolerance
+use fossil_sign_bench_bodies, only : body_t, make_apex_body, to_surface
 use penf,                  only : I4P, R8P
 use vecfor,                only : vector_R8P
 
 implicit none
 
 real(R8P), parameter     :: PI = acos(-1._R8P)
-type(surface_stl_object) :: cube, bunny, cube_oct
+type(surface_stl_object) :: cube, cone, cube_oct
+type(body_t)             :: cb
 type(curve_object)       :: c
 real(R8P)                :: u(200), v(200), b0(3), b1(3)
 integer(I4P)             :: k, st, st2, code(1)
 logical                  :: ok(10)
 
 call cube%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true.)
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
+call make_apex_body(256, 15._R8P, 'cone 15 (256)', cb)
+call to_surface(cb%soup, cone)
 call cube_oct%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true., aabb_tree_kind=AABB_TREE_OCTREE)
 
 ok(1) = check3(cube, 2000, 0.3_R8P, .true., 'cube-02')
-ok(2) = check3(bunny, 400, 0.05_R8P, .false., 'bunny')
+ok(2) = check3(cone, 400, 0.05_R8P, .false., 'cone 15 (256)')
 ok(3) = same_codes(cube, cube_oct, 1000)
 print '(A,L1)', 'cube-02 octree (brute force) = BVH codes: ', ok(3)
 
@@ -89,8 +93,8 @@ print '(A,L1)', '2-D refusal: ', ok(8)
 ! device paths (step 3)
 call cube_oct%box_classify_many_device(lo=reshape(b0, [3, 1]), hi=reshape(b1, [3, 1]), codes=code, status=st)
 call cube%enter_device
-call bunny%enter_device
-ok(9) = st == STATUS_INVALID_INPUT .and. dev3(cube, 0.3_R8P) .and. dev3(bunny, 0.05_R8P)
+call cone%enter_device
+ok(9) = st == STATUS_INVALID_INPUT .and. dev3(cube, 0.3_R8P) .and. dev3(cone, 0.05_R8P)
 print '(A,L1)', '3-D device = CPU codes (pseudo-normal, FWN), refusal before enter_device: ', ok(9)
 call c%box_classify_many_device(lo=reshape([0._R8P, 0._R8P], [2, 1]), hi=reshape([1._R8P, 1._R8P], [2, 1]), codes=code, &
                                 status=st)

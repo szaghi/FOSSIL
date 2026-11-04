@@ -9,12 +9,12 @@
 !<   mirror(normal), mirror(matrix), resize(-1,1,1), resize(-2,-2,-2) (odd, reflection),
 !<   resize(-1,-1,1) (even, a rotation: must stay outward too),
 !<   rotate(matrix=M) with an improper M (a reflection) and with a proper 90-degree rotation.
-!< Then dragon-fine mirrored through x = 0 against the original at mirrored points: same
+!< Then dragon (it replaced dragon-fine, issue #45) mirrored through x = 0 against the original at mirrored points: same
 !< sign everywhere, |d| equal to a relative 1e-12.
 
 program fossil_test_reflection_orientation
 
-use fossil, only : surface_stl_object
+use fossil, only : surface_stl_object, facet_object
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P, ex_R8P, ez_R8P, mirror_matrix_R8P, rotation_matrix_R8P
 
@@ -67,7 +67,7 @@ contains
    endfunction check_cube
 
    function check_dragon() result(passed)
-   !< Mirror dragon-fine through x = 0 and compare with the original at mirrored points.
+   !< Mirror dragon through x = 0 and compare with the original at mirrored points.
    logical                  :: passed            !< Check result.
    type(surface_stl_object) :: original, mirrored !< Surfaces.
    type(vector_R8P)         :: bmin, bmax, h, p, q !< Grid geometry, query point and its mirror image.
@@ -75,11 +75,17 @@ contains
    integer(I4P), parameter  :: N = 12_I4P        !< Grid points per direction.
    integer(I4P)             :: i, j, k           !< Counters.
    integer(I4P)             :: n_sign, n_mag     !< Mismatch counters.
+   type(facet_object), allocatable :: fs(:)      !< Copy of the sanitized facets.
+   type(facet_object), pointer     :: fp         !< Facet.
 
-   call original%load_from_file(file_name='src/tests/dragon-fine.stl', guess_format=.true.)
+   call original%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
    call original%sanitize
-   call mirrored%load_from_file(file_name='src/tests/dragon-fine.stl', guess_format=.true.)
-   call mirrored%sanitize
+   allocate(fs(original%get_facets_number())) ! the sanitized dragon, copied (cheaper than a second load + sanitize)
+   do i = 1, size(fs)
+      fp => original%facet_at(i)
+      fs(i) = fp
+   enddo
+   call mirrored%adopt_facets(facets=fs)
    call mirrored%mirror(normal=ex_R8P)
    call mirrored%analyze
 
@@ -104,7 +110,7 @@ contains
       enddo
    enddo
    passed = (n_sign == 0) .and. (n_mag == 0) .and. (mirrored%get_volume() > 0._R8P)
-   print '(A,I0,A,I0,A,I0,A,ES12.5,A,L1)', 'dragon-fine mirrored vs original on ', N**3, ' points: sign mismatches=', &
+   print '(A,I0,A,I0,A,I0,A,ES12.5,A,L1)', 'dragon mirrored vs original on ', N**3, ' points: sign mismatches=', &
          n_sign, ' |d| mismatches=', n_mag, ' volume=', mirrored%get_volume(), ' ok=', passed
    endfunction check_dragon
 endprogram fossil_test_reflection_orientation

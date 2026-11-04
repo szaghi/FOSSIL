@@ -2,10 +2,14 @@
 program fossil_test_boolean_stress
 !< FOSSIL test: boolean stress on snapped box pairs with coplanar faces (issue #33, step 6).
 !<
-!< 100 configurations from a fixed-seed generator: A = unit cube, B = a box whose sizes (0.5, 1,
+!< Regression variant (issue #45): the first 16 configurations of the fixed seed (9 overlapping, 7 touching, 12 with
+!< coplanar face planes; the generator never produces apart boxes). The full 100-configuration version is
+!< src/tests/validation/fossil_val_boolean_stress.f90.
+!<
+!< Configurations from a fixed-seed generator: A = unit cube, B = a box whose sizes (0.5, 1,
 !< 1.5) and offsets (-0.5 to 1, step 0.25) are snapped to a 0.25 grid, so coplanar faces, shared
 !< edges and touching contacts are frequent; every other configuration rotates both bodies by
-!< the same random proper rotation. The four ops run on each (400 booleans) against the analytic
+!< the same random proper rotation. The four ops run on each (64 booleans) against the analytic
 !< box volumes.
 !<
 !< Pass criterion (the acceptance of issue #33): no silent wrong volume. A result with status
@@ -21,7 +25,7 @@ use vecfor, only : vector_R8P
 
 implicit none
 
-integer(I4P), parameter :: N_CASES = 100
+integer(I4P), parameter :: N_CASES = 16
 integer(I4P), parameter :: OPS(4) = [BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF]
 integer(I8P)            :: seed
 integer(I4P)            :: c, k, st, n_ok_status, n_bad_status, n_wrong, n_topo_req, n_topo_bad, n_wt, n_mf

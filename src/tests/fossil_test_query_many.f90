@@ -5,13 +5,14 @@ program fossil_test_query_many
 !< - Unit cube (cube-02, grid vertices every 0.25), analytic: a facet-interior point (distance 1, closest point on the face, normal
 !<   +z, FEATURE_FACE), an edge point (FEATURE_EDGE, normal (1,1,0)/sqrt2), a vertex point
 !<   (FEATURE_VERTEX, normal (1,1,1)/sqrt3); signed negative inside.
-!< - cube-02 and bunny, a 12^3 grid around each: every output of query_many equals the scalar
-!<   compute_distance (signed, pseudo-normal, square root; facet, edge/vertex index, closest point,
-!<   normal) bit for bit, and bodies equal facet_body of the facet.
+!< - cube-02 and dragon.stl (it replaced the bunny, issue #45), a 12^3 grid around each: every
+!<   output of query_many equals the scalar compute_distance (signed, pseudo-normal, square root;
+!<   facet, edge/vertex index, closest point, normal) bit for bit, and bodies equal facet_body of
+!<   the facet.
 !< - Fast-winding-number sign: query_many equals compute_distance(sign_algorithm=FWN) bit for bit.
 !< - A size mismatch is refused with STATUS_INVALID_INPUT.
 !< - query_many_device (issue #37 step 3) equals query_many bit for bit, every output, both signs,
-!<   on cube-02 and bunny. Built without OpenACC (tests-gnu) the device loop runs on the host: this
+!<   on cube-02 and dragon. Built without OpenACC (tests-gnu) the device loop runs on the host: this
 !<   checks the device path's logic; the GPU check is the manual bench (pending). Before
 !<   enter_device it is refused.
 
@@ -22,7 +23,7 @@ use vecfor, only : vector_R8P
 
 implicit none
 
-type(surface_stl_object) :: cube, bunny
+type(surface_stl_object) :: cube, dragon
 type(vector_R8P)         :: p(3)
 real(R8P)                :: d(3), cp(3, 3), nrm(3, 3)
 integer(I4P)             :: ft(3), fi(3), st
@@ -46,9 +47,9 @@ ok(1) = ok(1) .and. abs(d(1) + 0.25_R8P) < 1.e-15_R8P
 print '(A,L1)', 'cube, face/edge/vertex analytic: ', ok(1)
 
 ok(2) = compare(cube, 'cube-02', SIGN_PSEUDO_NORMAL)
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-ok(3) = compare(bunny, 'bunny', SIGN_PSEUDO_NORMAL)
-ok(4) = compare(bunny, 'bunny, FWN sign', SIGN_FAST_WINDING_NUMBER)
+call dragon%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+ok(3) = compare(dragon, 'dragon', SIGN_PSEUDO_NORMAL)
+ok(4) = compare(dragon, 'dragon, FWN sign', SIGN_FAST_WINDING_NUMBER)
 
 call cube%query_many(points=p, distances=d, closest_points=cp(:, 1:2), status=st)
 ok(5) = st == STATUS_INVALID_INPUT
@@ -56,8 +57,8 @@ print '(A,L1)', 'size mismatch refused: ', ok(5)
 
 call cube%query_many_device(points=p, distances=d, status=st)
 ok(6) = st == STATUS_INVALID_INPUT
-ok(6) = ok(6) .and. device_path(cube, 'cube-02') .and. device_path(bunny, 'bunny')
-call bunny%query_many_device(points=p, distances=d, sign_algorithm=3_I4P - 1_I4P, status=st)
+ok(6) = ok(6) .and. device_path(cube, 'cube-02') .and. device_path(dragon, 'dragon')
+call dragon%query_many_device(points=p, distances=d, sign_algorithm=3_I4P - 1_I4P, status=st)
 ok(7) = st == STATUS_INVALID_INPUT
 print '(A,L1)', 'device path refusals (not entered, unsupported sign): ', ok(6) .and. ok(7)
 

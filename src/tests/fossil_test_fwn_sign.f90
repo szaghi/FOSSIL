@@ -7,7 +7,8 @@
 !<      same points (measured: pseudo-normal 10, ray parity 15, solid angle 0).
 !<   3. Inside-out cube put through sanitize: FWN sign correct at the centre.
 !<   4. distance_many with FWN equals the serial distance loop bit for bit, and
-!<      is_point_inside(FWN) agrees with the sign of distance(FWN).
+!<      is_point_inside(FWN) agrees with the sign of distance(FWN), on dragon (it replaced
+!<      dragon-fine, issue #45).
 
 program fossil_test_fwn_sign
 
@@ -119,7 +120,7 @@ contains
    real(R8P)                     :: d_one
    integer(I4P)                  :: i, n_diff, n_inside_diff, status
 
-   call s%load_from_file(file_name='src/tests/dragon-fine.stl', guess_format=.true.)
+   call s%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
    call s%sanitize
    allocate(pts(1000), d_many(1000))
    do i = 1, 1000
@@ -136,7 +137,7 @@ contains
          n_inside_diff = n_inside_diff + 1
    enddo
    passed = (n_diff == 0) .and. (n_inside_diff == 0) .and. (status == 0)
-   print '(A,I0,A,I0,A,L1)', 'dragon-fine 1000 points: distance_many vs serial diffs=', n_diff, &
+   print '(A,I0,A,I0,A,L1)', 'dragon 1000 points: distance_many vs serial diffs=', n_diff, &
          '  is_point_inside vs sign diffs=', n_inside_diff, ' ok=', passed
    endfunction check_batch
 endprogram fossil_test_fwn_sign

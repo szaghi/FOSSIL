@@ -2,12 +2,14 @@
 program fossil_test_swept_3d
 !< FOSSIL test: 3-D swept geometry between two poses (issue #41 step 5c).
 !<
-!< - The unit cube translating across a 6^3 block, exact path (default): the time-averaged face fluid
-!<   areas equal an independent analytic integration (breakpoints from the cube's faces, three-point
-!<   Gauss on every piece; the solid area of a face is piecewise quadratic with jumps) to round-off;
-!<   the uniform-flow residual is round-off; the projected walls sum to 0 over the block.
+!< - The unit cube translating across a 4^3 block (spacing 0.45, covering the whole motion), exact path
+!<   (default): the time-averaged face fluid areas equal an independent analytic integration
+!<   (breakpoints from the cube's faces, three-point Gauss on every piece; the solid area of a face is
+!<   piecewise quadratic with jumps) to round-off; the uniform-flow residual is round-off; the
+!<   projected walls sum to 0 over the block.
 !< - Exact path on bodies at a rotated pose, translating: the cube and the L-prism (non-convex)
-!<   rotated about (1, 1, 1), the 32-face cone: uniform-flow residual at round-off.
+!<   rotated about (1, 1, 1), the 32-face cone, on a 4^3 block over [-0.6, 2.1]^3: uniform-flow
+!<   residual at round-off. (Blocks were 6^3 before issue #45; 4^3 keeps every check, debug < 2 s.)
 !< - Negative control, `exact=.false.` (Gauss-Legendre, no breakpoints): the cube faces approach the
 !<   analytic ones only as nq = 2, 4, 8, 16 grows, at about first order (jumps).
 !< - The cube rotating by 0.3 rad about the (1, 1, 1) axis through its centre while translating:
@@ -29,17 +31,17 @@ type(body_t), allocatable       :: b(:)
 type(surface_stl_object)        :: s
 type(swept_cells_3d_t)          :: sw, sw2
 type(surface_stl_object)        :: sb
-real(R8P)                       :: e2(7), rex(3), err0, res0
+real(R8P)                       :: e2(5), rex(3), err0, res0
 type(rigid_pose_t)              :: p0, p1, pm, pe0, pe1
 type(rigid_pose_t), allocatable :: pq(:)
 real(R8P), allocatable          :: sq(:), wq(:)
-real(R8P)                       :: e(7), err(4), res(4), d(3), ax(3), ang, ang_m, w(3), c(3)
+real(R8P)                       :: e(5), err(4), res(4), d(3), ax(3), ang, ang_m, w(3), c(3)
 integer(I4P)                    :: i, k, st, st2
 logical                         :: ok(7)
 
 call bench_bodies(b)
 call to_surface(b(1)%soup, s) ! unit cube [0, 1]^3
-e = [(-0.23_R8P + 0.3_R8P * i, i = 0, 6)]
+e = [(-0.23_R8P + 0.45_R8P * i, i = 0, 4)]
 d = [0.31_R8P, 0.17_R8P, 0.23_R8P]
 p0 = pose_identity() ; p1 = pose_from_axis_angle([1._R8P, 0._R8P, 0._R8P], 0._R8P, d)
 call swept_cells_3d(s, p0, p1, e, e, e, sw, status=st)
@@ -59,7 +61,7 @@ ok(6) = st == STATUS_OK .and. .not. sw%exact .and. err(2) < err(1) .and. err(3) 
 print '(A,4ES9.1,A,4ES9.1,A,L1)', 'negative control (Gauss): max face error nq=2,4,8,16 ', err, '  max residual ', res, &
       '  ok ', ok(6)
 ! exact path on rotated / non-convex bodies, translating
-e2 = [(-0.6_R8P + 0.45_R8P * i, i = 0, 6)]
+e2 = [(-0.6_R8P + 0.675_R8P * i, i = 0, 4)]
 c = [0.5_R8P, 0.5_R8P, 0.5_R8P]
 p0 = pose_from_axis_angle([1._R8P, 1._R8P, 1._R8P], 0.3_R8P)
 p0%t = c - matmul(p0%r, c) ; p1 = p0 ; p1%t = p0%t + d
@@ -106,7 +108,7 @@ call pose_log_3d(p0, p1, ax, ang) ; call pose_log_3d(p0, pm, ax, ang_m)
 ok(4) = all(pe0%r == p0%r) .and. all(pe0%t == p0%t) .and. all(pe1%r == p1%r) .and. all(pe1%t == p1%t) .and. &
         abs(ang_m - 0.5_R8P * ang) < 1.e-14_R8P .and. abs(ang - 0.3_R8P) < 1.e-14_R8P
 print '(A,L1,A,L1)', 'explicit node poses = screw poses bit for bit: ', ok(3), '  interpolation ends exact, mid angle: ', ok(4)
-call swept_cells_3d(s, p0, p1, e(7:1:-1), e, e, sw, status=st)
+call swept_cells_3d(s, p0, p1, e(5:1:-1), e, e, sw, status=st)
 call swept_cells_3d(s, p0, p1, e, e, e, sw, nq=0_I4P, status=st2)
 ok(5) = st == STATUS_INVALID_INPUT .and. st2 == STATUS_INVALID_INPUT
 print '(A,L1)', 'refusals: ', ok(5)
@@ -122,9 +124,9 @@ contains
    integer                            :: i1, i2, i3 !< Face indexes.
 
    emax = 0._R8P
-   do i3 = 1, 6
-      do i2 = 1, 6
-         do i1 = 1, 7
+   do i3 = 1, size(e) - 1
+      do i2 = 1, size(e) - 1
+         do i1 = 1, size(e)
             emax = max(emax, abs(sw_%face_x(i1, i2, i3) - face_ref(1, e(i1), e(i2), e(i2 + 1), e(i3), e(i3 + 1))))
             emax = max(emax, abs(sw_%face_y(i2, i1, i3) - face_ref(2, e(i1), e(i3), e(i3 + 1), e(i2), e(i2 + 1))))
             emax = max(emax, abs(sw_%face_z(i2, i3, i1) - face_ref(3, e(i1), e(i2), e(i2 + 1), e(i3), e(i3 + 1))))

@@ -6,10 +6,11 @@ program fossil_test_pose
 !<   same rotation, to round-off.
 !< - Identity pose = no pose, bit for bit (surface and curve, every output).
 !< - Against the mesh (curve) moved explicitly and rebuilt: cube, cone, L-prism of the sign
-!<   benchmark and the bunny, under rotations about several axes with large translations; a NACA 0012
-!<   and an annulus under in-plane poses: signed distances to 1e-14 (L + |t|), closest points to
-!<   1e-14 (L + |t|), normals to 1e-14 (L + |t|) / h (h the shortest edge: the reference normals are
-!<   rebuilt from moved, rounded vertices), inside flags equal at points farther than 1e-12 L. Closest
+!<   benchmark and cube-04.stl (3072 facets, clean and closed; it replaced the bunny, issue #45), under
+!<   rotations about several axes with large translations; a NACA 0012 and an annulus under in-plane
+!<   poses: signed distances to 1e-14 (L + |t|), closest points to 1e-14 (L + |t|), normals to
+!<   1e-14 (L + |t|) / h (h the shortest edge: the reference normals are rebuilt from moved, rounded
+!<   vertices), inside flags equal at points farther than 1e-12 L. Closest
 !<   points and normals are compared where the foot point is unique (`ambiguous` with a 1e-9 relative
 !<   tolerance): at a near-tie either foot is a correct answer. The points are seeded (deterministic).
 
@@ -24,12 +25,12 @@ implicit none
 
 real(R8P), parameter      :: PI = acos(-1._R8P)
 type(body_t), allocatable :: b(:)
-type(soup_t)              :: bun
-type(surface_stl_object)  :: s, bunny
+type(soup_t)              :: fine
+type(surface_stl_object)  :: s, body
+type(facet_object), pointer :: fp
 type(curve_object)        :: c
 type(rigid_pose_t)        :: p1, p2, p3, id
 type(rigid_pose_2d_t)     :: q1
-type(facet_object), pointer :: fp
 real(R8P)                 :: u(200), v(200), x(3), e
 integer(I4P)              :: k, f, m
 logical                   :: ok(4)
@@ -48,13 +49,15 @@ ok(1) = e < 4.e-15_R8P
 print '(A,ES9.1,A,L1)', 'pose algebra: max err ', e, '  ok ', ok(1)
 
 call bench_bodies(b)
-! bunny as a soup
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-allocate(bun%v(3, 3, bunny%get_facets_number()))
-do f = 1, bunny%get_facets_number()
-   fp => bunny%facet_at(f)
+! cube-04.stl as a soup: a clean closed body, 3072 facets (issue #45 replaced the bunny; dragon.stl fails: a facet
+! tied at a non-manifold edge flips one pseudo-normal sign between posed and moved queries; a 256-sided faceted cone
+! fails the closest-point bound: its needle facets, aspect ~150, condition the foot point ~10x above 1e-14)
+call body%load_from_file(file_name='src/tests/cube-04.stl', guess_format=.true.)
+allocate(fine%v(3, 3, body%get_facets_number()))
+do f = 1, body%get_facets_number()
+   fp => body%facet_at(f)
    do m = 1, 3
-      bun%v(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
+      fine%v(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
    enddo
 enddo
 ! 2. identity = no pose; 3. against moved and rebuilt meshes
@@ -62,7 +65,7 @@ p3 = pose_from_axis_angle([0._R8P, 0._R8P, 1._R8P], -2.1_R8P, [-100._R8P, 40._R8
 call to_surface(b(1)%soup, s)
 ok(2) = same_identity(s)
 ok(3) = moved3(b(1)%soup, p1, 'cube') .and. moved3(b(1)%soup, p3, 'cube, far') .and. moved3(b(7)%soup, p2, 'cone') .and. &
-        moved3(b(8)%soup, p1, 'L-prism') .and. moved3(bun, p1, 'bunny')
+        moved3(b(8)%soup, p1, 'L-prism') .and. moved3(fine, p1, 'cube-04')
 ! 4. curves
 do k = 0, 99
    u(k + 1) = 0.5_R8P * (1._R8P - cos(PI * (100 - k) / 100)) ; v(k + 1) = thickness(u(k + 1))

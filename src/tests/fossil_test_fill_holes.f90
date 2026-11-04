@@ -5,7 +5,8 @@
 !< meshes, where it keeps genuine open boundaries open (case d).
 !<   a. cube minus 1 facet: 1 hole filled; watertight, volume 1.
 !<   b. cube-02 minus 2x2 cells and one far cell: 2 holes filled; watertight, volume 1.
-!<   c. dragon-fine: filled + skipped = boundary loops before, and the loops left afterwards are
+!<   c. dragon (it replaced dragon-fine, issue #45): it has boundary loops (else the case passes
+!<      trivially), filled + skipped = boundary loops before, and the loops left afterwards are
 !<      exactly the skipped ones.
 !<   d. open sheet (the z = 0 face of cube-02): its single loop is as large as the surface, so the
 !<      default max_hole_size keeps it open; the facet count is unchanged.
@@ -42,13 +43,13 @@ ok(2) = filled == 2 .and. skipped == 0 .and. s%is_watertight() .and. abs(s%get_v
 print '(A,2I4,A,L1,A,F9.6,A,L1)', 'b cube-02 two holes: filled/skipped', filled, skipped, ' watertight=', s%is_watertight(), &
       ' volume=', s%get_volume(), ' ok=', ok(2)
 ! c.
-call s%load_from_file(file_name='src/tests/dragon-fine.stl', guess_format=.true.)
+call s%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
 call s%sanitize
 loops_before = count_loops(s)
 call s%fill_holes(holes_filled=filled, holes_skipped=skipped, open_edges=open_edges)
 loops_after = count_loops(s)
-ok(3) = (filled + skipped == loops_before) .and. (loops_after == skipped)
-print '(A,I0,A,I0,A,I0,A,I0,A,I0,A,L1,A,L1)', 'c dragon-fine: loops before=', loops_before, ' filled=', filled, &
+ok(3) = (loops_before > 0) .and. (filled + skipped == loops_before) .and. (loops_after == skipped)
+print '(A,I0,A,I0,A,I0,A,I0,A,I0,A,L1,A,L1)', 'c dragon: loops before=', loops_before, ' filled=', filled, &
       ' skipped=', skipped, ' open edges=', open_edges, ' loops after=', loops_after, ' watertight=', s%is_watertight(), &
       ' ok=', ok(3)
 ! d.
