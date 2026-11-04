@@ -274,6 +274,9 @@ fobis fetch            # --update to re-fetch
   and touching-symdiff results are non-manifold by definition. Intersection
   points must stay canonical constructions (same bits from every facet pair),
   because the vertex weld compares coordinates exactly (`EPS` is 0).
+- **`find_self_intersections`**: pairs sharing one vertex are classified exactly (issue #46); pairs sharing an edge
+  are skipped, so two sheets crossing along a shared non-manifold edge are not detected, nor coplanar overlaps around
+  a shared vertex (unit normals parallel to 1e-12 rad count as coplanar).
 
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands

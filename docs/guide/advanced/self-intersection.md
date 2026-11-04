@@ -29,14 +29,21 @@ the input.
    collecting every leaf-pair whose AABBs overlap. Reuses the existing
    `enumerate_children` dispatcher so SAH BVH and octree both share
    the traversal code.
-2. **Pool-aware adjacency filter.** Two facets that share a vertex or
-   edge are *expected* to "intersect" along that shared feature; we
-   filter those out so only **real geometric crossings** remain. The
-   adjacency check uses the vertex-pool ID equality, not just
-   coordinate proximity.
-3. **Möller tri-tri narrow phase** (`facet%intersect_facet`). For each
-   surviving facet pair, test whether the two triangles actually cross
-   transversally. Reports the segment endpoints when they do.
+2. **Pool-aware adjacency filter.** The shared vertices of the pair are
+   counted by vertex-pool ID (coordinates when the pool is not in use).
+   Two facets sharing an **edge** meet along it, as expected: skipped.
+3. **Narrow phase.** No shared vertex: the Möller tri-tri test
+   (`facet%intersect_facet`), with the segment endpoints of a transverse
+   crossing. One shared **vertex** (issue #46): the exact `pair_classify`
+   (`orient3d`); a common segment of positive length is a crossing, the
+   vertex alone is a touch and is not reported. Coplanar pairs sharing a
+   vertex (normals parallel to 1e-12 rad) are skipped, as are pairs whose
+   other vertices lie strictly on one side of the other plane (they can
+   only touch).
+
+Not detected: two sheets crossing along a **shared edge** (a non-manifold
+edge with four facets, e.g. two cubes merged so that their face edges
+coincide), and an overlap of coplanar facets around a shared vertex.
 
 ## Pipeline (resolution)
 
@@ -83,7 +90,7 @@ along each axis if you suspect coplanar self-overlaps.
 ## Example: detection
 
 The dragon fixture in this repo is **known dirty** — it ships with
-~759 real self-intersections and is the regression workhorse for §1.2:
+~1167 real self-intersections (759 before issue #46 added the pairs sharing one vertex) and is the regression workhorse for §1.2:
 
 ```fortran
 program ex_find_self_intersections
@@ -103,9 +110,9 @@ endprogram ex_find_self_intersections
 ```
 
 For a clean mesh (`cube.stl`, `bunny.stl`), the same call returns
-`size(pairs) == 0` — the no-false-positive guarantee against the
-adjacency filter (every shared edge would otherwise register as a
-pseudo-intersection).
+`size(pairs) == 0` — the no-false-positive guarantee of the
+adjacency filter (every shared edge and every fan around a vertex would
+otherwise register as a pseudo-intersection).
 
 ## Example: resolution
 
@@ -134,7 +141,7 @@ endprogram ex_resolve_self_intersections
 
 The dragon fixture (~6.6k facets):
 
-![dragon.stl — known-dirty fixture with ~759 self-intersections](/pictures/advanced/self-intersection-dragon.png)
+![dragon.stl — known-dirty fixture with ~1167 self-intersections](/pictures/advanced/self-intersection-dragon.png)
 
 Visually the dragon looks fine; the self-intersections are interior
 geometric crossings invisible from outside. That's the *whole point*
