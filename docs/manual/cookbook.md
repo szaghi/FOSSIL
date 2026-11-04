@@ -46,6 +46,8 @@ The codes are listed in [constants](/guide/api/constants#status-codes).
 
 <<< @/examples/output/ck_load_clipped.ansi{ansi}
 
+![the clip box over the dragon: the 1869 facets the clipped load keeps, whole and reaching out of the box, and the rest of the dragon as a ghost](../examples/images/ck-load_clipped.svg){.fossil-figure}
+
 A facet is kept whole when it overlaps the box, so the loaded part reaches below the box (z 13.6403 for a box
 starting at 15). To cut the facets themselves, use [`clip`](/guide/api/surface-stl-object#clip) after the load.
 
@@ -56,6 +58,14 @@ starting at 15). To cut the facets themselves, use [`clip`](/guide/api/surface-s
 <<< @/examples/snippets/ck_watertight.f90
 
 <<< @/examples/output/ck_watertight.ansi{ansi}
+
+<div class="fossil-pair">
+
+![the cube loaded without its top face, its boundary loop in ember](../examples/images/ck-watertight-open.svg)
+
+![the same box after sanitize with fill_holes: six new facets in ember close the top](../examples/images/ck-watertight-closed.svg)
+
+</div>
 
 `fill_holes=.true.` closes the boundary loops that pass two limits: `max_hole_edges` (default 200) and
 `max_hole_size`, the loop's bounding-box diagonal over the surface's (default 0.1). The missing face is a large hole,
@@ -68,6 +78,8 @@ so the recipe raises the size limit to 1. `sanitize` reports each defect class o
 
 <<< @/examples/output/ck_validity.ansi{ansi}
 
+![the NACA 0012 wing section with its 72 boundary edges in ember, along the seams where the two caps meet the side](../examples/images/ck-validity.svg){.fossil-figure}
+
 `is_watertight` asks for two facets on every edge, `is_manifold` only for no edge with three or more, and `is_volume`
 for a watertight surface with a positive volume. The wing has edges with a single facet and none with three:
 manifold, not watertight. See
@@ -78,6 +90,14 @@ manifold, not watertight. See
 <<< @/examples/snippets/ck_flip.f90
 
 <<< @/examples/output/ck_flip.ansi{ansi}
+
+<div class="fossil-pair">
+
+![the inside-out cube, a translucent ghost, its 48 facet normals in ember pointing inward](../examples/images/ck-flip-before.svg)
+
+![after sanitize_normals the 48 normals point outward](../examples/images/ck-flip-after.svg)
+
+</div>
 
 `sanitize_normals` makes the windings consistent and points them outward; `analyze` then recomputes the volume.
 `sanitize` runs both. See the [repair pipeline](/guide/api/surface-stl-object#repair-pipeline).
@@ -90,6 +110,8 @@ manifold, not watertight. See
 
 <<< @/examples/output/ck_point_inside.ansi{ansi}
 
+![the unit cube as a ghost, p inside it in teal and q outside it in ember, as all four sign algorithms classify them](../examples/images/ck-point_inside.svg){.fossil-figure}
+
 On a watertight surface the four sign algorithms agree. The default is `SIGN_PSEUDO_NORMAL`, the cheapest; see
 [sign algorithms](/guide/api/constants#sign-algorithms).
 
@@ -98,6 +120,8 @@ On a watertight surface the four sign algorithms agree. The default is `SIGN_PSE
 <<< @/examples/snippets/ck_closest_point.f90
 
 <<< @/examples/output/ck_closest_point.ansi{ansi}
+
+![the query point joined to its closest point on the cube's top edge at x = 1, the returned facet in ember and the edge pseudo-normal there](../examples/images/ck-closest_point.svg){.fossil-figure}
 
 The closest point is on the edge between the faces x = 1 and z = 1, so the normal is the edge pseudo-normal, the
 angle-weighted mean of the two face normals. See
@@ -109,6 +133,8 @@ angle-weighted mean of the two face normals. See
 
 <<< @/examples/output/ck_sign_holes.ansi{ansi}
 
+![the cube without its top face and the 588 grid points the pseudo-normal sign misclassifies: all above the opening, all put inside](../examples/images/ck-sign_holes.svg){.fossil-figure}
+
 The pseudo-normal sign is local: near an open boundary it misclassifies 588 of the 8000 points. The fast winding
 number counts how much of the surface surrounds the point and misclassifies none. See
 [winding number](/guide/advanced/winding-number).
@@ -118,6 +144,8 @@ number counts how much of the surface surrounds the point and misclassifies none
 <<< @/examples/snippets/ck_ray_hit.f90
 
 <<< @/examples/output/ck_ray_hit.ansi{ansi}
+
+![a ray cast along +y from (0, -20, 12) to its first hit on the dragon, the facet hit in ember](../examples/images/ck-ray_hit.svg){.fossil-figure}
 
 `t` is the parameter along the ray, `point = origin + t direction`; the direction need not be a unit vector.
 `intersect_ray_all` returns every hit and `intersect_ray_any` stops at the first one. See
@@ -131,6 +159,8 @@ number counts how much of the surface surrounds the point and misclassifies none
 
 <<< @/examples/output/ck_grid_distance.ansi{ansi}
 
+![the signed distance of cube-01 on the grid plane z = 0.5, teal inside and ember outside, with the band nodes framed and the cube's section outlined](../examples/images/ck-grid-distance.svg){.fossil-figure}
+
 The cells near the surface (the band) get exact distances; fast sweeping fills the others with a first-order
 solution, -0.4750 at the centre where the exact value is -0.5. For exact values at a few points use `distance_many`.
 See [distance field](/guide/advanced/distance-field).
@@ -141,6 +171,8 @@ See [distance field](/guide/advanced/distance-field).
 
 <<< @/examples/output/ck_wall_distance.ansi{ansi}
 
+![the wall distance to cube-01 on the plane z = 0.5 with cutoff 0.25, a flat plateau wherever no wall is closer, and the recipe's first three points; the fourth, (3, 3, 3), is off the frame](../examples/images/ck-wall-distance.svg){.fossil-figure}
+
 The distance is unsigned. A point with no wall closer than the cutoff gets the cutoff and body 0, the centre of the
 cube included; the traversal stops early for it. See
 [wall distance](/guide/advanced/ib-queries#wall-distance-and-field-diagnostic).
@@ -150,6 +182,8 @@ cube included; the traversal stops early for it. See
 <<< @/examples/snippets/ck_tag_cells.f90
 
 <<< @/examples/output/ck_tag_cells.ansi{ansi}
+
+![one layer of the recipe's cells around cube-01, seen from above: cut cells on the wall, a ring of near cells outside them, inside cells within, outside cells beyond](../examples/images/ck-tag-cells.svg){.fossil-figure}
 
 A box is cut when it meets the surface, near when it is within `radius` of it, otherwise inside or outside by the
 sign at its centre (fast winding number by default). The 152 cut cells are the shell between the 6^3 and 4^3 blocks
@@ -163,6 +197,8 @@ that contain the cube's faces. See [AMR tagging](/guide/advanced/amr-tagging).
 
 <<< @/examples/output/ck_slice.ansi{ansi}
 
+![the NACA 0012 wing cut by the plane z = 0.5, its airfoil section one closed loop](../examples/images/ck-slice.svg){.fossil-figure}
+
 `slice_surface(surface, normal_axis, level, curve)` cuts by an axis-aligned plane and returns a `curve_object`; the
 section of the NACA 0012 wing is one closed loop of 60 vertices with area 0.08165. See
 [2-D geometry](/guide/advanced/2d-geometry).
@@ -172,6 +208,8 @@ section of the NACA 0012 wing is one closed loop of 60 vertices with area 0.0816
 <<< @/examples/snippets/ck_polygon_distance.f90
 
 <<< @/examples/output/ck_polygon_distance.ansi{ansi}
+
+![the signed distance to the unit square, negative inside, with the recipe's three query points joined to their closest points](../examples/images/ck-polygon-distance.svg){.fossil-figure}
 
 Outer loops run counter-clockwise and holes clockwise; the distance is negative inside. See
 [`curve_object`](/guide/api/curve-object).
@@ -184,6 +222,14 @@ Outer loops run counter-clockwise and holes clockwise; the distance is negative 
 
 <<< @/examples/output/ck_decimate.ansi{ansi}
 
+<div class="fossil-pair">
+
+![the dragon as loaded, 6588 facets, its facet edges faint](../examples/images/ck-decimate-before.svg)
+
+![the same dragon after decimate to a quarter of its facets, 1646, from the same camera](../examples/images/ck-decimate-after.svg)
+
+</div>
+
 Quadric edge collapses remove two facets each, so the result stops at or just below the target (1646 for 1647). See
 [decimation](/guide/advanced/decimate).
 
@@ -192,6 +238,14 @@ Quadric edge collapses remove two facets each, so the result stops at or just be
 <<< @/examples/snippets/ck_union.f90
 
 <<< @/examples/output/ck_union.ansi{ansi}
+
+<div class="fossil-pair">
+
+![two unit cubes, a translucent and b in ember, b translated by 0.5 along the diagonal so they overlap on a cube of side 0.5](../examples/images/ck-union-inputs.svg)
+
+![their union from boolean with BOOL_UNION: one watertight body of volume 1.875](../examples/images/ck-union-result.svg)
+
+</div>
 
 Two unit cubes overlapping on a cube of side 0.5 give 2 - 0.125 = 1.875. `BOOL_INTERSECT`, `BOOL_DIFFERENCE` and
 `BOOL_SYMDIFF` work the same way. See [booleans](/guide/advanced/booleans).
@@ -202,6 +256,14 @@ Two unit cubes overlapping on a cube of side 0.5 give 2 - 0.125 = 1.875. `BOOL_I
 
 <<< @/examples/output/ck_remesh.ansi{ansi}
 
+<div class="fossil-pair">
+
+![the unit cube as loaded: 48 facets, edges from 0.5 to 0.71](../examples/images/ck-remesh-before.svg)
+
+![the same cube after isotropic_remesh with target length 0.1 and features preserved: 2346 facets, sharp edges kept](../examples/images/ck-remesh-after.svg)
+
+</div>
+
 `preserve_features=.true.` keeps the twelve sharp edges of the cube, so the volume stays 1. After 10 iterations the
 edges are between 0.0282 and 0.1352 for a target of 0.1. See [isotropic remeshing](/guide/advanced/isotropic-remesh).
 
@@ -210,6 +272,8 @@ edges are between 0.0282 and 0.1352 for a target of 0.1. See [isotropic remeshin
 <<< @/examples/snippets/ck_curvature.f90
 
 <<< @/examples/output/ck_curvature.ansi{ansi}
+
+![the marching-cubes unit sphere coloured by the mean-curvature error H - 1 at each facet's foot (teal below 1, ember above, saturating at 0.05), with dots on the 25 facets where it exceeds 0.1, and the recipe's query point above with its foot](../examples/images/ck-curvature.svg){.fossil-figure}
 
 `curvatures=` returns the mean and Gaussian curvature at the foot point, by a cubic fit over the two rings of
 vertices around it: on this unit sphere of 6632 facets, H = 0.9944 and K = 0.9892. It runs on the CPU only. See
@@ -222,6 +286,8 @@ vertices around it: on this unit sphere of 6632 facets, H = 0.9944 and K = 0.989
 <<< @/examples/snippets/ck_pose.f90
 
 <<< @/examples/output/ck_pose.ansi{ansi}
+
+![the cube rotated 45 degrees by the pose, seen from above over the translucent cube at rest: the query point sits just inside the rotated cube's corner, 0.2 outside the cube at rest](../examples/images/ck-pose.svg){.fossil-figure}
 
 With `pose=` the world-frame point is mapped into the body frame, and the tree built at load time serves every pose.
 `pose_from_axis_angle` rotates about the origin, so the translation sets the pivot. A corner of the rotated cube reaches x = 0.5 +
