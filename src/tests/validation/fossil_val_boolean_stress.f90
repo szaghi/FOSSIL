@@ -8,8 +8,9 @@ program fossil_val_boolean_stress
 !< 100 configurations from a fixed-seed generator: A = unit cube, B = a box whose sizes (0.5, 1,
 !< 1.5) and offsets (-0.5 to 1, step 0.25) are snapped to a 0.25 grid, so coplanar faces, shared
 !< edges and touching contacts are frequent; every other configuration rotates both bodies by
-!< the same random proper rotation. The four ops run on each (400 booleans) against the analytic
-!< box volumes.
+!< the same random proper rotation. The four ops run on each (416 booleans) against the analytic
+!< box volumes. The generator never produces apart boxes (offsets >= -0.5, sizes >= 0.5): 4 fixed apart
+!< configurations follow (issue #46), B beyond a gap along x, y, z and the diagonal, rotated as the others.
 !<
 !< Pass criterion (the acceptance of issue #33): no silent wrong volume. A result with status
 !< OK must have the analytic volume (1e-10 relative to max(V, 1)); a non-OK status is allowed and
@@ -25,6 +26,12 @@ use vecfor, only : vector_R8P
 implicit none
 
 integer(I4P), parameter :: N_CASES = 100
+integer(I4P), parameter :: N_FIXED_APART = 4 !< Fixed apart configurations after the random ones.
+real(R8P),    parameter :: APART_S(3, N_FIXED_APART) = reshape([0.5_R8P, 1._R8P, 1._R8P,   1._R8P, 1._R8P, 1._R8P, &
+                                                          1._R8P, 1.5_R8P, 0.5_R8P,  0.5_R8P, 0.5_R8P, 0.5_R8P], [3, N_FIXED_APART])
+real(R8P),    parameter :: APART_T(3, N_FIXED_APART) = reshape([1.25_R8P, 0._R8P, 0._R8P,  0._R8P, -1.5_R8P, 0._R8P, &
+                                                          0._R8P, 0._R8P, 1.5_R8P,   1.25_R8P, 1.25_R8P, 1.25_R8P], &
+                                                         [3, N_FIXED_APART])
 integer(I4P), parameter :: OPS(4) = [BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF]
 integer(I8P)            :: seed
 integer(I4P)            :: c, k, st, n_ok_status, n_bad_status, n_wrong, n_topo_req, n_topo_bad, n_wt, n_mf
@@ -35,11 +42,15 @@ logical                 :: rotated, contact, wt, mf
 seed = 20261102_I8P
 n_ok_status = 0 ; n_bad_status = 0 ; n_wrong = 0 ; n_topo_req = 0 ; n_topo_bad = 0 ; n_wt = 0 ; n_mf = 0
 n_overlap = 0 ; n_contact = 0 ; n_apart = 0 ; n_coplanar = 0
-do c = 1, N_CASES
-   do k = 1, 3
-      s(k) = 0.5_R8P * real(1 + int(3 * rnd()), R8P)          ! 0.5, 1, 1.5
-      t(k) = -0.5_R8P + 0.25_R8P * real(int(7 * rnd()), R8P) ! -0.5 .. 1
-   enddo
+do c = 1, N_CASES + N_FIXED_APART
+   if (c <= N_CASES) then
+      do k = 1, 3
+         s(k) = 0.5_R8P * real(1 + int(3 * rnd()), R8P)          ! 0.5, 1, 1.5
+         t(k) = -0.5_R8P + 0.25_R8P * real(int(7 * rnd()), R8P) ! -0.5 .. 1
+      enddo
+   else
+      s = APART_S(:, c - N_CASES) ; t = APART_T(:, c - N_CASES)
+   endif
    rotated = mod(c, 2) == 0
    axis  = [rnd() - 0.5_R8P, rnd() - 0.5_R8P, rnd() - 0.5_R8P]
    angle = 6.283185307179586_R8P * rnd()
@@ -65,12 +76,14 @@ do c = 1, N_CASES
 enddo
 print '(A,I0,A,I0,A,I0,A,I0)', 'configurations: overlapping ', n_overlap, '  touching ', n_contact, '  apart ', n_apart, &
       '  with coplanar face planes ', n_coplanar
-print '(A,I0,A,I0,A,I0)', 'booleans: ', 4 * N_CASES, '  status OK: ', n_ok_status, '  non-OK status: ', n_bad_status
+print '(A,I0,A,I0,A,I0)', 'booleans: ', 4 * (N_CASES + N_FIXED_APART), '  status OK: ', n_ok_status, &
+      '  non-OK status: ', n_bad_status
 print '(A,I0)',           'silent wrong volumes (status OK, volume off): ', n_wrong
 print '(A,I0,A,I0)',      'watertight: ', n_wt, '  manifold: ', n_mf
 print '(A,I0,A,I0)',      'topology required (no contact, U/I/D, non-empty): ', n_topo_req, '  failing: ', n_topo_bad
-print '(A,L1)', 'Are all tests passed? ', n_wrong == 0 .and. n_topo_bad == 0
-if (.not. (n_wrong == 0 .and. n_topo_bad == 0)) error stop 1
+print '(A,L1)', 'Are all tests passed? ', &
+      n_wrong == 0 .and. n_topo_bad == 0 .and. n_apart == N_FIXED_APART
+if (.not. (n_wrong == 0 .and. n_topo_bad == 0 .and. n_apart == N_FIXED_APART)) error stop 1
 
 contains
    function rnd() result(r)
