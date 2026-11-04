@@ -1,0 +1,7 @@
+$ fig_tut07
+WARNING: sanitize: 54 hole(s) filled
+WARNING: sanitize: 136 boundary edge(s) not forming a closed loop
+WARNING: sanitize: 62 duplicate facet(s) removed
+WARNING: sanitize: 188 facet(s) with 1 disconnected edge remain
+WARNING: sanitize: 14 facet(s) with 2 disconnected edges remain
+WARNING: sanitize: 54 non-manifold edge(s) (3+ incident facets) detected

@@ -17,6 +17,8 @@ the geometry. This chapter does it in 2-D on the section of chapter 7 and in 3-D
   low cell), the measures exact to round-off. A cell whose boundary does not close (an open loop) is flagged in
   `closed`, with `alpha = -1`.
 
+![the 2-D cut cells around the dragon section, each cell shaded by its fluid fraction alpha from cream (solid, 0) to sepia (fluid, 1), the section drawn on top, and the two cells holding two fluid pieces outlined in yellow](../../examples/images/tut10-cells2d.svg){.fossil-figure}
+
 <<< @/examples/snippets/tut10_cut_cells-cut3d.f90
 
 - `cut_cells_3d(surface=, x=, y=, z=, cut=)` is a free routine (from `use fossil`), with a `cut_cells_3d_t` result:
@@ -25,6 +27,11 @@ the geometry. This chapter does it in 2-D on the section of chapter 7 and in 3-D
   `piece_centroid`, its wall terms and `piece_face(6, :)`, the fluid fraction of its six faces.
 - `pieces = -1` flags a cell that cannot be trusted: a boundary edge of the mesh crosses it, or its faces do not
   close. Such a cell has no measures.
+
+![the 3-D cells below z = 0 that are not all fluid, drawn as cubes shaded by their fluid fraction: the solid interior cream on the cut plane, the cut cells around it towards sepia, the flagged cells in ember; the dragon above z = 0 as a translucent ghost](../../examples/images/tut10-cells3d.svg){.fossil-figure}
+
+The top of the cubes is the plane of the 2-D section: the solid inside, the cut cells around it. The ember cells are
+flagged, where an open edge of the dragon crosses them.
 
 ## Running it
 

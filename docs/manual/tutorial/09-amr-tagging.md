@@ -15,6 +15,8 @@ classifies the blocks of an 8³ partition of the domain, then tags the cells of 
   the point queries. `inside(n)` optionally returns the centre side of every box, near boxes included.
 - `box_intersects_surface(lo, hi)` answers for one box; `box_classify_many_device` runs the batch on the device.
 
+![the placed dragon with the 87 blocks of the 8 by 8 by 8 partition that meet it, in ember, and the 62 blocks within 0.05 of it, in teal; the other 363 blocks are outside and not drawn](../../examples/images/tut09-blocks.svg){.fossil-figure}
+
 <<< @/examples/snippets/tut09_amr_tagging-tag.f90
 
 - `tag_block(x=, y=, z=, band=, tags=)` takes the cell edges of a rectilinear block (stretched allowed) and returns
@@ -24,6 +26,11 @@ classifies the blocks of an 8³ partition of the domain, then tags the cells of 
 - Each connected group of uncut cells is signed by one point query, with the same default sign algorithm.
 - The block sees only itself: a cut cell in a neighbouring block does not count, so a band that must cross block
   faces needs the block padded with ghost cells.
+
+![layer 16 of the 32 by 32 by 32 tagged block seen from above: cut cells in cream, inside cells in teal, the outside rings 1 to 4 in darker ember ring by ring and the capped cells at 5 darkest; the yellow curve is the section of the dragon at the mid-plane of the layer](../../examples/images/tut09-tags.svg){.fossil-figure}
+
+A cell is cut if the wall crosses it anywhere in its height, so the cut cells follow the wall over the whole layer,
+not only the section at its mid-plane.
 
 ## Running it
 

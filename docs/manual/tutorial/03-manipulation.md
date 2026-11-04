@@ -18,6 +18,14 @@ follow. Clipping, mirroring and merging close the chapter.
   runs. Call it after the last transformation and before any query.
 - `save_into_file` writes `dragon-placed.stl`, the body of chapters 4 to 12.
 
+<div class="fossil-pair">
+
+![the repaired dragon translated so that the centre of its bounding box is the origin, still in CAD units: it lies along x, the x and y edges of its box marked](../../examples/images/tut03-before.svg)
+
+![the same dragon after a quarter turn about z and resize: it lies along y, longest side 1, inside the domain cube from -0.6 to 0.6](../../examples/images/tut03-placed.svg)
+
+</div>
+
 <<< @/examples/snippets/tut03_manipulation-clip.f90
 
 - `clip(bmin=, bmax=)` keeps the facets that overlap the box and drops the others, whole: no facet is cut. With
@@ -28,6 +36,14 @@ follow. Clipping, mirroring and merging close the chapter.
 - `mirror(normal=)` reflects the facets through the plane through the origin with that normal (`mirror(matrix=)` takes
   the matrix). The facet winding is kept outward.
 - `merge_solids(other=)` appends the facets of `other` and analyzes the result.
+
+<div class="fossil-pair">
+
+![clip keeps the facets that overlap the box y at most 0, the head half of the dragon, drawn solid inside the clip box; the remainder, the tail half, is a translucent ghost](../../examples/images/tut03-clip.svg)
+
+![the clipped half in stone and its mirror image through the plane y = 0 in ember, the two halves merge_solids joins](../../examples/images/tut03-merge.svg)
+
+</div>
 
 ## Running it
 

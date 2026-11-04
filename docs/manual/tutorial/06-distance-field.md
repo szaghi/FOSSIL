@@ -41,6 +41,17 @@ The check compares every node with the exact distance of chapter 4, separately i
   far nodes of the stretched grid. A solver that needs exact values farther out widens `band`.
 - 849 nodes are inside. With 0.04³ per node that is a volume of 0.054, the volume of the dragon from chapter 3.
 
+<div class="fossil-pair">
+
+![the field on the grid plane x = 0, seen along x: each node is a cell coloured by phi, teal inside, cream at the surface, ember outward to the stretched far field, with the section of the dragon in yellow](../../examples/images/tut06-field.svg)
+
+![the same plane zoomed on the body, the band nodes only: a strip of exact distances about two cells wide on each side of the section; the deep inside and the far nodes, outside the band, are left dark](../../examples/images/tut06-band.svg)
+
+</div>
+
+Each node is drawn as its dual cell. Left, the colour is sign(φ)·√(|φ| / 0.6), so the thin inside shows; right,
+it is φ / 0.08, the band half-width.
+
 ::: tip What you learned
 `distance_field_object` fills a rectilinear grid with the signed distance: exact in a band, signed by flood fill,
 swept beyond. Reference: [Signed-distance field](/guide/advanced/distance-field).

@@ -21,6 +21,8 @@ by the plane z = 0, and the section is a `curve_object` with the same queries as
   line, read back by `load_from_file`. Chapters 10 and 11 read `dragon-section.dat`.
 - A curve can also be built from arrays: `adopt_loops(u=, v=, loop_sizes=)`.
 
+![the placed dragon cut by the plane z = 0, drawn as a rectangle: the part below the plane solid, the part above translucent, the section curve in ember along the cut](../../examples/images/tut07-section.svg){.fossil-figure}
+
 <<< @/examples/snippets/tut07_curves-query.f90
 
 - Points are `p = [u, v]`. `compute_distance` returns the signed distance, negative inside. Unlike the surface
@@ -32,6 +34,10 @@ by the plane z = 0, and the section is a `curve_object` with the same queries as
 
 - `initialize(x=, y=)` without `z` makes a 2-D field; `compute(curve=)` runs the same band, sign and sweep stages as
   in chapter 6.
+
+![the 2-D signed distance of the section seen from above, x pointing down and y to the right: the nodes of the 81 by 81 field around the curve coloured by tanh(phi/0.05), teal inside, cream on the wall, ember outside, with the two loops of the curve in yellow (the larger one runs through the middle and right lobes)](../../examples/images/tut07-field.svg){.fossil-figure}
+
+The colour saturates beyond about 0.1 from the wall; the field itself runs to the edges of the domain.
 
 ## Running it
 

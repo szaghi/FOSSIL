@@ -23,12 +23,22 @@ finds the ghost points of a 41³ grid and asks for all of that in one batch.
   1e-6: points on the medial axis, or in a thin gap. `second_foot_points` returns it; the caller decides what to do.
 - `query_point` is the one-point form; `query_many_device` runs the batch on the device (chapter 12).
 
+![query_many on a sheet of points above cube-01.stl, each joined to its wall point: the points over the top face have a face foot (yellow), those beyond one side an edge foot (teal), those beyond a corner a vertex foot (ember)](../../examples/images/tut08-features.svg){.fossil-figure}
+
+The features are easiest to see on a cube: the same call on a sheet of points above it splits them into the face,
+edge and vertex regions.
+
 <<< @/examples/snippets/tut08_ib_queries-images.f90
 
 - `image_points(points=, images=)` mirrors each point through its wall point, 2·foot − x. `visible(n)` is true when
   the segment from the wall point to the image crosses no facet, that is when the image is a usable fluid point.
 - `probe_many(points=, lengths=, probe_points=, visible=)` places probes at a given distance along the normal from
   the wall point (positive outward), with the same visibility test.
+
+![the 30 ghost points of the grid plane y = 0 (teal) inside the section of the dragon by that plane (grey), each joined through its wall point (yellow) to its image point (ember)](../../examples/images/tut08-images.svg){.fossil-figure}
+
+The view is along y: the wall points are the closest points in 3-D, so some lie off the plane and project off the
+section, and an image point can project inside it.
 
 ## Running it
 

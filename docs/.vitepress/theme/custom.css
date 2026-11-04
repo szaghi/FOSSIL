@@ -110,3 +110,26 @@
   max-width: 760px;
   height: auto;
 }
+
+/* Figures computed by FOSSIL and drawn by scripts/mesh2svg.py (issue #47): one centred, or a pair side by side. */
+.fossil-figure {
+  display: block;
+  margin: 1.4rem auto;
+  max-width: 100%;
+  height: auto;
+}
+.fossil-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 1.4rem 0;
+}
+.fossil-pair p {
+  flex: 1 1 300px;
+  min-width: 0;
+  margin: 0;
+}
+.fossil-pair img {
+  width: 100%;
+  height: auto;
+}

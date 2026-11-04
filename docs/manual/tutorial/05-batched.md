@@ -30,8 +30,20 @@ algorithms.
   non-manifold surface their pseudo-normals disagree.
 - The two sign algorithms give the same magnitudes and different signs at 50 of the 4096 points. The pseudo-normal
   sign puts 152 points inside, one of them at d = -0.647, deeper than the dragon is wide: a sign read from the
-  closest feature is wrong where the surface is open. The fast winding number puts 108 points inside, none deeper
+  closest feature is wrong where the surface is not a closed manifold. The fast winding number puts 108 points inside, none deeper
   than 0.070. On a surface that is not closed, use `SIGN_FAST_WINDING_NUMBER`; the rest of the tutorial does.
+
+<div class="fossil-pair">
+
+![the grid points the pseudo-normal sign puts inside the dragon (a translucent ghost in the domain cube): teal where the fast winding number agrees, ember for the 47 it puts outside, most of them in clusters far from the body](../../examples/images/tut05-pseudo-normal.svg)
+
+![the grid points the fast winding number puts inside: 108, all within the body, three of them in ember where the pseudo-normal disagrees](../../examples/images/tut05-winding-number.svg)
+
+</div>
+
+Most ember points of the left figure lie far from the body, near the corners of the domain. Each of the 47 takes its
+sign from the pseudo-normal of a vertex or an edge of the dragon, which is still neither closed nor manifold after
+chapter 2; one wrong pseudo-normal flips every point whose closest feature it is.
 
 The timing is not printed: it depends on the machine. The figures are in
 [GPU distance queries](/guide/advanced/device-distance) (the BVH is about 110 times faster than the octree on a mesh

@@ -13,6 +13,8 @@ program loads it, reads what FOSSIL computed on loading, and writes it back as A
 - Loading runs `analyze`: bounding box, volume, centroid, facet connectivity, the AABB tree (a SAH BVH by default)
   and the pseudo-normals the signed distance needs. Every later query relies on it.
 
+![the dragon as loaded, 6588 facets, inside the bounding box analyze computes](../../examples/images/tut01-dragon.svg){.fossil-figure}
+
 <<< @/examples/snippets/tut01_first_surface-inspect.f90
 
 - The components of `surface_stl_object` are private. They are read through accessors: `get_facets_number`,

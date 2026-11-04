@@ -22,6 +22,8 @@ tree, and it gives what a moving cut-cell update needs: the cells that change st
   its second query is skipped; `checked` counts those that needed it. The sign algorithm defaults to the
   pseudo-normal, as for the point queries.
 
+![the dragon cut by the plane of cell centres y = -0.125 at pose0 (grey line) and at pose1 (yellow line), with the cells whose centre state_changes flags: fresh, solid to fluid, in teal where the body left; dead, fluid to solid, in ember where it arrived](../../examples/images/tut11-move.svg){.fossil-figure}
+
 <<< @/examples/snippets/tut11_moving_bodies-swept.f90
 
 - `swept_cells_2d(curve, pose0, pose1, x, y, sw)` (and `swept_cells_3d(surface, pose0, pose1, x, y, z, sw)`) are free
@@ -36,6 +38,8 @@ tree, and it gives what a moving cut-cell update needs: the cells that change st
 - A pure translation takes the exact path (`sw%exact`): the face lengths are integrated piecewise between the
   instants when a vertex crosses a grid line or a node crosses a segment. A rotation is integrated by Gauss-Legendre
   at `nq` nodes (default 4), with `sw%error_estimate`.
+
+![the section translated by 0.02 along x (down in the figure): each cell shaded by its swept area, ember where it gains fluid on the trailing side, teal where it loses fluid on the leading side, the section at pose0 in grey and moved to pose1 in yellow](../../examples/images/tut11-swept.svg){.fossil-figure}
 
 ## Running it
 

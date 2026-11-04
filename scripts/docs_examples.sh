@@ -9,6 +9,9 @@
 #                                                       terminal session typing each command, then showing its output
 #                                !anim NAME             the program wrote NAME.dat: scripts/anim2svg.py draws its
 #                                                       geometry animations into images/ (NAME-*.svg)
+#                                !fig NAME              the program wrote NAME.fig, a scene of FOSSIL's geometry:
+#                                                       scripts/mesh2svg.py draws it into images/NAME.svg (issue #47)
+#   docs/examples/lib/*.f90    modules shared by the programs (fossil_fig: the scene writer), compiled first
 #   docs/examples/files/       input files, copied into the directory where the runs happen, with the test bodies
 #                              src/tests/{dragon,cube-01,naca0012-ascii}.stl
 #   docs/examples/snippets/    generated: <program>.f90 without the markers, and <program>-<region>.f90
@@ -40,7 +43,7 @@ rm -rf -- "$build"
 mkdir -p "$build/bin" "$build/mod" "$run_dir" "$ex/snippets" "$ex/output" "$ex/images"
 rm -f -- "$ex"/snippets/*.f90 "$ex"/output/*.ansi "$ex"/images/*.svg
 
-markers='^ *!(run|region|endregion|image|cast|anim) '
+markers='^ *!(run|region|endregion|image|cast|anim|fig) '
 # snippets: the whole program and each region, without the markers, dedented
 dedent() { awk '{l[NR]=$0; if ($0 ~ /[^ ]/) {match($0, /^ */); if (m == "" || RLENGTH < m) m = RLENGTH}}
                 END {for (i = 1; i <= NR; i++) print substr(l[i], m + 1)}' "$1"; }
@@ -49,15 +52,21 @@ for src in "$ex"/src/*.f90; do
   grep -Ev "$markers" "$src" > "$ex/snippets/$name.f90" || true
   for region in $(sed -n 's/^ *!region \([A-Za-z0-9_-]*\).*/\1/p' "$src"); do
     awk -v r="$region" '$1 == "!endregion" && $2 == r {on = 0}
-                        on && $0 !~ /^ *!(run|region|endregion|image|cast|anim) / {print}
+                        on && $0 !~ /^ *!(run|region|endregion|image|cast|anim|fig) / {print}
                         $1 == "!region" && $2 == r {on = 1}' "$src" > "$build/region.f90"
     dedent "$build/region.f90" > "$ex/snippets/$name-$region.f90"
   done
 done
 
-# programs
+# shared modules, then the programs
+objs=()
+for src in "$ex"/lib/*.f90; do
+  [ -e "$src" ] || continue
+  "$fc" -c -I"$mods" -J"$build/mod" -o "$build/$(basename "$src" .f90).o" "$src"
+  objs+=("$build/$(basename "$src" .f90).o")
+done
 for src in "$ex"/src/*.f90; do
-  "$fc" -I"$mods" -J"$build/mod" -o "$build/bin/$(basename "$src" .f90)" "$src" "$lib"
+  "$fc" -I"$mods" -I"$build/mod" -J"$build/mod" -o "$build/bin/$(basename "$src" .f90)" "$src" "${objs[@]}" "$lib"
 done
 
 # runs, in the order of the files and of the lines
@@ -95,4 +104,8 @@ done < <(sed -n 's/^ *!cast \(.*\)/\1/p' "$ex"/src/*.f90)
 for name in $(sed -n 's/^ *!anim \([A-Za-z0-9_-]*\).*/\1/p' "$ex"/src/*.f90); do
   python3 "$root/scripts/anim2svg.py" "$run_dir/$name.dat" "$ex/images"
 done
-echo "docs_examples: $(ls "$ex"/src/*.f90 | wc -l) programs, $(ls "$ex"/output/*.ansi | wc -l) runs"
+for name in $(sed -n 's/^ *!fig \([A-Za-z0-9_-]*\).*/\1/p' "$ex"/src/*.f90); do
+  python3 "$root/scripts/mesh2svg.py" "$run_dir/$name.fig" "$ex/images/$name.svg"
+done
+echo "docs_examples: $(ls "$ex"/src/*.f90 | wc -l) programs, $(ls "$ex"/output/*.ansi | wc -l) runs," \
+     "$(grep -h '^ *!fig ' "$ex"/src/*.f90 | wc -l) figures"

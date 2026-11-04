@@ -23,6 +23,8 @@ which side. This chapter queries single points.
   `edge_index` (1 to 3, 0 when not on an edge) and `vertex_index` (1 to 3, 0 when not at a vertex), the
   `closest_point` and the pseudo-normal `normal` of that feature. Chapter 8 gets the same for many points at once.
 
+![twelve probes around the dragon, each joined to its closest point on the surface by the distance segment](../../examples/images/tut04-probes.svg){.fossil-figure}
+
 ## Running it
 
 <<< @/examples/output/tut04.ansi{ansi}

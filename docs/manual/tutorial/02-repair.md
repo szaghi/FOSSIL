@@ -16,6 +16,17 @@ what can be repaired, and the validity predicates say what is left.
   (default 0.1) is closed by a minimum-weight patch. Larger loops stay open, so a genuine opening (an inlet, a symmetry
   cut) survives. `refine_holes=.true.` and `fair_holes=.true.` refine the patches and fair them to a smooth surface.
   The default is `fill_holes=.false.`.
+
+<div class="fossil-pair">
+
+![a round hole cut into the repaired dragon, its boundary loop in ember: the facet edges without a neighbour](../../examples/images/tut02-hole.svg)
+
+![the same hole closed by fill_holes with refine and fair: the patch in ember, refined to the density of the loop and faired to a smooth surface](../../examples/images/tut02-patch.svg)
+
+</div>
+
+A hole is a loop of boundary edges, the facet edges without a neighbour (`fcon_edge == 0`); `fill_holes` triangulates
+it, `refine` matches the density of the loop and `fair` smooths the patch into the surface around it.
 - Each defect class left or removed is reported once on stderr, as a `WARNING: sanitize:` line.
 
 <<< @/examples/snippets/tut02_repair-check.f90

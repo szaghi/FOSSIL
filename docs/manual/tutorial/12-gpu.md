@@ -27,6 +27,10 @@ This output comes from a gfortran build. Without an OpenACC compiler the `!$acc`
 "device" batch runs on the host, through the same kernels, and matches the host batch bit for bit: 0 mismatches of
 13824 for both signs. The program is still useful there, as a check that the device code path is correct.
 
+![the plane z = -0.026 of the batch, each point's cell shaded by the signed distance distance_many_device returns with the winding-number sign, teal inside and ember outside, the dragon cut by the plane in yellow; none of the 576 values differs from distance_many](../../examples/images/tut12-slice.svg){.fossil-figure}
+
+The figure is drawn from that run: the device code path, executed on the host, not a GPU.
+
 On a GPU, build FOSSIL with nvfortran 26.9 or later (NVIDIA HPC SDK). The `static-nvidia` mode builds the library,
 `tests-nvidia` the distance benchmark; the `local_nvf` varset sets the compute capability (`cc89` by default, edit
 `$NVF_CC` for another GPU, e.g. `cc80` for an A100):
