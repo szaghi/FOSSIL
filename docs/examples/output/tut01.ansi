@@ -1,0 +1,7 @@
+$ tut01_first_surface
+facets      6588
+box min       -10.8287   -4.1883    5.2821
+box max         9.6461    4.9512   19.7413
+volume          465.9287
+watertight  F   manifold F
+saved dragon-ascii.stl

@@ -1,0 +1,9 @@
+$ tut08_ib_queries
+ghost points 1368, shells 76, bodies 37
+feature: face 1051, edge 303, vertex 14
+ambiguous foot points 2
+ghost 1        0.00000 -0.33000 -0.33000
+  wall point   0.00005 -0.33150 -0.33212
+  normal       0.01806 -0.57622 -0.81709
+  image        0.00009 -0.33299 -0.33424
+images visible from their wall point 1330 of 1368

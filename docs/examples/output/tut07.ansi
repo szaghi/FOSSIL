@@ -1,0 +1,5 @@
+$ tut07_curves
+section z=0: 2 loops, 152 vertices, 0 open
+area  0.072609  perimeter  1.885961  valid T
+d(0,0)  -0.015933  closest   0.015329 -0.004344  segment 20
+2-D field: band cells 465, inside 327

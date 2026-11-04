@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is FOSSIL?
 
-FOSSIL (FOrtran Stereo Litography parser) is a pure Fortran 2003+ library for reading, writing, and manipulating STL (stereolithography) mesh files. It is OOP-designed and TDD-designed. The companion CLI app `fossilizer` (`src/app/fossilizer.f90`) wraps the library for command-line STL processing.
+FOSSIL (FOrtran Surfaces, Solids, Immersed boundaries and Level sets; until 2026-11 "FOrtran Stereo Litography parser") is a pure Fortran 2003+ geometry library for simulation codes: STL surfaces and 2-D curves (I/O, repair, processing), signed distance and level sets, immersed-boundary queries, AMR tagging, exact cut cells and moving bodies, on the CPU or bit-exact on the GPU. It is OOP-designed and TDD-designed. The companion CLI app `fossilizer` (`src/app/fossilizer.f90`) wraps the library for command-line STL processing.
 
 ## Build System
 
@@ -112,7 +112,20 @@ Test programs output `Are all tests passed? T` on success or `Are all tests pass
 ```bash
 fobis rule --ex makedoc   # Requires 'formal' and npm/VitePress
 fobis rule --ex deldoc    # Delete doc build artifacts
+bash scripts/docs_examples.sh   # rebuild static-gnu, compile and run docs/examples/src/*.f90, regenerate
+                                # docs/examples/{snippets,output,images} (~1 min); never edit those by hand
+cd docs && npm run docs:build   # API pages (formal) + VitePress site
 ```
+
+The site follows the FLAP/VecFor/StringiFor/FoXy skeleton (issue #43): Start here (`docs/guide/index.md`,
+`installation.md`) → Tutorial (`docs/manual/tutorial/NN-*.md`, 12 chapters) → Cookbook (`docs/manual/cookbook.md`) →
+Reference (`docs/guide/features.md` is the feature map, then `usage.md`, `advanced/*.md`, `api/*.md`) → Project. One
+sidebar in reading order in `docs/.vitepress/config.mts`. Every tutorial/cookbook snippet and output comes from a
+program in `docs/examples/src/` (markers `!run`, `!region`, `!cast`, `!anim`; see the script header); explicit output
+formats only. `scripts/anim2svg.py` draws the SMIL geometry animations (`!anim`), `scripts/ansi2svg.py` the terminal
+casts. Brand: `docs/brand/marks.py` generates `docs/public/{logo,logo-dark,favicon}.svg` (the carved ammonite);
+palette in `docs/.vitepress/theme/custom.css`. `scripts/check_doc_snippets.sh` still compiles the fortran blocks of
+the hand-written reference pages.
 
 ### Alternative build (fpm)
 

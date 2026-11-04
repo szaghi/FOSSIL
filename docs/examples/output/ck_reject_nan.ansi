@@ -1,0 +1,3 @@
+$ ck_reject_nan
+broken.stl rejected: non-finite coordinates
+status 5, facets 0

@@ -1,0 +1,5 @@
+$ ck_validity
+file                watertight manifold volume
+cube-01.stl                  T        T      T
+naca0012-ascii.stl           F        T      F
+dragon.stl                   F        F      F

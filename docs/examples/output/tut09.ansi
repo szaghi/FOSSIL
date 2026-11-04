@@ -1,0 +1,4 @@
+$ tut09_amr_tagging
+blocks: cut 87, near 62, inside 0, outside 363
+tag      -5     -4     -3     -2     -1      0      1      2      3      4      5
+cells      0      0      0      7    352   1689   2217   2602   3009   3361  19531

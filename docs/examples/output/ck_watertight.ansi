@@ -1,0 +1,4 @@
+$ ck_watertight
+open box:  40 facets, watertight F
+WARNING: sanitize: 1 hole(s) filled
+sanitized: 46 facets, watertight T, volume  1.00000

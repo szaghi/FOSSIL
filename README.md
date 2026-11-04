@@ -1,51 +1,32 @@
+<div align="center">
+
+<img src="docs/public/logo.svg" alt="FOSSIL logo: an ammonite meshed in triangles, carved by light" width="128">
+
 # FOSSIL
+#### FOrtran Surfaces, Solids, Immersed boundaries and Level sets
 
->#### FOrtran Stereo Litography parser
->A pure Fortran 2003+ OOP library for reading, writing, and manipulating [STL](https://en.wikipedia.org/wiki/STL_(file_format)) mesh files.
-
-[![CI](https://github.com/szaghi/FOSSIL/actions/workflows/ci.yml/badge.svg)](https://github.com/szaghi/FOSSIL/actions)
+[![GitHub tag](https://img.shields.io/github/v/tag/szaghi/FOSSIL)](https://github.com/szaghi/FOSSIL/tags)
+[![GitHub issues](https://img.shields.io/github/issues/szaghi/FOSSIL)](https://github.com/szaghi/FOSSIL/issues)
+[![CI](https://github.com/szaghi/FOSSIL/actions/workflows/ci.yml/badge.svg)](https://github.com/szaghi/FOSSIL/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/codecov/c/github/szaghi/FOSSIL.svg)](https://app.codecov.io/gh/szaghi/FOSSIL)
-[![GitHub tag](https://img.shields.io/github/tag/szaghi/FOSSIL.svg)](https://github.com/szaghi/FOSSIL/releases)
 [![License](https://img.shields.io/badge/license-GPLv3%20%7C%20BSD%20%7C%20MIT-blue.svg)](#copyrights)
 
-| 📂 **STL I/O**<br>Load and save ASCII or binary STL files. Format is auto-detected; bad input (NaN/Inf coordinates) is rejected via a status code | 🔧 **Surface manipulation**<br>Translate, rotate, mirror, resize, clip, and merge STL surfaces with a clean type-bound API | 🩺 **Surface analysis & repair**<br>Sanitize pipeline detects and fixes degenerate slivers, literal duplicates, disconnected edges, non-manifold edges, and inward-pointing normals. `is_watertight` / `is_manifold` / `is_volume` predicates summarise the result | 📏 **Signed distance**<br>Bit-exact closest-facet lookup via best-first traversal with d² pruning. Sign via Bærentzen–Aanæs pseudo-normal (default), ray intersection, or solid angle |
+> The geometry of complex bodies for simulation codes, in pure Fortran: triangulated surfaces and 2-D curves read and
+> repaired, signed distances and level sets, immersed-boundary queries, AMR tagging, exact cut cells and moving bodies,
+> on the CPU or bit-exact on the GPU.
+
+</div>
+
+| 📂 **STL in, STL out**<br>ASCII or binary, format detected, bad input rejected; box, volume, connectivity, shells and bodies. [I/O](https://szaghi.github.io/FOSSIL/guide/usage) | 🩹 **Repair dirty meshes**<br>Slivers, duplicates, gaps, flipped normals; holes patched and faired. [Repair](https://szaghi.github.io/FOSSIL/manual/tutorial/02-repair) | 📏 **Signed distance**<br>SAH BVH, bit-exact against brute force; four sign algorithms, the fast winding number for holed meshes. [Signs](https://szaghi.github.io/FOSSIL/guide/advanced/sign-benchmark) | 🌊 **Level sets**<br>Signed-distance fields on stretched grids: exact band, flood-fill signs, fast sweeping. [Fields](https://szaghi.github.io/FOSSIL/guide/advanced/distance-field) |
 |:---:|:---:|:---:|:---:|
-| ⚡ **SAH BVH acceleration**<br>Binary BVH built with the surface-area heuristic — adapts to triangle density. ~100× faster distance queries than the legacy octree on dragon-scale meshes. Octree remains selectable | 🧪 **OOP / TDD designed**<br>Three public types — `surface_stl_object`, `facet_object` and `distance_field_object` — every public operation exercised by the regression suite | 🚀 **Advanced geometry processing**<br>Booleans, winding number, alpha wrap, isotropic remesh, decimation, marching cubes, SDF segmentation, ray queries, cotangent Laplacian, per-vertex curvature, Taubin smoothing, hole filling — thirteen libigl/CGAL-class primitives, every one a single TBP | 🆓 **Free & open source**<br>Multi-licensed — GPLv3 for FOSS projects, BSD 2/3-Clause or MIT for commercial use. Fortran 2003+ standard compliant |
+| 〰️ **2-D curves**<br>Polylines for quadtree solvers with the same queries; sections of any STL. [2-D](https://szaghi.github.io/FOSSIL/guide/advanced/2d-geometry) | 🎯 **Immersed-boundary queries**<br>Closest point, feature, normal and body per point; image points, probes, wall distance. [IB queries](https://szaghi.github.io/FOSSIL/guide/advanced/ib-queries) | 🧭 **AMR tagging**<br>Blocks and cells cut, near, inside or outside from the tree; signed tag bands. [Tagging](https://szaghi.github.io/FOSSIL/guide/advanced/amr-tagging) | 🧱 **Exact cut cells**<br>Exact crossings; 2-D and 3-D fractions, apertures and fluid pieces with their own volumes. [Cut cells](https://szaghi.github.io/FOSSIL/guide/advanced/cut-cells) |
+| 🔄 **Moving bodies**<br>Body-frame queries, O(N) tree refit, exact swept volumes of a time step. [Motion](https://szaghi.github.io/FOSSIL/guide/advanced/moving-bodies) | 🛠️ **Geometry processing**<br>Booleans, self-intersections, decimation, remeshing, smoothing, alpha wrap, marching cubes, curvature. [Surfaces](https://szaghi.github.io/FOSSIL/guide/features#surfaces) | 🚀 **On the GPU, bit for bit**<br>OpenACC kernels shared with the CPU path, equal to it bit for bit. [GPU](https://szaghi.github.io/FOSSIL/guide/advanced/device-distance) | 🆓 **Free and portable**<br>Pure Fortran 2003+, no C; gfortran, ifx, nvfortran; FoBiS or fpm; GPLv3, BSD or MIT. [Install](https://szaghi.github.io/FOSSIL/guide/installation) |
+
+<p align="center"><img src="docs/examples/images/airfoil-cut-cells.svg" alt="animation: the exact cut cells of a NACA 0012 section pitching and translating through a 48 by 24 grid, each cell shaded by its solid fraction" width="700"><br>
+<sub>A pitching NACA 0012 crossing a Cartesian grid: its exact cut cells, every frame computed by FOSSIL (<a href="docs/examples/src/anim_airfoil.f90"><code>anim_airfoil.f90</code></a>).</sub></p>
 
 >#### [Documentation](https://szaghi.github.io/FOSSIL/)
-> For full documentation (guide, API reference, examples, etc...) see the [FOSSIL website](https://szaghi.github.io/FOSSIL/).
-
-| ![dragon](docs/pictures/dragon.jpg) | ![cube](docs/pictures/disconnected-cube.png) |
-|:---:|:---:|
-| *the dragon STL test (`src/tests/dragon.stl`) has 6588 triangular facets. With the default SAH BVH and the pseudo-normal sign algorithm, signed-distance queries on a 16³ grid run in ~0.022 s vs ~0.987 s on the legacy octree — about a 45× speedup at this size, growing past 100× on larger meshes. Bit-exact correctness vs brute force is asserted by the regression suite.* | *automatic repair of disconnected edges.* |
-
----
-
-## Advanced features
-
-FOSSIL ships a focused subset of the libigl / CGAL geometry-processing toolkit, drawn directly from the standard references in the field. Each is a single type-bound procedure on `surface_stl_object`; every one has a dedicated page with a CFD-relevant motivation, a worked Fortran example, and an honest list of known limitations.
-
-| Feature | Reference |
-|---|---|
-| [Boolean operations](https://szaghi.github.io/FOSSIL/guide/advanced/booleans) — union, intersection, difference, symmetric difference | Zhou et al. 2016 |
-| [Self-intersection detection / resolution](https://szaghi.github.io/FOSSIL/guide/advanced/self-intersection) — Möller tri-tri broad-and-narrow phase | Möller 1997 |
-| [Mesh decimation](https://szaghi.github.io/FOSSIL/guide/advanced/decimate) — quadric edge collapse with normal-flip / non-manifold safety | Garland & Heckbert 1997 |
-| [Generalized winding number](https://szaghi.github.io/FOSSIL/guide/advanced/winding-number) — robust inside/outside on dirty STL, hierarchical Barnes-Hut traversal | Jacobson 2013 + Barill 2018 |
-| [Marching cubes](https://szaghi.github.io/FOSSIL/guide/advanced/marching-cubes) — isosurface extraction with the SDF→STL roundtrip | Lorensen-Cline 1987 |
-| [Alpha wrapping](https://szaghi.github.io/FOSSIL/guide/advanced/alpha-wrap) — guaranteed watertight 2-manifold surrogate from any triangle soup | Portaneri et al. 2022 |
-| [Isotropic remeshing](https://szaghi.github.io/FOSSIL/guide/advanced/isotropic-remesh) — uniform-edge re-tessellation with optional sharp-feature preservation | Botsch & Kobbelt 2004 |
-| [SDF segmentation](https://szaghi.github.io/FOSSIL/guide/advanced/sdf-segmentation) — per-facet semantic labels via Shape Diameter Function + Gaussian-mixture clustering | Shapira, Shamir & Cohen-Or 2008 |
-| [Ray-mesh intersection queries](https://szaghi.github.io/FOSSIL/guide/advanced/ray-queries) — closest hit, all hits, any-hit early-exit | Möller-Trumbore |
-| [Cotangent Laplacian + barycentric mass](https://szaghi.github.io/FOSSIL/guide/advanced/cotangent-laplacian) — sparse SPD operator; foundation for curvature and smoothing | Pinkall & Polthier 1993; Meyer et al. 2003 |
-| [Per-vertex Gaussian + mean curvature](https://szaghi.github.io/FOSSIL/guide/advanced/curvature) — angle-defect Gaussian and signed mean curvature from `H n = (1/2) M⁻¹ L V` | Meyer et al. 2003 |
-| [Mesh smoothing (explicit + Taubin λ\|μ)](https://szaghi.github.io/FOSSIL/guide/advanced/smoothing) — production-grade denoiser for CFD-grade STL | Taubin 1995 |
-| [Hole filling](https://szaghi.github.io/FOSSIL/guide/advanced/hole-filling) — boundary loops closed by minimum-weight patches, oriented like the surface | Liepa 2003 |
-| [Immersed-boundary queries](https://szaghi.github.io/FOSSIL/guide/advanced/ib-queries) — closest point, pseudo-normal, feature and body per point on CPU/GPU, probe and image points with visibility, ambiguous foot points, vector level set | Bærentzen & Aanæs 2005 |
-| [Sign algorithms at sharp features](https://szaghi.github.io/FOSSIL/guide/advanced/sign-benchmark) — measured misclassification of the four sign algorithms at edges, vertices and 2-D corners down to 1e-12 L, clean and dirty meshes | Bærentzen & Aanæs 2005; Barill et al. 2018 |
-| [Moving bodies](https://szaghi.github.io/FOSSIL/guide/advanced/moving-bodies) — rigid poses, body-frame queries (CPU/GPU), moved copies with a tree refit, fresh and dead cells, swept geometry | Kou et al. 2022; Noack 2005; Falcovitz et al. 1997 |
-| [Cut-cell geometry](https://szaghi.github.io/FOSSIL/guide/advanced/cut-cells) — exact grid-line crossings and wall fractions (CPU/GPU), 2-D cut cells with pieces, 3-D face fractions, cell volumes and pieces | Woop et al. 2013 |
-| [AMR tagging](https://szaghi.github.io/FOSSIL/guide/advanced/amr-tagging) — blocks and cells cut, near, inside or outside from the BVH on CPU/GPU, signed tag bands on stretched blocks, 3-D and 2-D | Akenine-Möller 2001; Hoppe et al. 2022 |
-| [2-D geometry (curves)](https://szaghi.github.io/FOSSIL/guide/advanced/2d-geometry) — `curve_object` for quadtree solvers: segment BVH, signed distance, 2-D fast winding number, exact `orient2d`, STL slicing, repair, 2-D distance fields | Barill et al. 2018, Shewchuk 1997 |
+> The [tutorial](https://szaghi.github.io/FOSSIL/manual/), the [cookbook](https://szaghi.github.io/FOSSIL/manual/cookbook) and the [reference](https://szaghi.github.io/FOSSIL/guide/features) are on the [FOSSIL website](https://szaghi.github.io/FOSSIL/). Every code sample there is a program compiled and run to produce the output shown.
 
 ---
 

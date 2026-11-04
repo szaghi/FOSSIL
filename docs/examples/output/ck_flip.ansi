@@ -1,0 +1,3 @@
+$ ck_flip
+inside-out: volume  -1.00000, is_volume F
+fixed:      volume   1.00000, is_volume T (48 facets flipped)

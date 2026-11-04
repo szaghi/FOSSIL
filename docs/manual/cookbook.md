@@ -1,0 +1,228 @@
+---
+title: Cookbook
+---
+
+# Cookbook
+
+Short answers to "how do I ...?". Each recipe is a complete program with its real output; the
+[reference](/guide/api/) has the details. The programs read the test bodies of the repository, `dragon.stl` (binary,
+6588 facets, with holes), `cube-01.stl` (the unit cube, binary) and `naca0012-ascii.stl` (a wing section, ASCII),
+which are in [`src/tests`](https://github.com/szaghi/FOSSIL/tree/master/src/tests). The [tutorial](./index) builds
+the same calls up step by step.
+
+[[toc]]
+
+## Files
+
+### Read an STL file, ASCII or binary
+
+<<< @/examples/snippets/ck_read_any.f90
+
+<<< @/examples/output/ck_read_any.ansi{ansi}
+
+`guess_format=.true.` tells the formats apart by the file size: a binary STL of `n` facets is `84 + 50 n` bytes. See
+[`surface_stl_object`](/guide/api/surface-stl-object).
+
+### Reject a file with NaN or Inf coordinates
+
+<<< @/examples/snippets/ck_reject_nan.f90
+
+<<< @/examples/output/ck_reject_nan.ansi{ansi}
+
+With `status=` present the load returns `STATUS_INVALID_INPUT` (5) instead of stopping, and the surface stays empty.
+The codes are listed in [constants](/guide/api/constants#status-codes).
+
+### Save as ASCII or binary
+
+<<< @/examples/snippets/ck_save_formats.f90
+
+<<< @/examples/output/ck_save_formats.ansi{ansi}
+
+`is_ascii` defaults to `.true.`. The binary file of the 48-facet cube is `84 + 50 x 48 = 2484` bytes.
+
+### Load only a region of a large file
+
+<<< @/examples/snippets/ck_load_clipped.f90
+
+<<< @/examples/output/ck_load_clipped.ansi{ansi}
+
+A facet is kept whole when it overlaps the box, so the loaded part reaches below the box (z 13.6403 for a box
+starting at 15). To cut the facets themselves, use [`clip`](/guide/api/surface-stl-object#clip) after the load.
+
+## Repair
+
+### Close the holes of a surface
+
+<<< @/examples/snippets/ck_watertight.f90
+
+<<< @/examples/output/ck_watertight.ansi{ansi}
+
+`fill_holes=.true.` closes the boundary loops that pass two limits: `max_hole_edges` (default 200) and
+`max_hole_size`, the loop's bounding-box diagonal over the surface's (default 0.1). The missing face is a large hole,
+so the recipe raises the size limit to 1. `sanitize` reports each defect class on standard error. See
+[hole filling](/guide/advanced/hole-filling).
+
+### Check that a surface is valid
+
+<<< @/examples/snippets/ck_validity.f90
+
+<<< @/examples/output/ck_validity.ansi{ansi}
+
+`is_watertight` asks for two facets on every edge, `is_manifold` only for no edge with three or more, and `is_volume`
+for a watertight surface with a positive volume. The wing has edges with a single facet and none with three:
+manifold, not watertight. See
+[getters and predicates](/guide/api/surface-stl-object#getters-and-predicates).
+
+### Fix an inside-out surface
+
+<<< @/examples/snippets/ck_flip.f90
+
+<<< @/examples/output/ck_flip.ansi{ansi}
+
+`sanitize_normals` makes the windings consistent and points them outward; `analyze` then recomputes the volume.
+`sanitize` runs both. See the [repair pipeline](/guide/api/surface-stl-object#repair-pipeline).
+
+## Queries
+
+### Tell whether a point is inside
+
+<<< @/examples/snippets/ck_point_inside.f90
+
+<<< @/examples/output/ck_point_inside.ansi{ansi}
+
+On a watertight surface the four sign algorithms agree. The default is `SIGN_PSEUDO_NORMAL`, the cheapest; see
+[sign algorithms](/guide/api/constants#sign-algorithms).
+
+### Find the closest point and its normal
+
+<<< @/examples/snippets/ck_closest_point.f90
+
+<<< @/examples/output/ck_closest_point.ansi{ansi}
+
+The closest point is on the edge between the faces x = 1 and z = 1, so the normal is the edge pseudo-normal, the
+angle-weighted mean of the two face normals. See
+[distance and inside queries](/guide/api/surface-stl-object#distance-and-inside-queries).
+
+### Get a reliable sign on a mesh with holes
+
+<<< @/examples/snippets/ck_sign_holes.f90
+
+<<< @/examples/output/ck_sign_holes.ansi{ansi}
+
+The pseudo-normal sign is local: near an open boundary it misclassifies 588 of the 8000 points. The fast winding
+number counts how much of the surface surrounds the point and misclassifies none. See
+[winding number](/guide/advanced/winding-number).
+
+### Cast a ray
+
+<<< @/examples/snippets/ck_ray_hit.f90
+
+<<< @/examples/output/ck_ray_hit.ansi{ansi}
+
+`t` is the parameter along the ray, `point = origin + t direction`; the direction need not be a unit vector.
+`intersect_ray_all` returns every hit and `intersect_ray_any` stops at the first one. See
+[ray queries](/guide/advanced/ray-queries).
+
+## Grids
+
+### Compute the signed distance on a whole grid
+
+<<< @/examples/snippets/ck_grid_distance.f90
+
+<<< @/examples/output/ck_grid_distance.ansi{ansi}
+
+The cells near the surface (the band) get exact distances; fast sweeping fills the others with a first-order
+solution, -0.4750 at the centre where the exact value is -0.5. For exact values at a few points use `distance_many`.
+See [distance field](/guide/advanced/distance-field).
+
+### Compute the wall distance up to a cutoff
+
+<<< @/examples/snippets/ck_wall_distance.f90
+
+<<< @/examples/output/ck_wall_distance.ansi{ansi}
+
+The distance is unsigned. A point with no wall closer than the cutoff gets the cutoff and body 0, the centre of the
+cube included; the traversal stops early for it. See
+[wall distance](/guide/advanced/ib-queries#wall-distance-and-field-diagnostic).
+
+### Tag the cells near the wall
+
+<<< @/examples/snippets/ck_tag_cells.f90
+
+<<< @/examples/output/ck_tag_cells.ansi{ansi}
+
+A box is cut when it meets the surface, near when it is within `radius` of it, otherwise inside or outside by the
+sign at its centre (fast winding number by default). The 152 cut cells are the shell between the 6^3 and 4^3 blocks
+that contain the cube's faces. See [AMR tagging](/guide/advanced/amr-tagging).
+
+## Curves
+
+### Cut a 2-D section of an STL
+
+<<< @/examples/snippets/ck_slice.f90
+
+<<< @/examples/output/ck_slice.ansi{ansi}
+
+`slice_surface(surface, normal_axis, level, curve)` cuts by an axis-aligned plane and returns a `curve_object`; the
+section of the NACA 0012 wing is one closed loop of 60 vertices with area 0.08165. See
+[2-D geometry](/guide/advanced/2d-geometry).
+
+### Compute the signed distance to a polygon
+
+<<< @/examples/snippets/ck_polygon_distance.f90
+
+<<< @/examples/output/ck_polygon_distance.ansi{ansi}
+
+Outer loops run counter-clockwise and holes clockwise; the distance is negative inside. See
+[`curve_object`](/guide/api/curve-object).
+
+## Geometry processing
+
+### Decimate a mesh
+
+<<< @/examples/snippets/ck_decimate.f90
+
+<<< @/examples/output/ck_decimate.ansi{ansi}
+
+Quadric edge collapses remove two facets each, so the result stops at or just below the target (1646 for 1647). See
+[decimation](/guide/advanced/decimate).
+
+### Unite two bodies
+
+<<< @/examples/snippets/ck_union.f90
+
+<<< @/examples/output/ck_union.ansi{ansi}
+
+Two unit cubes overlapping on a cube of side 0.5 give 2 - 0.125 = 1.875. `BOOL_INTERSECT`, `BOOL_DIFFERENCE` and
+`BOOL_SYMDIFF` work the same way. See [booleans](/guide/advanced/booleans).
+
+### Remesh to a uniform edge length
+
+<<< @/examples/snippets/ck_remesh.f90
+
+<<< @/examples/output/ck_remesh.ansi{ansi}
+
+`preserve_features=.true.` keeps the twelve sharp edges of the cube, so the volume stays 1. After 10 iterations the
+edges are between 0.0282 and 0.1352 for a target of 0.1. See [isotropic remeshing](/guide/advanced/isotropic-remesh).
+
+### Measure the curvature at a point
+
+<<< @/examples/snippets/ck_curvature.f90
+
+<<< @/examples/output/ck_curvature.ansi{ansi}
+
+`curvatures=` returns the mean and Gaussian curvature at the foot point, by a cubic fit over the two rings of
+vertices around it: on this unit sphere of 6632 facets, H = 0.9944 and K = 0.9892. It runs on the CPU only. See
+[curvature at the foot point](/guide/advanced/ib-queries#curvature-at-the-foot-point).
+
+## Moving bodies
+
+### Query a rotated body without rebuilding it
+
+<<< @/examples/snippets/ck_pose.f90
+
+<<< @/examples/output/ck_pose.ansi{ansi}
+
+With `pose=` the world-frame point is mapped into the body frame, and the tree built at load time serves every pose.
+`pose_from_axis_angle` rotates about the origin, so the translation sets the pivot. A corner of the rotated cube reaches x = 0.5 +
+sqrt(2)/2, so the point is inside it, 0.0050 from a face. See [moving bodies](/guide/advanced/moving-bodies).

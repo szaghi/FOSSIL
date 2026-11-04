@@ -1,0 +1,3 @@
+$ tut12_gpu
+pseudo-normal : device vs host mismatches 0 of 13824
+winding number: device vs host mismatches 0 of 13824

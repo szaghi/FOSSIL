@@ -1,0 +1,6 @@
+$ ck_point_inside
+inside?         p  q
+pseudo-normal   T  F
+ray             T  F
+solid angle     T  F
+winding number  T  F
