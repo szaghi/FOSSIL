@@ -13,8 +13,17 @@ program fossil_test_swept_2d
 !< - negative control: the same motions with the Gauss path (`exact=.false.`, 4 nodes, no
 !<   breakpoints) leave residuals far above round-off;
 !< - refusals: decreasing edges, nq = 0, a poses size other than nq.
+!< Rotation (step 5b, Gauss-Legendre):
+!< - a square rotating about an off-centre point while translating, and a NACA 0012 pitching about
+!<   its quarter chord: the largest uniform-flow residual falls with nq = 2, 4, 8, 16 (printed with
+!<   the observed rate; the integrand has kinks, so the rate is algebraic) and the nq-vs-2nq estimate
+!<   bounds the change of the faces;
+!< - the poses at the Gauss nodes given explicitly (equal to the screw poses) give the same face
+!<   lengths bit for bit; `pose_interpolate` returns the end poses exactly and the mid pose at half
+!<   the angle.
 
-use fossil, only : curve_object, rigid_pose_2d_t, pose_2d, swept_cells_2d_t, swept_cells_2d, STATUS_INVALID_INPUT, STATUS_OK
+use fossil, only : curve_object, rigid_pose_2d_t, pose_2d, swept_cells_2d_t, swept_cells_2d, STATUS_INVALID_INPUT, STATUS_OK, &
+                   pose_interpolate, gauss_legendre_01
 use penf,   only : I4P, R8P
 
 implicit none
@@ -23,7 +32,13 @@ type(curve_object)     :: c
 type(swept_cells_2d_t) :: sw
 real(R8P)              :: x(9), y(7), err, res, d(2), sq(4)
 integer(I4P)           :: i, j, st, st2, st3
-logical                :: ok(5)
+logical                :: ok(8)
+real(R8P), parameter   :: PI = acos(-1._R8P)
+type(swept_cells_2d_t) :: sw2
+type(rigid_pose_2d_t)  :: p0, p1, pm, pe0, pe1
+type(rigid_pose_2d_t), allocatable :: pq(:)
+real(R8P), allocatable :: sq_(:), wq(:)
+real(R8P)              :: u(200), v(200)
 
 x = [(0.25_R8P * i, i = 0, 8)] ; y = [(0.25_R8P * i, i = 0, 6)]
 ! square [0.3, 1.1] x [0.2, 0.9] translating by d
@@ -64,11 +79,78 @@ call swept_cells_2d(c, pose_2d(0._R8P), pose_2d(0._R8P), x, y, sw, nq=3_I4P, pos
                     status=st3)
 ok(5) = st == STATUS_INVALID_INPUT .and. st2 == STATUS_INVALID_INPUT .and. st3 == STATUS_INVALID_INPUT
 print '(A,L1)', 'refusals: ', ok(5)
+! rotation: square about (1, 0.75) by 0.4 rad, plus a translation
+call c%adopt_loops(u=[sq(1), sq(2), sq(2), sq(1)], v=[sq(3), sq(3), sq(4), sq(4)], loop_sizes=[4_I4P])
+p0 = pose_2d(0._R8P) ; p1 = about(0.4_R8P, [1._R8P, 0.75_R8P], [0.1_R8P, 0.05_R8P])
+ok(6) = converges('square rotating off-centre')
+! NACA 0012 pitching by 0.15 rad about its quarter chord, chord 1 placed at (0.4, 0.75)
+do i = 0, 99
+   u(i + 1) = 0.5_R8P * (1._R8P - cos(PI * (100 - i) / 100)) ; v(i + 1) = thickness(u(i + 1))
+enddo
+u(101) = 0._R8P ; v(101) = 0._R8P
+do i = 1, 99
+   u(101 + i) = 0.5_R8P * (1._R8P - cos(PI * i / 100)) ; v(101 + i) = -thickness(u(101 + i))
+enddo
+u = u + 0.4_R8P ; v = v + 0.75_R8P
+call c%adopt_loops(u=u, v=v, loop_sizes=[200_I4P])
+p1 = about(0.15_R8P, [0.65_R8P, 0.75_R8P], [0._R8P, 0._R8P])
+ok(7) = converges('NACA 0012 pitching')
+! explicit node poses = screw poses; pose_interpolate ends and mid pose
+call gauss_legendre_01(4_I4P, sq_, wq)
+allocate(pq(4))
+do i = 1, 4
+   pq(i) = pose_interpolate(p0, p1, sq_(i))
+enddo
+call swept_cells_2d(c, p0, p1, x, y, sw, nq=4_I4P, status=st)
+call swept_cells_2d(c, p0, p1, x, y, sw2, nq=4_I4P, poses=pq, status=st2)
+pm = pose_interpolate(p0, p1, 0.5_R8P)
+pe0 = pose_interpolate(p0, p1, 0._R8P) ; pe1 = pose_interpolate(p0, p1, 1._R8P)
+ok(8) = st == STATUS_OK .and. st2 == STATUS_OK .and. all(sw%face_u == sw2%face_u) .and. all(sw%face_v == sw2%face_v) .and. &
+        all(sw2%residual == 0._R8P) .and. all(pe0%r == p0%r) .and. all(pe0%t == p0%t) .and. &
+        all(pe1%r == p1%r) .and. all(pe1%t == p1%t) .and. abs(atan2(pm%r(2, 1), pm%r(1, 1)) - 0.075_R8P) < 1.e-15_R8P
+print '(A,L1)', 'explicit node poses = screw poses bit for bit, interpolation ends exact, mid angle: ', ok(8)
 
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
 
 contains
+   function converges(label) result(good)
+   !< Residual of the Gauss path for nq = 2, 4, 8, 16 on c between p0 and p1: decreasing, the estimate
+   !< printed against the actual face change.
+   character(*), intent(in) :: label   !< Label.
+   logical                  :: good    !< Result.
+   real(R8P)                :: r(4), e(4) !< Residuals, estimates.
+   integer(I4P)             :: k, s_   !< Work.
+
+   good = .true.
+   do k = 1, 4
+      call swept_cells_2d(c, p0, p1, x, y, sw, nq=2_I4P**k, status=s_)
+      r(k) = maxval(abs(sw%residual), mask=sw%alpha0 >= 0._R8P .and. sw%alpha1 >= 0._R8P)
+      e(k) = sw%error_estimate
+      good = good .and. s_ == STATUS_OK .and. .not. sw%exact
+   enddo
+   good = good .and. r(2) < r(1) .and. r(3) < r(2) .and. r(4) < r(3) .and. r(4) < 1.e-3_R8P * maxval(sw%swept + 1._R8P)
+   print '(A,A,4ES9.1,A,3F6.2,A,4ES9.1,A,L1)', label, ': max residual nq=2,4,8,16 ', r, '  rates ', &
+         log(r(1:3) / r(2:4)) / log(2._R8P), '  estimates ', e, '  ok ', good
+   endfunction converges
+
+   pure function about(angle, centre, shift) result(p)
+   !< Rotation by angle about centre, then a translation.
+   real(R8P), intent(in) :: angle, centre(2), shift(2) !< Motion.
+   type(rigid_pose_2d_t) :: p                          !< Pose.
+
+   p = pose_2d(angle)
+   p%t = centre - matmul(p%r, centre) + shift
+   endfunction about
+
+   pure function thickness(xx) result(yy)
+   !< NACA 0012 half thickness (closed trailing edge).
+   real(R8P), intent(in) :: xx !< Chord position.
+   real(R8P)             :: yy !< Half thickness.
+
+   yy = 0.6_R8P * (0.2969_R8P * sqrt(xx) - 0.126_R8P * xx - 0.3516_R8P * xx**2 + 0.2843_R8P * xx**3 - 0.1036_R8P * xx**4)
+   endfunction thickness
+
    function balanced(s, label, exact_expected) result(good)
    !< Residual round-off in every closed cell, projected walls summing to 0, cleared/covered consistent.
    type(swept_cells_2d_t), intent(in) :: s              !< Swept geometry.
