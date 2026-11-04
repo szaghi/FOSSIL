@@ -74,7 +74,7 @@ The `local_nvf` varset supplies `$NVF_CC` (GPU compute capability, default
 varset is `local_gnu`, a no-op placeholder, so every GNU/Intel mode is
 unaffected.
 
-The `tests-nvidia` mode builds a **single targeted test** (`fossil_test_distance_bench`)
+The `tests-nvidia` mode builds a **single targeted test** (`src/tests/validation/fossil_test_distance_bench.f90`)
 that exercises the distance kernel chain — not the full suite. Host-only tests
 (file I/O, mesh-quality invariants) stay in `tests-gnu` / `tests-intel`; some
 tripped nvfortran 26.1 parser quirks unrelated to the device port (e.g. parser
@@ -106,6 +106,22 @@ fobis rule --ex makecoverage
 ```
 
 Test programs output `Are all tests passed? T` on success or `Are all tests passed? F` on failure.
+
+Two tiers (issue #45). **Regression** (`src/tests/*.f90`, every push, CI builds `tests-gnu-debug --coverage`): each
+test <= 2 s in that debug coverage build (`boolean_coplanar` 3 s is the one exception). Choose inputs for it:
+`dragon.stl` for self-consistency checks, a clean closed body (`cube-0N.stl`, `make_apex_body`, a marching-cubes
+sphere) for exact-sign checks, never `bunny.stl` (19 s load in debug); never loosen a tolerance to save time.
+**Validation** (`src/tests/validation/*.f90`: benches, large meshes, sweeps, the full-size `fossil_val_*` copies,
+`fossil_test_distance_bench`), nightly (`.github/workflows/validation.yml`) and before a release:
+
+```bash
+fobis build --mode validation-gnu    # -O2, into exe-validation/
+./scripts/run_validation.sh          # or: ./scripts/run_validation.sh fossil_val_sdf
+```
+
+Every `tests-*` mode excludes `src/tests/validation/` and `gen_doc_fixtures.f90`; the docs fixtures generator builds
+with `fobis build --mode doc-fixtures-gnu` (`scripts/make_doc_images.sh`). `fobis clean` leaves stale executables of
+moved sources in `exe/`: delete them by hand, or `run_tests.sh` runs them.
 
 ### Documentation
 

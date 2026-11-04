@@ -20,9 +20,29 @@ is welcome. The project follows a KISS (Keep It Simple and Stupid) philosophy.
    ```bash
    git checkout -b fix/master/my_contribution master
    ```
-3. Test your changes with `fobis build --fobos src/tests/fobos && bash scripts/run_tests.sh`
+3. Test your changes with `fobis build --mode tests-gnu && bash scripts/run_tests.sh` (the regression suite, see
+   [Tests](#tests)); if they touch a heavy path (benches, large meshes, sweeps), run the validation suite too
 4. Check for unnecessary whitespace: `git diff --check`
 5. Submit a pull request with a clear commit message
+
+## Tests
+
+The tests are in two tiers (issue #45):
+
+| Tier | Where | Built by | Run by | When |
+|---|---|---|---|---|
+| regression | `src/tests/*.f90` | `fobis build --mode tests-gnu` (CI: `tests-gnu-debug --coverage`) | `scripts/run_tests.sh` | every push |
+| validation | `src/tests/validation/*.f90` | `fobis build --mode validation-gnu` (-O2, `exe-validation/`) | `scripts/run_validation.sh` | nightly (`.github/workflows/validation.yml`) and before a release |
+
+A regression test must run in **2 s or less** in the debug coverage build (the CI build: `-O0 -fcheck=all`,
+coverage instrumented; `fossil_test_boolean_coplanar` is the one approved exception, 3 s). Keep it fast by the choice
+of input, never by a looser tolerance: `dragon.stl` (dirty, 1.6 s to load in debug) for self-consistency checks, a
+clean closed body (`cube-0N.stl`, `make_apex_body` from `fossil_sign_bench_bodies`, a marching-cubes sphere) where
+the sign must be exact; never `bunny.stl` (19 s to load in debug). A test that needs a large mesh, a fine grid or
+many cases goes to `src/tests/validation/`, often as a full copy (`fossil_val_*`) of a regression test that keeps a
+smaller case. The device bench `fossil_test_distance_bench` lives there too (built by `tests-nvidia`).
+
+A test prints `Are all tests passed? T` and exits 0 on success; a `fossil_xfail_*` program must fail.
 
 ## Fortran Coding Style
 
@@ -97,7 +117,7 @@ scripts/release.sh v2.1.0  # explicit version
 5. Push commit + tag
 
 Pushing the tag triggers the GitHub Actions release workflow, which automatically:
-- Runs the full test suite and uploads coverage
+- Runs the regression suite and uploads coverage (run the validation suite before tagging)
 - Builds this documentation site and deploys it to GitHub Pages
 - Packages a versioned tarball
 - Publishes a GitHub release with the changelog section as release notes
