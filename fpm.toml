@@ -11,7 +11,9 @@ BeFoR64 = { git="https://github.com/szaghi/BeFoR64.git" }
 FACE = { git="https://github.com/szaghi/FACE.git" }
 FLAP = { git="https://github.com/szaghi/FLAP.git" }
 FoXy = { git="https://github.com/Fortran-FOSS-Programmers/FoXy.git" }
-PENF = { git="https://github.com/szaghi/PENF.git" }
+# PENF_R16P: VecFor builds its R16P overloads with it, and fpm builds PENF once, from this declaration; without it
+# PENF aliases R16P to R8P and VecFor's generics collide (szaghi/VecFor#23)
+PENF = { git="https://github.com/szaghi/PENF.git", preprocess.cpp.macros = ["PENF_R16P"] }
 StringiFor = { git="https://github.com/szaghi/StringiFor.git" }
 VTKFortran = { git="https://github.com/szaghi/VTKFortran.git" }
 VecFor = { git="https://github.com/szaghi/VecFor.git" }
