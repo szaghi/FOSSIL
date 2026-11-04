@@ -1,0 +1,5 @@
+$ anim_boolean
+a%boolean(b, BOOL_UNION): volume 1.8750 (exact 1.8750), 84 facets, manifold T
+a%boolean(b, BOOL_INTERSECT): volume 0.1250 (exact 0.1250), 12 facets, manifold T
+a%boolean(b, BOOL_DIFFERENCE): volume 0.8750 (exact 0.8750), 48 facets, manifold T
+a%boolean(b, BOOL_SYMDIFF): volume 1.7500 (exact 1.7500), 96 facets, manifold F

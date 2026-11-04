@@ -230,6 +230,8 @@ Outer loops run counter-clockwise and holes clockwise; the distance is negative 
 
 </div>
 
+![the dragon decimated again and again to half its facets, 6588, 3294, 1646, 822, 410 and 204, from the same camera](../examples/images/anim-decimate.svg){.fossil-figure}
+
 Quadric edge collapses remove two facets each, so the result stops at or just below the target (1646 for 1647). See
 [decimation](/guide/advanced/decimate).
 
@@ -246,6 +248,8 @@ Quadric edge collapses remove two facets each, so the result stops at or just be
 ![their union from boolean with BOOL_UNION: one watertight body of volume 1.875](../examples/images/ck-union-result.svg)
 
 </div>
+
+![the two overlapping unit cubes, then their union, intersection, difference and symmetric difference with each computed volume, the void of the symmetric difference in ember](../examples/images/anim-boolean.svg){.fossil-figure}
 
 Two unit cubes overlapping on a cube of side 0.5 give 2 - 0.125 = 1.875. `BOOL_INTERSECT`, `BOOL_DIFFERENCE` and
 `BOOL_SYMDIFF` work the same way. See [booleans](/guide/advanced/booleans).
