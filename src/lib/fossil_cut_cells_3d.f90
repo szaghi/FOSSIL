@@ -42,9 +42,19 @@ module fossil_cut_cells_3d
 !< faces beyond the cells it flags), a cell without triangles whose fraction is not 0 or 1, and a
 !< cell whose edge states do not close get -1. A surface on the high plane of a cell lies inside that cell, so the open face
 !< bounds a zero-volume fluid piece there (as in 2-D).
+!<
+!< Piece measures (issue #40). Per piece: fluid volume and centroid, wetted area, centroid and
+!< normal integral, and the fluid fraction of each of the six cell faces (`piece_*`, the pieces of
+!< a cell at first_piece .. first_piece + pieces - 1). Walls: the divergence-theorem terms of every
+!< clipped polygon go to its set. Faces: Green's theorem per set over the fluid edge intervals and
+!< the trace segments, oriented by the polygon winding (fluid on the left on a high face, on the right
+!< on a low face). Volume and moments follow from the high faces and the walls. An inclusion (a closed
+!< wall set of positive solid volume) goes to the set around it, found by a +x ray. A single-piece
+!< cell takes the cell totals; zero-volume pieces are kept, with their volume (0), for a solver to drop.
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t
 use fossil_curve_slice,        only : slice_surface
 use fossil_facet_object,       only : facet_object
+use fossil_predicates,         only : orient2d_xy
 use fossil_surface_stl_object, only : surface_stl_object, STATUS_OK, STATUS_INVALID_INPUT
 use penf,                      only : I4P, R8P
 
@@ -74,6 +84,15 @@ type :: cut_cells_3d_t
    real(R8P),    allocatable :: wet_normal(:,:,:,:) !< Integral of the outward (solid to fluid) normal over the wall [3, ...].
    logical,      allocatable :: closed(:,:,:)       !< All six faces of the cell closed.
    integer(I4P), allocatable :: pieces(:,:,:)       !< Fluid pieces per cell [nx, ny, nz] (-1 if not closed).
+   integer(I4P), allocatable :: first_piece(:,:,:)  !< Index of the first piece of the cell [nx, ny, nz].
+   integer(I4P)              :: np = 0_I4P          !< Pieces in the block.
+   integer(I4P), allocatable :: piece_cell(:,:)     !< Cell of each piece [3, np].
+   real(R8P),    allocatable :: piece_volume(:)     !< Fluid volume of each piece [np].
+   real(R8P),    allocatable :: piece_centroid(:,:) !< Fluid centroid of each piece [3, np] (cell centre if no volume).
+   real(R8P),    allocatable :: piece_wet_area(:)   !< Wetted area of each piece [np].
+   real(R8P),    allocatable :: piece_wet_centroid(:,:) !< Wetted centroid of each piece [3, np].
+   real(R8P),    allocatable :: piece_wet_normal(:,:) !< Outward (solid to fluid) normal integral of each piece [3, np].
+   real(R8P),    allocatable :: piece_face(:,:)     !< Fluid fraction of the cell faces per piece [6 (-x, +x, -y, +y, -z, +z), np].
 endtype cut_cells_3d_t
 
 type :: pierce_t
@@ -226,10 +245,16 @@ contains
    real(R8P),    allocatable   :: ek(:,:)                 !< Edge keys [6, 3 nf] (end points, lexicographic order).
    integer(I4P), allocatable   :: idx(:)                  !< Sorted edges.
    real(R8P)                   :: pa(3), pb(3)            !< Edge ends.
+   real(R8P),    allocatable   :: pm(:,:)                 !< Measures of the pieces of a cell [17, np].
+   real(R8P),    allocatable   :: pbuf(:,:)               !< Measures of all pieces [17, capacity].
+   integer(I4P), allocatable   :: pcel(:,:)               !< Cells of all pieces [3, capacity].
+   integer(I4P)                :: npb                     !< Pieces so far.
+   real(R8P)                   :: tot(17), h(3)           !< Cell totals, cell size.
 
    nx = cut%nx ; ny = cut%ny ; nz = cut%nz
    nf = surface%get_facets_number()
-   allocate(tri(3, 3, nf), nrm(3, nf), cnt(nx * ny * nz + 1), cut%pieces(nx, ny, nz))
+   allocate(tri(3, 3, nf), nrm(3, nf), cnt(nx * ny * nz + 1), cut%pieces(nx, ny, nz), cut%first_piece(nx, ny, nz))
+   allocate(pbuf(17, 64), pcel(3, 64)) ; npb = 0_I4P
    cnt = 0_I4P
    do f = 1, nf
       fp => surface%facet_at(f)
@@ -295,6 +320,7 @@ contains
       do j = 1, ny
          do i = 1, nx
             c = i + nx * ((j - 1) + ny * (k - 1))
+            cut%first_piece(i, j, k) = npb + 1_I4P
             if (.not. cut%closed(i, j, k) .or. open_cell(i, j, k) .or. cut%alpha(i, j, k) < -1.e-12_R8P .or. &
                 cut%alpha(i, j, k) > 1._R8P + 1.e-12_R8P) then
                cut%pieces(i, j, k) = -1_I4P
@@ -304,22 +330,58 @@ contains
                cut%pieces(i, j, k) = merge(1_I4P, 0_I4P, cut%alpha(i, j, k) > 0.5_R8P)
             else
                call cell_pieces(surface, tri, nrm, lst(start(c):start(c + 1) - 1), &
-                                [x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], np)
+                                [x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], np, pm)
                cut%pieces(i, j, k) = np
+            endif
+            if (cut%pieces(i, j, k) < 1_I4P) cycle
+            ! measures: the cell totals for a single piece (exact), else the per-piece ones
+            if (cut%pieces(i, j, k) == 1_I4P) then
+               h = [x(i + 1) - x(i), y(j + 1) - y(j), z(k + 1) - z(k)]
+               tot = [cut%alpha(i, j, k) * product(h), cut%centroid(:, i, j, k), cut%wet_area(i, j, k), &
+                      cut%wet_centroid(:, i, j, k), cut%wet_normal(:, i, j, k), cut%face_x(i, j, k), cut%face_x(i + 1, j, k), &
+                      cut%face_y(i, j, k), cut%face_y(i, j + 1, k), cut%face_z(i, j, k), cut%face_z(i, j, k + 1)]
+               call add_pieces(reshape(tot, [17, 1]))
+            else
+               call add_pieces(pm)
             endif
          enddo
       enddo
    enddo
+   cut%np = npb
+   allocate(cut%piece_cell(3, npb), cut%piece_volume(npb), cut%piece_centroid(3, npb), cut%piece_wet_area(npb), &
+            cut%piece_wet_centroid(3, npb), cut%piece_wet_normal(3, npb), cut%piece_face(6, npb))
+   cut%piece_cell = pcel(:, 1:npb)
+   cut%piece_volume = pbuf(1, 1:npb) ; cut%piece_centroid = pbuf(2:4, 1:npb) ; cut%piece_wet_area = pbuf(5, 1:npb)
+   cut%piece_wet_centroid = pbuf(6:8, 1:npb) ; cut%piece_wet_normal = pbuf(9:11, 1:npb) ; cut%piece_face = pbuf(12:17, 1:npb)
+   contains
+      subroutine add_pieces(pp)
+      !< Append the pieces pp [17, n] of the cell (i, j, k).
+      real(R8P), intent(in)     :: pp(:,:) !< Measures.
+      real(R8P),    allocatable :: tb(:,:) !< Growth.
+      integer(I4P), allocatable :: tc(:,:) !< Growth.
+      integer(I4P)              :: n, cap  !< Work.
+
+      n = size(pp, 2, kind=I4P)
+      if (npb + n > size(pbuf, 2)) then
+         cap = max(2_I4P * size(pbuf, 2, kind=I4P), npb + n)
+         allocate(tb(17, cap), tc(3, cap)) ; tb(:, 1:npb) = pbuf(:, 1:npb) ; tc(:, 1:npb) = pcel(:, 1:npb)
+         call move_alloc(tb, pbuf) ; call move_alloc(tc, pcel)
+      endif
+      pbuf(:, npb + 1:npb + n) = pp
+      pcel(1, npb + 1:npb + n) = i ; pcel(2, npb + 1:npb + n) = j ; pcel(3, npb + 1:npb + n) = k
+      npb = npb + n
+      endsubroutine add_pieces
    endsubroutine cut_pieces_3d
 
-   subroutine cell_pieces(surface, tri, nrm, lst, c0, c1, npieces)
+   subroutine cell_pieces(surface, tri, nrm, lst, c0, c1, npieces, pm)
    !< Fluid pieces of the cell [c0, c1] cut by the triangles lst (see the module notes); -1 if the
-   !< boundary states do not close.
+   !< boundary states do not close. pm: the measures of the pieces (see `piece_measures`).
    type(surface_stl_object), intent(in)  :: surface   !< Surface (line-query fallback).
    real(R8P),                intent(in)  :: tri(:,:,:), nrm(:,:) !< Triangles, normals.
    integer(I4P),             intent(in)  :: lst(:)    !< Triangles of the cell.
    real(R8P),                intent(in)  :: c0(3), c1(3) !< Cell corners.
    integer(I4P),             intent(out) :: npieces   !< Pieces.
+   real(R8P), allocatable,   intent(out) :: pm(:,:)   !< Measures [17, npieces] (allocated if npieces >= 0).
    integer(I4P), parameter     :: NCORN = 8_I4P       !< Corner atoms follow the polygons.
    real(R8P),    allocatable   :: pv(:,:,:)           !< Polygons [3, 16, nt].
    integer(I4P), allocatable   :: pfl(:,:), pn(:)     !< Vertex flags, vertex counts.
@@ -431,6 +493,7 @@ contains
       endif
    enddo
    npieces = nc
+   call piece_measures
    contains
       integer(I4P) function find(i) result(r)
       !< Root of i (path halving).
@@ -652,6 +715,155 @@ contains
          call unite(sp(best), qq)
       enddo
       endsubroutine faces_islands
+
+      subroutine piece_measures
+      !< Measures of the counted sets, in the order of their roots: pm(1) fluid volume, pm(2:4) centroid,
+      !< pm(5) wetted area, pm(6:8) wetted centroid, pm(9:11) outward normal integral, pm(12:17) fluid
+      !< fraction of the faces -x, +x, -y, +y, -z, +z.
+      !<
+      !< Walls: the divergence-theorem terms of every polygon go to its set (the outward normal of the
+      !< fluid is minus the triangle's). Faces: the fluid area of each face by Green's theorem in face
+      !< coordinates local to c0, A = oint u dv counter-clockwise seen from +e_a, over the boundary arcs
+      !< of the fluid region of the face: the fluid edge intervals (an arc on a low edge, u = 0 or v = 0,
+      !< adds nothing) and the trace segments. A clipped polygon lies inside the cell, so the fluid is on
+      !< the left of its trace as wound on a high face and on the right on a low face: the orientation
+      !< comes from the winding, no sign test. Volume and moments need the high faces only (local
+      !< coordinates). An inclusion (closed set, positive solid volume) goes to the set around it: the
+      !< nearest wall a ray in +x from its rightmost vertex hits (exact inclusive test on the projected
+      !< triangle), else the fluid region where the ray leaves the cell through the +x face (the ray of
+      !< `faces_islands` on that face); -1 if neither is found.
+      real(R8P),    allocatable :: wt(:,:), fa(:,:) !< Wall terms [11, natom], face fluid areas [6, natom].
+      integer(I4P), allocatable :: tgt(:), pid(:)   !< Inclusion target, piece of a root.
+      real(R8P)                 :: h(3), pl(3), ql(3), sg, vp, mp(3), hf(3) !< Work.
+      integer(I4P)              :: qq, vv, jj, r, ax, sd, bt, b1, b2, kk, ee, k1, k2, s1, s2, guard, npc_ !< Work.
+
+      h = c1 - c0
+      allocate(wt(11, natom), fa(6, natom), tgt(natom), pid(natom))
+      wt = 0._R8P ; fa = 0._R8P ; tgt = 0_I4P ; pid = 0_I4P
+      do r = 1, nt
+         if (find(r) /= r .or. touch(r) .or. pn(r) == 0_I4P .or. vol(r) < 0._R8P) cycle
+         tgt(r) = inclusion_target(r)
+         if (tgt(r) == 0_I4P) then
+            npieces = -1_I4P ; return
+         endif
+      enddo
+      do r = 1, nt
+         if (tgt(r) == 0_I4P) cycle
+         kk = tgt(r) ; guard = 0_I4P
+         do while (tgt(kk) /= 0_I4P .and. guard < natom)
+            kk = tgt(kk) ; guard = guard + 1_I4P
+         enddo
+         tgt(r) = kk
+      enddo
+      npc_ = 0_I4P
+      do r = 1, natom
+         if (find(r) /= r) cycle
+         if (touch(r) .or. (r <= nt .and. tgt(r) == 0_I4P .and. vol(r) < 0._R8P)) then
+            npc_ = npc_ + 1_I4P ; pid(r) = npc_
+         endif
+      enddo
+      ! walls and traces
+      do qq = 1, nt
+         if (pn(qq) == 0_I4P) cycle
+         r = find(qq) ; if (tgt(r) /= 0_I4P) r = tgt(r)
+         do vv = 2, pn(qq) - 1
+            call tri_terms(pv(:, 1, qq) - c0, pv(:, vv, qq) - c0, pv(:, vv + 1, qq) - c0, wt(:, r))
+         enddo
+         do ax = 1, 3
+            b1 = mod(ax, 3_I4P) + 1_I4P ; b2 = mod(ax + 1_I4P, 3_I4P) + 1_I4P
+            do sd = 0, 1
+               bt = 2_I4P * (ax - 1_I4P) + sd ; sg = merge(1._R8P, -1._R8P, sd == 1_I4P)
+               do vv = 1, pn(qq)
+                  jj = mod(vv, pn(qq)) + 1_I4P
+                  if (.not. (btest(pfl(vv, qq), bt) .and. btest(pfl(jj, qq), bt))) cycle
+                  pl = pv(:, vv, qq) - c0 ; ql = pv(:, jj, qq) - c0
+                  fa(bt + 1, r) = fa(bt + 1, r) + sg * 0.5_R8P * (pl(b1) + ql(b1)) * (ql(b2) - pl(b2))
+               enddo
+            enddo
+         enddo
+      enddo
+      ! fluid edge intervals: edge along k at sides s1 (axis k1), s2 (axis k2); on the face (k1, s1) it
+      ! runs along v at u = s2 (counter-clockwise: +v at u = h); on the face (k2, s2) along u (no area)
+      do jj = 1, niv
+         ee = iv_edge(jj) ; kk = (ee - 1_I4P) / 4_I4P + 1_I4P
+         s1 = mod(mod(ee - 1_I4P, 4_I4P), 2_I4P) ; s2 = mod(ee - 1_I4P, 4_I4P) / 2_I4P
+         k1 = mod(kk, 3_I4P) + 1_I4P ; k2 = mod(kk + 1_I4P, 3_I4P) + 1_I4P
+         if (s2 == 1_I4P) then
+            r = find(iv_atom(jj))
+            fa(2 * (k1 - 1) + s1 + 1, r) = fa(2 * (k1 - 1) + s1 + 1, r) + h(k2) * (iv_hi(jj) - iv_lo(jj))
+         endif
+      enddo
+      allocate(pm(17, npc_))
+      hf = [h(2) * h(3), h(3) * h(1), h(1) * h(2)]
+      do r = 1, natom
+         if (pid(r) == 0_I4P) cycle
+         kk = pid(r)
+         vp = sum(h * fa([2, 4, 6], r)) / 3._R8P - wt(1, r)
+         mp = 0.5_R8P * h * h * fa([2, 4, 6], r) - wt(2:4, r)
+         pm(1, kk) = vp
+         pm(2:4, kk) = c0 + 0.5_R8P * h
+         if (vp > 0._R8P) pm(2:4, kk) = c0 + mp / vp
+         pm(5, kk) = wt(5, r)
+         pm(6:8, kk) = c0 + 0.5_R8P * h
+         if (wt(5, r) > 0._R8P) pm(6:8, kk) = c0 + wt(6:8, r) / wt(5, r)
+         pm(9:11, kk) = wt(9:11, r)
+         pm(12:17, kk) = fa(:, r) / [hf(1), hf(1), hf(2), hf(2), hf(3), hf(3)]
+      enddo
+      endsubroutine piece_measures
+
+      integer(I4P) function inclusion_target(ri) result(tr)
+      !< Root of the set around the inclusion ri (see `piece_measures`); 0 if not found.
+      integer(I4P), intent(in) :: ri !< Root of the inclusion.
+      real(R8P)                :: pr(3), t(3, 3), nn(3), xh, xb, o(3), ub, uc !< Work.
+      integer(I4P)             :: q2, v2, j2, qb, ed, sides(3) !< Work.
+
+      pr = -huge(1._R8P)
+      do q2 = 1, nt
+         if (pn(q2) == 0_I4P .or. find(q2) /= ri) cycle
+         do v2 = 1, pn(q2)
+            if (pv(1, v2, q2) > pr(1)) pr = pv(:, v2, q2)
+         enddo
+      enddo
+      xb = huge(1._R8P) ; qb = 0_I4P
+      do q2 = 1, nt
+         if (pn(q2) == 0_I4P .or. find(q2) == ri) cycle
+         t = tri(:, :, lst(q2)) ; nn = nrm(:, lst(q2))
+         if (nn(1) == 0._R8P) cycle
+         if (orient2d_xy(t(2, 1), t(3, 1), t(2, 2), t(3, 2), t(2, 3), t(3, 3)) == 0._R8P) cycle
+         o(1) = orient2d_xy(t(2, 1), t(3, 1), t(2, 2), t(3, 2), pr(2), pr(3))
+         o(2) = orient2d_xy(t(2, 2), t(3, 2), t(2, 3), t(3, 3), pr(2), pr(3))
+         o(3) = orient2d_xy(t(2, 3), t(3, 3), t(2, 1), t(3, 1), pr(2), pr(3))
+         if (.not. (all(o >= 0._R8P) .or. all(o <= 0._R8P))) cycle
+         xh = t(1, 1) - (nn(2) * (pr(2) - t(2, 1)) + nn(3) * (pr(3) - t(3, 1))) / nn(1)
+         if (xh > pr(1) .and. xh <= c1(1) .and. xh < xb) then
+            xb = xh ; qb = q2
+         endif
+      enddo
+      if (qb /= 0_I4P) then
+         tr = find(qb) ; return
+      endif
+      ! the +x face, (u, v) = (y, z): the nearest trace in +u, else the fluid interval of the edge u = high
+      ub = huge(1._R8P) ; qb = 0_I4P
+      do q2 = 1, nt
+         do v2 = 1, pn(q2)
+            j2 = mod(v2, pn(q2)) + 1_I4P
+            if (.not. (btest(pfl(v2, q2), 1) .and. btest(pfl(j2, q2), 1))) cycle
+            if ((pv(3, v2, q2) > pr(3)) .eqv. (pv(3, j2, q2) > pr(3))) cycle
+            uc = pv(2, v2, q2) + (pr(3) - pv(3, v2, q2)) / (pv(3, j2, q2) - pv(3, v2, q2)) * (pv(2, j2, q2) - pv(2, v2, q2))
+            if (uc > pr(2) .and. uc < ub) then
+               ub = uc ; qb = q2
+            endif
+         enddo
+      enddo
+      if (qb /= 0_I4P) then
+         tr = find(qb) ; return
+      endif
+      sides = [1_I4P, 1_I4P, 0_I4P] ; ed = edge_index(3_I4P, sides)
+      tr = 0_I4P
+      do j2 = 1, niv
+         if (iv_edge(j2) == ed .and. iv_lo(j2) <= pr(3) .and. pr(3) <= iv_hi(j2)) tr = find(iv_atom(j2))
+      enddo
+      endfunction inclusion_target
    endsubroutine cell_pieces
 
    logical function inside_parity(surface, p)
