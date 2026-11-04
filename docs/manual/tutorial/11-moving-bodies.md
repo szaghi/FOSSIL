@@ -49,8 +49,9 @@ tree, and it gives what a moving cut-cell update needs: the cells that change st
   [chapter 7](./07-curves): the section crosses itself once, at a fold. The swept areas come from the cut cells
   (Green's theorem, a region counted by its winding number) and the face averages from line crossings (parity),
   which count the knot differently; the residual is where they disagree. With the knot cut out of the section the
-  largest residual over the same kind of shifts is 7.8e-18. Check a curve with `self_intersections` before trusting
-  its swept geometry; `check_validity` does not look for crossings.
+  largest residual over the same kind of shifts is 7.8e-18. Pass `check_input=.true.` to have `swept_cells_2d` check
+  the curve first (`sw%self_intersecting`, a warning on stderr), or check it with
+  `check_validity(check_self_intersections=.true.)`.
 
 ::: tip What you learned
 `pose=` queries a moving body without touching its tree, `move` refits a copy for grid-aligned queries,

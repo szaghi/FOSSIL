@@ -121,8 +121,8 @@ follow from the fixed grid (issue #41):
   poses at the Gauss nodes (`gauss_legendre_01`).
 
 ```fortran
-call swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status)
-call swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status)
+call swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input)
+call swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, check_input)
 ```
 
 **Integration.**
@@ -189,9 +189,11 @@ fluid at the other.
   around the knot get a residual that is not round-off, even on the exact
   translation path. Measured on a section of the (non-manifold) dragon that
   crosses itself once at a fold: residual 5.3e-6 in the cell the knot enters;
-  with the knot removed, 7.8e-18 over the same 25 shifts. `check_validity`
-  does not look for crossings: call `self_intersections` on the curve before
-  trusting the swept geometry.
+  with the knot removed, 7.8e-18 over the same 25 shifts. Pass
+  `check_input=.true.` to `swept_cells_2d` / `swept_cells_3d`: the input is
+  checked first (one `self_intersections`, or `find_self_intersections` in
+  3-D, which costs more), `sw%self_intersecting` is set and a warning goes to
+  stderr; the result is computed anyway.
 - **Swept geometry: rotations converge slowly across jumps.**
   - A face's fluid length (area) jumps when the face's line (plane)
     leaves the body. Gauss across a jump is O(1/nq).

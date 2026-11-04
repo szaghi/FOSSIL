@@ -40,15 +40,18 @@ module fossil_swept_cells
 !< does not cross itself: on a self-intersecting curve (surface) the swept volumes come from the cut
 !< cells (Green's theorem, regions counted by winding number) and the face apertures from line
 !< crossings (parity), which count a knot differently, so the residual of the cells around the knot is
-!< not round-off (a dragon section crossing itself once: 5.3e-6, the knot removed: 7.8e-18). Check
-!< the input with `self_intersections`; `check_validity` does not.
+!< not round-off (a dragon section crossing itself once: 5.3e-6, the knot removed: 7.8e-18). Pass
+!< `check_input=.true.` to have the input checked first (`sw%self_intersecting`, a warning on stderr;
+!< issue #44), or call `self_intersections` / `check_validity(check_self_intersections=.true.)`.
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t
 use fossil_curve_slice,        only : slice_surface
 use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d
 use fossil_facet_object,       only : facet_object
 use fossil_rigid_pose,         only : rigid_pose_t, rigid_pose_2d_t, pose_interpolate, pose_angle_2d, pose_log_3d
+use fossil_self_intersection,  only : intersection_pair_t
 use fossil_surface_stl_object, only : surface_stl_object, STATUS_OK, STATUS_INVALID_INPUT
 use penf,                      only : I4P, R8P
+use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 
 implicit none
 private
@@ -69,6 +72,7 @@ type :: swept_cells_2d_t
    logical                   :: exact = .false. !< Exact (2-D translation) integration used.
    real(R8P)                 :: error_estimate = 0._R8P !< Max face |A(nq) - A(2 nq)| (Gauss, screw motion).
    integer(I4P)              :: evaluations = 0_I4P !< Face-aperture evaluations per face (largest).
+   logical                   :: self_intersecting = .false. !< The curve crosses itself (only with `check_input`).
 endtype swept_cells_2d_t
 
 type :: swept_cells_3d_t
@@ -87,6 +91,7 @@ type :: swept_cells_3d_t
    logical                   :: exact = .false. !< Exact (translation) integration used.
    real(R8P)                 :: error_estimate = 0._R8P !< Max face |A(nq) - A(2 nq)| (Gauss, screw motion).
    integer(I4P)              :: evaluations = 0_I4P !< Face-aperture evaluations per grid plane (largest).
+   logical                   :: self_intersecting = .false. !< The surface crosses itself (only with `check_input`).
 endtype swept_cells_3d_t
 
 type :: slist_t
@@ -95,12 +100,16 @@ type :: slist_t
 endtype slist_t
 
 contains
-   subroutine swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status)
+   subroutine swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input)
    !< Swept geometry of `curve` between `pose0` and `pose1` on the block with cell edges x(nx+1),
    !< y(ny+1) (issue #41 step 5; see the module notes). `nq` (default 4) Gauss-Legendre nodes for the
    !< rotating case; `poses(nq)` the poses at the nodes (`gauss_legendre_01`) instead of the screw
    !< motion; `exact` (default .true.) uses the exact integration for a pure translation.
    !< `status = STATUS_INVALID_INPUT` on bad edges, nq < 1 or a poses size other than nq.
+   !< `check_input` (default .false., issue #44): look for self-intersections of the curve first
+   !< (`self_intersections`, one BVH pass); if any, `sw%self_intersecting` and a warning on stderr: the
+   !< residual of the cells around a knot is not round-off (see the module notes). The result is
+   !< computed anyway.
    type(curve_object),     intent(in)            :: curve    !< Curve (body frame).
    type(rigid_pose_2d_t),  intent(in)            :: pose0    !< Pose at the start.
    type(rigid_pose_2d_t),  intent(in)            :: pose1    !< Pose at the end.
@@ -110,6 +119,8 @@ contains
    type(rigid_pose_2d_t),  intent(in),  optional :: poses(:) !< Poses at the Gauss nodes.
    logical,                intent(in),  optional :: exact    !< Exact translation path (default .true.).
    integer(I4P),           intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,                intent(in),  optional :: check_input !< Check the curve for self-intersections.
+   integer(I4P), allocatable :: pairs(:,:)             !< Crossing pairs (check_input).
    type(curve_object)       :: c0, c1                !< Copies at the two poses.
    type(cut_cells_2d_t)     :: k0, k1                !< Their cut cells.
    real(R8P), allocatable   :: fu2(:,:), fv2(:,:), fl2(:,:), res(:,:) !< 2 nq face lengths, work, residual.
@@ -137,6 +148,15 @@ contains
    sw%nx = nx ; sw%ny = ny
    allocate(sw%alpha0(nx, ny), sw%alpha1(nx, ny), sw%swept(nx, ny), sw%face_u(nx + 1, ny), sw%face_v(nx, ny + 1), &
             sw%wall(2, nx, ny), sw%residual(nx, ny), sw%cleared(nx, ny), sw%covered(nx, ny))
+   if (present(check_input)) then
+      if (check_input) then
+         call curve%self_intersections(pairs, n)
+         sw%self_intersecting = n > 0_I4P
+         if (sw%self_intersecting) write(stderr, '(A,I0,A)') 'WARNING: swept_cells_2d: the curve crosses itself (', n, &
+                                                             ' segment pairs): residuals around the knots are not round-off'
+         n = 4_I4P ; if (present(nq)) n = nq
+      endif
+   endif
    ! the volumes: exact cut cells at the two poses
    c0 = curve ; call c0%move(pose0) ; call c0%cut_cells(x, y, k0)
    c1 = curve ; call c1%move(pose1) ; call c1%cut_cells(x, y, k1)
@@ -439,7 +459,7 @@ contains
    enddo
    endsubroutine faces_gauss_2d
 
-   subroutine swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status)
+   subroutine swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, check_input)
    !< Swept geometry of `surface` between `pose0` and `pose1` on the block with cell edges x(nx+1),
    !< y(ny+1), z(nz+1) (issue #41 step 5): volumes from `cut_cells_3d` at the two poses; face apertures
    !< exact for a pure translation (`exact`, default .true.; see the module notes), else by `nq`-point
@@ -453,8 +473,11 @@ contains
    integer(I4P),             intent(in),  optional :: nq       !< Gauss nodes (default 4).
    type(rigid_pose_t),       intent(in),  optional :: poses(:) !< Poses at the Gauss nodes.
    logical,                  intent(in),  optional :: exact    !< Exact translation path (default .true.).
+   logical,                  intent(in),  optional :: check_input !< Check the surface for self-intersections
+                                                                  !< (`find_self_intersections`; see swept_cells_2d).
    integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    type(surface_stl_object) :: s0                 !< Moved copy.
+   type(intersection_pair_t), allocatable :: pairs(:) !< Crossing facet pairs (check_input).
    real(R8P)                :: d(3)               !< Displacement.
    logical                  :: translation        !< Exact path.
    type(cut_cells_3d_t)     :: k0, k1             !< Cut cells at the end poses.
@@ -481,6 +504,14 @@ contains
    sw%nx = nx ; sw%ny = ny ; sw%nz = nz
    allocate(sw%swept(nx, ny, nz), sw%face_x(nx + 1, ny, nz), sw%face_y(nx, ny + 1, nz), sw%face_z(nx, ny, nz + 1), &
             sw%wall(3, nx, ny, nz), sw%residual(nx, ny, nz), flux(nx, ny, nz))
+   if (present(check_input)) then
+      if (check_input) then
+         call surface%find_self_intersections(pairs)
+         sw%self_intersecting = size(pairs) > 0
+         if (sw%self_intersecting) write(stderr, '(A,I0,A)') 'WARNING: swept_cells_3d: the surface crosses itself (', &
+                                                             size(pairs), ' facet pairs): residuals around them are not round-off'
+      endif
+   endif
    s0 = surface ; call s0%move(pose1) ; call cut_cells_3d(s0, x, y, z, k1, st)
    s0 = surface ; call s0%move(pose0) ; call cut_cells_3d(s0, x, y, z, k0, st)
    sw%alpha0 = k0%alpha ; sw%alpha1 = k1%alpha

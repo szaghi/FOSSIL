@@ -44,7 +44,7 @@ endprogram curve_tour
 | `get_vertices_number`, `get_loops_number`, `get_loop_range(l, first, last)`, `get_vertex(i)`, `get_next(i)` | Topology and coordinates; `get_next(i)` is the end vertex of segment i (0 at the end of an open loop). |
 | `get_area`, `get_loop_area(l)`, `get_perimeter`, `get_centroid`, `get_bmin`, `get_bmax`, `get_normal_axis` | Metrics; areas are signed (solid area for a valid curve; open loops have none). |
 | `is_loop_closed(l)` | False for an open loop. |
-| `check_validity(loop)` | First defect: `CURVE_OPEN_LOOP`, `CURVE_TOO_FEW_VERTICES`, `CURVE_ZERO_LENGTH_SEGMENT`, `CURVE_ZERO_AREA_LOOP`, `CURVE_WRONG_ORIENTATION` (orientation not matching the exact nesting depth), or `CURVE_VALID`. |
+| `check_validity(loop, check_self_intersections)` | First defect: `CURVE_OPEN_LOOP`, `CURVE_TOO_FEW_VERTICES`, `CURVE_ZERO_LENGTH_SEGMENT`, `CURVE_ZERO_AREA_LOOP`, `CURVE_WRONG_ORIENTATION` (orientation not matching the exact nesting depth), or `CURVE_VALID`. With `check_self_intersections=.true.` (default `.false.`), also `CURVE_SELF_INTERSECTING` when two segments cross, touch or overlap. |
 | `nesting_depth(l)` | Number of closed loops containing loop l (exact). |
 | `self_intersections(pairs, n)` | Segment pairs that cross, touch or fold back, decided exactly. |
 | `repair(tolerance, gaps_closed, vertices_merged, loops_removed, loops_reversed, loops_open)` | Join and close open chains within the tolerance, merge vertices, drop degenerate loops, orient closed loops by nesting depth. |

@@ -43,7 +43,7 @@ private
 public :: curve_object
 public :: cut_cells_2d_t
 public :: CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, CURVE_ZERO_AREA_LOOP, CURVE_WRONG_ORIENTATION
-public :: CURVE_OPEN_LOOP
+public :: CURVE_OPEN_LOOP, CURVE_SELF_INTERSECTING
 
 ! Validity codes returned by `check_validity` (the first defect found, loop by loop).
 integer(I4P), parameter :: CURVE_VALID               = 0_I4P !< Valid curve.
@@ -52,6 +52,8 @@ integer(I4P), parameter :: CURVE_ZERO_LENGTH_SEGMENT = 2_I4P !< Two consecutive 
 integer(I4P), parameter :: CURVE_ZERO_AREA_LOOP      = 3_I4P !< A loop has zero signed area.
 integer(I4P), parameter :: CURVE_WRONG_ORIENTATION   = 4_I4P !< A loop's orientation does not match its nesting depth.
 integer(I4P), parameter :: CURVE_OPEN_LOOP           = 5_I4P !< A loop is open (a polyline).
+integer(I4P), parameter :: CURVE_SELF_INTERSECTING   = 6_I4P !< Two segments cross, touch or overlap (only with
+                                                             !< `check_self_intersections`, issue #44).
 
 type :: curve_object
    !< Closed planar curve: loops of vertices in an axis-aligned plane.
@@ -1087,18 +1089,23 @@ contains
    self%is_on_device = .false.
    endsubroutine exit_device
 
-   function check_validity(self, loop) result(defect)
+   function check_validity(self, loop, check_self_intersections) result(defect)
    !< First validity defect of the curve (CURVE_VALID if none), and the loop it was found in.
    !<
    !< Checked loop by loop: closed; at least 3 vertices; no zero-length segment (exactly coincident
    !< consecutive vertices); nonzero signed area; orientation matching the nesting depth (depth
    !< even = outer or island: counter-clockwise, positive area; odd = hole: clockwise). The
-   !< nesting depth is exact (`nesting_depth`). Self-intersections are checked separately, by
-   !< `self_intersections`.
+   !< nesting depth is exact (`nesting_depth`). Self-intersections are checked only with
+   !< `check_self_intersections` (default .false., the meaning of CURVE_VALID before issue #44): after
+   !< every loop passed, CURVE_SELF_INTERSECTING if `self_intersections` finds a pair, `loop` the loop of
+   !< its first segment. A curve that crosses itself breaks the cut cells and the swept geometry (the
+   !< regions are counted by winding number there, by parity in the line crossings).
    class(curve_object), intent(in)            :: self   !< Curve.
    integer(I4P),        intent(out), optional :: loop   !< Loop of the defect (0 if valid).
+   logical,             intent(in),  optional :: check_self_intersections !< Also look for crossings.
    integer(I4P)                               :: defect !< CURVE_* code.
-   integer(I4P)                               :: l, i   !< Counters.
+   integer(I4P)                               :: l, i, n !< Counters, crossing pairs.
+   integer(I4P), allocatable                  :: pairs(:,:) !< Crossing pairs.
 
    defect = CURVE_VALID
    if (present(loop)) loop = 0_I4P
@@ -1127,6 +1134,17 @@ contains
          return
       endif
    enddo
+   if (.not. present(check_self_intersections)) return
+   if (.not. check_self_intersections) return
+   call self%self_intersections(pairs, n)
+   if (n > 0_I4P) then
+      defect = CURVE_SELF_INTERSECTING
+      if (present(loop)) then
+         do l = 1, self%nl
+            if (pairs(1, 1) >= self%loop_start(l) .and. pairs(1, 1) < self%loop_start(l + 1)) loop = l
+         enddo
+      endif
+   endif
    endfunction check_validity
 
    elemental subroutine destroy(self)

@@ -46,10 +46,12 @@ What it covers:
   number still handle it, and the fast winding number sign is meant for it.
 - **Validity.** `check_validity` returns the first defect loop by loop (open
   loop, too few vertices, zero-length segment, zero area, wrong orientation for
-  the nesting depth); it does not look for crossings. `self_intersections`
-  returns the pairs of segments that cross, touch or overlap, decided exactly.
-  A curve can be valid and still cross itself, a section of a non-manifold
-  mesh for example; the cut cells and the swept geometry assume it does not.
+  the nesting depth). By default it does not look for crossings;
+  `check_validity(check_self_intersections=.true.)` also returns
+  `CURVE_SELF_INTERSECTING` when two segments cross, touch or overlap
+  (`self_intersections` lists them, decided exactly). A curve can pass the
+  default check and still cross itself, a section of a non-manifold mesh for
+  example; the cut cells and the swept geometry assume it does not.
 - **Exactness.** Decisions that must agree from one query to the next use the
   exact `orient2d`: nesting depth, self-intersections, slicing, repair. The
   point queries are plain floating point, as in 3-D, so they run unchanged
