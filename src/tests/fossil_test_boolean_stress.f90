@@ -2,15 +2,14 @@
 program fossil_test_boolean_stress
 !< FOSSIL test: boolean stress on snapped box pairs with coplanar faces (issue #33, step 6).
 !<
-!< Regression variant (issue #45): the first 16 configurations of the fixed seed (in the debug build of CI: 9 overlapping,
-!< 7 touching, 12 with coplanar face planes; the generator's I8P product overflows, so an -O2 build draws another
-!< set: 5, 11, 15), plus the 4 apart ones below (3 of them with coplanar face planes). The full 100-configuration version is
-!< src/tests/validation/fossil_val_boolean_stress.f90.
+!< Regression variant (issue #45): the first 14 configurations of the fixed seed (11 overlapping, 3 touching, 10 with
+!< coplanar face planes), plus the 4 apart ones below (3 of them with coplanar face planes). The full
+!< 100-configuration version is src/tests/validation/fossil_val_boolean_stress.f90.
 !<
 !< Configurations from a fixed-seed generator: A = unit cube, B = a box whose sizes (0.5, 1,
 !< 1.5) and offsets (-0.5 to 1, step 0.25) are snapped to a 0.25 grid, so coplanar faces, shared
 !< edges and touching contacts are frequent; every other configuration rotates both bodies by
-!< the same random proper rotation. The four ops run on each (80 booleans) against the analytic
+!< the same random proper rotation. The four ops run on each (72 booleans) against the analytic
 !< box volumes. The generator never produces apart boxes (offsets >= -0.5, sizes >= 0.5): 4 fixed apart
 !< configurations follow (issue #46), B beyond a gap along x, y, z and the diagonal, rotated as the others.
 !<
@@ -27,7 +26,7 @@ use vecfor, only : vector_R8P
 
 implicit none
 
-integer(I4P), parameter :: N_CASES = 16
+integer(I4P), parameter :: N_CASES = 14
 integer(I4P), parameter :: N_FIXED_APART = 4 !< Fixed apart configurations after the random ones.
 real(R8P),    parameter :: APART_S(3, N_FIXED_APART) = reshape([0.5_R8P, 1._R8P, 1._R8P,   1._R8P, 1._R8P, 1._R8P, &
                                                           1._R8P, 1.5_R8P, 0.5_R8P,  0.5_R8P, 0.5_R8P, 0.5_R8P], [3, N_FIXED_APART])
@@ -89,12 +88,13 @@ if (.not. (n_wrong == 0 .and. n_topo_bad == 0 .and. n_apart == N_FIXED_APART)) e
 
 contains
    function rnd() result(r)
-   !< Fixed-seed linear congruential generator in [0, 1) (portable, no intrinsic seeding).
+   !< Fixed-seed Park-Miller generator in (0, 1) (portable, no intrinsic seeding). The product stays below 2**47: no
+   !< integer overflow, so every build draws the same configurations (issue #46; the former 64-bit LCG overflowed,
+   !< undefined behaviour, and the debug and -O2 builds drew different sets).
    real(R8P) :: r
 
-   seed = mod(seed * 6364136223846793005_I8P + 1442695040888963407_I8P, huge(seed))
-   if (seed < 0_I8P) seed = -seed
-   r = real(mod(seed, 1000003_I8P), R8P) / 1000003._R8P
+   seed = mod(seed * 48271_I8P, 2147483647_I8P)
+   r = real(seed, R8P) / 2147483647._R8P
    endfunction rnd
 
    subroutine one(k)

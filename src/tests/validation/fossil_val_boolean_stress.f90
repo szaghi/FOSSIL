@@ -87,12 +87,13 @@ if (.not. (n_wrong == 0 .and. n_topo_bad == 0 .and. n_apart == N_FIXED_APART)) e
 
 contains
    function rnd() result(r)
-   !< Fixed-seed linear congruential generator in [0, 1) (portable, no intrinsic seeding).
+   !< Fixed-seed Park-Miller generator in (0, 1) (portable, no intrinsic seeding). The product stays below 2**47: no
+   !< integer overflow, so every build draws the same configurations (issue #46; the former 64-bit LCG overflowed,
+   !< undefined behaviour, and the debug and -O2 builds drew different sets).
    real(R8P) :: r
 
-   seed = mod(seed * 6364136223846793005_I8P + 1442695040888963407_I8P, huge(seed))
-   if (seed < 0_I8P) seed = -seed
-   r = real(mod(seed, 1000003_I8P), R8P) / 1000003._R8P
+   seed = mod(seed * 48271_I8P, 2147483647_I8P)
+   r = real(seed, R8P) / 2147483647._R8P
    endfunction rnd
 
    subroutine one(k)
