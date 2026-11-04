@@ -2,10 +2,14 @@
 program fossil_test_swept_3d
 !< FOSSIL test: 3-D swept geometry between two poses (issue #41 step 5c).
 !<
-!< - The unit cube translating across a 6^3 block: the time-averaged face fluid areas approach an
-!<   independent analytic integration (breakpoints from the cube's faces, three-point Gauss on every
-!<   piece; the solid area of a face is piecewise quadratic with jumps) as nq = 2, 4, 8, 16 grows;
-!<   the uniform-flow residual falls with them; the projected walls sum to 0 over the block.
+!< - The unit cube translating across a 6^3 block, exact path (default): the time-averaged face fluid
+!<   areas equal an independent analytic integration (breakpoints from the cube's faces, three-point
+!<   Gauss on every piece; the solid area of a face is piecewise quadratic with jumps) to round-off;
+!<   the uniform-flow residual is round-off; the projected walls sum to 0 over the block.
+!< - Exact path on bodies at a rotated pose, translating: the cube and the L-prism (non-convex)
+!<   rotated about (1, 1, 1), the 32-face cone: uniform-flow residual at round-off.
+!< - Negative control, `exact=.false.` (Gauss-Legendre, no breakpoints): the cube faces approach the
+!<   analytic ones only as nq = 2, 4, 8, 16 grows, at about first order (jumps).
 !< - The cube rotating by 0.3 rad about the (1, 1, 1) axis through its centre while translating:
 !<   the residual falls with nq = 2, 4, 8.
 !< - The poses at the Gauss nodes given explicitly (the screw poses) give the same face areas bit
@@ -24,28 +28,58 @@ implicit none
 type(body_t), allocatable       :: b(:)
 type(surface_stl_object)        :: s
 type(swept_cells_3d_t)          :: sw, sw2
+type(surface_stl_object)        :: sb
+real(R8P)                       :: e2(7), rex(3), err0, res0
 type(rigid_pose_t)              :: p0, p1, pm, pe0, pe1
 type(rigid_pose_t), allocatable :: pq(:)
 real(R8P), allocatable          :: sq(:), wq(:)
 real(R8P)                       :: e(7), err(4), res(4), d(3), ax(3), ang, ang_m, w(3), c(3)
 integer(I4P)                    :: i, k, st, st2
-logical                         :: ok(5)
+logical                         :: ok(7)
 
 call bench_bodies(b)
 call to_surface(b(1)%soup, s) ! unit cube [0, 1]^3
 e = [(-0.23_R8P + 0.3_R8P * i, i = 0, 6)]
 d = [0.31_R8P, 0.17_R8P, 0.23_R8P]
 p0 = pose_identity() ; p1 = pose_from_axis_angle([1._R8P, 0._R8P, 0._R8P], 0._R8P, d)
+call swept_cells_3d(s, p0, p1, e, e, e, sw, status=st)
+err0 = face_error(sw)
+res0 = maxval(abs(sw%residual), mask=sw%alpha0 >= 0._R8P .and. sw%alpha1 >= 0._R8P)
+w = [sum(sw%wall(1, :, :, :)), sum(sw%wall(2, :, :, :)), sum(sw%wall(3, :, :, :))]
+ok(1) = st == STATUS_OK .and. sw%exact .and. err0 < 1.e-14_R8P .and. res0 < 1.e-14_R8P .and. maxval(abs(w)) < 1.e-13_R8P
+print '(A,ES9.1,A,ES9.1,A,3ES9.1,A,I0,A,L1)', 'cube translating, exact: max face error vs analytic ', err0, &
+      '  max residual ', res0, '  sum of walls ', w, '  evaluations/plane ', sw%evaluations, '  ok ', ok(1)
 do k = 1, 4
-   call swept_cells_3d(s, p0, p1, e, e, e, sw, nq=2_I4P**k, status=st)
+   call swept_cells_3d(s, p0, p1, e, e, e, sw, nq=2_I4P**k, exact=.false., status=st)
    err(k) = face_error(sw)
    res(k) = maxval(abs(sw%residual), mask=sw%alpha0 >= 0._R8P .and. sw%alpha1 >= 0._R8P)
 enddo
-w = [sum(sw%wall(1, :, :, :)), sum(sw%wall(2, :, :, :)), sum(sw%wall(3, :, :, :))]
-ok(1) = st == STATUS_OK .and. err(2) < err(1) .and. err(3) < err(2) .and. err(4) < err(3) .and. res(4) < res(1) .and. &
-        maxval(abs(w)) < 1.e-13_R8P
-print '(A,4ES9.1,A,4ES9.1,A,3ES9.1,A,L1)', 'cube translating: max face error vs analytic nq=2,4,8,16 ', err, &
-      '  max residual ', res, '  sum of walls ', w, '  ok ', ok(1)
+ok(6) = st == STATUS_OK .and. .not. sw%exact .and. err(2) < err(1) .and. err(3) < err(2) .and. err(4) < err(3) .and. &
+        res(4) < res(1) .and. err(4) > 1.e-4_R8P
+print '(A,4ES9.1,A,4ES9.1,A,L1)', 'negative control (Gauss): max face error nq=2,4,8,16 ', err, '  max residual ', res, &
+      '  ok ', ok(6)
+! exact path on rotated / non-convex bodies, translating
+e2 = [(-0.6_R8P + 0.45_R8P * i, i = 0, 6)]
+c = [0.5_R8P, 0.5_R8P, 0.5_R8P]
+p0 = pose_from_axis_angle([1._R8P, 1._R8P, 1._R8P], 0.3_R8P)
+p0%t = c - matmul(p0%r, c) ; p1 = p0 ; p1%t = p0%t + d
+call swept_cells_3d(s, p0, p1, e, e, e, sw, status=st)
+rex(1) = maxval(abs(sw%residual), mask=sw%alpha0 >= 0._R8P .and. sw%alpha1 >= 0._R8P)
+ok(7) = st == STATUS_OK .and. sw%exact
+call to_surface(b(8)%soup, sb) ! L-prism [0, 2]^2 x [0, 1]
+c = [1._R8P, 1._R8P, 0.5_R8P]
+p0 = pose_from_axis_angle([1._R8P, 1._R8P, 1._R8P], 0.3_R8P)
+p0%t = c - matmul(p0%r, c) ; p1 = p0 ; p1%t = p0%t + 1.7_R8P * d
+call swept_cells_3d(sb, p0, p1, e2, e2, e2, sw, status=st)
+rex(2) = maxval(abs(sw%residual), mask=sw%alpha0 >= 0._R8P .and. sw%alpha1 >= 0._R8P)
+ok(7) = ok(7) .and. st == STATUS_OK .and. sw%exact
+call to_surface(b(7)%soup, sb) ! cone, 32 faces
+p0 = pose_identity() ; p1 = pose_from_axis_angle([1._R8P, 0._R8P, 0._R8P], 0._R8P, [0.13_R8P, -0.29_R8P, 0.41_R8P])
+call swept_cells_3d(sb, p0, p1, e2, e2, e2, sw, status=st)
+rex(3) = maxval(abs(sw%residual), mask=sw%alpha0 >= 0._R8P .and. sw%alpha1 >= 0._R8P)
+ok(7) = ok(7) .and. st == STATUS_OK .and. sw%exact .and. maxval(rex) < 1.e-13_R8P
+print '(A,3ES9.1,A,L1)', 'exact path, max residual: rotated cube, rotated L-prism, cone ', rex, '  ok ', ok(7)
+p0 = pose_identity()
 ! rotation about (1, 1, 1) through the centre, plus the translation
 c = [0.5_R8P, 0.5_R8P, 0.5_R8P]
 p1 = pose_from_axis_angle([1._R8P, 1._R8P, 1._R8P], 0.3_R8P)

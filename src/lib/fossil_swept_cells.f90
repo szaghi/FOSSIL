@@ -19,18 +19,28 @@ module fossil_swept_cells
 !<   fluid length is piecewise linear in s. The breakpoints are the instants when a wall vertex
 !<   crosses the face's line, and when one of the face's two end nodes crosses a wall segment; the
 !<   two-point Gauss rule on every piece is then exact.
-!< - otherwise (2-D rotation, 3-D): Gauss-Legendre at nq nodes, the apertures from a copy moved to
-!<   each node pose (2-D: exact line crossings of every face; 3-D: `cut_cells_3d` face fractions);
-!<   with the screw motion, `error_estimate` is the largest face difference between nq and 2 nq nodes.
+!< - 3-D pure translation: exact. On a copy at pose0 a grid plane x_ax = a moves to a - s d_ax and its
+!<   grid lines by -s d. Every vertex of the fluid polygon of a face (a mesh edge on the plane, a grid
+!<   line on a triangle, a grid corner) moves linearly in s while the combinatorics hold, so the area
+!<   is quadratic in s. The combinatorics change only when a mesh vertex crosses the moving plane, a
+!<   mesh edge crosses a moving grid line of the plane, or a grid node (moving by -s d) crosses a
+!<   triangle. These instants, collected per plane, split [0, 1]; on every piece two-point Gauss is
+!<   exact, and one evaluation (`slice_surface` of the shifted plane, 2-D cut cells on the shifted
+!<   grid) gives every face of the plane.
+!< - otherwise (rotation): Gauss-Legendre at nq nodes, the apertures from a copy moved to each node
+!<   pose (2-D: exact line crossings of every face; 3-D: `cut_cells_3d` face fractions); with the screw
+!<   motion, `error_estimate` is the largest face difference between nq and 2 nq nodes.
 !<
 !< Check (`residual`): the volume balance of the rigid velocity field of the screw motion, a field
 !< that moves with the body (Falcovitz's design requirement: uniform flow moving with the body is
 !< exact). Per cell, residual = swept + int_0^1 sum_f (flux of the field out of the fluid part of
 !< face f) ds; the field is linear in x, so a face flux is its fluid length (area) times the field at
-!< the fluid centroid. It is round-off for the exact 2-D translation and the quadrature error
+!< the fluid centroid. It is round-off for the exact translation paths and the quadrature error
 !< otherwise. Not computed (0) when the caller gives the node poses.
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t
+use fossil_curve_slice,        only : slice_surface
 use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d
+use fossil_facet_object,       only : facet_object
 use fossil_rigid_pose,         only : rigid_pose_t, rigid_pose_2d_t, pose_interpolate, pose_angle_2d, pose_log_3d
 use fossil_surface_stl_object, only : surface_stl_object, STATUS_OK, STATUS_INVALID_INPUT
 use penf,                      only : I4P, R8P
@@ -69,7 +79,9 @@ type :: swept_cells_3d_t
    real(R8P),    allocatable :: residual(:,:,:) !< Volume balance of the rigid field.
    logical,      allocatable :: cleared(:,:,:)  !< No fluid at pose0, fluid at pose1.
    logical,      allocatable :: covered(:,:,:)  !< Fluid at pose0, none at pose1.
-   real(R8P)                 :: error_estimate = 0._R8P !< Max face |A(nq) - A(2 nq)| (screw motion).
+   logical                   :: exact = .false. !< Exact (translation) integration used.
+   real(R8P)                 :: error_estimate = 0._R8P !< Max face |A(nq) - A(2 nq)| (Gauss, screw motion).
+   integer(I4P)              :: evaluations = 0_I4P !< Face-aperture evaluations per grid plane (largest).
 endtype swept_cells_3d_t
 
 type :: slist_t
@@ -422,10 +434,11 @@ contains
    enddo
    endsubroutine faces_gauss_2d
 
-   subroutine swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, status)
+   subroutine swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status)
    !< Swept geometry of `surface` between `pose0` and `pose1` on the block with cell edges x(nx+1),
-   !< y(ny+1), z(nz+1) (issue #41 step 5): volumes from `cut_cells_3d` at the two poses, face apertures
-   !< by `nq`-point Gauss-Legendre (default 4) on copies moved to the screw poses or to `poses(nq)`.
+   !< y(ny+1), z(nz+1) (issue #41 step 5): volumes from `cut_cells_3d` at the two poses; face apertures
+   !< exact for a pure translation (`exact`, default .true.; see the module notes), else by `nq`-point
+   !< Gauss-Legendre (default 4) on copies moved to the screw poses or to `poses(nq)`.
    !< `status = STATUS_INVALID_INPUT` on bad edges, nq < 1 or a poses size other than nq.
    type(surface_stl_object), intent(in)            :: surface  !< Surface (body frame).
    type(rigid_pose_t),       intent(in)            :: pose0    !< Pose at the start.
@@ -434,8 +447,11 @@ contains
    type(swept_cells_3d_t),   intent(out)           :: sw       !< Swept geometry.
    integer(I4P),             intent(in),  optional :: nq       !< Gauss nodes (default 4).
    type(rigid_pose_t),       intent(in),  optional :: poses(:) !< Poses at the Gauss nodes.
+   logical,                  intent(in),  optional :: exact    !< Exact translation path (default .true.).
    integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    type(surface_stl_object) :: s0                 !< Moved copy.
+   real(R8P)                :: d(3)               !< Displacement.
+   logical                  :: translation        !< Exact path.
    type(cut_cells_3d_t)     :: k0, k1             !< Cut cells at the end poses.
    real(R8P), allocatable   :: fx2(:,:,:), fy2(:,:,:), fz2(:,:,:), flux(:,:,:), fl2(:,:,:) !< Work.
    integer(I4P)             :: nx, ny, nz, n, i, j, k, st !< Work.
@@ -460,8 +476,8 @@ contains
    sw%nx = nx ; sw%ny = ny ; sw%nz = nz
    allocate(sw%swept(nx, ny, nz), sw%face_x(nx + 1, ny, nz), sw%face_y(nx, ny + 1, nz), sw%face_z(nx, ny, nz + 1), &
             sw%wall(3, nx, ny, nz), sw%residual(nx, ny, nz), flux(nx, ny, nz))
-   s0 = surface ; call s0%move(pose0) ; call cut_cells_3d(s0, x, y, z, k0, st)
    s0 = surface ; call s0%move(pose1) ; call cut_cells_3d(s0, x, y, z, k1, st)
+   s0 = surface ; call s0%move(pose0) ; call cut_cells_3d(s0, x, y, z, k0, st)
    sw%alpha0 = k0%alpha ; sw%alpha1 = k1%alpha
    do k = 1_I4P, nz
       do j = 1_I4P, ny
@@ -473,8 +489,26 @@ contains
    enddo
    sw%cleared = sw%alpha0 == 0._R8P .and. sw%alpha1 > 0._R8P
    sw%covered = sw%alpha0 > 0._R8P .and. sw%alpha1 == 0._R8P
-   call faces_gauss_3d(surface, pose0, pose1, x, y, z, n, sw%face_x, sw%face_y, sw%face_z, flux, poses)
-   if (.not. present(poses)) then
+   translation = all(pose1%r == pose0%r) .and. .not. present(poses)
+   if (present(exact)) translation = translation .and. exact
+   if (translation) then
+      sw%exact = .true.
+      d = pose1%t - pose0%t
+      call faces_translation_3d(s0, d, x, y, z, sw%face_x, sw%face_y, sw%face_z, sw%evaluations)
+      do k = 1_I4P, nz ! the field is uniform (d): only the fluid areas enter
+         do j = 1_I4P, ny
+            do i = 1_I4P, nx
+               flux(i, j, k) = d(1) * (sw%face_x(i + 1, j, k) - sw%face_x(i, j, k)) + &
+                               d(2) * (sw%face_y(i, j + 1, k) - sw%face_y(i, j, k)) + &
+                               d(3) * (sw%face_z(i, j, k + 1) - sw%face_z(i, j, k))
+            enddo
+         enddo
+      enddo
+   else
+      call faces_gauss_3d(surface, pose0, pose1, x, y, z, n, sw%face_x, sw%face_y, sw%face_z, flux, poses)
+      sw%evaluations = n
+   endif
+   if (.not. present(poses) .and. .not. translation) then
       allocate(fx2(nx + 1, ny, nz), fy2(nx, ny + 1, nz), fz2(nx, ny, nz + 1), fl2(nx, ny, nz))
       call faces_gauss_3d(surface, pose0, pose1, x, y, z, 2_I4P * n, fx2, fy2, fz2, fl2)
       sw%error_estimate = max(maxval(abs(fx2 - sw%face_x)), maxval(abs(fy2 - sw%face_y)), maxval(abs(fz2 - sw%face_z)))
@@ -490,6 +524,215 @@ contains
       enddo
    enddo
    endsubroutine swept_cells_3d
+
+   subroutine faces_translation_3d(s0, d, x, y, z, fx, fy, fz, nev)
+   !< Exact time-averaged fluid areas of every face under the translation s d of the surface s0 (at
+   !< pose0): per grid plane, quadratic in s between the breakpoints of `plane_breakpoints`, two-point
+   !< Gauss on every piece.
+   type(surface_stl_object), intent(in)  :: s0        !< Surface at pose0.
+   real(R8P),                intent(in)  :: d(3)      !< Displacement over the step.
+   real(R8P),                intent(in)  :: x(:), y(:), z(:) !< Cell edges.
+   real(R8P),                intent(out) :: fx(:,:,:), fy(:,:,:), fz(:,:,:) !< Fluid areas.
+   integer(I4P),             intent(out) :: nev       !< Largest number of evaluations per plane.
+   type(facet_object), pointer :: fp                  !< Facet.
+   real(R8P), allocatable      :: tri(:,:,:)          !< Triangles [3, 3, facets].
+   real(R8P), allocatable      :: ue(:), ve(:), bp(:), area(:,:) !< In-plane edges, breakpoints, areas.
+   real(R8P)                   :: a, dl(3)            !< Plane, displacement in the plane frame.
+   integer(I4P)                :: nf, f, m, ax, a1, a2, ip, np, nb !< Work.
+
+   nf = s0%get_facets_number()
+   allocate(tri(3, 3, nf))
+   do f = 1_I4P, nf
+      fp => s0%facet_at(f)
+      do m = 1_I4P, 3_I4P
+         tri(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
+      enddo
+   enddo
+   nev = 0_I4P
+   do ax = 1_I4P, 3_I4P
+      a1 = mod(ax, 3_I4P) + 1_I4P ; a2 = mod(ax + 1_I4P, 3_I4P) + 1_I4P ! in-plane axes, cyclic (slice_surface)
+      select case (ax)
+      case (1_I4P) ; np = size(x, kind=I4P) ; ue = y ; ve = z
+      case (2_I4P) ; np = size(y, kind=I4P) ; ue = z ; ve = x
+      case default ; np = size(z, kind=I4P) ; ue = x ; ve = y
+      endselect
+      dl = [d(ax), d(a1), d(a2)]
+      do ip = 1_I4P, np
+         select case (ax)
+         case (1_I4P) ; a = x(ip)
+         case (2_I4P) ; a = y(ip)
+         case default ; a = z(ip)
+         endselect
+         call plane_breakpoints(tri, [ax, a1, a2], a, dl, ue, ve, bp, nb)
+         call plane_average(s0, ax, a, dl, ue, ve, bp, nb, area)
+         select case (ax)
+         case (1_I4P) ; fx(ip, :, :) = area
+         case (2_I4P) ; fy(:, ip, :) = transpose(area)
+         case default ; fz(:, :, ip) = area
+         endselect
+         nev = max(nev, 2_I4P * (nb + 1_I4P))
+      enddo
+   enddo
+   endsubroutine faces_translation_3d
+
+   subroutine plane_breakpoints(tri, perm, a, dl, ue, ve, b, m)
+   !< Instants s in (0, 1) when the combinatorics of the fluid polygons of the grid plane x_ax = a,
+   !< moving by -s d in the frame of the surface (in-plane grid ue - s du, ve - s dv), change: a mesh
+   !< vertex on the plane inside the block's in-plane extent, a mesh edge on a grid line of the plane,
+   !< a grid node on a triangle. Coordinates in the plane frame (ax, a1, a2) = perm.
+   real(R8P),              intent(in)  :: tri(:,:,:) !< Triangles [3, 3, facets], global axes.
+   integer(I4P),           intent(in)  :: perm(3)    !< Plane frame axes (normal, u, v).
+   real(R8P),              intent(in)  :: a          !< Plane.
+   real(R8P),              intent(in)  :: dl(3)      !< Displacement in the plane frame.
+   real(R8P),              intent(in)  :: ue(:), ve(:) !< In-plane grid edges.
+   real(R8P), allocatable, intent(out) :: b(:)       !< Sorted unique breakpoints.
+   integer(I4P),           intent(out) :: m          !< Their number.
+   real(R8P), allocatable              :: tmp(:)     !< Work.
+   real(R8P)                           :: w(3, 3), e1(3), e2(3), g(3), r(3), det, s, be, ga, slo, shi !< Work.
+   integer(I4P)                        :: nu, nv, f, q, i, j, i1, i2, j1, j2 !< Work.
+
+   nu = size(ue, kind=I4P) ; nv = size(ve, kind=I4P)
+   allocate(tmp(64)) ; m = 0_I4P
+   slo = a - max(dl(1), 0._R8P) ; shi = a - min(dl(1), 0._R8P) ! slab swept by the plane
+   do f = 1_I4P, size(tri, 3, kind=I4P)
+      do q = 1_I4P, 3_I4P
+         w(:, q) = tri(perm, q, f)
+      enddo
+      if (maxval(w(1, :)) < slo .or. minval(w(1, :)) > shi) cycle
+      ! mesh vertices crossing the plane
+      if (dl(1) /= 0._R8P) then
+         do q = 1_I4P, 3_I4P
+            s = (a - w(1, q)) / dl(1)
+            if (s > 0._R8P .and. s < 1._R8P .and. inside_extent(w(2, q) + s * dl(2), w(3, q) + s * dl(3))) call add(s)
+         enddo
+      endif
+      ! mesh edges crossing the grid lines u = ue(i) - s du and v = ve(j) - s dv
+      do q = 1_I4P, 3_I4P
+         call edge_lines(w(:, q), w(:, mod(q, 3_I4P) + 1_I4P) - w(:, q), 2_I4P, 3_I4P, ue, ve)
+         call edge_lines(w(:, q), w(:, mod(q, 3_I4P) + 1_I4P) - w(:, q), 3_I4P, 2_I4P, ve, ue)
+      enddo
+      ! grid nodes G - s d crossing the triangle: w1 + be e1 + ga e2 + s dl = G
+      e1 = w(:, 2) - w(:, 1) ; e2 = w(:, 3) - w(:, 1)
+      det = dot_product(e1, cross(e2, dl))
+      if (det == 0._R8P) cycle
+      call index_range(ue, minval(w(2, :)) + min(0._R8P, dl(2)), maxval(w(2, :)) + max(0._R8P, dl(2)), i1, i2)
+      call index_range(ve, minval(w(3, :)) + min(0._R8P, dl(3)), maxval(w(3, :)) + max(0._R8P, dl(3)), j1, j2)
+      do j = j1, j2
+         do i = i1, i2
+            g = [a, ue(i), ve(j)] ; r = g - w(:, 1)
+            s = dot_product(e1, cross(e2, r)) / det
+            if (s <= 0._R8P .or. s >= 1._R8P) cycle
+            be = dot_product(r, cross(e2, dl)) / det ; ga = dot_product(e1, cross(r, dl)) / det
+            if (be >= 0._R8P .and. ga >= 0._R8P .and. be + ga <= 1._R8P) call add(s)
+         enddo
+      enddo
+   enddo
+   call sort_unique(tmp, m)
+   b = tmp(1:m)
+   contains
+      logical function inside_extent(pu, pv)
+      !< The in-plane point (relative to the moving grid, i.e. + s d) inside the block's extent.
+      real(R8P), intent(in) :: pu, pv !< Point.
+
+      inside_extent = pu >= ue(1) .and. pu <= ue(nu) .and. pv >= ve(1) .and. pv <= ve(nv)
+      endfunction inside_extent
+
+      subroutine edge_lines(p, e, k, o, lk, lo)
+      !< Crossings of the edge p + lam e with the moving grid lines w(k) = lk(i) - s dl(k) of the plane,
+      !< the other in-plane coordinate (axis o) inside [lo(1), lo(end)] relative to the moving grid.
+      real(R8P),    intent(in) :: p(3), e(3)    !< Edge.
+      integer(I4P), intent(in) :: k, o          !< Line normal and line direction (plane frame).
+      real(R8P),    intent(in) :: lk(:), lo(:)  !< Grid edges along k and along o.
+      real(R8P)                :: dd, lam, sk, wo !< Work.
+      integer(I4P)             :: ii, il, ih    !< Work.
+
+      dd = e(1) * dl(k) - dl(1) * e(k)
+      if (dd == 0._R8P) return
+      call index_range(lk, min(p(k), p(k) + e(k)) + min(0._R8P, dl(k)), max(p(k), p(k) + e(k)) + max(0._R8P, dl(k)), il, ih)
+      do ii = il, ih
+         lam = ((a - p(1)) * dl(k) - dl(1) * (lk(ii) - p(k))) / dd
+         sk = (e(1) * (lk(ii) - p(k)) - e(k) * (a - p(1))) / dd
+         if (lam < 0._R8P .or. lam > 1._R8P .or. sk <= 0._R8P .or. sk >= 1._R8P) cycle
+         wo = p(o) + lam * e(o) + sk * dl(o)
+         if (wo >= lo(1) .and. wo <= lo(size(lo))) call add(sk)
+      enddo
+      endsubroutine edge_lines
+
+      subroutine add(sv)
+      !< Append a breakpoint.
+      real(R8P), intent(in) :: sv !< Instant.
+
+      if (m == size(tmp, kind=I4P)) tmp = [tmp, tmp]
+      m = m + 1_I4P ; tmp(m) = sv
+      endsubroutine add
+   endsubroutine plane_breakpoints
+
+   pure subroutine index_range(e, lo, hi, i1, i2)
+   !< Indexes i1..i2 of the sorted edges e with lo <= e(i) <= hi (empty if i1 > i2), by bisection.
+   real(R8P),    intent(in)  :: e(:)   !< Sorted edges.
+   real(R8P),    intent(in)  :: lo, hi !< Range.
+   integer(I4P), intent(out) :: i1, i2 !< Indexes.
+   integer(I4P)              :: l, h, c !< Work.
+
+   l = 1_I4P ; h = size(e, kind=I4P) + 1_I4P ! first index with e >= lo
+   do while (l < h)
+      c = (l + h) / 2_I4P
+      if (e(c) < lo) then
+         l = c + 1_I4P
+      else
+         h = c
+      endif
+   enddo
+   i1 = l
+   l = 0_I4P ; h = size(e, kind=I4P) ! last index with e <= hi
+   do while (l < h)
+      c = (l + h + 1_I4P) / 2_I4P
+      if (e(c) > hi) then
+         h = c - 1_I4P
+      else
+         l = c
+      endif
+   enddo
+   i2 = l
+   endsubroutine index_range
+
+   subroutine plane_average(s0, ax, a, dl, ue, ve, b, m, area)
+   !< Time-averaged fluid areas of the faces of the plane x_ax = a moving by -s d (plane frame dl):
+   !< two-point Gauss on every piece between the breakpoints b(1:m), one section and one 2-D cut-cell
+   !< evaluation per node.
+   type(surface_stl_object), intent(in)  :: s0         !< Surface at pose0.
+   integer(I4P),             intent(in)  :: ax         !< Plane normal axis.
+   real(R8P),                intent(in)  :: a          !< Plane.
+   real(R8P),                intent(in)  :: dl(3)      !< Displacement in the plane frame.
+   real(R8P),                intent(in)  :: ue(:), ve(:) !< In-plane grid edges.
+   real(R8P),                intent(in)  :: b(:)       !< Breakpoints.
+   integer(I4P),             intent(in)  :: m          !< Their number.
+   real(R8P), allocatable,   intent(out) :: area(:,:)  !< Time-averaged fluid areas [nu, nv].
+   real(R8P), parameter     :: G = 0.5_R8P / sqrt(3._R8P) !< Two-point Gauss offset on a unit piece.
+   type(curve_object)       :: sec                     !< Section.
+   type(cut_cells_2d_t)     :: c2                      !< Its cut cells.
+   real(R8P)                :: sa, sb, h, sg           !< Work.
+   integer(I4P)             :: q, g2, j, k, st         !< Work.
+
+   allocate(area(size(ue) - 1, size(ve) - 1)) ; area = 0._R8P
+   do q = 0_I4P, m
+      sa = 0._R8P ; if (q > 0_I4P) sa = b(q)
+      sb = 1._R8P ; if (q < m) sb = b(q + 1)
+      h = sb - sa
+      if (h <= 0._R8P) cycle
+      do g2 = -1_I4P, 1_I4P, 2_I4P
+         sg = 0.5_R8P * (sa + sb) + g2 * G * h
+         call slice_surface(surface=s0, normal_axis=ax, level=a - sg * dl(1), curve=sec, on_plane_low=.true.)
+         call sec%cut_cells(x=ue - sg * dl(2), y=ve - sg * dl(3), cut=c2, status=st)
+         area = area + 0.5_R8P * h * c2%alpha
+      enddo
+   enddo
+   do k = 1_I4P, size(ve, kind=I4P) - 1_I4P
+      do j = 1_I4P, size(ue, kind=I4P) - 1_I4P
+         area(j, k) = area(j, k) * (ue(j + 1) - ue(j)) * (ve(k + 1) - ve(k))
+      enddo
+   enddo
+   endsubroutine plane_average
 
    subroutine faces_gauss_3d(surface, pose0, pose1, x, y, z, n, fx, fy, fz, flux, poses)
    !< Time-averaged fluid face areas by n-point Gauss-Legendre (`cut_cells_3d` at each node pose), and
