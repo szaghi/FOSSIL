@@ -123,6 +123,7 @@ type :: curve_object
       procedure, pass(self) :: get_normal_axis      !< Plane normal axis.
       procedure, pass(self) :: get_perimeter        !< Total length.
       procedure, pass(self) :: get_vertex           !< Coordinates of a vertex.
+      procedure, pass(self) :: get_next             !< End vertex of a segment (issue #41).
       procedure, pass(self) :: get_vertices_number  !< Number of vertices (= segments).
       procedure, pass(self) :: is_loop_closed       !< True if a loop is closed.
       procedure, pass(self) :: is_point_inside      !< Inside test.
@@ -1254,6 +1255,17 @@ contains
    uv = 0._R8P
    if (i >= 1_I4P .and. i <= self%nv) uv = [self%u(i), self%v(i)]
    endfunction get_vertex
+
+   pure function get_next(self, i) result(j)
+   !< End vertex of segment i (segment i runs from vertex i to vertex j; 0 at the end of an open loop
+   !< or out of range).
+   class(curve_object), intent(in) :: self !< Curve.
+   integer(I4P),        intent(in) :: i    !< Segment (= its start vertex).
+   integer(I4P)                    :: j    !< End vertex.
+
+   j = 0_I4P
+   if (i >= 1_I4P .and. i <= self%nv) j = self%next(i)
+   endfunction get_next
 
    pure function get_vertices_number(self) result(n)
    !< Number of vertices (= number of segments).

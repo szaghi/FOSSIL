@@ -14,7 +14,7 @@ implicit none
 private
 public :: rigid_pose_t, rigid_pose_2d_t
 public :: pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose, pose_inverse
-public :: to_body, to_world, rotate
+public :: to_body, to_world, rotate, pose_interpolate, pose_angle_2d, pose_log_3d
 
 type :: rigid_pose_t
    !< 3-D rigid pose: x_world = r x_body + t.
@@ -47,6 +47,10 @@ endinterface to_world
 interface rotate
    module procedure rotate_3d, rotate_2d
 endinterface rotate
+
+interface pose_interpolate
+   module procedure interpolate_3d, interpolate_2d
+endinterface pose_interpolate
 
 contains
    pure function pose_identity() result(p)
@@ -196,4 +200,75 @@ contains
    w(1) = p%r(1, 1) * v(1) + p%r(1, 2) * v(2)
    w(2) = p%r(2, 1) * v(1) + p%r(2, 2) * v(2)
    endfunction rotate_2d
+
+   pure function pose_angle_2d(p) result(theta)
+   !< Rotation angle of an in-plane pose, in (-pi, pi].
+   type(rigid_pose_2d_t), intent(in) :: p     !< Pose.
+   real(R8P)                         :: theta !< Angle [rad].
+
+   theta = atan2(p%r(2, 1), p%r(1, 1))
+   endfunction pose_angle_2d
+
+   pure subroutine pose_log_3d(p0, p1, axis, angle)
+   !< Relative rotation R1 R0^T of two poses as a unit axis and an angle in [0, pi] (axis = e_z for no
+   !< rotation).
+   type(rigid_pose_t), intent(in)  :: p0, p1  !< Poses.
+   real(R8P),          intent(out) :: axis(3) !< Unit axis.
+   real(R8P),          intent(out) :: angle   !< Angle [rad].
+   real(R8P)                       :: r(3, 3), w(3), c, s !< Relative rotation, work.
+   integer                         :: k       !< Column.
+
+   r = matmul(p1%r, transpose(p0%r))
+   w = [r(3, 2) - r(2, 3), r(1, 3) - r(3, 1), r(2, 1) - r(1, 2)] ! 2 sin(angle) axis
+   s = 0.5_R8P * norm2(w) ; c = 0.5_R8P * (r(1, 1) + r(2, 2) + r(3, 3) - 1._R8P)
+   angle = atan2(s, c)
+   axis = [0._R8P, 0._R8P, 1._R8P]
+   if (angle <= 0._R8P) return
+   if (s > 1.e-6_R8P) then
+      axis = w / norm2(w)
+   else ! angle near pi: axis from R + I = 2 k k^T (+ O(s)), its largest column
+      r = r + reshape([1._R8P, 0._R8P, 0._R8P, 0._R8P, 1._R8P, 0._R8P, 0._R8P, 0._R8P, 1._R8P], [3, 3])
+      k = maxloc([r(1, 1), r(2, 2), r(3, 3)], dim=1)
+      axis = r(:, k) / norm2(r(:, k))
+      if (dot_product(axis, w) < 0._R8P) axis = -axis
+   endif
+   endsubroutine pose_log_3d
+
+   pure function interpolate_2d(p0, p1, s) result(p)
+   !< Screw interpolation of in-plane poses (issue #41): the angle and the translation linear in s in
+   !< [0, 1], the angle difference taken in (-pi, pi]; the end poses are returned exactly.
+   type(rigid_pose_2d_t), intent(in) :: p0, p1 !< End poses.
+   real(R8P),             intent(in) :: s      !< Parameter in [0, 1].
+   type(rigid_pose_2d_t)             :: p      !< Pose at s.
+   real(R8P)                         :: a0, da !< Angles.
+
+   if (s == 0._R8P) then
+      p = p0 ; return
+   elseif (s == 1._R8P) then
+      p = p1 ; return
+   endif
+   a0 = pose_angle_2d(p0) ; da = pose_angle_2d(p1) - a0
+   da = atan2(sin(da), cos(da))
+   p = pose_2d(a0 + s * da, p0%t + s * (p1%t - p0%t))
+   endfunction interpolate_2d
+
+   pure function interpolate_3d(p0, p1, s) result(p)
+   !< Screw interpolation of 3-D poses (issue #41): the rotation R(s) = exp(s log(R1 R0^T)) R0 (fixed
+   !< axis, angle linear in s) and the translation linear in s; the end poses are returned exactly.
+   type(rigid_pose_t), intent(in) :: p0, p1  !< End poses.
+   real(R8P),          intent(in) :: s       !< Parameter in [0, 1].
+   type(rigid_pose_t)             :: p       !< Pose at s.
+   type(rigid_pose_t)             :: q       !< Partial relative rotation.
+   real(R8P)                      :: axis(3), angle !< Relative rotation.
+
+   if (s == 0._R8P) then
+      p = p0 ; return
+   elseif (s == 1._R8P) then
+      p = p1 ; return
+   endif
+   call pose_log_3d(p0, p1, axis, angle)
+   q = pose_from_axis_angle(axis, s * angle)
+   p%r = matmul(q%r, p0%r)
+   p%t = p0%t + s * (p1%t - p0%t)
+   endfunction interpolate_3d
 endmodule fossil_rigid_pose
