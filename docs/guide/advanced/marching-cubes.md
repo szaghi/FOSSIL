@@ -144,12 +144,13 @@ endprogram ex_resample_via_distance_field
 Sphere extracted from analytic SDF at 64³ grid resolution (9452 facets,
 volume 4.179 vs analytic 4.189):
 
-![Sphere from MC](/pictures/advanced/mc-sphere.png)
+![the unit sphere extract_isosurface draws from its analytic signed distance on a 64^3 grid over [-2, 2]^3: 9452 facets, volume 4.179](../../examples/images/ref-mc-sphere.svg){.fossil-figure}
 
 Cube resampled through its own SDF at resolution=64 (40 364 facets,
-volume 1.000 — bit-exact roundtrip):
+volume 0.99997: close, not bit-exact, the deficit is 3.4e-5); a corner,
+zoomed (the whole surface is too heavy to draw):
 
-![Cube resampled via SDF](/pictures/advanced/mc-cube-resampled.png)
+![a corner of the unit cube re-tessellated by resample_via_distance_field at resolution 64, one regular pattern of triangles per grid cell; the whole surface has 40364 facets, volume 0.99997](../../examples/images/ref-mc-cube-resampled.svg){.fossil-figure}
 
 The resampled cube has **far more triangles than the input** (12 →
 40 k) because MC tessellates by grid cell, not by silhouette. Run

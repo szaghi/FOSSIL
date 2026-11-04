@@ -162,16 +162,27 @@ The two are identical to ~1e-12 absolute on small inputs (a 12-facet
 cube has nothing to truncate); on the dragon mesh the gap is ~1e-3 at
 β=2.0 and ~1e-5 at β=4.0.
 
-## Cube reference image
-
-![Cube fixture used in the examples](/pictures/advanced/winding-cube.png)
+## Cube reference
 
 The cube is the simplest test case: 12 facets, three orthogonal
 diagonal-split faces, axis-aligned. A query at the centroid `(0.5, 0.5,
 0.5)` returns `w = 1.0` to floating-point precision; a query at a
 corner returns `w = 0.125` (one octant of the full $4\pi$ solid angle,
 which is what you should expect from this formulation at a vertex
-singularity).
+singularity), and one on a face `w = 0.5`.
+
+Open the cube and the field stays meaningful. Below, the cube without
+its top (clipped at `z = 0.9`) and `winding_number` on the slice
+`y = 0.5`: `w` reaches 0.95 deep inside (0.851 at the centre of the box),
+fades smoothly through the opening, and is 0 far outside. Just outside
+the walls below the rim it dips to −0.19, where the missing top is seen
+from its inner side; at the 0.5 threshold of `SIGN_FAST_WINDING_NUMBER`
+every cell of the slice below the rim is on the right side, and the
+inside bulges through the opening by under 0.1 (the cells with
+`w > 0.5` above `z = 0.9` reach `z = 0.98`), where inside is a
+matter of definition.
+
+![the unit cube without its top, its open rim in ember, and the winding number on the slice y = 0.5: up to 0.95 inside (0.851 at the centre), fading through the opening to 0 outside, slightly negative (teal, down to -0.19) just outside the walls below the rim](../../examples/images/ref-winding-cube.svg){.fossil-figure}
 
 ## Known limitations
 

@@ -10,9 +10,11 @@ Equalizes **edge length** across a triangulated surface while preserving
 its geometry. CAD-exported STL routinely mixes 0.01 mm and 10 mm
 triangles on the same body — perfectly fine for visualization, **fatal**
 for AABB-tree query balance and for cut-cell quality near refinement
-bands. Isotropic remeshing rewrites the tessellation so every edge is
-within ~30% of a target length `L`, producing a mesh whose every facet
-has roughly the same shape and size.
+bands. Isotropic remeshing rewrites the tessellation driving every edge
+towards the band `(4L/5, 4L/3)` about a target length `L`, producing a
+mesh whose facets have roughly the same shape and size (the band is a
+goal, not a bound: on the dragon below, after 3 iterations at `L = 0.46`,
+90 % of the edges lie in 0.16–0.52).
 
 Complementary to [decimation (§1.3)](https://github.com/szaghi/FOSSIL/issues/18):
 decimation reduces facet *count* while preserving the silhouette;
@@ -64,8 +66,10 @@ call surface%isotropic_remesh(target_length, iterations, preserve_features, stat
 ```
 
 - **`target_length`**: desired uniform edge length. Pass `≤ 0` (or
-  omit) to use the input's *median* edge length — produces a near-
-  identity remesh that just smooths the distribution. Pass a smaller
+  omit) to use the input's *median* edge length — a remesh at the
+  input's scale that evens the distribution (on an input with a long
+  tail of long edges, such as the dragon below, the splits outnumber
+  the collapses and the facet count grows). Pass a smaller
   value to densify, larger to coarsen.
 - **`iterations`**: outer-loop count. Default `5`. Convergence is
   typically visible after 3 passes; further iterations smooth the edge-
@@ -106,21 +110,27 @@ print '(A,I0)', 'sphere remeshed: n_facets = ', sphere%get_facets_number()
 endprogram ex_isotropic_remesh
 ```
 
-## Bunny remesh — visual reference
+## Dragon remesh — visual reference
 
-Input bunny (Stanford fixture, 69451 facets, mixed-scale tessellation
-typical of scanned data):
+Input dragon (`dragon.stl`, 6588 facets; the 69k-facet bunny is too heavy
+for an inline figure), its tessellation mixing long slivers and small
+triangles:
 
-![Stanford bunny — input](/pictures/advanced/remesh-bunny-input.png)
+![the dragon as loaded, 6588 facets, a mix of long slivers and small triangles: per-facet edge median 0.462, standard deviation 0.389](../../examples/images/ref-remesh-dragon-input.svg){.fossil-figure}
 
-After 3 iterations of remeshing at `target_length = 0.05`:
+After 3 iterations of `isotropic_remesh` at the default target (the
+median input edge):
 
-![Stanford bunny — after 3 iterations](/pictures/advanced/remesh-bunny-output.png)
+![the same dragon after 3 iterations of isotropic_remesh at the default target: 12924 facets, edge median 0.359, standard deviation 0.109](../../examples/images/ref-remesh-dragon-output.svg){.fossil-figure}
 
 The silhouette is preserved; the per-facet edge-length distribution
-tightens substantially (median unchanged, stddev drops by >5×). Facet
-count is roughly preserved (69451 → 69259) — remeshing isn't
-decimation, it just redistributes triangles.
+tightens (standard deviation 0.389 → 0.109, 3.6×). Remeshing isn't
+decimation, but neither does it keep the facet count: the dragon's
+edges have a long tail above the median (5 % are longer than 1.32,
+2.9× the median), every edge above `4L/3` is split, and the count
+roughly doubles (6588 → 12924), the median dropping below `L`
+(0.462 → 0.359). The thin features (horns, claws) are smoothed: the
+area falls by 10 % (742 → 666), the volume by 1.7 %.
 
 ## Known limitations
 

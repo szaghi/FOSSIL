@@ -139,12 +139,14 @@ endprogram ex_resolve_self_intersections
 
 ## Visual reference
 
-The dragon fixture (~6.6k facets):
+The dragon fixture (6588 facets), drawn translucent, with the segment
+`p`–`q` of each of the 1167 crossing pairs `find_self_intersections`
+reports:
 
-![dragon.stl — known-dirty fixture with ~1167 self-intersections](/pictures/advanced/self-intersection-dragon.png)
+![the dragon drawn translucent, the 1167 self-intersection segments find_self_intersections reports in ember, most of them at the head and the feet](../../examples/images/ref-self-intersection-dragon.svg){.fossil-figure}
 
-Visually the dragon looks fine; the self-intersections are interior
-geometric crossings invisible from outside. That's the *whole point*
+Drawn opaque, the dragon looks fine: the crossings are small folds
+the eye does not catch. That's the *whole point*
 of `find_self_intersections` — these are the defects that escape eye
 inspection and that `is_watertight()` doesn't catch.
 

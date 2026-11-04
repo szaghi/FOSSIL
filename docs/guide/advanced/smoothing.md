@@ -193,22 +193,32 @@ call surface%smooth(method=SMOOTH_METHOD_TAUBIN,    &
 
 ## Visual reference
 
-Stanford bunny with deterministic per-vertex Gaussian noise added at
-~1 % of the bounding-box diagonal — the "input" panel:
+A marching-cubes unit sphere (3804 facets after `sanitize(fill_holes=.true.)`;
+the 69k-facet bunny is too heavy for an inline figure) with deterministic
+per-vertex Gaussian noise of σ = 1 % of the bounding-box diagonal
+(0.035, a third of the 0.1 grid spacing), then after 5 Taubin `(λ, μ)`
+pairs at the defaults (`λ = 0.5`, `μ = -0.53`):
 
-![Noisy bunny — input to Taubin smoothing](/pictures/advanced/smoothing-bunny-noisy.png)
+<div class="fossil-pair">
 
-After 5 Taubin `(λ, μ)` pairs at the defaults (`λ = 0.5`, `μ = -0.53`):
+![the noisy sphere: Gaussian noise of sigma 1 % of the box diagonal on every vertex, rms of |v| - 1 0.0339, volume 4.157](../../examples/images/ref-smoothing-sphere-noisy.svg)
 
-![Bunny after 5 Taubin pairs](/pictures/advanced/smoothing-bunny-taubin.png)
+![the same sphere after smooth at its defaults, 5 Taubin pairs: rms of |v| - 1 halved to 0.0167, volume 4.162](../../examples/images/ref-smoothing-sphere-taubin.svg)
 
-The high-frequency surface "fuzz" is gone — the silhouette and the
-low-frequency shape (ears, haunch, the overall volume) are preserved.
-This is the band-pass response Taubin is designed for: it attenuates
-the noise band without the global shrinkage that plain explicit
-Laplacian smoothing would cause. The fixture and both renders are
-reproducible via `scripts/make_doc_images.sh` (the noise seed is
-fixed, so the figures are byte-stable across rebuilds).
+</div>
+
+The high-frequency surface "fuzz" is attenuated (the rms radial error
+halves, 0.0339 → 0.0167) while the volume stays put (4.157 → 4.162,
++0.12 %): the band-pass response Taubin is designed for, without the
+global shrinkage that plain explicit Laplacian smoothing would cause.
+Five pairs do not remove noise this strong (σ is a third of the grid
+spacing): a low-frequency waviness remains. On this input `smooth`
+returns `SMOOTH_STATUS_DEGENERATE`: the sanitized extraction keeps a
+zero-area facet (smallest edge 5.5e-18), which is skipped while the
+rest is smoothed. The figures are
+computed by `docs/examples/src/fig_ref_smoothing.f90` (the noise is a
+function of the vertex coordinates, so the figures are byte-stable
+across rebuilds).
 
 ## Known limitations
 
