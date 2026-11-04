@@ -27,6 +27,8 @@ what can be repaired, and the validity predicates say what is left.
 
 A hole is a loop of boundary edges, the facet edges without a neighbour (`fcon_edge == 0`); `fill_holes` triangulates
 it, `refine` matches the density of the loop and `fair` smooths the patch into the surface around it.
+
+![a sphere with four round holes of different sizes, closed one per frame by fill_holes(refine, fair) as max_hole_size grows past each loop's size: the patches in ember, the loops still open outlined](../../examples/images/anim-holes.svg){.fossil-figure}
 - Each defect class left or removed is reported once on stderr, as a `WARNING: sanitize:` line.
 
 <<< @/examples/snippets/tut02_repair-check.f90

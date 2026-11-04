@@ -24,6 +24,8 @@ tree, and it gives what a moving cut-cell update needs: the cells that change st
 
 ![the dragon cut by the plane of cell centres y = -0.125 at pose0 (grey line) and at pose1 (yellow line), with the cells whose centre state_changes flags: fresh, solid to fluid, in teal where the body left; dead, fluid to solid, in ember where it arrived](../../examples/images/tut11-move.svg){.fossil-figure}
 
+![the dragon moving through the plane of cell centres x = 0.01 over 8 steps, travelling along x and rolling 45 degrees about it, the part on the viewer's side translucent: per step its section in yellow and the cells state_changes flags, fresh in teal, dead in ember](../../examples/images/anim-moving.svg){.fossil-figure}
+
 <<< @/examples/snippets/tut11_moving_bodies-swept.f90
 
 - `swept_cells_2d(curve, pose0, pose1, x, y, sw)` (and `swept_cells_3d(surface, pose0, pose1, x, y, z, sw)`) are free

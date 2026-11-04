@@ -1,0 +1,16 @@
+$ anim_moving
+WARNING: sanitize: 54 hole(s) filled
+WARNING: sanitize: 136 boundary edge(s) not forming a closed loop
+WARNING: sanitize: 62 duplicate facet(s) removed
+WARNING: sanitize: 188 facet(s) with 1 disconnected edge remain
+WARNING: sanitize: 14 facet(s) with 2 disconnected edges remain
+WARNING: sanitize: 54 non-manifold edge(s) (3+ incident facets) detected
+dragon: 700 facets
+step  1: state_changes: 2 fresh, 28 dead (111 checked)
+step  2: state_changes: 7 fresh, 32 dead (173 checked)
+step  3: state_changes: 11 fresh, 40 dead (227 checked)
+step  4: state_changes: 19 fresh, 77 dead (294 checked)
+step  5: state_changes: 23 fresh, 67 dead (346 checked)
+step  6: state_changes: 38 fresh, 31 dead (331 checked)
+step  7: state_changes: 69 fresh, 5 dead (298 checked)
+step  8: state_changes: 83 fresh, 3 dead (301 checked)
