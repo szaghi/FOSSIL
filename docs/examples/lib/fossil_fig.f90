@@ -7,6 +7,8 @@ module fossil_fig
 !< ghost (the body before an operation, translucent), patch (what an operation added), hole (boundary edges), probe,
 !< foot, inside, outside, box, accent, cell; field (a value in [-1, 1]) and frac (a value in [0, 1]) colour a mesh.
 !< Coordinates are written with 8 significant digits: the drawing, not the data, is the product.
+!< Animations (issue #47 step 5): `fig_anim` sets the seconds per frame, then each `fig_frame` starts a frame; what is
+!< written before the first frame is drawn in every frame, what follows a frame belongs to it alone.
 use fossil,              only : surface_stl_object
 use fossil_facet_object, only : facet_object
 use penf,                only : I4P, R8P
@@ -15,7 +17,7 @@ use vecfor,              only : vector_R8P
 implicit none
 private
 public :: fig_open, fig_zoom, fig_surface, fig_boundary, fig_box, fig_segment, fig_segments, fig_points, fig_label
-public :: fig_triangle, fig_quad, fig_close
+public :: fig_triangle, fig_quad, fig_anim, fig_frame, fig_close
 
 character(*), parameter :: F3 = '(3ES16.8)', F6 = '(6ES16.8)', F9 = '(9ES16.8)', F10 = '(10ES16.8)'
 
@@ -187,6 +189,28 @@ contains
       write(u, F9) a%x, a%y, a%z, c%x, c%y, c%z, d%x, d%y, d%z
    endif
    endsubroutine fig_quad
+
+   subroutine fig_anim(u, seconds)
+   !< Make the scene an animation, `seconds` per frame (default of `fig_frame`).
+   integer(I4P), intent(in) :: u       !< Unit of the scene.
+   real(R8P),    intent(in) :: seconds !< Seconds per frame.
+
+   write(u, '(A,F8.3)') 'anim ', seconds
+   endsubroutine fig_anim
+
+   subroutine fig_frame(u, caption, seconds)
+   !< Start a frame: what follows, until the next frame, is drawn in this frame only.
+   integer(I4P), intent(in)           :: u       !< Unit of the scene.
+   character(*), intent(in), optional :: caption !< This frame's caption.
+   real(R8P),    intent(in), optional :: seconds !< This frame's duration (default: fig_anim's).
+
+   if (present(seconds)) then
+      write(u, '(A,F8.3)') 'frame ', seconds
+   else
+      write(u, '(A)') 'frame'
+   endif
+   if (present(caption)) write(u, '(A)') 'caption '//caption
+   endsubroutine fig_frame
 
    subroutine fig_close(u)
    !< Close the scene.
