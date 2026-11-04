@@ -23,7 +23,9 @@ where the grid meets the wall:
   - face fluid fractions and centroids from exact plane sections;
   - per cell: fluid volume fraction and centroid, and wetted area, centroid
     and normal;
-  - the number of separate fluid pieces of a cell (`cut%pieces`).
+  - the separate fluid pieces of a cell (`cut%pieces`), each with its own
+    volume and centroid, wetted area, centroid and normal, and the fluid
+    fraction of each of the six cell faces (`cut%piece_*`).
 
 The fluid is outside the solid. These outputs serve conservative cut-cell
 closures and sub-cell masks.
@@ -65,6 +67,8 @@ call body%load_from_file(file_name='body.stl', guess_format=.true.)
 call body%cell_wall_fractions(x=xc, y=xc, z=xc, frac=frac, inside=inside)
 call cut_cells_3d(surface=body, x=e, y=e, z=e, cut=cut3)
 print '(A,I0)', 'fluid pieces of cell (4, 4, 4): ', cut3%pieces(4, 4, 4) ! -1: cell not trusted
+if (cut3%pieces(4, 4, 4) > 0) print '(A,ES12.4)', 'volume of its first piece: ', &
+   cut3%piece_volume(cut3%first_piece(4, 4, 4))
 endprogram cut_geometry
 ```
 
@@ -118,6 +122,21 @@ endprogram cut_geometry
   - So a passage narrower than the cell, whose fluid meets the cell boundary
     in two separate disks, is one piece, and a thin plate across the cell
     leaves two.
+  - **Piece measures.** The pieces of cell (i, j, k) are
+    `first_piece(i, j, k)` to `first_piece(i, j, k) + pieces(i, j, k) - 1`;
+    `piece_cell(:, p)` gives the cell back. For each piece:
+    - the wall terms (area, centroid, normal, divergence-theorem volume and
+      moments) of the wall polygons in its set;
+    - the fluid area of each of the six faces by Green's theorem over the
+      fluid edge intervals and the traces of its wall polygons on the face,
+      oriented by the polygon winding: no sign test, so a wall lying in a
+      face plane needs no special case;
+    - volume and centroid from the high faces and the walls (coordinates
+      local to the cell);
+    - an inclusion (a closed solid inside the cell) belongs to the piece
+      around it, found by a ray in +x from its rightmost vertex to the
+      nearest wall, or to the +x face.
+    A cell with one piece takes the cell totals.
 
 ## Checks you can make
 
@@ -151,17 +170,18 @@ endprogram cut_geometry
 | 3-D pieces: thin plate; rods along x, y, z; void in the solid; hollow body; inclusion | 2; 1; 1; 2; 1 |
 | 3-D pieces: cube on a grid through its faces, edges and corners | equal to 2-D, no cell flagged |
 | 3-D pieces: bunny (open, 69451 facets), 24³ | holed cells flagged; no other cell with fluid and 0 pieces |
+| 3-D piece measures: sums over the pieces vs cell totals, 16922 cells (115 with 2+ pieces; tilted wedge, cone, tube, L-prism generic and grid-aligned, plate, hollow box) | volume 5.5·10⁻¹⁵, moments 5.5·10⁻¹⁴, wall terms 3.8·10⁻¹⁵, face fractions 1.6·10⁻¹⁴ |
+| 3-D piece measures: prisms vs the 2-D pieces of the section, 410 pieces | volume, first moments, ±z face fractions ≤ 1.8·10⁻¹⁴ |
+| 3-D piece measures: thin plate; hollow box; inclusion in the void, above a plate, beside a wall | exact volumes (0.5 and 0.499 of the cell; 98 and 1; 0.992; 0.782; 0.792) |
 | `orient3d`: near-coplanar grid (6144 points), coplanar dyadic points | exact signs and zeros (the naive determinant is wrong on 2022) |
 | line crossings, device path vs CPU | 0 mismatches (device path run on the host) |
 
 ## Limitations
 
-- **3-D pieces: a count only.** The 2-D cut cells give each piece its own
-  measures; in 3-D the cell's measures cover all its pieces together.
 - **Zero-volume pieces.** A wall lying on the high plane of a cell belongs to
   that cell, so the open face (aperture 1) bounds a fluid piece of zero
-  volume. It is counted, as in 2-D; a solver can drop pieces with no
-  volume.
+  volume. It is counted, as in 2-D, with `piece_volume` 0 (centroid at the
+  cell centre); a solver can drop pieces with no volume.
 - **Flagged cells (`pieces = -1`).** Cells a boundary edge of the mesh
   overlaps, cells whose fraction is outside [0, 1] (an open surface corrupts
   the face parities beyond the cells it flags), and cells whose edge states
