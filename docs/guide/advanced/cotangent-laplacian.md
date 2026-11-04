@@ -168,22 +168,28 @@ endprogram ex_cotangent_laplacian_mass
 
 The Laplacian itself is a sparse matrix — there is nothing to "see" in
 the operator. What *is* worth visualising is its **action**. Below,
-`L · x` is mapped onto a unit sphere, where `x` is the per-vertex
-x-coordinate field:
+`M⁻¹ L x` is mapped onto a unit sphere, where `x` is the per-vertex
+x-coordinate field (the remeshed marching-cubes sphere of the
+[curvature page](/guide/advanced/curvature), 2720 vertices; each facet
+shows the mean of its three vertex values, halved, so that the colour
+saturates at ±2):
 
-![L applied to the x-coordinate field on a unit sphere](/pictures/advanced/laplacian-sphere-Lx.png)
+![M^-1 L x on a remeshed unit sphere, seen from -y with +x to the right: ember on the -x cap, teal on the +x cap, a cream band at x = 0, with a facet-scale speckle](../../examples/images/ref-laplacian-sphere-Lx.svg){.fossil-figure}
 
 The x-coordinate is harmonic in the plane (`Δx = 0`), so on a *flat*
 mesh `L · x` would be zero everywhere. On the *curved* sphere it is
-not: `L · x` picks up a smooth dipole pattern aligned with the ±x
-axis — it is, up to the mass-matrix scaling, the x-component of the
-mean-curvature normal. The near-zero band around the equator and the
-sign flip between the +x and −x caps are the operator correctly
-reporting "how much does the coordinate field deviate from its local
-surface average." The small per-triangle speckle is marching-cubes
-tessellation noise (the same coarse-mesh effect discussed on the
-[curvature page](/guide/advanced/curvature)); the fixture is the same
-remeshed sphere. Reproducible via `scripts/make_doc_images.sh`.
+not: `x` is an eigenfunction of the Laplace-Beltrami operator, `Δ_S x =
+-2x` on the unit sphere, and `M⁻¹ L x` is its discrete version (the
+raw `L x` carries the vertex area `M_ii` as a factor, which varies from
+vertex to vertex; up to that scaling it is the x-component of the
+mean-curvature normal). Hence the dipole aligned with the ±x axis:
+`+2` on the −x cap, `−2` on the +x cap, zero on the band x = 0. The
+facet-scale speckle is the operator's pointwise error on an irregular
+mesh (RMS 0.47 against `-2x`, up to 5.3 at a few vertices: the same
+non-convergence discussed on the [curvature
+page](/guide/advanced/curvature)), not marching-cubes noise: the
+sphere was remeshed. The figure is drawn by
+`docs/examples/src/fig_ref_cotangent_laplacian.f90`.
 
 ## Known limitations
 

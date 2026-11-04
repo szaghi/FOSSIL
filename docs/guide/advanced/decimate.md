@@ -56,7 +56,9 @@ call surface%decimate(target_facets, status)
   count. The algorithm collapses edges until it reaches this count or
   cannot safely collapse any more.
 - **`status`**:
-  - `DEC_STATUS_OK` — reached `target_facets` exactly.
+  - `DEC_STATUS_OK` — reached `target_facets`: the count is at or just
+    below it (a collapse removes two facets, so an odd target can end
+    one below: the dragon's 6588 / 4 = 1647 ends at 1646).
   - `DEC_STATUS_NO_PROGRESS` — couldn't reach the target; surface is
     at the smallest count the safety checks allowed.
   - `DEC_STATUS_BAD_INPUT` — `target_facets <= 0`, or the input
@@ -90,19 +92,22 @@ endprogram ex_decimate
 
 ## Visual reference
 
-Stanford bunny — input (69 451 facets):
+The example's bunny (69 451 facets) is too heavy for a figure; the
+same call on the dragon (`dragon.stl`), 6588 facets as loaded:
 
-![Stanford bunny — input](/pictures/advanced/decimate-bunny-input.png)
+![the dragon as loaded, 6588 facets, flat-shaded with faint facet edges](../../examples/images/ref-decimate-dragon-input.svg){.fossil-figure}
 
-After decimation to 25 % of input (17 362 facets):
+After `decimate(target_facets=n0 / 4)` (1646 facets, from the same
+camera):
 
-![Stanford bunny — decimated to 25%](/pictures/advanced/decimate-bunny-output.png)
+![the dragon decimated to a quarter of its facets, 1646: the same silhouette with coarser facets on the body, horns, claws and tail kept](../../examples/images/ref-decimate-dragon-output.svg){.fossil-figure}
 
 The silhouette is preserved; per-facet area roughly quadruples (each
 remaining facet covers roughly 4× the area of an original). The
-ear-and-chin detail is preserved because those regions have high
-quadric error per edge, so the heap keeps them out of the collapse
-queue until the budget forces it.
+thin features (horns, claws, the tail's crest) are preserved because
+those regions have high quadric error per edge, so the heap keeps them
+out of the collapse queue until the budget forces it; the smooth body
+takes most of the collapses.
 
 ## Known limitations
 

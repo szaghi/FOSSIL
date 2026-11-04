@@ -114,22 +114,24 @@ endprogram ex_boolean
 
 ## Visual reference
 
-Two unit cubes offset diagonally by `(0.5, 0.5, 0.5)`. From the same
-input pair, the four boolean ops produce:
+Two unit cubes offset diagonally by `(0.5, 0.5, 0.5)` (`cube-01.stl`, the
+unit cube with 8 facets per face). From the same input pair, three of the
+four boolean ops produce:
 
 **`A ∪ B` — UNION** (volume 1.875 = 2 − 0.125):
 
-![Boolean UNION](/pictures/advanced/boolean-union.png)
+![the union of two unit cubes offset by (0.5, 0.5, 0.5): one solid, the two cubes joined at their overlap](../../examples/images/ref-boolean-union.svg){.fossil-figure}
 
 **`A ∩ B` — INTERSECT** (volume 0.125 = 0.5³):
 
-![Boolean INTERSECT](/pictures/advanced/boolean-intersect.png)
+![the intersection of the two cubes: the overlap cube of side 0.5, drawn inside the two inputs (translucent)](../../examples/images/ref-boolean-intersect.svg){.fossil-figure}
 
 **`A \ B` — DIFFERENCE** (volume 0.875 = 1 − 0.125):
 
-![Boolean DIFFERENCE](/pictures/advanced/boolean-difference.png)
+![the difference A minus B: the unit cube with its corner of side 0.5 cut away, next to the subtracted cube B (translucent)](../../examples/images/ref-boolean-difference.svg){.fossil-figure}
 
-All three results match their analytic volume to FP precision.
+All three results match their analytic volume to FP precision (errors
+below 5e-16, in the captions).
 
 ### Coplanar faces
 

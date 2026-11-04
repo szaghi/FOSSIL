@@ -123,25 +123,36 @@ endprogram ex_alpha_wrap
 `wrapped%is_watertight()` is `.true.` even though the input wasn't.
 `status` is `AWRAP_STATUS_NOT_CONVERGED` (some vertices are at the
 α-thick boundary band rather than snapped exactly to the input
-surface) — this is fine, the wrap topology is correct.
+surface). Watertight is not solid, though: the missing facet is half a
+face, far wider than the default α, so the wrap is a thin closed shell
+around both sides of the walls (volume 0.10, not 1; see the figures
+below). Check `get_volume()`, not only `is_watertight()`.
 
 ## Visual reference
 
-A unit cube minus one facet — the same input as the example above
-(the missing facet is on the back face, not visible from this angle):
+A unit cube minus one facet, as in the example above (`cube-01.stl`, 8
+facets per face, minus its first facet: a triangle of legs 0.5 on the
+face x = 0, its boundary in ember):
 
-![Holed cube — input with hidden hole](/pictures/advanced/alpha-wrap-input.png)
+![the unit cube minus one facet: a triangular hole of legs 0.5 on the face x = 0, its boundary in ember](../../examples/images/ref-alpha-wrap-input.svg){.fossil-figure}
 
-After `alpha_wrap` with α=0.1 and offset=0.033 (~CGAL defaults for a
-unit cube):
+After `alpha_wrap` with α=0.1 and offset=0.033 (about three times
+CGAL's default α, which is `bbox_diag / 50` ≈ 0.035 for a unit cube),
+cut open by the plane y = 0.83 through the hole:
 
-![Wrapped surrogate — watertight, voxel-y](/pictures/advanced/alpha-wrap-output.png)
+![the wrap cut open through the hole: a voxel-y closed shell lining both the outside and the inside of the cube's walls, entering through the hole](../../examples/images/ref-alpha-wrap-output.svg){.fossil-figure}
 
 The wrap shows the characteristic voxel-y texture from the leaf-size-
-α octree boundary extraction. Every face is closed; the hole in the
-input is gone. The rendered output is smaller than the input render
-because pvbatch auto-frames the slightly-larger wrap (the wrap's
-bounding box extends ~α beyond the input).
+α octree boundary extraction, and it is watertight, but **the hole is
+not closed**. The hole is wider than α, so the flood fill of stage 2
+gets through it and reaches the inside: the wrap is one closed shell
+that lines both sides of the cube's walls and enters through the hole,
+volume 0.35 instead of the cube's 1. This is what an alpha wrap does
+by design (a gap wider than α is a feature to keep, not a defect).
+Closing the hole takes α larger than it: with α = 0.3 (default offset) the wrap is
+the solid again, but a coarse 1.1-wide box (volume 1.331), since
+nothing snaps its vertices back to the input. The wrap extends beyond
+the input on every side (bounding box [-0.025, 1.025]³ at α = 0.1).
 
 ## Known limitations
 

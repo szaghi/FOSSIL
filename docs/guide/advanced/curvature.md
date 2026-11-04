@@ -178,8 +178,11 @@ call sphere%gaussian_curvature(K=curv_k, status=status)
 print '(A,I0)',      'curv status = ', status
 print '(A,I0)',      'n_vertices  = ', size(curv_k, kind=I4P)
 print '(A,ES12.5)',  'mean K      = ', sum(curv_k) / real(size(curv_k, kind=I4P), R8P)
-! A unit sphere has K = 1 everywhere; the discrete mean lands near 1
-! (tessellation noise spreads the per-vertex values — see Known limitations).
+! A unit sphere has K = 1 everywhere, but this raw extraction prints a mean
+! of -31.8: it has slits (boundary vertices take the half-defect formula)
+! and slivers. sanitize(fill_holes=.true.) + isotropic_remesh first bring
+! the mean to 1.02 (see Visual reference); the per-vertex values still
+! scatter (see Known limitations).
 endprogram ex_gaussian_curvature
 ```
 
@@ -251,31 +254,40 @@ no new infrastructure. Tracked under [issue
 
 ## Visual reference
 
-Gaussian curvature `K` on a unit sphere (built by marching cubes, then
-isotropically remeshed), coloured through a diverging map:
+A unit sphere by marching cubes (the `|x| - 1` field on 31³ samples of
+[-1.5, 1.5]³, repaired by `sanitize(fill_holes=.true.)`: the raw
+extraction has slits), then isotropically remeshed with the defaults
+(5436 facets). Each facet is coloured by the mean of its three vertex
+values minus the exact value 1 (teal below, ember above; the scale is
+in the caption). Gaussian curvature `K` by `gaussian_curvature`:
 
-![Gaussian curvature K on a remeshed unit sphere](/pictures/advanced/curvature-sphere-gaussian.png)
+![a remeshed unit sphere coloured by K - 1 from gaussian_curvature, saturating at +-1: a fine teal-ember speckle over the whole surface, facet by facet](../../examples/images/ref-curvature-sphere-gaussian.svg){.fossil-figure}
 
-Signed mean curvature `H` on the same surface:
+Signed mean curvature `H` on the same surface, by `mean_curvature`
+(left) and by `jet_curvature` (right), same colour scale:
 
-![Signed mean curvature H on a remeshed unit sphere](/pictures/advanced/curvature-sphere-mean.png)
+<div class="fossil-pair">
 
-**Read these figures honestly.** The bulk of each sphere reads as a
-near-uniform colour — that uniform field *is* the correct answer:
-`K ≈ 1` and `H ≈ 1` everywhere on a unit sphere. The speckled
-hot-spot clusters are **discrete-curvature artefacts at
-tessellation-degenerate vertices**, exactly the coarse-mesh noise
-described in [Known limitations](#known-limitations) below. They are
-not a rendering bug and they are not a bug in the curvature TBPs —
-they are what the discrete angle-defect and mean-curvature-normal
-formulae genuinely produce on the sliver triangles that survive even
-after a remesh of a marching-cubes sphere. The colour bar is clamped
-to the 2nd/98th percentile so the bulk signal stays visible despite
-the outliers. On a clean analytic triangulation the field is visibly
-uniform; on real CAD STL, run [§1.7 isotropic
-remeshing](/guide/advanced/isotropic-remesh) first if the curvature
-field looks this noisy. The fixtures and renders are reproducible via
-`scripts/make_doc_images.sh`.
+![the same sphere coloured by H - 1 from mean_curvature, saturating at +-0.5: a speckle over the whole surface, values from 0.31 to 1.87](../../examples/images/ref-curvature-sphere-mean.svg)
+
+![the same sphere coloured by H - 1 from jet_curvature, same scale: an almost uniform cream, values from 0.85 to 1.17](../../examples/images/ref-curvature-sphere-jet.svg)
+
+</div>
+
+**Read these figures honestly.** The means are right (`K` and `H`
+average 1.02 and 1.01 over the vertices, the exact value is 1), but the
+per-vertex values of the angle-defect and cotangent operators are not:
+on this irregular triangulation they scatter over the whole surface, no
+cluster or region in particular (2nd-98th percentile: `K` from -0.16 to
+3.10, `H` from 0.31 to 1.87). This is the non-convergence described in
+[Known limitations](#known-limitations) below, not a rendering bug or a
+bug in the curvature TBPs: it is what the discrete formulae genuinely
+produce on a mesh whose vertex valences and triangle shapes vary from
+vertex to vertex. `jet_curvature` on the same mesh stays within 0.85 to
+1.17. Use it when the pointwise value matters; on real CAD STL, run
+[§1.7 isotropic remeshing](/guide/advanced/isotropic-remesh) first in
+any case. The figures are drawn by
+`docs/examples/src/fig_ref_curvature.f90`.
 
 ## Known limitations
 
