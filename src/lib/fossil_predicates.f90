@@ -232,6 +232,7 @@ contains
    endfunction orient2d
 
    pure function orient2d_xy(ax, ay, bx, by, cx, cy) result(sign_area)
+   !$acc routine seq
    !< Exact sign of (a - c) x (b - c) for the points (ax, ay), (bx, by), (cx, cy).
    !<
    !< Positive if a, b, c run counter-clockwise, negative if clockwise, zero if they are
@@ -284,6 +285,7 @@ contains
    enddo
    contains
       pure subroutine add_product(p, q, s, e, n)
+      !$acc routine seq
       !< Add s * p * q (s = +-1) to the expansion e(1:n), exactly.
       real(R8P),    intent(in)    :: p, q, s !< Factors and sign.
       real(R8P),    intent(inout) :: e(:)    !< Expansion.
@@ -302,6 +304,7 @@ contains
    endfunction orient2d_xy
 
    pure subroutine split3(x, piece)
+   !$acc routine seq
    !< Split x exactly into three pieces of at most 18 significant bits, x = sum(piece).
    !<
    !< Bit masks only, no multiplication (see `orient2d_xy`): the high piece keeps the top 18
@@ -352,6 +355,7 @@ contains
    endfunction truncate17
 
    pure function truncate18(x) result(t)
+   !$acc routine seq
    !< x with all but its top 18 significant bits cleared (sign and exponent kept).
    real(R8P), intent(in) :: x !< Value.
    real(R8P)             :: t !< Truncated value.
@@ -368,6 +372,7 @@ contains
    endfunction truncate18
 
    pure subroutine grow_expansion(e, n, b)
+   !$acc routine seq
    !< e = e + b exactly (Shewchuk's Grow-Expansion with zero elimination).
    !<
    !< e(1:n) is a nonoverlapping expansion in increasing magnitude; so is the result.
@@ -396,6 +401,7 @@ contains
    endsubroutine grow_expansion
 
    pure subroutine two_sum(a, b, s, err)
+   !$acc routine seq
    !< s + err = a + b exactly, s = fl(a + b) (Knuth's TwoSum, no ordering assumption).
    real(R8P), intent(in)  :: a, b   !< Addends.
    real(R8P), intent(out) :: s, err !< Rounded sum and its exact error.

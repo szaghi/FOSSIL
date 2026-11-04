@@ -68,7 +68,7 @@ contains
    real(R8P), intent(in) :: a(2), b(2)   !< Segment.
    logical               :: overlap      !< Result.
 
-   overlap = in_box(a) .or. in_box(b)
+   overlap = in_box(a, lo, hi) .or. in_box(b, lo, hi)
    if (overlap) return
    ! quick reject: segment box disjoint from the box
    if (max(a(1), b(1)) < lo(1) .or. min(a(1), b(1)) > hi(1) .or. max(a(2), b(2)) < lo(2) .or. min(a(2), b(2)) > hi(2)) return
@@ -76,15 +76,17 @@ contains
              segments_intersect_2d(a(1), a(2), b(1), b(2), hi(1), lo(2), hi(1), hi(2)) .or. &
              segments_intersect_2d(a(1), a(2), b(1), b(2), hi(1), hi(2), lo(1), hi(2)) .or. &
              segments_intersect_2d(a(1), a(2), b(1), b(2), lo(1), hi(2), lo(1), lo(2))
-   contains
-      pure function in_box(p) result(yes)
-      !< p in the closed box.
-      real(R8P), intent(in) :: p(2) !< Point.
-      logical               :: yes  !< Result.
-
-      yes = p(1) >= lo(1) .and. p(1) <= hi(1) .and. p(2) >= lo(2) .and. p(2) <= hi(2)
-      endfunction in_box
    endfunction box_segment_overlap_2d
+
+   pure function in_box(p, lo, hi) result(yes)
+   !< p in the closed box.
+   !$acc routine seq
+   real(R8P), intent(in) :: p(2)         !< Point.
+   real(R8P), intent(in) :: lo(2), hi(2) !< Box.
+   logical               :: yes  !< Result.
+
+   yes = p(1) >= lo(1) .and. p(1) <= hi(1) .and. p(2) >= lo(2) .and. p(2) <= hi(2)
+   endfunction in_box
 
    pure function box_segment_distance2_2d(lo, hi, a, b) result(d2)
    !< Squared distance between the segment ab and the closed box [lo, hi]; exactly 0 when they
@@ -100,35 +102,39 @@ contains
 
    d2 = 0._R8P
    if (box_segment_overlap_2d(lo, hi, a, b)) return
-   d2 = min(point_box_d2(a), point_box_d2(b))
+   d2 = min(point_box_d2(a, lo, hi), point_box_d2(b, lo, hi))
    corner = reshape([lo(1), lo(2), hi(1), lo(2), hi(1), hi(2), lo(1), hi(2)], [2, 4])
    do k = 1, 4
-      d2 = min(d2, point_segment_d2(corner(:, k)))
+      d2 = min(d2, point_segment_d2(corner(:, k), a, b))
    enddo
-   contains
-      pure function point_box_d2(p) result(dd)
-      !< Squared distance from p to the box.
-      real(R8P), intent(in) :: p(2) !< Point.
-      real(R8P)             :: dd   !< Squared distance.
-      real(R8P)             :: e(2) !< Excess.
-
-      e = max(lo - p, 0._R8P, p - hi)
-      dd = e(1)**2 + e(2)**2
-      endfunction point_box_d2
-
-      pure function point_segment_d2(p) result(dd)
-      !< Squared distance from p to the segment ab.
-      real(R8P), intent(in) :: p(2) !< Point.
-      real(R8P)             :: dd   !< Squared distance.
-      real(R8P)             :: w(2), s(2), t, l2 !< Work.
-
-      s = b - a ; w = p - a ; l2 = s(1)**2 + s(2)**2
-      t = 0._R8P
-      if (l2 > 0._R8P) t = max(0._R8P, min(1._R8P, (w(1) * s(1) + w(2) * s(2)) / l2))
-      w = p - (a + t * s)
-      dd = w(1)**2 + w(2)**2
-      endfunction point_segment_d2
    endfunction box_segment_distance2_2d
+
+   pure function point_box_d2(p, lo, hi) result(dd)
+   !< Squared distance from p to the box.
+   !$acc routine seq
+   real(R8P), intent(in) :: p(2)         !< Point.
+   real(R8P), intent(in) :: lo(2), hi(2) !< Box.
+   real(R8P)             :: dd           !< Squared distance.
+   real(R8P)             :: e(2)         !< Excess.
+
+   e = max(lo - p, 0._R8P, p - hi)
+   dd = e(1)**2 + e(2)**2
+   endfunction point_box_d2
+
+   pure function point_segment_d2(p, a, b) result(dd)
+   !< Squared distance from p to the segment ab.
+   !$acc routine seq
+   real(R8P), intent(in) :: p(2)       !< Point.
+   real(R8P), intent(in) :: a(2), b(2) !< Segment.
+   real(R8P)             :: dd         !< Squared distance.
+   real(R8P)             :: w(2), s(2), t, l2 !< Work.
+
+   s = b - a ; w = p - a ; l2 = s(1)**2 + s(2)**2
+   t = 0._R8P
+   if (l2 > 0._R8P) t = max(0._R8P, min(1._R8P, (w(1) * s(1) + w(2) * s(2)) / l2))
+   w = p - (a + t * s)
+   dd = w(1)**2 + w(2)**2
+   endfunction point_segment_d2
 
    pure function segments_intersect_2d(p1u, p1v, p2u, p2v, q1u, q1v, q2u, q2v) result(hit)
    !< True if the closed segments p1p2 and q1q2 share a point (exact, `orient2d_xy`).

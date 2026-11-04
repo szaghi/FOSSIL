@@ -53,9 +53,9 @@ contains
 
    i1 = mod(axis, 3_I4P) + 1_I4P ; i2 = mod(axis + 1_I4P, 3_I4P) + 1_I4P
    hit = .false. ; t = 0._R8P ; enter = .false.
-   call psign(tv(3 + i1), tv(3 + i2), tv(6 + i1), tv(6 + i2), wa, sa) ! edge B -> C: weight of A
-   call psign(tv(6 + i1), tv(6 + i2), tv(i1), tv(i2), wb, sb)         ! edge C -> A: weight of B
-   call psign(tv(i1), tv(i2), tv(3 + i1), tv(3 + i2), wc, sc)         ! edge A -> B: weight of C
+   call psign(tv(3 + i1), tv(3 + i2), tv(6 + i1), tv(6 + i2), a, b, wa, sa) ! edge B -> C: weight of A
+   call psign(tv(6 + i1), tv(6 + i2), tv(i1), tv(i2), a, b, wb, sb)         ! edge C -> A: weight of B
+   call psign(tv(i1), tv(i2), tv(3 + i1), tv(3 + i2), a, b, wc, sc)         ! edge A -> B: weight of C
    if (sa == 0._R8P .or. sa /= sb .or. sa /= sc) return
    hit = .true.
    enter = sa < 0._R8P
@@ -64,30 +64,32 @@ contains
    else
       t = (tv(axis) + tv(3 + axis) + tv(6 + axis)) / 3._R8P
    endif
-   contains
-      pure subroutine psign(p1, p2, q1, q2, w, s)
-      !< Weight orient2d(p, q, (a, b)) (approximate magnitude, exact sign) and its perturbed sign.
-      real(R8P), intent(in)  :: p1, p2, q1, q2 !< Edge end points (projected).
-      real(R8P), intent(out) :: w, s           !< Weight, perturbed sign (-1, 0, +1).
-
-      w = orient2d_xy(p1, p2, q1, q2, a, b)
-      if (w > 0._R8P) then
-         s = 1._R8P
-      elseif (w < 0._R8P) then
-         s = -1._R8P
-      elseif (p2 > q2) then ! d/da orient2d(p, q, P) = p2 - q2
-         s = 1._R8P
-      elseif (p2 < q2) then
-         s = -1._R8P
-      elseif (q1 > p1) then ! d/db orient2d(p, q, P) = q1 - p1
-         s = 1._R8P
-      elseif (q1 < p1) then
-         s = -1._R8P
-      else
-         s = 0._R8P
-      endif
-      endsubroutine psign
    endsubroutine tri_line_hit_oac
+
+   pure subroutine psign(p1, p2, q1, q2, a, b, w, s)
+   !< Weight orient2d(p, q, (a, b)) (approximate magnitude, exact sign) and its perturbed sign.
+   !$acc routine seq
+   real(R8P), intent(in)  :: p1, p2, q1, q2 !< Edge end points (projected).
+   real(R8P), intent(in)  :: a, b           !< Line position.
+   real(R8P), intent(out) :: w, s           !< Weight, perturbed sign (-1, 0, +1).
+
+   w = orient2d_xy(p1, p2, q1, q2, a, b)
+   if (w > 0._R8P) then
+      s = 1._R8P
+   elseif (w < 0._R8P) then
+      s = -1._R8P
+   elseif (p2 > q2) then ! d/da orient2d(p, q, P) = p2 - q2
+      s = 1._R8P
+   elseif (p2 < q2) then
+      s = -1._R8P
+   elseif (q1 > p1) then ! d/db orient2d(p, q, P) = q1 - p1
+      s = 1._R8P
+   elseif (q1 < p1) then
+      s = -1._R8P
+   else
+      s = 0._R8P
+   endif
+   endsubroutine psign
 
    pure subroutine seg_line_hit_oac(pu, pv, qu, qv, axis, a, hit, t, enter)
    !< Crossing of the line along `axis` (1: along u at v = a; 2: along v at u = a) with the segment pq.

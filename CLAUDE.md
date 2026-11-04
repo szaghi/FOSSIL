@@ -42,7 +42,8 @@ module load nvhpc/26.9
 fobis build --mode tests-nvidia --varset local_nvf
 ```
 
-**Requires nvfortran >= 26.9.** Validated on 26.9 (RTX 4070, `cc89`); 26.1 is no
+**Requires nvfortran >= 26.9.** Validated on 26.9 (RTX 4070, `cc89`; last on 2026-11-04 with
+bunny, cube-01, dragon-fine at 32³, every device-vs-serial line 0); 26.1 is no
 longer supported, since the query-point mapping workaround it needed was removed.
 In a non-interactive shell `module load` may not populate `PATH`; export the SDK's
 `compilers/bin` and `compilers/lib` (+ `cuda/lib64`) directly instead.
@@ -55,7 +56,8 @@ Device-code rules (issue #20; see the comments in the named files):
   `=`, so set `vector_R8P` components directly (or call `assign_vector_R8P_dev`).
 - A `!$acc routine seq` procedure that uses `vector_R8P` must not be added to
   `fossil_facet_object`: it triggers an nvfortran NVVM duplicate-type bug (still
-  present in 26.9). Put it in its own module, like `fossil_triangle_closest`.
+  present in 26.9). Put it in its own module, like `fossil_triangle_closest`, and keep ONE such
+  routine per module: two in the same module trip it too (helpers take plain reals).
 - `enter_device` maps member arrays, never `self`: inside a compute region,
   reference them through top-level pointer aliases, never as
   `self%aabb%payload(i)`. The mapped arrays are `aabb%node`, `aabb%payload`,
@@ -81,7 +83,11 @@ rejects `(expr) .cross. (expr)` in one strict-normal test).
 The `tests-nvidia-curve` mode is its 2-D twin (issue #36): it builds
 `fossil_test_curve_bench` only (segment BVH closest point, 2-D fast winding number on
 the device). Same clean-build rule (shared `exe/`), pass criterion
-`device vs serial max |d| err 0.000E+00`; the `rich` and `box device vs serial mismatches` lines must be 0 too (the 3-D bench prints the same lines). Not yet validated on the GPU (pending).
+`device vs serial max |d| err 0.000E+00`; the `rich`, `box`, `posed`, `sign bench` and `line crossings` mismatch lines must be 0 too (the 3-D bench prints the same lines). Validated on the GPU 2026-11-04 (26.9, RTX 4070, 512²).
+
+The NVIDIA modes compile with `-gpu=nofma -Mnofma` (`$CSTATIC_NV`): with FMA contraction the
+device lost host bit-exactness (1-ulp distances, sign and facet-id flips at near-ties); the device
+kernels are 15-30 % slower for it. Do not remove it unless the gates stay at 0.
 
 The device build scope is **BVH-only** (the octree stays CPU-only).
 

@@ -49,8 +49,11 @@ $CSHARED_INT = -cpp -c -fpic -assume realloc_lhs
 $LSHARED     = -shared
 $CSTATIC_GNU = -cpp -c -frealloc-lhs
 $CSTATIC_INT = -cpp -c -assume realloc_lhs
-$CSTATIC_NV  = -cpp -c -acc -gpu=$NVF_CC -Minfo=accel
-$LSTATIC_NV  = -acc -gpu=$NVF_CC -Minfo=accel
+# nofma on host and device: FMA contraction differs between them, so the device path lost
+# host bit-exactness (1-ulp distances, 1504 sign-bench flips at near-ties; 2026-11-04, nvfortran
+# 26.9). Cost measured on dragon-fine 32^3, RTX 4070: device kernels 15-30 % slower.
+$CSTATIC_NV  = -cpp -c -acc -gpu=$NVF_CC,nofma -Mnofma -Minfo=accel
+$LSTATIC_NV  = -acc -gpu=$NVF_CC,nofma -Mnofma -Minfo=accel
 $OPENMP_GNU  = -fopenmp
 $DEBUG_GNU   = -O0 -g3 -Warray-bounds -Wcharacter-truncation -Wline-truncation -Wimplicit-interface -Wimplicit-procedure -Wunderflow -fcheck=all -fmodule-private -ffree-line-length-132 -fimplicit-none -fbacktrace -fdump-core -finit-real=nan -std=f2018 -fall-intrinsics
 $DEBUG_INT   = -O0 -debug all -check all -warn all -extend-source 132 -traceback -gen-interfaces#-fpe-all=0 -fp-stack-check -fstack-protector-all -ftrapuv -no-ftz -std18

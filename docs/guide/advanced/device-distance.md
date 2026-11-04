@@ -338,9 +338,16 @@ the same signs for a fraction of the cost.
   the CPU path is not compared bit for bit. The device build is not
   part of CI (no GPU runner): it is validated manually with
   `fossil_test_distance_bench`, which fails unless the device result
-  matches the serial CPU result bit for bit. Bit-exactness is not
-  guaranteed by construction: a different GPU or compiler version could
-  contract a multiply-add differently and move the last bits.
+  matches the serial CPU result bit for bit.
+- **No FMA contraction.** The NVIDIA modes compile with `-gpu=nofma -Mnofma`:
+  host and device contract multiply-adds differently, and with contraction
+  the device distances moved by 1 ulp, which flipped signs and closest-facet
+  ids at near-ties (1504 of the sign benchmark's queries; nvfortran 26.9,
+  2026-11-04). Without it every device check is bit-exact again; the
+  device kernels are 15-30 % slower than the timings above, which were
+  measured with contraction on (dragon-fine 32³: distance 29.9 → 35.9 ms,
+  FWN 299 → 390 ms). A new kernel stays bit-exact only if it uses no
+  operation the two sides round differently.
 
 ## See also
 
