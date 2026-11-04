@@ -5,9 +5,11 @@ module fossil_self_intersection
 !<
 !< Detects pairs of facets in the same surface whose triangles cross
 !< transversally (Möller tri-tri intersection). Reports the facet ID pair plus
-!< the intersection segment endpoints. Adjacent facets (those sharing a vertex
-!< or edge) are filtered out of the candidate set — they intersect only at the
-!< shared feature, which is geometrically expected, not a defect.
+!< the intersection segment endpoints. Facets sharing an edge meet only along
+!< it (unless coplanar and folded over each other) and are skipped. Facets
+!< sharing one vertex are not skipped (issue #46): they may still cross away
+!< from it, and are classified exactly; touching only at the shared vertex is
+!< not reported.
 !<
 !< Algorithm:
 !<
@@ -17,12 +19,17 @@ module fossil_self_intersection
 !<      candidate facet-pairs (i, j) with i < j whose facet bboxes overlap.
 !<      Tree-kind-agnostic — uses the public `enumerate_children` dispatcher.
 !<
-!<   2. Adjacency filter: skip pairs that share any vertex. Vertex identity is
+!<   2. Adjacency filter: count the shared vertices. Vertex identity is
 !<      determined by the pool's `vertex_id` (when the pool is in use) or by
-!<      coordinate equality within EPS otherwise.
+!<      coordinate equality within EPS otherwise. Two or three shared: skip.
 !<
-!<   3. Narrow phase: `facet%intersect_facet` (Möller 1997). Returns the segment
-!<      endpoints of any genuine transverse intersection.
+!<   3. Narrow phase. No shared vertex: `facet%intersect_facet` (Möller 1997),
+!<      the segment endpoints of a transverse intersection. One shared vertex:
+!<      the exact `pair_classify` (orient3d); a crossing (a common segment of
+!<      positive length) is reported, a touch (the vertex alone) is not.
+!<      Coplanar pairs sharing a vertex (unit normals parallel to 1e-12 rad)
+!<      are still skipped: an overlap of two coplanar facets around a common
+!<      vertex is not detected, nor a crossing at an angle below 1e-12 rad.
 !<
 !< Resolution (retriangulation along intersection segments and interior pruning
 !< via the generalized winding number) is left to the §1.1 booleans PR, which
@@ -32,6 +39,8 @@ use fossil_aabb_node_object, only : aabb_node_object
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object,     only : facet_object
 use fossil_list_id_object,   only : list_id_object
+use fossil_predicates,       only : orient3d
+use fossil_tritri_exact,     only : pair_classify, PAIR_CROSSING
 use fossil_utils,            only : EPS
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
@@ -42,6 +51,7 @@ public :: intersection_pair_t
 public :: find_self_intersections
 
 integer(I4P), parameter :: MAX_CHILDREN = 8_I4P  !< Buffer size for `enumerate_children` (octree fan-out).
+real(R8P),    parameter :: COPLANAR_SIN2 = 1.e-24_R8P !< Facets sharing a vertex with sin^2(normal angle) below: coplanar.
 
 type :: intersection_pair_t
    !< Single self-intersection record: an unordered pair of facet IDs (`a < b`)
@@ -106,8 +116,7 @@ contains
    do i = 1, n - 1
       do j = i + 1, n
          if (.not. bboxes_overlap(facet(i), facet(j))) cycle
-         if (share_any_vertex(facet(i), facet(j))) cycle
-         call facet(i)%intersect_facet(other=facet(j), p=p, q=q, intersects=hit)
+         call test_pair(fa=facet(i), fb=facet(j), hit=hit, p=p, q=q)
          if (hit) call push_pair(buf=buf, nfound=nfound, a=i, b=j, p=p, q=q)
       enddo
    enddo
@@ -227,8 +236,7 @@ contains
          if (na == nb .and. fi >= fj) cycle  ! intra-leaf: i < j only
          if (na /= nb .and. fi /= lo) cycle  ! inter-leaf: only the (lo, hi) direction
          if (.not. bboxes_overlap(facet(lo), facet(hi))) cycle
-         if (share_any_vertex(facet(lo), facet(hi))) cycle
-         call facet(lo)%intersect_facet(other=facet(hi), p=p, q=q, intersects=hit)
+         call test_pair(fa=facet(lo), fb=facet(hi), hit=hit, p=p, q=q)
          if (hit) call push_pair(buf=buf, nfound=nfound, a=lo, b=hi, p=p, q=q)
       enddo
    enddo
@@ -245,40 +253,81 @@ contains
                 fa%bb(2)%z < fb%bb(1)%z .or. fb%bb(2)%z < fa%bb(1)%z)
    endfunction bboxes_overlap
 
-   pure function share_any_vertex(fa, fb) result(yes)
-   !< True if `fa` and `fb` share at least one vertex.
+   subroutine test_pair(fa, fb, hit, p, q)
+   !< Narrow phase of one candidate pair (see the module header, steps 2 and 3).
+   type(facet_object), intent(in)  :: fa, fb !< The pair.
+   logical,            intent(out) :: hit    !< True if the facets cross.
+   type(vector_R8P),   intent(out) :: p, q   !< Intersection segment, if hit.
+   integer(I4P)                    :: kind   !< PAIR_* code of the exact classification.
+
+   hit = .false.
+   select case (shared_vertices_number(fa, fb))
+   case (0_I4P)
+      call fa%intersect_facet(other=fb, p=p, q=q, intersects=hit)
+   case (1_I4P)
+      ! the shared vertex lies on both planes: if the other two vertices of either facet are strictly on one side
+      ! of the other's plane, the facets meet at that vertex alone. This exact filter skips orient3d on the shared
+      ! vertex (always zero, the slow exact path), which every pair of a fan around a vertex would take.
+      ! coplanar (to 1e-12 rad: unit normals parallel, a vertex in common) are skipped, see the module header; the
+      ! test is cheap, while orient3d on coplanar points takes its slow exact path (fans of flat faces)
+      if ((fa%normal%y * fb%normal%z - fa%normal%z * fb%normal%y)**2 + &
+          (fa%normal%z * fb%normal%x - fa%normal%x * fb%normal%z)**2 + &
+          (fa%normal%x * fb%normal%y - fa%normal%y * fb%normal%x)**2 <= COPLANAR_SIN2) return
+      if (off_plane_one_side(t=fa%vertex, s=fb%vertex)) return
+      if (off_plane_one_side(t=fb%vertex, s=fa%vertex)) return
+      call pair_classify(ta=fa%vertex, tb=fb%vertex, kind=kind, p=p, q=q)
+      hit = kind == PAIR_CROSSING
+   case default
+      p = fa%vertex(1) ; q = p ! sharing an edge (or a duplicate): they meet along it
+   endselect
+   endsubroutine test_pair
+
+   function off_plane_one_side(t, s) result(yes)
+   !< True if the vertices of `s` not shared with `t` are all strictly on one side of the plane of `t` (exact).
+   type(vector_R8P), intent(in) :: t(3) !< Triangle giving the plane.
+   type(vector_R8P), intent(in) :: s(3) !< Triangle sharing one vertex with `t`.
+   logical                      :: yes
+   integer(I4P)                 :: i, npos, nneg, nfree
+   real(R8P)                    :: o
+
+   npos = 0_I4P ; nneg = 0_I4P ; nfree = 0_I4P
+   do i = 1, 3
+      if (vertex_coincident(s(i), t(1)) .or. vertex_coincident(s(i), t(2)) .or. vertex_coincident(s(i), t(3))) cycle
+      nfree = nfree + 1_I4P
+      o = orient3d(t(1), t(2), t(3), s(i))
+      if (o > 0._R8P) npos = npos + 1_I4P
+      if (o < 0._R8P) nneg = nneg + 1_I4P
+   enddo
+   yes = nfree > 0_I4P .and. (npos == nfree .or. nneg == nfree)
+   endfunction off_plane_one_side
+
+   pure function shared_vertices_number(fa, fb) result(n)
+   !< Number of vertices of `fa` shared with `fb` (0 to 3).
    !<
    !< Fast path: when the vertex pool is in use, both facets carry non-zero
    !< `vertex_id` triples — equality of any pair of ids is exact and cheap.
    !< Slow path: when the pool is not in use (or any id is unset), fall back
    !< to coordinate comparison within EPS.
    type(facet_object), intent(in) :: fa, fb
-   logical                        :: yes
+   integer(I4P)                   :: n
    integer(I4P)                   :: i, j
    logical                        :: pool_a, pool_b
 
-   yes = .false.
+   n = 0_I4P
    pool_a = all(fa%vertex_id /= 0_I4P)
    pool_b = all(fb%vertex_id /= 0_I4P)
-
-   if (pool_a .and. pool_b) then
-      do i = 1, 3
-         do j = 1, 3
+   do i = 1, 3
+      do j = 1, 3
+         if (pool_a .and. pool_b) then
             if (fa%vertex_id(i) == fb%vertex_id(j)) then
-               yes = .true. ; return
+               n = n + 1_I4P ; exit
             endif
-         enddo
+         elseif (vertex_coincident(fa%vertex(i), fb%vertex(j))) then
+            n = n + 1_I4P ; exit
+         endif
       enddo
-   else
-      do i = 1, 3
-         do j = 1, 3
-            if (vertex_coincident(fa%vertex(i), fb%vertex(j))) then
-               yes = .true. ; return
-            endif
-         enddo
-      enddo
-   endif
-   endfunction share_any_vertex
+   enddo
+   endfunction shared_vertices_number
 
    pure function vertex_coincident(va, vb) result(yes)
    !< Coordinate-equality test for two vertices, within EPS.

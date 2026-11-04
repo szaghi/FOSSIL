@@ -1,6 +1,6 @@
 !< FOSSIL test: self-intersection detection (issue #18 §1.2).
 !<
-!< Three invariants:
+!< Four invariants:
 !<   1. Hand-crafted intersecting pair — build two facets that cross along a
 !<      known segment, wrap them as a 2-facet surface, and assert the detector
 !<      finds exactly one pair with segment endpoints matching the analytic
@@ -17,6 +17,13 @@
 !<      phase or narrow phase falsely prunes everything. The exact count is
 !<      not asserted because it depends on EPS-sensitive behavior at the
 !<      narrow phase boundary; only its non-zero-ness is load-bearing.
+!<
+!<   4. Facets sharing one vertex (issue #46): they were skipped before the narrow phase, so crossings away from
+!<      the shared vertex went unseen. Two triangles sharing the origin and crossing along (0,0,0)-(0.5,0.5,0) are
+!<      one pair with that segment; two sharing it and touching only there are none. Invariant 2 covers the other
+!<      side: the fans around the vertices of closed meshes (the cone apex: 256 facets) still report none. Not
+!<      covered: two sheets crossing along a shared edge (a non-manifold edge, e.g. two cube-01 merged with the
+!<      offset (0.5, 0.5, 0.5)): pairs sharing an edge are still skipped.
 !<
 !< Note on dragon.stl: a future PR may either replace this fixture with a
 !< cleaned version or use it as ground truth for §1.2 resolution. Either way,
@@ -41,7 +48,7 @@ type(vector_R8P) :: p_lo, p_hi
 real(R8P) :: err_lo, err_hi
 integer(I4P) :: status
 integer(I4P) :: n_dragon
-logical :: are_tests_passed(3)
+logical :: are_tests_passed(4)
 
 real(R8P), parameter :: TOL_SEGMENT = 1.0e-12_R8P  ! analytic intersection — full FP precision
 
@@ -108,7 +115,44 @@ n_dragon = size(pairs)
 are_tests_passed(3) = (status == 0_I4P .and. n_dragon > 0_I4P)
 
 print '(A,I0)', 'dragon: nfound=', n_dragon
-print '(A,3L2)', 'per-case results: ', are_tests_passed
+
+! ----- 4. Facets sharing one vertex.
+!         A: z=0, (0,0,0), (2,0,0), (0,2,0). B: plane x=y through the shared origin, crossing A along
+!         (0,0,0)-(0.5,0.5,0). C: shares the origin, on the other side, touching A there only.
+if (allocated(tri)) deallocate(tri)
+allocate(tri(2))
+tri(1)%vertex(1) = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+tri(1)%vertex(2) = vector_R8P(2._R8P, 0._R8P, 0._R8P)
+tri(1)%vertex(3) = vector_R8P(0._R8P, 2._R8P, 0._R8P)
+tri(1)%id        = 1_I4P
+tri(2)%vertex(1) = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+tri(2)%vertex(2) = vector_R8P(0.5_R8P, 0.5_R8P, -1._R8P)
+tri(2)%vertex(3) = vector_R8P(0.5_R8P, 0.5_R8P, 1._R8P)
+tri(2)%id        = 2_I4P
+call pair_surface%adopt_facets(facets=tri)
+call pair_surface%find_self_intersections(pairs=pairs, status=status)
+are_tests_passed(4) = status == 0_I4P .and. size(pairs) == 1
+if (are_tests_passed(4)) are_tests_passed(4) = &
+   min(norm2([pairs(1)%p%x, pairs(1)%p%y, pairs(1)%p%z]), norm2([pairs(1)%q%x, pairs(1)%q%y, pairs(1)%q%z])) <= TOL_SEGMENT &
+   .and. abs(max(pairs(1)%p%x, pairs(1)%q%x) - 0.5_R8P) <= TOL_SEGMENT .and. &
+   abs(max(pairs(1)%p%y, pairs(1)%q%y) - 0.5_R8P) <= TOL_SEGMENT .and. &
+   max(abs(pairs(1)%p%z), abs(pairs(1)%q%z)) <= TOL_SEGMENT
+print '(A,I0)', 'shared vertex, crossing: nfound=', size(pairs)
+allocate(tri(2)) ! adopt_facets took the previous array
+tri(1)%vertex(1) = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+tri(1)%vertex(2) = vector_R8P(2._R8P, 0._R8P, 0._R8P)
+tri(1)%vertex(3) = vector_R8P(0._R8P, 2._R8P, 0._R8P)
+tri(1)%id        = 1_I4P
+tri(2)%vertex(1) = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+tri(2)%vertex(2) = vector_R8P(-1._R8P, 0._R8P, 1._R8P)
+tri(2)%vertex(3) = vector_R8P(0._R8P, -1._R8P, 1._R8P)
+tri(2)%id        = 2_I4P
+call pair_surface%adopt_facets(facets=tri)
+call pair_surface%find_self_intersections(pairs=pairs, status=status)
+print '(A,I0)', 'shared vertex, touching: nfound=', size(pairs)
+are_tests_passed(4) = are_tests_passed(4) .and. status == 0_I4P .and. size(pairs) == 0
+
+print '(A,4L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)',  'Are all tests passed? ', all(are_tests_passed)
 if (.not. all(are_tests_passed)) error stop 1
 
