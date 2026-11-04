@@ -222,14 +222,6 @@ Outer loops run counter-clockwise and holes clockwise; the distance is negative 
 
 <<< @/examples/output/ck_decimate.ansi{ansi}
 
-<div class="fossil-pair">
-
-![the dragon as loaded, 6588 facets, its facet edges faint](../examples/images/ck-decimate-before.svg)
-
-![the same dragon after decimate to a quarter of its facets, 1646, from the same camera](../examples/images/ck-decimate-after.svg)
-
-</div>
-
 ![the dragon decimated again and again to half its facets, 6588, 3294, 1646, 822, 410 and 204, from the same camera](../examples/images/anim-decimate.svg){.fossil-figure}
 
 Quadric edge collapses remove two facets each, so the result stops at or just below the target (1646 for 1647). See
@@ -240,14 +232,6 @@ Quadric edge collapses remove two facets each, so the result stops at or just be
 <<< @/examples/snippets/ck_union.f90
 
 <<< @/examples/output/ck_union.ansi{ansi}
-
-<div class="fossil-pair">
-
-![two unit cubes, a translucent and b in ember, b translated by 0.5 along the diagonal so they overlap on a cube of side 0.5](../examples/images/ck-union-inputs.svg)
-
-![their union from boolean with BOOL_UNION: one watertight body of volume 1.875](../examples/images/ck-union-result.svg)
-
-</div>
 
 ![the two overlapping unit cubes, then their union, intersection, difference and symmetric difference with each computed volume, the void of the symmetric difference in ember](../examples/images/anim-boolean.svg){.fossil-figure}
 

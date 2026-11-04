@@ -21,7 +21,7 @@ VecFor     = https://github.com/szaghi/VecFor
 [modes]
 modes = shared-gnu static-gnu shared-gnu-debug static-gnu-debug
         shared-intel static-intel shared-intel-debug static-intel-debug
-        tests-gnu tests-gnu-debug tests-gnu-openmp validation-gnu doc-fixtures-gnu
+        tests-gnu tests-gnu-debug tests-gnu-openmp validation-gnu
         tests-intel tests-intel-debug
         static-nvidia tests-nvidia tests-nvidia-curve
 
@@ -113,7 +113,6 @@ mklib     = static
 template  = template-static-gnu
 build_dir = ./exe/
 exclude_dirs = $EXDIRS src/tests/validation/
-exclude      = gen_doc_fixtures.f90
 
 # OpenMP-enabled test build. Identical to tests-gnu but adds -fopenmp so the
 # !$omp directives in distance_many (issue #19 §B3) activate. Without this mode
@@ -122,13 +121,11 @@ exclude      = gen_doc_fixtures.f90
 template  = template-static-gnu-openmp
 build_dir = ./exe/
 exclude_dirs = $EXDIRS src/tests/validation/
-exclude      = gen_doc_fixtures.f90
 
 [tests-gnu-debug]
 template  = template-static-gnu-debug
 build_dir = ./exe/
 exclude_dirs = $EXDIRS src/tests/validation/
-exclude      = gen_doc_fixtures.f90
 
 # Intel
 [shared-intel]
@@ -165,25 +162,16 @@ mklib     = static
 [validation-gnu]
 template  = template-static-gnu
 build_dir = ./exe-validation/
-exclude   = gen_doc_fixtures.f90
-
-# The figure fixtures of the reference pages (scripts/make_doc_images.sh): not a test (issue #45).
-[doc-fixtures-gnu]
-template  = template-static-gnu
-target    = src/app/gen_doc_fixtures.f90
-build_dir = ./exe/
 
 [tests-intel]
 template = template-static-intel
 build_dir = ./exe/
 exclude_dirs = $EXDIRS src/tests/validation/
-exclude      = gen_doc_fixtures.f90
 
 [tests-intel-debug]
 template  = template-static-intel-debug
 build_dir = ./exe/
 exclude_dirs = $EXDIRS src/tests/validation/
-exclude      = gen_doc_fixtures.f90
 
 # NVIDIA (OpenACC device target, issue #20). nvfortran >= 26.9, manual local build:
 #   module load nvhpc/26.9

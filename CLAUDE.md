@@ -119,8 +119,7 @@ fobis build --mode validation-gnu    # -O2, into exe-validation/
 ./scripts/run_validation.sh          # or: ./scripts/run_validation.sh fossil_val_sdf
 ```
 
-Every `tests-*` mode excludes `src/tests/validation/` and `gen_doc_fixtures.f90`; the docs fixtures generator builds
-with `fobis build --mode doc-fixtures-gnu` (`scripts/make_doc_images.sh`). `fobis clean` leaves stale executables of
+Every `tests-*` mode excludes `src/tests/validation/`. `fobis clean` leaves stale executables of
 moved sources in `exe/`: delete them by hand, or `run_tests.sh` runs them.
 
 ### Documentation
