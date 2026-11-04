@@ -187,7 +187,7 @@ type :: surface_stl_object
       procedure, pass(self) :: get_duplicate_facets_removed   !< Return count of facets dropped by the last duplicate-facet pass.
       procedure, pass(self) :: get_vertex_pool                !< Return read-only pointer to the unique-vertex pool.
       procedure, pass(self) :: is_watertight                  !< True if every edge has exactly 2 incident facets.
-      procedure, pass(self) :: is_manifold                    !< True if watertight AND no non-manifold edges.
+      procedure, pass(self) :: is_manifold                    !< True if no non-manifold edges (boundary edges allowed).
       procedure, pass(self) :: is_volume                      !< True if manifold AND positive signed volume AND finite centroid.
       ! mutator (the only externally-permitted direct writes; aabb has its own mutators)
       procedure, pass(self) :: set_header        !< Set STL header.
@@ -4947,13 +4947,13 @@ contains
    !< Builds a local facet array, then transfers ownership via `adopt_facets` (which
    !< runs `analyze`). Auto-detects ASCII vs binary when `guess_format=.true.` (size
    !< identity-check; see the binary-header trap discussion in audit #14 S3).
-   !< When `clip_min`/`clip_max` are present, only facets entirely inside the AABB
-   !< are loaded.
+   !< When `clip_min`/`clip_max` are present, only facets that overlap the AABB are
+   !< loaded (a facet crossing the box is kept whole; see `triangle_overlaps_aabb`).
    class(surface_stl_object),       intent(inout)        :: self                   !< Surface STL.
    character(*),                    intent(in)           :: file_name              !< STL file path.
    logical,                         intent(in), optional :: is_ascii               !< Force ASCII (default .true. if guess_format=.false.).
    logical,                         intent(in), optional :: guess_format           !< Auto-detect format from file size.
-   type(vector_R8P),                intent(in), optional :: clip_min, clip_max     !< AABB clip extents (facets inside only).
+   type(vector_R8P),                intent(in), optional :: clip_min, clip_max     !< AABB clip extents (facets overlapping it only).
    integer(I4P),                    intent(in), optional :: aabb_refinement_levels !< AABB refinement levels passed to analyze.
    integer(I4P),                    intent(in), optional :: aabb_tree_kind         !< AABB_TREE_OCTREE or AABB_TREE_SAH_BVH.
    integer(I4P),                    intent(out), optional :: status                !< 0=success, 1=alloc failure, 3=file not found.
