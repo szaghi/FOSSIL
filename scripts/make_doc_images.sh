@@ -20,8 +20,8 @@
 #   scripts/make_doc_images.sh
 #
 # Pre-requisite: build the fixture generator first —
-#   fobis build --mode tests-gnu
-# (gen_doc_fixtures is an app target, built alongside the test suite).
+#   fobis build --mode doc-fixtures-gnu
+# (gen_doc_fixtures is not a test: the test modes exclude it, issue #45).
 #
 # CI-tolerant: a missing renderer (pvbatch / gnuplot) is a warning, not a
 # hard failure — the script reports what it could not produce and exits 0
@@ -38,7 +38,7 @@ OUTDIR="docs/pictures/advanced"
 
 if [[ ! -x "$GEN" ]]; then
   echo "error: $GEN not found — build it first with:" >&2
-  echo "       fobis build --mode tests-gnu" >&2
+  echo "       fobis build --mode doc-fixtures-gnu" >&2
   exit 2
 fi
 

@@ -56,3 +56,6 @@ docs/guide/*.gcov.md
 docs/guide/coverage-analysis.md
 docs/public/coverage.json
 *.gcov
+
+# validation suite build (issue #45, fobis build --mode validation-gnu)
+exe-validation/

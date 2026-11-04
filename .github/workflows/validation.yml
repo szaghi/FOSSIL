@@ -1,0 +1,36 @@
+name: Validation
+
+# The heavy tests (issue #45): benches, sweeps, convergence studies, large meshes in src/tests/validation/.
+# Not run per push (ci.yml runs the fast regression suite); run nightly, on demand, and before every release.
+on:
+  schedule:
+    - cron: "17 2 * * *"   # nightly, 02:17 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup build environment
+      uses: ./.github/actions/setup-build-env
+
+    - name: Fetch dependencies
+      if: hashFiles('**/.deps_config.ini') != ''
+      run: FoBiS.py fetch
+
+    - name: Build the validation suite
+      run: FoBiS.py build --mode validation-gnu
+
+    - name: Run the validation suite
+      env:
+        OMP_NUM_THREADS: 4
+      run: ./scripts/run_validation.sh
