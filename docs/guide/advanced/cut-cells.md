@@ -22,7 +22,8 @@ where the grid meets the wall:
 - **Cut cells, 3-D:**
   - face fluid fractions and centroids from exact plane sections;
   - per cell: fluid volume fraction and centroid, and wetted area, centroid
-    and normal.
+    and normal;
+  - the number of separate fluid pieces of a cell (`cut%pieces`).
 
 The fluid is outside the solid. These outputs serve conservative cut-cell
 closures and sub-cell masks.
@@ -63,6 +64,7 @@ print '(A,F8.5)', 'fluid fraction of cell (3, 3): ', cut2%alpha(3, 3)
 call body%load_from_file(file_name='body.stl', guess_format=.true.)
 call body%cell_wall_fractions(x=xc, y=xc, z=xc, frac=frac, inside=inside)
 call cut_cells_3d(surface=body, x=e, y=e, z=e, cut=cut3)
+print '(A,I0)', 'fluid pieces of cell (4, 4, 4): ', cut3%pieces(4, 4, 4) ! -1: cell not trusted
 endprogram cut_geometry
 ```
 
@@ -100,6 +102,22 @@ endprogram cut_geometry
   - Volume and first moments come from the divergence theorem over the
     clipped triangles and the solid face parts, in coordinates local to each
     cell.
+  - **Pieces** come from a union-find over the parts of the boundary of the
+    fluid:
+    - the parts are the wall polygons (each triangle clipped to the cell) and
+      the fluid intervals of the 12 cell edges;
+    - the clip flags every vertex it makes with its cell plane, so the
+      vertices on a cell edge (two planes) are the edge's piercings, entering
+      or leaving the solid by the sign of the normal along the edge;
+    - the parts are joined where polygons share a vertex (the clipped points
+      of a shared mesh edge are bit-identical), at a piercing, at a fluid
+      corner, and where a solid island traced on a face is surrounded by
+      fluid (a ray from the island to the nearest trace or face edge);
+    - every joined set that touches the cell boundary is one piece; a closed
+      wall set inside the cell adds a piece only if it encloses a void.
+  - So a passage narrower than the cell, whose fluid meets the cell boundary
+    in two separate disks, is one piece, and a thin plate across the cell
+    leaves two.
 
 ## Checks you can make
 
@@ -128,12 +146,26 @@ endprogram cut_geometry
 | 3-D cells: axis-aligned box | fractions and moments ≤ 5·10⁻¹⁶ |
 | 3-D cells: half-space | fractions ≤ 1.7·10⁻¹³ against the closed-form volume |
 | 3-D cells: rotated cube, pyramid, cone | covering sums exact, per-cell divergence residual ≤ 2·10⁻¹⁶ |
+| 3-D pieces: prisms (thin wedge rotated about z, square tube, L-prism), 410 cells | equal to the 2-D pieces of the section on every cell; 32 cells with 2 pieces |
+| 3-D pieces: tube hole narrower than the cell; passage cutting a cell corner | 1 piece (the cell-boundary fluid alone would give 2) |
+| 3-D pieces: thin plate; rods along x, y, z; void in the solid; hollow body; inclusion | 2; 1; 1; 2; 1 |
+| 3-D pieces: cube on a grid through its faces, edges and corners | equal to 2-D, no cell flagged |
+| 3-D pieces: bunny (open, 69451 facets), 24³ | holed cells flagged; no other cell with fluid and 0 pieces |
+| `orient3d`: near-coplanar grid (6144 points), coplanar dyadic points | exact signs and zeros (the naive determinant is wrong on 2022) |
 | line crossings, device path vs CPU | 0 mismatches (device path run on the host) |
 
 ## Limitations
 
-- **No separate fluid pieces in 3-D yet.** Split and tunnel cells are
-  measured as a whole; the 2-D cut cells report pieces.
+- **3-D pieces: a count only.** The 2-D cut cells give each piece its own
+  measures; in 3-D the cell's measures cover all its pieces together.
+- **Zero-volume pieces.** A wall lying on the high plane of a cell belongs to
+  that cell, so the open face (aperture 1) bounds a fluid piece of zero
+  volume. It is counted, as in 2-D; a solver can drop pieces with no
+  volume.
+- **Flagged cells (`pieces = -1`).** Cells a boundary edge of the mesh
+  overlaps, cells whose fraction is outside [0, 1] (an open surface corrupts
+  the face parities beyond the cells it flags), and cells whose edge states
+  do not close.
 - **Points exactly on the surface.**
   - The inside flag of a cell centre comes from the crossings along its x
     line. Whether a crossing lies before or after the centre is decided on
@@ -142,8 +174,9 @@ endprogram cut_geometry
   - The tie-break of the line crossings orders the two transverse
     perturbations cyclically per axis. That is exact for the crossing counts
     of each line, but not one global perturbation.
-  - Exact agreement across axes for points on the surface would need an
-    exact `orient3d` with symbolic perturbation, which FOSSIL does not have.
+  - Exact agreement across axes for points on the surface would need one
+    global symbolic perturbation decided with `orient3d`. `orient3d` is now
+    exact; the perturbation is not implemented.
 - **Constructed points.** The 3-D sections and the clipping decide on the
   rounded crossing points, consistently across kernels. A body passing
   exactly through grid lines at non-representable points can then give a

@@ -172,8 +172,8 @@ How the coplanar overlap is handled:
 ## Known limitations
 
 - **Exactness.** The decisions (how two facets meet, which side a vertex
-  is on, whether points are collinear in a shared plane) use Shewchuk's
-  adaptive `orient3d`, with one snap: a vertex closer to the other facet's
+  is on, whether points are collinear in a shared plane) use the exact
+  `orient3d` (Shewchuk's filter, then an exact expansion), with one snap: a vertex closer to the other facet's
   plane, or to the other edge's line, than 10⁻¹⁰ of the local edge length
   counts as lying on it. Faces coplanar by construction are rarely exactly
   coplanar after a rotation or a scaling in floating point, and the snap
