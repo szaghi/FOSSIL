@@ -613,6 +613,7 @@ contains
    integer(I4P)                                  :: b, bb, bbb, bbbb      !< Counter.
    integer(I4P)                                  :: parent                !< Parent node index.
    type(aabb_object)                             :: octant(8)             !< AABB octants.
+   type(aabb_node_object), allocatable           :: node_kept(:)          !< Nodes kept when the depth is lowered.
 
    refinement_levels_ = self%refinement_levels
    tree_kind_         = self%tree_kind
@@ -671,6 +672,16 @@ contains
                endif
             enddo
          enddo levels_loop
+         if (nodes_number(refinement_levels=self%refinement_levels) < self%nodes_number) then
+            ! the largest-edge rule lowered the depth: drop the unused tail, so that the tree (node count, wn_payload,
+            ! device mapping) is the one a build at the lowered depth gives (issue #46)
+            self%nodes_number = nodes_number(refinement_levels=self%refinement_levels)
+            allocate(node_kept(0:self%nodes_number-1))
+            do b=0, self%nodes_number-1
+               node_kept(b) = self%node(b)
+            enddo
+            call move_alloc(from=node_kept, to=self%node)
+         endif
          if (present(facet).and.(do_facets_distribute_)) call self%distribute_facets_tree(facet=facet)
          self%is_initialized = .true.
       endif

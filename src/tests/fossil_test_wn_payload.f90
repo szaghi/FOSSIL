@@ -8,8 +8,8 @@
 !<      diag2 = squared bbox diagonal;
 !<   3. root dipole = sum of area * normal over all facets, to 1e-10 of the total area (absolute:
 !<      the sum is ~0 on closed surfaces; the bound covers summation-order rounding);
-!<   4. a second analyze rebuilds the same values (two analyze calls compared: see the note in
-!<      check); destroy deallocates the cache.
+!<   4. a later analyze rebuilds the same tree and values as load; an octree has exactly
+!<      1 + 8 + ... + 8**depth nodes (issue #46); destroy deallocates the cache.
 !< Multi-counting (the octree stores every facet once per level; a cache adding a node's own facets
 !< to its children's dipoles) is caught by check 2 at the non-root internal octree nodes, whose own
 !< facets form an open patch (dipole O(10) on dragon): hence the asserted dragon octree depth >= 2.
@@ -91,15 +91,15 @@ contains
    err_root = max(abs(s%wn_payload(0)%dx - total%x), abs(s%wn_payload(0)%dy - total%y), &
                   abs(s%wn_payload(0)%dz - total%z))
 
-   ! The rebuild check compares two analyze calls, not load vs analyze: on dragon the octree built by
-   ! load is cut at depth 2 by the largest-edge rule (refinement_levels lowered to 2, 585 nodes
-   ! allocated), and a later analyze builds the 2-level, 73-node tree directly.
+   ! The rebuild check compares the tree built by load with the one a later analyze builds: the same nodes and
+   ! values (issue #46: the octree kept the node array of the requested depth when the largest-edge rule lowered it,
+   ! 585 nodes against 73 on dragon). An octree has exactly 1 + 8 + ... + 8**depth nodes.
+   allocate(first(3, 0:nn - 1))
+   first(1, :) = s%wn_payload(:)%dx ; first(2, :) = s%wn_payload(:)%dy ; first(3, :) = s%wn_payload(:)%dz
+   if (tree_kind == AABB_TREE_OCTREE) passed = passed .and. (nn == (8_I4P**(depth + 1) - 1_I4P) / 7_I4P)
    call s%analyze(aabb_tree_kind=tree_kind)
    nr = s%aabb%get_nodes_number()
-   allocate(first(3, 0:nr - 1))
-   first(1, :) = s%wn_payload(:)%dx ; first(2, :) = s%wn_payload(:)%dy ; first(3, :) = s%wn_payload(:)%dz
-   call s%analyze(aabb_tree_kind=tree_kind)
-   rebuilt_ok = size(s%wn_payload) == nr
+   rebuilt_ok = nr == nn
    if (rebuilt_ok) rebuilt_ok = all(first(1, :) == s%wn_payload(:)%dx) .and. &
                                 all(first(2, :) == s%wn_payload(:)%dy) .and. all(first(3, :) == s%wn_payload(:)%dz)
    call s%destroy
