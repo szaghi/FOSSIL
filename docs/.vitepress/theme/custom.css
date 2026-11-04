@@ -133,3 +133,47 @@
   width: 100%;
   height: auto;
 }
+
+/* The landing gallery (scripts/gallery.py writes it, issue #47): one figure per feature card. */
+.fossil-gallery-caption {
+  text-align: center;
+  font-size: 0.9rem;
+  color: var(--vp-c-text-2);
+  margin: 0 auto 1.6rem;
+  max-width: 760px;
+}
+.fossil-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1rem;
+  margin: 1.4rem 0;
+}
+.vp-doc a.fossil-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.5rem;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-text-1);
+  text-decoration: none;
+  transition: border-color 0.2s;
+}
+.vp-doc a.fossil-card:hover {
+  border-color: var(--vp-c-brand-1);
+}
+.fossil-card img {
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+.fossil-card strong {
+  font-size: 0.95rem;
+  margin-top: 0.2rem;
+}
+.fossil-card span {
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: var(--vp-c-text-2);
+}

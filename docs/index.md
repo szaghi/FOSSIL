@@ -103,24 +103,33 @@ with the [tutorial](/manual/tutorial/01-first-surface), or look up a task in the
 
 ## See it run
 
-A NACA 0012 section pitching and translating through a Cartesian grid, every frame computed by FOSSIL
-([`anim_airfoil.f90`](https://github.com/szaghi/FOSSIL/blob/master/docs/examples/src/anim_airfoil.f90)): on the
-left the exact cut cells, shaded by their solid fraction ([chapter 10](/manual/tutorial/10-cut-cells)); on the right
-the level sets of the signed distance ([chapter 6](/manual/tutorial/06-distance-field)), with the body's pose passed to
-the query instead of rebuilding its tree ([chapter 11](/manual/tutorial/11-moving-bodies)).
+<!-- gallery:start -->
 
 <div class="fossil-casts">
-<img src="./examples/images/airfoil-cut-cells.svg" alt="animation: the cut cells of a NACA 0012 section pitching and translating through a 48 by 24 grid, each cell shaded by its solid fraction">
+<img src="./examples/images/airfoil-cut-cells.svg" alt="animation: the exact cut cells of a NACA 0012 section pitching and translating through a 48 by 24 grid, each cell shaded by its solid fraction">
 <img src="./examples/images/airfoil-level-sets.svg" alt="animation: iso-distance contours from 0.05 to 0.6 around the same pitching section">
 </div>
 
-The tutorial programs, run one after the other on the dragon test body:
+<p class="fossil-gallery-caption">A NACA 0012 section pitching and translating through a Cartesian grid, every frame computed by FOSSIL: its exact cut cells and the level sets of its signed distance, with the pose passed to the query instead of rebuilding the tree.</p>
 
-<div class="fossil-casts">
-<img src="./examples/images/tour.svg" alt="a terminal session running the tutorial programs of FOSSIL on the dragon test body">
+<div class="fossil-gallery">
+<a class="fossil-card" href="/FOSSIL/manual/tutorial/01-first-surface"><img src="./examples/images/tut01-dragon.svg" alt="STL in, STL out: the dragon loaded, 6588 facets, and the box analyze computes" loading="lazy"><strong>STL in, STL out</strong><span>the dragon loaded, 6588 facets, and the box analyze computes</span></a>
+<a class="fossil-card" href="/FOSSIL/manual/tutorial/02-repair"><img src="./examples/images/tut02-patch.svg" alt="Repair dirty meshes: a hole closed by fill_holes, refined and faired" loading="lazy"><strong>Repair dirty meshes</strong><span>a hole closed by fill_holes, refined and faired</span></a>
+<a class="fossil-card" href="/FOSSIL/manual/tutorial/04-distance"><img src="./examples/images/tut04-probes.svg" alt="Signed distance: probes and their closest points on the dragon" loading="lazy"><strong>Signed distance</strong><span>probes and their closest points on the dragon</span></a>
+<a class="fossil-card" href="/FOSSIL/manual/tutorial/06-distance-field"><img src="./examples/images/tut06-field.svg" alt="Level sets: the signed-distance field on a stretched grid" loading="lazy"><strong>Level sets</strong><span>the signed-distance field on a stretched grid</span></a>
+<a class="fossil-card" href="/FOSSIL/manual/tutorial/07-curves"><img src="./examples/images/tut07-field.svg" alt="2-D curves: a section of the dragon and its 2-D signed distance" loading="lazy"><strong>2-D curves</strong><span>a section of the dragon and its 2-D signed distance</span></a>
+<a class="fossil-card" href="/FOSSIL/manual/tutorial/08-ib-queries"><img src="./examples/images/tut08-features.svg" alt="Immersed-boundary queries: closest points on a face, an edge or a vertex" loading="lazy"><strong>Immersed-boundary queries</strong><span>closest points on a face, an edge or a vertex</span></a>
+<a class="fossil-card" href="/FOSSIL/manual/tutorial/09-amr-tagging"><img src="./examples/images/tut09-tags.svg" alt="AMR tagging: cut, inside and outside cells of a block, in signed bands" loading="lazy"><strong>AMR tagging</strong><span>cut, inside and outside cells of a block, in signed bands</span></a>
+<a class="fossil-card" href="/FOSSIL/manual/tutorial/10-cut-cells"><img src="./examples/images/tut10-cells2d.svg" alt="Exact cut cells: the fluid fraction of the cut cells of a section" loading="lazy"><strong>Exact cut cells</strong><span>the fluid fraction of the cut cells of a section</span></a>
+<a class="fossil-card" href="/FOSSIL/manual/tutorial/11-moving-bodies"><img src="./examples/images/tut11-swept.svg" alt="Moving bodies: the area a moving section sweeps in a time step" loading="lazy"><strong>Moving bodies</strong><span>the area a moving section sweeps in a time step</span></a>
+<a class="fossil-card" href="/FOSSIL/manual/cookbook#remesh-to-a-uniform-edge-length"><img src="./examples/images/ck-remesh-after.svg" alt="Geometry processing: a cube remeshed to a uniform edge, its sharp edges kept" loading="lazy"><strong>Geometry processing</strong><span>a cube remeshed to a uniform edge, its sharp edges kept</span></a>
+<a class="fossil-card" href="/FOSSIL/manual/tutorial/12-gpu"><img src="./examples/images/tut12-slice.svg" alt="On the GPU, bit for bit: the device code path on a slice: 0 differences from the host" loading="lazy"><strong>On the GPU, bit for bit</strong><span>the device code path on a slice: 0 differences from the host</span></a>
+<a class="fossil-card" href="/FOSSIL/manual/tutorial/01-first-surface"><img src="./examples/images/tour.svg" alt="Free and portable: the tutorial programs, run one after the other" loading="lazy"><strong>Free and portable</strong><span>the tutorial programs, run one after the other</span></a>
 </div>
 
-Every program of the tutorial and of the cookbook is compiled and run by
+<!-- gallery:end -->
+
+Every figure and every program of the tutorial and of the cookbook is computed and run by
 [`scripts/docs_examples.sh`](https://github.com/szaghi/FOSSIL/blob/master/scripts/docs_examples.sh): the outputs above
 are captured, not typed.
 

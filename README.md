@@ -22,8 +22,37 @@
 | 〰️ **2-D curves**<br>Polylines for quadtree solvers with the same queries; sections of any STL. [2-D](https://szaghi.github.io/FOSSIL/guide/advanced/2d-geometry) | 🎯 **Immersed-boundary queries**<br>Closest point, feature, normal and body per point; image points, probes, wall distance. [IB queries](https://szaghi.github.io/FOSSIL/guide/advanced/ib-queries) | 🧭 **AMR tagging**<br>Blocks and cells cut, near, inside or outside from the tree; signed tag bands. [Tagging](https://szaghi.github.io/FOSSIL/guide/advanced/amr-tagging) | 🧱 **Exact cut cells**<br>Exact crossings; 2-D and 3-D fractions, apertures and fluid pieces with their own volumes. [Cut cells](https://szaghi.github.io/FOSSIL/guide/advanced/cut-cells) |
 | 🔄 **Moving bodies**<br>Body-frame queries, O(N) tree refit, exact swept volumes of a time step. [Motion](https://szaghi.github.io/FOSSIL/guide/advanced/moving-bodies) | 🛠️ **Geometry processing**<br>Booleans, self-intersections, decimation, remeshing, smoothing, alpha wrap, marching cubes, curvature. [Surfaces](https://szaghi.github.io/FOSSIL/guide/features#surfaces) | 🚀 **On the GPU, bit for bit**<br>OpenACC kernels shared with the CPU path, equal to it bit for bit. [GPU](https://szaghi.github.io/FOSSIL/guide/advanced/device-distance) | 🆓 **Free and portable**<br>Pure Fortran 2003+, no C; gfortran, ifx, nvfortran; FoBiS or fpm; GPLv3, BSD or MIT. [Install](https://szaghi.github.io/FOSSIL/guide/installation) |
 
-<p align="center"><img src="docs/examples/images/airfoil-cut-cells.svg" alt="animation: the exact cut cells of a NACA 0012 section pitching and translating through a 48 by 24 grid, each cell shaded by its solid fraction" width="700"><br>
-<sub>A pitching NACA 0012 crossing a Cartesian grid: its exact cut cells, every frame computed by FOSSIL (<a href="docs/examples/src/anim_airfoil.f90"><code>anim_airfoil.f90</code></a>).</sub></p>
+<!-- gallery:start -->
+
+<p align="center">
+<img src="docs/examples/images/airfoil-cut-cells.svg" alt="animation: the exact cut cells of a NACA 0012 section pitching and translating through a 48 by 24 grid, each cell shaded by its solid fraction" width="420">
+<img src="docs/examples/images/airfoil-level-sets.svg" alt="animation: iso-distance contours from 0.05 to 0.6 around the same pitching section" width="420">
+<br><sub>A NACA 0012 section pitching and translating through a Cartesian grid, every frame computed by FOSSIL: its exact cut cells and the level sets of its signed distance, with the pose passed to the query instead of rebuilding the tree.</sub></p>
+
+<table>
+<tr>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/01-first-surface"><img src="docs/examples/images/tut01-dragon.svg" alt="STL in, STL out: the dragon loaded, 6588 facets, and the box analyze computes" width="260"></a><br><b>STL in, STL out</b><br><sub>the dragon loaded, 6588 facets, and the box analyze computes</sub></td>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/02-repair"><img src="docs/examples/images/tut02-patch.svg" alt="Repair dirty meshes: a hole closed by fill_holes, refined and faired" width="260"></a><br><b>Repair dirty meshes</b><br><sub>a hole closed by fill_holes, refined and faired</sub></td>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/04-distance"><img src="docs/examples/images/tut04-probes.svg" alt="Signed distance: probes and their closest points on the dragon" width="260"></a><br><b>Signed distance</b><br><sub>probes and their closest points on the dragon</sub></td>
+</tr>
+<tr>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/06-distance-field"><img src="docs/examples/images/tut06-field.svg" alt="Level sets: the signed-distance field on a stretched grid" width="260"></a><br><b>Level sets</b><br><sub>the signed-distance field on a stretched grid</sub></td>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/07-curves"><img src="docs/examples/images/tut07-field.svg" alt="2-D curves: a section of the dragon and its 2-D signed distance" width="260"></a><br><b>2-D curves</b><br><sub>a section of the dragon and its 2-D signed distance</sub></td>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/08-ib-queries"><img src="docs/examples/images/tut08-features.svg" alt="Immersed-boundary queries: closest points on a face, an edge or a vertex" width="260"></a><br><b>Immersed-boundary queries</b><br><sub>closest points on a face, an edge or a vertex</sub></td>
+</tr>
+<tr>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/09-amr-tagging"><img src="docs/examples/images/tut09-tags.svg" alt="AMR tagging: cut, inside and outside cells of a block, in signed bands" width="260"></a><br><b>AMR tagging</b><br><sub>cut, inside and outside cells of a block, in signed bands</sub></td>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/10-cut-cells"><img src="docs/examples/images/tut10-cells2d.svg" alt="Exact cut cells: the fluid fraction of the cut cells of a section" width="260"></a><br><b>Exact cut cells</b><br><sub>the fluid fraction of the cut cells of a section</sub></td>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/11-moving-bodies"><img src="docs/examples/images/tut11-swept.svg" alt="Moving bodies: the area a moving section sweeps in a time step" width="260"></a><br><b>Moving bodies</b><br><sub>the area a moving section sweeps in a time step</sub></td>
+</tr>
+<tr>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/cookbook#remesh-to-a-uniform-edge-length"><img src="docs/examples/images/ck-remesh-after.svg" alt="Geometry processing: a cube remeshed to a uniform edge, its sharp edges kept" width="260"></a><br><b>Geometry processing</b><br><sub>a cube remeshed to a uniform edge, its sharp edges kept</sub></td>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/12-gpu"><img src="docs/examples/images/tut12-slice.svg" alt="On the GPU, bit for bit: the device code path on a slice: 0 differences from the host" width="260"></a><br><b>On the GPU, bit for bit</b><br><sub>the device code path on a slice: 0 differences from the host</sub></td>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/01-first-surface"><img src="docs/examples/images/tour.svg" alt="Free and portable: the tutorial programs, run one after the other" width="260"></a><br><b>Free and portable</b><br><sub>the tutorial programs, run one after the other</sub></td>
+</tr>
+</table>
+
+<!-- gallery:end -->
 
 >#### [Documentation](https://szaghi.github.io/FOSSIL/)
 > The [tutorial](https://szaghi.github.io/FOSSIL/manual/), the [cookbook](https://szaghi.github.io/FOSSIL/manual/cookbook) and the [reference](https://szaghi.github.io/FOSSIL/guide/features) are on the [FOSSIL website](https://szaghi.github.io/FOSSIL/). Every code sample there is a program compiled and run to produce the output shown.

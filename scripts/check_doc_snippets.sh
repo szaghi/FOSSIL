@@ -78,6 +78,10 @@ done
 done
 
 failed=$(wc -l < "$FAILLOG" | tr -d ' ')
+# the README and the landing page show the same figures (issue #47): their gallery regions are generated
+if ! python3 "$(dirname "${BASH_SOURCE[0]}")/gallery.py" --check; then
+  failed=$((failed + 1))
+fi
 if [[ "$failed" -gt 0 ]]; then
   echo "snippet check: $failed failure(s)"
   exit 1
