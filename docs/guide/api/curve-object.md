@@ -41,7 +41,7 @@ endprogram curve_tour
 
 | Method | Purpose |
 |---|---|
-| `get_vertices_number`, `get_loops_number`, `get_loop_range(l, first, last)`, `get_vertex(i)` | Topology and coordinates. |
+| `get_vertices_number`, `get_loops_number`, `get_loop_range(l, first, last)`, `get_vertex(i)`, `get_next(i)` | Topology and coordinates; `get_next(i)` is the end vertex of segment i (0 at the end of an open loop). |
 | `get_area`, `get_loop_area(l)`, `get_perimeter`, `get_centroid`, `get_bmin`, `get_bmax`, `get_normal_axis` | Metrics; areas are signed (solid area for a valid curve; open loops have none). |
 | `is_loop_closed(l)` | False for an open loop. |
 | `check_validity(loop)` | First defect: `CURVE_OPEN_LOOP`, `CURVE_TOO_FEW_VERTICES`, `CURVE_ZERO_LENGTH_SEGMENT`, `CURVE_ZERO_AREA_LOOP`, `CURVE_WRONG_ORIENTATION` (orientation not matching the exact nesting depth), or `CURVE_VALID`. |
@@ -68,7 +68,7 @@ endprogram curve_tour
 | `box_intersects_curve(lo, hi)` | True if the closed box meets the curve (exact). |
 | `line_crossings(axis, a, t0, t1, t, segments, entering, n, status)` | Exact crossings of an axis-aligned line (issue #40); `line_crossings_many(_device)` for many lines into fixed buffers. |
 | `cell_wall_fractions(x, y, frac, inside, bad_lines, status)` | Wall fractions toward the four neighbours of every cell centre, parity inside flags. |
-| `move(pose)`, `state_changes(pose0, pose1, points, fresh, dead, sign_algorithm, checked, status)` | Rigid in-plane move with a tree refit; fresh and dead points between two poses (issue #41). `distance_many`, `query_many`, `is_point_inside` and the device twins take an optional `pose` (`rigid_pose_2d_t`). See [Moving bodies](/guide/advanced/moving-bodies). |
+| `move(pose)`, `state_changes(pose0, pose1, points, fresh, dead, sign_algorithm, checked, status)` | Rigid in-plane move with a tree refit; fresh and dead points between two poses (issue #41). `distance_many`, `query_many`, `is_point_inside` and the device twins take an optional `pose` (`rigid_pose_2d_t`). The swept geometry between two poses is the free routine `swept_cells_2d(curve, ...)`. See [Moving bodies](/guide/advanced/moving-bodies). |
 | `wall_distance_many(points, distances, bodies, cutoff, status)` | Unsigned wall distance and body, (cutoff, 0) beyond the cutoff (issue #42). |
 | `curve_markers(dx, centroids, lengths, normals, spacing_fraction, spacings, status)` | Exact arc-length resampling into nint(L/dx) pieces per loop: markers on the polyline, lengths, normals (issue #42). |
 | `cut_cells(x, y, cut, status)` | Exact cut cells (`cut_cells_2d_t`): fractions, apertures, centroids, wetted boundary, pieces. See [Cut-cell geometry](/guide/advanced/cut-cells). |
