@@ -26,8 +26,10 @@ module fossil_predicates
 !<
 !< Stage 1 scope (this PR):
 !<
-!<   - `orient3d` — fully adaptive, 4-stage Shewchuk implementation. This is
-!<     the only predicate the boolean codepath actually hot-paths through
+!<   - `orient3d` (and `orient3d_xyz`, the same on plain arrays) — exact sign
+!<     (issue #40): the floating-point filter of Shewchuk, then an exact
+!<     fall-back when the filter cannot decide. It needs no
+!<     `predicates_initialize`. The boolean codepath hot-paths through it
 !<     (tri-tri sign tests, inside/outside-of-tetrahedron classification).
 !<
 !<   - `orient2d` (and `orient2d_xy`, the same on plain reals) — exact sign
@@ -49,7 +51,7 @@ use vecfor, only : vector_R8P
 
 implicit none
 private
-public :: orient2d, orient2d_xy, orient3d, incircle, insphere
+public :: orient2d, orient2d_xy, orient3d, orient3d_xyz, incircle, insphere
 public :: predicates_initialize
 
 ! Splitter constant and error bounds — populated by `predicates_initialize`.
@@ -109,7 +111,7 @@ contains
    endsubroutine predicates_initialize
 
    pure function orient3d(a, b, c, d) result(sign_volume)
-   !< Robust sign of the signed volume of tetrahedron (a, b, c, d).
+   !< Exact sign of the signed volume of tetrahedron (a, b, c, d).
    !<
    !< Returns:
    !<   - positive  if `d` is below the plane defined by (a, b, c) when
@@ -117,59 +119,106 @@ contains
    !<   - zero      if the four points are exactly coplanar
    !<   - negative  if `d` is above the plane
    !<
-   !< The magnitude is approximately `6 * V` where V is the tetrahedron volume,
-   !< but the only **exact** semantic guarantee is the **sign**. Use only the
-   !< sign for combinatorial decisions; if you need the volume itself, use
-   !< `facet%tetrahedron_volume`.
-   !<
-   !< Algorithm: filtered evaluation with adaptive fall-back (Shewchuk Sec 4).
-   !<   Stage 1 (this implementation): compute the determinant in doubles plus
-   !<   a tight error bound; if |det| > bound, the sign is trustworthy and
-   !<   return immediately. This is the fast path; in typical inputs ~99% of
-   !<   queries terminate here at essentially the cost of the naive test.
-   !<
-   !< @note Stages 2-4 (expansion arithmetic) are not yet implemented. When the
-   !<       filter is inconclusive this implementation conservatively returns
-   !<       the filter's best estimate (i.e. the FP determinant), which retains
-   !<       the legacy double-precision behaviour for the rare degenerate case.
-   !<       Callers that need bit-exact decisions in the degenerate regime must
-   !<       still snap-round their inputs — see issue #18 §1.1 follow-up. The
-   !<       module is structured so the adaptive stages can be added behind
-   !<       this same API without any caller change.
+   !< The magnitude approximates `6 * V` where V is the tetrahedron volume; the
+   !< only exact guarantee is the **sign**. See `orient3d_xyz`.
    type(vector_R8P), intent(in) :: a, b, c, d   !< Tetrahedron vertices.
-   real(R8P)                    :: sign_volume  !< Filtered determinant; sign is the predicate result.
-   real(R8P)                    :: adx, bdx, cdx, ady, bdy, cdy, adz, bdz, cdz
-   real(R8P)                    :: bdxcdy, cdxbdy, cdxady, adxcdy, adxbdy, bdxady
-   real(R8P)                    :: det, permanent, errbound
+   real(R8P)                    :: sign_volume  !< Its sign is exact.
 
-   adx = a%x - d%x ; bdx = b%x - d%x ; cdx = c%x - d%x
-   ady = a%y - d%y ; bdy = b%y - d%y ; cdy = c%y - d%y
-   adz = a%z - d%z ; bdz = b%z - d%z ; cdz = c%z - d%z
+   sign_volume = orient3d_xyz([a%x, a%y, a%z], [b%x, b%y, b%z], [c%x, c%y, c%z], [d%x, d%y, d%z])
+   endfunction orient3d
 
+   pure function orient3d_xyz(a, b, c, d) result(sign_volume)
+   !< Exact sign of det[a - d; b - d; c - d] (rows) for the points a, b, c, d (issue #40).
+   !<
+   !< The sign is exact for any finite inputs (barring underflow of products of three
+   !< coordinates below ~1e-100, and overflow); the magnitude approximates 6 times the signed
+   !< volume (sign convention of `orient3d`).
+   !<
+   !< Stage 1, the filter (Shewchuk 1997): the determinant in doubles with the a priori bound
+   !< `(7 + 56 eps) eps |permanent|`. Conclusive for all but near-coplanar inputs, at the cost
+   !< of the naive test; when it is conclusive the result is the same double as before.
+   !<
+   !< Stage 2, exact: by multilinearity det[a - d; b - d; c - d] = [a, b, c] - [d, b, c] -
+   !< [a, d, c] - [a, b, d], with [p, q, r] = p . (q x r): 24 products of three input
+   !< coordinates, no differences. Each coordinate is split by bit masks into four pieces of
+   !< at most 17 significant bits (`split4`), so every product of three pieces is exact (at
+   !< most 51 bits); the exact products are summed into a nonoverlapping expansion with
+   !< error-free sums (`grow_expansion`), whose largest component carries the exact sign. As
+   !< in `orient2d_xy`, the split uses no multiplication: the products it feeds are exact, so
+   !< FMA contraction (nvfortran's default) cannot change the result.
+   real(R8P), intent(in) :: a(3), b(3), c(3), d(3) !< Points (x, y, z).
+   real(R8P)             :: sign_volume            !< Its sign is exact.
+   real(R8P), parameter  :: EPS_HALF = epsilon(1._R8P) / 2._R8P                !< Unit roundoff.
+   real(R8P), parameter  :: O3D_BOUND = (7._R8P + 56._R8P * EPS_HALF) * EPS_HALF !< Filter bound.
+   real(R8P)             :: adx, bdx, cdx, ady, bdy, cdy, adz, bdz, cdz !< Differences.
+   real(R8P)             :: bdxcdy, cdxbdy, cdxady, adxcdy, adxbdy, bdxady !< Products.
+   real(R8P)             :: det, permanent         !< Filter terms.
+   real(R8P)             :: e(512)                 !< Exact expansion of the determinant.
+   integer(I4P)          :: n, i                   !< Expansion length, counter.
+
+   adx = a(1) - d(1) ; bdx = b(1) - d(1) ; cdx = c(1) - d(1)
+   ady = a(2) - d(2) ; bdy = b(2) - d(2) ; cdy = c(2) - d(2)
+   adz = a(3) - d(3) ; bdz = b(3) - d(3) ; cdz = c(3) - d(3)
    bdxcdy = bdx * cdy ; cdxbdy = cdx * bdy
    cdxady = cdx * ady ; adxcdy = adx * cdy
    adxbdy = adx * bdy ; bdxady = bdx * ady
-
-   det = adz * (bdxcdy - cdxbdy) + &
-         bdz * (cdxady - adxcdy) + &
-         cdz * (adxbdy - bdxady)
-
-   ! Filter: |det| against the algebraic error bound. The `permanent` is the
-   ! sum of absolute terms in the determinant expansion — the worst-case
-   ! magnitude of accumulated round-off is bounded by this times o3derrboundA.
-   permanent = (abs(bdxcdy) + abs(cdxbdy)) * abs(adz) + &
-               (abs(cdxady) + abs(adxcdy)) * abs(bdz) + &
+   det = adz * (bdxcdy - cdxbdy) + bdz * (cdxady - adxcdy) + cdz * (adxbdy - bdxady)
+   permanent = (abs(bdxcdy) + abs(cdxbdy)) * abs(adz) + (abs(cdxady) + abs(adxcdy)) * abs(bdz) + &
                (abs(adxbdy) + abs(bdxady)) * abs(cdz)
-   errbound = o3derrboundA * permanent
-   if (abs(det) > errbound) then
+   if (abs(det) > O3D_BOUND * permanent) then
       sign_volume = det
       return
    endif
 
-   ! Filter inconclusive — for now, return the FP estimate. See @note above for
-   ! the path to upgrade this to the full adaptive Stage 4.
-   sign_volume = det
-   endfunction orient3d
+   n = 0_I4P
+   call add_triple(a, b, c, 1._R8P, e, n)
+   call add_triple(d, b, c, -1._R8P, e, n)
+   call add_triple(a, d, c, -1._R8P, e, n)
+   call add_triple(a, b, d, -1._R8P, e, n)
+   sign_volume = 0._R8P
+   do i = n, 1_I4P, -1_I4P ! components in increasing magnitude: the last nonzero one is the largest
+      if (e(i) /= 0._R8P) then
+         sign_volume = e(i)
+         exit
+      endif
+   enddo
+   contains
+      pure subroutine add_triple(p, q, r, s, e, n)
+      !< Add s [p, q, r] = s p . (q x r) (s = +-1) to the expansion e(1:n), exactly.
+      real(R8P),    intent(in)    :: p(3), q(3), r(3), s !< Rows and sign.
+      real(R8P),    intent(inout) :: e(:)    !< Expansion.
+      integer(I4P), intent(inout) :: n       !< Its length.
+
+      call add_product3(p(1), q(2), r(3), s, e, n)
+      call add_product3(p(1), q(3), r(2), -s, e, n)
+      call add_product3(p(2), q(1), r(3), -s, e, n)
+      call add_product3(p(2), q(3), r(1), s, e, n)
+      call add_product3(p(3), q(1), r(2), s, e, n)
+      call add_product3(p(3), q(2), r(1), -s, e, n)
+      endsubroutine add_triple
+
+      pure subroutine add_product3(x, y, z, s, e, n)
+      !< Add s * x * y * z (s = +-1) to the expansion e(1:n), exactly.
+      real(R8P),    intent(in)    :: x, y, z, s !< Factors and sign.
+      real(R8P),    intent(inout) :: e(:)       !< Expansion.
+      integer(I4P), intent(inout) :: n          !< Its length.
+      real(R8P)                   :: xx(4), yy(4), zz(4) !< Pieces.
+      integer(I4P)                :: k, l, m    !< Counters.
+
+      if (x == 0._R8P .or. y == 0._R8P .or. z == 0._R8P) return
+      call split4(x, xx) ; call split4(y, yy) ; call split4(z, zz)
+      do k = 1, 4
+         if (xx(k) == 0._R8P) cycle
+         do l = 1, 4
+            if (yy(l) == 0._R8P) cycle
+            do m = 1, 4
+               if (zz(m) == 0._R8P) cycle
+               call grow_expansion(e, n, s * (xx(k) * yy(l) * zz(m)))
+            enddo
+         enddo
+      enddo
+      endsubroutine add_product3
+   endfunction orient3d_xyz
 
    pure function orient2d(a, b, c) result(sign_area)
    !< Exact sign of the signed area of triangle (a, b, c) in the XY plane (z is ignored).
@@ -267,6 +316,40 @@ contains
    piece(2) = truncate18(r)
    piece(3) = r - piece(2)
    endsubroutine split3
+
+   pure subroutine split4(x, piece)
+   !< Split x exactly into four pieces of at most 17 significant bits, x = sum(piece).
+   !<
+   !< Bit masks only, no multiplication (see `orient3d_xyz`): as `split3` with 17-bit pieces,
+   !< so that a product of three pieces is exact. Subnormal inputs are returned as one piece.
+   real(R8P), intent(in)  :: x        !< Value.
+   real(R8P), intent(out) :: piece(4) !< Pieces, x = piece(1) + ... + piece(4) exactly.
+   real(R8P)              :: r        !< Remainder.
+   integer(I4P)           :: k        !< Counter.
+
+   r = x
+   do k = 1, 3
+      piece(k) = truncate17(r)
+      r = r - piece(k)
+   enddo
+   piece(4) = r
+   endsubroutine split4
+
+   pure function truncate17(x) result(t)
+   !< x with all but its top 17 significant bits cleared (sign and exponent kept).
+   real(R8P), intent(in) :: x !< Value.
+   real(R8P)             :: t !< Truncated value.
+   integer(I8P), parameter :: LOW36 = 68719476735_I8P !< 2^36 - 1: the low 36 mantissa bits.
+   integer(I8P)          :: bits !< Bit pattern.
+
+   bits = transfer(x, bits)
+   if (iand(ishft(bits, -52), 2047_I8P) == 0_I8P) then ! zero or subnormal: no implicit bit, keep whole
+      t = x
+      return
+   endif
+   bits = iand(bits, not(LOW36))
+   t = transfer(bits, t)
+   endfunction truncate17
 
    pure function truncate18(x) result(t)
    !< x with all but its top 18 significant bits cleared (sign and exponent kept).
