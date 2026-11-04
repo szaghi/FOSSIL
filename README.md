@@ -32,7 +32,7 @@
 <table>
 <tr>
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/01-first-surface"><img src="docs/examples/images/tut01-dragon.svg" alt="STL in, STL out: the dragon loaded, 6588 facets, and the box analyze computes" width="260"></a><br><b>STL in, STL out</b><br><sub>the dragon loaded, 6588 facets, and the box analyze computes</sub></td>
-<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/02-repair"><img src="docs/examples/images/tut02-patch.svg" alt="Repair dirty meshes: a hole closed by fill_holes, refined and faired" width="260"></a><br><b>Repair dirty meshes</b><br><sub>a hole closed by fill_holes, refined and faired</sub></td>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/02-repair"><img src="docs/examples/images/anim-holes.svg" alt="Repair dirty meshes: holes closed one by one by fill_holes, refined and faired" width="260"></a><br><b>Repair dirty meshes</b><br><sub>holes closed one by one by fill_holes, refined and faired</sub></td>
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/04-distance"><img src="docs/examples/images/tut04-probes.svg" alt="Signed distance: probes and their closest points on the dragon" width="260"></a><br><b>Signed distance</b><br><sub>probes and their closest points on the dragon</sub></td>
 </tr>
 <tr>
@@ -46,7 +46,7 @@
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/11-moving-bodies"><img src="docs/examples/images/tut11-swept.svg" alt="Moving bodies: the area a moving section sweeps in a time step" width="260"></a><br><b>Moving bodies</b><br><sub>the area a moving section sweeps in a time step</sub></td>
 </tr>
 <tr>
-<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/cookbook#remesh-to-a-uniform-edge-length"><img src="docs/examples/images/ck-remesh-after.svg" alt="Geometry processing: a cube remeshed to a uniform edge, its sharp edges kept" width="260"></a><br><b>Geometry processing</b><br><sub>a cube remeshed to a uniform edge, its sharp edges kept</sub></td>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/cookbook#unite-two-bodies"><img src="docs/examples/images/anim-boolean.svg" alt="Geometry processing: two cubes, then their union, intersection and differences" width="260"></a><br><b>Geometry processing</b><br><sub>two cubes, then their union, intersection and differences</sub></td>
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/12-gpu"><img src="docs/examples/images/tut12-slice.svg" alt="On the GPU, bit for bit: the device code path on a slice: 0 differences from the host" width="260"></a><br><b>On the GPU, bit for bit</b><br><sub>the device code path on a slice: 0 differences from the host</sub></td>
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/01-first-surface"><img src="docs/examples/images/tour.svg" alt="Free and portable: the tutorial programs, run one after the other" width="260"></a><br><b>Free and portable</b><br><sub>the tutorial programs, run one after the other</sub></td>
 </tr>
