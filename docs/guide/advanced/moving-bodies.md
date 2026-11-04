@@ -122,7 +122,7 @@ follow from the fixed grid (issue #41):
 
 ```fortran
 call swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status)
-call swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, status)
+call swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status)
 ```
 
 **Integration.**
@@ -132,7 +132,21 @@ call swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, status)
   - The breakpoints are the instants when a wall vertex crosses the
     face's line, or when an end node of the face crosses a wall segment.
   - Two-point Gauss on every piece is exact.
-- **Otherwise: Gauss–Legendre at `nq` nodes** (default 4), on copies moved
+- **3-D pure translation: exact.** The same idea, one grid plane at a time.
+  - In the frame of the body, a grid plane moves by −s d with its grid
+    lines. Every vertex of a face's fluid polygon moves linearly in time
+    while the combinatorics hold, so the area is quadratic in time.
+  - The breakpoints of a plane are the instants when a mesh vertex
+    crosses it, a mesh edge crosses one of its grid lines, or one of its
+    grid nodes crosses a triangle.
+  - Two-point Gauss on every piece is exact. One evaluation (a section
+    of the shifted plane and the 2-D cut cells on the shifted grid)
+    gives every face of the plane.
+- `exact=.false.` forces the Gauss path for a translation (both
+  dimensions); `sw%exact` reports which path ran and `sw%evaluations`
+  how many aperture evaluations it took (per face in 2-D, per plane in
+  3-D).
+- **Otherwise (rotation): Gauss–Legendre at `nq` nodes** (default 4), on copies moved
   to the node poses. With the screw motion, `error_estimate` is the
   largest face change between `nq` and `2 nq` nodes.
 
@@ -157,23 +171,31 @@ fluid at the other.
 | swept, 2-D translation: square (every face vs analytic), non-convex heptagon, heptagon at a rotated pose | faces to 8.3e-17; uniform-flow residual ≤ 1.7e-16 in every cell; walls sum to ≤ 1.4e-16 |
 | swept, 2-D negative control: Gauss with 4 nodes, no breakpoints | residual 9.0e-3 |
 | swept, 2-D rotation: off-centre square, pitching NACA 0012; nq = 2, 4, 8, 16 | residual 5.6e-3 → 1.6e-4 (rate ≈ 2.3) and 1.5e-3 → 1.6e-6 (rate ≈ 3.4) |
-| swept, 3-D: unit cube translating; nq = 2, 4, 8, 16 | faces vs analytic 2.5e-2 → 2.3e-3; residual 1.3e-2 → 7.1e-4 |
+| swept, 3-D translation: unit cube (every face vs analytic) | faces to 5.6e-17; uniform-flow residual 2.5e-17; walls sum to ≤ 8.3e-17 |
+| swept, 3-D translation: cube and L-prism at a pose rotated about (1, 1, 1), 32-face cone | uniform-flow residual 7.6e-17, 3.0e-16, 1.9e-16 |
+| swept, 3-D translation without one breakpoint class (vertex / edge-line / node-triangle) | residual up to 5.7e-4 / 1.4e-3 / 1.3e-5: each class is needed |
+| swept, 3-D negative control: unit cube translating, Gauss, nq = 2, 4, 8, 16 | faces vs analytic 2.5e-2 → 2.3e-3; residual 1.3e-2 → 7.1e-4 |
 | swept, 3-D: cube rotating about (1, 1, 1) while translating; nq = 2, 4, 8 | residual 1.1e-2 → 1.6e-3 |
 | swept: explicit node poses = screw poses | face apertures bit for bit |
 
 ## Limitations
 
-- **Swept geometry: Gauss converges slowly across jumps.**
+- **Swept geometry: rotations converge slowly across jumps.**
   - A face's fluid length (area) jumps when the face's line (plane)
     leaves the body. Gauss across a jump is O(1/nq).
-  - Rotation in 2-D gives rates of about 2–3.
-  - 3-D translation is about first order (faces 2.5e-2 → 2.3e-3 from
-    nq = 2 to 16).
-  - Only the 2-D translation is exact. A per-plane breakpoint path for 3-D
-    translations is a possible extension.
+  - Rotation in 2-D gives rates of about 2–3; in 3-D about first order
+    (cube: residual 1.1e-2 → 1.6e-3 from nq = 2 to 8).
+  - Only translations are exact: under a rotation the polygon vertices
+    no longer move linearly, so there is no finite set of pieces on which
+    a fixed rule is exact.
 - **Swept geometry: the cost.** The 2-D exact path costs O((faces +
-  nodes) × segments). The Gauss paths cost one moved copy and one
-  face pass per node, plus as many again for the error estimate.
+  nodes) × segments). The 3-D exact path costs, per grid plane, a scan of
+  the triangles in the slab the plane sweeps, plus 2 (breakpoints + 1)
+  sections and 2-D cut-cell passes; the breakpoints grow with the mesh
+  vertices and edges in that slab, so a fine mesh and a long step make
+  it expensive (`sw%evaluations` reports it). The Gauss paths cost one
+  moved copy and one face pass per node, plus as many again for the
+  error estimate.
 - **Rigid bodies only.** Deforming bodies, and refitting under deformation,
   are out of scope.
 - **Points near the surface.** `state_changes` decides states with the
