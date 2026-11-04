@@ -12,7 +12,11 @@ by the plane z = 0, and the section is a `curve_object` with the same queries as
 - `merge_collinear=.true.` drops vertices between collinear segments. `open_loops` counts the chains that did not
   close, as happens on a surface with holes; such a curve can be closed by `repair(tolerance=)`.
 - The solid is on the left of every segment: outer loops run counter-clockwise, holes clockwise. `check_validity()`
-  returns `CURVE_VALID` or the first defect found (`CURVE_OPEN_LOOP`, `CURVE_WRONG_ORIENTATION`, ...).
+  returns `CURVE_VALID` or the first defect found (`CURVE_OPEN_LOOP`, `CURVE_WRONG_ORIENTATION`, ...). It does not
+  look for crossings: `self_intersections(pairs, n)` returns the pairs of segments that cross, touch or overlap,
+  decided exactly. The section is valid and still crosses itself once, at a fold of the non-manifold dragon; the
+  distance queries do not mind, the cut cells and the swept geometry do ([chapter 11](./11-moving-bodies) shows how
+  the swept-geometry residual detects it).
 - `get_area` and `get_perimeter` are the 2-D metrics. `save_into_file` writes the ASCII loop format, one `u v` per
   line, read back by `load_from_file`. Chapters 10 and 11 read `dragon-section.dat`.
 - A curve can also be built from arrays: `adopt_loops(u=, v=, loop_sizes=)`.

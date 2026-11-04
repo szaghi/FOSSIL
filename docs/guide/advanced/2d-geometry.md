@@ -44,6 +44,12 @@ What it covers:
   with holes. An open loop has no closing segment and no area, and
   `check_validity` reports it. The distance and the generalized winding
   number still handle it, and the fast winding number sign is meant for it.
+- **Validity.** `check_validity` returns the first defect loop by loop (open
+  loop, too few vertices, zero-length segment, zero area, wrong orientation for
+  the nesting depth); it does not look for crossings. `self_intersections`
+  returns the pairs of segments that cross, touch or overlap, decided exactly.
+  A curve can be valid and still cross itself, a section of a non-manifold
+  mesh for example; the cut cells and the swept geometry assume it does not.
 - **Exactness.** Decisions that must agree from one query to the next use the
   exact `orient2d`: nesting depth, self-intersections, slicing, repair. The
   point queries are plain floating point, as in 3-D, so they run unchanged

@@ -31,8 +31,8 @@ tree, and it gives what a moving cut-cell update needs: the cells that change st
   - `sw%face_u`, `sw%face_v` are the fluid lengths of the faces averaged over the step; `sw%wall` is the averaged
     projected wall.
   - `sw%cleared` and `sw%covered` flag cells with no fluid at one pose and fluid at the other.
-  - `sw%residual` is the volume balance of the rigid velocity field in each cell: zero when the face averages are
-    exact.
+  - `sw%residual` is the volume balance of the rigid velocity field in each cell: round-off when the face averages
+    are exact and the wall does not cross itself.
 - A pure translation takes the exact path (`sw%exact`): the face lengths are integrated piecewise between the
   instants when a vertex crosses a grid line or a node crosses a segment. A rotation is integrated by Gauss-Legendre
   at `nq` nodes (default 4), with `sw%error_estimate`.
@@ -43,8 +43,14 @@ tree, and it gives what a moving cut-cell update needs: the cells that change st
 
 - The body-frame distances equal those of the moved and refitted copy to 1e-14.
 - Of the 13824 cell centres, 96 become fluid and 98 become solid; only 992 needed the second query.
-- The section translated by 0.005 sweeps 99 cells, 3 of which go from solid to fluid. The swept areas sum to zero,
-  as a rigid translation keeps the area, and the residual vanishes in every cell.
+- The section translated by 0.02 sweeps 131 cells, 16 of which go from solid to fluid. The swept areas sum to zero,
+  as a rigid translation keeps the area.
+- The residual is round-off in every cell but two, and 5.3e-6 in cell (23, 22). That is the knot of
+  [chapter 7](./07-curves): the section crosses itself once, at a fold. The swept areas come from the cut cells
+  (Green's theorem, a region counted by its winding number) and the face averages from line crossings (parity),
+  which count the knot differently; the residual is where they disagree. With the knot cut out of the section the
+  largest residual over the same kind of shifts is 7.8e-18. Check a curve with `self_intersections` before trusting
+  its swept geometry; `check_validity` does not look for crossings.
 
 ::: tip What you learned
 `pose=` queries a moving body without touching its tree, `move` refits a copy for grid-aligned queries,

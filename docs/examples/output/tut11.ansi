@@ -1,5 +1,6 @@
 $ tut11_moving_bodies
 posed = moved to 1e-14: T
 cells: fresh 96, dead 98, second query 992 of 13824
-section swept: exact T, cells with swept area 99, cleared 3
-  sum of swept = 0 to 1e-14: T, residual = 0 to 1e-14: T
+section swept: exact T, cells with swept area 131, cleared 16
+  sum of swept = 0 to 1e-14: T, cells with residual > 1e-14: 2
+  largest residual  5.30E-06 in cell 23 22: the knot of the section (chapter 7)

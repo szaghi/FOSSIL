@@ -154,7 +154,9 @@ call swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status
 field: swept volume plus the time integral of the field's outflow through
 the fluid part of every face. It vanishes when a uniform flow moving with
 the body is reproduced exactly, Falcovitz's design requirement. It is not
-computed (0) when the caller passes the node poses.
+computed (0) when the caller passes the node poses. The residual also
+checks the input: the exact paths assume a wall that does not cross itself
+(see the limitation below).
 
 `cleared` and `covered` flag the cells with no fluid at one pose and
 fluid at the other.
@@ -180,6 +182,16 @@ fluid at the other.
 
 ## Limitations
 
+- **Swept geometry: a self-intersecting wall breaks the balance.** The swept
+  volumes come from the cut cells (Green's theorem: a region counts by its
+  winding number) and the face apertures from line crossings (parity). Where
+  the wall crosses itself the two count the knot differently, so the cells
+  around the knot get a residual that is not round-off, even on the exact
+  translation path. Measured on a section of the (non-manifold) dragon that
+  crosses itself once at a fold: residual 5.3e-6 in the cell the knot enters;
+  with the knot removed, 7.8e-18 over the same 25 shifts. `check_validity`
+  does not look for crossings: call `self_intersections` on the curve before
+  trusting the swept geometry.
 - **Swept geometry: rotations converge slowly across jumps.**
   - A face's fluid length (area) jumps when the face's line (plane)
     leaves the body. Gauss across a jump is O(1/nq).

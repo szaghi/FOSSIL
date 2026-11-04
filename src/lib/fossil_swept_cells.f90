@@ -36,7 +36,12 @@ module fossil_swept_cells
 !< exact). Per cell, residual = swept + int_0^1 sum_f (flux of the field out of the fluid part of
 !< face f) ds; the field is linear in x, so a face flux is its fluid length (area) times the field at
 !< the fluid centroid. It is round-off for the exact translation paths and the quadrature error
-!< otherwise. Not computed (0) when the caller gives the node poses.
+!< otherwise. Not computed (0) when the caller gives the node poses. The exact paths assume a wall that
+!< does not cross itself: on a self-intersecting curve (surface) the swept volumes come from the cut
+!< cells (Green's theorem, regions counted by winding number) and the face apertures from line
+!< crossings (parity), which count a knot differently, so the residual of the cells around the knot is
+!< not round-off (a dragon section crossing itself once: 5.3e-6, the knot removed: 7.8e-18). Check
+!< the input with `self_intersections`; `check_validity` does not.
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t
 use fossil_curve_slice,        only : slice_surface
 use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d
