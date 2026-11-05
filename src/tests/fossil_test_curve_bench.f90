@@ -54,6 +54,7 @@ call bench(c, [-1.5_R8P, -1.5_R8P], [1.5_R8P, 1.5_R8P], 'disc with a hole (1100 
 
 call sign_bench
 call deviation_case(c)
+call feature_case(c)
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
@@ -196,6 +197,28 @@ contains
    print '(A,I0)', 'deviation device vs serial mismatches: ', bad
    ok = ok .and. bad == 0
    endsubroutine deviation_case
+
+   subroutine feature_case(cur)
+   !< Corner distances (issue #61): query_many_device vs query_many on a 64^2 grid over the curve, at 10 degrees.
+   type(curve_object), intent(inout) :: cur  !< Curve (entered here).
+   real(R8P), allocatable            :: p(:,:), d(:), f1(:), f2(:) !< Points, outputs.
+   real(R8P)                         :: lo(2), hi(2) !< Box.
+   integer(I4P)                      :: i, j, m, bad !< Counters.
+
+   lo = cur%get_bmin() - 0.1_R8P ; hi = cur%get_bmax() + 0.1_R8P
+   allocate(p(2, 64 * 64), d(64 * 64), f1(64 * 64), f2(64 * 64))
+   m = 0
+   do j = 1, 64 ; do i = 1, 64
+      m = m + 1 ; p(:, m) = lo + (hi - lo) * [(i - 0.5_R8P) / 64, (j - 0.5_R8P) / 64]
+   enddo ; enddo
+   call cur%query_many(points=p, distances=d, feature_distances=f1, feature_angle=10._R8P)
+   call cur%enter_device
+   call cur%query_many_device(points=p, distances=d, feature_distances=f2, feature_angle=10._R8P)
+   call cur%exit_device
+   bad = count(f1 /= f2)
+   print '(A,I0)', 'feature device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0
+   endsubroutine feature_case
 
    subroutine box(cur, p, h, algo, nm)
    !< box_classify_many_device vs box_classify_many (issue #38): a box of half-size h around every

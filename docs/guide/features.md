@@ -32,7 +32,7 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 | Gaussian and mean curvature per vertex; pointwise O(h²) by a cubic jet fit | `gaussian_curvature`, `mean_curvature`, `jet_curvature` | [Per-vertex curvature](/guide/advanced/curvature) | |
 | Mass, centre of mass, inertia tensor, principal axes (exact polyhedral integrals); 2-D second moments | `surface%mass_properties`, `curve%mass_properties`, `inertia_to_world`, `principal_frame` | [Mass properties](/guide/advanced/mass-properties) | |
 | Surface deviation: one-sided and symmetric Hausdorff distance, mean, rms, per-vertex distance | `surface%deviation`, `surface%hausdorff`, `curve%deviation`, `curve%hausdorff` | [Surface deviation](/guide/advanced/surface-deviation) | |
-| Feature edges: sharp, boundary and non-manifold edges, corners, polylines | `surface%feature_edges` | [Feature edges](/guide/advanced/feature-edges) | |
+| Feature edges: sharp, boundary and non-manifold edges, corners, polylines; refinement and distances along them; 2-D corners | `surface%feature_edges`, `build_features`, `box_feature_many`, `tag_block(feature_tags=)`, `query_many(feature_distances=)`, `curve%feature_corners` | [Feature edges](/guide/advanced/feature-edges) | |
 
 ## Distance and signs
 

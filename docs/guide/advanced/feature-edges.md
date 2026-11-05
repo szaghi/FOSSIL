@@ -102,6 +102,29 @@ a few cells. It works with `pose=` (body-frame points, as the other outputs). Th
 `feature_point_distance_oac`, and gives the same bits. `build_features` must come first (and `enter_device` for the
 device), else `STATUS_INVALID_INPUT`.
 
+## 2-D: corners
+
+For a [curve](/guide/advanced/2d-geometry) the features are its corners:
+
+```fortran
+call curve%feature_corners(corners, angle, status)                       ! turning above angle, ends of open loops
+call curve%tag_block(x, y, band, tags, ..., feature_band=fb, feature_tags=ft, feature_angle=a)
+call curve%query_many(points, distances, ..., feature_distances=fd, feature_angle=a)   ! and query_many_device
+```
+
+- **Corners.** A vertex of a closed loop is a corner when the angle between its incoming and outgoing segments exceeds
+  `angle` (30° by default). Both ends of every open loop are corners too.
+- **No build step.** The corners take O(n) to find, so the curve procedures compute them at each call; there is no
+  `build_features` in 2-D.
+- **`feature_tags`** is the Chebyshev cell distance to the nearest cell holding a corner. A corner on a cell edge marks
+  both cells.
+- **`feature_distances`** is the distance from each point to the nearest corner. On the device it runs as an OpenACC
+  loop with the same arithmetic, so it gives the same bits.
+
+![an L-shaped section with its six corners in gold and, on 32 x 32 cells, the cells holding a corner and the two rings around them shaded, darkest at the corners](../../examples/images/ref-feature-corners-2d.svg){.fossil-figure}
+
+The L-shape has 6 corners; with `feature_band=2`, 171 cells lie within two cells of one.
+
 ## Example
 
 <<< @/examples/snippets/ck_feature_edges.f90
@@ -148,6 +171,19 @@ creases.
 
 The GPU check (`fossil_test_distance_bench`) prints `feature device vs serial mismatches`, over the touched cells of a
 block of 24³ cells and the feature distances of their centres, required 0.
+
+`src/tests/fossil_test_curve_features.f90`, the 2-D twin:
+
+| Case | Expected |
+|---|---|
+| A unit square; a regular 64-gon; the 64-gon at 1° | 4 corners; none (5.6° per vertex); all 64 |
+| A NACA 0012 of 200 points | the trailing edge only |
+| An open polyline with a 10° bend | its two ends |
+| Corner tags of the square on 10 × 10 cells | equal to a brute force |
+| Corner distances | √0.5 and 1 at closed-form points, 0 at a corner; the device path equal to the CPU |
+
+The curve bench (`fossil_test_curve_bench`, the `tests-nvidia-curve` gate) prints `feature device vs serial mismatches`
+for the corner distances of a 64² grid.
 
 `fossil_test_isotropic_remesh` gives the same output as before the shared predicate (compared line by line against a
 build of the previous commit).

@@ -32,6 +32,7 @@ use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
 use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate
 use fossil_predicates,         only : orient2d_xy
 use fossil_mass_properties,    only : moments_accumulator_t, accumulate_segment, moments_to_properties_2d, symmetric2_eigen
+use fossil_feature_edges,      only : FEATURE_EDGE_DEFAULT_ANGLE, feature_cos
 use fossil_deviation,          only : deviation_evaluator_2d_t, deviation_sampled_2d, deviation_certified_2d, &
                                      DEV_STATUS_OK, DEV_STATUS_BAD_INPUT
 use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, segment_point_distance2, &
@@ -136,6 +137,7 @@ type :: curve_object
       procedure, pass(self) :: mass_properties      !< Mass, centroid, second moments, principal axes (issue #59).
       procedure, pass(self) :: deviation            !< One-sided deviation (Hausdorff) from another curve (issue #60).
       procedure, pass(self) :: hausdorff            !< Symmetric Hausdorff distance to another curve (issue #60).
+      procedure, pass(self) :: feature_corners      !< Corners: turning above an angle, ends of open loops (issue #61).
       procedure, pass(self) :: nesting_depth        !< Nesting depth of a loop (exact).
       procedure, pass(self) :: repair               !< Join/close chains, merge vertices, drop degenerate loops, orient.
       procedure, pass(self) :: save_into_file       !< Save into the ASCII loop format.
@@ -345,7 +347,9 @@ contains
    if (present(inside)) inside = il
    endsubroutine box_classify_many_device
 
-   subroutine tag_block(self, x, y, band, tags, sign_algorithm, status)
+   subroutine tag_block(self, x, y, band, tags, sign_algorithm, status, feature_band, feature_tags, feature_angle)
+   !< Corner tags (issue #61): with `feature_band` and `feature_tags(nx, ny)`, the Chebyshev cell distance to the nearest
+   !< cell holding a corner (`feature_corners`, `feature_angle`), capped at feature_band + 1.
    !< Signed tag bands on a rectilinear block of cells in the (u, v) plane (issue #38): the 2-D twin
    !< of `surface_stl_object%tag_block`. `x(nx+1)`, `y(ny+1)` are the u and v cell edges; `tags(nx,
    !< ny)`: 0 on a cut cell (exact), else the Chebyshev cell distance to the nearest cut cell of the
@@ -358,6 +362,9 @@ contains
    integer(I4P),        intent(out)           :: tags(:,:)      !< Tags [nx, ny].
    integer(I4P),        intent(in),  optional :: sign_algorithm !< SIGN_* (default SIGN_FAST_WINDING_NUMBER).
    integer(I4P),        intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),        intent(in),  optional :: feature_band   !< Corner band width (>= 0, issue #61).
+   integer(I4P),        intent(out), optional :: feature_tags(:,:) !< Chebyshev cells to the nearest corner cell [nx, ny].
+   real(R8P),           intent(in),  optional :: feature_angle  !< Corner threshold [degrees] (default 30).
    logical,      allocatable :: cut(:,:,:)  !< Cut cells.
    integer(I4P), allocatable :: dist(:,:,:), comp(:,:,:), seed(:,:) !< Bands, components, seeds.
    integer(I4P), allocatable :: sgn(:)      !< Sign of each component.
@@ -371,6 +378,35 @@ contains
    if (bad) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
+   endif
+   if (present(feature_tags)) then ! cells to the nearest corner (issue #61)
+      bad = .not. present(feature_band)
+      if (.not. bad) bad = feature_band < 0_I4P .or. size(feature_tags, 1) /= nx .or. size(feature_tags, 2) /= ny
+      if (bad) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+      block
+         integer(I4P), allocatable :: cn(:), fd(:,:,:)
+         logical,      allocatable :: hit(:,:,:)
+         real(R8P)                 :: t_
+         integer(I4P)              :: c_, ii, jj
+         call self%feature_corners(cn, angle=feature_angle)
+         allocate(hit(nx, ny, 1), fd(nx, ny, 1))
+         hit = .false.
+         t_ = 1.e-12_R8P * max(norm2(self%bmax - self%bmin), maxval(abs(self%bmin)), maxval(abs(self%bmax)))
+         do c_ = 1, size(cn)                  ! every cell whose closed box (inflated by t_) holds the corner
+            do jj = 1_I4P, ny
+               if (self%v(cn(c_)) < y(jj) - t_ .or. self%v(cn(c_)) > y(jj+1) + t_) cycle
+               do ii = 1_I4P, nx
+                  if (self%u(cn(c_)) < x(ii) - t_ .or. self%u(cn(c_)) > x(ii+1) + t_) cycle
+                  hit(ii, jj, 1) = .true.
+               enddo
+            enddo
+         enddo
+         call cell_bands(hit, feature_band, fd)
+         feature_tags = fd(:, :, 1)
+      endblock
    endif
    algo = SIGN_FAST_WINDING_NUMBER ; if (present(sign_algorithm)) algo = sign_algorithm
    if (.not. self%box_intersects_curve([x(1), y(1)], [x(nx+1), y(ny+1)])) then
@@ -706,7 +742,7 @@ contains
 
    recursive subroutine query_many(self, points, distances, closest_points, segments, vertices, normals, bodies, is_signed, &
                                    sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status, pose, &
-                                   curvatures)
+                                   curvatures, feature_distances, feature_angle)
    !< Batched rich query (issue #37), CPU, OpenMP over the points: distance (signed by default),
    !< closest point, closest segment, closest vertex (0 in a segment interior), pseudo-normal of the
    !< closest feature (segment normal or vertex bisector), body. Every output after `distances` is
@@ -738,6 +774,8 @@ contains
    real(R8P),           intent(in),  optional :: foot_tolerance     !< Foot separation (default 1e-9 box diagonal).
    integer(I4P),        intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
    type(rigid_pose_2d_t), intent(in), optional :: pose              !< Pose of the curve (issue #41): world points, outputs.
+   real(R8P),           intent(out), optional :: feature_distances(:) !< Distance to the nearest corner [n] (issue #61).
+   real(R8P),           intent(in),  optional :: feature_angle      !< Corner threshold [degrees] (default 30).
    real(R8P),           intent(out), optional :: curvatures(:)      !< Curvature at the foot point [n].
    real(R8P)                                  :: cp(2), nn(2), cp2(2), rel_, foot_ !< Per-point outputs, tolerances.
    logical                                    :: amb, want_amb      !< Ambiguity.
@@ -748,7 +786,8 @@ contains
       call self%query_many(points=body_points2(pose, points), distances=distances, closest_points=closest_points, &
                            segments=segments, vertices=vertices, normals=normals, bodies=bodies, is_signed=is_signed, &
                            sign_algorithm=sign_algorithm, ambiguous=ambiguous, second_foot_points=second_foot_points, &
-                           rel_tolerance=rel_tolerance, foot_tolerance=foot_tolerance, status=status, curvatures=curvatures)
+                           rel_tolerance=rel_tolerance, foot_tolerance=foot_tolerance, status=status, curvatures=curvatures, &
+                           feature_distances=feature_distances, feature_angle=feature_angle)
       if (present(status)) then
          if (status /= STATUS_OK) return
       endif
@@ -758,6 +797,13 @@ contains
          if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
       enddo
       return
+   endif
+   if (present(feature_distances)) then ! distance to the nearest corner (issue #61)
+      if (size(feature_distances) /= size(points, 2)) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+      call corner_distances(self, points, feature_angle, feature_distances)
    endif
    if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
    if (.not. rich_sizes_ok(size(distances, kind=I4P), closest_points, segments, vertices, normals, bodies) .or. &
@@ -928,7 +974,7 @@ contains
    endsubroutine curve_markers
 
    recursive subroutine query_many_device(self, points, distances, closest_points, segments, vertices, normals, bodies, &
-                                          is_signed, sign_algorithm, status, pose)
+                                          is_signed, sign_algorithm, status, pose, feature_distances, feature_angle)
    !< `query_many` on the device (issue #37): same contract and kernel. Requires `enter_device`.
    !< Every output is computed into local arrays (no absent optional in device code), the
    !< requested ones copied out on the host; #20 pointer aliases. GPU validation pending.
@@ -944,6 +990,8 @@ contains
    integer(I4P),        intent(in),  optional :: sign_algorithm     !< Sign algorithm.
    integer(I4P),        intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
    type(rigid_pose_2d_t), intent(in), optional :: pose              !< Pose of the curve (issue #41).
+   real(R8P),           intent(out), optional :: feature_distances(:) !< Distance to the nearest corner [n] (issue #61).
+   real(R8P),           intent(in),  optional :: feature_angle      !< Corner threshold [degrees] (default 30).
    real(R8P),    allocatable :: dd(:), cpl(:,:), nml(:,:) !< Device-side outputs.
    integer(I4P), allocatable :: sgl(:), vxl(:), bdl(:)    !< Device-side outputs.
    logical                   :: signed_, fwn              !< Resolved options.
@@ -956,7 +1004,8 @@ contains
    if (present(pose)) then ! body-frame query (issue #41), outputs mapped back on the host
       call self%query_many_device(points=body_points2(pose, points), distances=distances, closest_points=closest_points, &
                                   segments=segments, vertices=vertices, normals=normals, bodies=bodies, is_signed=is_signed, &
-                                  sign_algorithm=sign_algorithm, status=status)
+                                  sign_algorithm=sign_algorithm, status=status, feature_distances=feature_distances, &
+                                  feature_angle=feature_angle)
       if (present(status)) then
          if (status /= STATUS_OK) return
       endif
@@ -965,6 +1014,13 @@ contains
          if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
       enddo
       return
+   endif
+   if (present(feature_distances)) then ! distance to the nearest corner (issue #61), on the device
+      if (size(feature_distances) /= size(points, 2)) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+      call corner_distances(self, points, feature_angle, feature_distances, device=.true.)
    endif
    if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
    if (.not. rich_sizes_ok(size(distances, kind=I4P), closest_points, segments, vertices, normals, bodies)) then
@@ -1559,6 +1615,87 @@ contains
    if (present(lower)) lower = max(l1, l2)
    if (present(upper)) upper = max(u1, u2)
    endsubroutine hausdorff
+
+   subroutine feature_corners(self, corners, angle, status)
+   !< The corners of the curve (issue #61), the 2-D feature edges: vertices of closed loops where the curve turns by more
+   !< than `angle` (degrees, default 30: the angle between the incoming and the outgoing segment), and both ends of every
+   !< open loop. Vertex ids as `get_vertex`.
+   class(curve_object),       intent(in)            :: self    !< Curve.
+   integer(I4P), allocatable, intent(out)           :: corners(:) !< Corner vertices.
+   real(R8P),                 intent(in),  optional :: angle   !< Threshold [degrees].
+   integer(I4P),              intent(out), optional :: status  !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,      allocatable                        :: is_c(:) !< Corner flags.
+   real(R8P)                                        :: a(2), b(2), c_thr, la, lb !< Work.
+   integer(I4P)                                     :: i       !< Counter.
+
+   if (present(status)) status = STATUS_INVALID_INPUT
+   c_thr = feature_cos(FEATURE_EDGE_DEFAULT_ANGLE)
+   if (present(angle)) then
+      if (.not. (angle >= 0._R8P .and. angle <= 180._R8P)) then
+         allocate(corners(0)) ; return
+      endif
+      c_thr = feature_cos(angle)
+   endif
+   allocate(is_c(self%nv))
+   is_c = .false.
+   do i = 1, self%nv
+      if (self%prev(i) == 0_I4P .or. self%next(i) == 0_I4P) then
+         is_c(i) = .true. ; cycle
+      endif
+      a = [self%u(i) - self%u(self%prev(i)), self%v(i) - self%v(self%prev(i))]
+      b = [self%u(self%next(i)) - self%u(i), self%v(self%next(i)) - self%v(i)]
+      la = norm2(a) ; lb = norm2(b)
+      if (la > 0._R8P .and. lb > 0._R8P) is_c(i) = dot_product(a, b) / (la * lb) < c_thr
+   enddo
+   corners = pack([(i, i = 1_I4P, self%nv)], is_c)
+   if (present(status)) status = STATUS_OK
+   endsubroutine feature_corners
+
+   subroutine corner_distances(self, points, angle, d, device)
+   !< Distance from each point (u, v) to the nearest corner of the curve (huge without corners); with device=.true. an
+   !< OpenACC loop over the points (the same arithmetic, so the same bits).
+   type(curve_object),  intent(in)           :: self        !< Curve.
+   real(R8P),           intent(in)           :: points(:,:) !< Points [2, n].
+   real(R8P),           intent(in), optional :: angle       !< Corner threshold [degrees].
+   real(R8P),           intent(out)          :: d(:)        !< Distances [n].
+   logical,             intent(in), optional :: device      !< On the device.
+   integer(I4P), allocatable                 :: c(:)        !< Corners.
+   real(R8P),    allocatable                 :: cu(:), cv(:) !< Corner coordinates.
+   real(R8P)                                 :: best        !< Work.
+   integer(I4P)                              :: i, k, n, nc !< Counters.
+   logical                                   :: dev         !< On the device.
+
+   call self%feature_corners(c, angle=angle)
+   nc = size(c, kind=I4P) ; n = size(points, 2, kind=I4P)
+   allocate(cu(max(1_I4P, nc)), cv(max(1_I4P, nc)))
+   cu = 0._R8P ; cv = 0._R8P
+   if (nc > 0) then
+      cu(1:nc) = self%u(c) ; cv(1:nc) = self%v(c)
+   endif
+   dev = .false. ; if (present(device)) dev = device
+   if (dev) then
+      !$acc parallel loop copyin(points, cu, cv) copyout(d) private(best, k)
+      do i = 1_I4P, n
+         best = huge(1._R8P)
+         do k = 1_I4P, nc
+            best = min(best, (points(1, i) - cu(k)) ** 2 + (points(2, i) - cv(k)) ** 2)
+         enddo
+         d(i) = huge(1._R8P)
+         if (best < huge(1._R8P)) d(i) = sqrt(best)
+      enddo
+   else
+      !$omp parallel do default(shared) private(i, k, best)
+      do i = 1_I4P, n
+         best = huge(1._R8P)
+         do k = 1_I4P, nc
+            best = min(best, (points(1, i) - cu(k)) ** 2 + (points(2, i) - cv(k)) ** 2)
+         enddo
+         d(i) = huge(1._R8P)
+         if (best < huge(1._R8P)) d(i) = sqrt(best)
+      enddo
+      !$omp end parallel do
+   endif
+   endsubroutine corner_distances
 
    subroutine curve_evaluator_eval(self, points, distances, closest, segments)
    !< Unsigned distances of the points to the evaluator's curve, the closest points and their segments (`query_many`).
