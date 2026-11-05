@@ -3,13 +3,14 @@
 !<
 !< FOSSIL test: alpha wrapping, `surface%alpha_wrap` (issue #18 §1.6, issue #50). Every wrap must be status OK,
 !< watertight, manifold and free of self-crossings (find_self_intersections).
-!<   1. The cube, alpha 0.1: volume within 0.5% of the offset cube (Minkowski sum).
+!<   1. The cube, alpha 0.1: volume within 1.5% of the offset cube (Minkowski sum; chords of the coarsened wrap).
 !<   2. A marching-cubes sphere (32^3): >= 90% of the vertices on the offset surface, none closer than the offset.
 !<   3. The cube minus one facet, hole wider than the ball: a hollow shell lining both sides.
 !<   4. The same, hole narrower than the ball: capped.
 !<   5. One triangle: a closed shell around both sides.
 !<   6. The issue #50 table: cube-01 closed and minus one facet, alpha 0.1, 0.3, 0.7.
 !<   7. dragon.stl with the defaults; the wrap encloses it, vertices as in 2.
+!<   8. cube-01 with the defaults (alpha = bbox/50): under 20000 facets (161468 before the collapse stage, #52).
 
 program fossil_val_alpha_wrap
 
@@ -32,7 +33,7 @@ type(vector_R8P) :: bmin, bmax
 real(R8P) :: x, y, z, dx, alpha
 real(R8P) :: wrap_volume, expected_volume, offset
 integer(I4P) :: status, i, j, k
-logical :: are_tests_passed(7)
+logical :: are_tests_passed(8)
 
 integer(I4P), parameter :: N_GRID = 32_I4P
 
@@ -70,7 +71,7 @@ call cube%alpha_wrap(alpha=0.1_R8P, offset=offset, wrapped=wrapped_tbp, status=s
 wrap_volume = wrapped_tbp%get_volume()
 expected_volume = 1._R8P + 6._R8P * offset + 3._R8P * PI * offset**2 + 4._R8P / 3._R8P * PI * offset**3
 are_tests_passed(1) = wrap_ok('inv 1 (cube TBP)', wrapped_tbp, status) .and. &
-                       (abs(wrap_volume - expected_volume) <= 0.005_R8P * expected_volume)
+                       (abs(wrap_volume - expected_volume) <= 0.015_R8P * expected_volume)
 print '(A,F8.5,A,F8.5)', '        volume=', wrap_volume, ' offset cube=', expected_volume
 
 ! ---- Invariant 2: capstone TBP on the marching-cubes sphere: at least 90% of the wrap vertices on the offset
@@ -92,7 +93,7 @@ call cube_holed%alpha_wrap(alpha=0.6_R8P, offset=offset, wrapped=wrapped_tbp, st
 wrap_volume = wrapped_tbp%get_volume()
 expected_volume = 1._R8P + 6._R8P * offset + 3._R8P * PI * offset**2 + 4._R8P / 3._R8P * PI * offset**3
 are_tests_passed(4) = wrap_ok('inv 4 (holed cube, hole capped)', wrapped_tbp, status) .and. &
-                       (wrap_volume < expected_volume) .and. (wrap_volume > 0.98_R8P * expected_volume)
+                       (wrap_volume < expected_volume) .and. (wrap_volume > 0.95_R8P * expected_volume)
 print '(A,F8.5,A,F8.5)', '        volume=', wrap_volume, ' offset cube=', expected_volume
 
 ! ---- Invariant 5: one triangle (zero thickness, area 1/2): a closed shell around both sides, 2 offset x area + rim.
@@ -105,7 +106,7 @@ call plate%adopt_facets(facets=plate_facets)
 call plate%alpha_wrap(alpha=0.2_R8P, offset=offset, wrapped=wrapped_tbp, status=status)
 wrap_volume = wrapped_tbp%get_volume()
 are_tests_passed(5) = wrap_ok('inv 5 (one triangle)', wrapped_tbp, status) .and. &
-                       (wrap_volume >= 0.02_R8P) .and. (wrap_volume <= 0.0225_R8P)
+                       (wrap_volume >= 0.019_R8P) .and. (wrap_volume <= 0.0225_R8P)
 print '(A,F8.5)', '        volume=', wrap_volume
 
 ! ---- Invariant 6: the measured table of issue #50: cube-01.stl closed and minus one facet, alpha 0.1, 0.3, 0.7,
@@ -139,7 +140,12 @@ are_tests_passed(7) = wrap_ok('inv 7 (dragon, defaults)', wrapped_tbp, status) .
                        offset_ok(dragon, wrapped_tbp, offset) .and. (wrapped_tbp%get_volume() > dragon%get_volume())
 print '(A,F10.3,A,F10.3)', '        volume=', wrapped_tbp%get_volume(), ' dragon=', dragon%get_volume()
 
-print '(A,7L2)', 'per-case results: ', are_tests_passed
+! ---- Invariant 8: cube-01 with the defaults, coarsened (issue #52): under 20000 facets, and a valid wrap.
+call cube01%alpha_wrap(wrapped=wrapped_tbp, status=status)
+are_tests_passed(8) = wrap_ok('inv 8 (cube-01, defaults)', wrapped_tbp, status) .and. &
+                      (wrapped_tbp%get_facets_number() < 20000_I4P)
+
+print '(A,8L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 if (.not. (all(are_tests_passed))) error stop 1
 

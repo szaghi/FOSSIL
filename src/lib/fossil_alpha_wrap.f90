@@ -43,6 +43,9 @@ real(R8P),    parameter :: AWRAP_FLOAT_ON = 1.e-13_R8P     !< float_pair: a vert
 real(R8P),    parameter :: AWRAP_FLOAT_BAND = 1.e-8_R8P    !< float_pair: below this (relative), the exact test decides.
 integer(I4P), parameter :: PLANE_EXACT = 0_I4P, PLANE_APART = 1_I4P, PLANE_COPLANAR = 2_I4P !< plane_relation codes.
 integer(I4P), parameter :: AWRAP_PUSH_ROUNDS = 6_I4P         !< Rounds of the repair pass (each halves the move).
+real(R8P),    parameter :: AWRAP_COLLAPSE_EDGE = 0.5_R8P     !< Edges shorter than this times alpha are collapsed (#52).
+real(R8P),    parameter :: AWRAP_COLLAPSE_QUALITY = 0.2_R8P  !< A collapse leaves no triangle of worse shape than this.
+integer(I4P), parameter :: AWRAP_COLLAPSE_ROUNDS = 200_I4P   !< Rounds of the collapse stage (until none is accepted).
 
 type :: awrap_grid_t
    !< Cell grid of one level of awrap_run (issue #50). Cell (i, j, k) has centre o + (i - 1/2, j - 1/2, k - 1/2) h.
@@ -108,6 +111,11 @@ contains
    !<      back onto the offset surface (issue #53). A chord across a convex edge or corner of the input, its
    !<      vertices on the offset surface, cuts the input when the cells are larger than ε; vertices converging on a
    !<      concave crease of the offset surface fold the triangles around them.
+   !<
+   !<   7. Coarsening (issue #52): half-edge collapses of the edges shorter than α/2, cheapest first by quadric error,
+   !<      each accepted only if the wrap stays a closed 2-manifold and no moved triangle flips, gets a shape worse
+   !<      than 0.2 (a new sliver), meets the input or crosses the wrap. The kept end is a wrap vertex: the vertices
+   !<      stay at ε or farther. 5 to 10 times fewer facets.
    !<
    !< Refinement loop: a level that leaves a triangle meeting the input, or crossing the wrap, is redone with
    !< h/2, up to `max_iterations` levels (default AWRAP_DEFAULT_MAX_OUTER_ITERATIONS) and AWRAP_MAX_CELLS cells.
@@ -534,6 +542,9 @@ contains
    integer(I4P), allocatable                      :: cube_first(:), cube_tri(:), stamp(:)
    real(R8P), allocatable                         :: tbox(:,:)      !< Per triangle: min x, y, z, max x, y, z.
    logical, allocatable                           :: tdeg(:)        !< Per triangle: two coincident vertices.
+   logical, allocatable                           :: alive(:)       !< Per triangle: not removed by a collapse.
+   integer(I4P)                                   :: query          !< Stamp of the current crossing query.
+   logical, allocatable                           :: dirty(:)       !< Dual cubes a collapse of this round touched.
    logical, allocatable                           :: defect(:), push(:), moved(:)
    integer(I4P)                                   :: ev(0:11), nedge, nslot, i, j, k, a, c, e, t, cube_case, mask
    integer(I4P)                                   :: c0, c1, ci(3), lo(3), idx, ntri, cap, round, v, t1
@@ -618,18 +629,19 @@ contains
    enddo
    ! repair pass: a triangle that meets the input, or crosses a wrap triangle near it, has its vertices (and the other
    ! triangle's) moved halfway back to their binary positions, where the Marching Cubes surface is embedded
-   allocate(defect(ntri), push(g%nvertex), moved(g%nvertex), stamp(ntri), tbox(6, ntri), tdeg(ntri))
+   allocate(defect(ntri), push(g%nvertex), moved(g%nvertex), stamp(ntri), tbox(6, ntri), tdeg(ntri), alive(ntri))
+   alive = .true. ; stamp = 0_I4P
+   query = 0_I4P
    defect = .false.
    moved = .true.
    do round = 0_I4P, AWRAP_PUSH_ROUNDS
       call cube_lists
-      stamp = 0_I4P
       push = .false.
       do t = 1_I4P, ntri
          if (.not. any(moved(tv(:, t)))) cycle
          defect(t) = .false.
          if (degenerate(point(tv(:, t)))) cycle
-         if (touches_input(tcube(t), point(tv(:, t)))) then
+         if (touches_input(point(tv(:, t)))) then
             defect(t) = .true.
          else
             t1 = crossed_triangle(t)
@@ -651,10 +663,12 @@ contains
       moved = push
    enddo
    contact = any(defect)
+   if (.not. contact) call collapse_edges
    ! the facets (a triangle with coincident vertices has no area: dropped, both sides of its only edge go with it)
    allocate(wrap(ntri))
    c = 0_I4P
    do t = 1_I4P, ntri
+      if (.not. alive(t)) cycle
       if (tv(1, t) == tv(2, t) .or. tv(2, t) == tv(3, t) .or. tv(3, t) == tv(1, t)) cycle
       tri = point(tv(:, t))
       if (degenerate(tri)) cycle
@@ -697,6 +711,256 @@ contains
       enddo
       key(s) = kk ; slot_vertex(s) = v
       endsubroutine insert
+
+      subroutine collapse_edges
+      !< Coarsen the wrap by half-edge collapses (issue #52): an edge shorter than AWRAP_COLLAPSE_EDGE alpha is
+      !< collapsed onto one of its ends, the cheaper by the quadric error (Garland & Heckbert) of the planes around
+      !< both. The kept end is a wrap vertex, so every vertex stays where it was, at eps or farther from the input. A
+      !< collapse is accepted only if the edge has two triangles, the link condition holds (the mesh stays a closed
+      !< 2-manifold), no moved triangle degenerates or flips, and none meets the input or crosses the wrap (the
+      !< tests of the repair pass). Rounds: the candidates sorted by cost, then swept; a collapse marks the dual cubes
+      !< of its triangles, before and after, and later candidates touching them wait for the next round, so the
+      !< crossing lists stay valid within a round.
+      real(R8P), allocatable    :: qd(:,:), cost(:)
+      integer(I4P), allocatable :: inc_first(:), inc_tri(:), fill(:), ea(:), eb(:), order(:)
+      logical, allocatable      :: vdead(:)
+      integer(I4P)              :: rnd, ncoll, ne, e, t0, k, a, b, u, v, ntu, ntv, nsh, i1, w, ncell
+      integer(I4P)              :: tu(64), tvv(64), sh(2), nu(128), nv2(128), nnu, nnv, nb, tl(3)
+      real(R8P)                 :: lmax, ca, cb, n0(3), n1(3), box(6), area
+      type(vector_R8P)          :: tri0(3), tri1(3), newt(3, 64)
+      integer(I4P)              :: nnew
+      logical                   :: ok
+
+      lmax = AWRAP_COLLAPSE_EDGE * 2._R8P * g%rho
+      ncell = g%n(1) * g%n(2) * g%n(3)
+      allocate(qd(10, g%nvertex), vdead(g%nvertex), dirty(ncell))
+      qd = 0._R8P ; vdead = .false.
+      do t0 = 1_I4P, ntri
+         if (.not. alive(t0)) cycle
+         tri0 = point(tv(:, t0))
+         if (degenerate(tri0)) cycle
+         n0 = normal3(tri0) ; area = 0.5_R8P * norm2(n0)
+         if (area <= 0._R8P) cycle
+         n0 = n0 / (2._R8P * area)
+         box(1) = -dot_product(n0, [tri0(1)%x, tri0(1)%y, tri0(1)%z])
+         do k = 1_I4P, 3_I4P
+            qd(:, tv(k, t0)) = qd(:, tv(k, t0)) + area * [n0(1)**2, n0(1) * n0(2), n0(1) * n0(3), n0(1) * box(1), &
+                               n0(2)**2, n0(2) * n0(3), n0(2) * box(1), n0(3)**2, n0(3) * box(1), box(1)**2]
+         enddo
+      enddo
+      do rnd = 1_I4P, AWRAP_COLLAPSE_ROUNDS
+         call cube_lists
+         ! vertex -> live triangles
+         if (allocated(inc_first)) deallocate(inc_first, inc_tri, fill)
+         allocate(inc_first(g%nvertex + 1_I4P), fill(g%nvertex))
+         inc_first = 0_I4P
+         do t0 = 1_I4P, ntri
+            if (.not. alive(t0)) cycle
+            do k = 1_I4P, 3_I4P
+               inc_first(tv(k, t0) + 1_I4P) = inc_first(tv(k, t0) + 1_I4P) + 1_I4P
+            enddo
+         enddo
+         inc_first(1) = 1_I4P
+         do k = 1_I4P, g%nvertex
+            inc_first(k + 1_I4P) = inc_first(k + 1_I4P) + inc_first(k)
+         enddo
+         allocate(inc_tri(max(1_I4P, inc_first(g%nvertex + 1_I4P) - 1_I4P)))
+         fill = inc_first(1:g%nvertex) - 1_I4P
+         do t0 = 1_I4P, ntri
+            if (.not. alive(t0)) cycle
+            do k = 1_I4P, 3_I4P
+               fill(tv(k, t0)) = fill(tv(k, t0)) + 1_I4P ; inc_tri(fill(tv(k, t0))) = t0
+            enddo
+         enddo
+         ! candidates: the short edges (each listed by its triangles, once per direction-free key a < b)
+         if (allocated(ea)) deallocate(ea, eb, cost, order)
+         allocate(ea(3 * ntri), eb(3 * ntri), cost(3 * ntri))
+         ne = 0_I4P
+         do t0 = 1_I4P, ntri
+            if (.not. alive(t0) .or. tdeg(t0)) cycle
+            do k = 1_I4P, 3_I4P
+               a = tv(k, t0) ; b = tv(mod(k, 3_I4P) + 1_I4P, t0)
+               if (a > b) cycle
+               if (dist(point(a), point(b)) >= lmax) cycle
+               ca = qerr(qd(:, a) + qd(:, b), point(a)) ; cb = qerr(qd(:, a) + qd(:, b), point(b))
+               ne = ne + 1_I4P
+               if (ca <= cb) then ; ea(ne) = b ; eb(ne) = a ; cost(ne) = ca ; else ; ea(ne) = a ; eb(ne) = b ; cost(ne) = cb
+               endif
+            enddo
+         enddo
+         if (ne == 0_I4P) exit
+         allocate(order(ne))
+         call sort_by_cost(cost(1:ne), order)
+         dirty = .false.
+         ncoll = 0_I4P
+         do e = 1_I4P, ne
+            u = ea(order(e)) ; v = eb(order(e)) ! collapse u onto v
+            if (vdead(u) .or. vdead(v)) cycle
+            if (dirty_at(point(u)) .or. dirty_at(point(v))) cycle
+            ntu = 0_I4P ; ntv = 0_I4P
+            do k = inc_first(u), inc_first(u + 1_I4P) - 1_I4P
+               if (.not. alive(inc_tri(k))) cycle
+               if (ntu == size(tu)) then ; ntu = -1_I4P ; exit ; endif
+               ntu = ntu + 1_I4P ; tu(ntu) = inc_tri(k)
+            enddo
+            do k = inc_first(v), inc_first(v + 1_I4P) - 1_I4P
+               if (.not. alive(inc_tri(k))) cycle
+               if (ntv == size(tvv)) then ; ntv = -1_I4P ; exit ; endif
+               ntv = ntv + 1_I4P ; tvv(ntv) = inc_tri(k)
+            enddo
+            if (ntu < 0_I4P .or. ntv < 0_I4P) cycle ! a vertex of valence above 64: left alone
+            nsh = 0_I4P
+            do i1 = 1_I4P, ntu
+               if (any(tvv(1:ntv) == tu(i1))) then
+                  nsh = nsh + 1_I4P ; if (nsh <= 2_I4P) sh(nsh) = tu(i1)
+               endif
+            enddo
+            if (nsh /= 2_I4P) cycle
+            ! link condition: the common neighbours of u and v are the two opposite vertices
+            nnu = 0_I4P ; nnv = 0_I4P
+            do i1 = 1_I4P, ntu
+               do k = 1_I4P, 3_I4P
+                  w = tv(k, tu(i1))
+                  if (w /= u .and. .not. any(nu(1:nnu) == w)) then ; nnu = nnu + 1_I4P ; nu(nnu) = w ; endif
+               enddo
+            enddo
+            do i1 = 1_I4P, ntv
+               do k = 1_I4P, 3_I4P
+                  w = tv(k, tvv(i1))
+                  if (w /= v .and. .not. any(nv2(1:nnv) == w)) then ; nnv = nnv + 1_I4P ; nv2(nnv) = w ; endif
+               enddo
+            enddo
+            nb = 0_I4P
+            do i1 = 1_I4P, nnu
+               if (nu(i1) /= v .and. any(nv2(1:nnv) == nu(i1))) nb = nb + 1_I4P
+            enddo
+            if (nb /= 2_I4P) cycle
+            ! the moved triangles: no degeneracy, no flip, no dirty cube, no contact, no crossing (with the wrap and with
+            ! each other: a fan around v can fold)
+            ok = .true.
+            nnew = 0_I4P
+            do i1 = 1_I4P, ntu
+               t0 = tu(i1)
+               if (any(sh == t0)) cycle
+               tri0 = point(tv(:, t0))
+               tl = tv(:, t0)
+               where (tl == u) tl = v
+               tri1 = point(tl)
+               if (degenerate(tri1)) then ; ok = .false. ; exit ; endif
+               n0 = normal3(tri0) ; n1 = normal3(tri1)
+               if (dot_product(n0, n1) <= 0._R8P) then ; ok = .false. ; exit ; endif
+               ! shape: no triangle worse than AWRAP_COLLAPSE_QUALITY unless it already was
+               if (tri_quality(tri1) < min(AWRAP_COLLAPSE_QUALITY, tri_quality(tri0))) then ; ok = .false. ; exit ; endif
+               if (dirty_box(tbox(:, t0))) then ; ok = .false. ; exit ; endif
+               box = tri_box(tri1)
+               if (dirty_box(box)) then ; ok = .false. ; exit ; endif
+               if (touches_input(tri1)) then ; ok = .false. ; exit ; endif
+               if (crossing_with(tri1, box, [tu(1:ntu)]) > 0_I4P) then ; ok = .false. ; exit ; endif
+               nnew = nnew + 1_I4P ; newt(:, nnew) = tri1
+            enddo
+            if (ok) then
+               pairs: do i1 = 1_I4P, nnew - 1_I4P
+                  do k = i1 + 1_I4P, nnew
+                     if (pair_crosses(newt(:, i1), newt(:, k))) then ; ok = .false. ; exit pairs ; endif
+                  enddo
+               enddo pairs
+            endif
+            if (.not. ok) cycle
+            ! accept
+            do i1 = 1_I4P, ntu
+               t0 = tu(i1)
+               call mark_dirty(tbox(:, t0))
+               if (any(sh == t0)) then
+                  alive(t0) = .false.
+               else
+                  where (tv(:, t0) == u) tv(:, t0) = v
+                  call mark_dirty(tri_box(point(tv(:, t0))))
+               endif
+            enddo
+            vdead(u) = .true.
+            qd(:, v) = qd(:, v) + qd(:, u)
+            ncoll = ncoll + 1_I4P
+         enddo
+         if (ncoll == 0_I4P) exit
+      enddo
+      endsubroutine collapse_edges
+
+      pure function tri_quality(t) result(qq)
+      !< Shape quality 4 sqrt(3) area / (sum of the squared edges): 1 for an equilateral triangle, 0 for a degenerate.
+      type(vector_R8P), intent(in) :: t(3)
+      real(R8P)                    :: qq, l2
+
+      l2 = dist(t(1), t(2))**2 + dist(t(2), t(3))**2 + dist(t(3), t(1))**2
+      qq = 0._R8P
+      if (l2 > 0._R8P) qq = 2._R8P * sqrt(3._R8P) * norm2(normal3(t)) / l2
+      endfunction tri_quality
+
+      pure function qerr(q, p) result(r)
+      !< Quadric error of point p: p^T A p + 2 b.p + c, q = (a11 a12 a13 b1 a22 a23 b2 a33 b3 c).
+      real(R8P),        intent(in) :: q(10)
+      type(vector_R8P), intent(in) :: p
+      real(R8P)                    :: r
+
+      r = q(1) * p%x**2 + 2._R8P * q(2) * p%x * p%y + 2._R8P * q(3) * p%x * p%z + 2._R8P * q(4) * p%x + &
+          q(5) * p%y**2 + 2._R8P * q(6) * p%y * p%z + 2._R8P * q(7) * p%y + q(8) * p%z**2 + 2._R8P * q(9) * p%z + q(10)
+      endfunction qerr
+
+      pure function dist(a, b) result(d)
+      !< Distance of two points.
+      type(vector_R8P), intent(in) :: a, b
+      real(R8P)                    :: d
+
+      d = sqrt((a%x - b%x)**2 + (a%y - b%y)**2 + (a%z - b%z)**2)
+      endfunction dist
+
+      pure function tri_box(t) result(box)
+      !< Bounding box (min x, y, z, max x, y, z) of a triangle.
+      type(vector_R8P), intent(in) :: t(3)
+      real(R8P)                    :: box(6)
+
+      box = [min(t(1)%x, t(2)%x, t(3)%x), min(t(1)%y, t(2)%y, t(3)%y), min(t(1)%z, t(2)%z, t(3)%z), &
+             max(t(1)%x, t(2)%x, t(3)%x), max(t(1)%y, t(2)%y, t(3)%y), max(t(1)%z, t(2)%z, t(3)%z)]
+      endfunction tri_box
+
+      function dirty_box(box) result(yes)
+      !< Does the box overlap a dual cube a collapse of this round touched?
+      real(R8P), intent(in) :: box(6)
+      logical               :: yes
+      integer(I4P)          :: lo(3), hi(3), ii, jj, kk3
+
+      yes = .false.
+      call dual_range(box, lo, hi)
+      do kk3 = lo(3), hi(3)
+         do jj = lo(2), hi(2)
+            do ii = lo(1), hi(1)
+               if (dirty(lin(g%n, ii, jj, kk3))) then ; yes = .true. ; return ; endif
+            enddo
+         enddo
+      enddo
+      endfunction dirty_box
+
+      function dirty_at(p) result(yes)
+      !< Is the point in a dual cube a collapse of this round touched?
+      type(vector_R8P), intent(in) :: p
+      logical                      :: yes
+
+      yes = dirty_box([p%x, p%y, p%z, p%x, p%y, p%z])
+      endfunction dirty_at
+
+      subroutine mark_dirty(box)
+      !< Mark the dual cubes a box overlaps.
+      real(R8P), intent(in) :: box(6)
+      integer(I4P)          :: lo(3), hi(3), ii, jj, kk3
+
+      call dual_range(box, lo, hi)
+      do kk3 = lo(3), hi(3)
+         do jj = lo(2), hi(2)
+            do ii = lo(1), hi(1)
+               dirty(lin(g%n, ii, jj, kk3)) = .true.
+            enddo
+         enddo
+      enddo
+      endsubroutine mark_dirty
 
       subroutine cube_lists
       !< Triangles per dual cube, by bounding box (CSR over the linear index of the cube's lower cell): a triangle is
@@ -760,47 +1024,39 @@ contains
       endsubroutine dual_range
 
       function crossed_triangle(t0) result(t1)
-      !< A wrap triangle listed in the dual cubes t0's box overlaps that t0 crosses (0 if none): the two share a segment of
-      !< positive length (exact `pair_classify`). Two or three vertices in common (bit for bit) is adjacency, as in
-      !< find_self_intersections (issue #46); a (near-)coplanar pair crosses if it overlaps with positive area.
+      !< A wrap triangle that t0 crosses (0 if none), see crossing_with.
       integer(I4P), intent(in) :: t0
       integer(I4P)             :: t1
-      integer(I4P)             :: ii, jj, kk3, l, b, kind, ns, x, y, tc, rel, lo(3), hi(3)
-      type(vector_R8P)         :: ta(3), tb(3), p, q
+
+      t1 = crossing_with(point(tv(:, t0)), tbox(:, t0), [t0])
+      endfunction crossed_triangle
+
+      function crossing_with(ta, box, excl) result(t1)
+      !< A live wrap triangle, listed in the dual cubes the box overlaps and not in excl, that the triangle ta crosses
+      !< (0 if none): the two share a segment of positive length (exact `pair_classify` behind float filters). Two or
+      !< three vertices in common (bit for bit) is adjacency, as in find_self_intersections (issue #46); a
+      !< (near-)coplanar pair crosses if it overlaps with positive area.
+      type(vector_R8P), intent(in) :: ta(3)
+      real(R8P),        intent(in) :: box(6)
+      integer(I4P),     intent(in) :: excl(:)
+      integer(I4P)                 :: t1
+      integer(I4P)                 :: ii, jj, kk3, l, b, tc, lo(3), hi(3)
 
       t1 = 0_I4P
-      ta = point(tv(:, t0))
-      call dual_range(tbox(:, t0), lo, hi)
+      query = query + 1_I4P
+      call dual_range(box, lo, hi)
       do kk3 = lo(3), hi(3)
          do jj = lo(2), hi(2)
             do ii = lo(1), hi(1)
                l = lin(g%n, ii, jj, kk3)
                do b = cube_first(l), cube_first(l + 1_I4P) - 1_I4P
                   tc = cube_tri(b)
-                  if (tc == t0 .or. stamp(tc) == t0) cycle
-                  stamp(tc) = t0
+                  if (stamp(tc) == query) cycle
+                  stamp(tc) = query
+                  if (.not. alive(tc) .or. any(excl == tc)) cycle
                   if (tdeg(tc)) cycle
-                  if (any(tbox(1:3, tc) > tbox(4:6, t0)) .or. any(tbox(1:3, t0) > tbox(4:6, tc))) cycle
-                  tb = point(tv(:, tc))
-                  ns = 0_I4P
-                  do x = 1_I4P, 3_I4P
-                     do y = 1_I4P, 3_I4P
-                        if (same_xyz(ta(x), tb(y))) ns = ns + 1_I4P
-                     enddo
-                  enddo
-                  if (ns >= 2_I4P) cycle
-                  rel = plane_relation(ta, tb)
-                  if (rel == PLANE_APART) cycle
-                  if (rel == PLANE_COPLANAR) then
-                     if (coplanar_overlap(ta, tb)) then ; t1 = tc ; return ; endif
-                     cycle
-                  endif
-                  if (plane_relation(tb, ta) == PLANE_APART) cycle
-                  kind = float_pair(ta, tb)
-                  if (kind == 1_I4P) then ; t1 = tc ; return ; endif
-                  if (kind == 0_I4P .or. kind == 2_I4P) cycle ! a point contact is not a crossing
-                  call pair_classify(ta=ta, tb=tb, kind=kind, p=p, q=q)
-                  if (kind == PAIR_CROSSING) then
+                  if (any(tbox(1:3, tc) > box(4:6)) .or. any(box(1:3) > tbox(4:6, tc))) cycle
+                  if (pair_crosses(ta, point(tv(:, tc)))) then
                      t1 = tc
                      return
                   endif
@@ -808,27 +1064,29 @@ contains
             enddo
          enddo
       enddo
-      endfunction crossed_triangle
+      endfunction crossing_with
 
-      function touches_input(cube, tri) result(yes)
-      !< Does the triangle of dual cube `cube` (linear index of its lower cell) meet an input facet binned in its 8
-      !< cells (exact orient3d)? The pushed vertices stay within the cells' reach of their facets: the bins of the
-      !< 8 cells hold every facet the dual cube's triangles can meet, a pushed one included only while it stays in it,
-      !< so the bins of the 27 cells around the lower one are searched.
-      integer(I4P),     intent(in) :: cube
+      function touches_input(tri) result(yes)
+      !< Does the triangle meet an input facet (exact orient3d, float filters first)? The candidates are the facets
+      !< binned in the cells its bounding box overlaps: every facet it can meet.
       type(vector_R8P), intent(in) :: tri(3)
       logical                      :: yes
-      integer(I4P)                 :: ii, jj, kk3, di, dj, dk, l, b, kind
+      integer(I4P)                 :: ii, jj, kk3, l, b, kind, lo(3), hi(3), ax
+      real(R8P)                    :: vmin(3), vmax(3), o(3)
       type(vector_R8P)             :: p, q
 
       yes = .false.
-      call unlin(g%n, cube, ii, jj, kk3)
-      do dk = -1_I4P, 2_I4P
-         do dj = -1_I4P, 2_I4P
-            do di = -1_I4P, 2_I4P
-               if (ii + di < 1_I4P .or. jj + dj < 1_I4P .or. kk3 + dk < 1_I4P) cycle
-               if (ii + di > g%n(1) .or. jj + dj > g%n(2) .or. kk3 + dk > g%n(3)) cycle
-               l = lin(g%n, ii + di, jj + dj, kk3 + dk)
+      vmin = [min(tri(1)%x, tri(2)%x, tri(3)%x), min(tri(1)%y, tri(2)%y, tri(3)%y), min(tri(1)%z, tri(2)%z, tri(3)%z)]
+      vmax = [max(tri(1)%x, tri(2)%x, tri(3)%x), max(tri(1)%y, tri(2)%y, tri(3)%y), max(tri(1)%z, tri(2)%z, tri(3)%z)]
+      o = [g%o%x, g%o%y, g%o%z]
+      do ax = 1_I4P, 3_I4P
+         lo(ax) = max(1_I4P, min(g%n(ax), floor((vmin(ax) - o(ax)) / g%h, I4P) + 1_I4P))
+         hi(ax) = max(1_I4P, min(g%n(ax), floor((vmax(ax) - o(ax)) / g%h, I4P) + 1_I4P))
+      enddo
+      do kk3 = lo(3), hi(3)
+         do jj = lo(2), hi(2)
+            do ii = lo(1), hi(1)
+               l = lin(g%n, ii, jj, kk3)
                do b = g%bin_first(l), g%bin_first(l + 1_I4P) - 1_I4P
                   if (.not. boxes_overlap(tri, input_facet(g%bin_facet(b))%vertex)) cycle
                   if (plane_relation(tri, input_facet(g%bin_facet(b))%vertex) == PLANE_APART) cycle
@@ -961,6 +1219,38 @@ contains
          max(tb(1)%z, tb(2)%z, tb(3)%z) >= min(ta(1)%z, ta(2)%z, ta(3)%z)
    endfunction boxes_overlap
 
+   function pair_crosses(ta, tb) result(yes)
+   !< Do two wrap triangles cross (share a segment of positive length)? Two or three vertices in common (bit for bit)
+   !< is adjacency, as in find_self_intersections; a (near-)coplanar pair crosses if it overlaps with positive area;
+   !< otherwise float filters (plane_relation, float_pair: a point contact is not a crossing) before the exact
+   !< pair_classify.
+   type(vector_R8P), intent(in) :: ta(3), tb(3)
+   logical                      :: yes
+   integer(I4P)                 :: ns, x, y, rel, kind
+   type(vector_R8P)             :: p, q
+
+   yes = .false.
+   ns = 0_I4P
+   do x = 1_I4P, 3_I4P
+      do y = 1_I4P, 3_I4P
+         if (same_xyz(ta(x), tb(y))) ns = ns + 1_I4P
+      enddo
+   enddo
+   if (ns >= 2_I4P) return
+   rel = plane_relation(ta, tb)
+   if (rel == PLANE_APART) return
+   if (rel == PLANE_COPLANAR) then
+      yes = coplanar_overlap(ta, tb)
+      return
+   endif
+   if (plane_relation(tb, ta) == PLANE_APART) return
+   kind = float_pair(ta, tb)
+   if (kind == 1_I4P) then ; yes = .true. ; return ; endif
+   if (kind == 0_I4P .or. kind == 2_I4P) return
+   call pair_classify(ta=ta, tb=tb, kind=kind, p=p, q=q)
+   yes = kind == PAIR_CROSSING
+   endfunction pair_crosses
+
    pure function plane_relation(ta, tb) result(rel)
    !< Floating-point filter before the exact test of two wrap triangles, on the vertices of tb not shared with ta (bit
    !< for bit) against the plane of ta, with a relative tolerance of 1e-9: PLANE_APART, all on one side (the two meet
@@ -1057,6 +1347,38 @@ contains
       ok = (m == 2_I4P)
       endsubroutine section
    endfunction float_pair
+
+   subroutine sort_by_cost(cost, order)
+   !< Indices of cost in ascending order (heap sort; ties keep no particular order).
+   real(R8P),    intent(in)  :: cost(:)
+   integer(I4P), intent(out) :: order(:)
+   integer(I4P)              :: n, i, k
+
+   n = size(cost, kind=I4P)
+   order = [(i, i = 1_I4P, n)]
+   do i = n / 2_I4P, 1_I4P, -1_I4P
+      call sift(i, n)
+   enddo
+   do i = n, 2_I4P, -1_I4P
+      k = order(1) ; order(1) = order(i) ; order(i) = k
+      call sift(1_I4P, i - 1_I4P)
+   enddo
+   contains
+      subroutine sift(first, last)
+      integer(I4P), intent(in) :: first, last
+      integer(I4P)             :: r, c, tmp
+
+      r = first
+      do
+         c = 2_I4P * r
+         if (c > last) exit
+         if (c < last) then ; if (cost(order(c + 1_I4P)) > cost(order(c))) c = c + 1_I4P ; endif
+         if (cost(order(r)) >= cost(order(c))) exit
+         tmp = order(r) ; order(r) = order(c) ; order(c) = tmp
+         r = c
+      enddo
+      endsubroutine sift
+   endsubroutine sort_by_cost
 
    pure function cross_arr(a, b) result(c)
    !< Cross product of two arrays.

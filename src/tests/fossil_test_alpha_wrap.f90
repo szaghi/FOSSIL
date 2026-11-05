@@ -4,13 +4,16 @@
 !< wraps at a finer alpha, on a marching-cubes sphere and on dragon.stl, and checks them for self-crossings
 !< (find_self_intersections, 2-5 s each in the debug build) and for their distance from the input.
 !<
-!<   1. The cube: status OK, watertight, manifold, volume within 0.5% of the offset cube (the Minkowski sum of the
-!<      cube and a ball of radius offset), no vertex closer to the cube than the offset (issue #53: the repair pass
-!<      moves some, at its convex edges and corners).
+!<   1. The cube: status OK, watertight, manifold, volume within 3% of the offset cube (the Minkowski sum of the
+!<      cube and a ball of radius offset; the coarsened wrap's chords cut its rounded edges), no vertex closer to the
+!<      cube than the offset (issue #53), and coarsened by the collapse stage (issue #52): under 600 facets (2696
+!<      before it, 354 now).
 !<   2. The cube minus one facet, hole wider than the ball (alpha = 0.4): one closed shell lining both sides of the
 !<      walls (the offset-surface barrier keeps the two layers apart), OK, manifold, volume of a hollow shell.
-!<   3. The same, hole narrower than the ball (alpha = 0.6): the hole is capped, volume just below the offset cube's.
-!<   4. One triangle (zero thickness): a closed shell around both sides, volume 2 offset x area plus the rim.
+!<   3. The same, hole narrower than the ball (alpha = 0.6): the hole is capped, volume below the offset cube's,
+!<      within 5% (the cap's dimple and the coarse wrap's chords).
+!<   4. One triangle (zero thickness): a closed shell around both sides, volume 2 offset x area plus the rim, within
+!<      5% below (chords of the rim).
 !<   5. Bad input: alpha larger than the bounding-box diagonal is DEGENERATE with an empty wrap; an empty surface and
 !<      alpha <= 0 are BAD_INPUT.
 
@@ -55,7 +58,8 @@ print '(A,I0,A,I0,2(A,L1),A,F8.5,A,F8.5)', &
 print '(A,F12.9)', '        min vertex distance / offset=', min_distance(cube, wrapped_tbp) / offset
 are_tests_passed(1) = (status == AWRAP_STATUS_OK) .and. wrapped_tbp%is_watertight() .and. &
                        wrapped_tbp%is_manifold() .and. min_distance(cube, wrapped_tbp) >= (1._R8P - 1.e-9_R8P) * offset .and. &
-                       (abs(wrap_volume - expected_volume) <= 0.005_R8P * expected_volume)
+                       (abs(wrap_volume - expected_volume) <= 0.03_R8P * expected_volume) .and. &
+                       (wrapped_tbp%get_facets_number() < 600_I4P)
 
 ! ---- Invariant 2: the holed cube (a hole of inradius 0.29) at alpha = 0.4: the ball (diameter alpha, kept offset
 !      from the input) gets through the hole, so the wrap lines both sides of every wall: one closed shell, two offset
@@ -84,7 +88,7 @@ print '(A,I0,A,I0,2(A,L1),A,F8.5,A,F8.5)', &
       ' volume=', wrap_volume, ' offset cube=', expected_volume
 are_tests_passed(3) = (status == AWRAP_STATUS_OK) .and. wrapped_tbp%is_watertight() .and. &
                        wrapped_tbp%is_manifold() .and. &
-                       (wrap_volume < expected_volume) .and. (wrap_volume > 0.98_R8P * expected_volume)
+                       (wrap_volume < expected_volume) .and. (wrap_volume > 0.95_R8P * expected_volume)
 
 ! ---- Invariant 4: one triangle (a sheet of zero thickness, area 1/2): a closed shell around both of its sides,
 !      volume 2 offset x area plus the rim.
@@ -103,7 +107,7 @@ print '(A,I0,A,I0,2(A,L1),A,F8.5)', &
 ! 2 e A = 0.02; the rim (perimeter 3.41, half a cylinder of radius e) adds at most 0.0022
 are_tests_passed(4) = (status == AWRAP_STATUS_OK) .and. wrapped_tbp%is_watertight() .and. &
                        wrapped_tbp%is_manifold() .and. &
-                       (wrap_volume >= 0.02_R8P) .and. (wrap_volume <= 0.0225_R8P)
+                       (wrap_volume >= 0.019_R8P) .and. (wrap_volume <= 0.0225_R8P)
 
 ! ---- Invariant 5: bad input.
 call cube%alpha_wrap(alpha=100._R8P, wrapped=wrapped_tbp, status=status)
