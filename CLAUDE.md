@@ -112,7 +112,8 @@ test <= 2 s in that debug coverage build (`boolean_coplanar` 3 s is the one exce
 `scripts/check_test_budgets.sh` in the `makecoverage` rule (exceptions in `src/tests/budgets.txt`; factor 2 on CI).
 Re-time a test in that build after the last change of a step, not mid-step. Choose inputs for it:
 `dragon.stl` for self-consistency checks, a clean closed body (`cube-0N.stl`, `make_apex_body`, a marching-cubes
-sphere) for exact-sign checks, never `bunny.stl` (19 s load in debug); never loosen a tolerance to save time.
+sphere) for exact-sign checks, not `bunny.stl` (1.4 s to load in debug since issue #57, 19 s before; its tests
+are in validation); never loosen a tolerance to save time.
 **Validation** (`src/tests/validation/*.f90`: benches, large meshes, sweeps, the full-size `fossil_val_*` copies,
 `fossil_test_distance_bench`), nightly (`.github/workflows/validation.yml`) and before a release:
 

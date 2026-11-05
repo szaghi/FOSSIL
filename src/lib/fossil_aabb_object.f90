@@ -62,6 +62,8 @@ contains
    logical                                    :: is_exclusive_ !< Sentinel to enable/disable exclusive addition, local variable.
    type(list_id_object)                       :: facet_id_     !< List of facets IDs, local variable.
    integer(I4P)                               :: f             !< Counter.
+   integer(I4P), allocatable                  :: kept(:)       !< Accepted ids (non-exclusive).
+   integer(I4P)                               :: n_kept        !< Accepted ids count.
 
    is_exclusive_ = .true. ; if (present(is_exclusive)) is_exclusive_ = is_exclusive
    facet_id_ = facet_id
@@ -77,13 +79,19 @@ contains
          endif
       enddo
    else
+      ! the candidate ids are unique (a facet list, or a node's): gather the accepted ones and build the list once, in
+      ! the same order, instead of put's search and reallocation per id (quadratic in the list size, issue #57)
+      allocate(kept(facet_id%ids_number))
+      n_kept = 0_I4P
       do f=1, facet_id%ids_number
          if (self%is_inside(point=facet(facet_id%id(f))%vertex(1)).or.&
              self%is_inside(point=facet(facet_id%id(f))%vertex(2)).or.&
              self%is_inside(point=facet(facet_id%id(f))%vertex(3))) then
-            call self%facet_id%put(id=facet(facet_id%id(f))%id)
+            n_kept = n_kept + 1_I4P
+            kept(n_kept) = facet(facet_id%id(f))%id
          endif
       enddo
+      if (n_kept > 0_I4P) call self%facet_id%initialize(id=kept(1:n_kept))
    endif
    if (self%facet_id%ids_number > 0) facet_id = facet_id_
    endsubroutine add_facets

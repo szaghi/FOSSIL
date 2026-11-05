@@ -478,14 +478,44 @@ contains
    logical,                 intent(in), optional :: do_update_extents  !< Sentinel to enable/disable AABB extents update.
    logical                                       :: do_update_extents_ !< Sentinel to enable/disable AABB extents update, local var.
    type(list_id_object)                          :: facet_id           !< List of facets IDs.
+   type(list_id_object)                          :: candidates         !< Parent's facets IDs (non-exclusive).
+   integer(I4P), allocatable                     :: ids(:)             !< Facets IDs, contiguous.
+   logical                                       :: inclusive          !< Non-exclusive distribution.
    integer(I4P)                                  :: level              !< Counter.
    integer(I4P)                                  :: b, bb, bbb         !< Counter.
 
    do_update_extents_ = .true. ; if (present(do_update_extents)) do_update_extents_ = do_update_extents
    associate(node=>self%node)
-      call facet_id%initialize(id=facet%id)
+      allocate(ids(size(facet, dim=1)))
+      do b = 1, size(facet, dim=1)
+         ids(b) = facet(b)%id ! contiguous: passing facet%id made a temporary on every call (issue #57)
+      enddo
+      call facet_id%initialize(id=ids)
 
       ! add facets to nodes
+      inclusive = .false. ; if (present(is_exclusive)) inclusive = .not. is_exclusive
+      if (inclusive) then
+         ! non-exclusive (issue #57): a child's closed box lies inside its parent's (an octant), so a facet with a vertex
+         ! in the child has one in the parent: the parent's list, in the global order, holds every candidate. Top down,
+         ! each node scans its parent's list instead of all the facets (N x nodes box tests, superlinear: 1e9 on a
+         ! 69k-facet mesh); every node gets the same facets in the same order as the full scan.
+         do level=0, self%refinement_levels
+            b = first_node(level=level)
+            do bb=1, nodes_number_at_level(level=level)
+               bbb = b + bb - 1
+               if (level == 0) then
+                  call node(bbb)%add_facets(facet_id=facet_id, facet=facet, is_exclusive=.false.)
+               else
+                  if (node(parent_node(node=bbb))%has_facets()) then
+                     candidates = node(parent_node(node=bbb))%facet_id()
+                  else
+                     call candidates%initialize(id=[integer(I4P) ::]) ! still clears the node's list, as the full scan does
+                  endif
+                  call node(bbb)%add_facets(facet_id=candidates, facet=facet, is_exclusive=.false.)
+               endif
+            enddo
+         enddo
+      else
       do level=self%refinement_levels, 0, -1                        ! loop over refinement levels
          b = first_node(level=level)                                ! first node at level
          do bb=1, nodes_number_at_level(level=level)                ! loop over nodes at level
@@ -497,6 +527,7 @@ contains
             endif
          enddo
       enddo
+      endif
 
       ! destroy void nodes
       do level=self%refinement_levels, 0, -1                        ! loop over refinement levels
@@ -528,10 +559,15 @@ contains
    integer(I4P)                           :: level      !< Counter.
    integer(I4P)                           :: b, bb, bbb !< Counter.
    integer(I4P)                           :: parent     !< Parent node index.
+   integer(I4P), allocatable              :: ids(:)     !< Facets IDs, contiguous.
 
    associate(node=>self%node)
       ! add facets to nodes
-      call facet_id%initialize(id=facet%id)                             ! initialize facets IDs list
+      allocate(ids(size(facet, dim=1)))
+      do b = 1, size(facet, dim=1)
+         ids(b) = facet(b)%id ! contiguous: passing facet%id made a temporary on every call (issue #57)
+      enddo
+      call facet_id%initialize(id=ids)                                  ! initialize facets IDs list
       if (facet_id%ids_number > 0) then                                 ! check if facets list still has facets
          call node(0)%add_facets(facet_id=facet_id, &
                                  facet=facet,       &

@@ -36,11 +36,12 @@ The tests are in two tiers (issue #45):
 
 A regression test must run in **2 s or less** in the debug coverage build (the CI build: `-O0 -fcheck=all`,
 coverage instrumented; `fossil_test_boolean_coplanar` is the one approved exception, 3 s). Keep it fast by the choice
-of input, never by a looser tolerance: `dragon.stl` (dirty, 1.6 s to load in debug) for self-consistency checks, a
+of input, never by a looser tolerance: `dragon.stl` (dirty, 0.14 s to load in debug) for self-consistency checks, a
 clean closed body (`cube-0N.stl`, `make_apex_body` from `fossil_sign_bench_bodies`, a marching-cubes sphere) where
-the sign must be exact; never `bunny.stl` (19 s to load in debug). A test that needs a large mesh, a fine grid or
-many cases goes to `src/tests/validation/`, often as a full copy (`fossil_val_*`) of a regression test that keeps a
-smaller case. The device bench `fossil_test_distance_bench` lives there too (built by `tests-nvidia`).
+the sign must be exact; not `bunny.stl` (1.4 s to load in debug since issue #57, 19 s before; its tests are in
+validation). A test that needs a large mesh, a fine grid or many cases goes to `src/tests/validation/`, often as a
+full copy (`fossil_val_*`) of a regression test that keeps a smaller case. The device bench
+`fossil_test_distance_bench` lives there too (built by `tests-nvidia`).
 
 The budget is enforced: `fobis rule --ex makecoverage`, which CI runs, times every test after
 `scripts/run_tests.sh` with `scripts/check_test_budgets.sh` and fails if one is over its budget (2 s, or its line in
