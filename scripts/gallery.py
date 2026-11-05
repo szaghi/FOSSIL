@@ -48,6 +48,8 @@ CARDS = [
      "the fluid fraction of the cut cells of a section"),
     ("Moving bodies", "tut11-swept", "/manual/tutorial/11-moving-bodies",
      "the area a moving section sweeps in a time step"),
+    ("Mass properties", "anim-mass-properties", "/guide/advanced/mass-properties",
+     "a T-handle flipping about its intermediate axis, from its inertia tensor"),
     ("Geometry processing", "anim-boolean", "/manual/cookbook#unite-two-bodies",
      "two cubes, then their union, intersection and differences"),
     ("On the GPU, bit for bit", "tut12-slice", "/manual/tutorial/12-gpu",

@@ -84,6 +84,37 @@ call surface%mass_properties(mass, center, inertia, principal_moments, principal
 - `principal_moments` and `principal_axes` always refer to the tensor about the centre of mass, whatever `about` is.
 - The procedure does not modify the surface and needs no extra memory beyond a few scalars.
 
+## Frames and poses
+
+The tensor is computed in the frame of the surface's coordinates (the body frame of
+[moving bodies](/guide/advanced/moving-bodies)). Two free functions, exported by `fossil`, change frame:
+
+```fortran
+inertia_w = inertia_to_world(inertia, pose)       ! type(rigid_pose_t): R I R^T
+frame     = principal_frame(center, principal_axes) ! rigid_pose_t: principal coordinates -> body coordinates
+```
+
+- `inertia_to_world` gives the tensor of the body placed at `pose` (x_world = R x_body + t): R I Rᵀ. The translation
+  does not enter, because the tensor is about a point that moves with the body (the centre of mass). The body moved by
+  `move(pose)` gives the same tensor to round-off (5e-16 in the test).
+- `principal_frame` is the pose whose rotation is the principal axes and whose origin is the centre of mass: in its
+  coordinates the tensor is diagonal (off-diagonal 1e-16 of the largest moment in the test). Compose it with a
+  world pose to place a body integrated in its principal frame, as the animation below does.
+
+![a T-handle spinning about its intermediate axis: the spin is unstable and the handle flips over twice in 6 s, its angular momentum fixed in space](../../examples/images/anim-mass-properties.svg){.fossil-figure}
+
+The animation is a T-handle spinning about its intermediate principal axis, the tennis-racket (Dzhanibekov) effect.
+The program (`docs/examples/src/anim_mass_properties.f90`) does three things:
+
+- it takes the principal moments and axes from `mass_properties`;
+- it integrates Euler's equations $I \dot\omega = (I\omega) \times \omega$ in the principal frame together with the
+  orientation, using RK4 with a fixed step;
+- it draws the body at each pose with `principal_frame` and `move`.
+
+The angular velocity is drawn in ember from the centre of mass; the line of the angular momentum, fixed in space, in
+gold. A spin about the intermediate axis is unstable: the handle flips over twice in 6 s. Over the whole run the
+kinetic energy and the angular momentum drift by 3e-12 and 2e-11 relative, which is the integrator's error.
+
 ## Example
 
 <<< @/examples/snippets/ck_mass_properties.f90
@@ -108,6 +139,8 @@ About a corner, the parallel-axis term adds $m (0.1^2 + 0.15^2) = 1.53075$ to it
 | Marching-cubes unit sphere, 3 grids | mean moment → 2/5 m r² | observed order 2.01 |
 | Open box, inside-out box | `STATUS_INVALID_INPUT` | |
 | `symmetric3_eigen`, 200 random matrices | A v = w v, det v = 1, vᵀv = 1 | < 1e-13 |
+| The L prism moved by `move(pose)` | tensor = `inertia_to_world`, centre = `to_world` | 5.5e-16, 1.5e-16 |
+| `principal_frame` | Rᵀ I R diagonal, the principal moments on it | 1.2e-16, 8.5e-16 |
 
 The sphere converges at second order because the marching-cubes surface is a second-order approximation of the
 sphere: the integrals over that polyhedron are exact.

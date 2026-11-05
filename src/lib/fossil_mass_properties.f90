@@ -14,6 +14,7 @@ module fossil_mass_properties
 !< The callers pass coordinates relative to a reference point near the body (the bounding-box centre), so the sums
 !< do not cancel far from the origin. The sums are compensated (Neumaier) and run in a fixed order: O(eps) error,
 !< independent of the number of terms and of the thread count. The routines are pure and take plain arrays.
+use fossil_rigid_pose, only : rigid_pose_t
 use penf, only : I4P, R8P
 
 implicit none
@@ -22,6 +23,7 @@ public :: moments_accumulator_t
 public :: accumulate_tetrahedron
 public :: moments_to_properties_3d
 public :: symmetric3_eigen
+public :: inertia_to_world, principal_frame
 
 type :: moments_accumulator_t
    !< Compensated sums of the raw moments about the reference point.
@@ -195,4 +197,24 @@ contains
    v(3,3) = v(1,1) * v(2,2) - v(2,1) * v(1,2)
    endsubroutine symmetric3_eigen
 
+   pure function inertia_to_world(inertia, pose) result(inertia_w)
+   !< Inertia tensor of a body placed at `pose` (x_world = R x_body + t): R I R^T. The tensor is about the centre of mass
+   !< (or any body point); it moves with that point, so the translation does not enter.
+   real(R8P),          intent(in) :: inertia(3,3)   !< Tensor in the body frame.
+   type(rigid_pose_t), intent(in) :: pose           !< Pose.
+   real(R8P)                      :: inertia_w(3,3) !< Tensor in the world frame.
+
+   inertia_w = matmul(pose%r, matmul(inertia, transpose(pose%r)))
+   endfunction inertia_to_world
+
+   pure function principal_frame(center, principal_axes) result(pose)
+   !< The pose of the principal frame: x = R y + t maps principal coordinates y to the frame of `center`, with
+   !< R = the principal axes (columns) and t = the centre of mass. In that frame the inertia tensor is diagonal.
+   real(R8P),          intent(in) :: center(3)           !< Centre of mass.
+   real(R8P),          intent(in) :: principal_axes(3,3) !< Principal axes (columns, right-handed).
+   type(rigid_pose_t)             :: pose                !< Principal frame.
+
+   pose%r = principal_axes
+   pose%t = center
+   endfunction principal_frame
 endmodule fossil_mass_properties

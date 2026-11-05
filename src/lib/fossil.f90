@@ -31,6 +31,7 @@ use fossil_cut_cells_3d, only : cut_cells_3d_t, cut_cells_3d
 use fossil_rigid_pose, only : rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, &
                              pose_2d, pose_compose, pose_inverse, to_body, to_world, rotate, pose_interpolate
 use fossil_swept_cells, only : swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
+use fossil_mass_properties, only : inertia_to_world, principal_frame
 use fossil_box_query, only : BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_curve_object, only : curve_object, cut_cells_2d_t, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, &
                                CURVE_ZERO_AREA_LOOP, CURVE_WRONG_ORIENTATION, CURVE_OPEN_LOOP, CURVE_SELF_INTERSECTING
@@ -45,6 +46,7 @@ public :: cut_cells_3d_t, cut_cells_3d
 public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose
 public :: pose_inverse, to_body, to_world, rotate, pose_interpolate
 public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
+public :: inertia_to_world, principal_frame
 public :: curve_object, cut_cells_2d_t, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, CURVE_ZERO_AREA_LOOP, &
           CURVE_WRONG_ORIENTATION, CURVE_OPEN_LOOP, CURVE_SELF_INTERSECTING
 public :: intersection_pair_t

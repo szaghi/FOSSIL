@@ -12,10 +12,13 @@
 !< 8. Rejections: an open box and an inside-out box give STATUS_INVALID_INPUT.
 !< 9. symmetric3_eigen: random symmetric matrices (fixed seed) give A v = w v to 1e-13, det(v) = +1; repeated
 !<    eigenvalues of a diagonal matrix give the identity axes.
+!< 10. Frames: the L prism moved by move(pose) has the tensor inertia_to_world(I_body, pose) and the centre
+!<     to_world(pose, c_body), to 1e-14 relative.
+!< 11. principal_frame: R^T I R is diagonal (the principal moments) to 1e-14 relative, its origin the centre.
 program fossil_test_mass_properties
 
 use fossil, only : surface_stl_object, facet_object, extract_isosurface, pose_from_axis_angle, rigid_pose_t, &
-                   STATUS_OK, STATUS_INVALID_INPUT
+                   inertia_to_world, principal_frame, to_world, STATUS_OK, STATUS_INVALID_INPUT
 use fossil_mass_properties, only : symmetric3_eigen
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
@@ -51,9 +54,7 @@ print '(A,ES10.3,A,L1)', '1. box about a corner: rel err ', err, '  ok ', ok
 all_ok = all_ok .and. ok
 
 ! ---- 2. L-shaped prism, depth 1: rectangles [0,2]x[0,1] and [0,1]x[1,2]
-call make_prism(s, reshape([0._R8P, 0._R8P, 2._R8P, 0._R8P, 2._R8P, 1._R8P, 1._R8P, 1._R8P, 1._R8P, 2._R8P, 0._R8P, 2._R8P], &
-                           [2, 6]), 0._R8P, 1._R8P, &
-                tri=reshape([4, 5, 6, 4, 6, 1, 4, 1, 2, 4, 2, 3], [3, 4]))
+call make_l_prism(s)
 call s%mass_properties(mass=mass, center=center, inertia=inertia, status=status)
 m1 = 2._R8P ; c1 = [1._R8P, 0.5_R8P, 0.5_R8P] ; t1 = box_tensor(m1, 2._R8P, 1._R8P, 1._R8P)
 m2 = 1._R8P ; c2 = [0.5_R8P, 1.5_R8P, 0.5_R8P] ; t2 = box_tensor(m2, 1._R8P, 1._R8P, 1._R8P)
@@ -141,6 +142,29 @@ ok = check_eigen()
 print '(A,L1)', '9. symmetric3_eigen: ', ok
 all_ok = all_ok .and. ok
 
+! ---- 10. frames: a moved body
+call make_l_prism(s)
+call s%mass_properties(center=c1, inertia=t1, status=status)
+pose = pose_from_axis_angle(axis=[-2._R8P, 1._R8P, 0.5_R8P], angle=1.1_R8P, translation=[3._R8P, -1._R8P, 2._R8P])
+call s%move(pose)
+call s%mass_properties(center=c2, inertia=t2, status=k)
+e(1) = rel_err(t2, inertia_to_world(t1, pose))
+e(2) = maxval(abs(c2 - to_world(pose, c1))) / 3._R8P
+ok = status == STATUS_OK .and. k == STATUS_OK .and. e(1) <= 1e-14_R8P .and. e(2) <= 1e-14_R8P
+print '(A,2ES10.3,A,L1)', '10. moved L prism: tensor, centre errs ', e(1:2), '  ok ', ok
+all_ok = all_ok .and. ok
+
+! ---- 11. the principal frame diagonalises the tensor
+call s%mass_properties(center=center, inertia=inertia, principal_moments=pm, principal_axes=pa, status=status)
+pose = principal_frame(center, pa)
+t1 = matmul(transpose(pose%r), matmul(inertia, pose%r))
+e(1) = max(abs(t1(1,2)), abs(t1(1,3)), abs(t1(2,3))) / maxval(pm)
+e(2) = maxval(abs([t1(1,1), t1(2,2), t1(3,3)] - pm)) / maxval(pm)
+e(3) = maxval(abs(to_world(pose, [0._R8P, 0._R8P, 0._R8P]) - center))
+ok = status == STATUS_OK .and. e(1) <= 1e-14_R8P .and. e(2) <= 1e-14_R8P .and. e(3) == 0._R8P
+print '(A,3ES10.3,A,L1)', '11. principal frame: off-diagonal, moments, origin errs ', e, '  ok ', ok
+all_ok = all_ok .and. ok
+
 print '(A,L1)', 'Are all tests passed? ', all_ok
 
 contains
@@ -199,6 +223,14 @@ contains
    endif
    call adopt(surf, v(:,:,1:nt))
    endsubroutine make_prism
+
+   subroutine make_l_prism(surf)
+   !< The L-shaped prism [0,2]x[0,1] u [0,1]x[1,2], z in [0,1], one closed shell.
+   type(surface_stl_object), intent(inout) :: surf
+
+   call make_prism(surf, reshape([0._R8P, 0._R8P, 2._R8P, 0._R8P, 2._R8P, 1._R8P, 1._R8P, 1._R8P, 1._R8P, 2._R8P, 0._R8P, &
+                                  2._R8P], [2, 6]), 0._R8P, 1._R8P, tri=reshape([4, 5, 6, 4, 6, 1, 4, 1, 2, 4, 2, 3], [3, 4]))
+   endsubroutine make_l_prism
 
    subroutine make_hollow(surf)
    !< [0,4]^3 with the void [1,2]x[1,3]x[1,2] (inner shell wound inward).

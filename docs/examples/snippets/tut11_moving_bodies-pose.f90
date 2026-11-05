@@ -1,12 +1,12 @@
 use fossil, only : surface_stl_object, curve_object, rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, &
-                   pose_2d, swept_cells_2d_t, swept_cells_2d, SIGN_FAST_WINDING_NUMBER
+                   pose_2d, swept_cells_2d_t, swept_cells_2d, inertia_to_world, SIGN_FAST_WINDING_NUMBER, STATUS_OK
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P, ex_R8P, ey_R8P, ez_R8P
 
 implicit none
 integer(I4P), parameter       :: n = 24                        ! cell centres per direction
 real(R8P),    parameter       :: pi = 4._R8P * atan(1._R8P)
-type(surface_stl_object)      :: surface, moved
+type(surface_stl_object)      :: surface, moved, wrap
 type(curve_object)            :: section
 type(rigid_pose_t)            :: p0, p1
 type(rigid_pose_2d_t)         :: q0, q1
@@ -14,8 +14,8 @@ type(swept_cells_2d_t)        :: sw
 type(vector_R8P), allocatable :: centres(:)
 real(R8P),        allocatable :: d_posed(:), d_moved(:)
 logical,          allocatable :: fresh(:), dead(:)
-real(R8P)                     :: h, x(49)
-integer(I4P)                  :: i, j, k, c, checked
+real(R8P)                     :: h, x(49), mass, centre(3), moments(3), inertia(3,3), inertia1(3,3)
+integer(I4P)                  :: i, j, k, c, checked, status
 
 call surface%load_from_file(file_name='dragon-placed.stl', guess_format=.true.)
 h = 1.2_R8P / n

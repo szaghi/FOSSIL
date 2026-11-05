@@ -43,6 +43,24 @@ tree, and it gives what a moving cut-cell update needs: the cells that change st
 
 ![the section translated by 0.02 along x (down in the figure): each cell shaded by its swept area, ember where it gains fluid on the trailing side, teal where it loses fluid on the leading side, the section at pose0 in grey and moved to pose1 in yellow](../../examples/images/tut11-swept.svg){.fossil-figure}
 
+## Mass and inertia
+
+A body moved by the fluid, not along prescribed poses, needs its mass properties to integrate Newton–Euler.
+
+<<< @/examples/snippets/tut11_moving_bodies-inertia.f90
+
+- `mass_properties(mass=, center=, inertia=, principal_moments=, principal_axes=, density=, about=, status=)` gives the
+  mass, the centre of mass, the inertia tensor about the centre (or about `about`) and its principal moments and axes.
+  The integrals are exact; see [mass properties](/guide/advanced/mass-properties).
+- It needs a closed body, and the repaired dragon is not one (chapter 2). Its alpha wrap is closed by construction, a
+  surrogate 0.003 outside the surface, so the inertia is the wrap's.
+- `inertia_to_world(inertia, pose)` is the tensor at a pose, R I Rᵀ: the moved wrap gives the same tensor to round-off.
+
+![a T-handle spinning about its intermediate axis: the spin is unstable and the handle flips over twice in 6 s, its angular momentum fixed in space](../../examples/images/anim-mass-properties.svg){.fossil-figure}
+
+The animation integrates Euler's equations with the inertia tensor `mass_properties` returns for a T-handle: a spin
+about the intermediate principal axis is unstable, and the handle flips over periodically (the tennis-racket effect).
+
 ## Running it
 
 <<< @/examples/output/tut11.ansi{ansi}
