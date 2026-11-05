@@ -280,6 +280,7 @@ type :: surface_stl_object
       procedure, pass(self) :: deviation                       !< One-sided deviation (Hausdorff) from another surface (#60).
       procedure, pass(self) :: hausdorff                       !< Symmetric Hausdorff distance to another surface (#60).
       procedure, pass(self) :: feature_edges                   !< Sharp, boundary, non-manifold edges, corners (#61).
+      procedure, pass(self) :: save_features_into_file         !< Feature edges and corners as legacy VTK (#61).
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
                                          mirror_by_matrix      !< Mirror facets.
@@ -4749,6 +4750,75 @@ contains
    touched = tl
    if (present(status)) status = STATUS_OK
    endsubroutine box_feature_many_device
+
+   subroutine save_features_into_file(self, file_name, angle, corner_angle, include_boundary, include_nonmanifold, status)
+   !< Write the feature edges and corners (issue #61) as a legacy ASCII VTK POLYDATA file, for ParaView: the feature
+   !< vertices as POINTS, the corners as VERTICES, every feature edge as a 2-point LINE, and a cell scalar `kind` (0 for a
+   !< corner, else FEATURE_EDGE_SHARP / _BOUNDARY / _NONMANIFOLD), corners first as the format orders cells.
+   class(surface_stl_object), intent(in)            :: self                !< Surface.
+   character(*),              intent(in)            :: file_name           !< Output file.
+   real(R8P),                 intent(in),  optional :: angle, corner_angle !< Thresholds [degrees].
+   logical,                   intent(in),  optional :: include_boundary    !< Boundary edges are features.
+   logical,                   intent(in),  optional :: include_nonmanifold !< Non-manifold edges are features.
+   integer(I4P),              intent(out), optional :: status              !< STATUS_OK, STATUS_INVALID_INPUT, STATUS_FILE_OPEN_FAIL.
+   integer(I4P), allocatable                        :: edges(:,:), kinds(:), corners(:), map(:) !< Features, renumbering.
+   type(vector_R8P)                                 :: c                   !< Coordinates.
+   integer(I4P)                                     :: st, u, ios, i, np   !< Work.
+
+   call self%feature_edges(edges=edges, kinds=kinds, corners=corners, angle=angle, corner_angle=corner_angle, &
+                           include_boundary=include_boundary, include_nonmanifold=include_nonmanifold, status=st)
+   if (present(status)) status = st
+   if (st /= STATUS_OK) return
+   allocate(map(self%vertex_pool%vertex_count()))
+   map = 0 ; np = 0
+   do i = 1, size(edges, 2)
+      if (map(edges(1, i)) == 0) then
+         np = np + 1 ; map(edges(1, i)) = np
+      endif
+      if (map(edges(2, i)) == 0) then
+         np = np + 1 ; map(edges(2, i)) = np
+      endif
+   enddo
+   open(newunit=u, file=file_name, status='replace', action='write', iostat=ios)
+   if (ios /= 0) then
+      if (present(status)) status = STATUS_FILE_OPEN_FAIL
+      return
+   endif
+   write(u, '(A)') '# vtk DataFile Version 3.0'
+   write(u, '(A)') 'FOSSIL feature edges'
+   write(u, '(A)') 'ASCII'
+   write(u, '(A)') 'DATASET POLYDATA'
+   write(u, '(A,I0,A)') 'POINTS ', np, ' double'
+   block
+      integer(I4P), allocatable :: inv(:)
+      allocate(inv(np))
+      do i = 1, size(map)
+         if (map(i) > 0) inv(map(i)) = i
+      enddo
+      do i = 1, np
+         c = self%vertex_pool%coord(inv(i))
+         write(u, '(3ES24.16)') c%x, c%y, c%z
+      enddo
+   endblock
+   write(u, '(A,I0,1X,I0)') 'VERTICES ', size(corners), 2 * size(corners)
+   do i = 1, size(corners)
+      write(u, '(A,I0)') '1 ', map(corners(i)) - 1
+   enddo
+   write(u, '(A,I0,1X,I0)') 'LINES ', size(edges, 2), 3 * size(edges, 2)
+   do i = 1, size(edges, 2)
+      write(u, '(A,I0,1X,I0)') '2 ', map(edges(1, i)) - 1, map(edges(2, i)) - 1
+   enddo
+   write(u, '(A,I0)') 'CELL_DATA ', size(corners) + size(edges, 2)
+   write(u, '(A)') 'SCALARS kind int 1'
+   write(u, '(A)') 'LOOKUP_TABLE default'
+   do i = 1, size(corners)
+      write(u, '(A)') '0'
+   enddo
+   do i = 1, size(edges, 2)
+      write(u, '(I0)') kinds(i)
+   enddo
+   close(u)
+   endsubroutine save_features_into_file
 
    ! pure subroutine merge_solids(self, other)
    subroutine merge_solids(self, other, status)

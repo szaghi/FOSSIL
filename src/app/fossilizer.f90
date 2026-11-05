@@ -4,7 +4,8 @@ program fossiler
 !< FOSSILer, analyze, modify and repair STL files.
 
 use flap, only : command_line_interface
-use fossil, only : surface_stl_object, STATUS_OK, DEV_STATUS_OK, DEV_STATUS_NOT_CONVERGED
+use fossil, only : surface_stl_object, STATUS_OK, DEV_STATUS_OK, DEV_STATUS_NOT_CONVERGED, FEATURE_EDGE_SHARP, &
+                   FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD
 use penf, only : I4P, R8P, str
 use vecfor, only : vector_R8P
 
@@ -38,6 +39,8 @@ logical                               :: mass_properties                       !
 real(R8P)                             :: density                               !< Uniform density for the mass properties.
 character(999)                        :: file_name_compare                     !< Surface to compare with (issue #60).
 real(R8P)                             :: tolerance                             !< Tolerance of the certified deviation (0: default).
+character(999)                        :: file_name_features                    !< VTK file of the feature edges (issue #61).
+real(R8P)                             :: feature_angle                         !< Feature threshold [degrees].
 
 call cli_parse
 if (cli%is_passed(switch='--merge')) then
@@ -121,6 +124,7 @@ do s=1, stl_numbers
    endif
    if (mass_properties) call print_mass_properties(surface(s))
    if (cli%is_passed(switch='--compare')) call print_deviation(surface(s), trim(adjustl(file_name_compare)))
+   if (cli%is_passed(switch='--features')) call print_features(surface(s), trim(adjustl(file_name_features)))
    if (cli%is_passed(switch='--output')) then
       print '(A)', 'save output in: '//trim(adjustl(output))
       call surface(s)%save_into_file(file_name=adjustl(output))
@@ -159,6 +163,27 @@ contains
      print '(A,3ES23.15)', '                      ', axes(i,:)
   enddo
   endsubroutine print_mass_properties
+
+  subroutine print_features(surf, file_name)
+  !< Print the feature-edge counts and write them as legacy VTK (issue #61).
+  type(surface_stl_object), intent(in) :: surf      !< Surface.
+  character(*),             intent(in) :: file_name !< VTK file.
+  integer(I4P), allocatable            :: kinds(:), corners(:), ps(:), pv(:) !< Features.
+  integer(I4P)                         :: status    !< Status.
+
+  call surf%feature_edges(kinds=kinds, corners=corners, polyline_start=ps, polyline_vertices=pv, angle=feature_angle, &
+                          status=status)
+  if (status /= STATUS_OK) then
+     print '(A)', 'features: an empty surface or a bad angle'
+     return
+  endif
+  print '(A,F7.2,A)', 'feature edges at ', feature_angle, ' degrees'
+  print '(A,I0,A,I0,A,I0)', '  sharp ', count(kinds == FEATURE_EDGE_SHARP), '  boundary ', &
+                            count(kinds == FEATURE_EDGE_BOUNDARY), '  non-manifold ', count(kinds == FEATURE_EDGE_NONMANIFOLD)
+  print '(A,I0,A,I0)', '  corners ', size(corners), '  polylines ', size(ps) - 1
+  call surf%save_features_into_file(file_name=file_name, angle=feature_angle, status=status)
+  if (status == STATUS_OK) print '(A)', '  written to '//file_name
+  endsubroutine print_features
 
   subroutine print_deviation(a, file_name_b)
   !< Print the certified one-sided deviations of a and b from each other and their Hausdorff distance (issue #60).
@@ -302,6 +327,18 @@ contains
                def='0.0',                                                           &
                act='store')
 
+  call cli%add(switch='--features',                                                            &
+               help='print the feature edges and corners, write them to this legacy VTK file', &
+               required=.false.,                                                           &
+               def='features.vtk',                                                         &
+               act='store')
+
+  call cli%add(switch='--feature_angle',                         &
+               help='sharp-edge and corner threshold, degrees', &
+               required=.false.,                               &
+               def='30.0',                                     &
+               act='store')
+
   call cli%add(switch='--sanitize', &
                help='sanitize STL', &
                required=.false.,    &
@@ -381,6 +418,8 @@ contains
   call cli%get(        switch='--density',         val=density,             error=error) ; if (error/=0) stop
   call cli%get(        switch='--compare',         val=file_name_compare,   error=error) ; if (error/=0) stop
   call cli%get(        switch='--tolerance',       val=tolerance,           error=error) ; if (error/=0) stop
+  call cli%get(        switch='--features',        val=file_name_features,  error=error) ; if (error/=0) stop
+  call cli%get(        switch='--feature_angle',   val=feature_angle,       error=error) ; if (error/=0) stop
   call cli%get(        switch='--sanitize',        val=sanitize,            error=error) ; if (error/=0) stop
   call cli%get(        switch='--fill_holes',      val=fill_holes,          error=error) ; if (error/=0) stop
   call cli%get(        switch='--max_hole_edges',  val=max_hole_edges,      error=error) ; if (error/=0) stop

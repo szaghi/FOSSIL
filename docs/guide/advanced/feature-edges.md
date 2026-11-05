@@ -136,6 +136,35 @@ angles. It has no boundary edge: its 62 duplicated facets (removed by `sanitize`
 facets on 61 edges, which count as non-manifold. Raising the angle to 60° and excluding the other kinds keeps 2508
 creases.
 
+## Output for inspection
+
+```fortran
+call surface%save_features_into_file(file_name, angle, corner_angle, include_boundary, include_nonmanifold, status)
+```
+
+The file is legacy ASCII VTK `POLYDATA`, which ParaView opens directly:
+
+- the feature vertices are `POINTS`;
+- every corner is a `VERTEX`;
+- every feature edge is a 2-point `LINE`;
+- a cell scalar `kind` is 0 on the corners and the `FEATURE_EDGE_*` code on the edges.
+
+From the command line:
+
+```bash
+fossilizer -i part.stl --features part-features.vtk [--feature_angle 45]
+```
+
+```text
+feature edges at   30.00 degrees
+  sharp 24  boundary 0  non-manifold 0
+  corners 8  polylines 12
+  written to part-features.vtk
+```
+
+(the output for `cube-01.stl`). `src/tests/fossil_test_features_cli.f90` reads the summary and the VTK file back: 20
+points, 8 vertices, 24 lines and 32 cell scalars.
+
 ## Validation
 
 `src/tests/fossil_test_feature_edges.f90`:
