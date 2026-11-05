@@ -19,7 +19,7 @@
 
 program fossil_test_alpha_wrap
 
-use fossil, only : surface_stl_object, AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, AWRAP_STATUS_DEGENERATE
+use fossil, only : surface_stl_object, AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, AWRAP_STATUS_DEGENERATE, DEV_STATUS_OK
 use fossil_facet_object, only : facet_object
 use fossil_utils, only : PI
 use penf, only : I4P, R8P
@@ -33,7 +33,9 @@ type(facet_object), allocatable, target :: holed_facets(:)
 type(facet_object), pointer :: facets(:)
 real(R8P) :: wrap_volume, expected_volume, offset
 integer(I4P) :: status, i
-logical :: are_tests_passed(5)
+logical :: are_tests_passed(6)
+real(R8P) :: hl1, hu1, hl2, hu2 !< Deviation bounds wrap -> cube, cube -> wrap (issue #60).
+integer(I4P) :: hs1, hs2
 
 are_tests_passed = .false.
 
@@ -60,6 +62,20 @@ are_tests_passed(1) = (status == AWRAP_STATUS_OK) .and. wrapped_tbp%is_watertigh
                        wrapped_tbp%is_manifold() .and. min_distance(cube, wrapped_tbp) >= (1._R8P - 1.e-9_R8P) * offset .and. &
                        (abs(wrap_volume - expected_volume) <= 0.03_R8P * expected_volume) .and. &
                        (wrapped_tbp%get_facets_number() < 600_I4P)
+
+! ---- Invariant 6 (issue #60): the wrap is the cube's offset surface: its vertices lie on it and its facets are chords
+!      of it around the convex cube, so h(wrap, cube) <= offset, and h(cube, wrap) >= offset (the minimum distance
+!      above). Both one-sided deviations, certified at tolerance 1e-4, bracket the offset itself (1.000 to 1.003
+!      offset when written).
+call wrapped_tbp%deviation(cube, lower=hl1, upper=hu1, tolerance=1.e-4_R8P, status=hs1)
+call cube%deviation(wrapped_tbp, lower=hl2, upper=hu2, tolerance=1.e-4_R8P, status=hs2)
+print '(A,2F10.6,A,2F10.6)', 'inv 6 (deviation / offset): wrap -> cube ', hl1 / offset, hu1 / offset, '  cube -> wrap ', &
+                    hl2 / offset, hu2 / offset
+are_tests_passed(6) = hs1 == DEV_STATUS_OK .and. hs2 == DEV_STATUS_OK .and. &
+                      hl1 <= offset * (1._R8P + 1.e-9_R8P) .and. offset <= hu1 * (1._R8P + 1.e-9_R8P) .and. &
+                      hu1 - hl1 <= 1.e-4_R8P .and. &
+                      hl2 <= offset * (1._R8P + 1.e-9_R8P) .and. offset <= hu2 * (1._R8P + 1.e-9_R8P) .and. &
+                      hu2 - hl2 <= 1.e-4_R8P
 
 ! ---- Invariant 2: the holed cube (a hole of inradius 0.29) at alpha = 0.4: the ball (diameter alpha, kept offset
 !      from the input) gets through the hole, so the wrap lines both sides of every wall: one closed shell, two offset
@@ -120,7 +136,7 @@ call cube%alpha_wrap(alpha=-1._R8P, wrapped=wrapped_tbp, status=status)
 are_tests_passed(5) = are_tests_passed(5) .and. (status == AWRAP_STATUS_BAD_INPUT)
 print '(A,I0)', 'inv 5 (alpha <= 0): status=', status
 
-print '(A,5L2)', 'per-case results: ', are_tests_passed
+print '(A,6L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 if (.not. (all(are_tests_passed))) error stop 1
 contains

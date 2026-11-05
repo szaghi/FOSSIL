@@ -27,21 +27,24 @@ program fossil_test_decimate
 
 use fossil, only : surface_stl_object, &
                    extract_isosurface, &
-                   DEC_STATUS_OK, DEC_STATUS_NO_PROGRESS
+                   DEC_STATUS_OK, DEC_STATUS_NO_PROGRESS, DEV_STATUS_OK
 use fossil_facet_object, only : facet_object
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
 
 implicit none
 
-type(surface_stl_object) :: sphere, cube
+type(surface_stl_object) :: sphere, cube, sphere0
 type(facet_object), allocatable :: facets(:)
 real(R8P), allocatable   :: values(:, :, :)
 type(vector_R8P)         :: bmin, bmax
 real(R8P)                :: vol, vol_target, vol_before
 integer(I4P)             :: status, n0, n_target, n_before, i, j, k
 real(R8P)                :: x, y, z, dx
-logical                  :: are_tests_passed(3)
+logical                  :: are_tests_passed(4)
+real(R8P)                :: dev_lower(3), dev_upper(3) !< Deviation from the input sphere per level (issue #60).
+integer(I4P)             :: dev_status(3)
+real(R8P), parameter     :: DEV_MAX(3) = [1.2e-2_R8P, 2.1e-2_R8P, 4.e-2_R8P] !< Bounds (measured, see case 4).
 
 integer(I4P), parameter :: N_GRID = 32_I4P
 real(R8P),    parameter :: PI     = 3.141592653589793_R8P
@@ -66,6 +69,7 @@ bmax = vector_R8P( 2._R8P,  2._R8P,  2._R8P)
 call extract_isosurface(values=values, bmin=bmin, bmax=bmax, iso=0._R8P, &
                         surface=facets, status=status)
 call sphere%adopt_facets(facets=facets)
+sphere0 = sphere
 deallocate(values)
 n0         = sphere%get_facets_number()
 vol_target = 4._R8P / 3._R8P * PI
@@ -73,6 +77,7 @@ vol_target = 4._R8P / 3._R8P * PI
 ! Decimate to 50%; assert facet count and volume.
 n_target = n0 / 2
 call sphere%decimate(target_facets=n_target, status=status)
+call sphere%deviation(sphere0, lower=dev_lower(1), upper=dev_upper(1), status=dev_status(1))
 vol = sphere%get_volume()
 print '(A,I0,A,I0,A,I0,A,F8.4,A,F8.4,A,I0)', &
       'sphere 50%: n0=', n0, ' target=', n_target, ' got=', sphere%get_facets_number(), &
@@ -84,6 +89,7 @@ if (.not. (status == DEC_STATUS_OK .and. &
 
 n_target = n0 / 4
 call sphere%decimate(target_facets=n_target, status=status)
+call sphere%deviation(sphere0, lower=dev_lower(2), upper=dev_upper(2), status=dev_status(2))
 vol = sphere%get_volume()
 print '(A,I0,A,I0,A,F8.4,A,I0)', 'sphere 25%: target=', n_target, ' got=', sphere%get_facets_number(), &
       '  vol=', vol, ' nm_edges=', sphere%get_non_manifold_edges_number()
@@ -94,6 +100,7 @@ if (.not. (status == DEC_STATUS_OK .and. &
 
 n_target = n0 / 10
 call sphere%decimate(target_facets=n_target, status=status)
+call sphere%deviation(sphere0, lower=dev_lower(3), upper=dev_upper(3), status=dev_status(3))
 vol = sphere%get_volume()
 print '(A,I0,A,I0,A,F8.4,A,I0)', 'sphere 10%: target=', n_target, ' got=', sphere%get_facets_number(), &
       '  vol=', vol, ' nm_edges=', sphere%get_non_manifold_edges_number()
@@ -127,7 +134,14 @@ are_tests_passed(3) = (status == DEC_STATUS_OK .or. status == DEC_STATUS_NO_PROG
 print '(A,I0,A,I0,A,F8.4)', 'cube to 4 (degenerate): status=', status, &
       ' got=', cube%get_facets_number(), '  vol=', vol
 
-print '(A,3L2)', 'per-case results: ', are_tests_passed
+! ----- 4. How far each level moved the sphere (issue #60): the one-sided deviation of the decimated sphere from the
+!          input, certified to the default tolerance, grows with the decimation and stays below bounds measured when
+!          written (upper bounds 8.0e-3, 1.4e-2, 2.7e-2), with a margin of 1.5.
+print '(A,6ES11.3)', 'deviation from the input sphere (lower, upper per level): ', (dev_lower(i), dev_upper(i), i = 1, 3)
+are_tests_passed(4) = all(dev_status == DEV_STATUS_OK) .and. all(dev_upper <= DEV_MAX) .and. &
+                      dev_lower(1) < dev_lower(2) .and. dev_lower(2) < dev_lower(3)
+
+print '(A,4L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)',  'Are all tests passed? ', all(are_tests_passed)
 if (.not. all(are_tests_passed)) error stop 1
 

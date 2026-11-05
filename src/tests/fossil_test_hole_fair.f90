@@ -15,6 +15,7 @@ program fossil_test_hole_fair
 !< the face z = 1 at the corner x = y = 0. The loop runs along the cube's edges, where the loop
 !< edges belong to the side faces; fairing must keep the 90-degree creases (feature-aware ring),
 !< so the faired patch stays in the plane z = 1 and the volume stays 1 (to 1e-12).
+!< Issue #60: the certified deviation of the faired sphere from the full icosphere is below that of the plain fill.
 
 use fossil, only : surface_stl_object, facet_object
 use penf,   only : I4P, R8P
@@ -24,6 +25,7 @@ implicit none
 
 type(facet_object), allocatable :: sphere(:)
 real(R8P)                       :: rdev(3), dih(3), vol(3), vol_full
+real(R8P)                       :: hl(3), hu(3) !< Deviation of the filled sphere from the full one (issue #60).
 integer(I4P)                    :: n_patch(3)
 logical                         :: ok, wt(3)
 type(surface_stl_object)        :: full
@@ -32,15 +34,20 @@ ok = .true.
 call icosphere(levels=2_I4P, f=sphere)
 call full%adopt_facets(facets=sphere)
 vol_full = full%get_volume()
-call run(mode=1_I4P, rdev=rdev(1), dih=dih(1), vol=vol(1), wt=wt(1), n_patch=n_patch(1))
-call run(mode=2_I4P, rdev=rdev(2), dih=dih(2), vol=vol(2), wt=wt(2), n_patch=n_patch(2))
-call run(mode=3_I4P, rdev=rdev(3), dih=dih(3), vol=vol(3), wt=wt(3), n_patch=n_patch(3))
+call run(mode=1_I4P, rdev=rdev(1), dih=dih(1), vol=vol(1), wt=wt(1), n_patch=n_patch(1), hl=hl(1), hu=hu(1))
+call run(mode=2_I4P, rdev=rdev(2), dih=dih(2), vol=vol(2), wt=wt(2), n_patch=n_patch(2), hl=hl(2), hu=hu(2))
+call run(mode=3_I4P, rdev=rdev(3), dih=dih(3), vol=vol(3), wt=wt(3), n_patch=n_patch(3), hl=hl(3), hu=hu(3))
 print '(A,F10.6)', 'closed icosphere volume: ', vol_full
 print '(A)', '            patch  watertight  max|r-1|   max dihedral (deg)  volume'
 print '(A,I6,L8,F14.6,F14.3,F16.6)', 'plain   ', n_patch(1), wt(1), rdev(1), dih(1), vol(1)
 print '(A,I6,L8,F14.6,F14.3,F16.6)', 'refine  ', n_patch(2), wt(2), rdev(2), dih(2), vol(2)
 print '(A,I6,L8,F14.6,F14.3,F16.6)', 'fair    ', n_patch(3), wt(3), rdev(3), dih(3), vol(3)
 ok = all(wt) .and. rdev(3) < rdev(1) .and. dih(3) < dih(1) .and. abs(vol(3) - vol_full) < abs(vol(1) - vol_full)
+! Issue #60: the one-sided deviation of the filled sphere from the full icosphere, certified (default tolerance). The
+! faired patch follows the sphere: its upper bound is below the plain patch's lower bound.
+print '(A,2ES11.3,A,2ES11.3,A,2ES11.3)', 'deviation from the full sphere: plain ', hl(1), hu(1), '  refine ', hl(2), hu(2), &
+                                         '  fair ', hl(3), hu(3)
+ok = ok .and. hu(3) < hl(1)
 call crease_case
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
@@ -75,9 +82,10 @@ contains
    ok = ok .and. case_ok
    endsubroutine crease_case
 
-   subroutine run(mode, rdev, dih, vol, wt, n_patch)
+   subroutine run(mode, rdev, dih, vol, wt, n_patch, hl, hu)
    integer(I4P), intent(in)        :: mode
    real(R8P),    intent(out)       :: rdev, dih, vol
+   real(R8P),    intent(out)       :: hl, hu
    logical,      intent(out)       :: wt
    integer(I4P), intent(out)       :: n_patch
    type(surface_stl_object)        :: holed
@@ -96,6 +104,7 @@ contains
    case (3) ; call holed%fill_holes(max_hole_size=1._R8P, holes_filled=filled, fair=.true.)
    endselect
    n_patch = holed%get_facets_number() - n_orig
+   call holed%deviation(full, lower=hl, upper=hu)
    wt  = holed%is_watertight() .and. filled == 1
    vol = holed%get_volume()
    rdev = 0._R8P ; dih = 0._R8P

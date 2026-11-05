@@ -10,9 +10,11 @@ program fossil_test_hole_refine
 !<    area 0.5625 to 1e-12) and stays in the plane z = 1 (bit for bit);
 !<  - its edges are near the loop's density: longest patch edge below 2 x 0.25, mean within
 !<    [0.5, 1.5] x 0.25.
+!<  - (issue #60) both filled cubes lie on the input cube: their certified Hausdorff distance to it is within the
+!<    default tolerance (1e-3 of the diagonal), the patch exactly covering the planar hole.
 !< Tiny: 192 facets.
 
-use fossil, only : surface_stl_object, facet_object
+use fossil, only : surface_stl_object, facet_object, DEV_STATUS_OK
 use penf,   only : I4P, R8P
 
 implicit none
@@ -37,6 +39,8 @@ contains
    type(facet_object), pointer     :: f
    integer(I4P)                    :: i, n_keep, n_orig, filled, e
    real(R8P)                       :: area, lmax, lsum
+   real(R8P)                       :: hl, hu   !< Hausdorff bounds to the input cube (issue #60).
+   integer(I4P)                    :: hs
    logical                         :: in_plane, case_ok
 
    call cube%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true.)
@@ -67,6 +71,9 @@ contains
    enddo
    case_ok = filled == 1 .and. holed%is_watertight() .and. abs(holed%get_volume() - 1._R8P) < 1.e-12_R8P .and. &
              abs(area - 0.5625_R8P) < 1.e-12_R8P .and. in_plane
+   call holed%hausdorff(cube, lower=hl, upper=hu, status=hs)
+   print '(A,2ES11.3)', '   Hausdorff to the input cube: ', hl, hu
+   case_ok = case_ok .and. hs == DEV_STATUS_OK .and. hl <= 1.e-15_R8P .and. hu <= 2.e-3_R8P
    if (refine) case_ok = case_ok .and. lmax < 0.5_R8P .and. lsum / (3 * n_patch) >= 0.125_R8P .and. &
                          lsum / (3 * n_patch) <= 0.375_R8P
    print '(A,L1,A,I0,A,I0,A,L1,A,F14.12,A,F14.12,A,L1,A,F6.3,A,F6.3,A,L1)', 'refine ', refine, ': removed ', &

@@ -204,6 +204,39 @@ mismatches` for the disc with a hole rotated by 2 degrees against itself.
 A negative control: with $\rho_T = 0$ (the corner distances alone) the "upper" bound of the acute triangle is 1.6008,
 below the true 1.7241, and the test fails.
 
+## Where the library's tests use it
+
+Six operations that move a surface now carry a certified deviation check against their input. Each bound is measured
+once and stated with a margin; no tolerance is loosened to make a test pass.
+
+| Test | Operation | Certified result when written | Asserted |
+|---|---|---|---|
+| `fossil_test_isotropic_remesh` | fine remesh of the cube, features preserved | h ≤ 1.0e-2 at tolerance 1e-2 (the true distance is ~0) | h ≤ 1.2e-2: a #42-style chamfer (~0.03) fails |
+| | marching-cubes sphere, 2 iterations | 5.61e-3 ≤ h ≤ 6.55e-3 at tolerance 1e-3 | h ≤ 7.5e-3 |
+| `fossil_test_decimate` | sphere to 50 %, 25 %, 10 % | h ≤ 8.0e-3, 1.4e-2, 2.7e-2 | ≤ 1.5 × those; growing with the decimation |
+| `fossil_test_smoothing` | dragon, Taubin and explicit, 5 iterations | Taubin 0.307–0.333, explicit 0.565–0.589 | Taubin's upper below explicit's lower; Taubin ≤ 0.45 |
+| `fossil_test_hole_fair` | holed icosphere filled plain, refined, faired | plain 0.147–0.151, refined 0.161–0.164, faired 0.093–0.096 | faired's upper below plain's lower |
+| `fossil_test_hole_refine` | planar hole of the cube, plain and refined | H ≤ 1.6e-3 (default tolerance; true ~0) | H ≤ 2e-3 |
+| `fossil_test_alpha_wrap` | the cube wrapped with offset 0.033 | both directions 1.000–1.003 × offset | both bracket the offset within 1e-4 |
+
+The smoothing and fairing checks compare two certified brackets: Taubin moves the dragon less than the explicit
+Laplacian, and the faired patch lies closer to the sphere than the plain fill. These were claims of the documentation;
+they are now certified.
+
+## Known limitations
+
+- **Coplanar surfaces whose facets cross.** Where two surfaces coincide but are triangulated differently, the closest
+  points of a triangle's corners can fall on different facets of B, so the one-facet bound does not apply. The branch
+  and bound then refines along the crossing edges down to the tolerance, at a cost linear in 1 / tolerance. At the
+  default tolerance this is cheap (the remeshed cube above: 1.7e-3 in well under a second). At 1e-4 on the same cube
+  it reaches the work cap: the bounds stay valid but wider, with `DEV_STATUS_NOT_CONVERGED`.
+- **Surfaces that cross each other.** Near a crossing curve d is close to 0, the convexity bound is only as good as
+  the triangle size, and the branch and bound refines a strip around the curve down to the tolerance. Two
+  triangulations of the same sphere (the remesh above) cost about 0.3 s at tolerance 1e-3 in an unoptimised build,
+  and twice that at 5e-4.
+- **The mean and rms are estimates**, from the centroid rule on the sub-triangles; only `lower` and `upper` are bounds.
+- **The branch and bound runs on the host**; with `device=.true.` only the queries run on the device.
+
 ## See also
 
 - [Mass properties](/guide/advanced/mass-properties), [decimation](/guide/advanced/decimate),

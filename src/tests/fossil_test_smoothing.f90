@@ -33,23 +33,27 @@ program fossil_test_smoothing
 
 use fossil, only : surface_stl_object, &
                    SMOOTH_METHOD_EXPLICIT, SMOOTH_METHOD_TAUBIN, &
-                   SMOOTH_STATUS_OK
+                   SMOOTH_STATUS_OK, DEV_STATUS_OK
 use penf, only : I4P, R8P
 
 implicit none
 
-type(surface_stl_object) :: dragon_taubin, dragon_explicit, cube
+type(surface_stl_object) :: dragon_taubin, dragon_explicit, cube, dragon0
 real(R8P) :: vol_before, vol_taubin_after, vol_explicit_after
 real(R8P) :: area_before, area_taubin_after
 integer(I4P) :: status
 real(R8P), parameter :: TAUBIN_VOL_TOL_REL  = 0.05_R8P  ! ≤ 5% volume drift
 real(R8P), parameter :: AREA_DROP_MIN_REL   = 0.001_R8P ! ≥ 0.1% area drop
-logical :: are_tests_passed(4)
+logical :: are_tests_passed(5)
+real(R8P) :: lt, ut, le, ue                    !< Hausdorff bounds, Taubin and explicit (issue #60).
+integer(I4P) :: st, se
+real(R8P), parameter :: H_TAUBIN_MAX = 0.45_R8P !< Bound of the Taubin dragon's Hausdorff distance (0.333 when written).
 
 are_tests_passed = .false.
 
 ! ---- Inv 1 & 2: Taubin on dragon.
 call dragon_taubin%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+dragon0 = dragon_taubin
 vol_before  = dragon_taubin%get_volume()
 area_before = dragon_taubin%get_area()
 print '(A,F12.6,A,F12.6)', 'dragon before: vol=', vol_before, '  area=', area_before
@@ -85,7 +89,15 @@ call cube%smooth(method=SMOOTH_METHOD_TAUBIN, iterations=3_I4P, status=status)
 print '(A,I0)', 'inv 4 (cube status): status=', status
 are_tests_passed(4) = (status == SMOOTH_STATUS_OK)
 
-print '(A,4L2)', 'per-case results: ', are_tests_passed
+! ---- Inv 5 (issue #60): how far smoothing moved the dragon. Taubin's lambda|mu steps keep the surface in place, the
+!      explicit Laplacian shrinks it: the Hausdorff distance to the input, certified to the default tolerance, is
+!      smaller for Taubin (0.307-0.333 against 0.565-0.589 of the 26.7 diagonal when written) and below 0.45.
+call dragon_taubin%hausdorff(dragon0, lower=lt, upper=ut, status=st)
+call dragon_explicit%hausdorff(dragon0, lower=le, upper=ue, status=se)
+print '(A,2ES11.3,A,2ES11.3)', 'inv 5 (Hausdorff to the input): Taubin ', lt, ut, '  explicit ', le, ue
+are_tests_passed(5) = st == DEV_STATUS_OK .and. se == DEV_STATUS_OK .and. ut < le .and. ut <= H_TAUBIN_MAX
+
+print '(A,5L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 if (.not. (all(are_tests_passed))) error stop 1
 endprogram fossil_test_smoothing

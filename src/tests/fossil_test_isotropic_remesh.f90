@@ -19,7 +19,7 @@
 
 program fossil_test_isotropic_remesh
 
-use fossil, only : surface_stl_object, extract_isosurface
+use fossil, only : surface_stl_object, extract_isosurface, DEV_STATUS_OK
 use fossil_remesh, only : isotropic_remesh, REM_STATUS_OK, &
                           count_unique_edges, compute_median_edge_length, &
                           run_split_only, run_split_and_collapse, run_full_pipeline
@@ -43,8 +43,11 @@ integer(I4P) :: n_sharp_after_cube, nm_after_tbp
 real(R8P)    :: med_cube, vol_before_sphere, vol_after_sphere
 real(R8P)    :: vol_relaxed, dot_n
 real(R8P)    :: x, y, z, dx
-logical      :: are_tests_passed(8)
+logical      :: are_tests_passed(10)
 real(R8P)    :: vol_cube0
+real(R8P)    :: dev_lower, dev_upper           !< Hausdorff bounds (issue #60).
+real(R8P), parameter :: HSPHERE = 7.5e-3_R8P   !< Bound of the remeshed sphere's deviation from the input (step 10).
+type(surface_stl_object) :: cube_input
 real(R8P), parameter :: SHARP_DIHEDRAL_DEG = 60._R8P  ! cube edges (90°) above this threshold; smooth regions below
 logical      :: all_facets_valid
 real(R8P)    :: expected_x(3), got_x(3)
@@ -236,13 +239,30 @@ are_tests_passed(7) = (status == REM_STATUS_OK .and. nm_after_tbp == 0_I4P)
 ! must be locked too, or the relax pass pulls them off the crease and chamfers every edge (the cube kept
 ! its 12 sharp edges but lost 3 % of its volume and 6 % of its area before the fix).
 call cube_features%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+cube_input = cube_features
 vol_cube0 = cube_features%get_volume()
 call cube_features%isotropic_remesh(target_length=0.17_R8P, preserve_features=.true., status=status)
 print '(A,I0,A,I0,A,F12.9,A,F12.9,A)', 'cube fine features: status=', status, ' nf=', cube_features%get_facets_number(), &
       ' vol=', cube_features%get_volume(), ' (input ', vol_cube0, ')'
 are_tests_passed(8) = status == REM_STATUS_OK .and. abs(cube_features%get_volume() - vol_cube0) < 1.e-9_R8P * vol_cube0
 
-print '(A,8L2)', 'per-case results: ', are_tests_passed
+! Step 9 (issue #60): how far the remesh moved the surface. With preserve_features the remeshed cube lies on the cube:
+! its deviation from the input (one-sided: a chamfer moves the remeshed surface off the cube) is certified below
+! 1.2e-2 (tolerance 1e-2); a chamfered edge (the #42 bug) would put it near the chamfer's depth (about 0.03). A coarse
+! tolerance on purpose: coplanar surfaces whose facets cross refine along the crossings, at a cost linear in
+! 1 / tolerance, and 1e-2 is enough to tell a chamfer.
+call cube_features%deviation(cube_input, lower=dev_lower, upper=dev_upper, tolerance=1.e-2_R8P, status=status)
+print '(A,2ES12.4)', 'cube fine features: deviation from the input ', dev_lower, dev_upper
+are_tests_passed(9) = status == DEV_STATUS_OK .and. dev_upper <= 1.2e-2_R8P
+! Step 10: the remeshed sphere (2 iterations, no features) stays within a measured bound of the input sphere: its
+! one-sided deviation, certified at tolerance 1e-3, was 5.61e-3 <= h <= 6.55e-3 when written (the bound 7.5e-3). The two
+! spheres cross each other: near the crossings d is small and the branch and bound refines a strip down to the
+! tolerance, so a tighter one, or both directions, would exceed the test's time budget.
+call sphere_tbp%deviation(sphere_ref, lower=dev_lower, upper=dev_upper, tolerance=1.e-3_R8P, status=status)
+print '(A,2ES12.4)', 'sphere TBP: deviation from the input ', dev_lower, dev_upper
+are_tests_passed(10) = status == DEV_STATUS_OK .and. dev_upper <= HSPHERE
+
+print '(A,10L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)',  'Are all tests passed? ', all(are_tests_passed)
 if (.not. all(are_tests_passed)) error stop 1
 
