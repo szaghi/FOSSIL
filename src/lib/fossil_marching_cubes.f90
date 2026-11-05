@@ -30,11 +30,13 @@ module fossil_marching_cubes
 !<   `compute_volume` to return a positive volume.
 !<
 !< Output is a flat list of independent triangles — adjacent cubes that share
-!< an iso-crossing on a common edge produce duplicate vertices. Calling
-!< `surface%adopt_facets(...)` on the output runs `analyze` (which includes
-!< `connect_nearby_vertices`) and deduplicates near-coincident vertices,
-!< producing a watertight mesh. Hash-based per-edge dedup inside the MC loop
-!< would cut the output size by ~3x; deferred as future work.
+!< an iso-crossing on a common edge produce duplicate vertices, bit for bit
+!< (issue #48: every crossing is interpolated from the lower grid node of its
+!< edge, whatever the cell's local edge direction), so the exact vertex weld of
+!< `surface%adopt_facets(...)` -> `analyze` joins them. Triangles with
+!< coincident vertices (a corner value equal to iso) are not emitted.
+!< Hash-based per-edge dedup inside the MC loop would cut the output size by
+!< ~3x; deferred as future work.
 !<
 !< Known ambiguity (Lorensen-Cline limitation): on cases 105 and 150 (and
 !< their rotations) the case-table choice can leave small holes in the iso-
@@ -493,6 +495,12 @@ contains
             do c = 0, 11
                if (iand(edge_mask, ishft(1_I4P, c)) == 0_I4P) cycle
                ev0 = EDGE_VERTEX(1, c) ; ev1 = EDGE_VERTEX(2, c)
+               ! canonical crossing (issue #48): interpolate from the lower grid node of the edge, whatever the cell's
+               ! local edge direction (E2 runs V2 -> V3, from high to low), so that the up to four cells sharing a
+               ! grid edge compute the same bits and the exact vertex weld of analyze joins them
+               if (sum(VOX(:, ev0)) > sum(VOX(:, ev1))) then
+                  ev0 = EDGE_VERTEX(2, c) ; ev1 = EDGE_VERTEX(1, c)
+               endif
                t_interp = interp_t(corner_val(ev0), corner_val(ev1), iso)
                edge_pt(c)%x = corner_pos(ev0)%x + t_interp * (corner_pos(ev1)%x - corner_pos(ev0)%x)
                edge_pt(c)%y = corner_pos(ev0)%y + t_interp * (corner_pos(ev1)%y - corner_pos(ev0)%y)
@@ -516,6 +524,11 @@ contains
                f%vertex(1) = edge_pt(idx)
                f%vertex(3) = edge_pt(MC_TRI_TABLE(t + 1, cube_case))
                f%vertex(2) = edge_pt(MC_TRI_TABLE(t + 2, cube_case))
+               t = t + 3
+               ! a corner value equal to iso puts several crossings on that corner: the triangle has coincident
+               ! vertices, no area; dropping it removes both sides of its only edge, so no hole opens (issue #48)
+               if (same_point(f%vertex(1), f%vertex(2)) .or. same_point(f%vertex(2), f%vertex(3)) .or. &
+                   same_point(f%vertex(3), f%vertex(1))) cycle
                call f%compute_metrix
                if (used == cap) then
                   cap = 2 * cap
@@ -525,7 +538,6 @@ contains
                endif
                used = used + 1
                buf(used) = f
-               t = t + 3
             enddo
          enddo
       enddo
@@ -534,6 +546,14 @@ contains
    allocate(surface(used))
    surface(1:used) = buf(1:used)
    endsubroutine extract_isosurface
+
+   pure function same_point(a, b) result(same)
+   !< True if a and b are the same point, bit for bit.
+   type(vector_R8P), intent(in) :: a, b
+   logical                      :: same
+
+   same = a%x == b%x .and. a%y == b%y .and. a%z == b%z
+   endfunction same_point
 
    pure function interp_t(va, vb, iso) result(t)
    !< Parameter t ∈ [0, 1] along the edge (a → b) where the iso-crossing lies:
