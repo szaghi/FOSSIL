@@ -1,12 +1,14 @@
 !< FOSSIL test: facet%area() and surface%get_area() (issue #7).
 !<
-!< Four invariants:
+!< Five invariants:
 !<   1. The reporter's exact triangle [0,0,0]/[1,0,0]/[0.5,1,0] has area 0.5
 !<      and corresponding det = (2*area)^2 = 1.
 !<   2. On a real mesh, surface%get_area() equals the sum of per-facet
 !<      facet%area() to within accumulated FP round-off.
 !<   3. Surface area is invariant under rigid motions (translate + rotate).
 !<   4. Surface area scales as k^2 under uniform scaling by k.
+!<   5. A needle triangle whose Gram determinant a*c - b*b rounds below zero (-2.8e-17 in IEEE doubles) has a finite,
+!<      positive area, 6.1033e-10 (issue #49: the area was sqrt(det) / 2, NaN there).
 
 program fossil_test_area
 
@@ -26,7 +28,8 @@ real(R8P), parameter     :: TOL_TRIANGLE = 1.0e-15_R8P
 real(R8P), parameter     :: TOL_FP       = 1.0e-9_R8P
 real(R8P), parameter     :: TOL_INVARIANT = 1.0e-6_R8P
 integer(I4P)             :: f, nf
-logical                  :: are_tests_passed(4)
+type(facet_object)       :: needle
+logical                  :: are_tests_passed(5)
 
 are_tests_passed = .false.
 
@@ -65,9 +68,17 @@ call surface%analyze
 area_scaled = surface%get_area()
 are_tests_passed(4) = (abs(area_scaled - SCALE_K**2 * area_baseline) <= TOL_INVARIANT * area_scaled)
 
+! --- 5. Needle triangle: v3 = t v2 + 1e-9 ey (t = 0.207491395289921), its Gram determinant rounds below zero.
+needle%vertex(1) = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+needle%vertex(2) = vector_R8P(1._R8P, 0.3333333333333333_R8P, 0.7_R8P)
+needle%vertex(3) = vector_R8P(0.207491395289921_R8P, 0.06916379942997367_R8P, 0.1452439767029447_R8P)
+call needle%compute_metrix
+are_tests_passed(5) = abs(needle%area() - 6.103277792716772e-10_R8P) <= 1.e-5_R8P * 6.103277792716772e-10_R8P
+
 print '(A,F8.4,A,F8.4)',     'single triangle: area=', single%area(), '  det=', single%det
+print '(A,ES14.6,A,ES14.6)', 'needle triangle: area=', needle%area(), '  det=', needle%det
 print '(A,ES14.6,A,ES14.6)', 'dragon: sum_facets=', area_facet_sum, '  surface=', area_surface
-print '(A,4L2)', 'per-case results: ', are_tests_passed
+print '(A,5L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)',  'Are all tests passed? ', all(are_tests_passed)
 if (.not. all(are_tests_passed)) error stop 1
 

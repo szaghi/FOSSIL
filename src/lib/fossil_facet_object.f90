@@ -1224,13 +1224,15 @@ contains
    pure function area(self) result(a)
    !< Return the facet area (issue #7).
    !<
-   !< Area = (1/2) * |E12 x E13| = sqrt(self%det) / 2. Cheap closed form using
-   !< the Gram-determinant cache already populated by `compute_metrix`. Returns
-   !< zero if metrix has not been computed (`det` is zero-initialized).
+   !< Area = (1/2) * |E12 x E13|, from the edge vectors cached by `compute_metrix` (zero before it). Not
+   !< sqrt(det) / 2: the Gram determinant `det = a*c - b*b` cancels catastrophically on a needle triangle and can
+   !< round below zero, which made the area NaN (issue #49); the norm of the cross product is never negative.
    class(facet_object), intent(in) :: self !< Facet.
    real(R8P)                       :: a    !< Facet area.
 
-   a = 0.5_R8P * sqrt(self%det)
+   a = 0.5_R8P * sqrt((self%E12%y * self%E13%z - self%E12%z * self%E13%y)**2 + &
+                      (self%E12%z * self%E13%x - self%E12%x * self%E13%z)**2 + &
+                      (self%E12%x * self%E13%y - self%E12%y * self%E13%x)**2)
    endfunction area
 
    pure function vertex_angle(self, vertex_id)
