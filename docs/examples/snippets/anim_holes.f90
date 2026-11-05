@@ -1,5 +1,5 @@
 !< Animation of tutorial 2: fill_holes closing holes one after the other. A sphere (marching cubes on |x| - 1, as the
-!< curvature recipe builds it; the raw extraction has slits, so sanitize(fill_holes) repairs it, then it is decimated
+!< curvature recipe builds it; sanitize(fill_holes) drops its slivers and closes the holes that leaves, then it is decimated
 !< to 2200 facets) gets four round holes of different sizes (the facets whose centroid is within r_k of a point of the
 !< surface). fill_holes(refine, fair) then runs with a max_hole_size that grows from frame to frame, set between the
 !< loop sizes (printed), so each frame closes the next larger hole: the patches in ember, the open loops outlined.
@@ -42,7 +42,7 @@ do k = 1, NH
    centre(k) = centre(k) / norm2([centre(k)%x, centre(k)%y, centre(k)%z])
 enddo
 call sphere%adopt_facets(facets=facets)
-call sphere%sanitize(fill_holes=.true.)                                     ! the raw extraction has slits
+call sphere%sanitize(fill_holes=.true.)                                     ! drops the slivers, closes the holes that leaves
 call sphere%decimate(target_facets=2200_I4P, status=status)                 ! (and a light drawing)
 if (status /= DEC_STATUS_OK) error stop 'decimate failed'
 print '(A,I0,A,L1)', 'sphere: ', sphere%get_facets_number(), ' facets, watertight ', sphere%is_watertight()

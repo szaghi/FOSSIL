@@ -185,7 +185,7 @@ vertex to vertex; up to that scaling it is the x-component of the
 mean-curvature normal). Hence the dipole aligned with the ±x axis:
 `+2` on the −x cap, `−2` on the +x cap, zero on the band x = 0. The
 facet-scale speckle is the operator's pointwise error on an irregular
-mesh (RMS 0.47 against `-2x`, up to 5.3 at a few vertices: the same
+mesh (RMS 0.43 against `-2x`, up to 2.5 at a few vertices: the same
 non-convergence discussed on the [curvature
 page](/guide/advanced/curvature)), not marching-cubes noise: the
 sphere was remeshed. The figure is drawn by

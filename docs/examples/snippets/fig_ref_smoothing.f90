@@ -1,5 +1,5 @@
 !< Figures of the reference page "Mesh smoothing": the marching-cubes unit sphere (radius 1 on a 31^3 grid, sanitized
-!< with fill_holes: the raw extraction has slits)
+!< with fill_holes: it drops the slivers and closes the holes that leaves)
 !< with deterministic Gaussian noise added to every vertex (sigma 1 % of the bounding-box diagonal, the same
 !< displacement for every copy of a vertex: it is a function of the vertex coordinates), then the same surface after
 !< smooth at its defaults (5 Taubin pairs, lambda 0.5, mu -0.53). The captions give the volume and the rms of
@@ -27,7 +27,7 @@ call extract_isosurface(values=phi, bmin=vector_R8P(-1.5_R8P, -1.5_R8P, -1.5_R8P
                         bmax=vector_R8P(1.5_R8P, 1.5_R8P, 1.5_R8P), iso=0._R8P, surface=facets, status=status)
 if (status /= MC_STATUS_OK) error stop 'marching cubes failed'
 call sphere%adopt_facets(facets=facets)
-call sphere%sanitize(fill_holes=.true.)                                      ! the raw extraction has slits
+call sphere%sanitize(fill_holes=.true.)                                      ! drops the slivers, closes the holes that leaves
 d = sphere%get_bmax() - sphere%get_bmin()
 sigma = 0.01_R8P * d%normL2()
 allocate(facets(sphere%get_facets_number()))                                       ! the noisy copy

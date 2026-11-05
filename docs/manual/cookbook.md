@@ -261,7 +261,7 @@ edges are between 0.0282 and 0.1352 for a target of 0.1. See [isotropic remeshin
 
 <<< @/examples/output/ck_curvature.ansi{ansi}
 
-![the marching-cubes unit sphere coloured by the mean-curvature error H - 1 at each facet's foot (teal below 1, ember above, saturating at 0.05), with dots on the 25 facets where it exceeds 0.1, and the recipe's query point above with its foot](../examples/images/ck-curvature.svg){.fossil-figure}
+![the marching-cubes unit sphere coloured by the mean-curvature error H - 1 at each facet's foot (teal below 1, ember above, saturating at 0.05), dots where it exceeds 0.1 (none since issues #48 and #51; 25 slivers before), and the recipe's query point above with its foot](../examples/images/ck-curvature.svg){.fossil-figure}
 
 `curvatures=` returns the mean and Gaussian curvature at the foot point, by a cubic fit over the two rings of
 vertices around it: on this unit sphere of 6632 facets, H = 0.9944 and K = 0.9892. It runs on the CPU only. See

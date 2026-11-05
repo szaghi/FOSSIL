@@ -203,12 +203,12 @@ pairs at the defaults (`λ = 0.5`, `μ = -0.53`):
 
 ![the noisy sphere: Gaussian noise of sigma 1 % of the box diagonal on every vertex, rms of |v| - 1 0.0339, volume 4.157](../../examples/images/ref-smoothing-sphere-noisy.svg)
 
-![the same sphere after smooth at its defaults, 5 Taubin pairs: rms of |v| - 1 halved to 0.0167, volume 4.162](../../examples/images/ref-smoothing-sphere-taubin.svg)
+![the same sphere after smooth at its defaults, 5 Taubin pairs: rms of |v| - 1 halved to 0.0163, volume 4.163](../../examples/images/ref-smoothing-sphere-taubin.svg)
 
 </div>
 
 The high-frequency surface "fuzz" is attenuated (the rms radial error
-halves, 0.0339 → 0.0167) while the volume stays put (4.157 → 4.162,
+halves, 0.0339 → 0.0163) while the volume stays put (4.157 → 4.163,
 +0.12 %): the band-pass response Taubin is designed for, without the
 global shrinkage that plain explicit Laplacian smoothing would cause.
 Five pairs do not remove noise this strong (σ is a third of the grid

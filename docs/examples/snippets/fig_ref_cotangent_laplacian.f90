@@ -29,7 +29,7 @@ call extract_isosurface(values=phi, bmin=vector_R8P(-1.5_R8P, -1.5_R8P, -1.5_R8P
                         bmax=vector_R8P(1.5_R8P, 1.5_R8P, 1.5_R8P), iso=0._R8P, surface=facets, status=status)
 if (status /= MC_STATUS_OK) error stop 'marching cubes failed'
 call sphere%adopt_facets(facets=facets)
-call sphere%sanitize(fill_holes=.true.)                                      ! the raw extraction has slits
+call sphere%sanitize(fill_holes=.true.)                                      ! drops the slivers, closes the holes that leaves
 call sphere%isotropic_remesh(status=status)
 if (.not. sphere%is_watertight()) error stop 'sphere not watertight'
 call sphere%cotangent_laplacian(L=lap, M=mass, status=status)

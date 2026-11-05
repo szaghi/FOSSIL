@@ -178,11 +178,10 @@ call sphere%gaussian_curvature(K=curv_k, status=status)
 print '(A,I0)',      'curv status = ', status
 print '(A,I0)',      'n_vertices  = ', size(curv_k, kind=I4P)
 print '(A,ES12.5)',  'mean K      = ', sum(curv_k) / real(size(curv_k, kind=I4P), R8P)
-! A unit sphere has K = 1 everywhere, but this raw extraction prints a mean
-! of -31.8: it has slits (boundary vertices take the half-defect formula)
-! and slivers. sanitize(fill_holes=.true.) + isotropic_remesh first bring
-! the mean to 1.02 (see Visual reference); the per-vertex values still
-! scatter (see Known limitations).
+! A unit sphere has K = 1 everywhere: this extraction (watertight since
+! issue #48; with slits before, it printed -31.8) prints a mean of 0.971.
+! The per-vertex values scatter (see Known limitations); on the remeshed
+! sphere of the Visual reference the mean is 1.009.
 endprogram ex_gaussian_curvature
 ```
 
@@ -255,8 +254,8 @@ no new infrastructure. Tracked under [issue
 ## Visual reference
 
 A unit sphere by marching cubes (the `|x| - 1` field on 31³ samples of
-[-1.5, 1.5]³, repaired by `sanitize(fill_holes=.true.)`: the raw
-extraction has slits), then isotropically remeshed with the defaults
+[-1.5, 1.5]³, cleaned by `sanitize(fill_holes=.true.)`, which drops
+the slivers marching cubes leaves), then isotropically remeshed with the defaults
 (5436 facets). Each facet is coloured by the mean of its three vertex
 values minus the exact value 1 (teal below, ember above; the scale is
 in the caption). Gaussian curvature `K` by `gaussian_curvature`:
@@ -268,23 +267,23 @@ Signed mean curvature `H` on the same surface, by `mean_curvature`
 
 <div class="fossil-pair">
 
-![the same sphere coloured by H - 1 from mean_curvature, saturating at +-0.5: a speckle over the whole surface, values from 0.31 to 1.87](../../examples/images/ref-curvature-sphere-mean.svg)
+![the same sphere coloured by H - 1 from mean_curvature, saturating at +-0.5: a speckle over the whole surface, values from 0.33 to 1.79](../../examples/images/ref-curvature-sphere-mean.svg)
 
-![the same sphere coloured by H - 1 from jet_curvature, same scale: an almost uniform cream, values from 0.85 to 1.17](../../examples/images/ref-curvature-sphere-jet.svg)
+![the same sphere coloured by H - 1 from jet_curvature, same scale: an almost uniform cream, values from 0.86 to 1.16](../../examples/images/ref-curvature-sphere-jet.svg)
 
 </div>
 
 **Read these figures honestly.** The means are right (`K` and `H`
-average 1.02 and 1.01 over the vertices, the exact value is 1), but the
+average 1.009 and 1.005 over the vertices, the exact value is 1), but the
 per-vertex values of the angle-defect and cotangent operators are not:
 on this irregular triangulation they scatter over the whole surface, no
 cluster or region in particular (2nd-98th percentile: `K` from -0.16 to
-3.10, `H` from 0.31 to 1.87). This is the non-convergence described in
+2.95, `H` from 0.33 to 1.79). This is the non-convergence described in
 [Known limitations](#known-limitations) below, not a rendering bug or a
 bug in the curvature TBPs: it is what the discrete formulae genuinely
 produce on a mesh whose vertex valences and triangle shapes vary from
-vertex to vertex. `jet_curvature` on the same mesh stays within 0.85 to
-1.17. Use it when the pointwise value matters; on real CAD STL, run
+vertex to vertex. `jet_curvature` on the same mesh stays within 0.86 to
+1.16. Use it when the pointwise value matters; on real CAD STL, run
 [§1.7 isotropic remeshing](/guide/advanced/isotropic-remesh) first in
 any case. The figures are drawn by
 `docs/examples/src/fig_ref_curvature.f90`.

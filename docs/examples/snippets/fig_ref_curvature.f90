@@ -1,5 +1,5 @@
 !< Figures of the reference page "Per-vertex curvature": a unit sphere by marching cubes (the |x| - 1 field on 31^3
-!< samples of [-1.5, 1.5]^3; the raw extraction has slits, so sanitize(fill_holes) repairs it), isotropically remeshed
+!< samples of [-1.5, 1.5]^3; sanitize(fill_holes) drops its slivers and closes the holes that leaves), isotropically remeshed
 !< (default target length and iterations), then gaussian_curvature, mean_curvature and, for comparison, the H of
 !< jet_curvature (same colour scale as mean_curvature's). Each facet is coloured by the
 !< mean of its three vertex values minus the exact 1 (teal below, ember above, saturating at +-SCALE); the caption
@@ -27,7 +27,7 @@ call extract_isosurface(values=phi, bmin=vector_R8P(-1.5_R8P, -1.5_R8P, -1.5_R8P
                         bmax=vector_R8P(1.5_R8P, 1.5_R8P, 1.5_R8P), iso=0._R8P, surface=facets, status=status)
 if (status /= MC_STATUS_OK) error stop 'marching cubes failed'
 call sphere%adopt_facets(facets=facets)
-call sphere%sanitize(fill_holes=.true.)                                      ! the raw extraction has slits
+call sphere%sanitize(fill_holes=.true.)                                      ! drops the slivers, closes the holes that leaves
 call sphere%isotropic_remesh(status=status)
 if (.not. sphere%is_watertight()) error stop 'sphere not watertight'
 call sphere%gaussian_curvature(K=gk, status=status)

@@ -1,13 +1,13 @@
 $ anim_holes
-WARNING: sanitize: 78 hole(s) filled
-WARNING: sanitize: 72 degenerate facet(s) (zero-area / sliver) removed
+WARNING: sanitize: 18 hole(s) filled
+WARNING: sanitize: 60 degenerate facet(s) (zero-area / sliver) removed
 sphere: 2200 facets, watertight T
-hole 1: loop size  0.113
+hole 1: loop size  0.111
 hole 2: loop size  0.226
 hole 3: loop size  0.327
-hole 4: loop size  0.436
-max_hole_size  0.15: filled 1, left open 3, patch of 9 facets
+hole 4: loop size  0.433
+max_hole_size  0.15: filled 1, left open 3, patch of 12 facets
 max_hole_size  0.25: filled 1, left open 2, patch of 29 facets
-max_hole_size  0.35: filled 1, left open 1, patch of 61 facets
-max_hole_size  0.45: filled 1, left open 0, patch of 114 facets
+max_hole_size  0.35: filled 1, left open 1, patch of 62 facets
+max_hole_size  0.45: filled 1, left open 0, patch of 112 facets
 watertight: T
