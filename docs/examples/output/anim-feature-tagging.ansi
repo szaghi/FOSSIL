@@ -1,0 +1,4 @@
+$ anim_feature_tagging
+8^3 cells: 118 touch a feature edge (23 %)
+16^3 cells: 260 touch a feature edge (6 %)
+32^3 cells: 532 touch a feature edge (2 %)

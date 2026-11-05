@@ -38,6 +38,7 @@ use fossil_csr_matrix, only : csr_matrix_t
 use fossil_deviation, only : deviation_evaluator_t, deviation_sampled, deviation_certified, DEV_STATUS_OK, &
                              DEV_STATUS_BAD_INPUT
 use fossil_feature_edges, only : find_feature_edges, FEATURE_EDGE_DEFAULT_ANGLE
+use fossil_feature_bvh, only : build_segment_bvh, feature_box_touch_oac
 use fossil_mass_properties, only : moments_accumulator_t, accumulate_tetrahedron, moments_to_properties_3d, symmetric3_eigen
 use fossil_laplacian, only : build_cotangent_laplacian, &
                              LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
@@ -173,6 +174,11 @@ type :: surface_stl_object
    integer(I4P),            allocatable, public :: body_payload(:)    !< Body of each facet (issue #37), device-mappable. PUBLIC for !$acc directive access.
    real(R8P),               allocatable, public :: tri_vertices(:,:)  !< Exact vertices of each facet [9, facets] (issue #40), device-mappable.
    logical, public                          :: is_on_device=.false. !< Sentinel: true between matched enter_device / exit_device calls.
+   real(R8P),               allocatable, public :: feature_seg(:,:)   !< Feature-edge segments [6, n] (issue #61), device-mappable.
+   real(R8P),               allocatable, public :: feature_box(:,:)   !< Their BVH node boxes [6, nn].
+   integer(I4P),            allocatable, public :: feature_link(:,:)  !< Their BVH node links [4, nn].
+   logical,                 private :: features_built = .false.     !< build_features ran on the current geometry.
+   logical,                 private :: features_on_device = .false. !< The feature arrays were mapped by enter_device.
    contains
       ! read-only accessors (pure, inlined at -O2, zero data copy for scalars)
       procedure, pass(self) :: get_facets_number !< Return facets_number.
@@ -231,6 +237,9 @@ type :: surface_stl_object
       procedure, pass(self) :: box_intersects_surface          !< True if a box meets the surface (issue #38).
       procedure, pass(self) :: box_classify_many_device        !< box_classify_many on the device (issue #38).
       procedure, pass(self) :: tag_block                       !< Signed tag bands on a block of cells (issue #38).
+      procedure, pass(self) :: build_features                  !< Feature-edge tree for tagging and queries (issue #61).
+      procedure, pass(self) :: box_feature_many                !< Boxes touching a feature edge (issue #61).
+      procedure, pass(self) :: box_feature_many_device         !< box_feature_many on the device (issue #61).
       procedure, pass(self) :: line_crossings                  !< Exact crossings of an axis-aligned line (issue #40).
       procedure, pass(self) :: cell_wall_fractions             !< Wall fractions along the grid lines of a block (issue #40).
       procedure, pass(self) :: line_crossings_many             !< Crossings of many parallel lines, fixed buffers (issue #40).
@@ -592,6 +601,7 @@ contains
 
    if (present(status)) status = STATUS_OK
    if (present(aabb_tree_kind)) call self%aabb%set_tree_kind(aabb_tree_kind)
+   call drop_features(self)
    self%facets_number = 0
    if (allocated(self%facet)) self%facets_number = size(self%facet, dim=1)
    if (self%facets_number>0) then
@@ -2033,7 +2043,7 @@ contains
    if (present(inside)) inside = il
    endsubroutine box_classify_many_device
 
-   subroutine tag_block(self, x, y, z, band, tags, sign_algorithm, status)
+   subroutine tag_block(self, x, y, z, band, tags, sign_algorithm, status, feature_band, feature_tags)
    !< Signed tag bands on a rectilinear block of cells (issue #38), for AMR tagging.
    !<
    !< `x(nx+1)`, `y(ny+1)`, `z(nz+1)` are the cell edges (strictly increasing, stretched allowed);
@@ -2045,12 +2055,17 @@ contains
    !< default SIGN_FAST_WINDING_NUMBER) at the centre of its first cell. Distances count cells of this
    !< block only: a cut cell in a neighbouring block is not seen (pad the block with ghost cells for
    !< bands that cross block faces). `status = STATUS_INVALID_INPUT` on bad edges, shape or band.
+   !< Feature tags (issue #61): with `feature_band` and `feature_tags(nx, ny, nz)`, the Chebyshev cell distance to the
+   !< nearest cell touched by a feature edge (`box_feature_many`), capped at feature_band + 1, 0 on touched cells;
+   !< requires `build_features` (else STATUS_INVALID_INPUT).
    class(surface_stl_object), intent(in)            :: self           !< Surface.
    real(R8P),                 intent(in)            :: x(:), y(:), z(:) !< Cell edges.
    integer(I4P),              intent(in)            :: band           !< Band width (>= 0).
    integer(I4P),              intent(out)           :: tags(:,:,:)    !< Tags [nx, ny, nz].
    integer(I4P),              intent(in),  optional :: sign_algorithm !< SIGN_* (default SIGN_FAST_WINDING_NUMBER).
    integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),              intent(in),  optional :: feature_band   !< Feature band width (>= 0, issue #61).
+   integer(I4P),              intent(out), optional :: feature_tags(:,:,:) !< Feature tags [nx, ny, nz].
    logical,      allocatable :: cut(:,:,:)  !< Cut cells.
    integer(I4P), allocatable :: dist(:,:,:), comp(:,:,:), seed(:,:) !< Bands, components, seeds.
    integer(I4P), allocatable :: sgn(:)      !< Sign of each component.
@@ -2068,6 +2083,16 @@ contains
       return
    endif
    algo = SIGN_FAST_WINDING_NUMBER ; if (present(sign_algorithm)) algo = sign_algorithm
+   if (present(feature_tags)) then
+      bad = .not. (present(feature_band) .and. self%features_built)
+      if (.not. bad) bad = feature_band < 0_I4P .or. size(feature_tags, 1) /= nx .or. size(feature_tags, 2) /= ny .or. &
+                           size(feature_tags, 3) /= nz
+      if (bad) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+      call feature_cell_bands(self, x, y, z, feature_band, feature_tags)
+   endif
    tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
    if (box_contact(self, [x(1), y(1), z(1)], [x(nx+1), y(ny+1), z(nz+1)], tol, tol) /= BOX_CUT) then
       tags = band + 1_I4P
@@ -2934,6 +2959,10 @@ contains
 
    !$acc enter data copyin(self%aabb%node, self%aabb%payload, self%pnormal_payload, self%wn_payload, self%body_payload, &
    !$acc&                  self%tri_vertices)
+   if (self%features_built) then                 ! the feature-edge tree, if built (issue #61)
+      !$acc enter data copyin(self%feature_seg, self%feature_box, self%feature_link)
+      self%features_on_device = .true.
+   endif
    self%is_on_device = .true.
    endsubroutine enter_device
 
@@ -2951,6 +2980,10 @@ contains
 
    !$acc exit data delete(self%aabb%node, self%aabb%payload, self%pnormal_payload, self%wn_payload, self%body_payload, &
    !$acc&                 self%tri_vertices)
+   if (self%features_on_device) then
+      !$acc exit data delete(self%feature_seg, self%feature_box, self%feature_link)
+      self%features_on_device = .false.
+   endif
    self%is_on_device = .false.
    endsubroutine exit_device
 
@@ -3304,6 +3337,7 @@ contains
    if (self%facets_number == 0_I4P) return
    was_on_device = self%is_on_device
    if (was_on_device) call self%exit_device
+   call drop_features(self)                       ! the feature tree is stale (issue #61)
    do f = 1_I4P, self%facets_number
       do k = 1, 3
          w = to_world(pose, [self%facet(f)%vertex(k)%x, self%facet(f)%vertex(k)%y, self%facet(f)%vertex(k)%z])
@@ -4560,6 +4594,125 @@ contains
    if (present(degenerate)) degenerate = ndeg
    if (present(status)) status = STATUS_OK
    endsubroutine feature_edges
+
+   subroutine build_features(self, angle, corner_angle, include_boundary, include_nonmanifold, status)
+   !< Build the feature-edge tree used by `box_feature_many(_device)`, `tag_block(feature_band=)` and the
+   !< feature-distance queries (issue #61): the feature edges of `feature_edges` (same arguments) as segments, in a
+   !< bounding-volume hierarchy (`fossil_feature_bvh`). Explicit, because those procedures take the surface intent(in);
+   !< `analyze` (any geometry change) and `move` drop it. Call it before `enter_device` for the device twins.
+   class(surface_stl_object), intent(inout)         :: self                !< Surface.
+   real(R8P),                 intent(in),  optional :: angle               !< Sharp threshold [degrees].
+   real(R8P),                 intent(in),  optional :: corner_angle        !< Corner threshold [degrees].
+   logical,                   intent(in),  optional :: include_boundary    !< Boundary edges are features.
+   logical,                   intent(in),  optional :: include_nonmanifold !< Non-manifold edges are features.
+   integer(I4P),              intent(out), optional :: status              !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P), allocatable                        :: edges(:,:)          !< Feature edges.
+   type(vector_R8P)                                 :: a, b                !< Endpoints.
+   integer(I4P)                                     :: st, i               !< Status, counter.
+
+   call drop_features(self)
+   call self%feature_edges(edges=edges, angle=angle, corner_angle=corner_angle, include_boundary=include_boundary, &
+                           include_nonmanifold=include_nonmanifold, status=st)
+   if (present(status)) status = st
+   if (st /= STATUS_OK) return
+   allocate(self%feature_seg(6, size(edges, 2)))
+   do i = 1, size(edges, 2)
+      a = self%vertex_pool%coord(edges(1, i)) ; b = self%vertex_pool%coord(edges(2, i))
+      self%feature_seg(:, i) = [a%x, a%y, a%z, b%x, b%y, b%z]
+   enddo
+   call build_segment_bvh(self%feature_seg, self%feature_box, self%feature_link)
+   self%features_built = .true.
+   endsubroutine build_features
+
+   subroutine feature_cell_bands(self, x, y, z, band, dist)
+   !< Chebyshev cell distance to the nearest cell of the block touched by a feature edge, capped at band + 1.
+   type(surface_stl_object), intent(in)  :: self             !< Surface (features built).
+   real(R8P),                intent(in)  :: x(:), y(:), z(:) !< Cell edges.
+   integer(I4P),             intent(in)  :: band             !< Band width.
+   integer(I4P),             intent(out) :: dist(:,:,:)      !< Distances [nx, ny, nz].
+   real(R8P),    allocatable             :: lo(:,:), hi(:,:) !< Cell boxes.
+   logical,      allocatable             :: touched(:)       !< Touched cells.
+   integer(I4P)                          :: nx, ny, nz, i, j, k, c !< Counters.
+
+   nx = size(x) - 1 ; ny = size(y) - 1 ; nz = size(z) - 1
+   allocate(lo(3, nx * ny * nz), hi(3, nx * ny * nz), touched(nx * ny * nz))
+   c = 0
+   do k = 1, nz ; do j = 1, ny ; do i = 1, nx
+      c = c + 1 ; lo(:, c) = [x(i), y(j), z(k)] ; hi(:, c) = [x(i+1), y(j+1), z(k+1)]
+   enddo ; enddo ; enddo
+   call self%box_feature_many(lo, hi, touched)
+   call cell_bands(reshape(touched, [nx, ny, nz]), band, dist)
+   endsubroutine feature_cell_bands
+
+   subroutine drop_features(self)
+   !< Forget the feature-edge tree (the geometry changed). The device copy, if any, is released by exit_device.
+   type(surface_stl_object), intent(inout) :: self !< Surface.
+
+   if (self%features_on_device) return            ! released by exit_device first (as the other mapped arrays)
+   if (allocated(self%feature_seg)) deallocate(self%feature_seg)
+   if (allocated(self%feature_box)) deallocate(self%feature_box)
+   if (allocated(self%feature_link)) deallocate(self%feature_link)
+   self%features_built = .false.
+   endsubroutine drop_features
+
+   subroutine box_feature_many(self, lo, hi, touched, status)
+   !< Which boxes [lo, hi] touch a feature edge (issue #61): the segment-box separating-axis test on the box inflated by
+   !< `box_tolerance` (conservative: never misses a contact), through the feature tree (`build_features` first, else
+   !< STATUS_INVALID_INPUT). OpenMP over the boxes; the device twin runs the same routine.
+   class(surface_stl_object), intent(in)            :: self    !< Surface.
+   real(R8P),                 intent(in)            :: lo(:,:) !< Box minima [3, n].
+   real(R8P),                 intent(in)            :: hi(:,:) !< Box maxima [3, n].
+   logical,                   intent(out)           :: touched(:) !< Touched [n].
+   integer(I4P),              intent(out), optional :: status  !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)                                        :: tol     !< Inflation.
+   integer(I4P)                                     :: i       !< Counter.
+
+   touched = .false.
+   if (present(status)) status = STATUS_INVALID_INPUT
+   if (.not. self%features_built .or. size(lo, 1) /= 3 .or. size(hi, 1) /= 3 .or. size(lo, 2) /= size(hi, 2) .or. &
+       size(touched) /= size(lo, 2)) return
+   tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
+   !$omp parallel do default(shared) schedule(dynamic, 64) private(i)
+   do i = 1, size(lo, 2)
+      touched(i) = feature_box_touch_oac(self%feature_seg, self%feature_box, self%feature_link, lo(:, i), hi(:, i), tol)
+   enddo
+   !$omp end parallel do
+   if (present(status)) status = STATUS_OK
+   endsubroutine box_feature_many
+
+   subroutine box_feature_many_device(self, lo, hi, touched, status)
+   !< `box_feature_many` on the device (issue #61): the same routine in an OpenACC parallel loop over the boxes. Requires
+   !< `build_features` before `enter_device` (else STATUS_INVALID_INPUT). Mapped arrays through top-level pointer aliases
+   !< (#20 rules).
+   class(surface_stl_object), intent(inout), target :: self    !< Surface (target: device aliases).
+   real(R8P),                 intent(in)            :: lo(:,:) !< Box minima [3, n].
+   real(R8P),                 intent(in)            :: hi(:,:) !< Box maxima [3, n].
+   logical,                   intent(out)           :: touched(:) !< Touched [n].
+   integer(I4P),              intent(out), optional :: status  !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),    pointer                            :: seg_p(:,:), box_p(:,:) !< Aliases.
+   integer(I4P), pointer                            :: link_p(:,:)            !< Alias.
+   logical,      allocatable                        :: tl(:)   !< Device-side result.
+   real(R8P)                                        :: tol     !< Inflation.
+   integer(I4P)                                     :: i, n    !< Counters.
+
+   touched = .false.
+   if (present(status)) status = STATUS_INVALID_INPUT
+   if (.not. (self%is_on_device .and. self%features_on_device) .or. size(lo, 1) /= 3 .or. size(hi, 1) /= 3 .or. &
+       size(lo, 2) /= size(hi, 2) .or. size(touched) /= size(lo, 2)) then
+      write(stderr, '(A)') 'box_feature_many_device: build_features, then enter_device, first'
+      return
+   endif
+   tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
+   seg_p => self%feature_seg ; box_p => self%feature_box ; link_p => self%feature_link
+   n = size(lo, 2)
+   allocate(tl(n))
+   !$acc parallel loop present(seg_p, box_p, link_p) copyin(lo, hi) copyout(tl)
+   do i = 1, n
+      tl(i) = feature_box_touch_oac(seg_p, box_p, link_p, lo(:, i), hi(:, i), tol)
+   enddo
+   touched = tl
+   if (present(status)) status = STATUS_OK
+   endsubroutine box_feature_many_device
 
    ! pure subroutine merge_solids(self, other)
    subroutine merge_solids(self, other, status)

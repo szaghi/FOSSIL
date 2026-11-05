@@ -52,6 +52,8 @@ CARDS = [
      "a T-handle flipping about its intermediate axis, from its inertia tensor"),
     ("Surface deviation", "anim-deviation", "/guide/advanced/surface-deviation",
      "a decimation sweep coloured by its certified distance from the original"),
+    ("Feature edges", "anim-feature-tagging", "/guide/advanced/feature-edges",
+     "cells touching the sharp edges of a part, as the grid refines"),
     ("Geometry processing", "anim-boolean", "/manual/cookbook#unite-two-bodies",
      "two cubes, then their union, intersection and differences"),
     ("On the GPU, bit for bit", "tut12-slice", "/manual/tutorial/12-gpu",

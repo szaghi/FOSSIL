@@ -32,6 +32,11 @@ classifies the blocks of an 8³ partition of the domain, then tags the cells of 
 A cell is cut if the wall crosses it anywhere in its height, so the cut cells follow the wall over the whole layer,
 not only the section at its mid-plane.
 
+Sharp edges need finer cells than the smooth wall. After `call surface%build_features()`, the same call takes
+`feature_band=` and `feature_tags=`: a second field, the cell distance to the nearest cell crossed by a sharp,
+boundary or non-manifold edge. Refine where either field is small. See
+[feature edges](/guide/advanced/feature-edges#refinement-along-the-features).
+
 ## Running it
 
 <<< @/examples/output/tut09.ansi{ansi}

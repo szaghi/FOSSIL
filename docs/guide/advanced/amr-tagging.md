@@ -128,6 +128,13 @@ endprogram tag_blocks
 | tag bands: cube-02 uniform 16³ and stretched 12³, bunny 12³, blocks inside and outside | = brute-force reference (sign checked at every cell centre) |
 | tag bands: NACA 0012 stretched 48 × 20, 200-gon 32 × 32 | = brute-force reference |
 
+## Refining along feature edges
+
+Sharp edges and corners need more resolution than the smooth wall. `surface%build_features` followed by
+`tag_block(..., feature_band=, feature_tags=)` adds a second tag field: the Chebyshev cell distance to the nearest cell
+touched by a feature edge (issue #61). `box_feature_many(_device)` answers the same question for any list of boxes. See
+[feature edges](/guide/advanced/feature-edges#refinement-along-the-features).
+
 ## Limitations
 
 - **GPU not validated yet.** `box_classify_many_device` (3-D and 2-D) runs

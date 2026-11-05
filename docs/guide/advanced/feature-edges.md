@@ -61,6 +61,34 @@ call surface%feature_edges(edges, kinds, corners, polyline_start, polyline_verti
 - Edges are listed in increasing (low id, high id) order.
 - `status = STATUS_INVALID_INPUT` on an empty surface, or an angle outside [0°, 180°].
 
+## Refinement along the features
+
+The feature edges drive AMR refinement through a tree of their segments, built once:
+
+```fortran
+call surface%build_features(angle, corner_angle, include_boundary, include_nonmanifold, status)
+call surface%box_feature_many(lo, hi, touched, status)          ! lo(3, n), hi(3, n): which boxes touch a feature edge
+call surface%box_feature_many_device(lo, hi, touched, status)   ! the same on the device (build, then enter_device)
+call surface%tag_block(x, y, z, band, tags, ..., feature_band=fb, feature_tags=ft)   ! Chebyshev cells to the features
+```
+
+- **`build_features`** stores the feature edges as segments in a bounding-volume hierarchy (median split, at most 4
+  segments per leaf, `fossil_feature_bvh`). The queries take the surface `intent(in)`, so the tree is built
+  explicitly, as `enter_device` is. `analyze` (any geometry change) and `move` drop it. Asking before building returns
+  `STATUS_INVALID_INPUT`.
+- **`box_feature_many`** is a separating-axis test of each segment against the box inflated by `box_tolerance`, the
+  same conservative inflation as the box–triangle test of [AMR tagging](/guide/advanced/amr-tagging): a contact is
+  never missed. The test checks the 3 box axes and the 3 cross products of the segment direction with them. The CPU
+  loop and the device loop call the same routine, `feature_box_touch_oac`, so their results are bit-identical.
+- **`tag_block(feature_band=, feature_tags=)`** adds, alongside the signed surface tags, the Chebyshev cell distance to
+  the nearest cell touched by a feature, capped at `feature_band + 1`. A solver refines where `feature_tags` is small,
+  as it does near the wall with `tags`.
+
+![the machined part translucent, with the cells of a block of 8, 16 and 32 cells per side that touch a feature edge drawn as gold wireframe boxes, concentrating along the edges, the corners and the rims of the hole as the block refines](../../examples/images/anim-feature-tagging.svg){.fossil-figure}
+
+On blocks of 8, 16 and 32 cells per side, 118 (23 %), 260 (6 %) and 532 (2 %) cells touch a feature edge: the
+features are a set of curves, so the tagged fraction halves with each refinement.
+
 ## Example
 
 <<< @/examples/snippets/ck_feature_edges.f90
@@ -83,6 +111,20 @@ creases.
 | `cube-01` without one facet | 3 boundary edges; none with `include_boundary=.false.` |
 | Three triangles sharing one edge | 1 non-manifold edge, 6 boundary edges |
 | `dragon.stl`, sanitized | the same count after a translation; non-increasing as the angle goes 10°, 20°, 30°, 45°, 60° |
+
+`src/tests/fossil_test_feature_tagging.f90`:
+
+| Case | Expected |
+|---|---|
+| Before `build_features` | `box_feature_many`, `tag_block(feature_tags=)`: `STATUS_INVALID_INPUT` |
+| `cube-01`, a block of 14³ cells | the touched cells equal a brute force over every segment with the same predicate (448 of 2744) |
+| `tag_block(feature_band=2)` | the feature tags equal `cell_bands` of the brute-force set; the surface tags unchanged |
+| `box_feature_many_device` (host build: device code, directives inert) | equal to the CPU |
+| After `analyze` | the tree is dropped: `STATUS_INVALID_INPUT` |
+| A face centre, a cube edge | not touched, touched |
+
+The GPU check (`fossil_test_distance_bench`) prints `feature box device vs serial mismatches` for a block of 24³ cells
+over the bench surface, required 0.
 
 `fossil_test_isotropic_remesh` gives the same output as before the shared predicate (compared line by line against a
 build of the previous commit).

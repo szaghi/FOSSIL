@@ -751,6 +751,23 @@ end program ex_feature_edges
 
 ---
 
+### `build_features`, `box_feature_many`
+
+```fortran
+call surface%build_features(angle, corner_angle, include_boundary, include_nonmanifold, status)
+call surface%box_feature_many(lo, hi, touched, status)         ! and box_feature_many_device
+```
+
+**Purpose.** `build_features` stores the feature edges (same arguments as `feature_edges`) in a segment tree for the
+feature queries (issue #61); `analyze` and `move` drop it. `box_feature_many` marks the boxes `lo(3, n)`, `hi(3, n)`
+that touch a feature edge (conservative, never misses a contact); the device twin needs `build_features` before
+`enter_device`. `tag_block` takes `feature_band=` and `feature_tags=` for the Chebyshev cell distance to them.
+
+**See also.** [Feature edges](/guide/advanced/feature-edges#refinement-along-the-features),
+[AMR tagging](/guide/advanced/amr-tagging).
+
+---
+
 ## Distance and inside queries
 
 ### `distance`
