@@ -1,6 +1,6 @@
 !< FOSSIL test: self-intersection detection (issue #18 §1.2).
 !<
-!< Four invariants:
+!< Five invariants:
 !<   1. Hand-crafted intersecting pair — build two facets that cross along a
 !<      known segment, wrap them as a 2-facet surface, and assert the detector
 !<      finds exactly one pair with segment endpoints matching the analytic
@@ -25,6 +25,12 @@
 !<      covered: two sheets crossing along a shared edge (a non-manifold edge, e.g. two cube-01 merged with the
 !<      offset (0.5, 0.5, 0.5)): pairs sharing an edge are still skipped.
 !<
+!<   5. One shared vertex, decided exactly (issue #55): pair_classify's on-plane snap (1e-10) reported crossings on
+!<      near-coplanar pairs that meet at the shared vertex only. Four such pairs recorded from the alpha wrap of a
+!<      marching-cubes sphere (issue #50; checked in exact rational arithmetic: they touch at the vertex only) report
+!<      none; a pair sharing a segment along an edge reports one; a true crossing tilted by 1e-11 rad (below the snap,
+!<      above the 1e-12 rad coplanar skip) reports one.
+!<
 !< Note on dragon.stl: a future PR may either replace this fixture with a
 !< cleaned version or use it as ground truth for §1.2 resolution. Either way,
 !< invariant 3 documents the current state explicitly so it doesn't surprise.
@@ -48,7 +54,7 @@ type(vector_R8P) :: p_lo, p_hi
 real(R8P) :: err_lo, err_hi
 integer(I4P) :: status
 integer(I4P) :: n_dragon
-logical :: are_tests_passed(4)
+logical :: are_tests_passed(5)
 
 real(R8P), parameter :: TOL_SEGMENT = 1.0e-12_R8P  ! analytic intersection — full FP precision
 
@@ -152,8 +158,68 @@ call pair_surface%find_self_intersections(pairs=pairs, status=status)
 print '(A,I0)', 'shared vertex, touching: nfound=', size(pairs)
 are_tests_passed(4) = are_tests_passed(4) .and. status == 0_I4P .and. size(pairs) == 0
 
-print '(A,4L2)', 'per-case results: ', are_tests_passed
+! ----- 5. One shared vertex, exact (issue #55).
+are_tests_passed(5) = count_pairs([-5.77306988902962059E-01_R8P, -5.53817895460635534E-01_R8P, 6.46182104539364532E-01_R8P, &
+                                   -5.53817895460635534E-01_R8P, -5.78817895460635556E-01_R8P, 6.44968696221600912E-01_R8P, &
+                                   -5.53817895460635534E-01_R8P, -5.77306988902962059E-01_R8P, 6.46182104539364532E-01_R8P], &
+                                  [-5.52306988902962037E-01_R8P, -5.78817895460635556E-01_R8P, 6.46182104539364532E-01_R8P, &
+                                   -5.46177596370816087E-01_R8P, -5.53817895460635534E-01_R8P, 6.71182104539364444E-01_R8P, &
+                                   -5.53817895460635534E-01_R8P, -5.77306988902962059E-01_R8P, 6.46182104539364532E-01_R8P], &
+                                  'recorded, edge on the other plane') == 0
+are_tests_passed(5) = count_pairs([-2.88178954606355120E-02_R8P, -5.28817895460635512E-01_R8P, 8.82476194912600542E-01_R8P, &
+                                   -2.88178954606355120E-02_R8P, -5.48116400805985893E-01_R8P, 8.71182104539364621E-01_R8P, &
+                                   -3.81789546063560081E-03_R8P, -5.28817895460635512E-01_R8P, 8.82476194912600542E-01_R8P], &
+                                  [-2.88178954606355120E-02_R8P, -5.28817895460635512E-01_R8P, 8.82476194912600542E-01_R8P, &
+                                   -5.38178954606354232E-02_R8P, -5.05398251952148159E-01_R8P, 8.96182104539364532E-01_R8P, &
+                                   -5.38178954606354232E-02_R8P, -5.28817895460635512E-01_R8P, 8.82476194912600542E-01_R8P], &
+                                  'recorded, edge on the other plane') == 0 .and. are_tests_passed(5)
+are_tests_passed(5) = count_pairs([-6.78817895460635534E-01_R8P, 4.21182104539364444E-01_R8P, -6.46405453701377919E-01_R8P, &
+                                   -7.03817895460635556E-01_R8P, 4.08608085662430343E-01_R8P, -6.28817895460635490E-01_R8P, &
+                                   -6.96405453701377963E-01_R8P, 4.21182104539364444E-01_R8P, -6.28817895460635490E-01_R8P], &
+                                  [-7.03817895460635556E-01_R8P, 4.21182104539364444E-01_R8P, -6.21405453701377786E-01_R8P, &
+                                   -7.03817895460635556E-01_R8P, 4.46182104539364577E-01_R8P, -6.06667839126415420E-01_R8P, &
+                                   -6.96405453701377963E-01_R8P, 4.21182104539364444E-01_R8P, -6.28817895460635490E-01_R8P], &
+                                  'recorded, straddling') == 0 .and. are_tests_passed(5)
+are_tests_passed(5) = count_pairs([-6.03817895460635579E-01_R8P, 4.21182104539364444E-01_R8P, -7.21405453700546428E-01_R8P, &
+                                   -6.28817895460635490E-01_R8P, 4.08608085662430343E-01_R8P, -7.03817895460635556E-01_R8P, &
+                                   -6.21405453701377786E-01_R8P, 4.21182104539364444E-01_R8P, -7.03817895460635556E-01_R8P], &
+                                  [-6.28817895460635490E-01_R8P, 4.21182104539364444E-01_R8P, -6.96405453701377963E-01_R8P, &
+                                   -6.28817895460635490E-01_R8P, 4.46182104539364577E-01_R8P, -6.81667839126415487E-01_R8P, &
+                                   -6.21405453701377786E-01_R8P, 4.21182104539364444E-01_R8P, -7.03817895460635556E-01_R8P], &
+                                  'recorded, straddling') == 0 .and. are_tests_passed(5)
+!         a segment shared along an edge: B's edge (0,0,0)-(1,0,0) lies on A's edge (0,0,0)-(2,0,0)
+are_tests_passed(5) = count_pairs([0._R8P, 0._R8P, 0._R8P, 2._R8P, 0._R8P, 0._R8P, 0._R8P, 2._R8P, 0._R8P], &
+                                  [0._R8P, 0._R8P, 0._R8P, 1._R8P, 0._R8P, 0._R8P, 0._R8P, 0._R8P, 1._R8P], &
+                                  'segment along an edge') == 1 .and. are_tests_passed(5)
+!         a true crossing tilted by 1e-11 rad: B's free vertices 1e-11 above and below A's plane z = 0
+are_tests_passed(5) = count_pairs([0._R8P, 0._R8P, 0._R8P, 2._R8P, 0._R8P, 0._R8P, 0._R8P, 2._R8P, 0._R8P], &
+                                  [0._R8P, 0._R8P, 0._R8P, 1._R8P, 0.5_R8P, 1.e-11_R8P, 0.5_R8P, 1._R8P, -1.e-11_R8P], &
+                                  'crossing tilted by 1e-11 rad') == 1 .and. are_tests_passed(5)
+
+print '(A,5L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)',  'Are all tests passed? ', all(are_tests_passed)
 if (.not. all(are_tests_passed)) error stop 1
 
+contains
+   function count_pairs(va, vb, label) result(n)
+   !< Self-intersections of the two-facet surface (va, vb): 9 coordinates each.
+   real(R8P),    intent(in) :: va(9), vb(9) !< Vertices of the two facets.
+   character(*), intent(in) :: label        !< Case, printed.
+   integer(I4P)             :: n
+   type(facet_object), allocatable :: two(:)
+   type(surface_stl_object)        :: s2
+   type(intersection_pair_t), allocatable :: found(:)
+   integer(I4P)                    :: v
+
+   allocate(two(2))
+   do v = 1, 3
+      two(1)%vertex(v) = vector_R8P(va(3 * v - 2), va(3 * v - 1), va(3 * v))
+      two(2)%vertex(v) = vector_R8P(vb(3 * v - 2), vb(3 * v - 1), vb(3 * v))
+   enddo
+   two(1)%id = 1_I4P ; two(2)%id = 2_I4P
+   call s2%adopt_facets(facets=two)
+   call s2%find_self_intersections(pairs=found)
+   n = size(found)
+   print '(A,A,A,I0)', 'shared vertex, ', label, ': nfound=', n
+   endfunction count_pairs
 endprogram fossil_test_self_intersection

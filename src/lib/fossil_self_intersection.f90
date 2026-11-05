@@ -25,8 +25,11 @@ module fossil_self_intersection
 !<
 !<   3. Narrow phase. No shared vertex: `facet%intersect_facet` (Möller 1997),
 !<      the segment endpoints of a transverse intersection. One shared vertex:
-!<      the exact `pair_classify` (orient3d); a crossing (a common segment of
-!<      positive length) is reported, a touch (the vertex alone) is not.
+!<      an exact wedge test on orient3d signs of input vertices (issue #55; it
+!<      replaced pair_classify, whose on-plane snap reported crossings on
+!<      near-coplanar pairs touching at the vertex only); a crossing (a common
+!<      segment of positive length, along an edge included) is reported, a
+!<      touch (the vertex alone) is not.
 !<      Coplanar pairs sharing a vertex (unit normals parallel to 1e-12 rad)
 !<      are still skipped: an overlap of two coplanar facets around a common
 !<      vertex is not detected, nor a crossing at an angle below 1e-12 rad.
@@ -40,7 +43,6 @@ use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object,     only : facet_object
 use fossil_list_id_object,   only : list_id_object
 use fossil_predicates,       only : orient3d
-use fossil_tritri_exact,     only : pair_classify, PAIR_CROSSING
 use fossil_utils,            only : EPS
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
@@ -258,7 +260,6 @@ contains
    type(facet_object), intent(in)  :: fa, fb !< The pair.
    logical,            intent(out) :: hit    !< True if the facets cross.
    type(vector_R8P),   intent(out) :: p, q   !< Intersection segment, if hit.
-   integer(I4P)                    :: kind   !< PAIR_* code of the exact classification.
 
    hit = .false.
    select case (shared_vertices_number(fa, fb))
@@ -275,12 +276,85 @@ contains
           (fa%normal%x * fb%normal%y - fa%normal%y * fb%normal%x)**2 <= COPLANAR_SIN2) return
       if (off_plane_one_side(t=fa%vertex, s=fb%vertex)) return
       if (off_plane_one_side(t=fb%vertex, s=fa%vertex)) return
-      call pair_classify(ta=fa%vertex, tb=fb%vertex, kind=kind, p=p, q=q)
-      hit = kind == PAIR_CROSSING
+      call shared_vertex_crossing(ta=fa%vertex, tb=fb%vertex, hit=hit, p=p, q=q)
    case default
       p = fa%vertex(1) ; q = p ! sharing an edge (or a duplicate): they meet along it
    endselect
    endsubroutine test_pair
+
+   subroutine shared_vertex_crossing(ta, tb, hit, p, q)
+   !< Exact crossing test of two triangles sharing one vertex s, neither with its two free vertices strictly on one
+   !< side of the other's plane (issue #55; pair_classify's on-plane snap invented crossings on near-coplanar pairs).
+   !< ta meets the plane of tb in a segment from s to a point x on the planes' common line: x is a free vertex of ta
+   !< on that plane, or lies on the segment from a free vertex q off it to the other one, a. They cross (share a
+   !< segment of positive length, along an edge of tb included) iff the ray s->x lies in the closed wedge of tb at s.
+   !< The plane (s, b, q) cuts the plane of tb along the line s-b; x = q + t (a - q) with t > 0, so orient3d(s, b, q, x)
+   !< has the sign of orient3d(s, b, q, a): every decision is the sign of orient3d on input vertices. ta in the plane
+   !< of tb (both free vertices on it) is coplanar: skipped, as in the module header. p, q (s and the nearer section
+   !< end, floating point) only report the segment.
+   type(vector_R8P), intent(in)  :: ta(3), tb(3) !< The triangles.
+   logical,          intent(out) :: hit          !< True if they cross.
+   type(vector_R8P), intent(out) :: p, q         !< Common segment, if hit.
+   type(vector_R8P)              :: s, qa, aa, b1, b2, x, y
+   real(R8P)                     :: o(2), side1, side2, ref1, ref2
+   integer(I4P)                  :: is, js, i, m, fa(2), fb(2)
+
+   hit = .false.
+   p = ta(1) ; q = p
+   is = 0_I4P ; js = 0_I4P
+   do i = 1, 3
+      do m = 1, 3
+         if (vertex_coincident(ta(i), tb(m))) then ; is = i ; js = m ; endif
+      enddo
+   enddo
+   if (is == 0_I4P) return
+   s = ta(is)
+   fa = pack([1_I4P, 2_I4P, 3_I4P], [1_I4P, 2_I4P, 3_I4P] /= is)
+   fb = pack([1_I4P, 2_I4P, 3_I4P], [1_I4P, 2_I4P, 3_I4P] /= js)
+   b1 = tb(fb(1)) ; b2 = tb(fb(2))
+   o = [orient3d(tb(1), tb(2), tb(3), ta(fa(1))), orient3d(tb(1), tb(2), tb(3), ta(fa(2)))]
+   if (o(1) == 0._R8P .and. o(2) == 0._R8P) return ! coplanar
+   if (o(1) /= 0._R8P) then ; qa = ta(fa(1)) ; aa = ta(fa(2)) ; else ; qa = ta(fa(2)) ; aa = ta(fa(1)) ; endif
+   ! sides of x (through a) and references (the other edge's free vertex) about the planes (s, b1, qa), (s, b2, qa)
+   side1 = sign3(orient3d(s, b1, qa, aa)) ; ref1 = sign3(orient3d(s, b1, qa, b2))
+   side2 = sign3(orient3d(s, b2, qa, aa)) ; ref2 = sign3(orient3d(s, b2, qa, b1))
+   hit = (side1 == ref1 .or. side1 == 0._R8P) .and. (side2 == ref2 .or. side2 == 0._R8P) .and. &
+         .not. (side1 == 0._R8P .and. side2 == 0._R8P)
+   if (.not. hit) return
+   ! report: s and the nearer of the two section ends (floating point, reporting only)
+   x = section_end(ta, fa, tb)
+   y = section_end(tb, fb, ta)
+   if (norm2([y%x - s%x, y%y - s%y, y%z - s%z]) < norm2([x%x - s%x, x%y - s%y, x%z - s%z])) x = y
+   p = s ; q = x
+   contains
+      function section_end(t, f, o) result(e)
+      !< The end of the segment where t (free vertices f) meets the plane of o: a free vertex on it, or the crossing
+      !< of the edge between the free vertices.
+      type(vector_R8P), intent(in) :: t(3), o(3)
+      integer(I4P),     intent(in) :: f(2)
+      type(vector_R8P)             :: e
+      real(R8P)                    :: d1, d2
+
+      d1 = orient3d(o(1), o(2), o(3), t(f(1))) ; d2 = orient3d(o(1), o(2), o(3), t(f(2)))
+      if (d1 == 0._R8P) then
+         e = t(f(1))
+      elseif (d2 == 0._R8P .or. d1 * d2 > 0._R8P) then
+         e = t(f(2))
+      else
+         e = t(f(1)) + (d1 / (d1 - d2)) * (t(f(2)) - t(f(1)))
+      endif
+      endfunction section_end
+
+      pure function sign3(v) result(r)
+      !< Sign of v as -1, 0, 1.
+      real(R8P), intent(in) :: v
+      real(R8P)             :: r
+
+      r = 0._R8P
+      if (v > 0._R8P) r = 1._R8P
+      if (v < 0._R8P) r = -1._R8P
+      endfunction sign3
+   endsubroutine shared_vertex_crossing
 
    function off_plane_one_side(t, s) result(yes)
    !< True if the vertices of `s` not shared with `t` are all strictly on one side of the plane of `t` (exact).
