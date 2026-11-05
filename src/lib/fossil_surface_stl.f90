@@ -35,6 +35,7 @@ use fossil_alpha_wrap, only : awrap_run, &
                               AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, &
                               AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
 use fossil_csr_matrix, only : csr_matrix_t
+use fossil_mass_properties, only : moments_accumulator_t, accumulate_tetrahedron, moments_to_properties_3d, symmetric3_eigen
 use fossil_laplacian, only : build_cotangent_laplacian, &
                              LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
                              LAPL_STATUS_DEGENERATE_TRIANGLE
@@ -263,6 +264,7 @@ type :: surface_stl_object
       procedure, pass(self) :: mean_curvature                    !< Per-vertex signed mean curvature H = (1/2)||M^-1 L V|| (issue #18 §2.4).
       procedure, pass(self) :: smooth                            !< Mesh smoothing (explicit Laplacian or Taubin lambda|mu) (issue #18 §2.3).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
+      procedure, pass(self) :: mass_properties                 !< Mass, centre of mass, inertia tensor, principal axes (#59).
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
                                          mirror_by_matrix      !< Mirror facets.
@@ -4282,6 +4284,68 @@ contains
       enddo
    endif
    endfunction largest_edge_len
+
+   subroutine mass_properties(self, mass, center, inertia, principal_moments, principal_axes, density, about, volume, &
+                              status)
+   !< Mass properties of the closed body bounded by the surface (issue #59): mass, centre of mass, inertia tensor
+   !< (about the centre, or about `about`), principal moments (ascending) and principal axes (columns, right-handed).
+   !<
+   !< Exact polyhedral integrals over signed tetrahedra (`fossil_mass_properties`): the only error is round-off. The
+   !< tetrahedra are taken about the bounding-box centre, so a body far from the origin keeps its accuracy, and the sums
+   !< are compensated. Only the vertices enter (in their stored order), never the stored facet normals.
+   !<
+   !< The surface must be watertight with a positive enclosed volume (outward orientation): otherwise `status` is
+   !< `STATUS_INVALID_INPUT` and the outputs are zero. Inner shells wound inward (voids) subtract. With repeated principal
+   !< moments the principal axes are not unique; any orthonormal set returned is valid.
+   class(surface_stl_object), intent(in)            :: self                 !< Surface.
+   real(R8P),                 intent(out), optional :: mass                 !< Mass (density * volume).
+   real(R8P),                 intent(out), optional :: center(3)            !< Centre of mass.
+   real(R8P),                 intent(out), optional :: inertia(3,3)         !< Inertia tensor.
+   real(R8P),                 intent(out), optional :: principal_moments(3) !< Principal moments, ascending.
+   real(R8P),                 intent(out), optional :: principal_axes(3,3)  !< Principal axes (columns).
+   real(R8P),                 intent(in),  optional :: density              !< Uniform density (default 1).
+   real(R8P),                 intent(in),  optional :: about(3)             !< Point of the tensor (default: the centre).
+   real(R8P),                 intent(out), optional :: volume               !< Enclosed volume.
+   integer(I4P),              intent(out), optional :: status               !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(moments_accumulator_t)                      :: acc                  !< Raw moments.
+   real(R8P)                                        :: o(3)                 !< Reference point (bounding-box centre).
+   real(R8P)                                        :: a(3), b(3), c(3)     !< Facet vertices relative to o.
+   real(R8P)                                        :: density_             !< Density, local.
+   real(R8P)                                        :: volume_, mass_       !< Volume, mass, local.
+   real(R8P)                                        :: center_(3)           !< Centre, local.
+   real(R8P)                                        :: inertia_(3,3)        !< Tensor, local.
+   real(R8P)                                        :: w(3), v(3,3)         !< Principal moments and axes, local.
+   integer(I4P)                                     :: f                    !< Counter.
+
+   if (present(mass)) mass = 0._R8P
+   if (present(center)) center = 0._R8P
+   if (present(inertia)) inertia = 0._R8P
+   if (present(principal_moments)) principal_moments = 0._R8P
+   if (present(principal_axes)) principal_axes = 0._R8P
+   if (present(volume)) volume = 0._R8P
+   if (present(status)) status = STATUS_INVALID_INPUT
+   if (.not. self%is_watertight()) return
+   density_ = 1._R8P ; if (present(density)) density_ = density
+   o = 0.5_R8P * [self%bmin%x + self%bmax%x, self%bmin%y + self%bmax%y, self%bmin%z + self%bmax%z]
+   do f = 1, self%facets_number
+      a = [self%facet(f)%vertex(1)%x, self%facet(f)%vertex(1)%y, self%facet(f)%vertex(1)%z] - o
+      b = [self%facet(f)%vertex(2)%x, self%facet(f)%vertex(2)%y, self%facet(f)%vertex(2)%z] - o
+      c = [self%facet(f)%vertex(3)%x, self%facet(f)%vertex(3)%y, self%facet(f)%vertex(3)%z] - o
+      call accumulate_tetrahedron(acc, a, b, c)
+   enddo
+   if (.not. (acc%s(1) + acc%c(1) > 0._R8P)) return
+   call moments_to_properties_3d(acc, o, density_, about, volume_, mass_, center_, inertia_)
+   if (present(mass)) mass = mass_
+   if (present(center)) center = center_
+   if (present(inertia)) inertia = inertia_
+   if (present(volume)) volume = volume_
+   if (present(principal_moments) .or. present(principal_axes)) then
+      call symmetric3_eigen(inertia_, w, v)
+      if (present(principal_moments)) principal_moments = w
+      if (present(principal_axes)) principal_axes = v
+   endif
+   if (present(status)) status = STATUS_OK
+   endsubroutine mass_properties
 
    ! pure subroutine merge_solids(self, other)
    subroutine merge_solids(self, other, status)

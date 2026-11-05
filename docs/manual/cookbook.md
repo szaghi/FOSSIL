@@ -269,6 +269,16 @@ vertices around it: on this unit sphere of 6632 facets, H = 0.9944 and K = 0.989
 
 ## Moving bodies
 
+### Mass and inertia of a body
+
+<<< @/examples/snippets/ck_mass_properties.f90
+
+<<< @/examples/output/ck_mass_properties.ansi{ansi}
+
+The body must be closed (`status` says so otherwise). The tensor is about the centre of mass unless `about=` names another
+point; the principal moments are sorted ascending, here the block's three diagonal entries. See
+[mass properties](/guide/advanced/mass-properties).
+
 ### Query a rotated body without rebuilding it
 
 <<< @/examples/snippets/ck_pose.f90

@@ -50,6 +50,7 @@ const docs = [
       { text: 'SDF segmentation', link: '/guide/advanced/sdf-segmentation' },
       { text: 'Cotangent Laplacian', link: '/guide/advanced/cotangent-laplacian' },
       { text: 'Per-vertex curvature', link: '/guide/advanced/curvature' },
+      { text: 'Mass properties', link: '/guide/advanced/mass-properties' },
     ],
   },
   {

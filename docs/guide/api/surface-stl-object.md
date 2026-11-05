@@ -627,6 +627,54 @@ end program ex_statistics
 
 ---
 
+### `mass_properties`
+
+```fortran
+call surface%mass_properties(mass, center, inertia, principal_moments, principal_axes, density, about, volume, status)
+```
+
+**Purpose.** Mass properties of the closed body bounded by the surface (issue #59): mass, centre of mass, inertia
+tensor about the centre (or about `about`), principal moments (ascending) and principal axes (columns,
+right-handed). Exact polyhedral integrals, compensated sums about the bounding-box centre: the only error is
+round-off.
+
+**Arguments.** All optional.
+
+| Argument | Intent | Meaning |
+|---|---|---|
+| `mass` | out | `density` × enclosed volume |
+| `center(3)` | out | centre of mass |
+| `inertia(3,3)` | out | inertia tensor about `center`, or about `about` |
+| `principal_moments(3)` | out | eigenvalues of the tensor about the centre, ascending |
+| `principal_axes(3,3)` | out | the matching eigenvectors as columns, det = +1 |
+| `density` | in | uniform density, default 1 |
+| `about(3)` | in | the point of `inertia` |
+| `volume` | out | enclosed volume |
+| `status` | out | `STATUS_OK`; `STATUS_INVALID_INPUT` if not watertight or volume ≤ 0 (outputs zero) |
+
+**Example.**
+
+```fortran
+program ex_mass_properties
+use fossil
+use penf, only : I4P, R8P
+implicit none
+type(surface_stl_object) :: body
+real(R8P)                :: mass, center(3), moments(3), axes(3,3)
+integer(I4P)             :: status
+
+call body%load_from_file(file_name='cube.stl', guess_format=.true.)
+call body%sanitize
+call body%mass_properties(mass=mass, center=center, principal_moments=moments, principal_axes=axes, &
+                          density=7850._R8P, status=status)
+if (status == STATUS_OK) print '(A,ES12.5,A,3F9.4)', 'mass ', mass, ' centre ', center
+end program ex_mass_properties
+```
+
+**See also.** [Mass properties](/guide/advanced/mass-properties) (method, validation), [`move`](#move).
+
+---
+
 ## Distance and inside queries
 
 ### `distance`

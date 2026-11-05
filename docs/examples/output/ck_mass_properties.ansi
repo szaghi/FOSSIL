@@ -1,0 +1,9 @@
+$ ck_mass_properties
+mass                 47.1000 kg
+centre of mass        0.0500    0.1000    0.1500 m
+inertia tensor about the centre, kg m^2:
+    0.510250    0.000000    0.000000
+    0.000000    0.392500    0.000000
+    0.000000    0.000000    0.196250
+principal moments   0.196250  0.392500  0.510250
+about the corner: diagonal   2.041000  1.570000  0.785000

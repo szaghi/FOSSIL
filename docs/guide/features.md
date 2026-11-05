@@ -30,6 +30,7 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 | Shape-diameter segmentation (Shapira et al. 2008) | `surface%segment_sdf` | [SDF segmentation](/guide/advanced/sdf-segmentation) | |
 | Cotangent Laplacian and barycentric mass | `surface%cotangent_laplacian` | [Cotangent Laplacian](/guide/advanced/cotangent-laplacian) | |
 | Gaussian and mean curvature per vertex; pointwise O(h²) by a cubic jet fit | `gaussian_curvature`, `mean_curvature`, `jet_curvature` | [Per-vertex curvature](/guide/advanced/curvature) | |
+| Mass, centre of mass, inertia tensor, principal axes (exact polyhedral integrals) | `surface%mass_properties` | [Mass properties](/guide/advanced/mass-properties) | |
 
 ## Distance and signs
 
