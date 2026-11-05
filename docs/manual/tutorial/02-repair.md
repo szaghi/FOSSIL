@@ -38,6 +38,16 @@ it, `refine` matches the density of the loop and `fair` smooths the patch into t
   condition for the pseudo-normal sign of chapter 4 to be exact.
 - `save_into_file` without `is_ascii` writes ASCII.
 
+How far did the repair move the dragon?
+
+<<< @/examples/snippets/tut02_repair-deviation.f90
+
+- `deviation(other, lower=, upper=)` brackets the one-sided Hausdorff distance h(self, other): how far the farthest
+  point of self is from other. The bracket is certified, to 1e-3 of the bounding-box diagonal by default.
+- The two directions differ. The repaired dragon's farthest points are in the middle of the hole patches. The
+  original's farthest points are on the facets `sanitize` dropped as degenerate or duplicate. See
+  [surface deviation](/guide/advanced/surface-deviation).
+
 ## Running it
 
 <<< @/examples/output/tut02.ansi{ansi}
@@ -50,8 +60,8 @@ purpose: it shows where the choice of sign algorithm matters (chapters 4 and 5) 
 
 ::: tip What you learned
 `sanitize` (with `fill_holes=.true.` for small holes) repairs local defects and reports them on stderr;
-`is_watertight`, `is_manifold` and `is_volume` tell whether the result is a closed solid. Reference:
-[Hole filling](/guide/advanced/hole-filling).
+`is_watertight`, `is_manifold` and `is_volume` tell whether the result is a closed solid, and `deviation` how far the
+repair moved it. Reference: [Hole filling](/guide/advanced/hole-filling), [Surface deviation](/guide/advanced/surface-deviation).
 :::
 
 Next: [3. Placing the body](./03-manipulation).

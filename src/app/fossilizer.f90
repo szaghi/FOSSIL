@@ -4,7 +4,7 @@ program fossiler
 !< FOSSILer, analyze, modify and repair STL files.
 
 use flap, only : command_line_interface
-use fossil, only : surface_stl_object, STATUS_OK
+use fossil, only : surface_stl_object, STATUS_OK, DEV_STATUS_OK, DEV_STATUS_NOT_CONVERGED
 use penf, only : I4P, R8P, str
 use vecfor, only : vector_R8P
 
@@ -36,6 +36,8 @@ type(vector_R8P)                      :: translate_delta                       !
 real(R8P)                             :: translate_x, translate_y, translate_z !< Translate scalar deltas.
 logical                               :: mass_properties                       !< Print the mass properties (issue #59).
 real(R8P)                             :: density                               !< Uniform density for the mass properties.
+character(999)                        :: file_name_compare                     !< Surface to compare with (issue #60).
+real(R8P)                             :: tolerance                             !< Tolerance of the certified deviation (0: default).
 
 call cli_parse
 if (cli%is_passed(switch='--merge')) then
@@ -118,6 +120,7 @@ do s=1, stl_numbers
       print '(A,I0,A,I0,A)', 'fill holes: ', holes_filled, ' filled, ', holes_skipped, ' left open'
    endif
    if (mass_properties) call print_mass_properties(surface(s))
+   if (cli%is_passed(switch='--compare')) call print_deviation(surface(s), trim(adjustl(file_name_compare)))
    if (cli%is_passed(switch='--output')) then
       print '(A)', 'save output in: '//trim(adjustl(output))
       call surface(s)%save_into_file(file_name=adjustl(output))
@@ -156,6 +159,33 @@ contains
      print '(A,3ES23.15)', '                      ', axes(i,:)
   enddo
   endsubroutine print_mass_properties
+
+  subroutine print_deviation(a, file_name_b)
+  !< Print the certified one-sided deviations of a and b from each other and their Hausdorff distance (issue #60).
+  type(surface_stl_object), intent(in) :: a           !< This surface.
+  character(*),             intent(in) :: file_name_b !< The other surface's file.
+  type(surface_stl_object)             :: b           !< The other surface.
+  real(R8P)                            :: lower(2), upper(2), mean(2), rms(2) !< Results, both directions.
+  integer(I4P)                         :: status(2)   !< Statuses.
+
+  call b%load_from_file(file_name=file_name_b, guess_format=.true.)
+  if (tolerance > 0._R8P) then
+     call a%deviation(b, lower=lower(1), upper=upper(1), mean=mean(1), rms=rms(1), tolerance=tolerance, status=status(1))
+     call b%deviation(a, lower=lower(2), upper=upper(2), mean=mean(2), rms=rms(2), tolerance=tolerance, status=status(2))
+  else
+     call a%deviation(b, lower=lower(1), upper=upper(1), mean=mean(1), rms=rms(1), status=status(1))
+     call b%deviation(a, lower=lower(2), upper=upper(2), mean=mean(2), rms=rms(2), status=status(2))
+  endif
+  if (any(status /= DEV_STATUS_OK .and. status /= DEV_STATUS_NOT_CONVERGED)) then
+     print '(A)', 'compare: an empty surface'
+     return
+  endif
+  print '(A,A)',              'compare with ', file_name_b
+  print '(A,2ES23.15,A,2ES12.4)', '  h(this, other)  lower, upper ', lower(1), upper(1), '  mean, rms ', mean(1), rms(1)
+  print '(A,2ES23.15,A,2ES12.4)', '  h(other, this)  lower, upper ', lower(2), upper(2), '  mean, rms ', mean(2), rms(2)
+  print '(A,2ES23.15)',       '  Hausdorff       lower, upper ', maxval(lower), maxval(upper)
+  if (any(status == DEV_STATUS_NOT_CONVERGED)) print '(A)', '  (work cap reached: the bounds are valid but wider)'
+  endsubroutine print_deviation
 
   subroutine cli_parse()
   !< Build and parse command line interface.
@@ -260,6 +290,18 @@ contains
                def='1.0',                                         &
                act='store')
 
+  call cli%add(switch='--compare',                                                                &
+               help='print the certified deviation (Hausdorff distance) from another STL file', &
+               required=.false.,                                                              &
+               def='',                                                                        &
+               act='store')
+
+  call cli%add(switch='--tolerance',                                                   &
+               help='tolerance of --compare (upper - lower), 0: 1e-3 of the diagonal', &
+               required=.false.,                                                    &
+               def='0.0',                                                           &
+               act='store')
+
   call cli%add(switch='--sanitize', &
                help='sanitize STL', &
                required=.false.,    &
@@ -337,6 +379,8 @@ contains
   call cli%get(        switch='--rotate_angle',    val=rotate_angle,        error=error) ; if (error/=0) stop
   call cli%get(        switch='--mass_properties', val=mass_properties,     error=error) ; if (error/=0) stop
   call cli%get(        switch='--density',         val=density,             error=error) ; if (error/=0) stop
+  call cli%get(        switch='--compare',         val=file_name_compare,   error=error) ; if (error/=0) stop
+  call cli%get(        switch='--tolerance',       val=tolerance,           error=error) ; if (error/=0) stop
   call cli%get(        switch='--sanitize',        val=sanitize,            error=error) ; if (error/=0) stop
   call cli%get(        switch='--fill_holes',      val=fill_holes,          error=error) ; if (error/=0) stop
   call cli%get(        switch='--max_hole_edges',  val=max_hole_edges,      error=error) ; if (error/=0) stop

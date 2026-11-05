@@ -76,7 +76,8 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 
 `src/app/fossilizer.f90` wraps the library for the command line: load one or more STL files, clip, merge, mirror,
 rotate, translate, resize, sanitize and repair connectivity, print statistics and, with `--mass_properties
-[--density ρ]`, the mass properties of a closed body; save the result.
+[--density ρ]`, the mass properties of a closed body, or with `--compare other.stl`, the certified Hausdorff
+distance to another surface; save the result.
 
 ## Compilers
 

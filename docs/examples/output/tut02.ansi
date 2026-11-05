@@ -12,3 +12,5 @@ non-manif.  54
 volume          465.9329
 watertight  F   manifold F   volume F
 saved dragon-clean.stl
+repaired -> original  9.439E-02 <= h <=  1.190E-01
+original -> repaired  3.009E-03 <= h <=  2.968E-02

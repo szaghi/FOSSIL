@@ -168,6 +168,17 @@ joined to its closest point on the coarse copy.
   ones). The bracket is as wide as the default tolerance (1e-3 of the 26.7 diagonal); pass `tolerance=` to narrow it.
 - The means are tiny: almost every point of either surface lies on the other.
 
+## Command line
+
+`fossilizer --compare other.stl [--tolerance τ]` prints, for each input, both one-sided deviations and the Hausdorff
+distance as certified brackets, with the means and rms:
+
+```bash
+fossilizer -i repaired.stl --compare original.stl --tolerance 1e-4
+```
+
+`src/tests/fossil_test_deviation_cli.f90` reads the three brackets back for a cube against itself translated by 0.3.
+
 ## Validation
 
 `src/tests/fossil_test_deviation.f90`:
