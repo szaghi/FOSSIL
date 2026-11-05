@@ -7,10 +7,16 @@ title: Alpha wrapping
 ## What it does
 
 Takes any triangle soup — broken, holed, self-intersecting,
-non-manifold, or all of the above — and produces a **guaranteed
-watertight, 2-manifold** surface that is within Hausdorff offset `ε`
-of the input. The wrap is the standard "make any CAD junk usable for
-CFD" primitive.
+non-manifold, or all of the above — and wraps it in a surface at the
+scale `α`. The goal (Portaneri et al. 2022) is a watertight,
+2-manifold wrap within Hausdorff offset `ε` of the input, the standard
+"make any CAD junk usable for CFD" primitive. **The current MVP does
+not guarantee it** (issue #50, measured below): the wrap is the
+`α`-voxel shell of the input with the vertices already within `ε`
+snapped onto it, the status is `AWRAP_STATUS_NOT_CONVERGED` on every
+input measured, and the default wrap of `dragon.stl` is neither
+watertight nor manifold. Check `is_watertight()`, `is_manifold()` and
+`get_volume()` of the result.
 
 The existing `surface%sanitize` pipeline only fixes *local* defects:
 degenerate facets, duplicate facets, near-coincident vertices, normal
@@ -43,7 +49,10 @@ simplification at stage 5):
 4. **Vertex projection.** Lex-sort vertices for deduplication
    (per-facet copies of a shared vertex would project independently
    and tear the mesh). For each unique vertex, query the input AABB
-   tree for closest-point; if the gap ≤ `offset`, snap. Synchronous
+   tree for closest-point; if the gap ≤ `offset`, snap. A vertex
+   farther than `offset` stays where it is (issue #50): the octree
+   corners lie up to about `α√3` from the input while `offset`
+   defaults to `α/30`, so almost every vertex stays. Synchronous
    sweeps (3 by default) for stable convergence. Area-drop revert
    prevents triangle collapse during projection.
 5. **Single-pass capstone TBP.** `surface%alpha_wrap(...)` runs steps
@@ -78,8 +87,9 @@ call surface%alpha_wrap(alpha, offset, max_iterations, wrapped, status)
   - `AWRAP_STATUS_OK` — pipeline ran cleanly and every vertex is
     within `offset` of the input.
   - `AWRAP_STATUS_NOT_CONVERGED` — some vertices stayed outside the
-    Hausdorff bound. The wrap is still watertight and 2-manifold;
-    only the offset guarantee was missed.
+    Hausdorff bound. With the MVP projection this is the status of
+    every input measured (issue #50). The wrap is not guaranteed
+    watertight or 2-manifold: check it.
   - `AWRAP_STATUS_BAD_INPUT` — empty surface, `alpha ≤ 0`, or
     `offset ≤ 0`.
   - `AWRAP_STATUS_DEGENERATE` — `alpha` larger than the input bbox
@@ -155,6 +165,26 @@ nothing snaps its vertices back to the input. The wrap extends beyond
 the input on every side (bounding box [-0.025, 1.025]³ at α = 0.1).
 
 ## Known limitations
+
+- **Measured behaviour (issue #50).** `cube-01.stl` (closed) and the same
+  cube without one facet, default `offset`:
+
+  | `α` | closed: volume, watertight/manifold | holed: volume, watertight/manifold | status |
+  |---|---|---|---|
+  | 0.035 | 1.103, T/T | 0.108, T/T | NOT_CONVERGED |
+  | 0.1 | 1.158, T/T | 0.484, T/T | NOT_CONVERGED |
+  | 0.3 | 1.331, T/T | 1.331, T/T | NOT_CONVERGED |
+  | 0.7 | 6.859, T/T | 6.859, T/T | NOT_CONVERGED |
+
+  The closed cube's wrap is the voxel shell: at `α = 0.7` its volume is
+  1.9³, the box grown by `α` on every side. Below `α ≈ 0.3` the hole is
+  wider than `α`, the flood fill gets inside, and the wrap lines both
+  sides of the walls (a thin hollow shell). `dragon.stl` with the
+  defaults: NOT_CONVERGED, neither watertight nor manifold. Moving the
+  far vertices towards the input brings the closed cube to volume ≈ 1.00
+  but collapses the two sides of the holed cube's shell onto one wall
+  (non-watertight): the fix needs the offset-surface barrier and the
+  refinement loop below, not the projection alone.
 
 - **MVP is single-pass; no adaptive refinement.** The original step-5
   plan was an outer loop that re-runs steps 2-4 after splitting
