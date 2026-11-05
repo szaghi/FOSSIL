@@ -35,6 +35,7 @@ use fossil_alpha_wrap, only : awrap_run, &
                               AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, &
                               AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
 use fossil_csr_matrix, only : csr_matrix_t
+use fossil_deviation, only : deviation_sampled, DEV_STATUS_OK, DEV_STATUS_BAD_INPUT
 use fossil_mass_properties, only : moments_accumulator_t, accumulate_tetrahedron, moments_to_properties_3d, symmetric3_eigen
 use fossil_laplacian, only : build_cotangent_laplacian, &
                              LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
@@ -265,6 +266,8 @@ type :: surface_stl_object
       procedure, pass(self) :: smooth                            !< Mesh smoothing (explicit Laplacian or Taubin lambda|mu) (issue #18 §2.3).
       procedure, pass(self) :: largest_edge_len                !< Return the largest edge length.
       procedure, pass(self) :: mass_properties                 !< Mass, centre of mass, inertia tensor, principal axes (#59).
+      procedure, pass(self) :: deviation                       !< One-sided deviation (Hausdorff) from another surface (#60).
+      procedure, pass(self) :: hausdorff                       !< Symmetric Hausdorff distance to another surface (#60).
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
                                          mirror_by_matrix      !< Mirror facets.
@@ -4346,6 +4349,101 @@ contains
    endif
    if (present(status)) status = STATUS_OK
    endsubroutine mass_properties
+
+   subroutine deviation(self, other, lower, mean, rms, per_vertex, samples_per_area, samples, status)
+   !< One-sided deviation of this surface from `other` (issue #60): h(self, other) = sup over x in self of d(x, other).
+   !<
+   !< `lower` is the largest distance over deterministic samples of self (every vertex, every edge midpoint and the
+   !< centroids of a regular subdivision of each facet, `samples_per_area` per unit area, default 4 per mean facet
+   !< area): a lower bound of h. `mean` and `rms` are the area-weighted quadratures of d over self (estimates);
+   !< `per_vertex(i)` is d at vertex i of the vertex pool. Distances come from other's BVH (`distance_many`), so the
+   !< result does not depend on the tree kind or on the thread count. See `fossil_deviation`.
+   class(surface_stl_object), intent(in)            :: self             !< Surface A.
+   type(surface_stl_object),  intent(in)            :: other            !< Surface B.
+   real(R8P),                 intent(out), optional :: lower            !< Lower bound of h(self, other).
+   real(R8P),                 intent(out), optional :: mean             !< Mean of d over self (estimate).
+   real(R8P),                 intent(out), optional :: rms              !< Rms of d over self (estimate).
+   real(R8P), allocatable,    intent(out), optional :: per_vertex(:)    !< d at the vertex-pool vertices of self.
+   real(R8P),                 intent(in),  optional :: samples_per_area !< Interior samples per unit area.
+   integer(I4P),              intent(out), optional :: samples          !< Points evaluated.
+   integer(I4P),              intent(out), optional :: status           !< DEV_STATUS_OK or DEV_STATUS_BAD_INPUT.
+   real(R8P),    allocatable                        :: v(:,:)           !< Vertices of self.
+   integer(I4P), allocatable                        :: fv(:,:)          !< Facets of self.
+   real(R8P),    allocatable                        :: pv(:)            !< Per-vertex distances.
+   real(R8P)                                        :: lower_, mean_, rms_, spa !< Results, sampling density.
+   integer(I4P)                                     :: samples_, status_        !< Results.
+
+   if (present(lower)) lower = 0._R8P
+   if (present(mean)) mean = 0._R8P
+   if (present(rms)) rms = 0._R8P
+   if (present(samples)) samples = 0_I4P
+   if (present(status)) status = DEV_STATUS_BAD_INPUT
+   if (self%facets_number == 0_I4P .or. other%facets_number == 0_I4P) return
+   call deviation_mesh(self, v, fv)
+   spa = 4._R8P * self%facets_number / max(self%area, tiny(1._R8P))
+   if (present(samples_per_area)) spa = samples_per_area
+   allocate(pv(size(v, 2)))
+   call deviation_sampled(v, fv, eval_other, spa, lower_, mean_, rms_, pv, samples_, status_)
+   if (present(status)) status = status_
+   if (status_ /= DEV_STATUS_OK) return
+   if (present(lower)) lower = lower_
+   if (present(mean)) mean = mean_
+   if (present(rms)) rms = rms_
+   if (present(per_vertex)) call move_alloc(pv, per_vertex)
+   if (present(samples)) samples = samples_
+   contains
+      subroutine eval_other(points, distances)
+      !< Unsigned distances of the points to `other`.
+      real(R8P), intent(in)  :: points(:,:)  !< Points [3, n].
+      real(R8P), intent(out) :: distances(:) !< Distances [n].
+      type(vector_R8P), allocatable :: q(:)  !< Points as vectors.
+      integer(I4P)                  :: i     !< Counter.
+
+      allocate(q(size(points, 2)))
+      do i = 1, size(points, 2)
+         q(i) = vector_R8P(points(1, i), points(2, i), points(3, i))
+      enddo
+      call other%distance_many(points=q, distances=distances, is_signed=.false., is_square_root=.true.)
+      endsubroutine eval_other
+   endsubroutine deviation
+
+   subroutine hausdorff(self, other, lower, samples_per_area, status)
+   !< Symmetric Hausdorff distance H = max(h(self, other), h(other, self)) (issue #60): both one-sided deviations.
+   class(surface_stl_object), intent(in)            :: self             !< Surface A.
+   type(surface_stl_object),  intent(in)            :: other            !< Surface B.
+   real(R8P),                 intent(out), optional :: lower            !< Lower bound of H.
+   real(R8P),                 intent(in),  optional :: samples_per_area !< Interior samples per unit area.
+   integer(I4P),              intent(out), optional :: status           !< DEV_STATUS_OK or DEV_STATUS_BAD_INPUT.
+   real(R8P)                                        :: l1, l2           !< One-sided bounds.
+   integer(I4P)                                     :: s1, s2           !< Statuses.
+
+   if (present(lower)) lower = 0._R8P
+   call self%deviation(other, lower=l1, samples_per_area=samples_per_area, status=s1)
+   call other%deviation(self, lower=l2, samples_per_area=samples_per_area, status=s2)
+   if (present(status)) status = max(s1, s2)
+   if (s1 /= DEV_STATUS_OK .or. s2 /= DEV_STATUS_OK) return
+   if (present(lower)) lower = max(l1, l2)
+   endsubroutine hausdorff
+
+   subroutine deviation_mesh(surf, v, fv)
+   !< The vertex-pool vertices and the facets (pool indices) of a surface.
+   type(surface_stl_object),  intent(in)  :: surf     !< Surface.
+   real(R8P),    allocatable, intent(out) :: v(:,:)   !< Vertices [3, nv].
+   integer(I4P), allocatable, intent(out) :: fv(:,:)  !< Facets [3, nf].
+   type(vector_R8P)                       :: c        !< Coordinates.
+   integer(I4P)                           :: i, k     !< Counters.
+
+   allocate(v(3, surf%vertex_pool%vertex_count()), fv(3, surf%facets_number))
+   do i = 1, size(v, 2)
+      c = surf%vertex_pool%coord(i)
+      v(:, i) = [c%x, c%y, c%z]
+   enddo
+   do i = 1, surf%facets_number
+      do k = 1, 3
+         fv(k, i) = surf%vertex_pool%facet_vid(i, int(k, I4P))
+      enddo
+   enddo
+   endsubroutine deviation_mesh
 
    ! pure subroutine merge_solids(self, other)
    subroutine merge_solids(self, other, status)

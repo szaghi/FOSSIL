@@ -225,6 +225,16 @@ for bending about the u axis, here (b h³ − b′h′³)/12. See [mass properti
 
 ## Geometry processing
 
+### Measure how far a repair moved the surface
+
+<<< @/examples/snippets/ck_deviation.f90
+
+<<< @/examples/output/ck_deviation.ansi{ansi}
+
+The two directions differ: the hole patches are far from the original (they span the holes), while the original lies on
+the repaired surface except where `sanitize` removed facets. `lower` is a lower bound of the one-sided Hausdorff distance;
+`mean` and `rms` are estimates. See [surface deviation](/guide/advanced/surface-deviation).
+
 ### Decimate a mesh
 
 <<< @/examples/snippets/ck_decimate.f90
