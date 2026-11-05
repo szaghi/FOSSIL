@@ -42,7 +42,7 @@ module load nvhpc/26.9
 fobis build --mode tests-nvidia --varset local_nvf
 ```
 
-**Requires nvfortran >= 26.9.** Validated on 26.9 (RTX 4070, `cc89`; last on 2026-11-04 with
+**Requires nvfortran >= 26.9.** Validated on 26.9 (RTX 4070, `cc89`; last on 2026-11-05 at 8c78a46 with
 bunny, cube-01, dragon-fine at 32³, every device-vs-serial line 0); 26.1 is no
 longer supported, since the query-point mapping workaround it needed was removed.
 In a non-interactive shell `module load` may not populate `PATH`; export the SDK's
@@ -83,7 +83,7 @@ rejects `(expr) .cross. (expr)` in one strict-normal test).
 The `tests-nvidia-curve` mode is its 2-D twin (issue #36): it builds
 `fossil_test_curve_bench` only (segment BVH closest point, 2-D fast winding number on
 the device). Same clean-build rule (shared `exe/`), pass criterion
-`device vs serial max |d| err 0.000E+00`; the `rich`, `box`, `posed`, `sign bench` and `line crossings` mismatch lines must be 0 too (the 3-D bench prints the same lines). Validated on the GPU 2026-11-04 (26.9, RTX 4070, 512²).
+`device vs serial max |d| err 0.000E+00`; the `rich`, `box`, `posed`, `sign bench` and `line crossings` mismatch lines must be 0 too (the 3-D bench prints the same lines). Validated on the GPU 2026-11-05 (26.9, RTX 4070, 512²).
 
 The NVIDIA modes compile with `-gpu=nofma -Mnofma` (`$CSTATIC_NV`): with FMA contraction the
 device lost host bit-exactness (1-ulp distances, sign and facet-id flips at near-ties); the device
