@@ -108,7 +108,9 @@ fobis rule --ex makecoverage
 Test programs output `Are all tests passed? T` on success or `Are all tests passed? F` on failure.
 
 Two tiers (issue #45). **Regression** (`src/tests/*.f90`, every push, CI builds `tests-gnu-debug --coverage`): each
-test <= 2 s in that debug coverage build (`boolean_coplanar` 3 s is the one exception). Choose inputs for it:
+test <= 2 s in that debug coverage build (`boolean_coplanar` 3 s is the one exception), enforced by
+`scripts/check_test_budgets.sh` in the `makecoverage` rule (exceptions in `src/tests/budgets.txt`; factor 2 on CI).
+Re-time a test in that build after the last change of a step, not mid-step. Choose inputs for it:
 `dragon.stl` for self-consistency checks, a clean closed body (`cube-0N.stl`, `make_apex_body`, a marching-cubes
 sphere) for exact-sign checks, never `bunny.stl` (19 s load in debug); never loosen a tolerance to save time.
 **Validation** (`src/tests/validation/*.f90`: benches, large meshes, sweeps, the full-size `fossil_val_*` copies,

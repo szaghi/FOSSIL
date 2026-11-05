@@ -42,6 +42,19 @@ the sign must be exact; never `bunny.stl` (19 s to load in debug). A test that n
 many cases goes to `src/tests/validation/`, often as a full copy (`fossil_val_*`) of a regression test that keeps a
 smaller case. The device bench `fossil_test_distance_bench` lives there too (built by `tests-nvidia`).
 
+The budget is enforced: `fobis rule --ex makecoverage`, which CI runs, times every test after
+`scripts/run_tests.sh` with `scripts/check_test_budgets.sh` and fails if one is over its budget (2 s, or its line in
+`src/tests/budgets.txt`; times 2 on CI, whose runners are slower; a test over it is timed again and the faster run
+counts). It always prints the five slowest tests. To check
+a test of your own in that build:
+
+```bash
+fobis build --mode tests-gnu-debug --coverage && bash scripts/check_test_budgets.sh
+```
+
+An exception in `budgets.txt` needs a reason: a test that cannot get under 2 s with a smaller input belongs in
+`src/tests/validation/`.
+
 A test prints `Are all tests passed? T` and exits 0 on success; a `fossil_xfail_*` program must fail.
 
 ## Fortran Coding Style

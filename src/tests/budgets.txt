@@ -1,0 +1,4 @@
+# Time budgets of the regression tests (issue #45), in seconds, in the build CI runs (tests-gnu-debug --coverage).
+# A test not listed has 2 s. scripts/check_test_budgets.sh enforces them (makecoverage rule of fobos). An exception
+# needs a reason: a test this slow belongs in src/tests/validation/ unless it cannot be made smaller.
+fossil_test_boolean_coplanar 3  # the coplanar case matrix; approved in issue #45
