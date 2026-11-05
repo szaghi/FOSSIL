@@ -297,6 +297,7 @@ endtype surface_stl_object
 type, extends(deviation_evaluator_t) :: surface_evaluator_t
    !< A surface seen through its batched closest-point query, for `fossil_deviation` (issue #60).
    type(surface_stl_object), pointer :: surface => null() !< The surface B.
+   logical                           :: device = .false.  !< Query on the device (query_many_device).
    contains
       procedure, pass(self) :: eval => surface_evaluator_eval !< Unsigned distances and closest points.
 endtype surface_evaluator_t
@@ -4359,7 +4360,7 @@ contains
    endsubroutine mass_properties
 
    subroutine deviation(self, other, lower, upper, mean, rms, per_vertex, tolerance, samples_per_area, max_triangles, &
-                        samples, triangles, status)
+                        samples, triangles, device, status)
    !< One-sided deviation of this surface from `other` (issue #60): h(self, other) = sup over x in self of d(x, other),
    !< bracketed as lower <= h <= upper.
    !<
@@ -4371,7 +4372,9 @@ contains
    !< DEV_STATUS_NOT_CONVERGED and the bounds are valid but wider. Without `upper` (and `tolerance`) the branch and bound
    !< does not run. `mean` and `rms` are the area-weighted quadratures of d over self (estimates); `per_vertex(i)` is d
    !< at vertex i of the vertex pool. Distances and closest points come from other's BVH (`query_many`), so the result
-   !< does not depend on the tree kind or on the thread count. See `fossil_deviation`.
+   !< does not depend on the tree kind or on the thread count. With `device=.true.` every batch runs through
+   !< `query_many_device` (other must be on the device: `enter_device`; else DEV_STATUS_BAD_INPUT): the same kernels,
+   !< so the bounds are bit-identical to the CPU path. See `fossil_deviation`.
    class(surface_stl_object), intent(in)            :: self             !< Surface A.
    type(surface_stl_object),  intent(in),   target  :: other            !< Surface B.
    real(R8P),                 intent(out), optional :: lower            !< Lower bound of h(self, other).
@@ -4384,6 +4387,7 @@ contains
    integer(I4P),              intent(in),  optional :: max_triangles    !< Work cap of the branch and bound.
    integer(I4P),              intent(out), optional :: samples          !< Points sampled.
    integer(I4P),              intent(out), optional :: triangles        !< Triangles created by the branch and bound.
+   logical,                   intent(in),  optional :: device           !< Query other on the device.
    integer(I4P),              intent(out), optional :: status           !< DEV_STATUS_*.
    real(R8P),    allocatable                        :: v(:,:)           !< Vertices of self.
    integer(I4P), allocatable                        :: fv(:,:)          !< Facets of self.
@@ -4404,6 +4408,8 @@ contains
    if (present(status)) status = DEV_STATUS_BAD_INPUT
    if (self%facets_number == 0_I4P .or. other%facets_number == 0_I4P) return
    eval_other%surface => other
+   if (present(device)) eval_other%device = device
+   if (eval_other%device .and. .not. other%is_on_device) return
    call deviation_mesh(self, v, fv)
    spa = 4._R8P * self%facets_number / max(self%area, tiny(1._R8P))
    if (present(samples_per_area)) spa = samples_per_area
@@ -4431,7 +4437,7 @@ contains
    if (present(triangles)) triangles = triangles_
    endsubroutine deviation
 
-   subroutine hausdorff(self, other, lower, upper, tolerance, samples_per_area, max_triangles, status)
+   subroutine hausdorff(self, other, lower, upper, tolerance, samples_per_area, max_triangles, device, status)
    !< Symmetric Hausdorff distance H = max(h(self, other), h(other, self)) (issue #60): both one-sided deviations,
    !< bracketed as lower <= H <= upper (`upper` certified, as in `deviation`).
    class(surface_stl_object), intent(in)            :: self             !< Surface A.
@@ -4441,6 +4447,7 @@ contains
    real(R8P),                 intent(in),  optional :: tolerance        !< Target upper - lower of each direction.
    real(R8P),                 intent(in),  optional :: samples_per_area !< Interior samples per unit area.
    integer(I4P),              intent(in),  optional :: max_triangles    !< Work cap of each branch and bound.
+   logical,                   intent(in),  optional :: device           !< Query on the device (both surfaces entered).
    integer(I4P),              intent(out), optional :: status           !< DEV_STATUS_*.
    real(R8P)                                        :: l1, l2, u1, u2   !< One-sided bounds.
    integer(I4P)                                     :: s1, s2           !< Statuses.
@@ -4449,12 +4456,12 @@ contains
    if (present(upper)) upper = 0._R8P
    if (present(upper)) then
       call self%deviation(other, lower=l1, upper=u1, tolerance=tolerance, samples_per_area=samples_per_area, &
-                          max_triangles=max_triangles, status=s1)
+                          max_triangles=max_triangles, device=device, status=s1)
       call other%deviation(self, lower=l2, upper=u2, tolerance=tolerance, samples_per_area=samples_per_area, &
-                           max_triangles=max_triangles, status=s2)
+                           max_triangles=max_triangles, device=device, status=s2)
    else
-      call self%deviation(other, lower=l1, samples_per_area=samples_per_area, status=s1)
-      call other%deviation(self, lower=l2, samples_per_area=samples_per_area, status=s2)
+      call self%deviation(other, lower=l1, samples_per_area=samples_per_area, device=device, status=s1)
+      call other%deviation(self, lower=l2, samples_per_area=samples_per_area, device=device, status=s2)
       u1 = 0._R8P ; u2 = 0._R8P
    endif
    if (present(status)) status = max(s1, s2)
@@ -4477,7 +4484,12 @@ contains
    do i = 1, size(points, 2)
       q(i) = vector_R8P(points(1, i), points(2, i), points(3, i))
    enddo
-   call self%surface%query_many(points=q, distances=distances, closest_points=closest, facets=facets, is_signed=.false.)
+   if (self%device) then
+      call self%surface%query_many_device(points=q, distances=distances, closest_points=closest, facets=facets, &
+                                          is_signed=.false.)
+   else
+      call self%surface%query_many(points=q, distances=distances, closest_points=closest, facets=facets, is_signed=.false.)
+   endif
    endsubroutine surface_evaluator_eval
 
    subroutine deviation_mesh(surf, v, fv)

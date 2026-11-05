@@ -277,6 +277,12 @@ pseudo-normal one, against 1.3 to 2.5 times on the CPU. Use it where the
 surface is open; on a closed, sanitized surface the pseudo-normal gives
 the same signs for a fraction of the cost.
 
+### Surface deviation
+
+`surface%deviation(other, ..., device=.true.)` (issue #60) runs its batched closest-point queries through
+`query_many_device` on `other`, entered with `enter_device`: certified Hausdorff bounds bit-identical to the CPU, the
+branch and bound on the host. See [surface deviation](/guide/advanced/surface-deviation#on-the-device).
+
 ## Known limitations
 
 - **SAH BVH only.** The octree is not supported on the device. The original

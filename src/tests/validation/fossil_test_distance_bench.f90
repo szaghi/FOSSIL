@@ -74,6 +74,7 @@ integer(I4P)                  :: box_mismatch              !< Box classification
 integer                       :: sign_mismatch             !< Sign benchmark: device vs CPU signed-distance mismatches (issue #39).
 integer                       :: line_mismatch             !< Grid-line crossings: device vs CPU mismatches (issue #40).
 integer                       :: posed_mismatch            !< Posed queries: device vs CPU mismatches (issue #41).
+integer                       :: deviation_mismatch        !< Surface deviation: device vs CPU mismatches (issue #60).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -233,6 +234,8 @@ line_mismatch = device_line_mismatches_3d(sign_bodies)
 rich_ok = rich_ok .and. line_mismatch == 0
 call posed_case(mismatch=posed_mismatch)
 rich_ok = rich_ok .and. posed_mismatch == 0
+call deviation_case(mismatch=deviation_mismatch)
+rich_ok = rich_ok .and. deviation_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -321,6 +324,7 @@ print '(A,I0)',      '   box device vs serial mismatches: ', box_mismatch
 print '(A,I0)',      '   sign bench device vs serial mismatches: ', sign_mismatch
 print '(A,I0)',      '   line crossings device vs serial mismatches: ', line_mismatch
 print '(A,I0)',      '   posed device vs serial mismatches: ', posed_mismatch
+print '(A,I0)',      '   deviation device vs serial mismatches: ', deviation_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -376,6 +380,34 @@ contains
    call surface%exit_device
    mismatch = count(d1 /= d2) + count(c1 /= c2) + count(n1 /= n2) + count(f1 /= f2)
    endsubroutine posed_case
+
+   subroutine deviation_case(mismatch)
+   !< surface%deviation with device=.true. vs the CPU path (issue #60): a copy of the surface rotated by 2 degrees about
+   !< its centre against the surface (entered), certified bounds at 1e-2 of the diagonal, work capped at 200 000
+   !< triangles; lower, upper, status and per_vertex compared bit for bit.
+   integer, intent(out)     :: mismatch     !< Mismatches.
+   type(surface_stl_object) :: moved        !< The rotated copy.
+   type(rigid_pose_t)       :: pose         !< Rotation about the centre.
+   type(vector_R8P)         :: lo, hi       !< Bounding box.
+   real(R8P), allocatable   :: pv1(:), pv2(:) !< Per-vertex distances.
+   real(R8P)                :: l1, u1, l2, u2, c(3), tol !< Bounds, centre, tolerance.
+   integer(I4P)             :: s1, s2       !< Statuses.
+
+   lo = surface%get_bmin() ; hi = surface%get_bmax()
+   c = 0.5_R8P * [lo%x + hi%x, lo%y + hi%y, lo%z + hi%z]
+   tol = 1.e-2_R8P * norm2([hi%x - lo%x, hi%y - lo%y, hi%z - lo%z])
+   pose = pose_from_axis_angle([1._R8P, 1._R8P, 1._R8P], 2._R8P * acos(-1._R8P) / 180._R8P)
+   pose%t = c - matmul(pose%r, c)
+   moved = surface
+   call moved%move(pose)
+   call moved%deviation(surface, lower=l1, upper=u1, per_vertex=pv1, tolerance=tol, max_triangles=200000_I4P, status=s1)
+   call surface%enter_device
+   call moved%deviation(surface, lower=l2, upper=u2, per_vertex=pv2, tolerance=tol, max_triangles=200000_I4P, &
+                        device=.true., status=s2)
+   call surface%exit_device
+   mismatch = merge(0, 1, l1 == l2) + merge(0, 1, u1 == u2) + merge(0, 1, s1 == s2) + count(pv1 /= pv2)
+   print '(A,2ES12.4,A,I0)', '   deviation of a 2-degree rotated copy: ', l1, u1, ', status ', s1
+   endsubroutine deviation_case
 
    subroutine box_device_case(mismatch)
    !< box_classify_many_device against box_classify_many (issue #38): a box of half-size 1/64 of the

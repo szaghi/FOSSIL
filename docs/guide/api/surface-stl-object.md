@@ -679,8 +679,8 @@ end program ex_mass_properties
 
 ```fortran
 call surface%deviation(other, lower, upper, mean, rms, per_vertex, tolerance, samples_per_area, max_triangles, &
-                       samples, triangles, status)
-call surface%hausdorff(other, lower, upper, tolerance, samples_per_area, max_triangles, status)
+                       samples, triangles, device, status)
+call surface%hausdorff(other, lower, upper, tolerance, samples_per_area, max_triangles, device, status)
 ```
 
 **Purpose.** How far this surface lies from `other` (issue #60): `lower <= h <= upper` brackets the one-sided deviation
@@ -688,9 +688,11 @@ h(self, other) = sup over x in self of d(x, other). `lower` comes from determini
 sub-triangle centroids); `upper` is certified by a branch and bound over the facets (Lipschitz and convexity bounds of
 d), to `tolerance` (default 1e-3 of the larger bounding-box diagonal) or until `max_triangles`. `mean` and `rms` are
 area-weighted estimates of d over self; `per_vertex` holds d at every vertex of the vertex pool. `hausdorff` is the
-symmetric max(h(self, other), h(other, self)).
+symmetric max(h(self, other), h(other, self)). With `device=.true.` the queries run on the device (`other%enter_device`
+first), bit-identical to the CPU.
 
-**Arguments.** All optional except `other`; `status` is `DEV_STATUS_OK`, `DEV_STATUS_BAD_INPUT` (an empty surface) or
+**Arguments.** All optional except `other`; `status` is `DEV_STATUS_OK`, `DEV_STATUS_BAD_INPUT` (an empty surface, or
+`device` without `enter_device`) or
 `DEV_STATUS_NOT_CONVERGED` (the work cap stopped it; the bounds are valid).
 
 **Example.**

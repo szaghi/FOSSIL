@@ -87,7 +87,7 @@ to the default tolerance (1e-3 of the bounding-box diagonal) in at most 155 000 
 
 ```fortran
 call surface%deviation(other, lower, upper, mean, rms, per_vertex, tolerance, samples_per_area, max_triangles, &
-                       samples, triangles, status)
+                       samples, triangles, device, status)
    class(surface_stl_object), intent(in)            :: self             ! A
    type(surface_stl_object),  intent(in)            :: other            ! B
    real(R8P),                 intent(out), optional :: lower            ! lower bound of h(A, B)
@@ -100,18 +100,36 @@ call surface%deviation(other, lower, upper, mean, rms, per_vertex, tolerance, sa
    integer(I4P),              intent(in),  optional :: max_triangles    ! work cap, default 2 000 000
    integer(I4P),              intent(out), optional :: samples          ! points sampled
    integer(I4P),              intent(out), optional :: triangles        ! triangles of the branch and bound
+   logical,                   intent(in),  optional :: device           ! queries on the device (other entered)
    integer(I4P),              intent(out), optional :: status           ! DEV_STATUS_OK, _BAD_INPUT, _NOT_CONVERGED
 
-call surface%hausdorff(other, lower, upper, tolerance, samples_per_area, max_triangles, status) ! H(A, B)
+call surface%hausdorff(other, lower, upper, tolerance, samples_per_area, max_triangles, device, status) ! H(A, B)
 ```
 
-- `status = DEV_STATUS_BAD_INPUT` when either surface is empty, `DEV_STATUS_NOT_CONVERGED` when the work cap stopped
+- `device=.true.` runs the queries on the device (below).
+- `status = DEV_STATUS_BAD_INPUT` when either surface is empty (or `device` without `enter_device`), `DEV_STATUS_NOT_CONVERGED` when the work cap stopped
   the branch and bound (the bounds are valid).
 - Without `upper` the branch and bound does not run: `lower`, `mean`, `rms` and `per_vertex` cost one batched query.
 - Neither surface needs to be closed: the deviation is defined for any triangle soup.
 - The work is one batched closest-point query (`query_many`) for the samples, plus one per round of the branch and
   bound. The result does not depend on the thread count: the queries are independent, and the maximum, the sums and
   the rounds run in a fixed order.
+
+## On the device
+
+With `device=.true.`, every batch of the sampling and of the branch and bound runs through `query_many_device` on
+`other`, which must be resident (`other%enter_device`); otherwise `status = DEV_STATUS_BAD_INPUT`. The device and the
+CPU use the same closest-point kernels, so `lower`, `upper` and `per_vertex` are bit-identical. The branch and bound
+itself (bounds, splits) stays on the host: the device does the queries, which are the cost.
+
+```fortran
+call original%enter_device
+call coarse%deviation(original, lower=lower, upper=upper, device=.true., status=status)
+call original%exit_device
+```
+
+The GPU check (`fossil_test_distance_bench`) compares a copy of the bench surface, rotated by 2 degrees about its centre,
+against the surface on the device and on the CPU, and prints `deviation device vs serial mismatches`, which must be 0.
 
 ## Example: how far did the repair move the dragon?
 
@@ -142,6 +160,7 @@ call surface%hausdorff(other, lower, upper, tolerance, samples_per_area, max_tri
 | Acute triangle against tiny triangles at its corners: the maximum at the circumcentre | sampled bound misses it by > 1e-3; certified bounds bracket R = 1.72413 | sampled 1.6008; 1.72403 ≤ h ≤ 1.72413 |
 | The same with `max_triangles = 8` | `DEV_STATUS_NOT_CONVERGED`, valid bounds | 1.6008 ≤ h ≤ 2.3585 |
 | `triangle_rho`, 2000 random triangles | lattice maximum ≤ ρ, ≥ 0.98 ρ | |
+| `device=.true.` without `enter_device`; then entered (host build: device code, directives inert) | `DEV_STATUS_BAD_INPUT`; lower, upper, per_vertex = CPU | identical |
 
 A negative control: with $\rho_T = 0$ (the corner distances alone) the "upper" bound of the acute triangle is 1.6008,
 below the true 1.7241, and the test fails.
