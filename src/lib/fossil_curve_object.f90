@@ -32,6 +32,8 @@ use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
 use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate
 use fossil_predicates,         only : orient2d_xy
 use fossil_mass_properties,    only : moments_accumulator_t, accumulate_segment, moments_to_properties_2d, symmetric2_eigen
+use fossil_deviation,          only : deviation_evaluator_2d_t, deviation_sampled_2d, deviation_certified_2d, &
+                                     DEV_STATUS_OK, DEV_STATUS_BAD_INPUT
 use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, segment_point_distance2, &
                                      segment_closest_oac, segment_winding_number_oac
 use fossil_surface_stl_object, only : STATUS_OK, STATUS_INVALID_INPUT, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL, &
@@ -132,6 +134,8 @@ type :: curve_object
       procedure, pass(self) :: is_point_inside      !< Inside test.
       procedure, pass(self) :: load_from_file       !< Load from the ASCII loop format.
       procedure, pass(self) :: mass_properties      !< Mass, centroid, second moments, principal axes (issue #59).
+      procedure, pass(self) :: deviation            !< One-sided deviation (Hausdorff) from another curve (issue #60).
+      procedure, pass(self) :: hausdorff            !< Symmetric Hausdorff distance to another curve (issue #60).
       procedure, pass(self) :: nesting_depth        !< Nesting depth of a loop (exact).
       procedure, pass(self) :: repair               !< Join/close chains, merge vertices, drop degenerate loops, orient.
       procedure, pass(self) :: save_into_file       !< Save into the ASCII loop format.
@@ -141,6 +145,14 @@ type :: curve_object
       ! private methods
       procedure, pass(self), private :: analyze     !< Derived data: topology, metrics, normals.
 endtype curve_object
+
+type, extends(deviation_evaluator_2d_t) :: curve_evaluator_t
+   !< A curve seen through its batched closest-point query, for `fossil_deviation` (issue #60).
+   type(curve_object), pointer :: curve => null() !< The curve B.
+   logical                     :: device = .false. !< Query on the device (query_many_device).
+   contains
+      procedure, pass(self) :: eval => curve_evaluator_eval !< Unsigned distances, closest points and segments.
+endtype curve_evaluator_t
 
 contains
    ! public methods
@@ -1444,6 +1456,126 @@ contains
       w = self%bvh%winding_number(p(1), p(2), beta)
    endif
    endfunction winding_number
+
+   subroutine deviation(self, other, lower, upper, mean, rms, per_vertex, tolerance, samples_per_length, max_segments, &
+                        samples, created, device, status)
+   !< One-sided deviation of this curve from `other` (issue #60): h(self, other) = sup over x on self of d(x, other),
+   !< bracketed as lower <= h <= upper; the 2-D twin of `surface%deviation`. `lower` from deterministic samples (every
+   !< vertex, every segment midpoint, the midpoints of sub-segments, `samples_per_length` per unit length, default 4 per
+   !< mean segment length); `upper` certified by halving segments (Lipschitz, convexity and one-segment bounds) until
+   !< upper - lower <= `tolerance` (default 1e-3 of the larger bounding-box diagonal) or `max_segments` (default 2e6,
+   !< then DEV_STATUS_NOT_CONVERGED). `mean`, `rms`: length-weighted estimates; `per_vertex`: d at every vertex. Open
+   !< loops are allowed. `device=.true.`: the queries run through `query_many_device` (other entered).
+   class(curve_object), intent(in)            :: self               !< Curve A.
+   type(curve_object),  intent(in),   target  :: other              !< Curve B.
+   real(R8P),           intent(out), optional :: lower              !< Lower bound of h(self, other).
+   real(R8P),           intent(out), optional :: upper              !< Certified upper bound.
+   real(R8P),           intent(out), optional :: mean, rms          !< Estimates of d over self.
+   real(R8P), allocatable, intent(out), optional :: per_vertex(:)   !< d at the vertices of self.
+   real(R8P),           intent(in),  optional :: tolerance          !< Target upper - lower.
+   real(R8P),           intent(in),  optional :: samples_per_length !< Interior samples per unit length.
+   integer(I4P),        intent(in),  optional :: max_segments       !< Work cap.
+   integer(I4P),        intent(out), optional :: samples            !< Points sampled.
+   integer(I4P),        intent(out), optional :: created            !< Segments created by the halving.
+   logical,             intent(in),  optional :: device             !< Query other on the device.
+   integer(I4P),        intent(out), optional :: status             !< DEV_STATUS_*.
+   type(curve_evaluator_t)                    :: eval_other         !< other's distance query.
+   real(R8P),    allocatable                  :: v(:,:), pv(:), feet(:,:) !< Vertices, distances, feet.
+   integer(I4P), allocatable                  :: sg(:,:), fs(:)     !< Segments, feet's segments.
+   real(R8P)                                  :: lower_, upper_, mean_, rms_, spl, tol !< Results, parameters.
+   integer(I4P)                               :: samples_, created_, status_, cap, i, ns !< Results, counters.
+
+   if (present(lower)) lower = 0._R8P
+   if (present(upper)) upper = 0._R8P
+   if (present(mean)) mean = 0._R8P
+   if (present(rms)) rms = 0._R8P
+   if (present(samples)) samples = 0_I4P
+   if (present(created)) created = 0_I4P
+   if (present(status)) status = DEV_STATUS_BAD_INPUT
+   if (self%nv == 0_I4P .or. other%nv == 0_I4P) return
+   eval_other%curve => other
+   if (present(device)) eval_other%device = device
+   if (eval_other%device .and. .not. other%is_on_device) return
+   ns = count(self%next(1:self%nv) /= 0_I4P)
+   if (ns == 0_I4P) return
+   allocate(v(2, self%nv), sg(2, ns), pv(self%nv), feet(2, self%nv), fs(self%nv))
+   v(1, :) = self%u(1:self%nv) ; v(2, :) = self%v(1:self%nv)
+   ns = 0
+   do i = 1, self%nv
+      if (self%next(i) == 0_I4P) cycle
+      ns = ns + 1 ; sg(:, ns) = [i, self%next(i)]
+   enddo
+   spl = 4._R8P * ns / max(sum(self%seg_len(1:self%nv), mask=self%next(1:self%nv) /= 0_I4P), tiny(1._R8P))
+   if (present(samples_per_length)) spl = samples_per_length
+   call deviation_sampled_2d(v, sg, eval_other, spl, lower_, mean_, rms_, pv, samples_, status_, vertex_feet=feet, &
+                             vertex_segments=fs)
+   if (present(status)) status = status_
+   if (status_ /= DEV_STATUS_OK) return
+   created_ = 0_I4P
+   if (present(upper)) then
+      tol = 1.e-3_R8P * max(norm2(self%bmax - self%bmin), norm2(other%bmax - other%bmin))
+      if (present(tolerance)) tol = tolerance
+      cap = 2000000_I4P ; if (present(max_segments)) cap = max_segments
+      call deviation_certified_2d(v, sg, pv, feet, fs, eval_other, max(tol, tiny(1._R8P)), cap, lower_, upper_, &
+                                  created_, status_)
+      upper = upper_
+      if (present(status)) status = status_
+   endif
+   if (present(lower)) lower = lower_
+   if (present(mean)) mean = mean_
+   if (present(rms)) rms = rms_
+   if (present(per_vertex)) call move_alloc(pv, per_vertex)
+   if (present(samples)) samples = samples_
+   if (present(created)) created = created_
+   endsubroutine deviation
+
+   subroutine hausdorff(self, other, lower, upper, tolerance, samples_per_length, max_segments, device, status)
+   !< Symmetric Hausdorff distance max(h(self, other), h(other, self)) of two curves (issue #60), bracketed.
+   class(curve_object), intent(in)            :: self               !< Curve A.
+   type(curve_object),  intent(in)            :: other              !< Curve B.
+   real(R8P),           intent(out), optional :: lower, upper       !< Bounds of H.
+   real(R8P),           intent(in),  optional :: tolerance          !< Target upper - lower of each direction.
+   real(R8P),           intent(in),  optional :: samples_per_length !< Interior samples per unit length.
+   integer(I4P),        intent(in),  optional :: max_segments       !< Work cap of each direction.
+   logical,             intent(in),  optional :: device             !< Query on the device (both entered).
+   integer(I4P),        intent(out), optional :: status             !< DEV_STATUS_*.
+   real(R8P)                                  :: l1, l2, u1, u2     !< One-sided bounds.
+   integer(I4P)                               :: s1, s2             !< Statuses.
+
+   if (present(lower)) lower = 0._R8P
+   if (present(upper)) upper = 0._R8P
+   u1 = 0._R8P ; u2 = 0._R8P
+   if (present(upper)) then
+      call self%deviation(other, lower=l1, upper=u1, tolerance=tolerance, samples_per_length=samples_per_length, &
+                          max_segments=max_segments, device=device, status=s1)
+      call other%deviation(self, lower=l2, upper=u2, tolerance=tolerance, samples_per_length=samples_per_length, &
+                           max_segments=max_segments, device=device, status=s2)
+   else
+      call self%deviation(other, lower=l1, samples_per_length=samples_per_length, device=device, status=s1)
+      call other%deviation(self, lower=l2, samples_per_length=samples_per_length, device=device, status=s2)
+   endif
+   if (present(status)) status = max(s1, s2)
+   if (s1 == DEV_STATUS_BAD_INPUT .or. s2 == DEV_STATUS_BAD_INPUT) return
+   if (present(lower)) lower = max(l1, l2)
+   if (present(upper)) upper = max(u1, u2)
+   endsubroutine hausdorff
+
+   subroutine curve_evaluator_eval(self, points, distances, closest, segments)
+   !< Unsigned distances of the points to the evaluator's curve, the closest points and their segments (`query_many`).
+   class(curve_evaluator_t), intent(in)  :: self         !< Evaluator.
+   real(R8P),                intent(in)  :: points(:,:)  !< Points [2, n].
+   real(R8P),                intent(out) :: distances(:) !< Distances [n].
+   real(R8P),                intent(out) :: closest(:,:) !< Closest points [2, n].
+   integer(I4P),             intent(out) :: segments(:)  !< Closest segments [n].
+
+   if (self%device) then
+      call self%curve%query_many_device(points=points, distances=distances, closest_points=closest, segments=segments, &
+                                        is_signed=.false.)
+   else
+      call self%curve%query_many(points=points, distances=distances, closest_points=closest, segments=segments, &
+                                 is_signed=.false.)
+   endif
+   endsubroutine curve_evaluator_eval
 
    subroutine load_from_file(self, file_name, normal_axis, status)
    !< Load the curve from the ASCII loop format.

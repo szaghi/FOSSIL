@@ -19,7 +19,7 @@
 !< 10. The work cap: max_triangles = 8 gives DEV_STATUS_NOT_CONVERGED with valid, wider bounds.
 !< Device path (step 3):
 !< 12. device=.true. without enter_device: DEV_STATUS_BAD_INPUT. After enter_device: lower, upper and per_vertex equal
-!<     to the CPU path bit for bit (in a host build the device code runs with its directives inert; the GPU bench
+!<     to the CPU path bit for bit (tolerance 1e-3: the comparison is bitwise, a tight tolerance only costs time) (in a host build the device code runs with its directives inert; the GPU bench
 !<     fossil_test_distance_bench checks the device itself).
 !< 11. triangle_rho on 2000 random triangles (acute and obtuse, fixed seed): the largest distance to the nearest corner
 !<     over a 60 x 60 lattice of each triangle is <= rho and >= 0.98 rho (the lattice's resolution).
@@ -169,11 +169,11 @@ all_ok = all_ok .and. ok
 ! ---- 12. device path
 call make_sphere(a, 25_I4P, 1._R8P)
 call make_sphere(b, 21_I4P, 1.02_R8P)
-call a%deviation(b, lower=lower, upper=upper, per_vertex=pv, tolerance=1e-4_R8P, status=status)
-call a%deviation(b, lower=lower2, upper=e(1), per_vertex=pv2, tolerance=1e-4_R8P, device=.true., status=status2)
+call a%deviation(b, lower=lower, upper=upper, per_vertex=pv, tolerance=1e-3_R8P, status=status)
+call a%deviation(b, lower=lower2, upper=e(1), per_vertex=pv2, tolerance=1e-3_R8P, device=.true., status=status2)
 ok = status == DEV_STATUS_OK .and. status2 == DEV_STATUS_BAD_INPUT
 call b%enter_device
-call a%deviation(b, lower=lower2, upper=e(1), per_vertex=pv2, tolerance=1e-4_R8P, device=.true., status=status2)
+call a%deviation(b, lower=lower2, upper=e(1), per_vertex=pv2, tolerance=1e-3_R8P, device=.true., status=status2)
 call b%exit_device
 ok = ok .and. status2 == DEV_STATUS_OK .and. lower2 == lower .and. e(1) == upper .and. all(pv2 == pv)
 print '(A,2ES23.15,A,L1)', '12. device path: lower, upper ', lower2, e(1), '  ok ', ok

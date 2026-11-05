@@ -15,8 +15,9 @@ use penf, only : I4P, R8P
 
 implicit none
 private
-public :: deviation_evaluator_t
+public :: deviation_evaluator_t, deviation_evaluator_2d_t
 public :: deviation_sampled, deviation_certified, triangle_rho
+public :: deviation_sampled_2d, deviation_certified_2d
 public :: DEV_STATUS_OK, DEV_STATUS_BAD_INPUT, DEV_STATUS_NOT_CONVERGED
 
 integer(I4P), parameter :: DEV_STATUS_OK        = 0_I4P !< Success.
@@ -29,7 +30,23 @@ type, abstract :: deviation_evaluator_t
       procedure(eval_interface), deferred, pass(self) :: eval !< Distances and closest points of a batch.
 endtype deviation_evaluator_t
 
+type, abstract :: deviation_evaluator_2d_t
+   !< The curve B, seen through its batched distance query (2-D, issue #60 step 4).
+   contains
+      procedure(eval_2d_interface), deferred, pass(self) :: eval !< Distances and closest points of a batch.
+endtype deviation_evaluator_2d_t
+
 abstract interface
+   subroutine eval_2d_interface(self, points, distances, closest, segments)
+   !< Distances d(points(:, i), B) of a batch of points (u, v), the closest points of B and the segments they lie on.
+   import :: deviation_evaluator_2d_t, I4P, R8P
+   class(deviation_evaluator_2d_t), intent(in)  :: self         !< Evaluator.
+   real(R8P),                       intent(in)  :: points(:,:)  !< Points [2, n].
+   real(R8P),                       intent(out) :: distances(:) !< Unsigned distances [n].
+   real(R8P),                       intent(out) :: closest(:,:) !< Closest points of B [2, n].
+   integer(I4P),                    intent(out) :: segments(:)  !< Segment of B of each closest point [n].
+   endsubroutine eval_2d_interface
+
    subroutine eval_interface(self, points, distances, closest, facets)
    !< Distances d(points(:, i), B) of a batch of points, the closest points of B and the convex pieces of B (facets)
    !< they lie on (0 if unknown).
@@ -216,6 +233,148 @@ contains
    enddo
    upper = max(upper, lower)
    endsubroutine deviation_certified
+
+   subroutine deviation_sampled_2d(vertices, segments, eval, samples_per_length, lower, mean, rms, per_vertex, samples, &
+                                   status, vertex_feet, vertex_segments)
+   !< Sampled one-sided deviation of the polyline (vertices, segments) from the curve behind `eval` (2-D twin of
+   !< deviation_sampled): every vertex, every segment midpoint and the midpoints of n_s equal sub-segments of each segment
+   !< (n_s = ceil(length * samples_per_length)), weighted by length / n_s for the mean and the rms (midpoint rule).
+   real(R8P),    intent(in)                :: vertices(:,:)      !< Vertices of A [2, nv].
+   integer(I4P), intent(in)                :: segments(:,:)      !< Segments of A, vertex indices [2, ns].
+   class(deviation_evaluator_2d_t), intent(in) :: eval           !< Batched distance to B.
+   real(R8P),    intent(in)                :: samples_per_length !< Interior samples per unit length (> 0).
+   real(R8P),    intent(out)               :: lower              !< Largest sampled distance.
+   real(R8P),    intent(out)               :: mean, rms          !< Length-weighted estimates.
+   real(R8P),    intent(out)               :: per_vertex(:)      !< d at every vertex [nv].
+   integer(I4P), intent(out)               :: samples            !< Points evaluated.
+   integer(I4P), intent(out)               :: status             !< DEV_STATUS_OK or DEV_STATUS_BAD_INPUT.
+   real(R8P),    intent(out), optional     :: vertex_feet(:,:)   !< Closest points of B to the vertices [2, nv].
+   integer(I4P), intent(out), optional     :: vertex_segments(:) !< Segments of B of those closest points [nv].
+   real(R8P),    allocatable               :: p(:,:), w(:), d(:), q(:,:) !< Samples, weights, distances, feet.
+   integer(I4P), allocatable               :: g(:), nsub(:)      !< Feet's segments, subdivisions.
+   real(R8P)                               :: a(2), b(2), len, wsum !< Segment ends, length, total weight.
+   integer(I4P)                            :: nv, ns, np, i, j, k   !< Counters.
+
+   lower = 0._R8P ; mean = 0._R8P ; rms = 0._R8P ; samples = 0_I4P
+   nv = size(vertices, 2) ; ns = size(segments, 2)
+   status = DEV_STATUS_BAD_INPUT
+   if (nv == 0 .or. ns == 0 .or. size(per_vertex) /= nv .or. .not. (samples_per_length > 0._R8P)) return
+   if (any(segments < 1) .or. any(segments > nv)) return
+   allocate(nsub(ns))
+   np = nv
+   do i = 1, ns
+      len = norm2(vertices(:, segments(2, i)) - vertices(:, segments(1, i)))
+      nsub(i) = max(1_I4P, int(ceiling(len * samples_per_length), I4P))
+      np = np + 1 + nsub(i)
+   enddo
+   allocate(p(2, np), w(np), d(np), q(2, np), g(np))
+   w = 0._R8P
+   p(:, 1:nv) = vertices
+   k = nv
+   do i = 1, ns
+      a = vertices(:, segments(1, i)) ; b = vertices(:, segments(2, i)) ; len = norm2(b - a)
+      k = k + 1 ; p(:, k) = 0.5_R8P * (a + b)
+      do j = 1, nsub(i)
+         k = k + 1 ; p(:, k) = a + (j - 0.5_R8P) / nsub(i) * (b - a) ; w(k) = len / nsub(i)
+      enddo
+   enddo
+   call eval%eval(p(:, 1:k), d(1:k), q(:, 1:k), g(1:k))
+   per_vertex = d(1:nv)
+   if (present(vertex_feet)) vertex_feet = q(:, 1:nv)
+   if (present(vertex_segments)) vertex_segments = g(1:nv)
+   lower = maxval(d(1:k))
+   wsum = sum(w(1:k))
+   if (wsum > 0._R8P) then
+      mean = sum(w(1:k) * d(1:k)) / wsum
+      rms = sqrt(sum(w(1:k) * d(1:k) ** 2) / wsum)
+   endif
+   samples = k
+   status = DEV_STATUS_OK
+   endsubroutine deviation_sampled_2d
+
+   subroutine deviation_certified_2d(vertices, segments, per_vertex, vertex_feet, vertex_segments, eval, tolerance, &
+                                     max_segments, lower, upper, created, status)
+   !< Certified bounds lower <= h(A, B) <= upper for polylines (2-D twin of deviation_certified). A segment [a, b] with
+   !< end distances d_a, d_b, feet q_a, q_b on B is bounded by max(d_a, d_b) when both feet lie on one segment of B,
+   !< else by min(max(d_a, d_b) + |b - a| / 2, min over the feet q of max(|a - q|, |b - q|)); segments above
+   !< lower + tolerance are halved, their midpoints raising lower.
+   real(R8P),    intent(in)                :: vertices(:,:)      !< Vertices of A [2, nv].
+   integer(I4P), intent(in)                :: segments(:,:)      !< Segments of A [2, ns].
+   real(R8P),    intent(in)                :: per_vertex(:)      !< d at the vertices [nv].
+   real(R8P),    intent(in)                :: vertex_feet(:,:)   !< Feet of the vertices [2, nv].
+   integer(I4P), intent(in)                :: vertex_segments(:) !< Segments of B of the feet [nv].
+   class(deviation_evaluator_2d_t), intent(in) :: eval           !< Batched distance to B.
+   real(R8P),    intent(in)                :: tolerance          !< Target upper - lower (> 0).
+   integer(I4P), intent(in)                :: max_segments       !< Work cap.
+   real(R8P),    intent(inout)             :: lower              !< In: a lower bound; out: raised.
+   real(R8P),    intent(out)               :: upper              !< Upper bound of h.
+   integer(I4P), intent(out)               :: created            !< Segments created.
+   integer(I4P), intent(out)               :: status             !< DEV_STATUS_OK or DEV_STATUS_NOT_CONVERGED.
+   real(R8P),    allocatable               :: c(:,:,:), q(:,:,:), d(:,:), u(:) !< Active segments: ends, feet, distances.
+   real(R8P),    allocatable               :: c2(:,:,:), q2(:,:,:), d2(:,:)    !< Next round.
+   integer(I4P), allocatable               :: g(:,:), g2(:,:), mg(:)           !< Feet's segments.
+   real(R8P),    allocatable               :: mp(:,:), md(:), mq(:,:)          !< Midpoints.
+   logical,      allocatable               :: act(:)                           !< Halved this round.
+   integer(I4P)                            :: n, na, t, k                      !< Counters.
+
+   status = DEV_STATUS_OK
+   n = size(segments, 2)
+   allocate(c(2, 2, n), q(2, 2, n), d(2, n), g(2, n))
+   do t = 1, n
+      do k = 1, 2
+         c(:, k, t) = vertices(:, segments(k, t)) ; q(:, k, t) = vertex_feet(:, segments(k, t))
+         d(k, t) = per_vertex(segments(k, t)) ; g(k, t) = vertex_segments(segments(k, t))
+      enddo
+   enddo
+   created = n
+   upper = lower
+   do
+      allocate(u(n), act(n))
+      do t = 1, n
+         if (g(1, t) > 0 .and. g(1, t) == g(2, t)) then
+            u(t) = maxval(d(:, t))
+         else
+            u(t) = min(maxval(d(:, t)) + 0.5_R8P * norm2(c(:, 2, t) - c(:, 1, t)), &
+                       max(norm2(c(:, 1, t) - q(:, 1, t)), norm2(c(:, 2, t) - q(:, 1, t))), &
+                       max(norm2(c(:, 1, t) - q(:, 2, t)), norm2(c(:, 2, t) - q(:, 2, t))))
+         endif
+      enddo
+      act = u > lower + tolerance
+      na = count(act)
+      if (na < n) upper = max(upper, maxval(u, mask=.not. act))
+      if (na == 0) exit
+      if (created + 2 * na > max_segments) then
+         upper = max(upper, maxval(u))
+         status = DEV_STATUS_NOT_CONVERGED
+         exit
+      endif
+      allocate(mp(2, na), md(na), mq(2, na), mg(na))
+      k = 0
+      do t = 1, n
+         if (.not. act(t)) cycle
+         k = k + 1 ; mp(:, k) = 0.5_R8P * (c(:, 1, t) + c(:, 2, t))
+      enddo
+      call eval%eval(mp, md, mq, mg)
+      lower = max(lower, maxval(md))
+      allocate(c2(2, 2, 2 * na), q2(2, 2, 2 * na), d2(2, 2 * na), g2(2, 2 * na))
+      k = 0
+      do t = 1, n
+         if (.not. act(t)) cycle
+         k = k + 1
+         c2(:, 1, 2*k-1) = c(:, 1, t) ; c2(:, 2, 2*k-1) = mp(:, k)
+         q2(:, 1, 2*k-1) = q(:, 1, t) ; q2(:, 2, 2*k-1) = mq(:, k)
+         d2(:, 2*k-1) = [d(1, t), md(k)] ; g2(:, 2*k-1) = [g(1, t), mg(k)]
+         c2(:, 1, 2*k) = mp(:, k) ; c2(:, 2, 2*k) = c(:, 2, t)
+         q2(:, 1, 2*k) = mq(:, k) ; q2(:, 2, 2*k) = q(:, 2, t)
+         d2(:, 2*k) = [md(k), d(2, t)] ; g2(:, 2*k) = [mg(k), g(2, t)]
+      enddo
+      created = created + 2 * na
+      call move_alloc(c2, c) ; call move_alloc(q2, q) ; call move_alloc(d2, d) ; call move_alloc(g2, g)
+      deallocate(u, act, mp, md, mq, mg)
+      n = 2 * na
+   enddo
+   upper = max(upper, lower)
+   endsubroutine deviation_certified_2d
 
    pure function triangle_bound(c, d, q, g) result(u)
    !< Upper bound of d(x, B) over the triangle with corners c, their distances d, closest points q and the facets g of B

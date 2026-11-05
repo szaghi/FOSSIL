@@ -12,7 +12,8 @@ program fossil_test_curve_bench
 !< host (no OpenACC); built by the `tests-nvidia-curve` mode it runs on the GPU.
 !< Also `rich ... id mismatches` (query_many_device, issue #37) and `box device vs serial mismatches`
 !< (box_classify_many_device on a box around every grid point, issue #38), and `sign bench device vs
-!< serial mismatches` (sections of the issue #39 benchmark bodies) and `line crossings device vs serial
+!< serial mismatches` (sections of the issue #39 benchmark bodies), `deviation device vs serial mismatches` (issue #60:
+!< the last curve rotated by 2 degrees against itself, on the device and on the CPU) and `line crossings device vs serial
 !< mismatches` (issue #40): all must be 0.
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
@@ -52,6 +53,7 @@ call c%adopt_loops(u=u, v=v, loop_sizes=[1000_I4P, 100_I4P])
 call bench(c, [-1.5_R8P, -1.5_R8P], [1.5_R8P, 1.5_R8P], 'disc with a hole (1100 vertices)')
 
 call sign_bench
+call deviation_case(c)
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
@@ -162,6 +164,38 @@ contains
    print '(A,A,A,I0)', '   ', nm, 'posed device vs serial mismatches: ', bad
    ok = ok .and. bad == 0
    endsubroutine posed
+
+   subroutine deviation_case(cur)
+   !< curve%deviation with device=.true. vs the CPU path (issue #60): the curve rotated by 2 degrees about the origin
+   !< against the curve (entered), certified at 1e-4, lower, upper, status and per_vertex compared bit for bit.
+   type(curve_object), intent(inout) :: cur        !< Curve B (entered here).
+   type(curve_object)                :: moved      !< The rotated copy.
+   real(R8P), allocatable            :: uu(:), vv(:), pv1(:), pv2(:) !< Coordinates, per-vertex distances.
+   real(R8P)                         :: l1, u1, l2, u2, w(2), cs, sn !< Bounds, work.
+   integer(I4P)                      :: s1, s2, i, nl, first, last, bad !< Statuses, counters.
+   integer(I4P), allocatable         :: sizes(:)   !< Loop sizes.
+
+   cs = cos(2._R8P * PI / 180._R8P) ; sn = sin(2._R8P * PI / 180._R8P)
+   nl = cur%get_loops_number()
+   allocate(uu(cur%get_vertices_number()), vv(cur%get_vertices_number()), sizes(nl))
+   do i = 1, nl
+      call cur%get_loop_range(i, first, last)
+      sizes(i) = last - first + 1
+   enddo
+   do i = 1, cur%get_vertices_number()
+      w = cur%get_vertex(i)
+      uu(i) = cs * w(1) - sn * w(2) ; vv(i) = sn * w(1) + cs * w(2)
+   enddo
+   call moved%adopt_loops(u=uu, v=vv, loop_sizes=sizes)
+   call moved%deviation(cur, lower=l1, upper=u1, per_vertex=pv1, tolerance=1.e-4_R8P, status=s1)
+   call cur%enter_device
+   call moved%deviation(cur, lower=l2, upper=u2, per_vertex=pv2, tolerance=1.e-4_R8P, device=.true., status=s2)
+   call cur%exit_device
+   bad = merge(0, 1, l1 == l2) + merge(0, 1, u1 == u2) + merge(0, 1, s1 == s2) + count(pv1 /= pv2)
+   print '(A,2ES12.4,A,I0)', 'deviation of a 2-degree rotated copy: ', l1, u1, ', status ', s1
+   print '(A,I0)', 'deviation device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0
+   endsubroutine deviation_case
 
    subroutine box(cur, p, h, algo, nm)
    !< box_classify_many_device vs box_classify_many (issue #38): a box of half-size h around every

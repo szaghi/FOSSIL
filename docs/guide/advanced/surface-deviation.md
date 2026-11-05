@@ -131,6 +131,31 @@ call original%exit_device
 The GPU check (`fossil_test_distance_bench`) compares a copy of the bench surface, rotated by 2 degrees about its centre,
 against the surface on the device and on the CPU, and prints `deviation device vs serial mismatches`, which must be 0.
 
+## 2-D: curves
+
+`curve%deviation` and `curve%hausdorff` do the same for [curves](/guide/advanced/2d-geometry), open loops included:
+
+```fortran
+call curve%deviation(other, lower, upper, mean, rms, per_vertex, tolerance, samples_per_length, max_segments, &
+                     samples, created, device, status)
+call curve%hausdorff(other, lower, upper, tolerance, samples_per_length, max_segments, device, status)
+```
+
+- **Sampling:** every vertex, every segment midpoint, and the midpoints of sub-segments (`samples_per_length`, default
+  4 per mean segment length). The same midpoints, length-weighted, give `mean` and `rms`.
+- **Bounds for a segment [a, b]:**
+  - $\max(d_a, d_b)$ when both closest points lie on one segment of B;
+  - otherwise the smaller of $\max(d_a, d_b) + |b - a| / 2$ and $\min_q \max(|a - q|, |b - q|)$ over the two
+    closest points.
+- **Refinement:** segments above `lower` + `tolerance` are halved.
+- **Device:** `device=.true.` uses `curve%query_many_device`.
+
+![a NACA 0012 section of 200 points and a coarse copy of 12 points, the fine section's vertex farthest from the coarse one marked near the nose and joined to its closest point](../../examples/images/ref-deviation-2d.svg){.fossil-figure}
+
+The figure shows a NACA 0012 section of 200 points against a coarse copy of 12. The deviation is largest at the
+nose, where the coarse copy cuts the curvature; there it is 1.001e-2. The marked vertex is the largest `per_vertex`,
+joined to its closest point on the coarse copy.
+
 ## Example: how far did the repair move the dragon?
 
 <<< @/examples/snippets/ck_deviation.f90
@@ -161,6 +186,20 @@ against the surface on the device and on the CPU, and prints `deviation device v
 | The same with `max_triangles = 8` | `DEV_STATUS_NOT_CONVERGED`, valid bounds | 1.6008 ≤ h ≤ 2.3585 |
 | `triangle_rho`, 2000 random triangles | lattice maximum ≤ ρ, ≥ 0.98 ρ | |
 | `device=.true.` without `enter_device`; then entered (host build: device code, directives inert) | `DEV_STATUS_BAD_INPUT`; lower, upper, per_vertex = CPU | identical |
+
+`src/tests/fossil_test_curve_deviation.f90`, the 2-D path:
+
+| Case | Checked | Measured |
+|---|---|---|
+| Unit square against itself translated by 0.3 | h = 0.3 both ways, certified within 1e-4; `hausdorff` | 0.3 ≤ h ≤ 0.30003 |
+| 64-gon on the unit circle against itself scaled by 1.05 | 0.98 · 0.05 ≤ h ≤ 0.05 | 0.049940 ≤ h ≤ 0.050034 |
+| Open polyline (0,0)–(3,0) against tiny segments at x = 0 and 2.2: maximum 1.1 between the samples | sampled bound misses it; certified brackets it | sampled 1.075; 1.09991 ≤ h ≤ 1.10001 (29 segments) |
+| The same with `max_segments = 3` | `DEV_STATUS_NOT_CONVERGED`, valid bounds | 1.075 ≤ h ≤ 1.45 |
+| The 64-gons extruded to prisms | the 2-D and the 3-D brackets overlap | [0.049940, 0.050034] and [0.049940, 0.049997] |
+| `device=.true.`: refused before `enter_device`, then bit for bit | lower, upper, per_vertex | identical |
+
+The curve bench (`fossil_test_curve_bench`, the GPU gate of `tests-nvidia-curve`) prints `deviation device vs serial
+mismatches` for the disc with a hole rotated by 2 degrees against itself.
 
 A negative control: with $\rho_T = 0$ (the corner distances alone) the "upper" bound of the acute triangle is 1.6008,
 below the true 1.7241, and the test fails.
