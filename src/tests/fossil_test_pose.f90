@@ -7,8 +7,10 @@ program fossil_test_pose
 !< - Identity pose = no pose, bit for bit (surface and curve, every output).
 !< - Against the mesh (curve) moved explicitly and rebuilt: cube, cone, L-prism of the sign
 !<   benchmark and cube-04.stl (3072 facets, clean and closed; it replaced the bunny, issue #45), under
-!<   rotations about several axes with large translations; a NACA 0012 and an annulus under in-plane
-!<   poses: signed distances to 1e-14 (L + |t|), closest points to 1e-14 (L + |t|), normals to
+!<   rotations about several axes with large translations, and a 256-sided faceted cone (needle facets of aspect
+!<   163); a NACA 0012 and an annulus under in-plane poses: signed distances to 1e-14 (L + |t|), closest points to
+!<   max(1e-14, 0.1 eps a^2) (L + |t|) with a the largest facet aspect (longest edge over height; issue #56: the foot
+!<   point on a needle is conditioned by a^2, measured 0.020-0.023 eps a^2 (L + |t|) at a = 10 to 163), normals to
 !<   1e-14 (L + |t|) / h (h the shortest edge: the reference normals are rebuilt from moved, rounded
 !<   vertices), inside flags equal at points farther than 1e-12 L. Closest
 !<   points and normals are compared where the foot point is unique (`ambiguous` with a 1e-9 relative
@@ -17,7 +19,7 @@ program fossil_test_pose
 use fossil,                   only : surface_stl_object, curve_object, facet_object, rigid_pose_t, rigid_pose_2d_t, &
                                      pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose, &
                                      pose_inverse, to_body, to_world, SIGN_FAST_WINDING_NUMBER
-use fossil_sign_bench_bodies, only : body_t, soup_t, bench_bodies, to_surface
+use fossil_sign_bench_bodies, only : body_t, soup_t, bench_bodies, to_surface, make_apex_body
 use penf,                     only : I4P, R8P
 use vecfor,                   only : vector_R8P
 
@@ -26,6 +28,7 @@ implicit none
 real(R8P), parameter      :: PI = acos(-1._R8P)
 type(body_t), allocatable :: b(:)
 type(soup_t)              :: fine
+type(body_t)              :: needles
 type(surface_stl_object)  :: s, body
 type(facet_object), pointer :: fp
 type(curve_object)        :: c
@@ -50,8 +53,9 @@ print '(A,ES9.1,A,L1)', 'pose algebra: max err ', e, '  ok ', ok(1)
 
 call bench_bodies(b)
 ! cube-04.stl as a soup: a clean closed body, 3072 facets (issue #45 replaced the bunny; dragon.stl fails: a facet
-! tied at a non-manifold edge flips one pseudo-normal sign between posed and moved queries; a 256-sided faceted cone
-! fails the closest-point bound: its needle facets, aspect ~150, condition the foot point ~10x above 1e-14)
+! tied at a non-manifold edge flips one pseudo-normal sign between posed and moved queries); a 256-sided faceted cone,
+! needle facets of aspect 163, under the aspect-scaled closest-point bound (issue #56)
+call make_apex_body(256, 15._R8P, 'cone 15 (256)', needles)
 call body%load_from_file(file_name='src/tests/cube-04.stl', guess_format=.true.)
 allocate(fine%v(3, 3, body%get_facets_number()))
 do f = 1, body%get_facets_number()
@@ -65,7 +69,8 @@ p3 = pose_from_axis_angle([0._R8P, 0._R8P, 1._R8P], -2.1_R8P, [-100._R8P, 40._R8
 call to_surface(b(1)%soup, s)
 ok(2) = same_identity(s)
 ok(3) = moved3(b(1)%soup, p1, 'cube') .and. moved3(b(1)%soup, p3, 'cube, far') .and. moved3(b(7)%soup, p2, 'cone') .and. &
-        moved3(b(8)%soup, p1, 'L-prism') .and. moved3(fine, p1, 'cube-04')
+        moved3(b(8)%soup, p1, 'L-prism') .and. moved3(fine, p1, 'cube-04') .and. &
+        moved3(needles%soup, p1, 'cone 256') .and. moved3(needles%soup, p2, 'cone 256, p2')
 ! 4. curves
 do k = 0, 99
    u(k + 1) = 0.5_R8P * (1._R8P - cos(PI * (100 - k) / 100)) ; v(k + 1) = thickness(u(k + 1))
@@ -115,6 +120,7 @@ contains
    type(surface_stl_object) :: sb, sm  !< Body and moved surfaces.
    type(vector_R8P)         :: q(N)    !< World points.
    real(R8P) :: lo(3), hi(3), r(3), w(3), l, scale, d1(N), d2(N), c1(3, N), c2(3, N), n1(3, N), n2(3, N), ed, ec, en, hmin !< Work.
+   real(R8P) :: amax, cbound !< Largest facet aspect, closest-point bound.
    integer(I4P) :: i, ff, mm, nsign, ninc !< Work.
    logical      :: in1, in2, amb(N) !< Work.
 
@@ -154,11 +160,28 @@ contains
       hmin = min(hmin, norm2(sp%v(:, 2, ff) - sp%v(:, 1, ff)), norm2(sp%v(:, 3, ff) - sp%v(:, 2, ff)), &
                  norm2(sp%v(:, 1, ff) - sp%v(:, 3, ff)))
    enddo
-   good = ed <= 1.e-14_R8P * scale .and. ec <= 1.e-14_R8P * scale .and. en <= 1.e-14_R8P * scale / hmin .and. nsign == 0 &
+   ! the foot point on a needle is conditioned by its aspect squared (issue #56): largest aspect, longest edge over height
+   amax = 0._R8P
+   do ff = 1, size(sp%v, 3)
+      amax = max(amax, max(norm2(sp%v(:, 2, ff) - sp%v(:, 1, ff)), norm2(sp%v(:, 3, ff) - sp%v(:, 2, ff)), &
+                           norm2(sp%v(:, 1, ff) - sp%v(:, 3, ff)))**2 / norm2(cross3(sp%v(:, 2, ff) - sp%v(:, 1, ff), &
+                                                                                   sp%v(:, 3, ff) - sp%v(:, 1, ff))))
+   enddo
+   cbound = max(1.e-14_R8P, 0.1_R8P * epsilon(1._R8P) * amax**2) * scale
+   good = ed <= 1.e-14_R8P * scale .and. ec <= cbound .and. en <= 1.e-14_R8P * scale / hmin .and. nsign == 0 &
           .and. ninc == 0
-   print '(A,A,ES9.1,A,ES9.1,A,ES9.1,A,I0,A,I0,A,L1)', label, ': err/(L+|t|) distance ', ed / scale, '  closest ', ec / scale, &
-         '  normal*h/(L+|t|) ', en * hmin / scale, '  sign mismatches ', nsign, '  inside mismatches ', ninc, '  ok ', good
+   print '(A,A,ES9.1,A,ES9.1,A,ES9.1,A,F6.1,A,ES9.1,A,I0,A,I0,A,L1)', label, ': err/(L+|t|) distance ', ed / scale, &
+         '  closest ', ec / scale, ' (bound ', cbound / scale, ', aspect ', amax, ')  normal*h/(L+|t|) ', en * hmin / scale, &
+         '  sign mismatches ', nsign, '  inside mismatches ', ninc, '  ok ', good
    endfunction moved3
+
+   pure function cross3(a, c) result(x)
+   !< Cross product of two arrays.
+   real(R8P), intent(in) :: a(3), c(3) !< Vectors.
+   real(R8P)             :: x(3)       !< Result.
+
+   x = [a(2) * c(3) - a(3) * c(2), a(3) * c(1) - a(1) * c(3), a(1) * c(2) - a(2) * c(1)]
+   endfunction cross3
 
    function moved2(uu, vv, sizes, pose, label) result(good)
    !< Posed curve queries against the curve moved explicitly and rebuilt.
