@@ -37,6 +37,7 @@ use fossil_alpha_wrap, only : awrap_run, &
 use fossil_csr_matrix, only : csr_matrix_t
 use fossil_deviation, only : deviation_evaluator_t, deviation_sampled, deviation_certified, DEV_STATUS_OK, &
                              DEV_STATUS_BAD_INPUT
+use fossil_feature_edges, only : find_feature_edges, FEATURE_EDGE_DEFAULT_ANGLE
 use fossil_mass_properties, only : moments_accumulator_t, accumulate_tetrahedron, moments_to_properties_3d, symmetric3_eigen
 use fossil_laplacian, only : build_cotangent_laplacian, &
                              LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
@@ -269,6 +270,7 @@ type :: surface_stl_object
       procedure, pass(self) :: mass_properties                 !< Mass, centre of mass, inertia tensor, principal axes (#59).
       procedure, pass(self) :: deviation                       !< One-sided deviation (Hausdorff) from another surface (#60).
       procedure, pass(self) :: hausdorff                       !< Symmetric Hausdorff distance to another surface (#60).
+      procedure, pass(self) :: feature_edges                   !< Sharp, boundary, non-manifold edges, corners (#61).
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
                                          mirror_by_matrix      !< Mirror facets.
@@ -4511,6 +4513,53 @@ contains
       enddo
    enddo
    endsubroutine deviation_mesh
+
+   subroutine feature_edges(self, edges, kinds, corners, polyline_start, polyline_vertices, angle, corner_angle, &
+                            include_boundary, include_nonmanifold, degenerate, status)
+   !< Feature edges of the surface (issue #61): sharp edges (dihedral above `angle`, default 30 degrees; the facets must
+   !< be consistently oriented), boundary edges (one facet) and non-manifold edges (three or more), unless excluded;
+   !< their kinds (FEATURE_EDGE_SHARP, _BOUNDARY, _NONMANIFOLD); the corners (feature vertices with a number of feature
+   !< edges other than 2, or with 2 turning by more than `corner_angle`, default 30 degrees); the polylines chaining the
+   !< edges between corners (CSR: polyline p is polyline_vertices(polyline_start(p):polyline_start(p+1)-1); a polyline
+   !< without corners is closed, its first vertex repeated). Vertex ids index the vertex pool (`get_vertex_pool`).
+   !< `degenerate` counts the two-facet edges not classified because a facet has zero area. See `fossil_feature_edges`.
+   class(surface_stl_object), intent(in)            :: self                 !< Surface.
+   integer(I4P), allocatable, intent(out), optional :: edges(:,:)           !< Feature edges [2, ne].
+   integer(I4P), allocatable, intent(out), optional :: kinds(:)             !< FEATURE_EDGE_* [ne].
+   integer(I4P), allocatable, intent(out), optional :: corners(:)           !< Corner vertices.
+   integer(I4P), allocatable, intent(out), optional :: polyline_start(:)    !< Polyline offsets [np + 1].
+   integer(I4P), allocatable, intent(out), optional :: polyline_vertices(:) !< Polyline vertices.
+   real(R8P),                 intent(in),  optional :: angle                !< Sharp threshold [degrees].
+   real(R8P),                 intent(in),  optional :: corner_angle         !< Corner threshold [degrees].
+   logical,                   intent(in),  optional :: include_boundary     !< Boundary edges are features (default yes).
+   logical,                   intent(in),  optional :: include_nonmanifold  !< Non-manifold edges are features (yes).
+   integer(I4P),              intent(out), optional :: degenerate           !< Edges skipped for a zero-area facet.
+   integer(I4P),              intent(out), optional :: status               !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),    allocatable                        :: v(:,:)               !< Vertices.
+   integer(I4P), allocatable                        :: fv(:,:)              !< Facets.
+   integer(I4P), allocatable                        :: e(:,:), k(:), c(:), ps(:), pv(:) !< Results.
+   real(R8P)                                        :: a, ca                !< Thresholds.
+   logical                                          :: ib, inm              !< Inclusions.
+   integer(I4P)                                     :: ndeg                 !< Degenerate count.
+
+   if (present(status)) status = STATUS_INVALID_INPUT
+   if (present(degenerate)) degenerate = 0_I4P
+   a = FEATURE_EDGE_DEFAULT_ANGLE ; if (present(angle)) a = angle
+   ca = FEATURE_EDGE_DEFAULT_ANGLE ; if (present(corner_angle)) ca = corner_angle
+   ib = .true. ; if (present(include_boundary)) ib = include_boundary
+   inm = .true. ; if (present(include_nonmanifold)) inm = include_nonmanifold
+   if (self%facets_number == 0_I4P .or. .not. (a >= 0._R8P .and. a <= 180._R8P) .or. &
+       .not. (ca >= 0._R8P .and. ca <= 180._R8P)) return
+   call deviation_mesh(self, v, fv)
+   call find_feature_edges(fv, v, a, ca, ib, inm, e, k, c, ps, pv, ndeg)
+   if (present(edges)) call move_alloc(e, edges)
+   if (present(kinds)) call move_alloc(k, kinds)
+   if (present(corners)) call move_alloc(c, corners)
+   if (present(polyline_start)) call move_alloc(ps, polyline_start)
+   if (present(polyline_vertices)) call move_alloc(pv, polyline_vertices)
+   if (present(degenerate)) degenerate = ndeg
+   if (present(status)) status = STATUS_OK
+   endsubroutine feature_edges
 
    ! pure subroutine merge_solids(self, other)
    subroutine merge_solids(self, other, status)

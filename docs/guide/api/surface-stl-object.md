@@ -718,6 +718,39 @@ end program ex_deviation
 
 ---
 
+### `feature_edges`
+
+```fortran
+call surface%feature_edges(edges, kinds, corners, polyline_start, polyline_vertices, angle, corner_angle, &
+                           include_boundary, include_nonmanifold, degenerate, status)
+```
+
+**Purpose.** The feature edges of the surface (issue #61): sharp edges (dihedral above `angle`, default 30 degrees),
+boundary edges and non-manifold edges, their kinds (`FEATURE_EDGE_SHARP`, `_BOUNDARY`, `_NONMANIFOLD`), the corners and
+the polylines between them (CSR), as vertex-pool ids.
+
+**Arguments.** All optional; `status` is `STATUS_OK` or `STATUS_INVALID_INPUT` (empty surface, angle outside [0, 180]).
+
+**Example.**
+
+```fortran
+program ex_feature_edges
+use fossil
+use penf, only : I4P
+implicit none
+type(surface_stl_object)  :: part
+integer(I4P), allocatable :: kinds(:), corners(:)
+
+call part%load_from_file(file_name='cube.stl', guess_format=.true.)
+call part%feature_edges(kinds=kinds, corners=corners)
+print '(A,I0,A,I0)', 'sharp edges ', count(kinds == FEATURE_EDGE_SHARP), ', corners ', size(corners)
+end program ex_feature_edges
+```
+
+**See also.** [Feature edges](/guide/advanced/feature-edges) (definitions, method, validation).
+
+---
+
 ## Distance and inside queries
 
 ### `distance`

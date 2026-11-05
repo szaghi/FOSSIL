@@ -32,6 +32,8 @@ use fossil_rigid_pose, only : rigid_pose_t, rigid_pose_2d_t, pose_identity, pose
                              pose_2d, pose_compose, pose_inverse, to_body, to_world, rotate, pose_interpolate
 use fossil_swept_cells, only : swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
 use fossil_mass_properties, only : inertia_to_world, principal_frame
+use fossil_feature_edges, only : FEATURE_EDGE_SHARP, FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, &
+                                 FEATURE_EDGE_DEFAULT_ANGLE
 use fossil_deviation, only : DEV_STATUS_OK, DEV_STATUS_BAD_INPUT, DEV_STATUS_NOT_CONVERGED
 use fossil_box_query, only : BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_curve_object, only : curve_object, cut_cells_2d_t, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, &
@@ -48,6 +50,7 @@ public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, po
 public :: pose_inverse, to_body, to_world, rotate, pose_interpolate
 public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
 public :: inertia_to_world, principal_frame
+public :: FEATURE_EDGE_SHARP, FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, FEATURE_EDGE_DEFAULT_ANGLE
 public :: DEV_STATUS_OK, DEV_STATUS_BAD_INPUT, DEV_STATUS_NOT_CONVERGED
 public :: curve_object, cut_cells_2d_t, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, CURVE_ZERO_AREA_LOOP, &
           CURVE_WRONG_ORIENTATION, CURVE_OPEN_LOOP, CURVE_SELF_INTERSECTING

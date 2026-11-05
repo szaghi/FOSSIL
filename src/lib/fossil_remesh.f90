@@ -26,6 +26,7 @@ module fossil_remesh
 
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object,     only : facet_object
+use fossil_feature_edges,    only : FEATURE_EDGE_DEFAULT_ANGLE, feature_cos, is_sharp_dihedral
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
 
@@ -44,7 +45,7 @@ public :: run_split_collapse_flip
 public :: run_full_pipeline
 
 integer(I4P), parameter :: MAX_VAL = 32_I4P  !< Max vertex valence supported (rectangular incidence cap).
-real(R8P),    parameter :: FEATURE_DIHEDRAL_DEG = 30._R8P  !< Sharp-edge threshold for feature detection (cos > cos(30°)).
+real(R8P),    parameter :: FEATURE_DIHEDRAL_DEG = FEATURE_EDGE_DEFAULT_ANGLE !< Sharp-edge threshold (shared, issue #61).
 
 integer(I4P), parameter :: REM_STATUS_OK        = 0_I4P
 integer(I4P), parameter :: REM_STATUS_BAD_INPUT = 1_I4P  !< Empty input or vertex_id unset.
@@ -501,7 +502,7 @@ contains
    logical,      optional,    intent(in)  :: alive(:) !< Live facets (default: all; set after the first pass).
    integer(I4P), allocatable              :: e_v(:, :), e_facets(:, :)
    integer(I4P)                           :: ne, e
-   real(R8P)                              :: cos_thr, dot_n
+   real(R8P)                              :: cos_thr
    real(R8P)                              :: n1(3), n2(3), len1, len2
    logical, allocatable                   :: facet_alive(:)
 
@@ -514,7 +515,7 @@ contains
    call build_edges_with_facets(f_v=f_v, facet_alive=facet_alive, &
                                  e_v=e_v, e_facets=e_facets, ne=ne)
 
-   cos_thr = cos(FEATURE_DIHEDRAL_DEG * 3.141592653589793_R8P / 180._R8P)
+   cos_thr = feature_cos(FEATURE_DIHEDRAL_DEG)
 
    do e = 1, ne
       if (e_facets(1, e) == 0_I4P .or. e_facets(2, e) == 0_I4P) then
@@ -529,8 +530,7 @@ contains
       len2 = sqrt(n2(1)**2 + n2(2)**2 + n2(3)**2)
       if (len1 < tiny(1._R8P) .or. len2 < tiny(1._R8P)) cycle
       n1 = n1 / len1 ; n2 = n2 / len2
-      dot_n = n1(1)*n2(1) + n1(2)*n2(2) + n1(3)*n2(3)
-      if (dot_n < cos_thr) then
+      if (is_sharp_dihedral(n1, n2, cos_thr)) then   ! the predicate of fossil_feature_edges (issue #61)
          ! Sharp edge.
          vertex_locked(e_v(1, e)) = .true.
          vertex_locked(e_v(2, e)) = .true.

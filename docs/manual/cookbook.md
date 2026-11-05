@@ -236,6 +236,15 @@ the repaired surface except where `sanitize` removed facets. `lower <= h <= uppe
 distance (certified, to 1e-3 of the bounding-box diagonal by default); `mean` and `rms` are estimates. See
 [surface deviation](/guide/advanced/surface-deviation).
 
+### Find the sharp edges of a part
+
+<<< @/examples/snippets/ck_feature_edges.f90
+
+<<< @/examples/output/ck_feature_edges.ansi{ansi}
+
+`feature_edges` reports sharp edges (30 degrees by default), boundary and non-manifold edges, with their corners and
+polylines as vertex-pool ids. See [feature edges](/guide/advanced/feature-edges).
+
 ### Decimate a mesh
 
 <<< @/examples/snippets/ck_decimate.f90

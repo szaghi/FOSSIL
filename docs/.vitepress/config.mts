@@ -52,6 +52,7 @@ const docs = [
       { text: 'Per-vertex curvature', link: '/guide/advanced/curvature' },
       { text: 'Mass properties', link: '/guide/advanced/mass-properties' },
       { text: 'Surface deviation', link: '/guide/advanced/surface-deviation' },
+      { text: 'Feature edges', link: '/guide/advanced/feature-edges' },
     ],
   },
   {
