@@ -448,33 +448,16 @@ contains
 
    function wrap_ok(label, w, st) result(ok)
    !< Status OK, watertight, manifold, no self-crossing (find_self_intersections); prints the line.
-   !< A reported pair whose facets share a vertex, have normals parallel within 1e-8 rad and do not overlap in their
-   !< plane is not counted (printed apart): find_self_intersections skips such pairs only within 1e-12 rad (issue
-   !< #46), above it pair_classify's on-plane snap (1e-10) can build a segment that is not there. Checked in exact
-   !< rational arithmetic on the 46 such pairs of the sphere wrap and the one of the dragon's (issue #50 night log):
-   !< every one meets at the shared vertex only.
    character(*),             intent(in) :: label
    type(surface_stl_object), intent(in) :: w
    integer(I4P),             intent(in) :: st
    logical                              :: ok
    type(intersection_pair_t), allocatable :: pairs(:)
-   type(facet_object), pointer          :: fa, fb
-   integer(I4P)                         :: p, n_real, n_excused
 
    call w%find_self_intersections(pairs=pairs)
-   n_real = 0 ; n_excused = 0
-   do p = 1, size(pairs)
-      fa => w%facet_at(pairs(p)%a) ; fb => w%facet_at(pairs(p)%b)
-      if (spurious_coplanar(fa, fb)) then
-         n_excused = n_excused + 1
-      else
-         n_real = n_real + 1
-      endif
-   enddo
-   print '(A,A,I0,A,I0,2(A,L1),A,I0,A,I0)', label, ': status=', st, ' n_facets=', w%get_facets_number(), &
-         ' watertight=', w%is_watertight(), ' manifold=', w%is_manifold(), ' self-crossings=', n_real, &
-         ' near-coplanar touches=', n_excused
-   ok = (st == AWRAP_STATUS_OK) .and. w%is_watertight() .and. w%is_manifold() .and. (n_real == 0)
+   print '(A,A,I0,A,I0,2(A,L1),A,I0)', label, ': status=', st, ' n_facets=', w%get_facets_number(), &
+         ' watertight=', w%is_watertight(), ' manifold=', w%is_manifold(), ' self-crossings=', size(pairs)
+   ok = (st == AWRAP_STATUS_OK) .and. w%is_watertight() .and. w%is_manifold() .and. (size(pairs) == 0)
    endfunction wrap_ok
 
    function offset_ok(input, w, eps) result(ok)
@@ -500,56 +483,6 @@ contains
          real(n_on, R8P) / real(n_all, R8P)
    ok = (dmin >= 0.5_R8P * eps) .and. (real(n_on, R8P) >= 0.9_R8P * real(n_all, R8P))
    endfunction offset_ok
-
-   function spurious_coplanar(fa, fb) result(yes)
-   !< Two facets sharing a vertex, normals parallel within 1e-8 rad, no overlap in the plane (2-D separating axes
-   !< on the edges of either, projected along the dominant normal component).
-   type(facet_object), intent(in) :: fa, fb
-   logical                        :: yes
-   real(R8P)                      :: na(3), nb(3), a(2, 3), b(2, 3)
-   integer(I4P)                   :: i, j, shared, drop
-
-   yes = .false.
-   shared = 0
-   do i = 1, 3
-      do j = 1, 3
-         if (fa%vertex(i)%x == fb%vertex(j)%x .and. fa%vertex(i)%y == fb%vertex(j)%y .and. &
-             fa%vertex(i)%z == fb%vertex(j)%z) shared = shared + 1
-      enddo
-   enddo
-   if (shared /= 1) return
-   na = [fa%normal%x, fa%normal%y, fa%normal%z] ; nb = [fb%normal%x, fb%normal%y, fb%normal%z]
-   if (norm2([na(2) * nb(3) - na(3) * nb(2), na(3) * nb(1) - na(1) * nb(3), na(1) * nb(2) - na(2) * nb(1)]) > 1.e-8_R8P) return
-   drop = maxloc(abs(na), dim=1)
-   do i = 1, 3
-      a(:, i) = pack([fa%vertex(i)%x, fa%vertex(i)%y, fa%vertex(i)%z], [1, 2, 3] /= drop)
-      b(:, i) = pack([fb%vertex(i)%x, fb%vertex(i)%y, fb%vertex(i)%z], [1, 2, 3] /= drop)
-   enddo
-   yes = separated(a, b) .or. separated(b, a)
-   endfunction spurious_coplanar
-
-   pure function separated(p, q) result(sep)
-   !< Is there an edge of p with all of q on its outer side or on it (relative 1e-9)?
-   real(R8P), intent(in) :: p(2, 3), q(2, 3)
-   logical               :: sep
-   real(R8P)             :: e(2), sq(3), inner
-   integer(I4P)          :: i, j, k, m
-
-   sep = .false.
-   do i = 1, 3
-      j = mod(i, 3) + 1 ; k = mod(j, 3) + 1
-      e = p(:, j) - p(:, i)
-      inner = e(1) * (p(2, k) - p(2, i)) - e(2) * (p(1, k) - p(1, i))
-      if (inner == 0._R8P) cycle
-      do m = 1, 3
-         sq(m) = sign(1._R8P, inner) * (e(1) * (q(2, m) - p(2, i)) - e(2) * (q(1, m) - p(1, i)))
-      enddo
-      if (all(sq <= 1.e-9_R8P * abs(inner))) then
-         sep = .true.
-         return
-      endif
-   enddo
-   endfunction separated
 
    subroutine check_node_properties(octree, facets, alpha, max_depth, max_leaf_size, &
                                     n_false_pos, n_false_neg)
