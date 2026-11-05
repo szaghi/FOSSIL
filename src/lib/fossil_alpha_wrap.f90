@@ -1766,7 +1766,7 @@ contains
                   if (plane_relation(tb, ta) == PLANE_APART) cycle
                   kind = float_pair(ta, tb)
                   if (kind == 1_I4P) then ; t1 = tc ; return ; endif
-                  if (kind == 0_I4P) cycle
+                  if (kind == 0_I4P .or. kind == 2_I4P) cycle ! a point contact is not a crossing
                   call pair_classify(ta=ta, tb=tb, kind=kind, p=p, q=q)
                   if (kind == PAIR_CROSSING) then
                      t1 = tc
@@ -1960,16 +1960,18 @@ contains
    !< Floating-point crossing test of two triangles that meet each other's planes (a common vertex, bit for bit, or a
    !< vertex within a relative AWRAP_FLOAT_ON of a plane lies on it): each meets the other's plane in a segment on the
    !< planes' common line, and they cross iff the two segments overlap with positive length. 1: crossing, 0: not,
-   !< -1: not decided here, left to the exact pair_classify (a vertex within AWRAP_FLOAT_BAND of a plane but not on
-   !< it, a section that is not one segment, or, without a common vertex, an overlap within AWRAP_FLOAT_BAND of zero).
+   !< 2: they meet at a single point at most (a section is one point: a vertex on the other plane, the rest on one
+   !< side), -1: not decided here, left to the exact pair_classify (a vertex within AWRAP_FLOAT_BAND of a plane but not
+   !< on it, a section of three points, or, without a common vertex, an overlap within AWRAP_FLOAT_BAND of zero).
    type(vector_R8P), intent(in) :: ta(3), tb(3)
    integer(I4P)                 :: res
    real(R8P)                    :: xa(3, 2), xb(3, 2), l(3), sa(2), sb(2), ov, scale
    logical                      :: ok, shared
+   integer(I4P)                 :: m1
 
    res = -1_I4P
-   call section(ta, tb, xa, ok, shared) ; if (.not. ok) return
-   call section(tb, ta, xb, ok, shared) ; if (.not. ok) return
+   call section(ta, tb, xa, ok, shared, m1) ; if (.not. ok) then ; if (m1 == 1_I4P) res = 2_I4P ; return ; endif
+   call section(tb, ta, xb, ok, shared, m1) ; if (.not. ok) then ; if (m1 == 1_I4P) res = 2_I4P ; return ; endif
    l = cross_arr(normal3(ta), normal3(tb))
    if (norm2(l) == 0._R8P) return
    sa = [dot_product(xa(:, 1), l), dot_product(xa(:, 2), l)]
@@ -1982,15 +1984,16 @@ contains
       res = 0_I4P ! both sections start at the common vertex (the same bits): no overlap beyond it is a touch there
    endif
    contains
-      pure subroutine section(t, o, x, ok, shared)
+      pure subroutine section(t, o, x, ok, shared, m)
       !< The two points where t meets o's plane: its vertices on the plane (a common vertex, bit for bit, or within the
       !< tolerance), and the crossings of its edges whose ends are strictly on either side.
       type(vector_R8P), intent(in)  :: t(3), o(3)
       real(R8P),        intent(out) :: x(3, 2)
       logical,          intent(out) :: ok, shared
+      integer(I4P),     intent(out) :: m
       real(R8P)                     :: n(3), d(3), tol, v(3, 3)
       logical                       :: on(3)
-      integer(I4P)                  :: i, j, m
+      integer(I4P)                  :: i, j
 
       n = normal3(o)
       tol = 0._R8P
@@ -2002,6 +2005,7 @@ contains
       enddo
       shared = any(on)
       ok = .false.
+      m = -1_I4P
       if (any(.not. on .and. abs(d) > AWRAP_FLOAT_ON * norm2(n) * tol .and. abs(d) <= AWRAP_FLOAT_BAND * norm2(n) * tol)) return
       on = on .or. abs(d) <= AWRAP_FLOAT_ON * norm2(n) * tol
       m = 0_I4P
