@@ -1681,21 +1681,22 @@ endprogram ex_resolve_self_intersections_api
 call surface%alpha_wrap(alpha=0.1_R8P, offset=0.033_R8P, wrapped=wrapped, status=status)
 ```
 
-**Purpose.** Alpha wrapping (Portaneri 2022) — produce a guaranteed
-**watertight, 2-manifold** surface within Hausdorff offset `ε` of the
-input, regardless of how broken the input is (holes, self-intersections,
-non-manifold patches, missing facets). The standard "make any CAD junk
-usable for CFD" primitive. Conceptual overview, 5-stage pipeline, and
-the documented MVP gap (single-pass; no adaptive refinement) on the
+**Purpose.** Alpha wrapping (Portaneri 2022) — a **watertight,
+2-manifold** surface around any input, however broken (holes,
+self-intersections, non-manifold patches, missing facets): the boundary
+of the space a ball of diameter `alpha` carves from outside, laid at
+distance `offset` from the input. Gaps wider than about
+`alpha + 2 offset` are kept (both sides wrapped), narrower ones are
+capped. Pipeline, measured behaviour and limitations on the
 [§1.6 feature page](/guide/advanced/alpha-wrap).
 
 **Arguments.**
 
 | Argument         | Intent       | Type                       | Notes                                                                                                                                  |
 | ---------------- | ------------ | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `alpha`          | `in`, opt.   | `real(R8P)`                | Octree leaf-size target. Default `bbox_diag / 50` (CGAL's recommendation). Smaller = more detail and bigger output mesh.               |
-| `offset`         | `in`, opt.   | `real(R8P)`                | Hausdorff bound for vertex projection. Default `alpha / 30`. Vertices farther than this from the input stay put; status reports if any did. |
-| `max_iterations` | `in`, opt.   | `integer(I4P)`             | Reserved for future §1.6b adaptive-refinement loop. Currently ignored; MVP is single-pass.                                             |
+| `alpha`          | `in`, opt.   | `real(R8P)`                | Diameter of the carving ball. Default `bbox_diag / 50` (CGAL's recommendation). The output has about `(4/alpha)^2` triangles per unit area. |
+| `offset`         | `in`, opt.   | `real(R8P)`                | Distance of the wrap from the input. Default `alpha / 30`.                                                                             |
+| `max_iterations` | `in`, opt.   | `integer(I4P)`             | Grid levels of the refinement loop (cell size `alpha/4`, halved per level). Default 5.                                                 |
 | `wrapped`        | `out`        | `type(surface_stl_object)` | (required) Fresh output surface. `self` is unchanged.                                                                                  |
 | `status`         | `out`, opt.  | `integer(I4P)`             | `AWRAP_STATUS_OK / _NOT_CONVERGED / _BAD_INPUT / _DEGENERATE`.                                                                         |
 
@@ -1717,11 +1718,13 @@ endprogram ex_alpha_wrap_api
 
 **Notes.**
 
-- **`AWRAP_STATUS_NOT_CONVERGED` is normal at default α / offset** —
-  some vertices are at the α-thick boundary band rather than snapped to
-  the input. Wrap topology is still correct (watertight + manifold);
-  only the Hausdorff bound was missed for those vertices. Tighten α
-  for closer geometric snap at the cost of a larger output.
+- **`AWRAP_STATUS_OK`** means the wrap encloses the input without
+  touching it and does not cross itself; **`AWRAP_STATUS_NOT_CONVERGED`**
+  that the finest grid level allowed still had a defect there. The wrap
+  is closed and 2-manifold in both cases.
+- A gap wider than the ball is a feature: the wrap of an open box lines
+  both sides of its walls (a thin hollow shell). Check `get_volume()`,
+  not only `is_watertight()`.
 - **For dirty-input use cases** (the whole point of the algorithm),
   prefer `alpha_wrap` over running `sanitize` followed by `boolean`
   — the latter assumes a watertight input which `sanitize` cannot

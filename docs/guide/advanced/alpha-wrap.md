@@ -7,16 +7,18 @@ title: Alpha wrapping
 ## What it does
 
 Takes any triangle soup — broken, holed, self-intersecting,
-non-manifold, or all of the above — and wraps it in a surface at the
-scale `α`. The goal (Portaneri et al. 2022) is a watertight,
-2-manifold wrap within Hausdorff offset `ε` of the input, the standard
-"make any CAD junk usable for CFD" primitive. **The current MVP does
-not guarantee it** (issue #50, measured below): the wrap is the
-`α`-voxel shell of the input with the vertices already within `ε`
-snapped onto it, the status is `AWRAP_STATUS_NOT_CONVERGED` on every
-input measured, and the default wrap of `dragon.stl` is neither
-watertight nor manifold. Check `is_watertight()`, `is_manifold()` and
-`get_volume()` of the result.
+non-manifold, or all of the above — and wraps it in a closed,
+2-manifold surface at the scale `α` and the offset `ε` (Portaneri et
+al. 2022), the "make any CAD junk usable for CFD" primitive. The wrap
+is the boundary of the space a ball of diameter `α` carves from
+outside, laid on the surface at distance `ε` from the input:
+
+- a gap wider than about `α + 2ε` lets the ball in, and the wrap lines
+  both of its sides (a gap is a feature to keep);
+- a narrower gap, a hole or a crack, is closed by a cap where the ball
+  stops;
+- everywhere the ball reaches the input, the wrap lies on the
+  `ε`-offset surface.
 
 The existing `surface%sanitize` pipeline only fixes *local* defects:
 degenerate facets, duplicate facets, near-coincident vertices, normal
@@ -29,36 +31,46 @@ solid. Alpha wrapping is what makes that assumption true.
 
 ## Pipeline
 
-Five stages (Portaneri et al. SIGGRAPH 2022, with FOSSIL's MVP
-simplification at stage 5):
+Portaneri et al. carve a 3-D Delaunay triangulation. FOSSIL carves a
+uniform grid of cells of size `h` (`α/4` at first) instead, with the
+same rule, and puts the vertices on the offset surface (issue #50):
 
-1. **Leaf-size-α octree.** Build an octree over the input facets where
-   every leaf is at most `α` across in any dimension. SAT triangle-vs-
-   AABB filtering at every node decides which leaves overlap input
-   geometry (BOUNDARY) and which don't (EMPTY). Root bbox padded by
-   `2α` so the corner is provably empty of input.
-2. **Inside / outside flood fill.** Starting from the (-x,-y,-z)
-   corner leaf (always EMPTY by step 1's padding), 6-connectivity
-   BFS marks reached EMPTY leaves as OUTSIDE. BOUNDARY leaves are
-   barriers. EMPTY leaves not reached become INSIDE.
-3. **Boundary surface extraction.** For each face of every BOUNDARY
-   leaf where the neighbour leaf is OUTSIDE, emit a quad (two
-   triangles) sized to that face. This produces a watertight
-   2-manifold by construction: every face is shared by exactly two
-   leaves, and we emit iff the classification disagrees.
-4. **Vertex projection.** Lex-sort vertices for deduplication
-   (per-facet copies of a shared vertex would project independently
-   and tear the mesh). For each unique vertex, query the input AABB
-   tree for closest-point; if the gap ≤ `offset`, snap. A vertex
-   farther than `offset` stays where it is (issue #50): the octree
-   corners lie up to about `α√3` from the input while `offset`
-   defaults to `α/30`, so almost every vertex stays. Synchronous
-   sweeps (3 by default) for stable convergence. Area-drop revert
-   prevents triangle collapse during projection.
-5. **Single-pass capstone TBP.** `surface%alpha_wrap(...)` runs steps
-   1-4 once, reports convergence (`AWRAP_STATUS_NOT_CONVERGED` if any
-   vertex still > offset from input). The Portaneri adaptive-
-   refinement outer loop is a documented MVP gap (see Limitations).
+1. **Distance.** The unsigned distance `u` to the input at every cell
+   centre, by the input's AABB tree. Blocks of cells far from the
+   input are culled.
+2. **Flood fill.** Free cells are those where the ball fits outside
+   the offset surface, `u > α/2 + ε`. A flood fill from the grid
+   corner over free cells gives the reached set: where the ball's
+   centre can go from outside. Cavities it cannot reach are filled.
+3. **Carving.** A cell is carved if a ball whose centre is reachable
+   covers it, which holds within `u(r) − ε` of a reached centre `r`.
+   That is an exact power-distance transform, separable like the
+   squared distance transform. A cell that touches the input is never
+   carved, so the input always lies in solid cells, even a sheet of
+   zero thickness carved on both sides. This is the offset-surface
+   barrier: the two sides of a wall are separate surfaces and never
+   collapse onto each other.
+4. **Well-composed.** Carved cells are turned solid until no 2×2
+   square has a checkerboard and no 2×2×2 block has an isolated
+   diagonal pair. Marching Cubes on such a lattice gives a closed
+   2-manifold.
+5. **Extraction.** Marching Cubes on the cell centres. Each
+   carved–solid edge gets one vertex, computed once:
+   - the first point from the carved centre where `u = ε` (sphere
+     tracing, which never passes the first root, so it stays on the
+     carved side of any wall);
+   - if the edge never comes within `ε` of the input, its midpoint
+     projected onto the offset surface;
+   - on a cap, the point where the carving balls end.
+6. **Repair.** A triangle that meets the input, or crosses another
+   wrap triangle, has its vertices moved halfway back towards their
+   cell faces, where the Marching Cubes surface is embedded, for up to
+   6 rounds. A chord across a convex edge of the input, with its ends
+   on the offset surface, cuts the input when the cells are larger
+   than `ε`. The contact test is exact (`orient3d`); the crossing test
+   is in floating point, with the exact test inside a `1e-8` band.
+7. **Refinement loop.** A level that still has a defect is redone with
+   `h/2`, up to `max_iterations` levels (default 5) and `2^23` cells.
 
 ## API
 
@@ -67,38 +79,34 @@ call surface%alpha_wrap(alpha, offset, max_iterations, wrapped, status)
    class(surface_stl_object), intent(in)            :: self
    real(R8P),                 intent(in),  optional :: alpha          ! default bbox_diag/50
    real(R8P),                 intent(in),  optional :: offset         ! default alpha/30
-   integer(I4P),              intent(in),  optional :: max_iterations ! reserved (MVP single-pass)
+   integer(I4P),              intent(in),  optional :: max_iterations ! grid levels, default 5
    type(surface_stl_object),  intent(out)           :: wrapped
    integer(I4P),              intent(out), optional :: status         ! AWRAP_STATUS_*
 ```
 
-- **`alpha`** is the leaf-size target. Smaller = more detail and
-  larger output mesh (octree depth grows). Default `bbox_diag / 50`
-  follows CGAL's `Alpha_wrap_3` recommendation. Cap at depth 12
-  (`AWRAP_MAX_DEPTH`) keeps tree size bounded; with default α the
-  cap rarely fires.
-- **`offset`** is the Hausdorff distance bound for vertex projection.
-  Smaller = wrap snaps closer to input but more vertices stay outside
-  the bound (returns NOT_CONVERGED). Default `alpha / 30` per CGAL.
-- **`max_iterations`** is reserved for the future §1.6b adaptive-
-  refinement loop and is currently ignored.
-- **`wrapped`** is a fresh output surface — `self` is unchanged.
+- **`alpha`** is the diameter of the carving ball: the scale below
+  which gaps are closed. The defaults follow CGAL's `Alpha_wrap_3`.
+  The output has about `(4/α)²` triangles per unit of area, so halving
+  `alpha` quadruples it.
+- **`offset`** is the distance from the input at which the wrap lies.
+- **`max_iterations`** is the number of grid levels the refinement
+  loop may use.
+- **`wrapped`** is a fresh output surface; `self` is unchanged.
 - **`status`**:
-  - `AWRAP_STATUS_OK` — pipeline ran cleanly and every vertex is
-    within `offset` of the input.
-  - `AWRAP_STATUS_NOT_CONVERGED` — some vertices stayed outside the
-    Hausdorff bound. With the MVP projection this is the status of
-    every input measured (issue #50). The wrap is not guaranteed
-    watertight or 2-manifold: check it.
-  - `AWRAP_STATUS_BAD_INPUT` — empty surface, `alpha ≤ 0`, or
+  - `AWRAP_STATUS_OK`: the wrap encloses the input without touching
+    it and does not cross itself.
+  - `AWRAP_STATUS_NOT_CONVERGED`: the finest level allowed still has a
+    triangle that touches the input or crosses the wrap. The wrap of
+    that level is returned, still closed and 2-manifold.
+  - `AWRAP_STATUS_BAD_INPUT`: empty surface, `alpha ≤ 0`, or
     `offset ≤ 0`.
-  - `AWRAP_STATUS_DEGENERATE` — `alpha` larger than the input bbox
-    diagonal; octree can't refine. Output is the trivial 1-leaf wrap.
+  - `AWRAP_STATUS_DEGENERATE`: `alpha` at least the input's bounding
+    box diagonal. The wrap is empty.
 
 ## Example
 
-A "broken" cube — input minus one facet — wrapped back into a
-watertight surrogate:
+A "broken" cube, `cube.stl` minus one facet (a triangular hole of
+inradius 0.29), wrapped twice:
 
 ```fortran
 program ex_alpha_wrap
@@ -122,131 +130,104 @@ enddo
 call holed%adopt_facets(facets=holed_facets)
 print '(A,L1)', 'input watertight? ', holed%is_watertight()  ! .false. — has a hole
 
-! Alpha-wrap with CGAL defaults.
-call holed%alpha_wrap(wrapped=wrapped, status=status)
+! A ball larger than the hole: the wrap caps it.
+call holed%alpha_wrap(alpha=0.6_R8P, wrapped=wrapped, status=status)
 print '(A,I0,A,L1,A,F8.4)', 'output status=', status, &
       '  watertight? ', wrapped%is_watertight(), &
       '  vol = ', wrapped%get_volume()
 endprogram ex_alpha_wrap
 ```
 
-`wrapped%is_watertight()` is `.true.` even though the input wasn't.
-`status` is `AWRAP_STATUS_NOT_CONVERGED` (some vertices are at the
-α-thick boundary band rather than snapped exactly to the input
-surface). Watertight is not solid, though: the missing facet is half a
-face, far wider than the default α, so the wrap is a thin closed shell
-around both sides of the walls (volume 0.10, not 1; see the figures
-below). Check `get_volume()`, not only `is_watertight()`.
+With `alpha = 0.6` the ball cannot pass the hole: `status` is
+`AWRAP_STATUS_OK`, the wrap is watertight and manifold, and its volume
+is 1.109. The cube grown by the offset (0.02) has volume 1.124; the
+difference is the dimple the cap makes into the hole. With the default
+`alpha` (0.035) the hole is far wider than the ball. The wrap is then
+one closed shell lining both sides of every wall, of volume 0.0135 and
+not a solid. Check `get_volume()`, not only `is_watertight()`.
 
 ## Visual reference
 
-A unit cube minus one facet, as in the example above (`cube-01.stl`, 8
-facets per face, minus its first facet: a triangle of legs 0.5 on the
-face x = 0, its boundary in ember):
+A unit cube minus one facet (`cube-01.stl`, 8 facets per face, minus
+its first facet: a triangle of legs 0.5 on the face x = 0, its
+boundary in ember):
 
 ![the unit cube minus one facet: a triangular hole of legs 0.5 on the face x = 0, its boundary in ember](../../examples/images/ref-alpha-wrap-input.svg){.fossil-figure}
 
-After `alpha_wrap` with α=0.1 and offset=0.033 (about three times
-CGAL's default α, which is `bbox_diag / 50` ≈ 0.035 for a unit cube),
-cut open by the plane y = 0.83 through the hole:
+After `alpha_wrap` with `alpha` 0.15 and `offset` 0.033, cut open by
+the plane y = 0.83 through the hole:
 
-![the wrap cut open through the hole: a voxel-y closed shell lining both the outside and the inside of the cube's walls, entering through the hole](../../examples/images/ref-alpha-wrap-output.svg){.fossil-figure}
+![the wrap cut open through the hole: one closed shell lining both sides of every wall at the offset, two layers 0.066 apart, entering through the hole](../../examples/images/ref-alpha-wrap-output.svg){.fossil-figure}
 
-The wrap shows the characteristic voxel-y texture from the leaf-size-
-α octree boundary extraction, and it is watertight, but **the hole is
-not closed**. The hole is wider than α, so the flood fill of stage 2
-gets through it and reaches the inside: the wrap is one closed shell
-that lines both sides of the cube's walls and enters through the hole,
-volume 0.35 instead of the cube's 1. This is what an alpha wrap does
-by design (a gap wider than α is a feature to keep, not a defect).
-Closing the hole takes α larger than it: with α = 0.3 (default offset) the wrap is
-the solid again, but a coarse 1.1-wide box (volume 1.331), since
-nothing snaps its vertices back to the input. The wrap extends beyond
-the input on every side (bounding box [-0.025, 1.025]³ at α = 0.1).
+The ball, of diameter 0.15, fits through the hole (inradius 0.146 >
+0.075 + 0.033). The wrap is one closed shell: one layer outside each
+wall, one inside, 2ε apart, joined around the rim of the hole. The
+barrier keeps the two layers apart: a cell touching the wall is never
+carved, so each layer's vertices are traced from its own side.
+
+With `alpha` 0.6 (and `offset` 0.02) the ball does not fit, and the
+wrap closes the hole with a cap that dips into it:
+
+![the wrap of alpha 0.6 cut open the same way: the solid cube grown by the offset, the hole closed by a cap that dips into it](../../examples/images/ref-alpha-wrap-capped.svg){.fossil-figure}
 
 ## Known limitations
 
-- **Measured behaviour (issue #50).** `cube-01.stl` (closed) and the same
-  cube without one facet, default `offset`:
+- **Measured behaviour (issue #50).** `cube-01.stl` (closed) and the
+  same cube without one facet, default `offset` (`α/30`). Every wrap
+  is status OK, watertight and manifold:
 
-  | `α` | closed: volume, watertight/manifold | holed: volume, watertight/manifold | status |
-  |---|---|---|---|
-  | 0.035 | 1.103, T/T | 0.108, T/T | NOT_CONVERGED |
-  | 0.1 | 1.158, T/T | 0.484, T/T | NOT_CONVERGED |
-  | 0.3 | 1.331, T/T | 1.331, T/T | NOT_CONVERGED |
-  | 0.7 | 6.859, T/T | 6.859, T/T | NOT_CONVERGED |
+  | `α` | closed: volume, facets | holed: volume, facets |
+  |---|---|---|
+  | 0.035 | 1.007, 161468 | 0.014, 309188 |
+  | 0.1 | 1.020, 20168 | 0.048, 37928 |
+  | 0.3 | 1.060, 2696 | 1.059, 2728 |
+  | 0.7 | 1.143, 584 | 1.143, 584 |
 
-  The closed cube's wrap is the voxel shell: at `α = 0.7` its volume is
-  1.9³, the box grown by `α` on every side. Below `α ≈ 0.3` the hole is
-  wider than `α`, the flood fill gets inside, and the wrap lines both
-  sides of the walls (a thin hollow shell). `dragon.stl` with the
-  defaults: NOT_CONVERGED, neither watertight nor manifold. Moving the
-  far vertices towards the input brings the closed cube to volume ≈ 1.00
-  but collapses the two sides of the holed cube's shell onto one wall
-  (non-watertight): the fix needs the offset-surface barrier and the
-  refinement loop below, not the projection alone.
+  The closed cube's volume is the cube grown by the offset,
+  `(1 + 2ε)³` less the rounding of the edges and corners: at
+  `α = 0.1` the Minkowski sum is 1.0201. The hole (inradius 0.146)
+  lets the ball in for `α/2 + ε < 0.146`, that is `α < 0.27`, but the
+  flood fill needs a cell centre where the ball fits, so on the grid
+  the hole closes earlier: open at `α = 0.1` and 0.15, closed at 0.2
+  (cells of `α/4`). Below the threshold the wrap is a hollow shell. `dragon.stl` with the defaults is status OK, watertight and
+  manifold, with 126916 facets and volume 484.2 (the dragon's is
+  465.9); 97% of its vertices lie on the offset surface.
 
-- **MVP is single-pass; no adaptive refinement.** The original step-5
-  plan was an outer loop that re-runs steps 2-4 after splitting
-  BOUNDARY leaves whose vertices didn't snap within ε. It was
-  implemented end-to-end (with 2:1 balance enforcement) but pivoted
-  to single-pass after testing — the face-quad extraction in step 3
-  is correct only on uniform-depth octrees, and adaptive refinement
-  creates depth-differential leaves that produce T-junction edges →
-  non-manifold by construction. 2:1 balance is insufficient (even
-  depth-diff = 1 produces 1-quad-vs-4-quads T-junctions). Closing
-  the gap requires either Ju 2002 manifold-preserving QEF dual
-  contouring (~300 LOC) or polygon fan-out at refinement transitions
-  (~150 LOC). Both are substantial extensions; deferred to **§1.6b
-  follow-up**. The `max_iterations` parameter is retained in the API
-  for stability across that future upgrade.
+- **Output size and time.** Cells of `α/4` give many more triangles
+  than Portaneri's (whose triangles are of size `α`): 161k for the
+  closed `cube-01` at the default `α`. The time grows with the output
+  (its `analyze`, and the repair pass's checks): 20 s for the closed
+  `cube-01` at the default `α`, 200 s for the holed one (309k facets),
+  single core.
+  Decimate the wrap (`surface%decimate`) if its size matters.
 
-- **Inputs with large geometric defects may not converge.** A hole
-  spanning a substantial fraction of one face leaks the flood fill
-  through and prevents the wrap from closing along the hole's
-  silhouette. The MVP returns NOT_CONVERGED in such cases; for
-  smaller defects (gaps ≤ a few α), the wrap closes the hole at the
-  leaf scale (as the holed-cube example above demonstrates).
-  Closing arbitrarily-large defects requires CGAL's offset-isosurface
-  barrier formulation (also §1.6b).
+- **Vertices off the offset surface.** On caps the wrap lies where
+  the ball stops, up to about `α/2 + ε` from the input. A vertex the
+  repair pass moved lies between the offset surface and its cell
+  face, which can be closer than `ε`: 0.85 `ε` at the closest on a
+  coarse marching-cubes sphere, with 98% of its vertices on the offset
+  surface. Portaneri's wrap never comes closer than `ε`.
 
-- **Voxel-y appearance.** The wrap surface is axis-aligned at the
-  leaf scale until vertex projection in step 4 smooths it toward the
-  input. With default α and offset ratios, ~80-90% of vertices snap
-  within bound; the rest stay axis-aligned. Sharper detail recovery
-  needs smaller α (which scales the output mesh size as `α^-2`) or
-  the §1.6b adaptive refinement.
-
-- **Octree depth capped at 12** (`AWRAP_MAX_DEPTH`). At default α
-  this caps the smallest leaf at `bbox_diag / 50 / 2^11 ≈ 1e-5 ×
-  bbox_diag`, more than fine enough for typical CAD. For
-  pathological inputs (microscale features in a large bbox), the cap
-  prevents the octree from refining further and the wrap loses
-  detail at those features.
-
-- **Performance**: typical CAD STL with ~10k facets at default α
-  produces a wrap of ~5k facets in ~0.5 s on a single core. Memory
-  use is dominated by the octree node array (~10 MB for ~70k
-  leaves). Inputs >1M facets work but the SAT filtering becomes the
-  bottleneck (~`O(facets × leaves)` worst case); consider
-  decimating first via `surface%decimate(...)`.
+- **Concave detail below `α`** is not carved, by design. The ball
+  does not enter a groove narrower than `α + 2ε`, so the wrap bridges
+  it.
 
 ## See also
 
 - [`surface%alpha_wrap` API entry](/guide/api/surface-stl-object#alpha_wrap) —
   the formal signature with intent declarations.
-- [Constants](/guide/api/constants) — `AWRAP_STATUS_*`.
+- [Marching Cubes](/guide/advanced/marching-cubes) — the extraction
+  stage, here on a binary lattice.
 - [`surface%sanitize`](/guide/api/surface-stl-object#sanitize) — for
   inputs that are *already* manifold-modulo-local-defects (degenerate
   / duplicate facets, near-coincident vertices). `sanitize` is much
   cheaper than `alpha_wrap`; reach for `alpha_wrap` only when
   sanitize cannot recover the topology.
-- [`surface%decimate`](/guide/api/surface-stl-object) — useful as a
-  pre-processing pass for million-facet inputs to reduce the SAT
-  filtering cost.
-- The [§1.6 implementation issue](https://github.com/szaghi/FOSSIL/issues/18)
-  has the full 5-commit history including the mid-implementation
-  pivot from adaptive-refinement to single-pass.
+- [`surface%decimate`](/guide/api/surface-stl-object) — to coarsen the
+  wrap.
+- Issue [#50](https://github.com/szaghi/FOSSIL/issues/50): the
+  diagnosis of the first, voxel-shell implementation and the design of
+  this one.
 
 ## References
 
@@ -255,6 +236,9 @@ the input on every side (bounding box [-0.025, 1.025]³ at α = 0.1).
 - CGAL `Alpha_wrap_3` package documentation. The reference
   implementation that defines the canonical defaults (α =
   bbox_diag/50, offset = α/30) FOSSIL inherits.
-- Ju, Losasso, Schaefer & Warren, *Dual Contouring of Hermite Data*,
-  SIGGRAPH 2002. The proper dual-contouring with manifold-
-  preserving vertex placement that §1.6b would adopt.
+- Felzenszwalb & Huttenlocher, *Distance Transforms of Sampled
+  Functions*, Theory of Computing 8 (2012). The separable transform
+  used for the carving.
+- Lorensen & Cline, *Marching Cubes*, SIGGRAPH 1987; Latecki,
+  *Discrete Representation of Spatial Objects in Computer Vision*
+  (1998), on well-composed sets.
