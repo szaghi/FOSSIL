@@ -1694,7 +1694,7 @@ capped. Pipeline, measured behaviour and limitations on the
 
 | Argument         | Intent       | Type                       | Notes                                                                                                                                  |
 | ---------------- | ------------ | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `alpha`          | `in`, opt.   | `real(R8P)`                | Diameter of the carving ball. Default `bbox_diag / 50` (CGAL's recommendation). The output has about `(4/alpha)^2` triangles per unit area. |
+| `alpha`          | `in`, opt.   | `real(R8P)`                | Diameter of the carving ball. Default `bbox_diag / 50` (CGAL's recommendation). The wrap is coarsened to edges of about `alpha/2`.             |
 | `offset`         | `in`, opt.   | `real(R8P)`                | Distance of the wrap from the input. Default `alpha / 30`.                                                                             |
 | `max_iterations` | `in`, opt.   | `integer(I4P)`             | Grid levels of the refinement loop (cell size `alpha/4`, halved per level). Default 5.                                                 |
 | `wrapped`        | `out`        | `type(surface_stl_object)` | (required) Fresh output surface. `self` is unchanged.                                                                                  |

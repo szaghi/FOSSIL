@@ -4,7 +4,7 @@
 !fig ref-alpha-wrap-capped
 !< Figures of the reference page "Alpha wrapping": the unit cube minus its first facet (the page's broken input; the
 !< hole's boundary in ember, the camera looking at it); then holed%alpha_wrap(alpha=0.15, offset=0.033), cut open by
-!< the plane y = the hole's centroid (the wrap facets on the near side are not drawn): the hole is wider than the ball,
+!< the plane y = the hole's centroid (each wrap facet cut by it, the near side not drawn): the hole is wider than the ball,
 !< so the wrap is one closed shell lining both sides of every wall, two offset layers kept apart by the barrier;
 !< then holed%alpha_wrap(alpha=0.6), cut the same way: the ball does not fit through the hole, the wrap caps it.
 program fig_ref_alpha_wrap
@@ -12,6 +12,7 @@ use fossil,              only : surface_stl_object, AWRAP_STATUS_OK
 use fossil_facet_object, only : facet_object
 use fossil_fig,          only : fig_open, fig_surface, fig_boundary, fig_triangle, fig_close
 use penf,                only : I4P, R8P
+use vecfor,              only : vector_R8P
 
 implicit none
 real(R8P), parameter                    :: DEG = 57.29577951308232_R8P
@@ -55,8 +56,28 @@ contains
    call fig_open(u, name, trim(caption), azimuth, elevation)
    do j = 1, wrapped%get_facets_number()
       f => wrapped%facet_at(j)
-      if (f%centroid%y <= cut) call fig_triangle(u, 'body', f%vertex(1), f%vertex(2), f%vertex(3))
+      call draw_cut(f%vertex)
    enddo
    call fig_close(u)
    endsubroutine cutaway
+
+   subroutine draw_cut(t)
+   !< The part of triangle t with y <= cut (Sutherland-Hodgman on one plane): a triangle or a quad, drawn as triangles.
+   type(vector_R8P), intent(in) :: t(3) !< Triangle.
+   type(vector_R8P)             :: poly(4), a, b
+   integer(I4P)                 :: k, m
+   real(R8P)                    :: da, db
+
+   m = 0
+   do k = 1, 3
+      a = t(k) ; b = t(mod(k, 3) + 1)
+      da = a%y - cut ; db = b%y - cut
+      if (da <= 0._R8P) then ; m = m + 1 ; poly(m) = a ; endif
+      if (da * db < 0._R8P) then
+         m = m + 1 ; poly(m) = a + (da / (da - db)) * (b - a)
+      endif
+   enddo
+   if (m >= 3) call fig_triangle(u, 'body', poly(1), poly(2), poly(3))
+   if (m == 4) call fig_triangle(u, 'body', poly(1), poly(3), poly(4))
+   endsubroutine draw_cut
 endprogram fig_ref_alpha_wrap

@@ -70,7 +70,14 @@ same rule, and puts the vertices on the offset surface (issue #50):
    on the offset surface, cuts the input when the cells are larger
    than `ε`. The contact test is exact (`orient3d`); the crossing test
    is in floating point, with the exact test inside a `1e-8` band.
-7. **Refinement loop.** A level that still has a defect is redone with
+7. **Coarsening.** Edges shorter than `α/2` are collapsed onto one
+   of their ends, cheapest first by the quadric error of the planes
+   around them (issue #52). A collapse is accepted only if the wrap
+   stays a closed 2-manifold and no moved triangle flips, becomes a
+   sliver (shape quality below 0.2), meets the input or crosses the
+   wrap. The kept end is a wrap vertex, so every vertex stays at `ε` or
+   farther. This removes 80% to 95% of the triangles.
+8. **Refinement loop.** A level that still has a defect is redone with
    `h/2`, up to `max_iterations` levels (default 5) and `2^23` cells.
 
 ## API
@@ -87,8 +94,8 @@ call surface%alpha_wrap(alpha, offset, max_iterations, wrapped, status)
 
 - **`alpha`** is the diameter of the carving ball: the scale below
   which gaps are closed. The defaults follow CGAL's `Alpha_wrap_3`.
-  The output has about `(4/α)²` triangles per unit of area, so halving
-  `alpha` quadruples it.
+  The coarsened output has edges up to about `α/2` on flat parts, so
+  halving `alpha` roughly quadruples the facet count.
 - **`offset`** is the distance from the input at which the wrap lies.
 - **`max_iterations`** is the number of grid levels the refinement
   loop may use.
@@ -140,9 +147,10 @@ endprogram ex_alpha_wrap
 ```
 
 With `alpha = 0.6` the ball cannot pass the hole: `status` is
-`AWRAP_STATUS_OK`, the wrap is watertight and manifold, and its volume
-is 1.109. The cube grown by the offset (0.02) has volume 1.124; the
-difference is the dimple the cap makes into the hole. With the default
+`AWRAP_STATUS_OK`, the wrap is watertight and manifold (116 facets),
+and its volume is 1.089. The cube grown by the offset (0.02) has
+volume 1.124; the difference is the dimple the cap makes into the hole
+and the chords of the coarse wrap across the rounded edges. With the default
 `alpha` (0.035) the hole is far wider than the ball. The wrap is then
 one closed shell lining both sides of every wall, of volume 0.0135 and
 not a solid. Check `get_volume()`, not only `is_watertight()`.
@@ -173,34 +181,35 @@ wrap closes the hole with a cap that dips into it:
 
 ## Known limitations
 
-- **Measured behaviour (issue #50).** `cube-01.stl` (closed) and the
-  same cube without one facet, default `offset` (`α/30`). Every wrap
-  is status OK, watertight and manifold:
+- **Measured behaviour (issues #50, #52).** `cube-01.stl` (closed) and
+  the same cube without one facet, default `offset` (`α/30`). Every
+  wrap is status OK, watertight and manifold:
 
   | `α` | closed: volume, facets | holed: volume, facets |
   |---|---|---|
-  | 0.035 | 1.007, 161468 | 0.014, 309188 |
-  | 0.1 | 1.020, 20168 | 0.048, 37928 |
-  | 0.3 | 1.060, 2696 | 1.059, 2728 |
-  | 0.7 | 1.143, 584 | 1.143, 584 |
+  | 0.035 | 1.007, 18272 | 0.015, 35640 |
+  | 0.1 | 1.020, 2382 | 0.050, 4590 |
+  | 0.3 | 1.053, 276 | 1.052, 290 |
+  | 0.7 | 1.113, 116 | 1.111, 106 |
 
   The closed cube's volume is the cube grown by the offset,
-  `(1 + 2ε)³` less the rounding of the edges and corners: at
-  `α = 0.1` the Minkowski sum is 1.0201. The hole (inradius 0.146)
+  `(1 + 2ε)³`, less the rounding of the edges and corners and the
+  chords the coarse wrap lays across them: at `α = 0.1` the Minkowski
+  sum is 1.0201, at `α = 0.7` it is 1.1438. The hole (inradius 0.146)
   lets the ball in for `α/2 + ε < 0.146`, that is `α < 0.27`, but the
   flood fill needs a cell centre where the ball fits, so on the grid
   the hole closes earlier: open at `α = 0.1` and 0.15, closed at 0.2
-  (cells of `α/4`). Below the threshold the wrap is a hollow shell. `dragon.stl` with the defaults is status OK, watertight and
-  manifold, with 126916 facets and volume 484.2 (the dragon's is
-  465.9); 97% of its vertices lie on the offset surface.
+  (cells of `α/4`). Below the threshold the wrap is a hollow shell.
+  `dragon.stl` with the defaults is status OK, watertight and
+  manifold, with 11370 facets and volume 487.5 (the dragon's is
+  465.9); 94% of its vertices lie on the offset surface.
 
-- **Output size and time.** Cells of `α/4` give many more triangles
-  than Portaneri's (whose triangles are of size `α`): 161k for the
-  closed `cube-01` at the default `α`. The time grows with the output
-  (its `analyze`, and the repair pass's checks): 20 s for the closed
-  `cube-01` at the default `α`, 200 s for the holed one (309k facets),
-  single core.
-  Decimate the wrap (`surface%decimate`) if its size matters.
+- **Output size and time.** The time goes mostly into `analyze` of
+  the output, so it follows the facet count: 3.4 s for the closed
+  `cube-01` at the default `α` (18272 facets), 11 s for the holed one
+  (35640, a shell lining both sides of every wall), 6 s for the dragon
+  (11370), single core. Before the coarsening (issue #52) these were
+  161k, 309k and 127k facets, in 16 s, 195 s and 13 s.
 
 - **Vertices off the offset surface.** On caps the wrap lies where
   the ball stops, up to about `α/2 + ε` from the input. A vertex the
