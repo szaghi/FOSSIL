@@ -38,7 +38,7 @@ use fossil_csr_matrix, only : csr_matrix_t
 use fossil_deviation, only : deviation_evaluator_t, deviation_sampled, deviation_certified, DEV_STATUS_OK, &
                              DEV_STATUS_BAD_INPUT
 use fossil_feature_edges, only : find_feature_edges, FEATURE_EDGE_DEFAULT_ANGLE
-use fossil_feature_bvh, only : build_segment_bvh, feature_box_touch_oac
+use fossil_feature_bvh, only : build_segment_bvh, feature_box_touch_oac, feature_point_distance_oac
 use fossil_mass_properties, only : moments_accumulator_t, accumulate_tetrahedron, moments_to_properties_3d, symmetric3_eigen
 use fossil_laplacian, only : build_cotangent_laplacian, &
                              LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
@@ -1700,7 +1700,7 @@ contains
 
    recursive subroutine query_many(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
                                    is_signed, sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, &
-                                   status, pose, curvatures)
+                                   status, pose, curvatures, feature_distances)
    !< Batch rich query (issue #37): `query_point` for every point, OpenMP over the points.
    !<
    !< Every output after `distances` is optional (a caller pays only for what it asks); arrays are
@@ -1736,6 +1736,7 @@ contains
    integer(I4P),              intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
    type(rigid_pose_t),        intent(in),  optional :: pose               !< Pose of the body (issue #41): world-frame points
                                                                           !< and outputs.
+   real(R8P),                 intent(out), optional :: feature_distances(:) !< Distance to the nearest feature edge [n] (#61).
    real(R8P),                 intent(out), optional :: curvatures(:,:)    !< Mean and Gaussian curvature at the foot [2, n].
    real(R8P), allocatable                           :: hv(:), kv(:)       !< Per-vertex mean and Gaussian curvature.
    type(vector_R8P)                                 :: cp, pn, cp2        !< Per-point closest point, normal, second foot.
@@ -1750,7 +1751,7 @@ contains
                            facets=facets, features=features, feature_indexes=feature_indexes, normals=normals, bodies=bodies, &
                            is_signed=is_signed, sign_algorithm=sign_algorithm, ambiguous=ambiguous, &
                            second_foot_points=second_foot_points, rel_tolerance=rel_tolerance, foot_tolerance=foot_tolerance, &
-                           status=status, curvatures=curvatures)
+                           status=status, curvatures=curvatures, feature_distances=feature_distances)
       if (present(status)) then
          if (status /= STATUS_OK) return
       endif
@@ -1760,6 +1761,18 @@ contains
          if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
       enddo
       return
+   endif
+   if (present(feature_distances)) then ! distance to the nearest feature edge (issue #61), build_features first
+      if (.not. self%features_built .or. size(feature_distances) /= size(points)) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+      !$omp parallel do default(shared) schedule(dynamic, 64) private(i)
+      do i = 1_I4P, size(points, kind=I4P)
+         feature_distances(i) = feature_point_distance_oac(self%feature_seg, self%feature_box, self%feature_link, &
+                                                           [points(i)%x, points(i)%y, points(i)%z])
+      enddo
+      !$omp end parallel do
    endif
    if (present(status)) status = STATUS_OK
    n = size(points, kind=I4P)
@@ -2336,7 +2349,7 @@ contains
    endsubroutine line_crossings_many_device
 
    recursive subroutine query_many_device(self, points, distances, closest_points, facets, features, feature_indexes, &
-                                          normals, bodies, is_signed, sign_algorithm, status, pose)
+                                          normals, bodies, is_signed, sign_algorithm, status, pose, feature_distances)
    !< `query_many` on the device (issue #37): same arguments, outputs and defaults.
    !<
    !< Requires `enter_device` (else STATUS_INVALID_INPUT and a stderr message). The kernel always
@@ -2359,6 +2372,7 @@ contains
    logical,                   intent(in),  optional :: is_signed          !< Signed (default .true.).
    integer(I4P),              intent(in),  optional :: sign_algorithm     !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
    integer(I4P),              intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),                 intent(out), optional :: feature_distances(:) !< Distance to the nearest feature edge [n] (#61).
    type(rigid_pose_t),        intent(in),  optional :: pose               !< Pose of the body (issue #41).
    real(R8P),    allocatable :: dd(:), cpl(:,:), nml(:,:) !< Device-side outputs.
    integer(I4P), allocatable :: fcl(:), ftl(:), fil(:), bdl(:) !< Device-side outputs.
@@ -2367,6 +2381,9 @@ contains
    type(pnormal_payload_t),      pointer :: pnormal_p(:) !< Alias of self%pnormal_payload.
    type(wn_node_t),              pointer :: wn_p(:)      !< Alias of self%wn_payload.
    integer(I4P),                 pointer :: body_p(:)    !< Alias of self%body_payload.
+   real(R8P),    pointer :: fseg_p(:,:), fbox_p(:,:)     !< Aliases of the feature tree (issue #61).
+   integer(I4P), pointer :: flink_p(:,:)                 !< Alias of the feature tree links.
+   real(R8P),    allocatable :: fdl(:), pts(:,:)         !< Device-side feature distances, points.
    type(vector_R8P) :: point_i, closest_v, v1_v, e12_v, e13_v !< Per-point work (component-wise stores, #20).
    real(R8P)        :: d2, nx, ny, nz, side, omega, beta2      !< Per-point work.
    integer(I4P)     :: best_facet, best_payload, region, n, i, algo !< Per-point work.
@@ -2375,7 +2392,8 @@ contains
    if (present(pose)) then ! body-frame query (issue #41), outputs mapped back on the host
       call self%query_many_device(points=body_points(pose, points), distances=distances, closest_points=closest_points, &
                                   facets=facets, features=features, feature_indexes=feature_indexes, normals=normals, &
-                                  bodies=bodies, is_signed=is_signed, sign_algorithm=sign_algorithm, status=status)
+                                  bodies=bodies, is_signed=is_signed, sign_algorithm=sign_algorithm, status=status, &
+                                  feature_distances=feature_distances)
       if (present(status)) then
          if (status /= STATUS_OK) return
       endif
@@ -2384,6 +2402,24 @@ contains
          if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
       enddo
       return
+   endif
+   if (present(feature_distances)) then ! distance to the nearest feature edge (issue #61), on the device
+      if (.not. (self%is_on_device .and. self%features_on_device) .or. size(feature_distances) /= size(points)) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         write(stderr, '(A)') 'query_many_device(feature_distances=): build_features, then enter_device, first'
+         return
+      endif
+      fseg_p => self%feature_seg ; fbox_p => self%feature_box ; flink_p => self%feature_link
+      n = size(points, kind=I4P)
+      allocate(fdl(n), pts(3, n))
+      do i = 1_I4P, n
+         pts(:, i) = [points(i)%x, points(i)%y, points(i)%z]
+      enddo
+      !$acc parallel loop present(fseg_p, fbox_p, flink_p) copyin(pts) copyout(fdl)
+      do i = 1_I4P, n
+         fdl(i) = feature_point_distance_oac(fseg_p, fbox_p, flink_p, pts(:, i))
+      enddo
+      feature_distances = fdl
    endif
    if (present(status)) status = STATUS_OK
    n = size(points, kind=I4P)

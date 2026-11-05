@@ -210,3 +210,11 @@ All of them are lengths for `probe_many`:
   `spacing_fraction` reports how many do.
 - **3-D visibility uses ray casting.** A ray grazing an edge exactly may
   count or miss a hit, as in any ray caster. The 2-D test is exact.
+
+## Distance to the nearest feature edge
+
+`query_many(..., feature_distances=)` (and the device twin) adds the distance from each point to the nearest sharp,
+boundary or non-manifold edge, after `surface%build_features` (issue #61). Image-point and ghost-cell closures degrade
+at corners; this distance tells a solver where to switch. See
+[feature edges](/guide/advanced/feature-edges#distance-to-the-nearest-feature).
+

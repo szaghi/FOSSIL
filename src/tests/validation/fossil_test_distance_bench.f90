@@ -328,7 +328,7 @@ print '(A,I0)',      '   sign bench device vs serial mismatches: ', sign_mismatc
 print '(A,I0)',      '   line crossings device vs serial mismatches: ', line_mismatch
 print '(A,I0)',      '   posed device vs serial mismatches: ', posed_mismatch
 print '(A,I0)',      '   deviation device vs serial mismatches: ', deviation_mismatch
-print '(A,I0)',      '   feature box device vs serial mismatches: ', feature_mismatch
+print '(A,I0)',      '   feature device vs serial mismatches: ', feature_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -414,13 +414,15 @@ contains
    endsubroutine deviation_case
 
    subroutine feature_case(mismatch)
-   !< box_feature_many_device vs box_feature_many (issue #61): the bench surface's feature edges (default 30 degrees) and
-   !< a 24^3 block of cells over its bounding box.
+   !< box_feature_many_device vs box_feature_many and query_many_device vs query_many feature distances (issue #61): the
+   !< bench surface's feature edges (default 30 degrees), a 24^3 block of cells over its bounding box and their centres.
    integer, intent(out)     :: mismatch     !< Mismatches.
    integer(I4P), parameter  :: NC = 24      !< Cells per direction.
    type(vector_R8P)         :: lo_, hi_     !< Bounding box.
    real(R8P), allocatable   :: blo(:,:), bhi(:,:) !< Cell boxes.
    logical,   allocatable   :: t1(:), t2(:) !< Touched.
+   type(vector_R8P), allocatable :: cq(:)   !< Cell centres.
+   real(R8P), allocatable   :: fd1(:), fd2(:), dq(:) !< Feature distances, distances.
    real(R8P)                :: h(3)         !< Cell size.
    integer(I4P)             :: i, j, k, c, st !< Counters.
 
@@ -433,10 +435,16 @@ contains
    enddo ; enddo ; enddo
    call surface%build_features(status=st)
    call surface%box_feature_many(blo, bhi, t1)
+   allocate(cq(NC**3), fd1(NC**3), fd2(NC**3), dq(NC**3))
+   do c = 1, NC**3                                   ! feature distances at the cell centres (step 3)
+      cq(c) = vector_R8P(0.5_R8P * (blo(1, c) + bhi(1, c)), 0.5_R8P * (blo(2, c) + bhi(2, c)), 0.5_R8P * (blo(3, c) + bhi(3, c)))
+   enddo
+   call surface%query_many(points=cq, distances=dq, feature_distances=fd1)
    call surface%enter_device
    call surface%box_feature_many_device(blo, bhi, t2)
+   call surface%query_many_device(points=cq, distances=dq, feature_distances=fd2)
    call surface%exit_device
-   mismatch = count(t1 .neqv. t2)
+   mismatch = count(t1 .neqv. t2) + count(fd1 /= fd2)
    print '(A,I0,A,I0)', '   feature cells touched: ', count(t1), ' of ', NC**3
    endsubroutine feature_case
 

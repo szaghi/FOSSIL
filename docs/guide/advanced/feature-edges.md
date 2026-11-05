@@ -89,6 +89,19 @@ call surface%tag_block(x, y, z, band, tags, ..., feature_band=fb, feature_tags=f
 On blocks of 8, 16 and 32 cells per side, 118 (23 %), 260 (6 %) and 532 (2 %) cells touch a feature edge: the
 features are a set of curves, so the tagged fraction halves with each refinement.
 
+## Distance to the nearest feature
+
+```fortran
+call surface%query_many(points, distances, ..., feature_distances=fd)         ! and query_many_device
+```
+
+`feature_distances(i)` is the distance from `points(i)` to the nearest feature edge: a depth-first descent of the
+feature tree, pruning nodes farther than the best so far, with the exact distance to each segment (clamped projection
+on the segment). A ghost-cell or image-point closure can switch its stencil near a corner where this distance is below
+a few cells. It works with `pose=` (body-frame points, as the other outputs). The device twin runs the same routine,
+`feature_point_distance_oac`, and gives the same bits. `build_features` must come first (and `enter_device` for the
+device), else `STATUS_INVALID_INPUT`.
+
 ## Example
 
 <<< @/examples/snippets/ck_feature_edges.f90
@@ -123,8 +136,18 @@ creases.
 | After `analyze` | the tree is dropped: `STATUS_INVALID_INPUT` |
 | A face centre, a cube edge | not touched, touched |
 
-The GPU check (`fossil_test_distance_bench`) prints `feature box device vs serial mismatches` for a block of 24³ cells
-over the bench surface, required 0.
+`src/tests/fossil_test_feature_distance.f90`:
+
+| Case | Expected |
+|---|---|
+| Before `build_features` | `STATUS_INVALID_INPUT` |
+| `cube-01`: below an edge, at a face centre, beyond a corner, on an edge | 0.5, 0.5, √0.29, 0 (to 1e-15) |
+| 500 random points | equal bit for bit to a brute force over every segment |
+| `pose=` | equal to the query of the body-frame points (6e-16) |
+| `query_many_device` (host build: device code, directives inert) | equal to the CPU |
+
+The GPU check (`fossil_test_distance_bench`) prints `feature device vs serial mismatches`, over the touched cells of a
+block of 24³ cells and the feature distances of their centres, required 0.
 
 `fossil_test_isotropic_remesh` gives the same output as before the shared predicate (compared line by line against a
 build of the previous commit).

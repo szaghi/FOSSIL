@@ -12,7 +12,7 @@ use penf, only : I4P, R8P
 
 implicit none
 private
-public :: build_segment_bvh, segment_box_overlap, feature_box_touch_oac
+public :: build_segment_bvh, segment_box_overlap, feature_box_touch_oac, feature_point_distance_oac
 
 integer(I4P), parameter :: LEAF  = 4_I4P   !< Segments per leaf (at most).
 integer(I4P), parameter :: STACK = 128_I4P !< Traversal stack (depth of a median split of 2^60 segments).
@@ -157,4 +157,47 @@ contains
       endif
    enddo
    endfunction feature_box_touch_oac
+
+   pure function feature_point_distance_oac(seg, box, link, p) result(d)
+   !$acc routine seq
+   !< Distance from p to the nearest segment of the tree (huge if the tree is empty): depth-first, nodes pruned when
+   !< their box is farther than the best so far. Exact point-segment distance (clamped projection); the CPU and the
+   !< device run this same routine, so their results are bit-identical.
+   real(R8P),    intent(in) :: seg(:,:)  !< Segments [6, n].
+   real(R8P),    intent(in) :: box(:,:)  !< Node boxes [6, nn].
+   integer(I4P), intent(in) :: link(:,:) !< Node links [4, nn].
+   real(R8P),    intent(in) :: p(3)      !< Point.
+   real(R8P)                :: d         !< Distance.
+   real(R8P)                :: best, e(3), w(3), t, dd, g(3) !< Work.
+   integer(I4P)             :: stk(STACK), top, node, k      !< Traversal.
+
+   best = huge(1._R8P)
+   if (size(link, 2) > 0) then
+      top = 1 ; stk(1) = 1
+      do while (top > 0)
+         node = stk(top) ; top = top - 1
+         g = max(box(1:3, node) - p, 0._R8P) + max(p - box(4:6, node), 0._R8P)
+         if (g(1) * g(1) + g(2) * g(2) + g(3) * g(3) >= best) cycle
+         if (link(1, node) == 0) then
+            do k = link(3, node), link(3, node) + link(4, node) - 1
+               e = seg(4:6, k) - seg(1:3, k) ; w = p - seg(1:3, k)
+               t = e(1) * e(1) + e(2) * e(2) + e(3) * e(3)
+               if (t > 0._R8P) then
+                  t = max(0._R8P, min(1._R8P, (w(1) * e(1) + w(2) * e(2) + w(3) * e(3)) / t))
+               else
+                  t = 0._R8P
+               endif
+               w = w - t * e
+               dd = w(1) * w(1) + w(2) * w(2) + w(3) * w(3)
+               if (dd < best) best = dd
+            enddo
+         else
+            top = top + 1 ; stk(top) = link(2, node)
+            top = top + 1 ; stk(top) = link(1, node)
+         endif
+      enddo
+   endif
+   d = huge(1._R8P)
+   if (best < huge(1._R8P)) d = sqrt(best)
+   endfunction feature_point_distance_oac
 endmodule fossil_feature_bvh
