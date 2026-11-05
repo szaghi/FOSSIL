@@ -1,0 +1,4 @@
+$ fig_ref_mass_properties_2d
+area  0.081693, centroid  0.16425 -0.03491
+second moments I_uu, I_vv, I_uv:  4.2518E-03  2.5678E-04 -8.8934E-04
+principal values  6.7742E-05  4.4408E-03, long axis at  -12.00 degrees

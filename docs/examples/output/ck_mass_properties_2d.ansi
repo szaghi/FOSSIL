@@ -1,0 +1,7 @@
+$ ck_mass_properties_2d
+area                  5.60000E-03 m^2
+centroid               0.00000  0.00000
+int v^2 dA (bending about u)  2.77867E-05 m^4
+int u^2 dA (bending about v)  8.98667E-06 m^4
+polar moment          3.67733E-05 m^4
+by hand: (b h^3 - b'h'^3)/12 =  2.77867E-05

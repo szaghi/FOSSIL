@@ -20,9 +20,9 @@ use penf, only : I4P, R8P
 implicit none
 private
 public :: moments_accumulator_t
-public :: accumulate_tetrahedron
-public :: moments_to_properties_3d
-public :: symmetric3_eigen
+public :: accumulate_tetrahedron, accumulate_segment
+public :: moments_to_properties_3d, moments_to_properties_2d
+public :: symmetric3_eigen, symmetric2_eigen
 public :: inertia_to_world, principal_frame
 
 type :: moments_accumulator_t
@@ -84,6 +84,22 @@ contains
    enddo
    endsubroutine accumulate_tetrahedron
 
+   pure subroutine accumulate_segment(acc, p, q)
+   !< Add the Green's-theorem terms of the segment p -> q, coordinates relative to the reference point.
+   type(moments_accumulator_t), intent(inout) :: acc  !< Accumulator.
+   real(R8P),                   intent(in)    :: p(2) !< Segment start (u, v).
+   real(R8P),                   intent(in)    :: q(2) !< Segment end (u, v).
+   real(R8P)                                  :: c    !< Cross term u_p v_q - u_q v_p.
+
+   c = p(1) * q(2) - q(1) * p(2)
+   call add_term(acc, 1_I4P, c / 2._R8P)
+   call add_term(acc, 2_I4P, c * (p(1) + q(1)) / 6._R8P)
+   call add_term(acc, 3_I4P, c * (p(2) + q(2)) / 6._R8P)
+   call add_term(acc, 4_I4P, c * (p(1) * p(1) + p(1) * q(1) + q(1) * q(1)) / 12._R8P)
+   call add_term(acc, 5_I4P, c * (p(2) * p(2) + p(2) * q(2) + q(2) * q(2)) / 12._R8P)
+   call add_term(acc, 6_I4P, c * (2._R8P * p(1) * p(2) + p(1) * q(2) + q(1) * p(2) + 2._R8P * q(1) * q(2)) / 24._R8P)
+   endsubroutine accumulate_segment
+
    pure subroutine moments_to_properties_3d(acc, reference, density, about, volume, mass, center, inertia)
    !< Volume, mass, centre of mass and inertia tensor (about the centre, or about `about`) from the raw moments.
    type(moments_accumulator_t), intent(in)           :: acc          !< Raw moments about `reference`.
@@ -120,6 +136,37 @@ contains
       inertia(i,i) = density * (cm(1,1) + cm(2,2) + cm(3,3) - cm(i,i))
    enddo
    endsubroutine moments_to_properties_3d
+
+   pure subroutine moments_to_properties_2d(acc, reference, density, about, area, mass, center, second_moments)
+   !< Area, mass, centroid and second moments [I_uu, I_vv, I_uv] = density * [int (u-p_u)^2, int (v-p_v)^2,
+   !< int (u-p_u)(v-p_v)] dA about p = the centroid (or `about`), from the raw moments.
+   type(moments_accumulator_t), intent(in)           :: acc               !< Raw moments about `reference`.
+   real(R8P),                   intent(in)           :: reference(2)      !< Reference point.
+   real(R8P),                   intent(in)           :: density           !< Uniform density (per unit area).
+   real(R8P),                   intent(in), optional :: about(2)          !< Point of the moments (default: the centroid).
+   real(R8P),                   intent(out)          :: area              !< Area.
+   real(R8P),                   intent(out)          :: mass              !< Mass per unit depth.
+   real(R8P),                   intent(out)          :: center(2)         !< Centroid.
+   real(R8P),                   intent(out)          :: second_moments(3) !< [I_uu, I_vv, I_uv].
+   real(R8P)                                         :: m(10)             !< Totals.
+   real(R8P)                                         :: d(2)              !< Centroid relative to the reference.
+   real(R8P)                                         :: e(2)              !< Centroid relative to `about`.
+   real(R8P)                                         :: cm(3)             !< Central moments.
+
+   m = accumulator_total(acc)
+   area = m(1)
+   mass = density * area
+   d = m(2:3) / area
+   center = reference + d
+   cm(1) = m(4) - area * d(1) * d(1)
+   cm(2) = m(5) - area * d(2) * d(2)
+   cm(3) = m(6) - area * d(1) * d(2)
+   if (present(about)) then
+      e = center - about
+      cm = cm + area * [e(1) * e(1), e(2) * e(2), e(1) * e(2)]
+   endif
+   second_moments = density * cm
+   endsubroutine moments_to_properties_2d
 
    pure subroutine symmetric3_eigen(a, w, v)
    !< Eigen-decomposition of a symmetric 3x3 matrix by cyclic Jacobi rotations: a v(:,k) = w(k) v(:,k).
@@ -196,6 +243,23 @@ contains
    v(2,3) = v(3,1) * v(1,2) - v(1,1) * v(3,2)
    v(3,3) = v(1,1) * v(2,2) - v(2,1) * v(1,2)
    endsubroutine symmetric3_eigen
+
+   pure subroutine symmetric2_eigen(m, w, angle)
+   !< Principal values of the symmetric 2x2 matrix [[m(1), m(3)], [m(3), m(2)]]: `w` ascending, `angle` (radians, in
+   !< (-pi/2, pi/2]) from the u axis to the eigenvector of the larger value w(2). Repeated values give angle = 0.
+   real(R8P), intent(in)  :: m(3)  !< [m_uu, m_vv, m_uv].
+   real(R8P), intent(out) :: w(2)  !< Eigenvalues, ascending.
+   real(R8P), intent(out) :: angle !< Angle of the eigenvector of w(2).
+   real(R8P)              :: h, r  !< Half-sum, radius.
+   real(R8P), parameter   :: PI = acos(-1._R8P) !< Pi.
+
+   h = 0.5_R8P * (m(1) + m(2))
+   r = hypot(0.5_R8P * (m(1) - m(2)), m(3))
+   w = [h - r, h + r]
+   angle = 0._R8P
+   if (r > 0._R8P) angle = 0.5_R8P * atan2(2._R8P * m(3), m(1) - m(2))
+   if (angle <= -0.5_R8P * PI) angle = angle + PI
+   endsubroutine symmetric2_eigen
 
    pure function inertia_to_world(inertia, pose) result(inertia_w)
    !< Inertia tensor of a body placed at `pose` (x_world = R x_body + t): R I R^T. The tensor is about the centre of mass

@@ -214,6 +214,15 @@ section of the NACA 0012 wing is one closed loop of 60 vertices with area 0.0816
 Outer loops run counter-clockwise and holes clockwise; the distance is negative inside. See
 [`curve_object`](/guide/api/curve-object).
 
+### Second moments of area of a section
+
+<<< @/examples/snippets/ck_mass_properties_2d.f90
+
+<<< @/examples/output/ck_mass_properties_2d.ansi{ansi}
+
+The hole is wound clockwise, so it subtracts. `second_moments(2)`, the integral of v², is the second moment of area
+for bending about the u axis, here (b h³ − b′h′³)/12. See [mass properties](/guide/advanced/mass-properties#2-d-curves).
+
 ## Geometry processing
 
 ### Decimate a mesh

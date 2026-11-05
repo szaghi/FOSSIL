@@ -31,6 +31,7 @@ use fossil_line_query,         only : curve_line_crossings_oac
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
 use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate
 use fossil_predicates,         only : orient2d_xy
+use fossil_mass_properties,    only : moments_accumulator_t, accumulate_segment, moments_to_properties_2d, symmetric2_eigen
 use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, segment_point_distance2, &
                                      segment_closest_oac, segment_winding_number_oac
 use fossil_surface_stl_object, only : STATUS_OK, STATUS_INVALID_INPUT, STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL, &
@@ -130,6 +131,7 @@ type :: curve_object
       procedure, pass(self) :: is_loop_closed       !< True if a loop is closed.
       procedure, pass(self) :: is_point_inside      !< Inside test.
       procedure, pass(self) :: load_from_file       !< Load from the ASCII loop format.
+      procedure, pass(self) :: mass_properties      !< Mass, centroid, second moments, principal axes (issue #59).
       procedure, pass(self) :: nesting_depth        !< Nesting depth of a loop (exact).
       procedure, pass(self) :: repair               !< Join/close chains, merge vertices, drop degenerate loops, orient.
       procedure, pass(self) :: save_into_file       !< Save into the ASCII loop format.
@@ -1523,6 +1525,69 @@ contains
       nl = nl + 1_I4P ; sizes(nl) = cur ; closed(nl) = .not. open_next ; cur = 0_I4P ; open_next = .false.
       endsubroutine close_loop
    endsubroutine load_from_file
+
+   subroutine mass_properties(self, mass, center, second_moments, polar_moment, principal_moments, principal_angle, &
+                              density, about, area, status)
+   !< Mass properties per unit depth of the region bounded by the curve (issue #59): mass, centroid, second moments
+   !< [I_uu, I_vv, I_uv] = density * [int (u - p_u)^2, int (v - p_v)^2, int (u - p_u)(v - p_v)] dA about p = the
+   !< centroid (or `about`), the polar moment I_uu + I_vv (the inertia for a rotation in the plane), the principal values
+   !< of the second-moment matrix (ascending) and the angle (radians, in (-pi/2, pi/2], from the u axis) of the axis of
+   !< the larger one.
+   !<
+   !< Exact polygon integrals by Green's theorem (`fossil_mass_properties`), summed about the bounding-box centre with
+   !< compensation: the only error is round-off. Holes, wound clockwise, subtract. Every loop must be closed and the
+   !< enclosed area positive: otherwise `status` is `STATUS_INVALID_INPUT` and the outputs are zero.
+   class(curve_object), intent(in)            :: self                 !< Curve.
+   real(R8P),           intent(out), optional :: mass                 !< Mass per unit depth (density * area).
+   real(R8P),           intent(out), optional :: center(2)            !< Centroid (u, v).
+   real(R8P),           intent(out), optional :: second_moments(3)    !< [I_uu, I_vv, I_uv].
+   real(R8P),           intent(out), optional :: polar_moment         !< I_uu + I_vv.
+   real(R8P),           intent(out), optional :: principal_moments(2) !< Principal values, ascending.
+   real(R8P),           intent(out), optional :: principal_angle      !< Angle of the axis of the larger value.
+   real(R8P),           intent(in),  optional :: density              !< Uniform density per unit area (default 1).
+   real(R8P),           intent(in),  optional :: about(2)             !< Point of the moments (default: the centroid).
+   real(R8P),           intent(out), optional :: area                 !< Enclosed area.
+   integer(I4P),        intent(out), optional :: status               !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(moments_accumulator_t)                :: acc                  !< Raw moments.
+   real(R8P)                                  :: o(2)                 !< Reference point (bounding-box centre).
+   real(R8P)                                  :: density_             !< Density, local.
+   real(R8P)                                  :: area_, mass_         !< Area, mass, local.
+   real(R8P)                                  :: center_(2)           !< Centroid, local.
+   real(R8P)                                  :: sm(3)                !< Second moments, local.
+   real(R8P)                                  :: w(2), angle          !< Principal values and angle, local.
+   integer(I4P)                               :: i                    !< Counter.
+
+   if (present(mass)) mass = 0._R8P
+   if (present(center)) center = 0._R8P
+   if (present(second_moments)) second_moments = 0._R8P
+   if (present(polar_moment)) polar_moment = 0._R8P
+   if (present(principal_moments)) principal_moments = 0._R8P
+   if (present(principal_angle)) principal_angle = 0._R8P
+   if (present(area)) area = 0._R8P
+   if (present(status)) status = STATUS_INVALID_INPUT
+   if (self%nv == 0_I4P .or. self%nl == 0_I4P) return
+   if (.not. all(self%loop_closed)) return
+   density_ = 1._R8P ; if (present(density)) density_ = density
+   o = 0.5_R8P * (self%bmin + self%bmax)
+   do i = 1, self%nv
+      call accumulate_segment(acc, [self%u(i), self%v(i)] - o, [self%u(self%next(i)), self%v(self%next(i))] - o)
+   enddo
+   if (.not. (acc%s(1) + acc%c(1) > 0._R8P)) return
+   call moments_to_properties_2d(acc, o, density_, about, area_, mass_, center_, sm)
+   if (present(mass)) mass = mass_
+   if (present(center)) center = center_
+   if (present(second_moments)) second_moments = sm
+   if (present(polar_moment)) polar_moment = sm(1) + sm(2)
+   if (present(area)) area = area_
+   if (present(principal_moments) .or. present(principal_angle)) then
+      if (present(about)) call moments_to_properties_2d(acc, o, density_, area=area_, mass=mass_, center=center_, &
+                                                        second_moments=sm)
+      call symmetric2_eigen(sm, w, angle)
+      if (present(principal_moments)) principal_moments = w
+      if (present(principal_angle)) principal_angle = angle
+   endif
+   if (present(status)) status = STATUS_OK
+   endsubroutine mass_properties
 
    pure function nesting_depth(self, l) result(depth)
    !< Nesting depth of loop l: the number of other loops that contain it (exact).

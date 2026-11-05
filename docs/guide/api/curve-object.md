@@ -46,6 +46,7 @@ endprogram curve_tour
 | `is_loop_closed(l)` | False for an open loop. |
 | `check_validity(loop, check_self_intersections)` | First defect: `CURVE_OPEN_LOOP`, `CURVE_TOO_FEW_VERTICES`, `CURVE_ZERO_LENGTH_SEGMENT`, `CURVE_ZERO_AREA_LOOP`, `CURVE_WRONG_ORIENTATION` (orientation not matching the exact nesting depth), or `CURVE_VALID`. With `check_self_intersections=.true.` (default `.false.`), also `CURVE_SELF_INTERSECTING` when two segments cross, touch or overlap. |
 | `nesting_depth(l)` | Number of closed loops containing loop l (exact). |
+| `mass_properties(mass, center, second_moments, polar_moment, principal_moments, principal_angle, density, about, area, status)` | Per unit depth: mass, centroid, second moments [I_uu, I_vv, I_uv] about the centroid (or `about`), polar moment, principal values (ascending) and the angle of the long axis; exact Green's-theorem sums. Closed loops and a positive area required, else `STATUS_INVALID_INPUT`. See [mass properties](/guide/advanced/mass-properties#2-d-curves) (issue #59). |
 | `self_intersections(pairs, n)` | Segment pairs that cross, touch or fold back, decided exactly. |
 | `repair(tolerance, gaps_closed, vertices_merged, loops_removed, loops_reversed, loops_open)` | Join and close open chains within the tolerance, merge vertices, drop degenerate loops, orient closed loops by nesting depth. |
 

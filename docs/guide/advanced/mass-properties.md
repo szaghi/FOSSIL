@@ -115,6 +115,46 @@ The angular velocity is drawn in ember from the centre of mass; the line of the 
 gold. A spin about the intermediate axis is unstable: the handle flips over twice in 6 s. Over the whole run the
 kinetic energy and the angular momentum drift by 3e-12 and 2e-11 relative, which is the integrator's error.
 
+## 2-D: curves
+
+`curve%mass_properties` gives the same quantities, per unit depth, for the region bounded by a closed
+[curve](/guide/advanced/2d-geometry). Green's theorem over each segment $(u_i, v_i) \to (u_j, v_j)$, with
+$c = u_i v_j - u_j v_i$, gives:
+
+$$
+A = \sum \frac{c}{2}, \qquad \int u \, dA = \sum \frac{c}{6}(u_i + u_j), \qquad
+\int u^2 \, dA = \sum \frac{c}{12}(u_i^2 + u_i u_j + u_j^2),
+$$
+
+$$
+\int u v \, dA = \sum \frac{c}{24}(2 u_i v_i + u_i v_j + u_j v_i + 2 u_j v_j).
+$$
+
+The sums are taken about the bounding-box centre and compensated, as in 3-D. Holes, wound clockwise, subtract.
+
+```fortran
+call curve%mass_properties(mass, center, second_moments, polar_moment, principal_moments, principal_angle, &
+                           density, about, area, status)
+```
+
+- `second_moments = [I_uu, I_vv, I_uv]` $= \rho \, [\int (u-p_u)^2, \int (v-p_v)^2, \int (u-p_u)(v-p_v)] \, dA$ about
+  p = the centroid (or `about`). These are the second moments of the region, not of inertia about the axes:
+  $I_{vv} = \int v^2 dA$ is the beam engineer's second moment of area for bending about the u axis.
+- `polar_moment` $= I_{uu} + I_{vv}$ is the inertia per unit depth for a rotation in the plane: the $I_{zz}$ of the
+  extruded body divided by its depth (checked against the 3-D path to round-off).
+- `principal_moments(2)` are the eigenvalues of the 2×2 matrix of second moments, ascending, and `principal_angle`
+  (radians, in (−π/2, π/2]) is the direction of the axis of the larger one: the long axis of the section.
+- Every loop must be closed and the enclosed area positive; otherwise `status = STATUS_INVALID_INPUT`.
+
+![a NACA 0012 section of unit chord pitched by -12 degrees, with its centroid and its two principal axes: the long one follows the chord at -12 degrees](../../examples/images/ref-mass-properties-2d.svg){.fossil-figure}
+
+A NACA 0012 section of unit chord pitched by −12° (200 points). Its area is 0.0817, its centroid is at 0.42 chord,
+and `principal_angle` returns the pitch, −12.00°.
+
+<<< @/examples/snippets/ck_mass_properties_2d.f90
+
+<<< @/examples/output/ck_mass_properties_2d.ansi{ansi}
+
 ## Example
 
 <<< @/examples/snippets/ck_mass_properties.f90
@@ -142,6 +182,20 @@ About a corner, the parallel-axis term adds $m (0.1^2 + 0.15^2) = 1.53075$ to it
 | The L prism moved by `move(pose)` | tensor = `inertia_to_world`, centre = `to_world` | 5.5e-16, 1.5e-16 |
 | `principal_frame` | Rᵀ I R diagonal, the principal moments on it | 1.2e-16, 8.5e-16 |
 
+`src/tests/fossil_test_curve_mass_properties.f90`, the 2-D path:
+
+| Case | Checked | Measured error |
+|---|---|---|
+| Rectangle away from the origin, density 3 | area, centroid, A a²/12, A b²/12, 0 | 0 |
+| Right triangle | centroid (a/3, b/3), A a²/18, A b²/18, −A a b/36 | 7.4e-17 |
+| L-shape | the two rectangles moved to the common centroid | 1.2e-16 |
+| Annulus of regular N-gons, N = 64, 128, 256 | the polygon formula of each loop; J → π(R⁴ − r⁴)/2 | 1.4e-16; order 2.00 |
+| Ellipse polygon | I_vv → π a b³/4 | order 2.00 |
+| The L rotated by 0.6 rad | R M Rᵀ, polar moment, principal values and angle | 3.6e-16 |
+| The rotated L moved by 10⁶ | the same rounded polygon moved back exactly | 1.8e-16 |
+| Open loop, clockwise outer loop | `STATUS_INVALID_INPUT` | |
+| The L extruded to a 3-D prism | mass A d, I_zz = d J, I_xx = d I_vv + A d³/12, I_xy = −d I_uv | 0 |
+
 The sphere converges at second order because the marching-cubes surface is a second-order approximation of the
 sphere: the integrals over that polyhedron are exact.
 
@@ -152,6 +206,7 @@ sphere: the integrals over that polyhedron are exact.
 
 ## References
 
+- G. Bashein, P. R. Detmer, *Centroid of a polygon*, Graphics Gems IV, 1994 (the polygon area moments).
 - B. Mirtich, *Fast and accurate computation of polyhedral mass properties*, Journal of Graphics Tools 1(2), 1996.
 - F. Tonon, *Explicit exact formulas for the 3-D tetrahedron inertia tensor in terms of its vertex coordinates*,
   Journal of Mathematics and Statistics 1(1), 2004.
