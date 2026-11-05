@@ -15,8 +15,12 @@ program fossil_test_foot_curvature
 !<   is refused (negative control).
 !< - Regular N-gons of circumradius 1 (N = 16, 32, 64): every foot gives (pi/N)/sin(pi/N), the error
 !<   against 1/R falls by 4 per halving of h; a hole gives the opposite sign; an open straight line 0.
+!< - The marching-cubes unit sphere on a 31^3 grid of step 0.1 (samples on the sphere: collapsed facets, the
+!<   smallest of area ~1e-31): at the foot of every facet centroid seen from radius 1.02, max |H - 1| < 0.1
+!<   (issue #51: a foot on a collapsed facet returned H = 0; before #48 the unwelded sphere gave up to 3.8).
 
-use fossil, only : surface_stl_object, facet_object, curve_object, rigid_pose_t, rigid_pose_2d_t, pose_from_axis_angle, &
+use fossil, only : extract_isosurface, surface_stl_object, facet_object, curve_object, rigid_pose_t, rigid_pose_2d_t, &
+                   pose_from_axis_angle, &
                    pose_2d, to_world, to_body, STATUS_INVALID_INPUT, STATUS_OK
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
@@ -33,7 +37,7 @@ type(rigid_pose_t)              :: p
 real(R8P)                       :: mx(3), d(NP), cv(2, NP), cv2(2, NP), dir(3, NP), eh(3), ek(3), r(3), e2(3), &
                                    pts(2, NP), k1(NP), k2(NP), u(64), v(64), t
 integer(I4P)                    :: i, lev, st, nn
-logical                         :: ok(6), exact
+logical                         :: ok(7), exact
 
 call random_seed(size=nn)
 call random_seed(put=[(7 + i, i = 1, nn)])
@@ -125,10 +129,43 @@ t = 2 * (PI / 32) / sin(PI / 32)
 ok(6) = maxval(abs(k1 + t)) < 1.e-12_R8P .and. maxval(abs(k2)) == 0._R8P
 print '(A,F9.5,A,ES9.1,A,L1)', 'hole r=1/2: k ', sum(k1) / NP, '  open line max |k| ', maxval(abs(k2)), '  ok ', ok(6)
 
+ok(7) = mc_sphere_ok()
+print '(A,L1)', 'marching-cubes sphere with collapsed facets, max |H - 1| < 0.1: ', ok(7)
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
 
 contains
+   function mc_sphere_ok() result(ok7)
+   !< The marching-cubes unit sphere (31^3, step 0.1): every facet's foot from radius 1.02 within 0.1 of H = 1, and
+   !< a collapsed facet present (area < 1e-20), so that the degenerate-facet path is exercised.
+   logical                         :: ok7
+   type(surface_stl_object)        :: sp
+   type(facet_object), allocatable :: mcf(:)
+   type(facet_object), pointer     :: fp
+   type(vector_R8P), allocatable   :: q(:)
+   real(R8P), allocatable          :: dd(:), hk(:,:)
+   real(R8P)                       :: phi(31, 31, 31), x(3), amin
+   integer(I4P)                    :: i, j, k, n
+
+   do k = 1, 31 ; do j = 1, 31 ; do i = 1, 31
+      phi(i, j, k) = norm2(-1.5_R8P + 0.1_R8P * ([i, j, k] - 1)) - 1._R8P
+   enddo ; enddo ; enddo
+   call extract_isosurface(values=phi, bmin=vector_R8P(-1.5_R8P, -1.5_R8P, -1.5_R8P), &
+                           bmax=vector_R8P(1.5_R8P, 1.5_R8P, 1.5_R8P), iso=0._R8P, surface=mcf)
+   call sp%adopt_facets(facets=mcf)
+   n = sp%get_facets_number() ; allocate(q(n), dd(n), hk(2, n))
+   amin = huge(1._R8P)
+   do i = 1, n
+      fp => sp%facet_at(i)
+      x = [fp%centroid%x, fp%centroid%y, fp%centroid%z] ; x = 1.02_R8P * x / norm2(x)
+      q(i) = vector_R8P(x(1), x(2), x(3)) ; amin = min(amin, fp%area())
+   enddo
+   call sp%query_many(points=q, distances=dd, curvatures=hk)
+   ok7 = amin < 1.e-20_R8P .and. maxval(abs(hk(1, :) - 1._R8P)) < 0.1_R8P
+   print '(A,I0,A,ES9.2,A,F8.4)', 'mc sphere: facets ', n, '  smallest area ', amin, '  max |H - 1| ', &
+         maxval(abs(hk(1, :) - 1._R8P))
+   endfunction mc_sphere_ok
+
    subroutine put(fo, k, a, b, cc)
    !< Facet k from three points.
    type(facet_object), intent(inout) :: fo(:)     !< Facets.

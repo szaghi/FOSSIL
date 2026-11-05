@@ -1764,7 +1764,10 @@ contains
    function foot_curvature(self, f, cp, hv, kv) result(c)
    !< Mean and Gaussian curvature at a foot point on facet f (issue #42 step 3): the per-vertex values
    !< weighted by the barycentric coordinates of the foot, clamped to the triangle (the foot lies in it
-   !< up to round-off). (0, 0) for no facet or a degenerate facet.
+   !< up to round-off). (0, 0) for no facet. On a near-collinear facet (Gram determinant <= 1e-12 d11 d22,
+   !< where the barycentric solve is noise or its det rounds to <= 0) the values are interpolated along the
+   !< longest edge at the foot's projection, and averaged if the three vertices coincide (issue #51: such
+   !< facets, left by marching cubes where a sample lies on the iso-surface, returned (0, 0)).
    class(surface_stl_object), intent(in) :: self      !< Surface.
    integer(I4P),              intent(in) :: f         !< Facet (0: none).
    type(vector_R8P),          intent(in) :: cp        !< Foot point.
@@ -1786,7 +1789,10 @@ contains
    d11 = e1%dotproduct(e1) ; d12 = e1%dotproduct(e2) ; d22 = e2%dotproduct(e2)
    d1w = e1%dotproduct(w)  ; d2w = e2%dotproduct(w)
    den = d11 * d22 - d12 * d12
-   if (den <= 0._R8P) return
+   if (den <= 1.e-12_R8P * d11 * d22) then
+      c = degenerate_foot_curvature(self%facet(f)%vertex, cp, hv(vid), kv(vid))
+      return
+   endif
    b(2) = (d22 * d1w - d12 * d2w) / den
    b(3) = (d11 * d2w - d12 * d1w) / den
    b(2:3) = max(b(2:3), 0._R8P)
@@ -1795,6 +1801,31 @@ contains
    c(1) = sum(b * hv(vid))
    c(2) = sum(b * kv(vid))
    endfunction foot_curvature
+
+   pure function degenerate_foot_curvature(v, cp, hv, kv) result(c)
+   !< (H, K) at a foot on a near-collinear facet (issue #51): linear along the longest edge, at the foot's
+   !< projection on it (clamped to the edge); the mean of the three if the vertices coincide.
+   type(vector_R8P), intent(in) :: v(3)          !< Facet vertices.
+   type(vector_R8P), intent(in) :: cp            !< Foot point.
+   real(R8P),        intent(in) :: hv(3), kv(3)  !< Per-vertex values at v.
+   real(R8P)                    :: c(2)          !< (H, K).
+   type(vector_R8P)             :: e             !< Longest edge.
+   real(R8P)                    :: l2(3), t      !< Squared edge lengths, edge parameter.
+   integer(I4P)                 :: a, b          !< Longest edge's ends.
+
+   l2(1) = (v(2)%x - v(1)%x)**2 + (v(2)%y - v(1)%y)**2 + (v(2)%z - v(1)%z)**2
+   l2(2) = (v(3)%x - v(2)%x)**2 + (v(3)%y - v(2)%y)**2 + (v(3)%z - v(2)%z)**2
+   l2(3) = (v(1)%x - v(3)%x)**2 + (v(1)%y - v(3)%y)**2 + (v(1)%z - v(3)%z)**2
+   a = maxloc(l2, 1) ; b = mod(a, 3) + 1
+   if (l2(a) <= 0._R8P) then
+      c = [sum(hv), sum(kv)] / 3._R8P
+      return
+   endif
+   e%x = v(b)%x - v(a)%x ; e%y = v(b)%y - v(a)%y ; e%z = v(b)%z - v(a)%z
+   t = ((cp%x - v(a)%x) * e%x + (cp%y - v(a)%y) * e%y + (cp%z - v(a)%z) * e%z) / l2(a)
+   t = min(max(t, 0._R8P), 1._R8P)
+   c = [(1._R8P - t) * hv(a) + t * hv(b), (1._R8P - t) * kv(a) + t * kv(b)]
+   endfunction degenerate_foot_curvature
 
    subroutine box_classify_many(self, lo, hi, codes, radius, sign_algorithm, inside, status)
    !< Classify boxes against the surface (issue #38): OpenMP over the boxes.
