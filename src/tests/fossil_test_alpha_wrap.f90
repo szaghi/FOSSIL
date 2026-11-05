@@ -5,7 +5,8 @@
 !< (find_self_intersections, 2-5 s each in the debug build) and for their distance from the input.
 !<
 !<   1. The cube: status OK, watertight, manifold, volume within 0.5% of the offset cube (the Minkowski sum of the
-!<      cube and a ball of radius offset).
+!<      cube and a ball of radius offset), no vertex closer to the cube than the offset (issue #53: the repair pass
+!<      moves some, at its convex edges and corners).
 !<   2. The cube minus one facet, hole wider than the ball (alpha = 0.4): one closed shell lining both sides of the
 !<      walls (the offset-surface barrier keeps the two layers apart), OK, manifold, volume of a hollow shell.
 !<   3. The same, hole narrower than the ball (alpha = 0.6): the hole is capped, volume just below the offset cube's.
@@ -51,8 +52,9 @@ print '(A,I0,A,I0,2(A,L1),A,F8.5,A,F8.5)', &
       'inv 1 (cube TBP): status=', status, ' n_facets=', wrapped_tbp%get_facets_number(), &
       ' watertight=', wrapped_tbp%is_watertight(), ' manifold=', wrapped_tbp%is_manifold(), &
       ' volume=', wrap_volume, ' offset cube=', expected_volume
+print '(A,F12.9)', '        min vertex distance / offset=', min_distance(cube, wrapped_tbp) / offset
 are_tests_passed(1) = (status == AWRAP_STATUS_OK) .and. wrapped_tbp%is_watertight() .and. &
-                       wrapped_tbp%is_manifold() .and. &
+                       wrapped_tbp%is_manifold() .and. min_distance(cube, wrapped_tbp) >= (1._R8P - 1.e-9_R8P) * offset .and. &
                        (abs(wrap_volume - expected_volume) <= 0.005_R8P * expected_volume)
 
 ! ---- Invariant 2: the holed cube (a hole of inradius 0.29) at alpha = 0.4: the ball (diameter alpha, kept offset
@@ -117,4 +119,20 @@ print '(A,I0)', 'inv 5 (alpha <= 0): status=', status
 print '(A,5L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 if (.not. (all(are_tests_passed))) error stop 1
+contains
+   function min_distance(input, w) result(dmin)
+   !< Smallest distance from a vertex of w to input.
+   type(surface_stl_object), intent(in) :: input, w
+   real(R8P)                            :: dmin
+   type(facet_object), pointer          :: f
+   integer(I4P)                         :: j, v
+
+   dmin = huge(1._R8P)
+   do j = 1, w%get_facets_number()
+      f => w%facet_at(j)
+      do v = 1, 3
+         dmin = min(dmin, input%distance(point=f%vertex(v), is_signed=.false., is_square_root=.true.))
+      enddo
+   enddo
+   endfunction min_distance
 endprogram fossil_test_alpha_wrap

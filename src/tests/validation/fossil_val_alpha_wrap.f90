@@ -4,7 +4,7 @@
 !< FOSSIL test: alpha wrapping, `surface%alpha_wrap` (issue #18 §1.6, issue #50). Every wrap must be status OK,
 !< watertight, manifold and free of self-crossings (find_self_intersections).
 !<   1. The cube, alpha 0.1: volume within 0.5% of the offset cube (Minkowski sum).
-!<   2. A marching-cubes sphere (32^3): >= 90% of the vertices on the offset surface, none closer than offset / 2.
+!<   2. A marching-cubes sphere (32^3): >= 90% of the vertices on the offset surface, none closer than the offset.
 !<   3. The cube minus one facet, hole wider than the ball: a hollow shell lining both sides.
 !<   4. The same, hole narrower than the ball: capped.
 !<   5. One triangle: a closed shell around both sides.
@@ -74,7 +74,7 @@ are_tests_passed(1) = wrap_ok('inv 1 (cube TBP)', wrapped_tbp, status) .and. &
 print '(A,F8.5,A,F8.5)', '        volume=', wrap_volume, ' offset cube=', expected_volume
 
 ! ---- Invariant 2: capstone TBP on the marching-cubes sphere: at least 90% of the wrap vertices on the offset
-!      surface, none closer to the input than half the offset (the repair pass moves a few towards their cell faces).
+!      surface, none closer to the input than the offset (issue #53).
 call sphere%alpha_wrap(alpha=0.1_R8P, offset=offset, wrapped=wrapped_tbp, status=status)
 are_tests_passed(2) = wrap_ok('inv 2 (sphere TBP)', wrapped_tbp, status) .and. offset_ok(sphere, wrapped_tbp, offset)
 
@@ -160,8 +160,8 @@ contains
    endfunction wrap_ok
 
    function offset_ok(input, w, eps) result(ok)
-   !< At least 90% of the vertices of w at eps from input (relative 1e-6), none closer than eps / 2 (the repair pass
-   !< moves a vertex towards its cell face, which can be closer than eps: 0.85 eps on the sphere, issue #50).
+   !< At least 90% of the vertices of w at eps from input (relative 1e-6), none closer than eps (relative 1e-9; the
+   !< repair pass projects a vertex it moves back onto the offset surface, issue #53).
    type(surface_stl_object), intent(in) :: input, w
    real(R8P),                intent(in) :: eps
    logical                              :: ok
@@ -180,6 +180,6 @@ contains
    enddo
    print '(A,F12.9,A,F6.3)', '        min vertex distance / offset=', dmin / eps, ' on the offset surface: ', &
          real(n_on, R8P) / real(n_all, R8P)
-   ok = (dmin >= 0.5_R8P * eps) .and. (real(n_on, R8P) >= 0.9_R8P * real(n_all, R8P))
+   ok = (dmin >= (1._R8P - 1.e-9_R8P) * eps) .and. (real(n_on, R8P) >= 0.9_R8P * real(n_all, R8P))
    endfunction offset_ok
 endprogram fossil_val_alpha_wrap

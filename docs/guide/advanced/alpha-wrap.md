@@ -65,7 +65,8 @@ same rule, and puts the vertices on the offset surface (issue #50):
 6. **Repair.** A triangle that meets the input, or crosses another
    wrap triangle, has its vertices moved halfway back towards their
    cell faces, where the Marching Cubes surface is embedded, for up to
-   6 rounds. A chord across a convex edge of the input, with its ends
+   6 rounds; a vertex that ends closer than `ε` to the input goes back
+   onto the offset surface. A chord across a convex edge of the input, with its ends
    on the offset surface, cuts the input when the cells are larger
    than `ε`. The contact test is exact (`orient3d`); the crossing test
    is in floating point, with the exact test inside a `1e-8` band.
@@ -203,10 +204,12 @@ wrap closes the hole with a cap that dips into it:
 
 - **Vertices off the offset surface.** On caps the wrap lies where
   the ball stops, up to about `α/2 + ε` from the input. A vertex the
-  repair pass moved lies between the offset surface and its cell
-  face, which can be closer than `ε`: 0.85 `ε` at the closest on a
-  coarse marching-cubes sphere, with 98% of its vertices on the offset
-  surface. Portaneri's wrap never comes closer than `ε`.
+  repair pass moved lies between the offset surface and its cell face;
+  if that is closer than `ε`, it goes back onto the offset surface
+  (issue #53). No wrap vertex is ever closer than `ε`: on a coarse
+  marching-cubes sphere 98.6% of them lie exactly at `ε`, the rest
+  farther. The triangles between them can come closer, as chords of the
+  offset surface do.
 
 - **Concave detail below `α`** is not carved, by design. The ball
   does not enter a groove narrower than `α + 2ε`, so the wrap bridges

@@ -104,16 +104,17 @@ contains
    !<   6. Repair: a wrap triangle that meets an input facet (exact `pair_classify` against the facets binned around
    !<      it), or crosses a wrap triangle near it (exact, with the adjacency rule of find_self_intersections), has
    !<      its vertices moved halfway back to their binary (edge-midpoint) positions, where the Marching Cubes surface
-   !<      is embedded, for up to AWRAP_PUSH_ROUNDS rounds. A chord across a convex edge or corner of the input, its
+   !<      is embedded, for up to AWRAP_PUSH_ROUNDS rounds; a vertex that ends closer than ε to the input is projected
+   !<      back onto the offset surface (issue #53). A chord across a convex edge or corner of the input, its
    !<      vertices on the offset surface, cuts the input when the cells are larger than ε; vertices converging on a
    !<      concave crease of the offset surface fold the triangles around them.
    !<
    !< Refinement loop: a level that leaves a triangle meeting the input, or crossing the wrap, is redone with
    !< h/2, up to `max_iterations` levels (default AWRAP_DEFAULT_MAX_OUTER_ITERATIONS) and AWRAP_MAX_CELLS cells.
    !< Status OK: the wrap encloses the input without touching it and does not cross itself; NOT_CONVERGED: the finest
-   !< level still has a defect (its wrap is returned). The wrap is closed and 2-manifold in both cases. Its vertices
-   !< lie on the ε-offset surface, except where the repair pass moved them towards the cell faces (convex edges and
-   !< corners, concave creases) and on the caps (up to about α/2 + ε from the input).
+   !< level still has a defect (its wrap is returned). The wrap is closed and 2-manifold in both cases. No vertex is
+   !< closer than ε to the input: they lie on the ε-offset surface, except where the repair pass moved them outwards
+   !< (convex edges and corners, concave creases) and on the caps (up to about α/2 + ε from the input).
    type(facet_object),              intent(in)            :: input_facet(:) !< Input facets (any topology).
    type(aabb_tree_object),          intent(in)            :: input_tree     !< AABB tree over input_facet.
    real(R8P),                       intent(in)            :: alpha          !< Diameter of the carving ball.
@@ -537,7 +538,8 @@ contains
    integer(I4P)                                   :: ev(0:11), nedge, nslot, i, j, k, a, c, e, t, cube_case, mask
    integer(I4P)                                   :: c0, c1, ci(3), lo(3), idx, ntri, cap, round, v, t1
    integer(I8P)                                   :: kk
-   type(vector_R8P)                               :: tri(3)
+   type(vector_R8P)                               :: tri(3), cp
+   real(R8P)                                      :: u
 
    contact = .false.
    ! count the carved-solid edges, size the hash
@@ -640,7 +642,11 @@ contains
       enddo
       if (.not. any(push) .or. round == AWRAP_PUSH_ROUNDS) exit
       do v = 1_I4P, g%nvertex
-         if (push(v)) point(v) = 0.5_R8P * (point(v) + mid(v))
+         if (.not. push(v)) cycle
+         point(v) = 0.5_R8P * (point(v) + mid(v))
+         ! back onto the offset surface if the move went closer to the input than eps (issue #53)
+         call closest_point(input_facet, input_tree, point(v), cp, u)
+         if (u < g%eps .and. u > 0._R8P) point(v) = cp + (g%eps / u) * (point(v) - cp)
       enddo
       moved = push
    enddo
