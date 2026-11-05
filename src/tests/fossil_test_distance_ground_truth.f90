@@ -36,7 +36,7 @@ character(*), parameter :: STL_FILES(*) = [character(64) :: &
    'src/tests/naca0012-ascii.stl',                         &
    'src/tests/dragon.stl']
 integer(I4P), parameter :: REF_LEVELS = 2
-integer(I4P), parameter :: NI = 9, NJ = 9, NK = 9   ! 9^3 = 729 query points per mesh
+integer(I4P), parameter :: NI = 8, NJ = 8, NK = 8   ! 8^3 = 512 query points per mesh (9^3 took 2.1 s in debug, #45)
 real(R8P),    parameter :: MARGIN = 0.5_R8P         ! outside margin as fraction of bbox
 
 type(surface_stl_object)      :: surface
