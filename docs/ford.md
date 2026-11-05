@@ -1,6 +1,6 @@
 ---
 project: FOSSIL
-summary: FOrtran Stereo (si) Litography parser
+summary: FOrtran Surfaces, Solids, Immersed boundaries and Level sets
 project_url: https://szaghi.github.io/FOSSIL
 author: Stefano Zaghi
 email: stefano.zaghi@gmail.it
@@ -14,4 +14,4 @@ coloured_edges: true
 graph_maxdepth: 6
 ---
 
-FOrtran Stereo (si) Litography parser
+FOrtran Surfaces, Solids, Immersed boundaries and Level sets

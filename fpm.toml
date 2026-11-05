@@ -4,7 +4,7 @@ license = "GPL-3.0"
 author = "Stefano Zaghi"
 maintainer = "stefano.zaghi@gmail.it"
 copyright = "Copyright 2026 Stefano Zaghi"
-description = "FOrtran Stereo (si) Litography parser"
+description = "FOrtran Surfaces, Solids, Immersed boundaries and Level sets"
 
 [dependencies]
 BeFoR64 = { git="https://github.com/szaghi/BeFoR64.git" }

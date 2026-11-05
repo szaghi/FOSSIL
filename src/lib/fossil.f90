@@ -1,7 +1,7 @@
-!< FOSSIL, FOrtran Stereo (si) Litography parser.
+!< FOSSIL, FOrtran Surfaces, Solids, Immersed boundaries and Level sets.
 
 module fossil
-!< FOSSIL, FOrtran Stereo (si) Litography parser.
+!< FOSSIL, FOrtran Surfaces, Solids, Immersed boundaries and Level sets.
 
 use fossil_aabb_tree_object, only : AABB_AUTO_REFINEMENT, AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 use fossil_decimate, only : DEC_STATUS_OK, DEC_STATUS_BAD_INPUT, DEC_STATUS_NO_PROGRESS
