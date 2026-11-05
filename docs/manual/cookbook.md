@@ -232,8 +232,9 @@ for bending about the u axis, here (b h³ − b′h′³)/12. See [mass properti
 <<< @/examples/output/ck_deviation.ansi{ansi}
 
 The two directions differ: the hole patches are far from the original (they span the holes), while the original lies on
-the repaired surface except where `sanitize` removed facets. `lower` is a lower bound of the one-sided Hausdorff distance;
-`mean` and `rms` are estimates. See [surface deviation](/guide/advanced/surface-deviation).
+the repaired surface except where `sanitize` removed facets. `lower <= h <= upper` brackets the one-sided Hausdorff
+distance (certified, to 1e-3 of the bounding-box diagonal by default); `mean` and `rms` are estimates. See
+[surface deviation](/guide/advanced/surface-deviation).
 
 ### Decimate a mesh
 

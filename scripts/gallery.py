@@ -50,6 +50,8 @@ CARDS = [
      "the area a moving section sweeps in a time step"),
     ("Mass properties", "anim-mass-properties", "/guide/advanced/mass-properties",
      "a T-handle flipping about its intermediate axis, from its inertia tensor"),
+    ("Surface deviation", "anim-deviation", "/guide/advanced/surface-deviation",
+     "a decimation sweep coloured by its certified distance from the original"),
     ("Geometry processing", "anim-boolean", "/manual/cookbook#unite-two-bodies",
      "two cubes, then their union, intersection and differences"),
     ("On the GPU, bit for bit", "tut12-slice", "/manual/tutorial/12-gpu",

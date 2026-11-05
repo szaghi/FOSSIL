@@ -35,7 +35,8 @@ use fossil_alpha_wrap, only : awrap_run, &
                               AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, &
                               AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
 use fossil_csr_matrix, only : csr_matrix_t
-use fossil_deviation, only : deviation_sampled, DEV_STATUS_OK, DEV_STATUS_BAD_INPUT
+use fossil_deviation, only : deviation_evaluator_t, deviation_sampled, deviation_certified, DEV_STATUS_OK, &
+                             DEV_STATUS_BAD_INPUT
 use fossil_mass_properties, only : moments_accumulator_t, accumulate_tetrahedron, moments_to_properties_3d, symmetric3_eigen
 use fossil_laplacian, only : build_cotangent_laplacian, &
                              LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
@@ -292,6 +293,13 @@ type :: surface_stl_object
       procedure, pass(self), private :: rotate_by_matrix            !< Rotate facets given matrix.
       procedure, pass(self), private :: set_facets_id               !< (Re)set facets ID.
 endtype surface_stl_object
+
+type, extends(deviation_evaluator_t) :: surface_evaluator_t
+   !< A surface seen through its batched closest-point query, for `fossil_deviation` (issue #60).
+   type(surface_stl_object), pointer :: surface => null() !< The surface B.
+   contains
+      procedure, pass(self) :: eval => surface_evaluator_eval !< Unsigned distances and closest points.
+endtype surface_evaluator_t
 
 contains
    ! accessors (pure, scalar/vector return — inlined by gfortran/ifort at -O2, no data copy)
@@ -4350,80 +4358,127 @@ contains
    if (present(status)) status = STATUS_OK
    endsubroutine mass_properties
 
-   subroutine deviation(self, other, lower, mean, rms, per_vertex, samples_per_area, samples, status)
-   !< One-sided deviation of this surface from `other` (issue #60): h(self, other) = sup over x in self of d(x, other).
+   subroutine deviation(self, other, lower, upper, mean, rms, per_vertex, tolerance, samples_per_area, max_triangles, &
+                        samples, triangles, status)
+   !< One-sided deviation of this surface from `other` (issue #60): h(self, other) = sup over x in self of d(x, other),
+   !< bracketed as lower <= h <= upper.
    !<
    !< `lower` is the largest distance over deterministic samples of self (every vertex, every edge midpoint and the
    !< centroids of a regular subdivision of each facet, `samples_per_area` per unit area, default 4 per mean facet
-   !< area): a lower bound of h. `mean` and `rms` are the area-weighted quadratures of d over self (estimates);
-   !< `per_vertex(i)` is d at vertex i of the vertex pool. Distances come from other's BVH (`distance_many`), so the
-   !< result does not depend on the tree kind or on the thread count. See `fossil_deviation`.
+   !< area), raised by the branch and bound. `upper` is certified: each facet is bounded through the Lipschitz and the
+   !< convexity bounds of d and split until upper - lower <= `tolerance` (default 1e-3 of the larger bounding-box
+   !< diagonal), or until `max_triangles` (default 2 000 000) triangles were created: then status is
+   !< DEV_STATUS_NOT_CONVERGED and the bounds are valid but wider. Without `upper` (and `tolerance`) the branch and bound
+   !< does not run. `mean` and `rms` are the area-weighted quadratures of d over self (estimates); `per_vertex(i)` is d
+   !< at vertex i of the vertex pool. Distances and closest points come from other's BVH (`query_many`), so the result
+   !< does not depend on the tree kind or on the thread count. See `fossil_deviation`.
    class(surface_stl_object), intent(in)            :: self             !< Surface A.
-   type(surface_stl_object),  intent(in)            :: other            !< Surface B.
+   type(surface_stl_object),  intent(in),   target  :: other            !< Surface B.
    real(R8P),                 intent(out), optional :: lower            !< Lower bound of h(self, other).
+   real(R8P),                 intent(out), optional :: upper            !< Certified upper bound of h(self, other).
    real(R8P),                 intent(out), optional :: mean             !< Mean of d over self (estimate).
    real(R8P),                 intent(out), optional :: rms              !< Rms of d over self (estimate).
    real(R8P), allocatable,    intent(out), optional :: per_vertex(:)    !< d at the vertex-pool vertices of self.
+   real(R8P),                 intent(in),  optional :: tolerance        !< Target upper - lower.
    real(R8P),                 intent(in),  optional :: samples_per_area !< Interior samples per unit area.
-   integer(I4P),              intent(out), optional :: samples          !< Points evaluated.
-   integer(I4P),              intent(out), optional :: status           !< DEV_STATUS_OK or DEV_STATUS_BAD_INPUT.
+   integer(I4P),              intent(in),  optional :: max_triangles    !< Work cap of the branch and bound.
+   integer(I4P),              intent(out), optional :: samples          !< Points sampled.
+   integer(I4P),              intent(out), optional :: triangles        !< Triangles created by the branch and bound.
+   integer(I4P),              intent(out), optional :: status           !< DEV_STATUS_*.
    real(R8P),    allocatable                        :: v(:,:)           !< Vertices of self.
    integer(I4P), allocatable                        :: fv(:,:)          !< Facets of self.
    real(R8P),    allocatable                        :: pv(:)            !< Per-vertex distances.
-   real(R8P)                                        :: lower_, mean_, rms_, spa !< Results, sampling density.
-   integer(I4P)                                     :: samples_, status_        !< Results.
+   real(R8P),    allocatable                        :: feet(:,:)        !< Closest points of the vertices.
+   integer(I4P), allocatable                        :: feet_facets(:)   !< Their facets.
+   real(R8P)                                        :: lower_, upper_, mean_, rms_, spa, tol !< Results, parameters.
+   integer(I4P)                                     :: samples_, triangles_, status_, cap    !< Results, parameters.
+   type(vector_R8P)                                 :: d1, d2           !< Bounding-box diagonals.
+   type(surface_evaluator_t)                        :: eval_other       !< other's distance query.
 
    if (present(lower)) lower = 0._R8P
+   if (present(upper)) upper = 0._R8P
    if (present(mean)) mean = 0._R8P
    if (present(rms)) rms = 0._R8P
    if (present(samples)) samples = 0_I4P
+   if (present(triangles)) triangles = 0_I4P
    if (present(status)) status = DEV_STATUS_BAD_INPUT
    if (self%facets_number == 0_I4P .or. other%facets_number == 0_I4P) return
+   eval_other%surface => other
    call deviation_mesh(self, v, fv)
    spa = 4._R8P * self%facets_number / max(self%area, tiny(1._R8P))
    if (present(samples_per_area)) spa = samples_per_area
-   allocate(pv(size(v, 2)))
-   call deviation_sampled(v, fv, eval_other, spa, lower_, mean_, rms_, pv, samples_, status_)
+   allocate(pv(size(v, 2)), feet(3, size(v, 2)), feet_facets(size(v, 2)))
+   call deviation_sampled(v, fv, eval_other, spa, lower_, mean_, rms_, pv, samples_, status_, vertex_feet=feet, &
+                          vertex_facets=feet_facets)
    if (present(status)) status = status_
    if (status_ /= DEV_STATUS_OK) return
+   triangles_ = 0_I4P
+   if (present(upper)) then
+      d1 = self%bmax - self%bmin ; d2 = other%bmax - other%bmin
+      tol = 1.e-3_R8P * max(d1%normL2(), d2%normL2())
+      if (present(tolerance)) tol = tolerance
+      cap = 2000000_I4P ; if (present(max_triangles)) cap = max_triangles
+      call deviation_certified(v, fv, pv, feet, feet_facets, eval_other, max(tol, tiny(1._R8P)), cap, lower_, upper_, &
+                               triangles_, status_)
+      upper = upper_
+      if (present(status)) status = status_
+   endif
    if (present(lower)) lower = lower_
    if (present(mean)) mean = mean_
    if (present(rms)) rms = rms_
    if (present(per_vertex)) call move_alloc(pv, per_vertex)
    if (present(samples)) samples = samples_
-   contains
-      subroutine eval_other(points, distances)
-      !< Unsigned distances of the points to `other`.
-      real(R8P), intent(in)  :: points(:,:)  !< Points [3, n].
-      real(R8P), intent(out) :: distances(:) !< Distances [n].
-      type(vector_R8P), allocatable :: q(:)  !< Points as vectors.
-      integer(I4P)                  :: i     !< Counter.
-
-      allocate(q(size(points, 2)))
-      do i = 1, size(points, 2)
-         q(i) = vector_R8P(points(1, i), points(2, i), points(3, i))
-      enddo
-      call other%distance_many(points=q, distances=distances, is_signed=.false., is_square_root=.true.)
-      endsubroutine eval_other
+   if (present(triangles)) triangles = triangles_
    endsubroutine deviation
 
-   subroutine hausdorff(self, other, lower, samples_per_area, status)
-   !< Symmetric Hausdorff distance H = max(h(self, other), h(other, self)) (issue #60): both one-sided deviations.
+   subroutine hausdorff(self, other, lower, upper, tolerance, samples_per_area, max_triangles, status)
+   !< Symmetric Hausdorff distance H = max(h(self, other), h(other, self)) (issue #60): both one-sided deviations,
+   !< bracketed as lower <= H <= upper (`upper` certified, as in `deviation`).
    class(surface_stl_object), intent(in)            :: self             !< Surface A.
    type(surface_stl_object),  intent(in)            :: other            !< Surface B.
    real(R8P),                 intent(out), optional :: lower            !< Lower bound of H.
+   real(R8P),                 intent(out), optional :: upper            !< Certified upper bound of H.
+   real(R8P),                 intent(in),  optional :: tolerance        !< Target upper - lower of each direction.
    real(R8P),                 intent(in),  optional :: samples_per_area !< Interior samples per unit area.
-   integer(I4P),              intent(out), optional :: status           !< DEV_STATUS_OK or DEV_STATUS_BAD_INPUT.
-   real(R8P)                                        :: l1, l2           !< One-sided bounds.
+   integer(I4P),              intent(in),  optional :: max_triangles    !< Work cap of each branch and bound.
+   integer(I4P),              intent(out), optional :: status           !< DEV_STATUS_*.
+   real(R8P)                                        :: l1, l2, u1, u2   !< One-sided bounds.
    integer(I4P)                                     :: s1, s2           !< Statuses.
 
    if (present(lower)) lower = 0._R8P
-   call self%deviation(other, lower=l1, samples_per_area=samples_per_area, status=s1)
-   call other%deviation(self, lower=l2, samples_per_area=samples_per_area, status=s2)
+   if (present(upper)) upper = 0._R8P
+   if (present(upper)) then
+      call self%deviation(other, lower=l1, upper=u1, tolerance=tolerance, samples_per_area=samples_per_area, &
+                          max_triangles=max_triangles, status=s1)
+      call other%deviation(self, lower=l2, upper=u2, tolerance=tolerance, samples_per_area=samples_per_area, &
+                           max_triangles=max_triangles, status=s2)
+   else
+      call self%deviation(other, lower=l1, samples_per_area=samples_per_area, status=s1)
+      call other%deviation(self, lower=l2, samples_per_area=samples_per_area, status=s2)
+      u1 = 0._R8P ; u2 = 0._R8P
+   endif
    if (present(status)) status = max(s1, s2)
-   if (s1 /= DEV_STATUS_OK .or. s2 /= DEV_STATUS_OK) return
+   if (s1 == DEV_STATUS_BAD_INPUT .or. s2 == DEV_STATUS_BAD_INPUT) return
    if (present(lower)) lower = max(l1, l2)
+   if (present(upper)) upper = max(u1, u2)
    endsubroutine hausdorff
+
+   subroutine surface_evaluator_eval(self, points, distances, closest, facets)
+   !< Unsigned distances of the points to the evaluator's surface, the closest points and their facets (`query_many`).
+   class(surface_evaluator_t), intent(in)  :: self         !< Evaluator.
+   real(R8P),                  intent(in)  :: points(:,:)  !< Points [3, n].
+   real(R8P),                  intent(out) :: distances(:) !< Distances [n].
+   real(R8P),                  intent(out) :: closest(:,:) !< Closest points [3, n].
+   integer(I4P),               intent(out) :: facets(:)    !< Closest facets [n].
+   type(vector_R8P), allocatable           :: q(:)         !< Points as vectors.
+   integer(I4P)                            :: i            !< Counter.
+
+   allocate(q(size(points, 2)))
+   do i = 1, size(points, 2)
+      q(i) = vector_R8P(points(1, i), points(2, i), points(3, i))
+   enddo
+   call self%surface%query_many(points=q, distances=distances, closest_points=closest, facets=facets, is_signed=.false.)
+   endsubroutine surface_evaluator_eval
 
    subroutine deviation_mesh(surf, v, fv)
    !< The vertex-pool vertices and the facets (pool indices) of a surface.

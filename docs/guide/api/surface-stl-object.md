@@ -678,16 +678,20 @@ end program ex_mass_properties
 ### `deviation`
 
 ```fortran
-call surface%deviation(other, lower, mean, rms, per_vertex, samples_per_area, samples, status)
-call surface%hausdorff(other, lower, samples_per_area, status)
+call surface%deviation(other, lower, upper, mean, rms, per_vertex, tolerance, samples_per_area, max_triangles, &
+                       samples, triangles, status)
+call surface%hausdorff(other, lower, upper, tolerance, samples_per_area, max_triangles, status)
 ```
 
-**Purpose.** How far this surface lies from `other` (issue #60): `lower` is a lower bound of the one-sided deviation
-h(self, other) = sup over x in self of d(x, other), from deterministic samples (vertices, edge midpoints, sub-triangle
-centroids); `mean` and `rms` are area-weighted estimates of d over self; `per_vertex` holds d at every vertex of the
-vertex pool. `hausdorff` is the symmetric max(h(self, other), h(other, self)).
+**Purpose.** How far this surface lies from `other` (issue #60): `lower <= h <= upper` brackets the one-sided deviation
+h(self, other) = sup over x in self of d(x, other). `lower` comes from deterministic samples (vertices, edge midpoints,
+sub-triangle centroids); `upper` is certified by a branch and bound over the facets (Lipschitz and convexity bounds of
+d), to `tolerance` (default 1e-3 of the larger bounding-box diagonal) or until `max_triangles`. `mean` and `rms` are
+area-weighted estimates of d over self; `per_vertex` holds d at every vertex of the vertex pool. `hausdorff` is the
+symmetric max(h(self, other), h(other, self)).
 
-**Arguments.** All optional except `other`; `status` is `DEV_STATUS_OK` or `DEV_STATUS_BAD_INPUT` (an empty surface).
+**Arguments.** All optional except `other`; `status` is `DEV_STATUS_OK`, `DEV_STATUS_BAD_INPUT` (an empty surface) or
+`DEV_STATUS_NOT_CONVERGED` (the work cap stopped it; the bounds are valid).
 
 **Example.**
 
@@ -697,14 +701,14 @@ use fossil
 use penf, only : I4P, R8P
 implicit none
 type(surface_stl_object) :: before, after
-real(R8P)                :: h, mean
+real(R8P)                :: lower, upper
 integer(I4P)             :: status
 
 call before%load_from_file(file_name='cube.stl', guess_format=.true.)
 after = before
 call after%decimate(target_facets=before%get_facets_number() / 2)
-call after%deviation(before, lower=h, mean=mean, status=status)
-if (status == DEV_STATUS_OK) print '(A,ES10.3,A,ES10.3)', 'h >= ', h, ', mean ', mean
+call after%deviation(before, lower=lower, upper=upper, status=status)
+if (status == DEV_STATUS_OK) print '(ES10.3,A,ES10.3)', lower, ' <= h <= ', upper
 end program ex_deviation
 ```
 
