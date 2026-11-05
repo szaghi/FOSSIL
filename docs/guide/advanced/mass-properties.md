@@ -164,6 +164,31 @@ and `principal_angle` returns the pitch, −12.00°.
 The block is 0.1 × 0.2 × 0.3 m, so $I_{xx} = m (0.2^2 + 0.3^2)/12 = 47.1 \cdot 0.13/12 = 0.51025$ kg m², as printed.
 About a corner, the parallel-axis term adds $m (0.1^2 + 0.15^2) = 1.53075$ to it.
 
+## Command line
+
+`fossilizer --mass_properties` prints the mass properties of each input after the other operations, with an
+optional uniform `--density` (default 1). A surface that is not closed is reported, not measured:
+
+```bash
+fossilizer -i cube-02.stl --mass_properties --density 2
+```
+
+```text
+mass properties, density   2.000000000000000E+00
+  mass                  2.000000000000000E+00
+  centre of mass        5.000000000000000E-01  5.000000000000000E-01  5.000000000000000E-01
+  inertia tensor about the centre of mass:
+                        3.333333333333334E-01 -1.355252715606881E-19 -1.355252715606881E-19
+                       -1.355252715606881E-19  3.333333333333334E-01  1.355252715606881E-19
+                       -1.355252715606881E-19  1.355252715606881E-19  3.333333333333334E-01
+  principal moments     3.333333333333333E-01  3.333333333333361E-01  3.333333333333361E-01
+  principal axes (columns):
+  ...
+```
+
+The cube's three moments are equal, so its principal axes are any orthonormal set (the printed ones are one).
+`src/tests/fossil_test_mass_cli.f90` reads these lines back.
+
 ## Validation
 
 `src/tests/fossil_test_mass_properties.f90`, against closed-form results:

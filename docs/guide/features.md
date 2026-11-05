@@ -74,7 +74,8 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 ## `fossilizer` CLI
 
 `src/app/fossilizer.f90` wraps the library for the command line: load one or more STL files, clip, merge, mirror,
-rotate, translate, resize, sanitize and repair connectivity, print statistics, save the result.
+rotate, translate, resize, sanitize and repair connectivity, print statistics and, with `--mass_properties
+[--density ρ]`, the mass properties of a closed body; save the result.
 
 ## Compilers
 

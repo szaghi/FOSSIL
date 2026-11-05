@@ -4,7 +4,7 @@ program fossiler
 !< FOSSILer, analyze, modify and repair STL files.
 
 use flap, only : command_line_interface
-use fossil, only : surface_stl_object
+use fossil, only : surface_stl_object, STATUS_OK
 use penf, only : I4P, R8P, str
 use vecfor, only : vector_R8P
 
@@ -34,6 +34,8 @@ logical                               :: refine_holes                          !
 logical                               :: fair_holes                            !< Fair hole patches (implies refine).
 type(vector_R8P)                      :: translate_delta                       !< Translate delta.
 real(R8P)                             :: translate_x, translate_y, translate_z !< Translate scalar deltas.
+logical                               :: mass_properties                       !< Print the mass properties (issue #59).
+real(R8P)                             :: density                               !< Uniform density for the mass properties.
 
 call cli_parse
 if (cli%is_passed(switch='--merge')) then
@@ -115,6 +117,7 @@ do s=1, stl_numbers
                                  holes_filled=holes_filled, holes_skipped=holes_skipped, refine=refine_holes, fair=fair_holes)
       print '(A,I0,A,I0,A)', 'fill holes: ', holes_filled, ' filled, ', holes_skipped, ' left open'
    endif
+   if (mass_properties) call print_mass_properties(surface(s))
    if (cli%is_passed(switch='--output')) then
       print '(A)', 'save output in: '//trim(adjustl(output))
       call surface(s)%save_into_file(file_name=adjustl(output))
@@ -123,6 +126,37 @@ do s=1, stl_numbers
 enddo
 
 contains
+  subroutine print_mass_properties(body)
+  !< Print the mass properties of a closed body (issue #59).
+  type(surface_stl_object), intent(in) :: body         !< Surface.
+  real(R8P)                            :: mass         !< Mass.
+  real(R8P)                            :: center(3)    !< Centre of mass.
+  real(R8P)                            :: inertia(3,3) !< Inertia tensor about the centre.
+  real(R8P)                            :: moments(3)   !< Principal moments.
+  real(R8P)                            :: axes(3,3)    !< Principal axes (columns).
+  integer(I4P)                         :: status       !< Status.
+  integer(I4P)                         :: i            !< Counter.
+
+  call body%mass_properties(mass=mass, center=center, inertia=inertia, principal_moments=moments, principal_axes=axes, &
+                            density=density, status=status)
+  if (status /= STATUS_OK) then
+     print '(A)', 'mass properties: not a closed body (not watertight, or enclosed volume <= 0)'
+     return
+  endif
+  print '(A,ES23.15)',  'mass properties, density ', density
+  print '(A,ES23.15)',  '  mass                ', mass
+  print '(A,3ES23.15)', '  centre of mass      ', center
+  print '(A)',          '  inertia tensor about the centre of mass:'
+  do i = 1, 3
+     print '(A,3ES23.15)', '                      ', inertia(i,:)
+  enddo
+  print '(A,3ES23.15)', '  principal moments   ', moments
+  print '(A)',          '  principal axes (columns):'
+  do i = 1, 3
+     print '(A,3ES23.15)', '                      ', axes(i,:)
+  enddo
+  endsubroutine print_mass_properties
+
   subroutine cli_parse()
   !< Build and parse command line interface.
   integer(I4P) :: error               !< Error trapping flag.
@@ -214,6 +248,18 @@ contains
                def='1.57079633',         &
                act='store')
 
+  call cli%add(switch='--mass_properties',                                                   &
+               help='print mass, centre of mass, inertia tensor, principal moments and axes (closed bodies)', &
+               required=.false.,                                                                &
+               def='.false.',                                                                   &
+               act='store_true')
+
+  call cli%add(switch='--density',                                &
+               help='uniform density for --mass_properties',     &
+               required=.false.,                                  &
+               def='1.0',                                         &
+               act='store')
+
   call cli%add(switch='--sanitize', &
                help='sanitize STL', &
                required=.false.,    &
@@ -289,6 +335,8 @@ contains
   call cli%get(        switch='--resize_z',        val=resize_z,            error=error) ; if (error/=0) stop
   call cli%get(        switch='--rotate_axis',     val=rotate_axis_,        error=error) ; if (error/=0) stop
   call cli%get(        switch='--rotate_angle',    val=rotate_angle,        error=error) ; if (error/=0) stop
+  call cli%get(        switch='--mass_properties', val=mass_properties,     error=error) ; if (error/=0) stop
+  call cli%get(        switch='--density',         val=density,             error=error) ; if (error/=0) stop
   call cli%get(        switch='--sanitize',        val=sanitize,            error=error) ; if (error/=0) stop
   call cli%get(        switch='--fill_holes',      val=fill_holes,          error=error) ; if (error/=0) stop
   call cli%get(        switch='--max_hole_edges',  val=max_hole_edges,      error=error) ; if (error/=0) stop

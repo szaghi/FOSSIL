@@ -1,10 +1,10 @@
 !< Animation of the reference page "Mass properties": the tennis-racket flip (Dzhanibekov effect). A T-handle, a closed
-!< prism with three distinct principal moments, spins about its intermediate axis with a small perturbation (0.05 rad/s about the other two axes); the spin is
-!< unstable and the handle flips over periodically. The program takes the inertia tensor from mass_properties,
-!< integrates Euler's equations I w' = (I w) x w in the principal frame (RK4, fixed step) together with the
-!< orientation R' = R [w]x, and draws the body at each pose (principal_frame, move) with its angular velocity (ember,
-!< from the centre of mass) and the line of its angular momentum, fixed in the world frame (gold). The printed drifts of the kinetic energy and of the
-!< angular momentum are the integrator's error.
+!< prism with three distinct principal moments, spins about its intermediate axis with a small perturbation (0.05 rad/s
+!< about the other two axes); the spin is unstable and the handle flips over periodically. The program takes the
+!< inertia tensor from mass_properties, integrates Euler's equations I w' = (I w) x w in the principal frame (RK4, fixed
+!< step) together with the orientation R' = R [w]x, and draws the body at each pose (principal_frame, move) with its
+!< angular velocity (ember, from the centre of mass) and the line of its angular momentum, fixed in the world frame
+!< (gold). The printed drifts of the kinetic energy and of the angular momentum are the integrator's error.
 program anim_mass_properties
 use fossil,              only : surface_stl_object, facet_object, rigid_pose_t, principal_frame, pose_compose, &
                                 pose_inverse, STATUS_OK
