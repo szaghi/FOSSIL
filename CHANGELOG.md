@@ -4,6 +4,65 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.1.0] — 2026-11-05
+### Added
+- **alpha-wrap**: Carve on a cell grid, wrap on the offset surface
+
+- **alpha-wrap**: Coarsen the wrap by constrained edge collapses
+
+
+### Changed
+- **alpha-wrap**: Remove the MVP octree stages ⚠ BREAKING CHANGE
+
+
+### Documentation
+- Figures of the tutorial, computed by FOSSIL
+
+- Figures of the cookbook, computed by FOSSIL
+
+- One gallery for the landing page and the README
+
+- Animations in the figure renderer
+
+- Animations of hole filling and of a moving body
+
+- Animations of the booleans and of decimation
+
+- Animated cards in the gallery
+
+- Computed figures on the booleans, alpha wrap, Laplacian, curvature and decimation pages
+
+- Computed figures on the remeshing, marching-cubes, self-intersection, smoothing and winding-number pages
+
+- Drop the ParaView pictures the computed figures replace
+
+- **alpha-wrap**: What the MVP wrap guarantees, measured
+
+- The figures and numbers after the marching-cubes and curvature fixes
+
+- **alpha-wrap**: The wrap on the offset surface, measured
+
+- **self-intersection**: Regenerate the dragon figure after #55
+
+- **alpha-wrap**: The coarsened wrap, re-measured
+
+
+### Fixed
+- **facet**: Area from the cross product, never NaN
+
+- **marching-cubes**: Watertight output, crossings welded bit for bit
+
+- **curvature**: The foot curvature on a collapsed facet
+
+- **self-intersection**: Decide the pairs sharing a vertex exactly
+
+- **alpha-wrap**: Keep repaired vertices at the offset
+
+
+### Performance
+- **alpha-wrap**: Decide point contacts in floating point
+
+
 ## [2.0.0] — 2026-11-04
 ### Added
 - **tests**: Add concurrency test for fossil distance calculations
