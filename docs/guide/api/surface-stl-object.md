@@ -2259,7 +2259,7 @@ one of them is `pure`.
 | `get_bmin()`, `get_bmax()`            | `type(vector_R8P)` — min / max corners of the axis-aligned bounding box.               |
 | `get_volume()`                        | `real(R8P)` — signed volume. Positive for closed bodies with outward normals.          |
 | `get_area()`                          | `real(R8P)` — total surface area (sum of facet areas). Added in issue #7.              |
-| `get_centroid()`                      | `type(vector_R8P)` — surface centroid.                                                 |
+| `get_centroid()`                      | `type(vector_R8P)` — centre of the enclosed volume (from the vertices, as the volume; meaningful on a closed body). Fixed in issue #59: before, it scaled with the facet size. |
 | `get_header()`                        | `character(FRLEN)` — STL header string.                                                |
 | `set_header(header)`                  | Set the header for the next `save_into_file`.                                          |
 | `get_non_manifold_edges_number()`     | `integer(I4P)` — edges shared by 3+ facets.                                            |

@@ -1049,28 +1049,44 @@ contains
    endsubroutine clip
 
    pure subroutine compute_centroid(self)
-   !< Compute centroid of STL surface.
+   !< Compute centroid of STL surface: the centre of the enclosed volume.
    !<
-   !< @note Metrix and volume must be already computed.
+   !< Divergence theorem over the signed tetrahedra (o, v1, v2, v3), o the bounding-box centre:
+   !< centroid = o + sum D (v1 + v2 + v3 - 3 o) / 24 / sum D / 6, D = (v1-o) . ((v2-o) x (v3-o)). Only the
+   !< vertices enter, in their stored order (as in the volume), never the stored facet normals. The previous
+   !< formula weighted each facet by its unit normal where the unnormalised one is needed, so the result
+   !< scaled with the facet size (2.0 instead of 0.5 on the unit cube cube-01, issue #59).
    !<
-   !< Degenerate / non-watertight surfaces can have `volume == 0`; the centroid
-   !< formula divides by `48 * volume`, so we guard against producing NaN/Inf.
-   !< In the degenerate case we fall back to the origin — a defined value the
-   !< caller can detect via `volume == 0` if needed.
-   class(surface_stl_object), intent(inout) :: self !< File STL.
-   integer(I4P)                             :: f    !< Counter.
+   !< @note The bounding box must be already computed.
+   !<
+   !< Degenerate / non-watertight surfaces can enclose a zero signed volume: the centroid then falls back to
+   !< the origin, a defined value the caller can detect via `volume == 0`.
+   class(surface_stl_object), intent(inout) :: self    !< File STL.
+   real(R8P)                                :: o(3)    !< Reference point.
+   real(R8P)                                :: a(3)    !< Vertex 1 relative to o.
+   real(R8P)                                :: b(3)    !< Vertex 2 relative to o.
+   real(R8P)                                :: c(3)    !< Vertex 3 relative to o.
+   real(R8P)                                :: d       !< Six times the tetrahedron volume.
+   real(R8P)                                :: v6      !< Sum of d.
+   real(R8P)                                :: m24(3)  !< Sum of d (a + b + c).
+   integer(I4P)                             :: f       !< Counter.
 
    if (self%facets_number>0) then
       self%centroid = 0._R8P
-      if (abs(self%volume) > tiny(0._R8P)) then
-         do f=1, self%facets_number
-            ! Sign: tetrahedron_volume now follows the standard divergence-theorem
-            ! convention (outward normals -> positive volume). centroid_part scales
-            ! with self%normal, so the accumulator picks up `+centroid_part` (the
-            ! historical `-` came from FOSSIL's previously-inverted volume sign).
-            self%centroid = self%centroid + self%facet(f)%centroid_part()
-         enddo
-         self%centroid = self%centroid / (48 * self%volume)
+      o = 0.5_R8P * [self%bmin%x + self%bmax%x, self%bmin%y + self%bmax%y, self%bmin%z + self%bmax%z]
+      v6 = 0._R8P
+      m24 = 0._R8P
+      do f=1, self%facets_number
+         a = [self%facet(f)%vertex(1)%x, self%facet(f)%vertex(1)%y, self%facet(f)%vertex(1)%z] - o
+         b = [self%facet(f)%vertex(2)%x, self%facet(f)%vertex(2)%y, self%facet(f)%vertex(2)%z] - o
+         c = [self%facet(f)%vertex(3)%x, self%facet(f)%vertex(3)%y, self%facet(f)%vertex(3)%z] - o
+         d = a(1) * (b(2) * c(3) - b(3) * c(2)) + a(2) * (b(3) * c(1) - b(1) * c(3)) + a(3) * (b(1) * c(2) - b(2) * c(1))
+         v6 = v6 + d
+         m24 = m24 + d * (a + b + c)
+      enddo
+      if (abs(v6) > tiny(0._R8P)) then
+         m24 = o + m24 / (4._R8P * v6)
+         self%centroid = vector_R8P(m24(1), m24(2), m24(3))
       endif
    endif
    endsubroutine compute_centroid
