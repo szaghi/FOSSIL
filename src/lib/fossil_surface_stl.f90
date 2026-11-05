@@ -3931,45 +3931,29 @@ contains
    endsubroutine segment_sdf
 
    subroutine alpha_wrap(self, alpha, offset, max_iterations, wrapped, status)
-   !< Alpha wrapping: produce a watertight 2-manifold surrogate from any
-   !< triangle-soup input (issue #18 §1.6). Reference: Portaneri, Hemmer,
-   !< Birdal, Mandad & Alliez, *Alpha Wrapping with an Offset* (SIGGRAPH 2022).
+   !< Alpha wrapping: a watertight, 2-manifold surrogate of any triangle soup (issue #18 §1.6, issue #50). Reference:
+   !< Portaneri, Hemmer, Birdal, Mandad & Alliez, *Alpha Wrapping with an Offset* (SIGGRAPH 2022).
    !<
-   !< Pipeline (5 stages, all in `fossil_alpha_wrap`):
-   !<   1. Build a leaf-size-α octree over the input facets.
-   !<   2. Classify every empty leaf as INSIDE/OUTSIDE via flood fill from
-   !<      a known-outside corner seed (BOUNDARY leaves act as barriers).
-   !<   3. Extract the wrap surface as the BOUNDARY ↔ OUTSIDE interface
-   !<      (face-quad emission per Portaneri Phase 3a).
-   !<   4. Project each wrap vertex toward the closest input-surface point
-   !<      within Hausdorff offset ε.
-   !<   5. (this routine) Adaptively refine BOUNDARY leaves whose vertices
-   !<      didn't snap within ε and re-run; up to `max_iterations` outer
-   !<      passes (default 5).
+   !< The wrap is the boundary of the space a ball of diameter `alpha` carves from outside, laid on the `offset`
+   !< surface of the input: a gap wider than about alpha + 2 offset lets the ball in (both sides of the walls are
+   !< wrapped), a narrower one is closed by a cap. Computed on a cell grid (alpha/4 first) by `awrap_run` in
+   !< `fossil_alpha_wrap`, which has the pipeline.
    !<
    !< Defaults from CGAL's Alpha_wrap_3:
    !<   - alpha  = bbox_diagonal / 50
    !<   - offset = alpha / 30
    !<
    !< Status:
-   !<   - AWRAP_STATUS_OK            converged within max_iterations
-   !<   - AWRAP_STATUS_BAD_INPUT     empty surface, alpha ≤ 0
-   !<   - AWRAP_STATUS_DEGENERATE    alpha > input bbox diagonal
-   !<   - AWRAP_STATUS_NOT_CONVERGED max_iterations exhausted with errors > offset;
-   !<                                wrapped surface still returned but is not
-   !<                                guaranteed watertight or within Hausdorff bound
-   !<
-   !< Known MVP limitation: inputs with large geometric defects (holes
-   !< spanning a substantial fraction of one face) may not converge — the
-   !< flood fill keeps leaking through the hole at every refinement level.
-   !< Closing such defects requires CGAL's offset-isosurface barrier
-   !< formulation, which is out of MVP scope. For typical CAD STL with
-   !< small defects (gaps ≤ a few α), the algorithm converges within 2-3
-   !< outer iterations.
+   !<   - AWRAP_STATUS_OK            the wrap encloses the input without touching it and does not cross itself
+   !<   - AWRAP_STATUS_BAD_INPUT     empty surface, alpha <= 0 or offset <= 0
+   !<   - AWRAP_STATUS_DEGENERATE    alpha >= input bbox diagonal (empty wrap)
+   !<   - AWRAP_STATUS_NOT_CONVERGED `max_iterations` grid levels (cell size halved each, default 5, at most 2^23
+   !<                                cells) still left a triangle touching the input or crossing the wrap; the wrap
+   !<                                of the finest level is returned, closed and 2-manifold
    class(surface_stl_object), intent(in)            :: self           !< Input surface (any topology).
    real(R8P),                 intent(in),  optional :: alpha          !< Feature size (default bbox_diagonal/50).
    real(R8P),                 intent(in),  optional :: offset         !< Hausdorff bound (default alpha/30).
-   integer(I4P),              intent(in),  optional :: max_iterations !< Outer-loop cap (default AWRAP_DEFAULT_MAX_OUTER_ITERATIONS).
+   integer(I4P),              intent(in),  optional :: max_iterations !< Grid levels (default AWRAP_DEFAULT_MAX_OUTER_ITERATIONS).
    type(surface_stl_object),  intent(out)           :: wrapped        !< Output watertight surrogate.
    integer(I4P),              intent(out), optional :: status         !< Status code.
    real(R8P)                                        :: alpha_eff, offset_eff

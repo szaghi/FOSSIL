@@ -53,6 +53,7 @@ implicit none
 private
 public :: extract_isosurface
 public :: MC_STATUS_OK, MC_STATUS_BAD_DIMENSIONS
+public :: EDGE_VERTEX, VOX, MC_EDGE_TABLE, MC_TRI_TABLE ! the tables, for alpha_wrap's binary extraction (issue #50)
 
 integer(I4P), parameter :: MC_STATUS_OK             = 0_I4P
 integer(I4P), parameter :: MC_STATUS_BAD_DIMENSIONS = 1_I4P  !< Grid has fewer than 2 cells along some axis.

@@ -8,7 +8,7 @@
 !< Step 5: validate the capstone `surface%alpha_wrap` TBP — adaptive
 !<         refinement loop integrating steps 1-4.
 !<
-!< 3 invariants for step 1, 3 for step 2, 3 for step 3, 3 for step 4, 3 for step 5.
+!< 3 invariants for step 1, 3 for step 2, 3 for step 3, 3 for step 4, 5 for the wrap of awrap_run (issue #50).
 !<
 !< REGRESSION variant (issue #45): invariants 11 and 14 (projection and capstone TBP on the
 !< sphere wrap, ~2 s each in the debug build: the 7296-facet sphere wrap goes through the
@@ -16,7 +16,8 @@
 !< src/tests/validation/fossil_val_alpha_wrap.f90, which is the full original test. Here
 !< they are reported as skipped (.true.), invariant 12 checks the projected cube wrap of
 !< invariant 10, and the marching-cubes sphere is sampled on a 20^3 grid (32^3 in the
-!< validation copy); alpha stays 0.1.
+!< validation copy); alpha stays 0.1. Invariants 13, 15 and 17 check the wraps for self-crossings
+!< (find_self_intersections, 2-5 s each in the debug build) in the validation copy only.
 !<
 !<   1. Cube — refinement structure. cube.stl is a closed unit cube. Build
 !<      octree with α = 0.1. Assert: n_boundary_leaves > 0 (geometry is
@@ -70,25 +71,24 @@
 !<      for the projected wrap of the cube; must be zero (vertex dedup
 !<      ensures shared vertices stay shared after projection, so no
 !<      seams open up).
-!<  13. Capstone TBP `surface%alpha_wrap` on the cube — converges
-!<      (status OK or NOT_CONVERGED but watertight), volume within 10%
-!<      of unit cube. End-to-end exercise of the public API.
+!<  13. Capstone TBP `surface%alpha_wrap` on the cube (issue #50): status OK,
+!<      watertight, manifold, volume within 0.5% of the
+!<      offset cube (the Minkowski sum of the cube and a ball of radius offset).
 !<  14. [validation copy only] Capstone TBP on the sphere — convergence is acceptable as either
 !<      OK or NOT_CONVERGED (curved surface is harder; the SUFFICIENT
 !<      property is a watertight result with volume within 30% of
 !<      analytic (4/3)π).
-!<  15. Holed-cube robustness: the TBP runs to a result without
-!<      crashing, output is non-empty, output is watertight if the hole
-!<      is small enough relative to α (we use a single-triangle hole at
-!<      α small enough to capture). DOCUMENTED MVP LIMITATION: a hole
-!<      spanning a substantial fraction of one face won't close at any
-!<      α — needs the offset-isosurface barrier from the full Portaneri
-!<      formulation. Tested separately to keep the assertion honest.
+!<  15. Holed cube, hole wider than the ball (alpha = 0.4): one closed shell
+!<      lining both sides of the walls (the offset-surface barrier keeps the two
+!<      layers apart), OK, manifold, volume of a hollow shell.
+!<  16. Holed cube, hole narrower than the ball (alpha = 0.6): the hole is
+!<      capped, volume just below the offset cube's.
+!<  17. One triangle (zero thickness): a closed shell around both sides,
+!<      volume 2 offset x area plus the rim.
 
 program fossil_test_alpha_wrap
 
-use fossil, only : surface_stl_object, extract_isosurface, &
-                   AWRAP_STATUS_NOT_CONVERGED
+use fossil, only : surface_stl_object, extract_isosurface
 use fossil_alpha_wrap, only : awrap_octree_t, awrap_build_octree, awrap_classify_leaves, &
                               awrap_extract_surface, awrap_project_vertices, &
                               AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, AWRAP_STATUS_DEGENERATE, &
@@ -96,13 +96,14 @@ use fossil_alpha_wrap, only : awrap_octree_t, awrap_build_octree, awrap_classify
                               AWRAP_LEAF_FLAG_EMPTY, AWRAP_LEAF_FLAG_INSIDE, AWRAP_LEAF_FLAG_OUTSIDE, &
                               AWRAP_MAX_DEPTH
 use fossil_facet_object, only : facet_object
-use fossil_utils, only : triangle_overlaps_aabb
+use fossil_utils, only : PI, triangle_overlaps_aabb
 use penf, only : I4P, R8P
 use vecfor, only : vector_R8P
 
 implicit none
 
-type(surface_stl_object) :: cube, sphere, cube_holed, wrap_surface, wrapped_tbp
+type(surface_stl_object) :: cube, sphere, cube_holed, wrap_surface, wrapped_tbp, plate
+type(facet_object), allocatable :: plate_facets(:)
 type(facet_object), allocatable :: sphere_facets(:)
 type(facet_object), allocatable, target :: holed_facets(:)
 type(facet_object), allocatable :: wrap_facets(:)
@@ -120,7 +121,7 @@ integer(I4P) :: n_in_geometry, n_outside_geometry, n_empty_remaining
 integer(I4P) :: n_inside_closed_cube
 integer(I4P) :: n_wrap_facets, n_nm_edges
 logical :: any_overlap, prop_no_false_pos, prop_no_false_neg, prop_size_ok
-logical :: are_tests_passed(15)
+logical :: are_tests_passed(17)
 
 integer(I4P), parameter :: N_GRID = 20_I4P
 
@@ -357,33 +358,73 @@ n_nm_edges = wrap_surface%get_non_manifold_edges_number()
 print '(A,I0)', 'inv 12 (projected manifold): non_manifold_edges=', n_nm_edges
 are_tests_passed(12) = (n_nm_edges == 0_I4P)
 
-! ---- Invariant 13: capstone TBP on cube, end-to-end.
-call cube%alpha_wrap(alpha=0.1_R8P, offset=0.033_R8P, wrapped=wrapped_tbp, status=status)
+! ---- Invariant 13: capstone TBP on the cube (issue #50): status OK, closed, manifold, and its
+!      volume is the cube grown by the offset (Minkowski sum with a ball: 1 + 6e + 3 pi e^2 + 4/3 pi e^3).
+offset = 0.033_R8P
+call cube%alpha_wrap(alpha=0.3_R8P, offset=offset, wrapped=wrapped_tbp, status=status)
 wrap_volume = wrapped_tbp%get_volume()
-print '(A,I0,A,I0,A,L1,A,F8.4)', &
+expected_volume = 1._R8P + 6._R8P * offset + 3._R8P * PI * offset**2 + 4._R8P / 3._R8P * PI * offset**3
+print '(A,I0,A,I0,2(A,L1),A,F8.5,A,F8.5)', &
       'inv 13 (cube TBP): status=', status, ' n_facets=', wrapped_tbp%get_facets_number(), &
-      ' watertight=', wrapped_tbp%is_watertight(), ' volume=', wrap_volume
-are_tests_passed(13) = (status == AWRAP_STATUS_OK .or. status == AWRAP_STATUS_NOT_CONVERGED) .and. &
-                       wrapped_tbp%is_watertight()                          .and. &
-                       (abs(wrap_volume - 1._R8P) <= 0.30_R8P)
+      ' watertight=', wrapped_tbp%is_watertight(), ' manifold=', wrapped_tbp%is_manifold(), &
+      ' volume=', wrap_volume, ' offset cube=', expected_volume
+are_tests_passed(13) = (status == AWRAP_STATUS_OK) .and. wrapped_tbp%is_watertight() .and. &
+                       wrapped_tbp%is_manifold() .and. &
+                       (abs(wrap_volume - expected_volume) <= 0.005_R8P * expected_volume)
 
 ! ---- Invariant 14: capstone TBP on sphere — validation copy only (see the header).
 are_tests_passed(14) = .true.
 print '(A)', 'inv 14 (sphere TBP): skipped, run by src/tests/validation/fossil_val_alpha_wrap.f90'
 
-! ---- Invariant 15: capstone TBP on holed cube — robustness only.
-!      The hole spans an entire face (1/12 of the surface area, but spans
-!      one full face). At α = 0.1 with 5 outer iterations the algorithm
-!      may NOT close it — that's the documented MVP limitation. We only
-!      assert the TBP runs without crashing AND returns a non-empty wrap;
-!      the watertightness is best-effort.
-call cube_holed%alpha_wrap(alpha=0.1_R8P, offset=0.033_R8P, wrapped=wrapped_tbp, status=status)
-print '(A,I0,A,I0,A,L1)', &
-      'inv 15 (holed cube TBP): status=', status, ' n_facets=', wrapped_tbp%get_facets_number(), &
-      ' watertight=', wrapped_tbp%is_watertight()
-are_tests_passed(15) = (wrapped_tbp%get_facets_number() > 0_I4P)
+! ---- Invariant 15: the holed cube (a hole of inradius 0.29) at alpha = 0.4: the ball (diameter alpha, kept offset
+!      from the input) gets through the hole, so the wrap lines both sides of every wall: one closed shell, two offset
+!      layers that the barrier keeps apart (they collapsed onto one wall before issue #50).
+call cube_holed%alpha_wrap(alpha=0.4_R8P, offset=offset, wrapped=wrapped_tbp, status=status)
+wrap_volume = wrapped_tbp%get_volume()
+print '(A,I0,A,I0,2(A,L1),A,F8.5)', &
+      'inv 15 (holed cube, hole open): status=', status, ' n_facets=', wrapped_tbp%get_facets_number(), &
+      ' watertight=', wrapped_tbp%is_watertight(), ' manifold=', wrapped_tbp%is_manifold(), &
+      ' volume=', wrap_volume
+! hollow: at least the 2-offset layer over the 5.5 units of wall area, and far below the solid's 1.2 (the ball, radius
+! 0.2, rounds the inner corners, so the inner layer leaves the walls there)
+are_tests_passed(15) = (status == AWRAP_STATUS_OK) .and. wrapped_tbp%is_watertight() .and. &
+                       wrapped_tbp%is_manifold() .and. &
+                       (wrap_volume >= 11._R8P * offset) .and. (wrap_volume <= 0.7_R8P)
 
-print '(A,15L2)', 'per-case results: ', are_tests_passed
+! ---- Invariant 16: the same holed cube at alpha = 0.6: the ball does not fit through the hole, the wrap closes it
+!      with a cap that dips into it, so the volume is just below the offset cube's.
+offset = 0.02_R8P
+call cube_holed%alpha_wrap(alpha=0.6_R8P, offset=offset, wrapped=wrapped_tbp, status=status)
+wrap_volume = wrapped_tbp%get_volume()
+expected_volume = 1._R8P + 6._R8P * offset + 3._R8P * PI * offset**2 + 4._R8P / 3._R8P * PI * offset**3
+print '(A,I0,A,I0,2(A,L1),A,F8.5,A,F8.5)', &
+      'inv 16 (holed cube, hole capped): status=', status, ' n_facets=', wrapped_tbp%get_facets_number(), &
+      ' watertight=', wrapped_tbp%is_watertight(), ' manifold=', wrapped_tbp%is_manifold(), &
+      ' volume=', wrap_volume, ' offset cube=', expected_volume
+are_tests_passed(16) = (status == AWRAP_STATUS_OK) .and. wrapped_tbp%is_watertight() .and. &
+                       wrapped_tbp%is_manifold() .and. &
+                       (wrap_volume < expected_volume) .and. (wrap_volume > 0.98_R8P * expected_volume)
+
+! ---- Invariant 17: one triangle (a sheet of zero thickness, area 1/2): a closed shell around both of its sides,
+!      volume 2 offset x area plus the rim.
+allocate(plate_facets(1))
+plate_facets(1)%vertex(1) = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+plate_facets(1)%vertex(2) = vector_R8P(1._R8P, 0._R8P, 0._R8P)
+plate_facets(1)%vertex(3) = vector_R8P(0._R8P, 1._R8P, 0._R8P)
+call plate_facets(1)%compute_metrix
+call plate%adopt_facets(facets=plate_facets)
+call plate%alpha_wrap(alpha=0.3_R8P, offset=offset, wrapped=wrapped_tbp, status=status)
+wrap_volume = wrapped_tbp%get_volume()
+print '(A,I0,A,I0,2(A,L1),A,F8.5)', &
+      'inv 17 (one triangle): status=', status, ' n_facets=', wrapped_tbp%get_facets_number(), &
+      ' watertight=', wrapped_tbp%is_watertight(), ' manifold=', wrapped_tbp%is_manifold(), &
+      ' volume=', wrap_volume
+! 2 e A = 0.02; the rim (perimeter 3.41, half a cylinder of radius e) adds at most 0.0022
+are_tests_passed(17) = (status == AWRAP_STATUS_OK) .and. wrapped_tbp%is_watertight() .and. &
+                       wrapped_tbp%is_manifold() .and. &
+                       (wrap_volume >= 0.02_R8P) .and. (wrap_volume <= 0.0225_R8P)
+
+print '(A,17L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 if (.not. (all(are_tests_passed))) error stop 1
 

@@ -12,7 +12,7 @@
 !< Step 5: validate the capstone `surface%alpha_wrap` TBP — adaptive
 !<         refinement loop integrating steps 1-4.
 !<
-!< 3 invariants for step 1, 3 for step 2, 3 for step 3, 3 for step 4, 3 for step 5:
+!< 3 invariants for step 1, 3 for step 2, 3 for step 3, 3 for step 4, 7 for the wrap of awrap_run:
 !<   1. Cube — refinement structure. cube.stl is a closed unit cube. Build
 !<      octree with α = 0.1. Assert: n_boundary_leaves > 0 (geometry is
 !<      captured), every boundary leaf actually overlaps at least one input
@@ -65,25 +65,19 @@
 !<      for the projected wrap of the cube; must be zero (vertex dedup
 !<      ensures shared vertices stay shared after projection, so no
 !<      seams open up).
-!<  13. Capstone TBP `surface%alpha_wrap` on the cube — converges
-!<      (status OK or NOT_CONVERGED but watertight), volume within 10%
-!<      of unit cube. End-to-end exercise of the public API.
-!<  14. Capstone TBP on the sphere — convergence is acceptable as either
-!<      OK or NOT_CONVERGED (curved surface is harder; the SUFFICIENT
-!<      property is a watertight result with volume within 30% of
-!<      analytic (4/3)π).
-!<  15. Holed-cube robustness: the TBP runs to a result without
-!<      crashing, output is non-empty, output is watertight if the hole
-!<      is small enough relative to α (we use a single-triangle hole at
-!<      α small enough to capture). DOCUMENTED MVP LIMITATION: a hole
-!<      spanning a substantial fraction of one face won't close at any
-!<      α — needs the offset-isosurface barrier from the full Portaneri
-!<      formulation. Tested separately to keep the assertion honest.
+!<  13-19: the wrap of awrap_run (issue #50); every wrap must be status OK,
+!<      watertight, manifold and free of self-crossings (find_self_intersections).
+!<  13. Cube, alpha 0.1: volume within 0.5% of the offset cube (Minkowski sum).
+!<  14. Marching-cubes sphere: >= 90% of the vertices on the offset surface, none closer than offset / 2.
+!<  15. Holed cube, hole wider than the ball: a hollow shell lining both sides.
+!<  16. Holed cube, hole narrower than the ball: capped.
+!<  17. One triangle: a closed shell around both sides.
+!<  18. The issue #50 table: cube-01 closed and minus one facet, alpha 0.1, 0.3, 0.7.
+!<  19. dragon.stl with the defaults; the wrap encloses it, vertices as in 14.
 
 program fossil_val_alpha_wrap
 
-use fossil, only : surface_stl_object, extract_isosurface, &
-                   AWRAP_STATUS_NOT_CONVERGED
+use fossil, only : surface_stl_object, extract_isosurface, intersection_pair_t
 use fossil_alpha_wrap, only : awrap_octree_t, awrap_build_octree, awrap_classify_leaves, &
                               awrap_extract_surface, awrap_project_vertices, &
                               AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, AWRAP_STATUS_DEGENERATE, &
@@ -91,13 +85,15 @@ use fossil_alpha_wrap, only : awrap_octree_t, awrap_build_octree, awrap_classify
                               AWRAP_LEAF_FLAG_EMPTY, AWRAP_LEAF_FLAG_INSIDE, AWRAP_LEAF_FLAG_OUTSIDE, &
                               AWRAP_MAX_DEPTH
 use fossil_facet_object, only : facet_object
-use fossil_utils, only : triangle_overlaps_aabb
+use fossil_utils, only : PI, triangle_overlaps_aabb
 use penf, only : I4P, R8P
 use vecfor, only : vector_R8P
 
 implicit none
 
-type(surface_stl_object) :: cube, sphere, cube_holed, wrap_surface, wrapped_tbp
+type(surface_stl_object) :: cube, sphere, cube_holed, wrap_surface, wrapped_tbp, plate, cube01, cube01_holed, dragon
+type(facet_object), allocatable :: plate_facets(:)
+real(R8P), parameter :: TABLE_ALPHA(3) = [0.1_R8P, 0.3_R8P, 0.7_R8P]
 type(facet_object), allocatable :: sphere_facets(:)
 type(facet_object), allocatable, target :: holed_facets(:)
 type(facet_object), allocatable :: wrap_facets(:)
@@ -115,7 +111,7 @@ integer(I4P) :: n_in_geometry, n_outside_geometry, n_empty_remaining
 integer(I4P) :: n_inside_closed_cube
 integer(I4P) :: n_wrap_facets, n_nm_edges
 logical :: any_overlap, prop_no_false_pos, prop_no_false_neg, prop_size_ok
-logical :: are_tests_passed(15)
+logical :: are_tests_passed(19)
 
 integer(I4P), parameter :: N_GRID = 32_I4P
 
@@ -368,44 +364,192 @@ n_nm_edges = wrap_surface%get_non_manifold_edges_number()
 print '(A,I0)', 'inv 12 (projected manifold): non_manifold_edges=', n_nm_edges
 are_tests_passed(12) = (n_nm_edges == 0_I4P)
 
-! ---- Invariant 13: capstone TBP on cube, end-to-end.
-call cube%alpha_wrap(alpha=0.1_R8P, offset=0.033_R8P, wrapped=wrapped_tbp, status=status)
+! ---- Invariant 13: capstone TBP on the cube (issue #50): status OK, closed, manifold, no self-crossing, and its
+!      volume is the cube grown by the offset (Minkowski sum with a ball: 1 + 6e + 3 pi e^2 + 4/3 pi e^3).
+offset = 0.033_R8P
+call cube%alpha_wrap(alpha=0.1_R8P, offset=offset, wrapped=wrapped_tbp, status=status)
 wrap_volume = wrapped_tbp%get_volume()
-print '(A,I0,A,I0,A,L1,A,F8.4)', &
-      'inv 13 (cube TBP): status=', status, ' n_facets=', wrapped_tbp%get_facets_number(), &
-      ' watertight=', wrapped_tbp%is_watertight(), ' volume=', wrap_volume
-are_tests_passed(13) = (status == AWRAP_STATUS_OK .or. status == AWRAP_STATUS_NOT_CONVERGED) .and. &
-                       wrapped_tbp%is_watertight()                          .and. &
-                       (abs(wrap_volume - 1._R8P) <= 0.30_R8P)
+expected_volume = 1._R8P + 6._R8P * offset + 3._R8P * PI * offset**2 + 4._R8P / 3._R8P * PI * offset**3
+are_tests_passed(13) = wrap_ok('inv 13 (cube TBP)', wrapped_tbp, status) .and. &
+                       (abs(wrap_volume - expected_volume) <= 0.005_R8P * expected_volume)
+print '(A,F8.5,A,F8.5)', '        volume=', wrap_volume, ' offset cube=', expected_volume
 
-! ---- Invariant 14: capstone TBP on sphere.
-call sphere%alpha_wrap(alpha=0.1_R8P, offset=0.033_R8P, wrapped=wrapped_tbp, status=status)
+! ---- Invariant 14: capstone TBP on the marching-cubes sphere: at least 90% of the wrap vertices on the offset
+!      surface, none closer to the input than half the offset (the repair pass moves a few towards their cell faces).
+call sphere%alpha_wrap(alpha=0.1_R8P, offset=offset, wrapped=wrapped_tbp, status=status)
+are_tests_passed(14) = wrap_ok('inv 14 (sphere TBP)', wrapped_tbp, status) .and. offset_ok(sphere, wrapped_tbp, offset)
+
+! ---- Invariant 15: the holed cube (a hole of inradius 0.29) at alpha = 0.15: the ball gets through the hole, the
+!      wrap lines both sides of every wall, two offset layers the barrier keeps apart.
+call cube_holed%alpha_wrap(alpha=0.15_R8P, offset=offset, wrapped=wrapped_tbp, status=status)
 wrap_volume = wrapped_tbp%get_volume()
-expected_volume = 4._R8P / 3._R8P * 3.14159265358979_R8P
-print '(A,I0,A,I0,A,L1,A,F8.4)', &
-      'inv 14 (sphere TBP): status=', status, ' n_facets=', wrapped_tbp%get_facets_number(), &
-      ' watertight=', wrapped_tbp%is_watertight(), ' volume=', wrap_volume
-are_tests_passed(14) = (status == AWRAP_STATUS_OK .or. status == AWRAP_STATUS_NOT_CONVERGED) .and. &
-                       wrapped_tbp%is_watertight()                          .and. &
-                       (abs(wrap_volume - expected_volume) <= 0.30_R8P * expected_volume)
+are_tests_passed(15) = wrap_ok('inv 15 (holed cube, hole open)', wrapped_tbp, status) .and. &
+                       (wrap_volume >= 11._R8P * offset) .and. (wrap_volume <= 0.7_R8P)
+print '(A,F8.5)', '        volume=', wrap_volume
 
-! ---- Invariant 15: capstone TBP on holed cube — robustness only.
-!      The hole spans an entire face (1/12 of the surface area, but spans
-!      one full face). At α = 0.1 with 5 outer iterations the algorithm
-!      may NOT close it — that's the documented MVP limitation. We only
-!      assert the TBP runs without crashing AND returns a non-empty wrap;
-!      the watertightness is best-effort.
-call cube_holed%alpha_wrap(alpha=0.1_R8P, offset=0.033_R8P, wrapped=wrapped_tbp, status=status)
-print '(A,I0,A,I0,A,L1)', &
-      'inv 15 (holed cube TBP): status=', status, ' n_facets=', wrapped_tbp%get_facets_number(), &
-      ' watertight=', wrapped_tbp%is_watertight()
-are_tests_passed(15) = (wrapped_tbp%get_facets_number() > 0_I4P)
+! ---- Invariant 16: the same holed cube at alpha = 0.6: the hole is capped, volume just below the offset cube's.
+offset = 0.02_R8P
+call cube_holed%alpha_wrap(alpha=0.6_R8P, offset=offset, wrapped=wrapped_tbp, status=status)
+wrap_volume = wrapped_tbp%get_volume()
+expected_volume = 1._R8P + 6._R8P * offset + 3._R8P * PI * offset**2 + 4._R8P / 3._R8P * PI * offset**3
+are_tests_passed(16) = wrap_ok('inv 16 (holed cube, hole capped)', wrapped_tbp, status) .and. &
+                       (wrap_volume < expected_volume) .and. (wrap_volume > 0.98_R8P * expected_volume)
+print '(A,F8.5,A,F8.5)', '        volume=', wrap_volume, ' offset cube=', expected_volume
 
-print '(A,15L2)', 'per-case results: ', are_tests_passed
+! ---- Invariant 17: one triangle (zero thickness, area 1/2): a closed shell around both sides, 2 offset x area + rim.
+allocate(plate_facets(1))
+plate_facets(1)%vertex(1) = vector_R8P(0._R8P, 0._R8P, 0._R8P)
+plate_facets(1)%vertex(2) = vector_R8P(1._R8P, 0._R8P, 0._R8P)
+plate_facets(1)%vertex(3) = vector_R8P(0._R8P, 1._R8P, 0._R8P)
+call plate_facets(1)%compute_metrix
+call plate%adopt_facets(facets=plate_facets)
+call plate%alpha_wrap(alpha=0.2_R8P, offset=offset, wrapped=wrapped_tbp, status=status)
+wrap_volume = wrapped_tbp%get_volume()
+are_tests_passed(17) = wrap_ok('inv 17 (one triangle)', wrapped_tbp, status) .and. &
+                       (wrap_volume >= 0.02_R8P) .and. (wrap_volume <= 0.0225_R8P)
+print '(A,F8.5)', '        volume=', wrap_volume
+
+! ---- Invariant 18: the measured table of issue #50: cube-01.stl closed and minus one facet, alpha 0.1, 0.3, 0.7,
+!      default offset (alpha / 30): every wrap OK, closed, manifold, not self-crossing.
+call cube01%load_from_file(file_name='src/tests/cube-01.stl', guess_format=.true.)
+facets => cube01%facets_ref()
+if (allocated(holed_facets)) deallocate(holed_facets) ! adopt_facets may have taken it
+allocate(holed_facets(size(facets, kind=I4P) - 1_I4P))
+do i = 1_I4P, size(holed_facets, kind=I4P)
+   holed_facets(i) = facets(i + 1_I4P)
+enddo
+call cube01_holed%adopt_facets(facets=holed_facets)
+are_tests_passed(18) = .true.
+do i = 1_I4P, 3_I4P
+   alpha = TABLE_ALPHA(i)
+   call cube01%alpha_wrap(alpha=alpha, wrapped=wrapped_tbp, status=status)
+   are_tests_passed(18) = wrap_ok('inv 18 (cube-01, closed)', wrapped_tbp, status) .and. are_tests_passed(18)
+   print '(A,F5.2,A,F8.5)', '        alpha=', alpha, ' volume=', wrapped_tbp%get_volume()
+   call cube01_holed%alpha_wrap(alpha=alpha, wrapped=wrapped_tbp, status=status)
+   are_tests_passed(18) = wrap_ok('inv 18 (cube-01, holed)', wrapped_tbp, status) .and. are_tests_passed(18)
+   print '(A,F5.2,A,F8.5)', '        alpha=', alpha, ' volume=', wrapped_tbp%get_volume()
+enddo
+
+! ---- Invariant 19: dragon.stl with the defaults (it was neither watertight nor manifold before issue #50): OK, closed,
+!      manifold, not self-crossing, and it encloses the dragon (larger volume).
+call dragon%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+call dragon%alpha_wrap(wrapped=wrapped_tbp, status=status)
+bmin = dragon%get_bmin() ; bmax = dragon%get_bmax()
+offset = sqrt((bmax%x - bmin%x)**2 + (bmax%y - bmin%y)**2 + (bmax%z - bmin%z)**2) / 50._R8P / 30._R8P
+are_tests_passed(19) = wrap_ok('inv 19 (dragon, defaults)', wrapped_tbp, status) .and. &
+                       offset_ok(dragon, wrapped_tbp, offset) .and. (wrapped_tbp%get_volume() > dragon%get_volume())
+print '(A,F10.3,A,F10.3)', '        volume=', wrapped_tbp%get_volume(), ' dragon=', dragon%get_volume()
+
+print '(A,19L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)', 'Are all tests passed? ', all(are_tests_passed)
 if (.not. (all(are_tests_passed))) error stop 1
 
 contains
+
+   function wrap_ok(label, w, st) result(ok)
+   !< Status OK, watertight, manifold, no self-crossing (find_self_intersections); prints the line.
+   !< A reported pair whose facets share a vertex, have normals parallel within 1e-8 rad and do not overlap in their
+   !< plane is not counted (printed apart): find_self_intersections skips such pairs only within 1e-12 rad (issue
+   !< #46), above it pair_classify's on-plane snap (1e-10) can build a segment that is not there. Checked in exact
+   !< rational arithmetic on the 46 such pairs of the sphere wrap and the one of the dragon's (issue #50 night log):
+   !< every one meets at the shared vertex only.
+   character(*),             intent(in) :: label
+   type(surface_stl_object), intent(in) :: w
+   integer(I4P),             intent(in) :: st
+   logical                              :: ok
+   type(intersection_pair_t), allocatable :: pairs(:)
+   type(facet_object), pointer          :: fa, fb
+   integer(I4P)                         :: p, n_real, n_excused
+
+   call w%find_self_intersections(pairs=pairs)
+   n_real = 0 ; n_excused = 0
+   do p = 1, size(pairs)
+      fa => w%facet_at(pairs(p)%a) ; fb => w%facet_at(pairs(p)%b)
+      if (spurious_coplanar(fa, fb)) then
+         n_excused = n_excused + 1
+      else
+         n_real = n_real + 1
+      endif
+   enddo
+   print '(A,A,I0,A,I0,2(A,L1),A,I0,A,I0)', label, ': status=', st, ' n_facets=', w%get_facets_number(), &
+         ' watertight=', w%is_watertight(), ' manifold=', w%is_manifold(), ' self-crossings=', n_real, &
+         ' near-coplanar touches=', n_excused
+   ok = (st == AWRAP_STATUS_OK) .and. w%is_watertight() .and. w%is_manifold() .and. (n_real == 0)
+   endfunction wrap_ok
+
+   function offset_ok(input, w, eps) result(ok)
+   !< At least 90% of the vertices of w at eps from input (relative 1e-6), none closer than eps / 2 (the repair pass
+   !< moves a vertex towards its cell face, which can be closer than eps: 0.85 eps on the sphere, issue #50).
+   type(surface_stl_object), intent(in) :: input, w
+   real(R8P),                intent(in) :: eps
+   logical                              :: ok
+   type(facet_object), pointer          :: f
+   real(R8P)                            :: d, dmin
+   integer(I4P)                         :: i, v, n_on, n_all
+
+   dmin = huge(1._R8P) ; n_on = 0 ; n_all = 0
+   do i = 1, w%get_facets_number()
+      f => w%facet_at(i)
+      do v = 1, 3
+         d = input%distance(point=f%vertex(v), is_signed=.false., is_square_root=.true.)
+         dmin = min(dmin, d) ; n_all = n_all + 1
+         if (abs(d - eps) <= 1.e-6_R8P * eps) n_on = n_on + 1
+      enddo
+   enddo
+   print '(A,F12.9,A,F6.3)', '        min vertex distance / offset=', dmin / eps, ' on the offset surface: ', &
+         real(n_on, R8P) / real(n_all, R8P)
+   ok = (dmin >= 0.5_R8P * eps) .and. (real(n_on, R8P) >= 0.9_R8P * real(n_all, R8P))
+   endfunction offset_ok
+
+   function spurious_coplanar(fa, fb) result(yes)
+   !< Two facets sharing a vertex, normals parallel within 1e-8 rad, no overlap in the plane (2-D separating axes
+   !< on the edges of either, projected along the dominant normal component).
+   type(facet_object), intent(in) :: fa, fb
+   logical                        :: yes
+   real(R8P)                      :: na(3), nb(3), a(2, 3), b(2, 3)
+   integer(I4P)                   :: i, j, shared, drop
+
+   yes = .false.
+   shared = 0
+   do i = 1, 3
+      do j = 1, 3
+         if (fa%vertex(i)%x == fb%vertex(j)%x .and. fa%vertex(i)%y == fb%vertex(j)%y .and. &
+             fa%vertex(i)%z == fb%vertex(j)%z) shared = shared + 1
+      enddo
+   enddo
+   if (shared /= 1) return
+   na = [fa%normal%x, fa%normal%y, fa%normal%z] ; nb = [fb%normal%x, fb%normal%y, fb%normal%z]
+   if (norm2([na(2) * nb(3) - na(3) * nb(2), na(3) * nb(1) - na(1) * nb(3), na(1) * nb(2) - na(2) * nb(1)]) > 1.e-8_R8P) return
+   drop = maxloc(abs(na), dim=1)
+   do i = 1, 3
+      a(:, i) = pack([fa%vertex(i)%x, fa%vertex(i)%y, fa%vertex(i)%z], [1, 2, 3] /= drop)
+      b(:, i) = pack([fb%vertex(i)%x, fb%vertex(i)%y, fb%vertex(i)%z], [1, 2, 3] /= drop)
+   enddo
+   yes = separated(a, b) .or. separated(b, a)
+   endfunction spurious_coplanar
+
+   pure function separated(p, q) result(sep)
+   !< Is there an edge of p with all of q on its outer side or on it (relative 1e-9)?
+   real(R8P), intent(in) :: p(2, 3), q(2, 3)
+   logical               :: sep
+   real(R8P)             :: e(2), sq(3), inner
+   integer(I4P)          :: i, j, k, m
+
+   sep = .false.
+   do i = 1, 3
+      j = mod(i, 3) + 1 ; k = mod(j, 3) + 1
+      e = p(:, j) - p(:, i)
+      inner = e(1) * (p(2, k) - p(2, i)) - e(2) * (p(1, k) - p(1, i))
+      if (inner == 0._R8P) cycle
+      do m = 1, 3
+         sq(m) = sign(1._R8P, inner) * (e(1) * (q(2, m) - p(2, i)) - e(2) * (q(1, m) - p(1, i)))
+      enddo
+      if (all(sq <= 1.e-9_R8P * abs(inner))) then
+         sep = .true.
+         return
+      endif
+   enddo
+   endfunction separated
 
    subroutine check_node_properties(octree, facets, alpha, max_depth, max_leaf_size, &
                                     n_false_pos, n_false_neg)
