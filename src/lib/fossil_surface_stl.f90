@@ -6541,7 +6541,8 @@ contains
    call self%adopt_facets(facets=facets, aabb_refinement_levels=aabb_refinement_levels, aabb_tree_kind=aabb_tree_kind)
    endsubroutine load_from_file
 
-   subroutine distance_to(self, other, distance, point_self, point_other, facet_self, facet_other, intersecting, status)
+   subroutine distance_to(self, other, distance, point_self, point_other, facet_self, facet_other, intersecting, status, &
+                          pose_self, pose_other)
    !< Distance between this surface and `other` (issue #67): the minimum over their facet pairs, by a best-first descent
    !< of the two trees (`fossil_body_distance`), bit-identical to the brute-force minimum, with the closest facets
    !< (ties: the lexicographically smallest pair) and the witness points. 0 with `intersecting` when they touch or
@@ -6553,6 +6554,8 @@ contains
    integer(I4P),              intent(out), optional :: facet_self, facet_other     !< Closest facets.
    logical,                   intent(out), optional :: intersecting !< The bodies touch or cross.
    integer(I4P),              intent(out), optional :: status       !< STATUS_OK, STATUS_INVALID_INPUT (empty surface).
+   type(rigid_pose_t),        intent(in),  optional :: pose_self, pose_other !< Poses (step 2): the bodies where `move`
+                                                                    !< would put them, trees not refitted; same bits.
    real(R8P)                                        :: d2, pa(3), pb(3)
    integer(I4P)                                     :: ia, ib
    logical                                          :: meet
@@ -6564,7 +6567,7 @@ contains
       return
    endif
    call body_distance(self%facet(1:self%facets_number), self%aabb, other%facet(1:other%facets_number), other%aabb, &
-                      d2, ia, ib, pa, pb, meet)
+                      d2, ia, ib, pa, pb, meet, pose_a=pose_self, pose_b=pose_other)
    distance = sqrt(d2)
    if (present(point_self)) point_self = pa
    if (present(point_other)) point_other = pb

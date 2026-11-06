@@ -21,6 +21,9 @@ walls come within a few cells, and collision response.
   is dropped when its box distance exceeds the best found; leaf pairs are evaluated in a fixed order. Facet pairs at
   equal distance are tie-broken by the smaller (facet_self, facet_other), so the result, facets and points included,
   is **bit-identical to the brute-force loop** over all pairs (`body_distance_brute`).
+- **Poses** (`pose_self=`, `pose_other=`): the bodies are taken where `move` would put them, without refitting either
+  tree. Each facet is moved by `to_world` (the bits `move` writes), and each tree node is bounded by the box of its
+  eight moved corners, a conservative bound. The result equals the one after `move`, bit for bit.
 - CPU only: one query per pair of bodies, not a batch over points.
 
 ## Example
@@ -28,6 +31,7 @@ walls come within a few cells, and collision response.
 ```fortran
 call a%distance_to(b, distance=d, point_self=pa, point_other=pb, facet_self=fa, facet_other=fb, &
                    intersecting=hit)
+call a%distance_to(b, distance=d, pose_self=pose_a, pose_other=pose_b) ! moving bodies, trees as built
 ```
 
 ## Validation
