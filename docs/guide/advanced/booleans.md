@@ -20,24 +20,29 @@ and CGAL's nef-polyhedra-free boolean for the *generic* case.
 
 ## Pipeline
 
-The implementation follows Zhou et al. (SIGGRAPH 2016) "Mesh
-Arrangements for Solid Geometry":
+The implementation follows Zhou et al. (SIGGRAPH 2016), *Mesh Arrangements for Solid Geometry*, made exact after
+Cherchi et al. (2020), *Fast and robust mesh arrangements using floating-point arithmetic* (issue #65). No step uses
+a tolerance:
 
-1. **Cross-mesh tree-vs-tree intersection collection**
-   (`fossil_arrangement`). Both surfaces' AABB trees walked in
-   lockstep; every triangle pair whose AABBs overlap is tested for
-   actual triangle-triangle intersection (Möller). The collected
-   intersection segments form the *arrangement*.
-2. **CDT-based facet retriangulation**. Every input triangle that
-   participates in an intersection is split into sub-triangles along
-   its share of the arrangement segments. FOSSIL's own `fossil_dt`
-   module (Bowyer-Watson + Sloan constraint recovery) does the
-   constrained Delaunay triangulation in the facet's plane.
-3. **Per-sub-triangle classification** (`fossil_boolean`). For each
-   sub-triangle's centroid, evaluate the [winding
-   number](/guide/advanced/winding-number) against both input solids:
-   `(in_A?, in_B?)` is a 2-bit tag.
-4. **Truth-table selection** per operation:
+1. **Exact pair classification** (`fossil_tritri_exact%pair_cut`). Both surfaces' AABB trees are walked in lockstep;
+   every facet pair whose boxes overlap is classified from exact `orient3d` signs: separated, crossing, touching or
+   coplanar. A crossing gives a common segment whose endpoints are **implicit points** (`fossil_implicit_points`): an
+   input vertex, the point where an edge meets a plane, or the point where two exactly coplanar edges meet. A point
+   is kept as its construction, never rounded while the arrangement is built.
+2. **Point registry** (`fossil_arrangement`). One index per geometric point, exactly: points of one construction
+   merge, then points of different constructions with the same exact coordinates. Each is rounded once, by one
+   formula, so every facet that shares it gets the same bits; two distinct points never share rounded coordinates.
+3. **Exact retriangulation** (`fossil_cdt_implicit%cdt_facet`). Each cut facet is triangulated with its cuts as
+   constraints. Every validity decision (where a point lies, which edge a constraint crosses, whether a quadrilateral
+   is convex) is the exact `orient2d` of implicit points; `incircle` on the rounded coordinates only chooses among
+   valid triangulations (quality). A cut point inside a facet edge is also inserted in the facet across it.
+4. **Selection by patches** (`fossil_boolean`). The sub-triangles of one surface connected across edges that lie on
+   no cut form a patch, all inside or all outside the other surface. Each patch is decided once, exactly, at one of
+   its cut edges: the side of the opposite vertex against the facet of the other surface that made the cut (or the
+   wedge of the two facets that share it, convex or reflex). A patch without cuts takes the winding number of the
+   other surface at one of its large sub-triangles. Sub-triangles inside an exactly coplanar facet of the other
+   surface are shared and follow the orientation table below.
+5. **Truth-table selection** per operation:
 
    | Tag       | UNION | INTERSECT | DIFFERENCE (A\B) | SYMDIFF |
    |-----------|:-----:|:---------:|:----------------:|:-------:|
@@ -46,20 +51,18 @@ Arrangements for Solid Geometry":
    | (out, in) | keep  | drop      | drop             | keep    |
    | (out, out)| drop  | drop      | drop             | drop    |
 
-   Special-case row for sub-triangles **on the shared boundary** of A
-   and B: their orientation determines which operation wants them.
-5. **Adopt** the surviving sub-triangles into `self` via
-   `adopt_facets` (rebuilds AABB tree, vertex pool, connectivity,
-   pseudo-normals).
+6. **Adopt** the surviving sub-triangles into `self` via `adopt_facets` (rebuilds AABB tree, vertex pool,
+   connectivity, pseudo-normals).
 
 ## API
 
 ```fortran
-call surface%boolean(other, op, status)
+call surface%boolean(other, op, status, weld)
    class(surface_stl_object),  intent(inout)         :: self
    class(surface_stl_object),  intent(in)            :: other
    integer(I4P),               intent(in)            :: op      ! BOOL_*
    integer(I4P),               intent(out), optional :: status  ! BOOL_STATUS_*
+   real(R8P),                  intent(in),  optional :: weld    ! opt-in vertex weld distance, default off
 ```
 
 - **`op`** is one of:
@@ -68,10 +71,17 @@ call surface%boolean(other, op, status)
   - `BOOL_DIFFERENCE` — inside `self` (A) but not inside `other` (B)
   - `BOOL_SYMDIFF` — inside exactly one of `self`, `other`
 - **`status`** ∈ `{BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED,
-  BOOL_STATUS_NOT_IMPLEMENTED, BOOL_STATUS_EMPTY_INPUT}`. Most
-  failures are degenerate-input-related (CDT couldn't recover a
-  near-collinear constraint). The CDT failure mode is documented in
-  `fossil_dt`'s docstring.
+  BOOL_STATUS_NOT_IMPLEMENTED, BOOL_STATUS_EMPTY_INPUT}`. With the exact
+  triangulation, `BOOL_STATUS_CDT_FAILED` means an input the arrangement
+  cannot represent: cuts that cross inside a facet (a self-intersecting
+  input) or a degenerate facet with cuts. No validation case returns it.
+- **`weld`** (opt-in, default off): before the arrangement, every vertex
+  of B within `weld` of a vertex of A takes that vertex's coordinates bit
+  for bit, when it is the unique nearest, no other vertex of B goes to it,
+  and no facet of B becomes degenerate. Inputs that share vertices up to
+  round-off (a part and its copy written by another tool) then merge;
+  without it they give the exact result, with slivers. It is the only
+  snapping that keeps the arrangement exact.
 
 **Pre-conditions for clean output** (enforced by example, not by
 runtime check — set them up yourself):
@@ -80,10 +90,9 @@ runtime check — set them up yourself):
   .true.`).
 - Both have outward-oriented normals — run `surface%sanitize_normals`
   if you're not sure.
-- The intersection between A and B doesn't trip the CDT's recovery
-  loop. Coplanar faces, shared edges and touching contacts are handled
-  (issue #33); see [Known limitations](#known-limitations) for the
-  exactness statement.
+- Neither input intersects itself. Coplanar faces, shared edges and
+  touching contacts are handled; see [Known limitations](#known-limitations)
+  for the exactness statement.
 
 ## Example
 
@@ -177,13 +186,18 @@ endprogram ex_boolean_coplanar
 How the coplanar overlap is handled:
 
 1. Each facet pair is classified exactly (separated, crossing, touching,
-   coplanar) from `orient3d` signs, not from floating-point distances.
+   coplanar) from `orient3d` signs, not from floating-point distances. Only
+   exactly coplanar faces count as coplanar: faces coplanar by construction
+   but off by round-off (after a rotation) cross at a round-off angle, and
+   the result keeps the slivers between them (see *Near-degenerate
+   configurations*).
 2. A coplanar pair cuts each facet along the parts of the other facet's
    edges that lie inside it, so the overlap becomes sub-triangles of its
    own in both facets.
 3. Cut endpoints on a facet edge are also inserted in the facet across
    that edge, so no crack (T-junction) is left.
-4. A sub-triangle lying on the other surface is classified by the
+4. A sub-triangle inside an exactly coplanar facet of the other surface
+   (all three vertices in it, exact `orient2d`) is classified by the
    shared-face table (same or opposite orientation), not by the winding
    number, which is ill-defined on the surface.
 
@@ -200,16 +214,23 @@ four ops on one pair and checks them all.
 | Area | area(A ∪ B) + area(A ∩ B) = area(A) + area(B), without coplanar overlaps | 1e-9 relative |
 | Surface | the result lies on the inputs: its deviation from A and B merged ([surface deviation](/guide/advanced/surface-deviation), sampled lower bound) is 0 to round-off | 1e-9 of the joint diagonal |
 | Membership | at fixed-seed points farther than 1e-6 of the diagonal from both inputs, inside(result) = op(inside(A), inside(B)), solid-angle sign | no mismatch |
-| Validity | ∪, ∩, − without contact: watertight, manifold, V > 0, no self-intersecting facet pair | exact |
+| Validity | ∪, ∩, − without contact: watertight, manifold, V > 0, no self-intersecting facet pair deeper than a rounding fold | exact; folds ≤ 1e-12 of the diagonal |
 
 The volume and the moments come from signed tetrahedra about a fixed point, so they are defined on the non-manifold
-results of contacts and of △ too. The pass criterion is #33's: a result with status OK satisfies every identity that
+results of contacts and of △ too.
+
+Self-intersections: the exact result keeps the slivers of near-degenerate inputs, and rounding it to doubles can fold
+a sliver by an ulp. A pair reported by `find_self_intersections` is first confirmed by the exact `pair_cut` on the
+result's doubles (the detector's floating-point test reports false crossings on slivers 1e-10 wide), then measured:
+its depth is the smaller of the intersection's length and of the two facets' penetrations through each other's plane.
+A fold is short or shallow; a real crossing is both long and deep, of the order of a facet. Validity allows folds up
+to 1e-12 of the joint diagonal; the deepest measured anywhere is about 1e-15. The pass criterion is #33's: a result with status OK satisfies every identity that
 applies; a non-OK status (`BOOL_STATUS_CDT_FAILED`) is allowed and counted.
 
 `src/tests/validation/fossil_val_boolean_identities.f90` runs the harness on the box cases validated so far against
 analytic volumes: the 6 coplanar cases, axis-aligned and rotated, and the 18 regression stress configurations. Its
 regression subset, `src/tests/fossil_test_boolean_identities.f90`, runs 3 rotated coplanar cases and one stress
-configuration (the boolean dominates the cost: 0.25 s per pair in the debug coverage build). All 30 pairs
+configuration (0.38 s in all, in the debug coverage build). All 30 pairs
 pass. Every residual is below 2e-16 and the deviation below 1e-15, with no membership mismatch. As a negative control,
 the union with one facet dropped fails: its volume is off by 6 %, its moments by 14 %, its area by 4 %.
 
@@ -228,41 +249,57 @@ diagonal d), scaled to a unit diagonal.
 | 40³ bodies, all 10 kind pairs × 4 motions | 40 | 40 | 40 | 2.1e-16 | 1.8e-16 | 3.5e-14 |
 | wrapped bunny (16 280 facets) × wrapped dragon (9 678) × 4 motions | 4 | 4 | 4 | 1.1e-16 | 1.4e-16 | 5.2e-15 |
 
-No membership mismatch on 200 points per pair (`src/tests/validation/fossil_val_boolean_curved.f90`, 244 s at -O2).
+No membership mismatch on 200 points per pair (`src/tests/validation/fossil_val_boolean_curved.f90`, 66 s at -O2; 244 s at #63).
 The regression tier, `src/tests/fossil_test_boolean_curved.f90`, runs two 10³ pairs (sphere × torus, cylinder ×
-cube), 1.7 s in the debug coverage build. The first run of this sweep found the defect below.
+cube), 0.31 s in the debug coverage build. The first run of this sweep found the defect below.
 
 ### Near-degenerate configurations
 
 `src/tests/validation/fossil_val_boolean_degenerate.f90` sets a body against itself, coincident or moved by a tiny
 amount, plus nested bodies and contacts. The bodies are the unit cube and a marching-cubes sphere (24³, 2 972 facets).
 Translations follow a generic direction; rotations turn about a generic axis through the centre. Outcome per case (✓:
-status OK and every identity holds; CDT: `BOOL_STATUS_CDT_FAILED`, allowed; ✗: status OK, identities within 2e-10, but
-the result is not watertight):
+status OK and every identity holds):
 
 | Configuration | 1e-4 | 1e-6 | 1e-8 | 1e-10 | 1e-12 | 1e-14 |
 |---|---|---|---|---|---|---|
 | cube, translated (of the size) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| cube, rotated (rad) | ✓ | ✓ | CDT | ✓ | ✓ | |
-| sphere, translated | ✓ | ✓ | ✗ | CDT | ✓ | ✓ |
-| sphere, rotated | ✓ | ✗ | CDT | ✗ | ✓ | |
+| cube, rotated (rad) | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| sphere, translated | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| sphere, rotated | ✓ | ✓ | ✓ | ✓ | ✓ | |
 
 Also ✓: the cube and the sphere against themselves, each against itself scaled by 0.5 (nested), the cube against a
 half cube sharing part of a face, contacts at a vertex, along an edge and on a face patch, and the sphere against the
-same sphere re-facetted (25³). 28 of the 31 cases pass; before the fixes below, 23 did, and five of the failures were
-silently wrong volumes, up to 2.3 %.
+same sphere re-facetted (25³). All 31 cases pass, every one required. Before issue #65, 28 passed: the 1e-10 snap of
+the classification and the 1e-9 tolerances of the retriangulation disagreed between about 1e-10 and 1e-6, and three
+sphere cases came out with holes a few 1e-9 wide (status OK); a copy moved by less than the snap was merged into the
+original.
 
-Where the snap decides: a copy moved by less than 1e-10 of the local edge length is coplanar with the original
-(columns 1e-12 and 1e-14, and the cube at 1e-10), and the result is the original body. A copy moved by more than
-about 1e-6 is an ordinary crossing. In between, the cuts are 1e-10 to 1e-8 apart, and the retriangulation decides
-with fixed tolerances (points merged within 1e-10 per coordinate in the facet's plane, points on a segment within 1e-9 of its
-length) that do not match the exact classification. On the flat cube that only costs a `CDT_FAILED`. On the curved
-sphere three cases come out with holes a few 1e-9 wide, with the volume, the moments and the membership still right. The
-band is relative to the facets, not to the body: a coarser sphere (10³) against itself translated by 1e-6 cracks
-too.
-This remains open: matching the retriangulation's decisions to the classification's (symbolic points with their
-provenance, rather than coordinates compared within tolerances) is a design change. Aligning the tolerances to 1e-10
-was tried, and it brought back a silent 2.3 % volume error on the cube rotated by 1e-8.
+Now a copy moved by any amount is an ordinary crossing, decided exactly. Below about 1e-10 the cuts are thinner than
+the facets by ten orders of magnitude: the result is the exact one, with slivers between the two surfaces,
+watertight, manifold, with the right volume (for a 10³ sphere and its copy moved by 1e-12, V(A ∪ B) − V(A) = 1.5e-12
+V(A): the slivers). The opt-in `weld` gives the merged body instead when the copy's vertices are within the weld
+distance of the original's.
+
+**Dense sweep.** `src/tests/validation/fossil_val_boolean_sweep.f90` runs the cube (12 and 192 facets),
+the sphere (10³, 24³) and the torus (12³, 24³) against themselves translated along a generic direction or rotated
+about a generic axis by v = 1e-4 … 1e-14 in steps of 10^0.5 (21 values), and with the weld for v ≤ 1e-10:
+
+| Body | Facets | Translated (21 + 9 welded) | Rotated (21 + 9 welded) |
+|---|---|---|---|
+| cube | 12 | 30 / 30 | 30 / 30 |
+| cube | 192 | 30 / 30 | 30 / 30 |
+| sphere, 10³ | 380 | 30 / 30 | 30 / 30 |
+| sphere, 24³ | 2 972 | 30 / 30 | 30 / 30 |
+| torus, 12³ | 432 | 30 / 30 | 30 / 30 |
+| torus, 24³ | 2 304 | 30 / 30 | 30 / 30 |
+
+360 cases, every status OK, every identity of the four ops (validity included); 775 s at -O2.
+
+One configuration is non-manifold by definition: translated along (1, 2, 3), which is parallel to the marching-cubes
+facets of normal (−1, −1, 1), an edge of the 10³ sphere's copy can stay exactly in a facet plane of the original
+(rounding keeps it there). The copy then touches the original along that edge without crossing it, and the
+difference pinches to zero thickness there, like any contact. The exact topology is right; the sweep uses a generic
+direction.
 
 ### CSG chains
 
@@ -297,26 +334,22 @@ regression tier, `src/tests/fossil_test_boolean_csg.f90`, runs 4-operation chain
 
 `src/tests/validation/fossil_val_boolean_perf.f90` times a boolean (best of 3, -O2) against the facet count:
 
-| Case | Facets (A + B) | Time | µs per facet | Before (#63) |
-|---|---|---|---|---|
-| sphere 16³ − small cylinder | 1 656 | 0.021 s | 12.9 | 0.049 s |
-| sphere 32³ − small cylinder | 5 688 | 0.053 s | 9.4 | 0.18 s |
-| sphere 64³ − small cylinder | 22 440 | 0.19 s | 8.4 | 0.76 s |
-| sphere 96³ − small cylinder | 50 808 | 0.43 s | 8.4 | 1.81 s |
-| sphere 16³ − moved copy | 2 680 | 0.064 s | 23.8 | 0.12 s |
-| sphere 32³ − moved copy | 10 744 | 0.26 s | 23.8 | 0.56 s |
-| sphere 64³ − moved copy | 44 248 | 0.80 s | 18.1 | 2.26 s |
-| sphere 96³ − moved copy | 100 984 | 1.65 s | 16.4 | 5.51 s |
-| wrapped bunny − wrapped dragon (each op) | 25 958 | 1.1–1.2 s | 42–46 | 2.7–2.8 s |
+| Case | Facets (A + B) | Time | µs per facet | #63 | before #63 |
+|---|---|---|---|---|---|
+| sphere 16³ − small cylinder | 1 656 | 0.013 s | 7.7 | 0.021 s | 0.049 s |
+| sphere 32³ − small cylinder | 5 688 | 0.033 s | 5.7 | 0.053 s | 0.18 s |
+| sphere 64³ − small cylinder | 22 440 | 0.14 s | 6.2 | 0.19 s | 0.76 s |
+| sphere 96³ − small cylinder | 50 808 | 0.34 s | 6.6 | 0.43 s | 1.81 s |
+| sphere 16³ − moved copy | 2 680 | 0.015 s | 5.5 | 0.064 s | 0.12 s |
+| sphere 32³ − moved copy | 10 744 | 0.047 s | 4.4 | 0.26 s | 0.56 s |
+| sphere 64³ − moved copy | 44 248 | 0.24 s | 5.3 | 0.80 s | 2.26 s |
+| sphere 96³ − moved copy | 100 984 | 0.55 s | 5.5 | 1.65 s | 5.51 s |
+| wrapped bunny − wrapped dragon (each op) | 25 958 | 0.11–0.23 s | 4.4–9.0 | 1.1–1.2 s | 2.7–2.8 s |
 
-The cost per facet is flat in N: the boolean is linear in practice. Selection dominated (about 95 % of the time).
-For every sub-triangle it computed the winding number of both surfaces, although only the other surface's decides,
-and the one of its own surface, at a point lying on that surface, is the expensive query. It also ran an unbounded
-closest-point search for the geometric shared test. Selection now computes only the other surface's winding number,
-none for a shared sub-triangle, and the search stops at the test's own bound, 1e-6 of the longest edge
-(`distance_tree_with_region(max_distance2=)`): same decisions, 2.4–4.2× faster. What remains is mostly the winding
-number queries, one per sub-triangle. Flood-filling the side over the uncut facets would skip most of them; it was not
-done, because one wrong query would then misplace a whole patch.
+The cost per facet is flat in N: the boolean is linear in practice. Since issue #65 the selection makes one decision
+per patch instead of one winding-number query per sub-triangle, and the exact arrangement costs less than those
+queries did: 1.5–5× faster than #63. The exact predicates run their filters first; the exact stage is reached only
+by near-degenerate configurations (near-coplanar facets), where `orient3d` uses error-free products (`ieee_fma`).
 
 ### Defects found by the harness
 
@@ -332,7 +365,7 @@ done, because one wrong query would then misplace a whole patch.
   a point lies close inside it, and the facet across that edge keeps it whole: a crack. The cube against itself
   rotated by 1e-4 rad (cuts 3.5e-5 from the unit edges) lost 28 half-edges, with status OK and a volume off by 9e-6.
   The facet edges are now constraints too.
-- **Folded Bowyer–Watson cavity** (fixed, issue #63). `incircle` is not exact, and on near-cocircular points (the
+- **Folded Bowyer–Watson cavity** (fixed, issue #63; the boolean no longer uses `fossil_dt` since issue #65). `incircle` is not exact, and on near-cocircular points (the
   cuts of near-coincident surfaces) the cavity of an inserted point was not star-shaped from it, so the fan of new
   triangles folded. The cube against itself rotated by 1e-8 rad lost 2.3 % of its volume with status OK. A neighbour
   across an edge that the point does not see strictly (exact `orient2d`) now always joins the cavity. That case now
@@ -341,10 +374,24 @@ done, because one wrong query would then misplace a whole patch.
   coplanar overlap, kept once) when its centroid lay within 1e-9 L of the closest facet of the other surface and the
   normals were parallel to 0.99, that is within 8°. Sub-triangles a few 1e-9 wide beside a crossing of two facets a
   few degrees apart passed both tests: a marching-cubes sphere against itself translated by 1e-6 cracked. A
-  sub-triangle is now shared when its centroid lies inside a facet of the other surface that the exact pair
-  classification found coplanar with its parent. The geometric test remains only for faces within the snap whose
-  boxes are disjoint, so that they never met the classifier (a face and its copy moved by 1e-12), with normals
-  parallel to 1e-15.
+  sub-triangle is now shared when it lies inside a facet of the other surface exactly coplanar with its parent (since
+  issue #65: its three vertices, exact `orient2d`); the geometric fallback is gone.
+- **Snap against tolerances** (fixed, issue #65). The classification snapped vertices within 1e-10 of a plane, and the
+  retriangulation merged points within 1e-10 and put points on segments within 1e-9, each in its own frame. Facets
+  sharing a point could decide differently, and a curved body against its copy moved by 1e-10 … 1e-6 cracked with
+  status OK. The arrangement is now exact (implicit points, exact predicates), with no tolerance left.
+- **Sliver classified from its own centroid** (fixed, issue #65). Without the snap, a sliver between two near-coincident
+  surfaces has its centroid within round-off of the other surface, and its winding number decides nothing; whole
+  patches lying within round-off of the other surface (rotated coplanar boxes) do the same. Selection now decides per
+  patch, exactly at a cut edge.
+- **Distinct points with the same doubles** (fixed, issue #65). Two exact points less than an ulp apart (the cut points
+  of rotated coplanar faces) can round to the same coordinates, and the welded result joined an edge of A with an edge
+  of B: four facets on one edge. Distinct registry points now get distinct rounded coordinates (the implicit one moves
+  by ulps; an input vertex never moves).
+- **Exact predicates too slow without the snap** (fixed, issue #65). Near-coplanar pairs put every `orient3d` in its
+  exact stage (68 % of the time). The exact stage now detects a shared coordinate plane, uses the six products of
+  exact differences when they are exact, and makes each product of three doubles exact with `ieee_fma` (four
+  doubles instead of 64 pieces): the regression tests went from 4.9 s to 0.5 s.
 
 `src/tests/fossil_test_boolean_degenerate.f90` covers the first two with the cube cases, which fail on the code
 before the fixes. The third needs a curved body and is too slow for the regression tier, so the validation sweep
@@ -352,29 +399,20 @@ gates its case, the sphere translated by 1e-6.
 
 ## Known limitations
 
-- **Exactness.** The decisions (how two facets meet, which side a vertex
-  is on, whether points are collinear in a shared plane) use the exact
-  `orient3d` (Shewchuk's filter, then an exact expansion), with one snap: a vertex closer to the other facet's
-  plane, or to the other edge's line, than 10⁻¹⁰ of the local edge length
-  counts as lying on it. Faces coplanar by construction are rarely exactly
-  coplanar after a rotation or a scaling in floating point, and the snap
-  keeps them coplanar. Features smaller than that relative distance are
-  merged by design. The intersection points are floating-point
-  constructions, but canonical ones (each built by one formula from
-  lexicographically ordered inputs), so every facet that shares a point
-  gets the same bits and the result welds exactly.
-- **What is validated.** Two kinds of check. Analytic volumes: box pairs with coplanar overlaps, shared edges
-  and contacts, a 6-case matrix of all four ops, axis-aligned and rotated (`fossil_test_boolean_coplanar`), and
-  416 booleans on snapped random box pairs (`fossil_val_boolean_stress`). Identities that hold for any pair (see
-  *Validation identities*): curved marching-cubes bodies, and the wrapped bunny against the wrapped dragon (84
-  pairs). Near-degenerate configurations: 31 cases. CSG chains of up to 49 operations. Every result with status
-  OK satisfied every identity, except the open band below.
-- **Near-coincident curved surfaces (open).** A curved body against a copy of itself moved so that the cuts land
-  between about 1e-10 and 1e-8 of the facet size apart can come out with holes a few 1e-9 wide. The status is OK,
-  and the volume, the moments and the membership are still right; `is_watertight()` is false. Measured on a 24³
-  sphere translated by 1e-8 and rotated by 1e-6 and 1e-10 rad, and on a 10³ sphere translated by 1e-6. The cause
-  is that the retriangulation's fixed tolerances disagree with the exact classification's snap (see
-  *Near-degenerate configurations*). Check `is_watertight()` on the result when the inputs may nearly coincide.
+- **Exactness.** Every decision is the exact sign of a polynomial in the input coordinates (filtered, then exact
+  expansion arithmetic), with no tolerance and no snap; the only rounding is the output's: every cut point is rounded
+  once, the same bits in every facet that shares it, distinct points to distinct doubles. Two consequences of the
+  exact semantics: faces coplanar by construction but off by round-off (after a rotation, a scaling) cross at
+  round-off angles, so the result keeps slivers between them (watertight, the right volume; pass `weld` if the
+  inputs share vertices up to round-off); and rounding the exact result to doubles can fold such a sliver by an ulp,
+  a self-intersecting facet pair about 1e-17 deep (measured ≤ 1e-15 of the diagonal everywhere). Removing those
+  folds would need snap rounding of the output, not done.
+- **What is validated.** Analytic volumes: box pairs with coplanar overlaps, shared edges and contacts, a 6-case
+  matrix of all four ops, axis-aligned and rotated (`fossil_test_boolean_coplanar`), and 416 booleans on snapped
+  random box pairs (`fossil_val_boolean_stress`). Identities that hold for any pair (see *Validation identities*):
+  curved marching-cubes bodies and the wrapped bunny against the wrapped dragon (84 pairs), 31 near-degenerate
+  cases, the dense sweep (360 cases), CSG chains of up to 49 operations. Every result has status OK and
+  satisfies every identity.
 - **Non-manifold results by definition.** Solids that touch only along an
   edge or at a point give a union (or difference) that is non-manifold
   there, and a symmetric difference whose two pieces `A \ B` and `B \ A`
@@ -386,22 +424,24 @@ gates its case, the sphere translated by 1e-6.
   [`surface%resolve_self_intersections`](/guide/api/surface-stl-object)
   first if you suspect this is your case.
 
-- **CDT failures** (`BOOL_STATUS_CDT_FAILED`) signal that
-  near-collinear arrangement segments couldn't be recovered into the
-  retriangulation. Rare in practice; usually accompanies pathological
-  input geometry.
+- **CDT failures** (`BOOL_STATUS_CDT_FAILED`): the exact triangulation of
+  a facet cannot fail on cuts that meet only at their ends; it fails on
+  cuts crossing inside a facet (a self-intersecting input) or on a
+  degenerate facet with cuts. None in the validation.
 
 ## See also
 
 - [`resolve_self_intersections`](/guide/api/surface-stl-object) —
   self-intersection cleanup, a pre-requisite for clean booleans.
-- [winding number](/guide/advanced/winding-number) — used internally
-  to classify each sub-triangle.
+- [winding number](/guide/advanced/winding-number) — decides a patch
+  that has no cut edge.
 - [Constants](/guide/api/constants) — `BOOL_*` and `BOOL_STATUS_*`.
 - [Roadmap issue](https://github.com/szaghi/FOSSIL/issues/18) — full
   multi-commit history of the boolean pipeline.
 - [Issue #33](https://github.com/szaghi/FOSSIL/issues/33) — coplanar
   overlaps, exact classification and the validation matrix.
+- [Issue #65](https://github.com/szaghi/FOSSIL/issues/65) — the exact
+  arrangement (implicit points, no snap) and the opt-in weld.
 
 ## References
 
@@ -410,8 +450,13 @@ gates its case, the sphere translated by 1e-6.
 - Bernstein & Fussell, *Fast, Exact, Linear Booleans*, Symposium on
   Geometry Processing 2009. The "Cork" precursor — historical
   context.
-- Möller, *A Fast Triangle-Triangle Intersection Test*, Journal of
-  Graphics Tools 2(2), 1997. Used for the tree-vs-tree narrow phase.
+- Cherchi, Livesu, Scateni & Attene, *Fast and robust mesh arrangements
+  using floating-point arithmetic*, ACM Transactions on Graphics 39(6),
+  2020. The exact arrangement on implicit points.
+- Attene, *Indirect predicates for geometric constructions*,
+  Computer-Aided Design 126, 2020. Predicates on implicit points.
+- Shewchuk, *Adaptive precision floating-point arithmetic and fast robust
+  geometric predicates*, Discrete & Computational Geometry 18, 1997.
 - Sloan, *A fast algorithm for generating constrained Delaunay
   triangulations*, Computers & Structures 47(3), 1993. The constraint
-  recovery used in `fossil_dt` Phase 2.
+  recovery of `cdt_facet`.

@@ -304,7 +304,10 @@ fobis fetch            # --update to re-fetch
   Contact-only and touching-symdiff results are non-manifold by definition.
   Validated by identities that need no analytic answer (test-side harness
   `src/tests/fossil_boolean_harness.f90`: volume, second moments, area,
-  deviation, membership, validity).
+  deviation, membership, validity; self-intersections confirmed by the
+  exact `pair_cut`, since `find_self_intersections`' floating test reports
+  false crossings on slivers): curved bodies, the dense degenerate sweep
+  (`fossil_val_boolean_sweep`, 360 cases, 1e-4..1e-14), CSG chains.
 - **`find_self_intersections`**: pairs sharing one vertex are classified exactly (issue #46); pairs sharing an edge
   are skipped, so two sheets crossing along a shared non-manifold edge are not detected, nor coplanar overlaps around
   a shared vertex (unit normals parallel to 1e-12 rad count as coplanar).
