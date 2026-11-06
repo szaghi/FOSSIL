@@ -197,6 +197,25 @@ configuration (the boolean dominates the cost: 0.25 s per pair in the debug cove
 pass. Every residual is below 2e-16 and the deviation below 1e-15, with no membership mismatch. As a negative control,
 the union with one facet dropped fails: its volume is off by 6 %, its moments by 14 %, its area by 4 %.
 
+### Curved and dense meshes
+
+The bodies are closed marching-cubes surfaces (test-side module `src/tests/fossil_boolean_bodies.f90`): a sphere of
+radius 0.5, a torus of radii 0.4 and 0.15, a capped cylinder of radius 0.3 and height 1, each sampled on n³ points of
+[-0.65, 0.65]³ and closed by `sanitize(fill_holes=.true.)`, plus the unit cube. The second body of each pair is moved
+by a fixed-seed proper rigid motion (random axis and angle, each translation component within ±0.2). `bunny.stl` and `dragon.stl` are
+not closed, so they enter through [`alpha_wrap`](/guide/advanced/alpha-wrap) (α = d/50, offset d/500 of their
+diagonal d), scaled to a unit diagonal.
+
+| Configurations | Pairs | Status OK | Pass | max volume residual | max moment residual | max deviation |
+|---|---|---|---|---|---|---|
+| 24³ bodies, all 10 kind pairs × 4 motions | 40 | 40 | 40 | 2.5e-16 | 1.6e-16 | 6.7e-15 |
+| 40³ bodies, all 10 kind pairs × 4 motions | 40 | 40 | 40 | 2.1e-16 | 1.8e-16 | 3.5e-14 |
+| wrapped bunny (16 280 facets) × wrapped dragon (9 678) × 4 motions | 4 | 4 | 4 | 1.1e-16 | 1.4e-16 | 5.2e-15 |
+
+No membership mismatch on 200 points per pair (`src/tests/validation/fossil_val_boolean_curved.f90`, 244 s at -O2).
+The regression tier, `src/tests/fossil_test_boolean_curved.f90`, runs two 10³ pairs (sphere × torus, cylinder ×
+cube), 1.7 s in the debug coverage build. The first run of this sweep found the defect below.
+
 ### Defects found by the harness
 
 - **Delaunay store overflow** (fixed, issue #63). The constrained triangulation of a cut facet
