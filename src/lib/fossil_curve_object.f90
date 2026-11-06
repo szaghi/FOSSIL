@@ -26,13 +26,16 @@ module fossil_curve_object
 !<
 !< Exactness. Metrics are plain floating point. Nesting (and so orientation validity) uses the
 !< exact `orient2d_xy` crossing test, so every loop gets the same answer from every query.
-use fossil_box_query,          only : curve_box_contact_oac, cell_bands, cell_components, BOX_NONE, BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
+use fossil_box_query,          only : curve_box_contact_oac, curve_box_thin_oac, cell_bands, cell_components, BOX_NONE, &
+                                     BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
 use fossil_line_query,         only : curve_line_crossings_oac
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
 use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate
 use fossil_predicates,         only : orient2d_xy
 use fossil_mass_properties,    only : moments_accumulator_t, accumulate_segment, moments_to_properties_2d, symmetric2_eigen
 use fossil_feature_edges,      only : FEATURE_EDGE_DEFAULT_ANGLE, feature_cos
+use fossil_thickness,          only : THICKNESS_RAY, THICKNESS_MEDIAL, THICKNESS_DEFAULT_CONE, THICKNESS_DEFAULT_RAYS, &
+                                     THICKNESS_DEFAULT_SEPARATION, lower_median
 use fossil_deviation,          only : deviation_evaluator_2d_t, deviation_sampled_2d, deviation_certified_2d, &
                                      DEV_STATUS_OK, DEV_STATUS_BAD_INPUT
 use fossil_segment_bvh,        only : segment_bvh, FEATURE_VERTEX_START, FEATURE_VERTEX_END, segment_point_distance2, &
@@ -88,6 +91,10 @@ type :: curve_object
    real(R8P)                 :: centroid(2) = 0._R8P !< Centroid of the solid region (u, v).
    type(segment_bvh)         :: bvh                 !< SAH BVH over the segments.
    logical                   :: is_on_device = .false. !< Arrays mapped by enter_device.
+   real(R8P),    allocatable :: thin_pay(:)         !< Local size per segment-tree payload entry (issue #62).
+   real(R8P),    allocatable :: thin_node(:)        !< Minimum local size per tree node.
+   logical                   :: thin_built = .false. !< build_thin ran on the current curve.
+   logical                   :: thin_on_device = .false. !< The thin arrays were mapped by enter_device.
    contains
       ! public methods
       procedure, pass(self) :: adopt_loops          !< Build the curve from vertex arrays and loop sizes.
@@ -138,6 +145,11 @@ type :: curve_object
       procedure, pass(self) :: deviation            !< One-sided deviation (Hausdorff) from another curve (issue #60).
       procedure, pass(self) :: hausdorff            !< Symmetric Hausdorff distance to another curve (issue #60).
       procedure, pass(self) :: feature_corners      !< Corners: turning above an angle, ends of open loops (issue #61).
+      procedure, pass(self) :: thickness => curve_thickness !< Local thickness and gap per segment (issue #62).
+      procedure, pass(self) :: thin_regions => curve_thin_regions !< Segments thinner than factor*h, in runs (issue #62).
+      procedure, pass(self) :: build_thin => curve_build_thin !< Local sizes for the thin tagging (issue #62).
+      procedure, pass(self) :: box_thin_many => curve_box_thin_many !< Boxes meeting a thin segment (issue #62).
+      procedure, pass(self) :: box_thin_many_device => curve_box_thin_many_device !< box_thin_many on the device (#62).
       procedure, pass(self) :: nesting_depth        !< Nesting depth of a loop (exact).
       procedure, pass(self) :: repair               !< Join/close chains, merge vertices, drop degenerate loops, orient.
       procedure, pass(self) :: save_into_file       !< Save into the ASCII loop format.
@@ -347,9 +359,13 @@ contains
    if (present(inside)) inside = il
    endsubroutine box_classify_many_device
 
-   subroutine tag_block(self, x, y, band, tags, sign_algorithm, status, feature_band, feature_tags, feature_angle)
+   subroutine tag_block(self, x, y, band, tags, sign_algorithm, status, feature_band, feature_tags, feature_angle, &
+                        thin_factor, thin_band, thin_tags)
    !< Corner tags (issue #61): with `feature_band` and `feature_tags(nx, ny)`, the Chebyshev cell distance to the nearest
    !< cell holding a corner (`feature_corners`, `feature_angle`), capped at feature_band + 1.
+   !< Thin tags (issue #62): with `thin_factor`, `thin_band` and `thin_tags(nx, ny)`, the Chebyshev cell distance to the
+   !< nearest cell meeting a segment thinner than thin_factor times the cell's larger side (`box_thin_many`), capped at
+   !< thin_band + 1; requires `build_thin` (else STATUS_INVALID_INPUT).
    !< Signed tag bands on a rectilinear block of cells in the (u, v) plane (issue #38): the 2-D twin
    !< of `surface_stl_object%tag_block`. `x(nx+1)`, `y(ny+1)` are the u and v cell edges; `tags(nx,
    !< ny)`: 0 on a cut cell (exact), else the Chebyshev cell distance to the nearest cut cell of the
@@ -365,6 +381,9 @@ contains
    integer(I4P),        intent(in),  optional :: feature_band   !< Corner band width (>= 0, issue #61).
    integer(I4P),        intent(out), optional :: feature_tags(:,:) !< Chebyshev cells to the nearest corner cell [nx, ny].
    real(R8P),           intent(in),  optional :: feature_angle  !< Corner threshold [degrees] (default 30).
+   real(R8P),           intent(in),  optional :: thin_factor    !< Thin threshold factor (issue #62).
+   integer(I4P),        intent(in),  optional :: thin_band      !< Thin band width (>= 0).
+   integer(I4P),        intent(out), optional :: thin_tags(:,:) !< Thin tags [nx, ny].
    logical,      allocatable :: cut(:,:,:)  !< Cut cells.
    integer(I4P), allocatable :: dist(:,:,:), comp(:,:,:), seed(:,:) !< Bands, components, seeds.
    integer(I4P), allocatable :: sgn(:)      !< Sign of each component.
@@ -408,6 +427,31 @@ contains
          feature_tags = fd(:, :, 1)
       endblock
    endif
+   if (present(thin_tags)) then ! cells meeting a thin segment (issue #62)
+      bad = .not. (present(thin_band) .and. present(thin_factor) .and. self%thin_built)
+      if (.not. bad) bad = thin_band < 0_I4P .or. thin_factor <= 0._R8P .or. size(thin_tags, 1) /= nx .or. &
+                           size(thin_tags, 2) /= ny
+      if (bad) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+      block
+         real(R8P),    allocatable :: blo(:,:), bhi(:,:)
+         logical,      allocatable :: hit(:)
+         integer(I4P), allocatable :: td(:,:,:)
+         integer(I4P)              :: c_, ii, jj
+         allocate(blo(2, nx * ny), bhi(2, nx * ny), hit(nx * ny), td(nx, ny, 1))
+         c_ = 0
+         do jj = 1_I4P, ny
+            do ii = 1_I4P, nx
+               c_ = c_ + 1 ; blo(:, c_) = [x(ii), y(jj)] ; bhi(:, c_) = [x(ii+1), y(jj+1)]
+            enddo
+         enddo
+         call self%box_thin_many(blo, bhi, thin_factor, hit)
+         call cell_bands(reshape(hit, [nx, ny, 1]), thin_band, td)
+         thin_tags = td(:, :, 1)
+      endblock
+   endif
    algo = SIGN_FAST_WINDING_NUMBER ; if (present(sign_algorithm)) algo = sign_algorithm
    if (.not. self%box_intersects_curve([x(1), y(1)], [x(nx+1), y(ny+1)])) then
       tags = band + 1_I4P
@@ -441,6 +485,438 @@ contains
       enddo
    enddo
    endsubroutine tag_block
+
+   subroutine curve_thickness(self, thickness, gap, method, cone_angle, rays, invalid, status, separation_angle)
+   !< Local thickness and gap of every segment (issue #62), the 2-D twin of `surface_stl_object%thickness`, measured from
+   !< the segment midpoint p along its outward normal n; `huge` where undefined, where nothing is in front, and on the
+   !< missing closing segment of an open loop.
+   !< - THICKNESS_RAY: `rays` rays in a fan of full aperture `cone_angle` [degrees] around -n (thickness) or +n (gap):
+   !<   ray 1 on the axis, then pairs at +-theta_j, theta_j = (cone_angle/2) j / (rays/2). First hit by the segment tree
+   !<   (the source segment excluded); counted as for surfaces (leaving the solid for the thickness, entering or missing
+   !<   for the gap), lower median, huge with fewer than half counted (`invalid`).
+   !< - THICKNESS_MEDIAL: the shrinking disc, started at min(R0, t_axis/2), shrunk through the closest point (batched
+   !<   `query_many`), stopped below `separation_angle` (default 30 degrees) as for surfaces.
+   class(curve_object),    intent(in)            :: self             !< Curve.
+   real(R8P), allocatable, intent(out), optional :: thickness(:)     !< Thickness [nv].
+   real(R8P), allocatable, intent(out), optional :: gap(:)           !< Gap [nv].
+   integer(I4P),           intent(in),  optional :: method           !< THICKNESS_RAY (default) or THICKNESS_MEDIAL.
+   real(R8P),              intent(in),  optional :: cone_angle       !< Full aperture [degrees] (default 60).
+   integer(I4P),           intent(in),  optional :: rays             !< Rays per segment (default 31).
+   integer(I4P),           intent(out), optional :: invalid          !< Segments with an undefined value.
+   integer(I4P),           intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),              intent(in),  optional :: separation_angle !< Medial denoising angle [degrees] (default 30).
+   real(R8P), allocatable                        :: th(:), gp(:)     !< Work values.
+   logical,   allocatable                        :: bad(:)           !< Undefined segments.
+   real(R8P)                                     :: cone, sep        !< Options.
+   integer(I4P)                                  :: meth, m, i       !< Options, counter.
+   logical                                       :: want_t, want_g   !< Requested outputs.
+
+   if (present(invalid)) invalid = 0
+   if (present(status)) status = STATUS_OK
+   meth = THICKNESS_RAY ; if (present(method)) meth = method
+   cone = THICKNESS_DEFAULT_CONE ; if (present(cone_angle)) cone = cone_angle
+   m = THICKNESS_DEFAULT_RAYS ; if (present(rays)) m = rays
+   sep = THICKNESS_DEFAULT_SEPARATION ; if (present(separation_angle)) sep = separation_angle
+   want_t = present(thickness) ; want_g = present(gap)
+   if (self%nv == 0 .or. self%bvh%nodes_number == 0 .or. (meth /= THICKNESS_RAY .and. meth /= THICKNESS_MEDIAL) .or. &
+       m < 1 .or. cone < 0._R8P .or. cone >= 180._R8P .or. sep < 0._R8P .or. sep >= 180._R8P .or. &
+       .not. (want_t .or. want_g)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   allocate(th(self%nv), gp(self%nv), bad(self%nv))
+   th = huge(1._R8P) ; gp = huge(1._R8P) ; bad = .false.
+   if (meth == THICKNESS_RAY) then
+      !$omp parallel do default(shared) schedule(dynamic, 16) private(i)
+      do i = 1, self%nv
+         if (self%next(i) > 0) call ray_segment(i)
+      enddo
+      !$omp end parallel do
+   else
+      if (want_t) call medial(-1._R8P, th)
+      if (want_g) call medial(1._R8P, gp)
+   endif
+   if (present(invalid)) invalid = count(bad)
+   if (present(thickness)) call move_alloc(th, thickness)
+   if (present(gap)) call move_alloc(gp, gap)
+   contains
+      subroutine ray_segment(s)
+      !< Thickness and gap of segment s by the ray method.
+      integer(I4P), intent(in) :: s                             !< Segment.
+      real(R8P)                :: p(2), n(2), d(2), buf(m), t, th0 !< Work.
+      integer(I4P)             :: k, nv_, nmiss, hs             !< Counters, hit segment.
+      real(R8P)                :: side                          !< -1 thickness, +1 gap.
+      integer(I4P)             :: pass_                         !< Pass.
+
+      p = 0.5_R8P * [self%u(s) + self%u(self%next(s)), self%v(s) + self%v(self%next(s))]
+      n = [self%seg_nu(s), self%seg_nv(s)]
+      if (n(1) ** 2 + n(2) ** 2 < 0.25_R8P) then
+         bad(s) = .true. ; return
+      endif
+      do pass_ = 1, 2
+         if (pass_ == 1 .and. .not. want_t) cycle
+         if (pass_ == 2 .and. .not. want_g) cycle
+         side = merge(-1._R8P, 1._R8P, pass_ == 1)
+         nv_ = 0 ; nmiss = 0
+         do k = 1, m
+            th0 = fan_angle(k)
+            d = side * [cos(th0) * n(1) - sin(th0) * n(2), sin(th0) * n(1) + cos(th0) * n(2)]
+            call ray_first_2d(self, p, d, s, t, hs)
+            if (hs == 0) then
+               nmiss = nmiss + 1 ; cycle
+            endif
+            if (side < 0._R8P) then
+               if (self%seg_nu(hs) * d(1) + self%seg_nv(hs) * d(2) <= 0._R8P) cycle
+            else
+               if (self%seg_nu(hs) * d(1) + self%seg_nv(hs) * d(2) >= 0._R8P) cycle
+            endif
+            nv_ = nv_ + 1 ; buf(nv_) = t
+         enddo
+         if (side < 0._R8P) then
+            if (2 * nv_ < m) then
+               bad(s) = .true.
+            else
+               th(s) = lower_median(buf(1:nv_))
+            endif
+         else
+            if (2 * (nv_ + nmiss) < m) then
+               bad(s) = .true.
+            else
+               buf(nv_ + 1:nv_ + nmiss) = huge(1._R8P)
+               gp(s) = lower_median(buf(1:nv_ + nmiss))
+            endif
+         endif
+      enddo
+      endsubroutine ray_segment
+
+      pure function fan_angle(k) result(a)
+      !< Angle of ray k of the fan [rad]: 0, then +-theta_j.
+      integer(I4P), intent(in) :: k !< Ray.
+      real(R8P)                :: a !< Angle.
+
+      a = 0._R8P
+      if (k > 1) a = merge(1._R8P, -1._R8P, mod(k, 2) == 0) * 0.5_R8P * cone * (acos(-1._R8P) / 180._R8P) * &
+                     real(k / 2, R8P) / real(m / 2, R8P)
+      endfunction fan_angle
+
+      subroutine medial(side, val)
+      !< Shrinking disc on the side `side` n of every segment (-1 thickness, +1 gap); val = 2r.
+      real(R8P), intent(in)    :: side   !< -1 or +1.
+      real(R8P), intent(inout) :: val(:) !< Diameters [nv] (huge on entry).
+      integer(I4P), parameter  :: MAXIT = 64 !< Iteration cap.
+      real(R8P),    allocatable :: r(:), pc(:,:), dir(:,:), dq(:), q(:,:), c(:,:) !< Work.
+      integer(I4P), allocatable :: act(:)   !< Segments not converged.
+      real(R8P)                 :: r0, rn, cos_sep, w(2), t !< Work.
+      integer(I4P)              :: na, it, k, s, nk, hs !< Counters.
+
+      cos_sep = cos(sep * acos(-1._R8P) / 180._R8P)
+      r0 = norm2(self%bmax - self%bmin)
+      allocate(r(self%nv), pc(2, self%nv), dir(2, self%nv), act(self%nv))
+      na = 0
+      do s = 1, self%nv
+         r(s) = r0 ; pc(:, s) = 0._R8P ; dir(:, s) = 0._R8P
+         if (self%next(s) == 0) cycle
+         pc(:, s) = 0.5_R8P * [self%u(s) + self%u(self%next(s)), self%v(s) + self%v(self%next(s))]
+         dir(:, s) = side * [self%seg_nu(s), self%seg_nv(s)]
+         if (dir(1, s) ** 2 + dir(2, s) ** 2 < 0.25_R8P) then
+            bad(s) = .true.
+         else
+            na = na + 1 ; act(na) = s
+         endif
+      enddo
+      !$omp parallel do default(shared) schedule(dynamic, 16) private(k, s, t, hs)
+      do k = 1, na                                         ! start: half the axial chord
+         s = act(k)
+         call ray_first_2d(self, pc(:, s), dir(:, s), s, t, hs)
+         if (hs > 0) r(s) = min(r0, 0.5_R8P * t)
+      enddo
+      !$omp end parallel do
+      do it = 1, MAXIT
+         if (na == 0) exit
+         allocate(c(2, na), dq(na), q(2, na))
+         do k = 1, na
+            s = act(k) ; c(:, k) = pc(:, s) + r(s) * dir(:, s)
+         enddo
+         call self%query_many(points=c, distances=dq, closest_points=q, is_signed=.false.)
+         nk = 0
+         do k = 1, na
+            s = act(k)
+            if (dq(k) >= r(s) * (1._R8P - 1e-12_R8P)) cycle
+            w = q(:, k) - pc(:, s)
+            t = 2._R8P * (dir(1, s) * w(1) + dir(2, s) * w(2))
+            if (t <= 0._R8P) cycle
+            rn = (w(1) * w(1) + w(2) * w(2)) / t
+            if (rn >= r(s)) cycle
+            w = q(:, k) - pc(:, s) - rn * dir(:, s)
+            if (-(dir(1, s) * w(1) + dir(2, s) * w(2)) > cos_sep * rn) cycle
+            r(s) = rn ; nk = nk + 1 ; act(nk) = s
+         enddo
+         na = nk
+         deallocate(c, dq, q)
+      enddo
+      do k = 1, na
+         bad(act(k)) = .true. ; r(act(k)) = huge(1._R8P)
+      enddo
+      do s = 1, self%nv
+         if (self%next(s) == 0 .or. bad(s) .or. r(s) >= huge(1._R8P)) cycle
+         if (side > 0._R8P .and. r(s) >= r0) cycle
+         val(s) = 2._R8P * r(s)
+      enddo
+      endsubroutine medial
+   endsubroutine curve_thickness
+
+   subroutine ray_first_2d(self, o, d, excl, t, hs)
+   !< First segment hit by the ray o + t d (t >= 0), the segment `excl` skipped: hs (0: none) and t. Segment tree,
+   !< slab test on the node boxes, nearest first.
+   type(curve_object), intent(in)  :: self   !< Curve.
+   real(R8P),          intent(in)  :: o(2)   !< Origin.
+   real(R8P),          intent(in)  :: d(2)   !< Direction (unit).
+   integer(I4P),       intent(in)  :: excl   !< Segment to skip.
+   real(R8P),          intent(out) :: t      !< Parameter of the hit.
+   integer(I4P),       intent(out) :: hs     !< Hit segment (0: none).
+   integer(I4P)                    :: stk(128), sp, nd, j, s !< Traversal.
+   real(R8P)                       :: e(2), ao(2), den, tt, w, t0, t1, ta, tb !< Work.
+
+   t = huge(1._R8P) ; hs = 0
+   if (self%bvh%nodes_number == 0) return
+   sp = 1 ; stk(1) = 1
+   do while (sp > 0)
+      nd = stk(sp) ; sp = sp - 1
+      t0 = 0._R8P ; t1 = t                                  ! slab test against [0, t)
+      if (d(1) /= 0._R8P) then
+         ta = (self%bvh%lo_u(nd) - o(1)) / d(1) ; tb = (self%bvh%hi_u(nd) - o(1)) / d(1)
+         t0 = max(t0, min(ta, tb)) ; t1 = min(t1, max(ta, tb))
+      elseif (o(1) < self%bvh%lo_u(nd) .or. o(1) > self%bvh%hi_u(nd)) then
+         cycle
+      endif
+      if (d(2) /= 0._R8P) then
+         ta = (self%bvh%lo_v(nd) - o(2)) / d(2) ; tb = (self%bvh%hi_v(nd) - o(2)) / d(2)
+         t0 = max(t0, min(ta, tb)) ; t1 = min(t1, max(ta, tb))
+      elseif (o(2) < self%bvh%lo_v(nd) .or. o(2) > self%bvh%hi_v(nd)) then
+         cycle
+      endif
+      if (t0 > t1) cycle
+      if (self%bvh%left(nd) == 0) then
+         do j = self%bvh%first(nd), self%bvh%last(nd)
+            s = self%bvh%seg_id(j)
+            if (s == excl) cycle
+            e = [self%u(self%next(s)) - self%u(s), self%v(self%next(s)) - self%v(s)]
+            ao = [self%u(s) - o(1), self%v(s) - o(2)]
+            den = d(1) * e(2) - d(2) * e(1)
+            if (den == 0._R8P) cycle
+            tt = (ao(1) * e(2) - ao(2) * e(1)) / den
+            w = (ao(1) * d(2) - ao(2) * d(1)) / den
+            if (tt < 0._R8P .or. w < 0._R8P .or. w > 1._R8P .or. tt >= t) cycle
+            t = tt ; hs = s
+         enddo
+      else
+         sp = sp + 1 ; stk(sp) = self%bvh%right(nd)
+         sp = sp + 1 ; stk(sp) = self%bvh%left(nd)
+      endif
+   enddo
+   endsubroutine ray_first_2d
+
+   subroutine curve_thin_regions(self, thickness, gap, h, factor, region, region_length, status)
+   !< The segments thinner than factor * h (local size min(thickness, gap) below it, issue #62), grouped into runs of
+   !< consecutive thin segments along each loop (a closed loop wraps around), sorted by decreasing length (ties: the
+   !< lowest segment first): region(nv) is 0 or the region id, region_length(nr) the lengths.
+   class(curve_object),       intent(in)            :: self             !< Curve.
+   real(R8P),                 intent(in),  optional :: thickness(:)     !< Thickness per segment.
+   real(R8P),                 intent(in),  optional :: gap(:)           !< Gap per segment.
+   real(R8P),                 intent(in)            :: h                !< Cell size.
+   real(R8P),                 intent(in)            :: factor           !< Threshold factor.
+   integer(I4P), allocatable, intent(out)           :: region(:)        !< Region of each segment (0: not thin) [nv].
+   real(R8P),    allocatable, intent(out)           :: region_length(:) !< Length of each region [nr].
+   integer(I4P),              intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),    allocatable                        :: ls(:), length(:) !< Local sizes, root lengths.
+   integer(I4P), allocatable                        :: parent(:), roots(:), rank(:), root_id(:) !< Union-find, order.
+   logical,      allocatable                        :: thin(:)          !< Thin segments.
+   integer(I4P)                                     :: nv, s, a, b, nr, i, j, key !< Counters.
+   logical                                          :: bad              !< Input check.
+
+   nv = self%nv
+   allocate(region(nv), region_length(0)) ; region = 0
+   if (present(status)) status = STATUS_INVALID_INPUT
+   bad = .not. (present(thickness) .or. present(gap)) .or. nv == 0 .or. h <= 0._R8P .or. factor <= 0._R8P
+   if (.not. bad .and. present(thickness)) bad = size(thickness) /= nv
+   if (.not. bad .and. present(gap)) bad = size(gap) /= nv
+   if (bad) return
+   allocate(ls(nv)) ; ls = huge(1._R8P)
+   if (present(thickness)) ls = min(ls, thickness)
+   if (present(gap)) ls = min(ls, gap)
+   thin = ls < factor * h .and. self%next > 0
+   allocate(parent(nv)) ; parent = [(s, s = 1, nv)]
+   do s = 1, nv
+      if (.not. thin(s)) cycle
+      if (.not. thin(self%next(s))) cycle                 ! segment next(s) follows segment s along the loop
+      a = find(s) ; b = find(self%next(s))
+      if (a /= b) parent(max(a, b)) = min(a, b)
+   enddo
+   allocate(length(nv), root_id(nv), roots(nv)) ; length = 0._R8P ; root_id = 0
+   do s = 1, nv
+      if (thin(s)) then
+         a = find(s) ; length(a) = length(a) + self%seg_len(s)
+      endif
+   enddo
+   nr = 0
+   do s = 1, nv
+      if (thin(s) .and. find(s) == s) then
+         nr = nr + 1 ; roots(nr) = s
+      endif
+   enddo
+   allocate(rank(nr)) ; rank = roots(1:nr)
+   do i = 2, nr
+      key = rank(i) ; j = i - 1
+      do while (j >= 1)
+         if (length(rank(j)) >= length(key)) exit
+         rank(j + 1) = rank(j) ; j = j - 1
+      enddo
+      rank(j + 1) = key
+   enddo
+   deallocate(region_length) ; allocate(region_length(nr))
+   do i = 1, nr
+      root_id(rank(i)) = i ; region_length(i) = length(rank(i))
+   enddo
+   do s = 1, nv
+      if (thin(s)) region(s) = root_id(find(s))
+   enddo
+   if (present(status)) status = STATUS_OK
+   contains
+      function find(x) result(r)
+      !< Root of x, with path halving.
+      integer(I4P), intent(in) :: x !< Segment.
+      integer(I4P)             :: r !< Root.
+
+      r = x
+      do while (parent(r) /= r)
+         parent(r) = parent(parent(r)) ; r = parent(r)
+      enddo
+      endfunction find
+   endsubroutine curve_thin_regions
+
+   subroutine curve_build_thin(self, thickness, gap, status)
+   !< Store min(thickness, gap) per segment tree payload entry, with its minimum per node (issue #62), for
+   !< `box_thin_many(_device)` and `tag_block(thin_factor=)`. `adopt_loops` drops it; `move` keeps it. Call it before
+   !< `enter_device` for the device twin.
+   class(curve_object),    intent(inout)         :: self         !< Curve.
+   real(R8P),              intent(in),  optional :: thickness(:) !< Thickness per segment.
+   real(R8P),              intent(in),  optional :: gap(:)       !< Gap per segment.
+   integer(I4P),           intent(out), optional :: status       !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),    allocatable                     :: ls(:)        !< Local sizes.
+   integer(I4P), allocatable                     :: order(:), stk(:) !< Pre-order, stack.
+   integer(I4P)                                  :: nn, no, sp, nd, j, k !< Counters.
+   logical                                       :: bad          !< Input check.
+
+   call curve_drop_thin(self)
+   if (present(status)) status = STATUS_INVALID_INPUT
+   bad = .not. (present(thickness) .or. present(gap)) .or. self%bvh%nodes_number == 0
+   if (.not. bad .and. present(thickness)) bad = size(thickness) /= self%nv
+   if (.not. bad .and. present(gap)) bad = size(gap) /= self%nv
+   if (bad) return
+   allocate(ls(self%nv)) ; ls = huge(1._R8P)
+   if (present(thickness)) ls = min(ls, thickness)
+   if (present(gap)) ls = min(ls, gap)
+   allocate(self%thin_pay(self%bvh%segments_number))
+   do j = 1, self%bvh%segments_number
+      self%thin_pay(j) = ls(self%bvh%seg_id(j))
+   enddo
+   nn = self%bvh%nodes_number
+   allocate(self%thin_node(nn), order(nn), stk(nn)) ; self%thin_node = huge(1._R8P)
+   no = 0 ; sp = 1 ; stk(1) = 1
+   do while (sp > 0)
+      nd = stk(sp) ; sp = sp - 1
+      no = no + 1 ; order(no) = nd
+      if (self%bvh%left(nd) > 0) then
+         sp = sp + 1 ; stk(sp) = self%bvh%left(nd) ; sp = sp + 1 ; stk(sp) = self%bvh%right(nd)
+      endif
+   enddo
+   do k = no, 1, -1                                       ! reversed pre-order: children before parents
+      nd = order(k)
+      if (self%bvh%left(nd) == 0) then
+         do j = self%bvh%first(nd), self%bvh%last(nd)
+            self%thin_node(nd) = min(self%thin_node(nd), self%thin_pay(j))
+         enddo
+      else
+         self%thin_node(nd) = min(self%thin_node(self%bvh%left(nd)), self%thin_node(self%bvh%right(nd)))
+      endif
+   enddo
+   self%thin_built = .true.
+   if (present(status)) status = STATUS_OK
+   endsubroutine curve_build_thin
+
+   subroutine curve_drop_thin(self)
+   !< Forget the stored local sizes. The device copy, if any, is released by exit_device.
+   type(curve_object), intent(inout) :: self !< Curve.
+
+   if (self%thin_on_device) return
+   if (allocated(self%thin_pay)) deallocate(self%thin_pay)
+   if (allocated(self%thin_node)) deallocate(self%thin_node)
+   self%thin_built = .false.
+   endsubroutine curve_drop_thin
+
+   subroutine curve_box_thin_many(self, lo, hi, factor, touched, status)
+   !< Which boxes [lo, hi] (u, v) meet (exactly) a segment thinner than factor * h, h the larger side of each box
+   !< (issue #62; `build_thin` first, else STATUS_INVALID_INPUT). OpenMP over the boxes; the device twin runs the same
+   !< routine (`curve_box_thin_oac`).
+   class(curve_object), intent(in)            :: self       !< Curve.
+   real(R8P),           intent(in)            :: lo(:,:)    !< Box minima [2, n].
+   real(R8P),           intent(in)            :: hi(:,:)    !< Box maxima [2, n].
+   real(R8P),           intent(in)            :: factor     !< Threshold factor.
+   logical,             intent(out)           :: touched(:) !< Touched [n].
+   integer(I4P),        intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P)                               :: i          !< Counter.
+
+   touched = .false.
+   if (present(status)) status = STATUS_INVALID_INPUT
+   if (.not. self%thin_built .or. size(lo, 1) /= 2 .or. size(hi, 1) /= 2 .or. size(lo, 2) /= size(hi, 2) .or. &
+       size(touched) /= size(lo, 2)) return
+   !$omp parallel do default(shared) schedule(dynamic, 64) private(i)
+   do i = 1, size(lo, 2)
+      touched(i) = curve_box_thin_oac(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, &
+                                      self%bvh%right, self%bvh%first, self%bvh%last, self%bvh%seg_id, self%next, self%u, &
+                                      self%v, self%thin_pay, self%thin_node, lo(:, i), hi(:, i), factor)
+   enddo
+   !$omp end parallel do
+   if (present(status)) status = STATUS_OK
+   endsubroutine curve_box_thin_many
+
+   subroutine curve_box_thin_many_device(self, lo, hi, factor, touched, status)
+   !< `box_thin_many` on the device (issue #62): requires `build_thin` before `enter_device` (else STATUS_INVALID_INPUT).
+   !< #20 rules: top-level pointer aliases of the mapped arrays.
+   class(curve_object), intent(inout), target :: self       !< Curve (target: device aliases).
+   real(R8P),           intent(in)            :: lo(:,:)    !< Box minima [2, n].
+   real(R8P),           intent(in)            :: hi(:,:)    !< Box maxima [2, n].
+   real(R8P),           intent(in)            :: factor     !< Threshold factor.
+   logical,             intent(out)           :: touched(:) !< Touched [n].
+   integer(I4P),        intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),    pointer :: lo_u(:), lo_v(:), hi_u(:), hi_v(:), u(:), v(:), tp(:), tn(:) !< Aliases.
+   integer(I4P), pointer :: left(:), right(:), first(:), last(:), seg_id(:), next(:)  !< Aliases.
+   logical, allocatable  :: tl(:)          !< Device-side result.
+   real(R8P)             :: blo(2), bhi(2) !< Per-box work.
+   integer(I4P)          :: i, n           !< Counters.
+
+   touched = .false.
+   if (present(status)) status = STATUS_INVALID_INPUT
+   if (.not. (self%is_on_device .and. self%thin_on_device) .or. size(lo, 1) /= 2 .or. size(hi, 1) /= 2 .or. &
+       size(lo, 2) /= size(hi, 2) .or. size(touched) /= size(lo, 2)) then
+      write(stderr, '(A)') 'fossil_curve_object%box_thin_many_device: build_thin, then enter_device, first'
+      return
+   endif
+   n = size(lo, 2)
+   allocate(tl(n))
+   lo_u => self%bvh%lo_u ; lo_v => self%bvh%lo_v ; hi_u => self%bvh%hi_u ; hi_v => self%bvh%hi_v
+   left => self%bvh%left ; right => self%bvh%right ; first => self%bvh%first ; last => self%bvh%last
+   seg_id => self%bvh%seg_id ; next => self%next ; u => self%u ; v => self%v ; tp => self%thin_pay ; tn => self%thin_node
+   !$acc parallel loop present(lo_u, lo_v, hi_u, hi_v, left, right, first, last, seg_id, next, u, v, tp, tn) &
+   !$acc&              copyin(lo, hi) copyout(tl) private(blo, bhi)
+   do i = 1, n
+      blo(1) = lo(1, i) ; blo(2) = lo(2, i) ; bhi(1) = hi(1, i) ; bhi(2) = hi(2, i)
+      tl(i) = curve_box_thin_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, seg_id, next, u, v, tp, tn, blo, bhi, &
+                                 factor)
+   enddo
+   touched = tl
+   if (present(status)) status = STATUS_OK
+   endsubroutine curve_box_thin_many_device
 
    subroutine line_crossings(self, axis, a, t0, t1, t, segments, entering, n, status)
    !< Exact crossings of the line along `axis` (1: along u at v = a; 2: along v at u = a) with the
@@ -1143,6 +1619,10 @@ contains
    !$acc&                  self%bvh%len2, self%bvh%seg_id, self%next, self%u, self%v, self%pn_u, self%pn_v, &
    !$acc&                  self%bvh%wn_cu, self%bvh%wn_cv, self%bvh%wn_du, self%bvh%wn_dv, self%bvh%wn_c, self%bvh%wn_diag2, &
    !$acc&                  self%seg_nu, self%seg_nv, self%vertex_body)
+   if (self%thin_built) then                       ! the local sizes, if built (issue #62)
+      !$acc enter data copyin(self%thin_pay, self%thin_node)
+      self%thin_on_device = .true.
+   endif
    self%is_on_device = .true.
    endsubroutine enter_device
 
@@ -1156,6 +1636,10 @@ contains
    !$acc&                 self%bvh%len2, self%bvh%seg_id, self%next, self%u, self%v, self%pn_u, self%pn_v, &
    !$acc&                 self%bvh%wn_cu, self%bvh%wn_cv, self%bvh%wn_du, self%bvh%wn_dv, self%bvh%wn_c, self%bvh%wn_diag2, &
    !$acc&                 self%seg_nu, self%seg_nv, self%vertex_body)
+   if (self%thin_on_device) then
+      !$acc exit data delete(self%thin_pay, self%thin_node)
+      self%thin_on_device = .false.
+   endif
    self%is_on_device = .false.
    endsubroutine exit_device
 

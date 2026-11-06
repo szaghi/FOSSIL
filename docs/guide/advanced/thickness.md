@@ -153,6 +153,24 @@ call surface%box_thin_many(lo, hi, factor, touched)                    ! any box
   thin-touched cell, capped at `thin_band + 1`, through `cell_bands`, as the [feature tags](/guide/advanced/feature-edges)
   do.
 
+## 2-D curves
+
+`curve%thickness` is the twin for curves. It measures from the midpoint of every segment along its outward normal.
+The ray method casts a fan in the curve's plane: ray 1 on the axis, then pairs at $\pm\theta_j$ with
+$\theta_j = \tfrac{\alpha}{2}\,j/\lfloor m/2 \rfloor$. The first hits come from the segment tree, with the source
+segment excluded. The medial method shrinks a disc, started at half the axial chord and stopped by the same
+separation angle. The missing closing segment of an open loop gets `huge`.
+
+![a NACA 0012 section with the medial circle of every 8th segment (gold) and the segments thinner than chord/32 in ember: the trailing-edge strip](../../examples/images/ref-thickness-2d.svg){.fossil-figure}
+
+- `curve%thin_regions(thickness, gap, h, factor, region, region_length)` groups the thin segments into runs along
+  each loop (a closed loop wraps around), sorted by decreasing length.
+- `curve%build_thin`, `box_thin_many(_device)` and `tag_block(..., thin_factor, thin_band, thin_tags)` give the AMR
+  criterion. The box-segment test is exact (`box_segment_overlap_2d`), and `curve_box_thin_oac` is shared by the CPU
+  and the device. The bench line `thin device vs serial mismatches` of `fossil_test_curve_bench` must be 0.
+- On a NACA 0012 section, the thin regions shrink towards the trailing edge as h decreases, and the trailing edge
+  stays thin at every h: its thickness tends to zero.
+
 ## API
 
 ```fortran
@@ -202,6 +220,15 @@ Every argument is optional, and at least one output is required. The constants `
 | `box_thin_many`, 16³ cells, factor 2 | equal to a brute force over every facet with the same predicate; `thin_tags` equal to `cell_bands` of it |
 | `box_thin_many_device` | equal to the CPU |
 | after `move` / after `analyze` | kept, and equal to the brute force on the moved facets / dropped |
+
+`src/tests/fossil_test_curve_thickness.f90`:
+
+| Case | Result |
+|---|---|
+| NACA 0012, 100 points per side, segments with $0.1 < x < 0.9$ | medial against $2 y_t\sqrt{1 + y_t'^2}$ at the midpoint to 4.0e-4; never above the axial chord |
+| an annulus, radii 1 (256 sides) and 0.5 (128 sides) | medial thickness 0.5 to 1.9e-5; hole gap 1 to 3.0e-4; outer gap `huge`; ray thickness against the exact median chord $R\cos\theta - \sqrt{r^2 - R^2\sin^2\theta}$ to 5.6e-5 |
+| h decreasing on the section | thin length never grows; the two trailing-edge segments thin at every h |
+| tagging, 32 × 32 cells, factor 2 | refused before `build_thin`; equal to a brute force over every segment; `thin_tags` equal to `cell_bands` of it; device equal |
 
 ## Limits
 

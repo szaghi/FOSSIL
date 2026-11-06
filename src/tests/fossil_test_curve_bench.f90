@@ -14,9 +14,10 @@ program fossil_test_curve_bench
 !< (box_classify_many_device on a box around every grid point, issue #38), and `sign bench device vs
 !< serial mismatches` (sections of the issue #39 benchmark bodies), `deviation device vs serial mismatches` (issue #60:
 !< the last curve rotated by 2 degrees against itself, on the device and on the CPU) and `line crossings device vs serial
-!< mismatches` (issue #40): all must be 0.
+!< mismatches` (issue #40) and `thin device vs serial mismatches` (issue #62: box_thin_many_device on the cells of a
+!< 64^2 block, medial thickness and gap): all must be 0.
 
-use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
+use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d, device_line_mismatches_2d
 use fossil, only : rigid_pose_2d_t, pose_2d, to_world
@@ -55,6 +56,7 @@ call bench(c, [-1.5_R8P, -1.5_R8P], [1.5_R8P, 1.5_R8P], 'disc with a hole (1100 
 call sign_bench
 call deviation_case(c)
 call feature_case(c)
+call thin_case(c)
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
@@ -219,6 +221,33 @@ contains
    print '(A,I0)', 'feature device vs serial mismatches: ', bad
    ok = ok .and. bad == 0
    endsubroutine feature_case
+
+   subroutine thin_case(cur)
+   !< Thin cells (issue #62): box_thin_many_device vs box_thin_many on the 64^2 cells of a block over the curve, the local
+   !< sizes from the medial thickness and gap, factor 25 (the hole and the ring are 0.6 and 0.7 across, the cells 0.034).
+   type(curve_object), intent(inout) :: cur  !< Curve (entered here).
+   real(R8P), allocatable            :: lo(:,:), hi(:,:), th(:), gp(:) !< Cells, local sizes.
+   logical,   allocatable            :: t1(:), t2(:) !< Touched.
+   real(R8P)                         :: b0(2), b1(2) !< Box.
+   integer(I4P)                      :: i, j, m, bad !< Counters.
+
+   b0 = cur%get_bmin() - 0.1_R8P ; b1 = cur%get_bmax() + 0.1_R8P
+   allocate(lo(2, 64 * 64), hi(2, 64 * 64), t1(64 * 64), t2(64 * 64))
+   m = 0
+   do j = 1, 64 ; do i = 1, 64
+      m = m + 1 ; lo(:, m) = b0 + (b1 - b0) * [i - 1, j - 1] / 64._R8P ; hi(:, m) = b0 + (b1 - b0) * [i, j] / 64._R8P
+   enddo ; enddo
+   call cur%thickness(thickness=th, gap=gp, method=THICKNESS_MEDIAL)
+   call cur%build_thin(thickness=th, gap=gp)
+   call cur%box_thin_many(lo, hi, 25._R8P, t1)
+   call cur%enter_device
+   call cur%box_thin_many_device(lo, hi, 25._R8P, t2)
+   call cur%exit_device
+   bad = count(t1 .neqv. t2)
+   print '(A,I0,A,I0)', 'thin cells touched: ', count(t1), ' of ', 64 * 64
+   print '(A,I0)', 'thin device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0 .and. count(t1) > 0
+   endsubroutine thin_case
 
    subroutine box(cur, p, h, algo, nm)
    !< box_classify_many_device vs box_classify_many (issue #38): a box of half-size h around every

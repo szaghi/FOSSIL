@@ -30,7 +30,7 @@ use penf,                    only : I4P, R8P
 implicit none
 private
 public :: BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
-public :: bvh_box_contact_oac, curve_box_contact_oac, box_tolerance, bvh_box_thin_oac
+public :: bvh_box_contact_oac, curve_box_contact_oac, box_tolerance, bvh_box_thin_oac, curve_box_thin_oac
 public :: cell_bands, cell_components
 
 integer(I4P), parameter :: BOX_NONE    = 0_I4P !< Contact result: neither cut nor near (inside/outside not decided).
@@ -191,6 +191,50 @@ contains
       endif
    enddo
    endfunction curve_box_contact_oac
+
+   pure function curve_box_thin_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, seg_id, next, u, v, thin_pay, &
+                                    thin_node, lo, hi, factor) result(touch)
+   !< True if the closed box [lo, hi] (u, v) meets (exactly) a segment of the curve whose local size (issue #62) is below
+   !< factor * h, h the larger side of the box. `thin_pay(j)` is the local size of payload entry j, `thin_node(nd)` the
+   !< minimum over the subtree of node nd (root 1): a subtree with no segment that thin is pruned whole. The segments come
+   !< from the curve's own vertices, as in `curve_box_contact_oac`. The CPU and the device run this same routine.
+   !$acc routine seq
+   real(R8P),    intent(in) :: lo_u(:), lo_v(:), hi_u(:), hi_v(:)  !< Node boxes.
+   integer(I4P), intent(in) :: left(:), right(:), first(:), last(:) !< Children, leaf ranges.
+   integer(I4P), intent(in) :: seg_id(:)    !< Curve segment of each payload entry.
+   integer(I4P), intent(in) :: next(:)      !< Next vertex of each vertex (segment i = i -> next(i)).
+   real(R8P),    intent(in) :: u(:), v(:)   !< Curve vertices.
+   real(R8P),    intent(in) :: thin_pay(:)  !< Local size per payload entry.
+   real(R8P),    intent(in) :: thin_node(:) !< Minimum local size per node.
+   real(R8P),    intent(in) :: lo(2), hi(2) !< Query box.
+   real(R8P),    intent(in) :: factor       !< Threshold factor.
+   logical                  :: touch        !< Contact with a thin segment.
+   integer(I4P)             :: stk(STACK), sp, nd, j, s !< Traversal.
+   real(R8P)                :: a(2), b(2), thr !< Segment, threshold.
+
+   touch = .false.
+   thr = factor * max(hi(1) - lo(1), hi(2) - lo(2))
+   sp = 1_I4P ; stk(1) = 1_I4P
+   do while (sp > 0_I4P)
+      nd = stk(sp) ; sp = sp - 1_I4P
+      if (thin_node(nd) >= thr) cycle
+      if (lo_u(nd) > hi(1) .or. hi_u(nd) < lo(1) .or. lo_v(nd) > hi(2) .or. hi_v(nd) < lo(2)) cycle
+      if (left(nd) == 0_I4P) then
+         do j = first(nd), last(nd)
+            if (thin_pay(j) >= thr) cycle
+            s = seg_id(j)
+            a = [u(s), v(s)] ; b = [u(next(s)), v(next(s))]
+            if (box_segment_overlap_2d(lo, hi, a, b)) then
+               touch = .true.
+               return
+            endif
+         enddo
+      else
+         sp = sp + 1_I4P ; stk(sp) = right(nd)
+         sp = sp + 1_I4P ; stk(sp) = left(nd)
+      endif
+   enddo
+   endfunction curve_box_thin_oac
 
    pure subroutine cell_bands(cut, band, dist)
    !< Chebyshev cell distance to the nearest cut cell, capped at band + 1 (also where no cell is cut).
