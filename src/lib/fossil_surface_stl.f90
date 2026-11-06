@@ -3699,12 +3699,25 @@ contains
    type(facet_object), allocatable                     :: kept(:)
    integer(I4P)                                        :: bool_status
    type(surface_stl_object)                            :: welded  !< B with its vertices welded onto A's.
+   type(facet_object), allocatable                     :: fb(:)   !< B's facets, patches mapped into A's table.
+   integer(I4P), allocatable                           :: pmap(:) !< B's patch -> A's patch (issue #66).
+   integer(I4P)                                        :: k       !< Counter.
 
+   ! patches (issue #66): every output facet keeps its parent's patch; B's patches join A's table by name
+   call sync_patch_names(self)
+   allocate(pmap(other%get_patches_number()))
+   do k = 1, size(pmap)
+      pmap(k) = find_or_add_patch(self%patch_names, other%patch_name(k))
+   enddo
    if (present(weld)) then
       if (weld > 0._R8P .and. self%facets_number > 0 .and. other%facets_number > 0) then
          call weld_onto(a=self, b=other, tol=weld, bw=welded)
+         fb = welded%facet(1:welded%facets_number)
+         do k = 1, size(fb)
+            fb(k)%patch = pmap(max(1_I4P, min(fb(k)%patch, size(pmap, kind=I4P))))
+         enddo
          call compute_boolean(facet_a=self%facet,  tree_a=self%aabb, &
-                              facet_b=welded%facet, tree_b=welded%aabb, &
+                              facet_b=fb, tree_b=welded%aabb, &
                               op=op, kept_facet=kept, status=bool_status)
          if (present(status)) status = bool_status
          if (bool_status /= BOOL_STATUS_OK) return
@@ -3712,8 +3725,16 @@ contains
          return
       endif
    endif
+   if (other%facets_number > 0) then
+      fb = other%facet(1:other%facets_number)
+      do k = 1, size(fb)
+         fb(k)%patch = pmap(max(1_I4P, min(fb(k)%patch, size(pmap, kind=I4P))))
+      enddo
+   else
+      allocate(fb(0))
+   endif
    call compute_boolean(facet_a=self%facet,  tree_a=self%aabb, &
-                        facet_b=other%facet, tree_b=other%aabb, &
+                        facet_b=fb, tree_b=other%aabb, &
                         op=op, kept_facet=kept, status=bool_status)
    if (present(status)) status = bool_status
    if (bool_status /= BOOL_STATUS_OK) return

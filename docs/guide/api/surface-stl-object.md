@@ -1819,6 +1819,8 @@ endprogram ex_boolean_api
   [known limitations](/guide/advanced/booleans#known-limitations).
 - The result replaces `self` in place — if you need the original, copy
   it first (`saved = self`) before calling.
+- Every output facet keeps its parent's [patch](#patches); `other`'s
+  patches join `self`'s table by name (issue #66).
 - `BOOL_SYMDIFF` keeps every part of each surface, the parts inside the
   other flipped (one arrangement, like the other ops).
 

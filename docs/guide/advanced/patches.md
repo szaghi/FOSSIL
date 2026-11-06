@@ -37,6 +37,13 @@ The patch id travels with the facet, so every operation that keeps or copies fac
   patch named `filled` otherwise (a hole across a wall/inlet edge has no single right answer; the caller can
   `set_patch` it).
 
+## Through booleans
+
+`boolean` and `resolve_self_intersections` keep the patch of every facet: a sub-triangle of the arrangement takes
+its parent facet's patch, so the area of a patch in the result is the area of its parent patch outside (or inside) the
+other body, as the operation selects. The other surface's patches join the table by name before the arrangement:
+`A ∪ B` of a body with patches `low`, `high` and one with `b_low`, `b_high` has all four, and equal names merge.
+
 ## API
 
 See [Patches](/guide/api/surface-stl-object#patches) in the API reference.

@@ -904,6 +904,7 @@ contains
             endif
          enddo
          call f%compute_metrix
+         f%patch = arr%facet(gi)%patch ! a sub-triangle keeps its parent's patch (issue #66)
          call grow_cut
          call push(buf_facet, buf_owner, buf_source, used, cap, f, arr%owner(gi), gi, buf_pid)
          buf_pid(:, used) = gid(tris(:, k)) ; buf_cut(:, used) = tcon(:, k)
