@@ -70,6 +70,7 @@ use vecfor, only : ex_R8P, ey_R8P, ez_R8P, mirror_matrix_R8P, rotation_matrix_R8
 implicit none
 private
 public :: surface_stl_object
+public :: proximity_pairs_of
 public :: intersection_pair_t
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 public :: FEATURE_FACE, FEATURE_EDGE, FEATURE_VERTEX
@@ -223,6 +224,7 @@ type :: surface_stl_object
       procedure, pass(self) :: load_from_file       !< Load STL from a file path (ASCII or binary, auto-detected).
       procedure, pass(self) :: load_from_files      !< Load several STL files, one patch per file (issue #66).
       procedure, pass(self) :: distance_to          !< Distance to another body, with the closest pair (issue #67).
+      procedure, pass(self) :: proximity_pairs      !< Pairs of bodies of the surface closer than a cutoff (issue #67).
       procedure, pass(self) :: save_into_file       !< Save STL to a file path.
       procedure, pass(self) :: save_aabb_into_file  !< Save the AABB tree leaves as separate STL files.
       ! public methods
@@ -6575,6 +6577,73 @@ contains
    if (present(facet_other)) facet_other = ib
    if (present(intersecting)) intersecting = meet
    endsubroutine distance_to
+
+   subroutine proximity_pairs(self, cutoff, pairs, distances, status)
+   !< The pairs of bodies of this surface (`facet_body`: outer shells with their cavities) closer than `cutoff`
+   !< (issue #67): pairs(:, k) = [b1, b2] with b1 < b2, in order, and their distances (0 when they touch or cross).
+   !< Each body becomes a surface of its own, then as `proximity_pairs_of`.
+   class(surface_stl_object),  intent(in)            :: self         !< Surface.
+   real(R8P),                  intent(in)            :: cutoff       !< Distance cutoff (>= 0).
+   integer(I4P), allocatable,  intent(out)           :: pairs(:, :)  !< Body pairs [2, n].
+   real(R8P),    allocatable,  intent(out)           :: distances(:) !< Their distances [n].
+   integer(I4P),               intent(out), optional :: status       !< STATUS_OK, STATUS_INVALID_INPUT.
+   type(surface_stl_object), allocatable             :: parts(:)     !< One surface per body.
+   type(facet_object), allocatable                   :: fs(:)        !< Facets of a body.
+   integer(I4P)                                      :: b, f, n      !< Counters.
+
+   if (present(status)) status = STATUS_OK
+   allocate(pairs(2, 0), distances(0))
+   if (self%facets_number == 0 .or. .not. cutoff >= 0._R8P) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   allocate(parts(self%get_bodies_number()))
+   do b = 1, size(parts)
+      n = count([(self%facet_body(f) == b, f = 1, self%facets_number)])
+      allocate(fs(n)) ; n = 0
+      do f = 1, self%facets_number
+         if (self%facet_body(f) /= b) cycle
+         n = n + 1 ; fs(n) = self%facet(f)
+      enddo
+      call parts(b)%adopt_facets(facets=fs)
+   enddo
+   call proximity_pairs_of(parts, cutoff, pairs, distances, status)
+   endsubroutine proximity_pairs
+
+   subroutine proximity_pairs_of(surfaces, cutoff, pairs, distances, status)
+   !< The pairs of surfaces closer than `cutoff` (issue #67): a broad phase on the bounding boxes (pairs whose boxes are
+   !< farther than `cutoff` are skipped), then `distance_to` for the others; pairs(:, k) = [i, j], i < j, in order.
+   type(surface_stl_object),  intent(in)            :: surfaces(:)  !< Bodies.
+   real(R8P),                 intent(in)            :: cutoff       !< Distance cutoff (>= 0).
+   integer(I4P), allocatable, intent(out)           :: pairs(:, :)  !< Surface pairs [2, n].
+   real(R8P),    allocatable, intent(out)           :: distances(:) !< Their distances [n].
+   integer(I4P),              intent(out), optional :: status       !< STATUS_OK, STATUS_INVALID_INPUT.
+   type(vector_R8P)                                 :: l1, h1, l2, h2
+   real(R8P)                                        :: d, g
+   integer(I4P)                                     :: i, j
+
+   if (present(status)) status = STATUS_OK
+   allocate(pairs(2, 0), distances(0))
+   if (.not. cutoff >= 0._R8P) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   do i = 1, size(surfaces)
+      if (surfaces(i)%facets_number == 0) cycle
+      l1 = surfaces(i)%bmin ; h1 = surfaces(i)%bmax
+      do j = i + 1, size(surfaces)
+         if (surfaces(j)%facets_number == 0) cycle
+         l2 = surfaces(j)%bmin ; h2 = surfaces(j)%bmax
+         g = max(0._R8P, l2%x - h1%x, l1%x - h2%x)**2 + max(0._R8P, l2%y - h1%y, l1%y - h2%y)**2 + &
+             max(0._R8P, l2%z - h1%z, l1%z - h2%z)**2
+         if (g > cutoff * cutoff * (1._R8P + 1.e-10_R8P)) cycle
+         call surfaces(i)%distance_to(surfaces(j), d)
+         if (d > cutoff) cycle
+         pairs = reshape([reshape(pairs, [2 * size(distances)]), i, j], [2, size(distances) + 1])
+         distances = [distances, d]
+      enddo
+   enddo
+   endsubroutine proximity_pairs_of
 
    subroutine load_from_files(self, file_names, guess_format, aabb_refinement_levels, aabb_tree_kind, status)
    !< Load several STL files into one surface, one patch per file (issue #66), in the order given; a multi-solid ASCII

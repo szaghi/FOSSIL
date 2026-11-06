@@ -44,7 +44,7 @@ use fossil_curve_object, only : curve_object, cut_cells_2d_t, CURVE_VALID, CURVE
 implicit none
 private
 public :: facet_object
-public :: surface_stl_object
+public :: surface_stl_object, proximity_pairs_of
 public :: distance_field_object, FAR_VALUE
 public :: slice_surface
 public :: cut_cells_3d_t, cut_cells_3d

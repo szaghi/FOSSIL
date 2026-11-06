@@ -181,6 +181,16 @@ points, and `intersecting` when the bodies touch or cross (exact classification)
 surface. `pose_self` / `pose_other` (`rigid_pose_t`) place the bodies as `move` would, without refitting the trees,
 with the same bits. See [body–body distance](/guide/advanced/body-distance).
 
+### `proximity_pairs`
+
+```fortran
+call surface%proximity_pairs(cutoff, pairs, distances, status)   ! bodies of one surface
+call proximity_pairs_of(surfaces, cutoff, pairs, distances, status) ! a list of surfaces
+```
+
+The pairs (i < j, in order) closer than `cutoff`, with their distances (issue #67): a broad phase on the bounding
+boxes, then [`distance_to`](#distance-to).
+
 ### Patches
 
 Named boundary patches (issue #66; [reference page](/guide/advanced/patches)).

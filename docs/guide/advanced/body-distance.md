@@ -24,6 +24,9 @@ walls come within a few cells, and collision response.
 - **Poses** (`pose_self=`, `pose_other=`): the bodies are taken where `move` would put them, without refitting either
   tree. Each facet is moved by `to_world` (the bits `move` writes), and each tree node is bounded by the box of its
   eight moved corners, a conservative bound. The result equals the one after `move`, bit for bit.
+- **Many bodies:** `proximity_pairs(cutoff, pairs, distances)` gives the pairs of bodies of one surface (its shells,
+  `facet_body`) closer than `cutoff`, and `proximity_pairs_of(surfaces, cutoff, ...)` the pairs of a list of surfaces:
+  pairs whose bounding boxes are farther than `cutoff` are skipped, the others get `distance_to`.
 - CPU only: one query per pair of bodies, not a batch over points.
 
 ## Example
