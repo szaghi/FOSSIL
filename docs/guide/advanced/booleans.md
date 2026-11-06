@@ -349,7 +349,7 @@ regression tier, `src/tests/fossil_test_boolean_csg.f90`, runs 4-operation chain
 The cost per facet is flat in N: the boolean is linear in practice. Since issue #65 the selection makes one decision
 per patch instead of one winding-number query per sub-triangle, and the exact arrangement costs less than those
 queries did: 1.5–5× faster than #63. The exact predicates run their filters first; the exact stage is reached only
-by near-degenerate configurations (near-coplanar facets), where `orient3d` uses error-free products (`ieee_fma`).
+by near-degenerate configurations (near-coplanar facets), where `orient3d` uses error-free products (Dekker's, with a bit-mask split).
 
 ### Defects found by the harness
 
@@ -390,7 +390,7 @@ by near-degenerate configurations (near-coplanar facets), where `orient3d` uses 
   by ulps; an input vertex never moves).
 - **Exact predicates too slow without the snap** (fixed, issue #65). Near-coplanar pairs put every `orient3d` in its
   exact stage (68 % of the time). The exact stage now detects a shared coordinate plane, uses the six products of
-  exact differences when they are exact, and makes each product of three doubles exact with `ieee_fma` (four
+  exact differences when they are exact, and makes each product of three doubles exact with error-free products (four
   doubles instead of 64 pieces): the regression tests went from 4.9 s to 0.5 s.
 
 `src/tests/fossil_test_boolean_degenerate.f90` covers the first two with the cube cases, which fail on the code

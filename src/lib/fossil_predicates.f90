@@ -46,7 +46,6 @@ module fossil_predicates
 !<       thread-safe under read-after-write semantics; the values it computes
 !<       depend only on the host's IEEE 754 round-to-nearest mode.
 
-use, intrinsic :: ieee_arithmetic, only : ieee_fma
 use penf,   only : I4P, I8P, R8P
 use vecfor, only : vector_R8P
 
@@ -144,11 +143,11 @@ contains
    !< of them; otherwise, by multilinearity det[a - d; b - d; c - d] = [a, b, c] - [d, b, c] -
    !< [a, d, c] - [a, b, d], with [p, q, r] = p . (q x r): 24 products of three input
    !< coordinates. Each product of three doubles is made an exact sum of four doubles by
-   !< error-free products (`ieee_fma` gives the exact error of a rounded product, issue #65;
-   !< it was 64 bit-mask pieces per product before), summed into a nonoverlapping expansion with
+   !< error-free products (`two_product`, Dekker's with a bit-mask split, issue #65; it was 64
+   !< bit-mask pieces per product before), summed into a nonoverlapping expansion with
    !< error-free sums (`grow_expansion`), whose largest component carries the exact sign. FMA
-   !< contraction cannot change the result: every rounded product feeds only an explicit
-   !< `ieee_fma` that recovers its exact error. Host only (not a device routine).
+   !< contraction cannot change the result: every step of the error terms is exact.
+   !< Host only (not a device routine).
    real(R8P), intent(in) :: a(3), b(3), c(3), d(3) !< Points (x, y, z).
    real(R8P)             :: sign_volume            !< Its sign is exact.
    real(R8P), parameter  :: EPS_HALF = epsilon(1._R8P) / 2._R8P                !< Unit roundoff.
@@ -237,15 +236,46 @@ contains
       real(R8P)                   :: p, pe, q, qe, r, re !< x y = p + pe, p z = q + qe, pe z = r + re (exact).
 
       if (x == 0._R8P .or. y == 0._R8P .or. z == 0._R8P) return
-      p = x * y ; pe = ieee_fma(x, y, -p)
-      q = p * z ; qe = ieee_fma(p, z, -q)
-      r = pe * z ; re = ieee_fma(pe, z, -r)
+      call two_product(x, y, p, pe)
+      call two_product(p, z, q, qe)
+      call two_product(pe, z, r, re)
       if (re /= 0._R8P) call grow_expansion(e, n, s * re)
       if (r /= 0._R8P) call grow_expansion(e, n, s * r)
       if (qe /= 0._R8P) call grow_expansion(e, n, s * qe)
       call grow_expansion(e, n, s * q)
       endsubroutine add_product3
    endfunction orient3d_xyz
+
+   pure subroutine two_product(a, b, p, e)
+   !< a b = p + e exactly, p = fl(a b) (Dekker 1971). The factors are split into two halves of at most 26 significant
+   !< bits by rounding the bit pattern (`round26`, no multiplication), so every partial product is exact and every
+   !< step of the error term is exact: FMA contraction cannot change the result, and no `ieee_fma` is needed
+   !< (nvfortran 26.9 does not provide it).
+   real(R8P), intent(in)  :: a, b !< Factors.
+   real(R8P), intent(out) :: p, e !< Product and its exact error.
+   real(R8P)              :: ah, al, bh, bl
+
+   p = a * b
+   ah = round26(a) ; al = a - ah
+   bh = round26(b) ; bl = b - bh
+   e = ((ah * bh - p) + ah * bl + al * bh) + al * bl
+   endsubroutine two_product
+
+   pure function round26(x) result(t)
+   !< x rounded to 26 significant bits on its bit pattern (add half of the dropped 27-bit field, clear it): x - t has
+   !< at most 26 significant bits. Zero and subnormal inputs are returned as they are.
+   real(R8P), intent(in)   :: x
+   real(R8P)               :: t
+   integer(I8P), parameter :: LOW27 = 134217727_I8P, HALF27 = 67108864_I8P
+   integer(I8P)            :: bits
+
+   bits = transfer(x, bits)
+   if (iand(ishft(bits, -52), 2047_I8P) == 0_I8P) then
+      t = x ; return
+   endif
+   bits = iand(bits + HALF27, not(LOW27))
+   t = transfer(bits, t)
+   endfunction round26
 
    pure function orient2d(a, b, c) result(sign_area)
    !< Exact sign of the signed area of triangle (a, b, c) in the XY plane (z is ignored).
