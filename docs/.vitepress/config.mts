@@ -55,6 +55,7 @@ const docs = [
       { text: 'Feature edges', link: '/guide/advanced/feature-edges' },
       { text: 'Thickness and gaps', link: '/guide/advanced/thickness' },
       { text: 'Named patches', link: '/guide/advanced/patches' },
+      { text: 'Body–body distance', link: '/guide/advanced/body-distance' },
     ],
   },
   {

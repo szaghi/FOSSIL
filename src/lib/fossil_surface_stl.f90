@@ -35,6 +35,7 @@ use fossil_alpha_wrap, only : awrap_run, &
                               AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, &
                               AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
 use fossil_csr_matrix, only : csr_matrix_t
+use fossil_body_distance, only : body_distance
 use fossil_deviation, only : deviation_evaluator_t, deviation_sampled, deviation_certified, DEV_STATUS_OK, &
                              DEV_STATUS_BAD_INPUT
 use fossil_feature_edges, only : find_feature_edges, FEATURE_EDGE_DEFAULT_ANGLE, feature_cos
@@ -221,6 +222,7 @@ type :: surface_stl_object
       ! file I/O (moved from file_stl_object)
       procedure, pass(self) :: load_from_file       !< Load STL from a file path (ASCII or binary, auto-detected).
       procedure, pass(self) :: load_from_files      !< Load several STL files, one patch per file (issue #66).
+      procedure, pass(self) :: distance_to          !< Distance to another body, with the closest pair (issue #67).
       procedure, pass(self) :: save_into_file       !< Save STL to a file path.
       procedure, pass(self) :: save_aabb_into_file  !< Save the AABB tree leaves as separate STL files.
       ! public methods
@@ -6538,6 +6540,38 @@ contains
    call move_alloc(names, self%patch_names)
    call self%adopt_facets(facets=facets, aabb_refinement_levels=aabb_refinement_levels, aabb_tree_kind=aabb_tree_kind)
    endsubroutine load_from_file
+
+   subroutine distance_to(self, other, distance, point_self, point_other, facet_self, facet_other, intersecting, status)
+   !< Distance between this surface and `other` (issue #67): the minimum over their facet pairs, by a best-first descent
+   !< of the two trees (`fossil_body_distance`), bit-identical to the brute-force minimum, with the closest facets
+   !< (ties: the lexicographically smallest pair) and the witness points. 0 with `intersecting` when they touch or
+   !< cross (exact classification). Both surfaces as they are (placed by `move` or a transform, trees current).
+   class(surface_stl_object), intent(in)            :: self         !< Surface.
+   class(surface_stl_object), intent(in)            :: other        !< Other body.
+   real(R8P),                 intent(out)           :: distance     !< Distance.
+   real(R8P),                 intent(out), optional :: point_self(3), point_other(3) !< Witness points.
+   integer(I4P),              intent(out), optional :: facet_self, facet_other     !< Closest facets.
+   logical,                   intent(out), optional :: intersecting !< The bodies touch or cross.
+   integer(I4P),              intent(out), optional :: status       !< STATUS_OK, STATUS_INVALID_INPUT (empty surface).
+   real(R8P)                                        :: d2, pa(3), pb(3)
+   integer(I4P)                                     :: ia, ib
+   logical                                          :: meet
+
+   if (present(status)) status = STATUS_OK
+   distance = huge(1._R8P)
+   if (self%facets_number == 0 .or. other%facets_number == 0) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   call body_distance(self%facet(1:self%facets_number), self%aabb, other%facet(1:other%facets_number), other%aabb, &
+                      d2, ia, ib, pa, pb, meet)
+   distance = sqrt(d2)
+   if (present(point_self)) point_self = pa
+   if (present(point_other)) point_other = pb
+   if (present(facet_self)) facet_self = ia
+   if (present(facet_other)) facet_other = ib
+   if (present(intersecting)) intersecting = meet
+   endsubroutine distance_to
 
    subroutine load_from_files(self, file_names, guess_format, aabb_refinement_levels, aabb_tree_kind, status)
    !< Load several STL files into one surface, one patch per file (issue #66), in the order given; a multi-solid ASCII

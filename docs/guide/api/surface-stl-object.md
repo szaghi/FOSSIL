@@ -168,6 +168,17 @@ end program ex_save_into_file
 
 ---
 
+### `distance_to`
+
+```fortran
+call surface%distance_to(other, distance, point_self, point_other, facet_self, facet_other, intersecting, status)
+```
+
+Distance between the surface and `other` (issue #67): the minimum over their facet pairs, by a best-first descent of
+the two trees, bit-identical to the brute-force minimum; the closest facets (ties: the smallest pair), the witness
+points, and `intersecting` when the bodies touch or cross (exact classification). `STATUS_INVALID_INPUT` for an empty
+surface. See [body–body distance](/guide/advanced/body-distance).
+
 ### Patches
 
 Named boundary patches (issue #66; [reference page](/guide/advanced/patches)).
