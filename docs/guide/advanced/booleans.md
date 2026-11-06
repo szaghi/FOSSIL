@@ -225,6 +225,28 @@ cube), 1.7 s in the debug coverage build. The first run of this sweep found the 
   silently wrong result. The store now grows by doubling. `src/tests/fossil_test_dt_capacity.f90` covers both the
   triangulation (600 points on an elliptic arc create 27 087 triangles against 3 618 entries) and the boolean that
   failed.
+- **Facet edge lost by the retriangulation** (fixed, issue #63). Each cut facet was triangulated with its cuts as
+  constraints, but not its own three edges. Bowyer–Watson with a finite super-triangle does not keep a hull edge when
+  a point lies close inside it, and the facet across that edge keeps it whole: a crack. The cube against itself
+  rotated by 1e-4 rad (cuts 3.5e-5 from the unit edges) lost 28 half-edges, with status OK and a volume off by 9e-6.
+  The facet edges are now constraints too.
+- **Folded Bowyer–Watson cavity** (fixed, issue #63). `incircle` is not exact, and on near-cocircular points (the
+  cuts of near-coincident surfaces) the cavity of an inserted point was not star-shaped from it, so the fan of new
+  triangles folded. The cube against itself rotated by 1e-8 rad lost 2.3 % of its volume with status OK. A neighbour
+  across an edge that the point does not see strictly (exact `orient2d`) now always joins the cavity. That case now
+  returns `BOOL_STATUS_CDT_FAILED`, which is allowed.
+- **Shared sub-triangles misdetected** (fixed, issue #63). A sub-triangle was "shared" with the other surface (a
+  coplanar overlap, kept once) when its centroid lay within 1e-9 L of the closest facet of the other surface and the
+  normals were parallel to 0.99, that is within 8°. Sub-triangles a few 1e-9 wide beside a crossing of two facets a
+  few degrees apart passed both tests: a marching-cubes sphere against itself translated by 1e-6 cracked. A
+  sub-triangle is now shared when its centroid lies inside a facet of the other surface that the exact pair
+  classification found coplanar with its parent. The geometric test remains only for faces within the snap whose
+  boxes are disjoint, so that they never met the classifier (a face and its copy moved by 1e-12), with normals
+  parallel to 1e-15.
+
+`src/tests/fossil_test_boolean_degenerate.f90` covers the first two with the cube cases, which fail on the code
+before the fixes. The third needs a curved body and is too slow for the regression tier, so the validation sweep
+gates its case, the sphere translated by 1e-6.
 
 ## Known limitations
 

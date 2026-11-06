@@ -49,6 +49,7 @@ use fossil_dt,               only : triangulation_t, cdt_build, &
                                     DT_STATUS_CROSSING_CONSTRAINTS
 use fossil_facet_object,     only : facet_object
 use fossil_list_id_object,   only : list_id_object
+use fossil_predicates,       only : orient2d_xy
 use fossil_tritri_exact,     only : pair_classify, coplanar_portion, PAIR_CROSSING, PAIR_COPLANAR
 use fossil_utils,            only : EPS
 use penf,                    only : I4P, R8P
@@ -61,6 +62,7 @@ public :: arrangement_t
 public :: arrangement_initialize
 public :: arrangement_collect_intersections
 public :: arrangement_retriangulate
+public :: coplanar_partner
 public :: project_to_plane
 public :: lift_from_plane
 public :: ARR_STATUS_OK, ARR_STATUS_CDT_FAILED
@@ -86,6 +88,9 @@ type :: cut_list_t
    type(vector_R8P), allocatable :: point(:)            !< Flat 3D point buffer; pairs of consecutive entries form segments.
    integer(I4P)                  :: n_steiner = 0_I4P   !< Number of isolated points (issue #33).
    type(vector_R8P), allocatable :: steiner(:)          !< Points on the facet's edges coming from the neighbour across them.
+   integer(I4P)                  :: n_coplanar = 0_I4P  !< Number of coplanar partners (issue #63).
+   integer(I4P), allocatable     :: coplanar(:)         !< Global indices of the facets of the other surface classified
+                                                        !< coplanar with this one (PAIR_COPLANAR, exact with the snap).
 endtype cut_list_t
 
 type :: arrangement_t
@@ -346,6 +351,65 @@ contains
    cut%steiner(cut%n_steiner) = p
    endsubroutine append_steiner
 
+   subroutine append_partner(cut, g)
+   !< Append a coplanar partner to a cut list (no duplicates).
+   type(cut_list_t), intent(inout) :: cut !< Cut list.
+   integer(I4P),     intent(in)    :: g   !< Global index of the partner facet.
+   integer(I4P), allocatable       :: tmp(:)
+
+   if (cut%n_coplanar > 0) then
+      if (any(cut%coplanar(1:cut%n_coplanar) == g)) return
+   endif
+   if (.not. allocated(cut%coplanar)) then
+      allocate(cut%coplanar(4))
+   elseif (cut%n_coplanar == size(cut%coplanar)) then
+      allocate(tmp(2 * size(cut%coplanar)))
+      tmp(1:cut%n_coplanar) = cut%coplanar(1:cut%n_coplanar)
+      call move_alloc(from=tmp, to=cut%coplanar)
+   endif
+   cut%n_coplanar = cut%n_coplanar + 1_I4P
+   cut%coplanar(cut%n_coplanar) = g
+   endsubroutine append_partner
+
+   function coplanar_partner(arr, gi, sub) result(partner)
+   !< The coplanar partner of facet gi (a facet of the other surface classified PAIR_COPLANAR with it) whose interior
+   !< contains the centroid of the sub-triangle `sub` of gi, or 0 (issue #63). The arrangement cut gi along the
+   !< portions of its partners' edges inside it, so a sub-triangle lies inside a partner or outside it: its centroid
+   !< decides, with exact orient2d on the coordinates in the plane that drops the largest component of gi's normal.
+   !< This replaces a centroid-to-plane distance test that called shared the sub-triangles a few 1e-9 wide beside a
+   !< crossing of two facets a few degrees apart (normals parallel to 0.99 passed), and cracked the result.
+   type(arrangement_t), intent(in) :: arr     !< Arrangement.
+   integer(I4P),        intent(in) :: gi      !< Parent facet of the sub-triangle.
+   type(facet_object),  intent(in) :: sub     !< Sub-triangle (metrics computed).
+   integer(I4P)                    :: partner !< Partner index, 0 if none.
+   integer(I4P)                    :: k, g, i1, i2
+   real(R8P)                       :: n(3), c(3), a(3), b(3), d(3), s1, s2, s3
+
+   partner = 0_I4P
+   if (arr%cut(gi)%n_coplanar == 0_I4P) return
+   n = abs([arr%facet(gi)%normal%x, arr%facet(gi)%normal%y, arr%facet(gi)%normal%z])
+   if (n(1) >= n(2) .and. n(1) >= n(3)) then
+      i1 = 2 ; i2 = 3
+   elseif (n(2) >= n(3)) then
+      i1 = 3 ; i2 = 1
+   else
+      i1 = 1 ; i2 = 2
+   endif
+   c = [sub%centroid%x, sub%centroid%y, sub%centroid%z]
+   do k = 1, arr%cut(gi)%n_coplanar
+      g = arr%cut(gi)%coplanar(k)
+      a = [arr%facet(g)%vertex(1)%x, arr%facet(g)%vertex(1)%y, arr%facet(g)%vertex(1)%z]
+      b = [arr%facet(g)%vertex(2)%x, arr%facet(g)%vertex(2)%y, arr%facet(g)%vertex(2)%z]
+      d = [arr%facet(g)%vertex(3)%x, arr%facet(g)%vertex(3)%y, arr%facet(g)%vertex(3)%z]
+      s1 = orient2d_xy(a(i1), a(i2), b(i1), b(i2), c(i1), c(i2))
+      s2 = orient2d_xy(b(i1), b(i2), d(i1), d(i2), c(i1), c(i2))
+      s3 = orient2d_xy(d(i1), d(i2), a(i1), a(i2), c(i1), c(i2))
+      if ((s1 > 0._R8P .and. s2 > 0._R8P .and. s3 > 0._R8P) .or. (s1 < 0._R8P .and. s2 < 0._R8P .and. s3 < 0._R8P)) then
+         partner = g ; return
+      endif
+   enddo
+   endfunction coplanar_partner
+
    pure function same_point(a, b) result(same)
    type(vector_R8P), intent(in) :: a, b
    logical                      :: same
@@ -372,6 +436,8 @@ contains
       call append_segment(cut=arr%cut(gi), p=p, q=q)
       call append_segment(cut=arr%cut(gj), p=p, q=q)
    elseif (kind == PAIR_COPLANAR) then
+      call append_partner(cut=arr%cut(gi), g=gj)
+      call append_partner(cut=arr%cut(gj), g=gi)
       do e = 1, 3
          call coplanar_portion(u=arr%facet(gj)%vertex(e), v=arr%facet(gj)%vertex(mod(e, 3) + 1), &
                                t=arr%facet(gi)%vertex, found=found, p=p, q=q)
@@ -551,7 +617,7 @@ contains
       if (allocated(segs))  deallocate(segs)
       allocate(pts2d(2, 3 + 2 * n_cuts + n_st))
       allocate(pts3d(3 + 2 * n_cuts + n_st))
-      allocate(segs(2, max(n_cuts, 1_I4P)))
+      allocate(segs(2, n_cuts + 3_I4P))
 
       ! Three facet vertices first (so they keep stable indices 1, 2, 3).
       do i = 1, 3
@@ -585,6 +651,16 @@ contains
          call project_to_plane(facet=arr%facet(gi), p3d=arr%cut(gi)%steiner(k), u=u, v=v)
          idx_p = find_or_append_2d(pts2d=pts2d, n_pts=n_pts, x=u, y=v)
          if (n_pts > n_before) pts3d(idx_p) = arr%cut(gi)%steiner(k)
+      enddo
+
+      ! The facet's own edges are constraints too (issue #63): Bowyer-Watson with a finite super-triangle
+      ! does not keep a hull edge when a point lies close inside it (a cut 3.5e-5 from a unit edge on two
+      ! cubes rotated by 1e-4 rad apart), and the facet across that edge keeps it: a crack. Split at the
+      ! points lying on them (cut endpoints, T-junction points) like the cuts.
+      do i = 1, 3
+         n_segs = n_segs + 1
+         segs(1, n_segs) = i
+         segs(2, n_segs) = mod(i, 3) + 1
       enddo
 
       ! --- Split constraints at the points lying on them (collinear overlapping cuts, cuts along

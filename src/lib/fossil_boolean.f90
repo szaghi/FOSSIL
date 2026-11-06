@@ -32,7 +32,7 @@ module fossil_boolean
 
 use fossil_arrangement,    only : arrangement_t, arrangement_initialize, &
                                   arrangement_collect_intersections, &
-                                  arrangement_retriangulate, &
+                                  arrangement_retriangulate, coplanar_partner, &
                                   ARR_STATUS_OK, ARR_STATUS_CDT_FAILED
 use fossil_aabb_tree_object, only : aabb_tree_object, wn_node_t
 use fossil_facet_object,   only : facet_object
@@ -117,13 +117,13 @@ contains
    endif
 
    ! Stage 4 — tag + select.
-   call tag_and_select(sub_facet=sub_facet, sub_owner=sub_owner, &
+   call tag_and_select(arr=arr, sub_facet=sub_facet, sub_owner=sub_owner, sub_source=sub_source, &
                        facet_a=facet_a, tree_a=tree_a, &
                        facet_b=facet_b, tree_b=tree_b, &
                        op=op, kept_facet=kept_facet, status=status)
    endsubroutine boolean_compute
 
-   subroutine tag_and_select(sub_facet, sub_owner, facet_a, tree_a, facet_b, tree_b, &
+   subroutine tag_and_select(arr, sub_facet, sub_owner, sub_source, facet_a, tree_a, facet_b, tree_b, &
                              op, kept_facet, status)
    !< For each sub-triangle, query both WN fields at its centroid, apply the
    !< op-specific selection rule, emit the keepers into `kept_facet`.
@@ -133,8 +133,10 @@ contains
    !< `fossil_winding_number` keeps each call sub-linear in facet count, so
    !< the boolean's overall cost is approximately
    !<     O(N log N)  where N = total sub-triangles.
+   type(arrangement_t),             intent(in)            :: arr
    type(facet_object),              intent(in)            :: sub_facet(:)
    integer(I4P),                    intent(in)            :: sub_owner(:)
+   integer(I4P),                    intent(in)            :: sub_source(:)
    type(facet_object),              intent(in)            :: facet_a(:)
    type(aabb_tree_object),          intent(in), target    :: tree_a
    type(facet_object),              intent(in)            :: facet_b(:)
@@ -167,26 +169,24 @@ contains
       wn_a = winding_number(facet=facet_a, tree=tree_a, wn=cache_a, point=c)
       wn_b = winding_number(facet=facet_b, tree=tree_b, wn=cache_b, point=c)
 
-      ! Detect "shared boundary" sub-triangles: those whose centroid lies on
-      ! a coplanar facet of the OTHER surface.
-      !
-      ! Detection rule: distance to the closest other-surface facet is below
-      ! tolerance AND the normals are (anti-)parallel. The WN-based detection
-      ! that would naively work in symbolic geometry (WN ≈ 0.5 on the boundary)
-      ! does not work in our hierarchical implementation: WN at a point exactly
-      ! on the boundary surface evaluates to ~1 (treated as interior) rather
-      ! than 0.5, because Bærentzen's solid-angle convention plus hierarchical
-      ! summation produce a 4π total at boundary points rather than 2π. So we
-      ! use the geometric test directly.
+      ! Detect "shared boundary" sub-triangles: those lying inside a facet of the OTHER surface that the
+      ! arrangement classified coplanar with their parent (exact orient3d pair classification with the
+      ! on-plane snap, issue #33). The WN cannot tell (it is ~1 rather than 0.5 on the boundary). The
+      ! geometric centroid-to-plane test remains as the fallback for pairs the broad phase never met, with
+      ! normals parallel to 1e-15 (it misfired at 0.99 on tiny sub-triangles beside crossings, issue #63).
       block
-         logical   :: shared
-         real(R8P) :: orient_dot
-         if (sub_owner(k) == 1_I4P) then
-            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_b, &
-                                          other_tree=tree_b, orient_dot=orient_dot)
+         logical      :: shared
+         real(R8P)    :: orient_dot
+         integer(I4P) :: partner
+         partner = coplanar_partner(arr=arr, gi=sub_source(k), sub=sub_facet(k))
+         shared = partner > 0_I4P
+         orient_dot = 0._R8P
+         if (shared) then
+            orient_dot = sub_facet(k)%normal%dotproduct(rhs=arr%facet(partner)%normal)
+         elseif (sub_owner(k) == 1_I4P) then
+            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_b, other_tree=tree_b, orient_dot=orient_dot)
          else
-            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_a, &
-                                          other_tree=tree_a, orient_dot=orient_dot)
+            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_a, other_tree=tree_a, orient_dot=orient_dot)
          endif
          in_a = (wn_a > WN_INSIDE_THRESHOLD)
          in_b = (wn_b > WN_INSIDE_THRESHOLD)
@@ -353,7 +353,10 @@ contains
    !<   - on the facet itself (not only its plane): d <= `SHARED_NEAR_TOL` * L (1e-6). Coplanar
    !<     overlaps are cut by the arrangement, so a sub-triangle is either inside the other facet
    !<     or away from it by a fraction of its own size;
-   !<   - normal parallelism: `|orient_dot| > SHARED_NORM_TOL` = 0.99.
+   !<   - normal parallelism: `|orient_dot| > SHARED_NORM_TOL` = 1 - 1e-15 (angle below ~4.5e-8 rad, issue #63).
+   !< The fallback of `coplanar_partner` for faces within the on-plane snap whose facet boxes are disjoint, so that the
+   !< pair never reached the exact classification (a face and its copy moved by 1e-12). It was 0.99 (8 degrees): it
+   !< called shared the sub-triangles a few 1e-9 wide beside a crossing of two facets a few degrees apart.
    type(facet_object),     intent(in)         :: sub
    type(facet_object),     intent(in)         :: other_facet(:)
    type(aabb_tree_object), intent(in), target :: other_tree
@@ -364,7 +367,7 @@ contains
    type(vector_R8P)                           :: dc
    real(R8P), parameter :: SHARED_PLANE_TOL = 1.0e-9_R8P
    real(R8P), parameter :: SHARED_NEAR_TOL  = 1.0e-6_R8P
-   real(R8P), parameter :: SHARED_NORM_TOL  = 0.99_R8P
+   real(R8P), parameter :: SHARED_NORM_TOL  = 1._R8P - 1.e-15_R8P
 
    yes = .false. ; orient_dot = 0._R8P
    distance_sq = MaxR8P

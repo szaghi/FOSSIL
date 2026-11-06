@@ -341,11 +341,18 @@ contains
    !<
    !< Marks collected triangles as inactive **before** adding their neighbors
    !< to the BFS queue, so each triangle is visited exactly once.
+   !<
+   !< The cavity must be star-shaped from the point: every boundary edge strictly visible from it, or the fan of
+   !< `retriangulate_cavity` folds (overlapping or zero-area triangles). `incircle` is not exact, and near-cocircular
+   !< points (cuts of near-coincident surfaces, issue #63) broke that. So a neighbour across an edge that the point
+   !< does not see strictly (exact `orient2d`) is always added, whatever `incircle` says: the boundary of the cavity
+   !< is then made of visible edges only, and a point on an edge of its host also takes the triangle across it.
    type(triangulation_t), intent(inout) :: tri
    integer(I4P),          intent(in)    :: p_idx, host
    integer(I4P),          intent(out)   :: cavity(:)
    integer(I4P),          intent(out)   :: n_cavity
    integer(I4P)                         :: head, tail, t, e, nbr
+   type(vector_R8P)                     :: pu, pw, pp
 
    ! Use cavity(:) as both the BFS queue AND the output list — one pop at
    ! `head` advances the queue; pushes append at `tail`. After BFS the
@@ -361,7 +368,10 @@ contains
          nbr = tri%tri(t)%nbr(e)
          if (nbr == 0_I4P) cycle  ! boundary edge
          if (.not. tri%tri(nbr)%active) cycle  ! already in cavity
-         if (in_circumcircle(tri=tri, t=nbr, p_idx=p_idx)) then
+         pu = vector_R8P(tri%px(tri%tri(t)%v(mod(e, 3) + 1)), tri%py(tri%tri(t)%v(mod(e, 3) + 1)), 0._R8P)
+         pw = vector_R8P(tri%px(tri%tri(t)%v(mod(e + 1, 3) + 1)), tri%py(tri%tri(t)%v(mod(e + 1, 3) + 1)), 0._R8P)
+         pp = vector_R8P(tri%px(p_idx), tri%py(p_idx), 0._R8P)
+         if (orient2d(a=pu, b=pw, c=pp) <= 0._R8P .or. in_circumcircle(tri=tri, t=nbr, p_idx=p_idx)) then
             tri%tri(nbr)%active = .false.
             tail = tail + 1
             cavity(tail) = nbr
