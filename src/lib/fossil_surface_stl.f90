@@ -6619,8 +6619,9 @@ contains
       if (present(status)) then ; status = istat ; return ; endif
    endif
    if (is_ascii_ .and. self%get_patches_number() > 1_I4P) then
-      ! one solid block per patch, facets in their order (issue #66)
+      ! one solid block per non-empty patch, facets in their order (issue #66)
       do p = 1, self%get_patches_number()
+         if (.not. any(self%facet(1:self%facets_number)%patch == p)) cycle ! an empty patch writes no block
          write(file_unit, '(A)') 'solid '//self%patch_name(p)
          do f=1, self%facets_number
             if (self%facet(f)%patch == p) call self%facet(f)%save_into_file_ascii(file_unit=file_unit)

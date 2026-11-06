@@ -7,7 +7,7 @@
 !< 3. `load_from_files` of the three blocks as three files equals the three-block file (names, counts, vertices).
 !< 4. A single-solid ASCII file and a binary file: one patch named after the header; the written ASCII file is the
 !<    single block it was before #66 (first line `solid <header>`, last line `endsolid <header>`).
-!< 5. `set_patch` creates a named patch and moves facets into it.
+!< 5. `set_patch` creates a named patch and moves facets into it; an empty patch writes no block.
 program fossil_test_patches_io
 
 use fossil, only : surface_stl_object, facet_object
@@ -61,6 +61,11 @@ ok5 = c%get_patches_number() == 2 .and. c%patch_name(2) == 'inlet' .and. c%facet
       c%facet_patch(2) == 2 .and. c%facet_patch(3) == 1
 call c%set_patch([3_I4P], 'inlet')
 ok5 = ok5 .and. c%get_patches_number() == 2 .and. c%facet_patch(3) == 2
+! an empty patch (here the header's, once every facet moved out of it) writes no block
+call c%set_patch([(k, k = 1, c%get_facets_number())], 'all')
+call c%save_into_file(file_name=D//'-1.stl', is_ascii=.true.)
+call r%load_from_file(file_name=D//'-1.stl', guess_format=.true.)
+ok5 = ok5 .and. r%get_patches_number() == 1 .and. r%patch_name(1) == 'all' .and. r%get_facets_number() == 12
 print '(A,L1)', '5. set_patch: ', ok5
 
 do k = 1, 6
