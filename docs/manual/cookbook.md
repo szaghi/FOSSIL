@@ -40,6 +40,16 @@ The codes are listed in [constants](/guide/api/constants#status-codes).
 
 `is_ascii` defaults to `.true.`. The binary file of the 48-facet cube is `84 + 50 x 48 = 2484` bytes.
 
+### Wall, inlet and outlet from one STL
+
+<<< @/examples/snippets/ck_patches.f90
+
+<<< @/examples/output/ck_patches.ansi{ansi}
+
+Each `solid <name>` block of an ASCII STL is a named patch, kept on every facet; `load_from_files` reads one file per
+patch. The query outputs `patches=` give the boundary condition at each point: the patch of its closest facet. The
+patch travels through repair, booleans and remeshing. See [named patches](/guide/advanced/patches).
+
 ### Load only a region of a large file
 
 <<< @/examples/snippets/ck_load_clipped.f90

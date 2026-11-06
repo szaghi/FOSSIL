@@ -63,6 +63,10 @@ section, and an image point can project inside it.
 - On the wrap, 2856 of 7226 facets are thinner than one grid spacing (h = 0.03), in 305 regions: the legs, the tail
   and the creases of a coarse 41³ grid. Those are the places to refine before trusting the ghost points there.
 
+With [named patches](/guide/advanced/patches) (an STL with several `solid` blocks), `query_many(patches=)`,
+`probe_many(patches=)` and `image_points(patches=)` also give the patch of each wall point: which boundary condition
+the ghost point closes.
+
 ::: tip What you learned
 `query_many` gives the wall point, feature, normal and body of every point in one call; `image_points` and
 `probe_many` build the fluid-side points with a visibility test. Reference:

@@ -5,7 +5,7 @@ program fossiler
 
 use flap, only : command_line_interface
 use fossil, only : surface_stl_object, STATUS_OK, DEV_STATUS_OK, DEV_STATUS_NOT_CONVERGED, FEATURE_EDGE_SHARP, &
-                   FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, THICKNESS_RAY, THICKNESS_MEDIAL
+                   FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, THICKNESS_RAY, THICKNESS_MEDIAL, facet_object
 use penf, only : I4P, R8P, str
 use vecfor, only : vector_R8P
 
@@ -40,6 +40,7 @@ real(R8P)                             :: density                               !
 character(999)                        :: file_name_compare                     !< Surface to compare with (issue #60).
 real(R8P)                             :: tolerance                             !< Tolerance of the certified deviation (0: default).
 character(999)                        :: file_name_features                    !< VTK file of the feature edges (issue #61).
+character(999)                        :: patches_prefix                        !< File prefix of one STL per patch (issue #66).
 real(R8P)                             :: feature_angle                         !< Feature threshold [degrees].
 character(999)                        :: file_name_thickness                   !< VTK file of the thickness (issue #62).
 character(999)                        :: thickness_method                      !< ray or medial.
@@ -129,6 +130,7 @@ do s=1, stl_numbers
    if (mass_properties) call print_mass_properties(surface(s))
    if (cli%is_passed(switch='--compare')) call print_deviation(surface(s), trim(adjustl(file_name_compare)))
    if (cli%is_passed(switch='--features')) call print_features(surface(s), trim(adjustl(file_name_features)))
+   if (cli%is_passed(switch='--patches')) call print_patches(surface(s), trim(adjustl(patches_prefix)))
    if (cli%is_passed(switch='--thickness')) call print_thickness(surface(s), trim(adjustl(file_name_thickness)))
    if (cli%is_passed(switch='--output')) then
       print '(A)', 'save output in: '//trim(adjustl(output))
@@ -168,6 +170,43 @@ contains
      print '(A,3ES23.15)', '                      ', axes(i,:)
   enddo
   endsubroutine print_mass_properties
+
+  subroutine print_patches(surf, prefix)
+  !< Print the named patches (issue #66): facets and area per patch; write each to <prefix><name>.stl (ASCII).
+  type(surface_stl_object), intent(in) :: surf   !< Surface.
+  character(*),             intent(in) :: prefix !< File prefix.
+  type(surface_stl_object)             :: part   !< One patch.
+  type(facet_object), allocatable      :: fs(:)  !< Its facets.
+  type(facet_object), pointer          :: f      !< Facet cursor.
+  integer(I4P)                         :: p, i, n !< Counters.
+  real(R8P)                            :: area   !< Patch area.
+  character(len=:), allocatable        :: name   !< Patch file name.
+
+  print '(A,I0)', 'patches: ', surf%get_patches_number()
+  do p = 1, surf%get_patches_number()
+     n = 0 ; area = 0._R8P
+     do i = 1, surf%get_facets_number()
+        f => surf%facet_at(i)
+        if (f%patch /= p) cycle
+        n = n + 1 ; area = area + f%area()
+     enddo
+     print '(A,I0,3A,I0,A,ES12.5)', '  ', p, ' ', surf%patch_name(p), ': facets ', n, ', area ', area
+     if (n == 0) cycle
+     allocate(fs(n)) ; n = 0
+     do i = 1, surf%get_facets_number()
+        f => surf%facet_at(i)
+        if (f%patch /= p) cycle
+        n = n + 1 ; fs(n) = f ; fs(n)%patch = 1
+     enddo
+     call part%adopt_facets(facets=fs)
+     call part%set_header(surf%patch_name(p))
+     name = prefix//surf%patch_name(p)//'.stl'
+     if (len_trim(surf%patch_name(p)) == 0) name = prefix//trim(str(p, .true.))//'.stl'
+     call part%save_into_file(file_name=name, is_ascii=.true.)
+     print '(A)', '    written to '//name
+     call part%destroy
+  enddo
+  endsubroutine print_patches
 
   subroutine print_features(surf, file_name)
   !< Print the feature-edge counts and write them as legacy VTK (issue #61).
@@ -366,6 +405,12 @@ contains
                def='0.0',                                                           &
                act='store')
 
+  call cli%add(switch='--patches',                                                               &
+               help='print the named patches (solid blocks), write one STL per patch with this file prefix', &
+               required=.false.,                                                                 &
+               def='patch_',                                                                     &
+               act='store')
+
   call cli%add(switch='--features',                                                            &
                help='print the feature edges and corners, write them to this legacy VTK file', &
                required=.false.,                                                           &
@@ -483,6 +528,7 @@ contains
   call cli%get(        switch='--compare',         val=file_name_compare,   error=error) ; if (error/=0) stop
   call cli%get(        switch='--tolerance',       val=tolerance,           error=error) ; if (error/=0) stop
   call cli%get(        switch='--features',        val=file_name_features,  error=error) ; if (error/=0) stop
+  call cli%get(        switch='--patches',         val=patches_prefix,      error=error) ; if (error/=0) stop
   call cli%get(        switch='--feature_angle',   val=feature_angle,       error=error) ; if (error/=0) stop
   call cli%get(        switch='--thickness',       val=file_name_thickness, error=error) ; if (error/=0) stop
   call cli%get(        switch='--thickness_method', val=thickness_method,   error=error) ; if (error/=0) stop

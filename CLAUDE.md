@@ -283,7 +283,8 @@ fobis fetch            # --update to re-fetch
   facet's. Queries: `query_many(_device)(patches=)`, `probe_many`, `image_points` (device: host lookup from the
   returned facet ids; bench line `patch device vs serial mismatches`).
   2-D: `curve_object` (private `seg_patch`, `patch_names`): `# patch <name>` lines (do not end a loop), `repair`,
-  `slice_surface` (facet's patch), `set_patch`, queries `patches=` (curve bench line too).
+  `slice_surface` (facet's patch), `set_patch`, queries `patches=` (curve bench line too). Empty patches write no block.
+  `fossilizer --patches prefix_` lists them and writes one STL per patch.
 - `fossil_box_predicates.f90`, `fossil_box_query.f90` — AMR tagging (issue #38): box-triangle separating-axis test (conservative: run on the box inflated by `box_tolerance`, 1e-12 of the problem size, never misses a contact), exact 2-D box-segment test; `bvh_box_contact_oac` / `curve_box_contact_oac` (shared CPU/device traversals), `cell_bands` / `cell_components` (tag-band BFS, 26-connected components). The device box path follows the #20 rules and needs no new device arrays.
 
 ## Coding conventions

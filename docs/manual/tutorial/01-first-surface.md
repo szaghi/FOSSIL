@@ -29,6 +29,13 @@ program loads it, reads what FOSSIL computed on loading, and writes it back as A
 - `save_into_file(file_name=, is_ascii=)` writes the surface, as ASCII by default (`is_ascii=.false.` writes binary).
   `status` reports `STATUS_FILE_OPEN_FAIL` when the file cannot be created.
 
+## Several solids in one file
+
+An ASCII STL can hold several `solid <name> … endsolid` blocks: exporters write one per boundary condition (wall,
+inlet, outlet). `load_from_file` keeps them as named patches (`get_patches_number`, `patch_name`, `facet_patch`), and
+`save_into_file` writes them back as blocks; `load_from_files` reads one file per patch. See the cookbook recipe
+[wall, inlet and outlet from one STL](../cookbook#wall-inlet-and-outlet-from-one-stl).
+
 ## Running it
 
 <<< @/examples/output/tut01.ansi{ansi}

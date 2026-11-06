@@ -52,10 +52,11 @@
 </tr>
 <tr>
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/guide/advanced/thickness"><img src="docs/examples/images/anim-thin-regions.svg" alt="Thickness and gaps: a wing's walls thinner than the cell, shrinking to the trailing edge" width="260"></a><br><b>Thickness and gaps</b><br><sub>a wing's walls thinner than the cell, shrinking to the trailing edge</sub></td>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/guide/advanced/patches"><img src="docs/examples/images/anim-patches.svg" alt="Named patches: query points around a body, each coloured by the patch of its closest facet" width="260"></a><br><b>Named patches</b><br><sub>query points around a body, each coloured by the patch of its closest facet</sub></td>
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/guide/advanced/booleans"><img src="docs/examples/images/anim-boolean-csg.svg" alt="Booleans: a block drilled nine times, each step checked by an independent boolean" width="260"></a><br><b>Booleans</b><br><sub>a block drilled nine times, each step checked by an independent boolean</sub></td>
-<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/12-gpu"><img src="docs/examples/images/tut12-slice.svg" alt="On the GPU, bit for bit: the device code path on a slice: 0 differences from the host" width="260"></a><br><b>On the GPU, bit for bit</b><br><sub>the device code path on a slice: 0 differences from the host</sub></td>
 </tr>
 <tr>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/12-gpu"><img src="docs/examples/images/tut12-slice.svg" alt="On the GPU, bit for bit: the device code path on a slice: 0 differences from the host" width="260"></a><br><b>On the GPU, bit for bit</b><br><sub>the device code path on a slice: 0 differences from the host</sub></td>
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/01-first-surface"><img src="docs/examples/images/tour.svg" alt="Free and portable: the tutorial programs, run one after the other" width="260"></a><br><b>Free and portable</b><br><sub>the tutorial programs, run one after the other</sub></td>
 </tr>
 </table>

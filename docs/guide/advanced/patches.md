@@ -4,6 +4,8 @@ title: Named patches
 
 # Named patches
 
+![a box with its patches: the inlet (z-) in teal, the outlet (z+) in ember, the side walls in stone](../../examples/images/ref-patches.svg){.fossil-figure}
+
 ## What it does
 
 A CFD body carries several boundary conditions: walls, inlets, outlets, porous or heated regions. Exporters write
@@ -59,6 +61,8 @@ every facet keeps a patch:
 
 ## In the queries
 
+![a ring of query points rising around the box, each coloured by the patch of its closest facet: wall in gold, inlet in teal, outlet in ember](../../examples/images/anim-patches.svg){.fossil-figure}
+
 `query_many(patches=)`, `query_many_device(patches=)`, `probe_many(patches=)` and `image_points(patches=)` return
 the patch of the facet that holds each query's closest point: the boundary condition to apply at an image point or a
 forcing point. The device path looks it up on the host from the facet ids the device returns, so it is bit-identical
@@ -82,6 +86,16 @@ and the curve takes the surface's names. `query_many(_device)(patches=)`, `probe
 # patch inlet
 0 1
 ```
+
+## Command line
+
+`fossilizer -i body.stl --patches prefix_` prints the patches (facets and area each) and writes each one to
+`prefix_<name>.stl`.
+
+## Example
+
+The cookbook recipe [wall, inlet and outlet from one STL](/manual/cookbook#wall-inlet-and-outlet-from-one-stl) tags
+the faces of a box, writes them as three blocks, reads them back and queries the patch at three points.
 
 ## API
 
