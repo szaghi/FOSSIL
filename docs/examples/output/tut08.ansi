@@ -7,3 +7,5 @@ ghost 1        0.00000 -0.33000 -0.33000
   normal       0.01806 -0.57622 -0.81709
   image        0.00009 -0.33299 -0.33424
 images visible from their wall point 1330 of 1368
+wrap: thinnest wall  3.92E-05, narrowest gap  2.92E-04, h  0.030
+under h: 2856 of 7226 facets in 305 regions, the largest of area  0.0908

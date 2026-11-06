@@ -245,6 +245,18 @@ distance (certified, to 1e-3 of the bounding-box diagonal by default); `mean` an
 `feature_edges` reports sharp edges (30 degrees by default), boundary and non-manifold edges, with their corners and
 polylines as vertex-pool ids. See [feature edges](/guide/advanced/feature-edges).
 
+### Find walls too thin for my grid
+
+<<< @/examples/snippets/ck_thin_walls.f90
+
+<<< @/examples/output/ck_thin_walls.ansi{ansi}
+
+`thickness(method=THICKNESS_MEDIAL)` gives each facet the diameter of the largest ball tangent to it inside the body
+(and outside, for `gap`). `thin_regions` groups the facets thinner than `factor * h` into connected regions. The
+thickness is computed once; each cell size is one cheap call. On this NACA 0012 section, the thin facets shrink towards
+the trailing edge as h decreases. For AMR, `build_thin` and `tag_block(thin_factor=, thin_band=, thin_tags=)` turn the
+same values into refinement tags. See [thickness and gaps](/guide/advanced/thickness).
+
 ### Decimate a mesh
 
 <<< @/examples/snippets/ck_decimate.f90

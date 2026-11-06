@@ -135,6 +135,15 @@ Sharp edges and corners need more resolution than the smooth wall. `surface%buil
 touched by a feature edge (issue #61). `box_feature_many(_device)` answers the same question for any list of boxes. See
 [feature edges](/guide/advanced/feature-edges#refinement-along-the-features).
 
+## Refining thin walls and gaps
+
+A wall or a gap thinner than the cell breaks an immersed boundary even where the surface is tagged. After
+`surface%thickness` and `surface%build_thin`, `tag_block(..., thin_factor=, thin_band=, thin_tags=)` adds the Chebyshev
+cell distance to the nearest cell that meets a facet whose local size (min of thickness and gap) is below
+`thin_factor` times the cell's largest side (issue #62). Each block compares with its own cell size, so refinement
+stops where the cells are fine enough. `box_thin_many(_device)` answers the same question for any list of boxes. See
+[thickness and gaps](/guide/advanced/thickness#amr-criterion).
+
 ## Limitations
 
 - **GPU not validated yet.** `box_classify_many_device` (3-D and 2-D) runs

@@ -40,6 +40,16 @@ edge and vertex regions.
 The view is along y: the wall points are the closest points in 3-D, so some lie off the plane and project off the
 section, and an image point can project inside it.
 
+<<< @/examples/snippets/tut08_ib_queries-thin.f90
+
+- A wall or a gap thinner than a cell is where an immersed boundary goes wrong: ghost points with an ambiguous wall
+  point, image points behind another wall. `thickness(method=THICKNESS_MEDIAL)` measures, before any grid, the
+  diameter of the largest ball tangent to each facet inside the body (`thickness`) and outside (`gap`).
+- The dragon is first wrapped into one closed surface (`alpha_wrap`, chapter 11). The raw file is 76 overlapping
+  shells, and a ball inside it would stop on the inner shells.
+- `thin_regions(h=, factor=)` groups the facets thinner than `factor * h` into connected regions, largest first. For
+  AMR, `build_thin` and `tag_block(thin_factor=, ...)` turn the same values into refinement tags (chapter 9).
+
 ## Running it
 
 <<< @/examples/output/tut08.ansi{ansi}
@@ -50,6 +60,8 @@ section, and an image point can project inside it.
   closed mesh of one solid there is one body.
 - The image of 1330 ghost points is visible from its wall point. The other 38 images lie behind another part of the
   surface, and a stencil there needs another closure.
+- On the wrap, 2856 of 7226 facets are thinner than one grid spacing (h = 0.03), in 305 regions: the legs, the tail
+  and the creases of a coarse 41³ grid. Those are the places to refine before trusting the ghost points there.
 
 ::: tip What you learned
 `query_many` gives the wall point, feature, normal and body of every point in one call; `image_points` and

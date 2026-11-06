@@ -14,7 +14,7 @@ use fossil_facet_object, only : facet_object, pnormal_payload_t,                
                                 triangle_point_distance
 use fossil_list_id_object, only : list_id_object
 use fossil_rigid_pose, only : rigid_pose_t, to_body, to_world, rotate
-use fossil_box_query, only : bvh_box_contact_oac, box_tolerance, cell_bands, cell_components, &
+use fossil_box_query, only : bvh_box_contact_oac, bvh_box_thin_oac, box_tolerance, cell_bands, cell_components, &
                              BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_box_predicates, only : box_triangle_overlap
 use fossil_line_query, only : bvh_line_crossings_oac, tri_line_hit_oac, sort_crossings_oac
@@ -182,6 +182,10 @@ type :: surface_stl_object
    integer(I4P),            allocatable, public :: feature_link(:,:)  !< Their BVH node links [4, nn].
    logical,                 private :: features_built = .false.     !< build_features ran on the current geometry.
    logical,                 private :: features_on_device = .false. !< The feature arrays were mapped by enter_device.
+   real(R8P),               allocatable, public :: thin_pay(:)        !< Local size per BVH payload triangle (#62), mappable.
+   real(R8P),               allocatable, public :: thin_node(:)       !< Minimum local size per BVH node [0:nn-1].
+   logical,                 private :: thin_built = .false.          !< build_thin ran on the current facets.
+   logical,                 private :: thin_on_device = .false.      !< The thin arrays were mapped by enter_device.
    contains
       ! read-only accessors (pure, inlined at -O2, zero data copy for scalars)
       procedure, pass(self) :: get_facets_number !< Return facets_number.
@@ -285,6 +289,10 @@ type :: surface_stl_object
       procedure, pass(self) :: feature_edges                   !< Sharp, boundary, non-manifold edges, corners (#61).
       procedure, pass(self) :: save_features_into_file         !< Feature edges and corners as legacy VTK (#61).
       procedure, pass(self) :: thickness => surface_thickness !< Local thickness and gap per facet (#62).
+      procedure, pass(self) :: thin_regions                    !< Facets thinner than factor*h, in regions (#62).
+      procedure, pass(self) :: build_thin                      !< Local sizes for the thin tagging (#62).
+      procedure, pass(self) :: box_thin_many                   !< Boxes meeting a thin facet (#62).
+      procedure, pass(self) :: box_thin_many_device            !< box_thin_many on the device (#62).
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
                                          mirror_by_matrix      !< Mirror facets.
@@ -607,6 +615,7 @@ contains
    if (present(status)) status = STATUS_OK
    if (present(aabb_tree_kind)) call self%aabb%set_tree_kind(aabb_tree_kind)
    call drop_features(self)
+   call drop_thin(self)
    self%facets_number = 0
    if (allocated(self%facet)) self%facets_number = size(self%facet, dim=1)
    if (self%facets_number>0) then
@@ -2061,7 +2070,8 @@ contains
    if (present(inside)) inside = il
    endsubroutine box_classify_many_device
 
-   subroutine tag_block(self, x, y, z, band, tags, sign_algorithm, status, feature_band, feature_tags)
+   subroutine tag_block(self, x, y, z, band, tags, sign_algorithm, status, feature_band, feature_tags, thin_factor, thin_band, &
+                        thin_tags)
    !< Signed tag bands on a rectilinear block of cells (issue #38), for AMR tagging.
    !<
    !< `x(nx+1)`, `y(ny+1)`, `z(nz+1)` are the cell edges (strictly increasing, stretched allowed);
@@ -2076,6 +2086,9 @@ contains
    !< Feature tags (issue #61): with `feature_band` and `feature_tags(nx, ny, nz)`, the Chebyshev cell distance to the
    !< nearest cell touched by a feature edge (`box_feature_many`), capped at feature_band + 1, 0 on touched cells;
    !< requires `build_features` (else STATUS_INVALID_INPUT).
+   !< Thin tags (issue #62): with `thin_factor`, `thin_band` and `thin_tags(nx, ny, nz)`, the Chebyshev cell distance to
+   !< the nearest cell meeting a facet thinner than thin_factor times the cell's largest side (`box_thin_many`), capped at
+   !< thin_band + 1; requires `build_thin` (else STATUS_INVALID_INPUT).
    class(surface_stl_object), intent(in)            :: self           !< Surface.
    real(R8P),                 intent(in)            :: x(:), y(:), z(:) !< Cell edges.
    integer(I4P),              intent(in)            :: band           !< Band width (>= 0).
@@ -2084,6 +2097,9 @@ contains
    integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
    integer(I4P),              intent(in),  optional :: feature_band   !< Feature band width (>= 0, issue #61).
    integer(I4P),              intent(out), optional :: feature_tags(:,:,:) !< Feature tags [nx, ny, nz].
+   real(R8P),                 intent(in),  optional :: thin_factor    !< Thin threshold factor (issue #62).
+   integer(I4P),              intent(in),  optional :: thin_band      !< Thin band width (>= 0).
+   integer(I4P),              intent(out), optional :: thin_tags(:,:,:) !< Thin tags [nx, ny, nz].
    logical,      allocatable :: cut(:,:,:)  !< Cut cells.
    integer(I4P), allocatable :: dist(:,:,:), comp(:,:,:), seed(:,:) !< Bands, components, seeds.
    integer(I4P), allocatable :: sgn(:)      !< Sign of each component.
@@ -2110,6 +2126,16 @@ contains
          return
       endif
       call feature_cell_bands(self, x, y, z, feature_band, feature_tags)
+   endif
+   if (present(thin_tags)) then
+      bad = .not. (present(thin_band) .and. present(thin_factor) .and. self%thin_built)
+      if (.not. bad) bad = thin_band < 0_I4P .or. thin_factor <= 0._R8P .or. size(thin_tags, 1) /= nx .or. &
+                           size(thin_tags, 2) /= ny .or. size(thin_tags, 3) /= nz
+      if (bad) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+      call thin_cell_bands(self, x, y, z, thin_factor, thin_band, thin_tags)
    endif
    tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
    if (box_contact(self, [x(1), y(1), z(1)], [x(nx+1), y(ny+1), z(nz+1)], tol, tol) /= BOX_CUT) then
@@ -3004,6 +3030,10 @@ contains
       !$acc enter data copyin(self%feature_seg, self%feature_box, self%feature_link)
       self%features_on_device = .true.
    endif
+   if (self%thin_built) then                     ! the local sizes, if built (issue #62)
+      !$acc enter data copyin(self%thin_pay, self%thin_node)
+      self%thin_on_device = .true.
+   endif
    self%is_on_device = .true.
    endsubroutine enter_device
 
@@ -3024,6 +3054,10 @@ contains
    if (self%features_on_device) then
       !$acc exit data delete(self%feature_seg, self%feature_box, self%feature_link)
       self%features_on_device = .false.
+   endif
+   if (self%thin_on_device) then
+      !$acc exit data delete(self%thin_pay, self%thin_node)
+      self%thin_on_device = .false.
    endif
    self%is_on_device = .false.
    endsubroutine exit_device
@@ -4761,6 +4795,243 @@ contains
    touched = tl
    if (present(status)) status = STATUS_OK
    endsubroutine box_feature_many_device
+
+   subroutine build_thin(self, thickness, gap, status)
+   !< Store the local size of every facet, min(thickness, gap) of `thickness` (issue #62), for `box_thin_many(_device)`
+   !< and `tag_block(thin_factor=)`: per SAH BVH payload triangle, plus its minimum per tree node, so a traversal prunes
+   !< the subtrees with no thin facet. Explicit, because those procedures take the surface intent(in). `analyze` drops it
+   !< (the facet ids change); `move` keeps it (a rigid motion changes neither the thickness nor the tree). Call it before
+   !< `enter_device` for the device twin. STATUS_INVALID_INPUT without a SAH BVH, without both arrays of size nf, or with
+   !< neither.
+   class(surface_stl_object), intent(inout)         :: self         !< Surface.
+   real(R8P),                 intent(in),  optional :: thickness(:) !< Thickness per facet.
+   real(R8P),                 intent(in),  optional :: gap(:)       !< Gap per facet.
+   integer(I4P),              intent(out), optional :: status       !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),    allocatable                        :: ls(:)        !< Local size per facet.
+   integer(I4P), allocatable                        :: order(:), stk(:) !< Post-order, stack.
+   integer(I4P)                                     :: nn, no, sp, cur, lc, rc, k, idx !< Counters.
+   logical                                          :: bad          !< Input check.
+
+   call drop_thin(self)
+   if (present(status)) status = STATUS_INVALID_INPUT
+   bad = .not. (present(thickness) .or. present(gap)) .or. self%facets_number == 0 .or. &
+         self%aabb%get_tree_kind() /= AABB_TREE_SAH_BVH
+   if (.not. bad) bad = .not. (allocated(self%aabb%node) .and. allocated(self%aabb%payload))
+   if (.not. bad .and. present(thickness)) bad = size(thickness) /= self%facets_number
+   if (.not. bad .and. present(gap)) bad = size(gap) /= self%facets_number
+   if (bad) return
+   allocate(ls(self%facets_number)) ; ls = huge(1._R8P)
+   if (present(thickness)) ls = min(ls, thickness)
+   if (present(gap)) ls = min(ls, gap)
+   allocate(self%thin_pay(size(self%aabb%payload)))
+   do idx = 1, size(self%aabb%payload)
+      self%thin_pay(idx) = ls(self%aabb%payload(idx)%facet_id)
+   enddo
+   nn = size(self%aabb%node)
+   allocate(self%thin_node(0:nn - 1), order(nn), stk(nn)) ; self%thin_node = huge(1._R8P)
+   no = 0 ; sp = 1 ; stk(1) = 0                     ! pre-order from the root; reversed, children come before parents
+   do while (sp > 0)
+      cur = stk(sp) ; sp = sp - 1
+      no = no + 1 ; order(no) = cur
+      lc = bvh_left_child_oac(self%aabb%node(cur)) ; rc = bvh_right_child_oac(self%aabb%node(cur))
+      if (lc > 0) then
+         sp = sp + 1 ; stk(sp) = lc
+      endif
+      if (rc > 0) then
+         sp = sp + 1 ; stk(sp) = rc
+      endif
+   enddo
+   do k = no, 1, -1
+      cur = order(k)
+      do idx = bvh_payload_first_oac(self%aabb%node(cur)), &
+               bvh_payload_first_oac(self%aabb%node(cur)) + bvh_payload_count_oac(self%aabb%node(cur)) - 1
+         self%thin_node(cur) = min(self%thin_node(cur), self%thin_pay(idx))
+      enddo
+      lc = bvh_left_child_oac(self%aabb%node(cur)) ; rc = bvh_right_child_oac(self%aabb%node(cur))
+      if (lc > 0) self%thin_node(cur) = min(self%thin_node(cur), self%thin_node(lc))
+      if (rc > 0) self%thin_node(cur) = min(self%thin_node(cur), self%thin_node(rc))
+   enddo
+   self%thin_built = .true.
+   if (present(status)) status = STATUS_OK
+   endsubroutine build_thin
+
+   subroutine drop_thin(self)
+   !< Forget the stored local sizes (the facets changed). The device copy, if any, is released by exit_device.
+   type(surface_stl_object), intent(inout) :: self !< Surface.
+
+   if (self%thin_on_device) return
+   if (allocated(self%thin_pay)) deallocate(self%thin_pay)
+   if (allocated(self%thin_node)) deallocate(self%thin_node)
+   self%thin_built = .false.
+   endsubroutine drop_thin
+
+   subroutine box_thin_many(self, lo, hi, factor, touched, status)
+   !< Which boxes [lo, hi] meet a facet thinner than factor * h, h the largest side of each box (issue #62): the
+   !< box-triangle separating-axis test on the box inflated by `box_tolerance` (conservative), over the facets whose local
+   !< size (`build_thin` first, else STATUS_INVALID_INPUT) is below the threshold. OpenMP over the boxes; the device twin
+   !< runs the same routine.
+   class(surface_stl_object), intent(in)            :: self       !< Surface.
+   real(R8P),                 intent(in)            :: lo(:,:)    !< Box minima [3, n].
+   real(R8P),                 intent(in)            :: hi(:,:)    !< Box maxima [3, n].
+   real(R8P),                 intent(in)            :: factor     !< Threshold factor.
+   logical,                   intent(out)           :: touched(:) !< Touched [n].
+   integer(I4P),              intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P)                                        :: tol        !< Inflation.
+   integer(I4P)                                     :: i          !< Counter.
+
+   touched = .false.
+   if (present(status)) status = STATUS_INVALID_INPUT
+   if (.not. self%thin_built .or. size(lo, 1) /= 3 .or. size(hi, 1) /= 3 .or. size(lo, 2) /= size(hi, 2) .or. &
+       size(touched) /= size(lo, 2)) return
+   tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
+   !$omp parallel do default(shared) schedule(dynamic, 64) private(i)
+   do i = 1, size(lo, 2)
+      touched(i) = bvh_box_thin_oac(self%aabb%node, self%aabb%payload, self%thin_pay, self%thin_node, lo(:, i), hi(:, i), &
+                                    tol, factor)
+   enddo
+   !$omp end parallel do
+   if (present(status)) status = STATUS_OK
+   endsubroutine box_thin_many
+
+   subroutine box_thin_many_device(self, lo, hi, factor, touched, status)
+   !< `box_thin_many` on the device (issue #62): the same routine in an OpenACC parallel loop over the boxes. Requires
+   !< `build_thin` before `enter_device` (else STATUS_INVALID_INPUT). Mapped arrays through top-level pointer aliases
+   !< (#20 rules).
+   class(surface_stl_object), intent(inout), target :: self       !< Surface (target: device aliases).
+   real(R8P),                 intent(in)            :: lo(:,:)    !< Box minima [3, n].
+   real(R8P),                 intent(in)            :: hi(:,:)    !< Box maxima [3, n].
+   real(R8P),                 intent(in)            :: factor     !< Threshold factor.
+   logical,                   intent(out)           :: touched(:) !< Touched [n].
+   integer(I4P),              intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(aabb_node_object),       pointer            :: node_p(:)  !< Alias.
+   type(facet_distance_payload), pointer            :: payload_p(:) !< Alias.
+   real(R8P),                    pointer            :: tp_p(:), tn_p(:) !< Aliases.
+   logical,      allocatable                        :: tl(:)      !< Device-side result.
+   real(R8P)                                        :: tol        !< Inflation.
+   integer(I4P)                                     :: i, n       !< Counters.
+
+   touched = .false.
+   if (present(status)) status = STATUS_INVALID_INPUT
+   if (.not. (self%is_on_device .and. self%thin_on_device) .or. size(lo, 1) /= 3 .or. size(hi, 1) /= 3 .or. &
+       size(lo, 2) /= size(hi, 2) .or. size(touched) /= size(lo, 2)) then
+      write(stderr, '(A)') 'box_thin_many_device: build_thin, then enter_device, first'
+      return
+   endif
+   tol = box_tolerance([self%bmin%x, self%bmin%y, self%bmin%z], [self%bmax%x, self%bmax%y, self%bmax%z])
+   node_p => self%aabb%node ; payload_p => self%aabb%payload ; tp_p => self%thin_pay ; tn_p => self%thin_node
+   n = size(lo, 2)
+   allocate(tl(n))
+   !$acc parallel loop present(node_p, payload_p, tp_p, tn_p) copyin(lo, hi) copyout(tl)
+   do i = 1, n
+      tl(i) = bvh_box_thin_oac(node_p, payload_p, tp_p, tn_p, lo(:, i), hi(:, i), tol, factor)
+   enddo
+   touched = tl
+   if (present(status)) status = STATUS_OK
+   endsubroutine box_thin_many_device
+
+   subroutine thin_cell_bands(self, x, y, z, factor, band, dist)
+   !< Chebyshev cell distance to the nearest cell of the block that meets a thin facet, capped at band + 1.
+   type(surface_stl_object), intent(in)  :: self             !< Surface (thin data built).
+   real(R8P),                intent(in)  :: x(:), y(:), z(:) !< Cell edges.
+   real(R8P),                intent(in)  :: factor           !< Threshold factor.
+   integer(I4P),             intent(in)  :: band             !< Band width.
+   integer(I4P),             intent(out) :: dist(:,:,:)      !< Distances [nx, ny, nz].
+   real(R8P),    allocatable             :: lo(:,:), hi(:,:) !< Cell boxes.
+   logical,      allocatable             :: touched(:)       !< Touched cells.
+   integer(I4P)                          :: nx, ny, nz, i, j, k, c !< Counters.
+
+   nx = size(x) - 1 ; ny = size(y) - 1 ; nz = size(z) - 1
+   allocate(lo(3, nx * ny * nz), hi(3, nx * ny * nz), touched(nx * ny * nz))
+   c = 0
+   do k = 1, nz ; do j = 1, ny ; do i = 1, nx
+      c = c + 1 ; lo(:, c) = [x(i), y(j), z(k)] ; hi(:, c) = [x(i+1), y(j+1), z(k+1)]
+   enddo ; enddo ; enddo
+   call self%box_thin_many(lo, hi, factor, touched)
+   call cell_bands(reshape(touched, [nx, ny, nz]), band, dist)
+   endsubroutine thin_cell_bands
+
+   subroutine thin_regions(self, thickness, gap, h, factor, region, region_area, status)
+   !< The facets thinner than factor * h (local size min(thickness, gap) below it, issue #62), grouped into regions
+   !< connected through shared edges (union-find over the facet connectivity), sorted by decreasing area (ties: the
+   !< lowest facet id first): region(nf) is 0 or the region id, region_area(nr) the areas.
+   class(surface_stl_object), intent(in)            :: self           !< Surface.
+   real(R8P),                 intent(in),  optional :: thickness(:)   !< Thickness per facet.
+   real(R8P),                 intent(in),  optional :: gap(:)         !< Gap per facet.
+   real(R8P),                 intent(in)            :: h              !< Cell size.
+   real(R8P),                 intent(in)            :: factor         !< Threshold factor.
+   integer(I4P), allocatable, intent(out)           :: region(:)      !< Region of each facet (0: not thin) [nf].
+   real(R8P),    allocatable, intent(out)           :: region_area(:) !< Area of each region [nr].
+   integer(I4P),              intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),    allocatable                        :: ls(:), area(:) !< Local sizes, root areas.
+   integer(I4P), allocatable                        :: parent(:), first(:), rank(:), root_id(:) !< Union-find, order.
+   logical,      allocatable                        :: thin(:)        !< Thin facets.
+   integer(I4P)                                     :: nf, f, e, g, a, b, nr, i, j, key !< Counters.
+   logical                                          :: bad            !< Input check.
+
+   nf = self%facets_number
+   allocate(region(nf), region_area(0)) ; region = 0
+   if (present(status)) status = STATUS_INVALID_INPUT
+   bad = .not. (present(thickness) .or. present(gap)) .or. nf == 0 .or. h <= 0._R8P .or. factor <= 0._R8P
+   if (.not. bad .and. present(thickness)) bad = size(thickness) /= nf
+   if (.not. bad .and. present(gap)) bad = size(gap) /= nf
+   if (bad) return
+   allocate(ls(nf)) ; ls = huge(1._R8P)
+   if (present(thickness)) ls = min(ls, thickness)
+   if (present(gap)) ls = min(ls, gap)
+   thin = ls < factor * h
+   allocate(parent(nf)) ; parent = [(f, f = 1, nf)]
+   do f = 1, nf
+      if (.not. thin(f)) cycle
+      do e = 1, 3
+         g = self%facet(f)%fcon_edge(e)
+         if (g < 1 .or. g > nf) cycle
+         if (.not. thin(g)) cycle
+         a = find(f) ; b = find(g)
+         if (a /= b) parent(max(a, b)) = min(a, b)       ! the root is the lowest facet id of the region
+      enddo
+   enddo
+   allocate(area(nf), root_id(nf)) ; area = 0._R8P ; root_id = 0
+   do f = 1, nf
+      if (thin(f)) then
+         a = find(f) ; area(a) = area(a) + self%facet(f)%area()
+      endif
+   enddo
+   nr = 0
+   allocate(first(nf))
+   do f = 1, nf                                         ! roots in increasing facet id
+      if (thin(f) .and. find(f) == f) then
+         nr = nr + 1 ; first(nr) = f
+      endif
+   enddo
+   allocate(rank(nr)) ; rank = first(1:nr)
+   do i = 2, nr                                         ! stable insertion sort by decreasing area
+      key = rank(i) ; j = i - 1
+      do while (j >= 1)
+         if (area(rank(j)) >= area(key)) exit
+         rank(j + 1) = rank(j) ; j = j - 1
+      enddo
+      rank(j + 1) = key
+   enddo
+   deallocate(region_area) ; allocate(region_area(nr))
+   do i = 1, nr
+      root_id(rank(i)) = i ; region_area(i) = area(rank(i))
+   enddo
+   do f = 1, nf
+      if (thin(f)) region(f) = root_id(find(f))
+   enddo
+   if (present(status)) status = STATUS_OK
+   contains
+      function find(x) result(r)
+      !< Root of x, with path halving.
+      integer(I4P), intent(in) :: x !< Facet.
+      integer(I4P)             :: r !< Root.
+
+      r = x
+      do while (parent(r) /= r)
+         parent(r) = parent(parent(r)) ; r = parent(r)
+      enddo
+      endfunction find
+   endsubroutine thin_regions
 
    subroutine surface_thickness(self, thickness, gap, method, cone_angle, rays, vertex_thickness, vertex_gap, invalid, status, &
                                 separation_angle)

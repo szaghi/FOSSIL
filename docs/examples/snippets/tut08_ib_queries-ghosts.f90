@@ -1,13 +1,14 @@
-use fossil, only : surface_stl_object, SIGN_FAST_WINDING_NUMBER, FEATURE_FACE, FEATURE_EDGE, FEATURE_VERTEX
+use fossil, only : surface_stl_object, SIGN_FAST_WINDING_NUMBER, FEATURE_FACE, FEATURE_EDGE, FEATURE_VERTEX, &
+                  THICKNESS_MEDIAL
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P, ex_R8P, ey_R8P, ez_R8P
 
 implicit none
 integer(I4P), parameter       :: n = 41                         ! grid points per direction
-type(surface_stl_object)      :: surface
+type(surface_stl_object)      :: surface, wrap
 type(vector_R8P), allocatable :: points(:), ghosts(:)
-real(R8P),        allocatable :: d(:), foot(:,:), normal(:,:), image(:,:)
-integer(I4P),     allocatable :: feature(:), body(:)
+real(R8P),        allocatable :: d(:), foot(:,:), normal(:,:), image(:,:), thickness(:), gap(:), area(:)
+integer(I4P),     allocatable :: feature(:), body(:), region(:)
 logical,          allocatable :: ambiguous(:), visible(:)
 real(R8P)                     :: h
 integer(I4P)                  :: i, j, k, p, m

@@ -115,6 +115,44 @@ rays escape. A larger separation angle keeps only contacts with walls facing awa
 wall opposite", at the price of the corner-limited local feature size. The medial gap is finite on most facets of a
 non-convex body: it is the exterior local feature size, of the body's own scale away from narrow passages.
 
+## Under-resolution report
+
+`thin_regions` answers "where is this body thinner than my cell?" before any grid exists. A facet is thin when its
+local size, min(thickness, gap), is below `factor * h`. The thin facets are grouped into regions connected through
+shared edges (union-find over the facet connectivity), sorted by decreasing area, ties broken by the lowest facet id.
+The arrays are inputs, so a sweep over h, or one call per AMR level, does not recompute the thickness, which is the
+expensive part.
+
+![a plate with a thin fin: for h = 0.1 the fin, 0.05 thick, is reported as one region, ember](../../examples/images/ref-thin-regions-coarse.svg){.fossil-figure}
+
+![the same plate for h = 0.04, below the fin thickness: the fin's sides are no longer reported; its cap and end faces still are](../../examples/images/ref-thin-regions-fine.svg){.fossil-figure}
+
+The fin is 0.05 thick, built with [`boolean`](/guide/advanced/booleans) as the union of two boxes. For h = 0.1 it is
+one region. For h = 0.04 its sides drop out, since their local size is exactly 0.05, but its cap and end faces stay.
+A ball tangent to the cap away from its centre line meets the side walls first, so the local feature size there is
+below the fin thickness. The edges of a thin wall are its thinnest part.
+
+## AMR criterion
+
+```fortran
+call surface%build_thin(thickness=thickness, gap=gap)                  ! store min(thickness, gap) in the BVH
+call surface%tag_block(x, y, z, band, tags, thin_factor=1._R8P, thin_band=1, thin_tags=thin_tags)
+call surface%box_thin_many(lo, hi, factor, touched)                    ! any boxes; box_thin_many_device too
+```
+
+- **Criterion.** A box is thin-touched when it meets a facet whose local size is below `factor` times the box's
+  largest side. The box-triangle separating-axis test runs on the box inflated by `box_tolerance`, so it never misses
+  a contact. Each AMR block uses its own h, and refinement stops where the cells are fine enough.
+- **Pruning.** `build_thin` stores the local size of every SAH BVH payload triangle and its minimum over every node.
+  `bvh_box_thin_oac` prunes a subtree whose minimum is above the threshold, as well as one whose box misses the cell.
+- **Lifetime.** `analyze` drops the stored sizes, because the facet ids change. `move` keeps them, because a rigid
+  motion changes neither the thickness nor the tree topology.
+- **Device.** `box_thin_many_device` runs the same routine in an OpenACC loop. `enter_device` maps the two arrays
+  when they are built. The bench line `thin device vs serial mismatches` of `fossil_test_distance_bench` must be 0.
+- **Tags.** `tag_block(thin_factor=, thin_band=, thin_tags=)` gives the Chebyshev cell distance to the nearest
+  thin-touched cell, capped at `thin_band + 1`, through `cell_bands`, as the [feature tags](/guide/advanced/feature-edges)
+  do.
+
 ## API
 
 ```fortran
@@ -154,11 +192,25 @@ Every argument is optional, and at least one output is required. The constants `
 | two unit boxes 0.2 apart | gap $0.2$ to 2.8e-16 on the facing faces, `huge` on the others |
 | 1 and 4 OpenMP threads | bit-identical |
 
+`src/tests/fossil_test_thin_regions.f90`, on the plate with the fin (medial thickness):
+
+| Case | Result |
+|---|---|
+| `thin_regions`, h = 0.1 | every fin side in region 1, nothing below the plate top, region 1 of area ≥ the two fin sides |
+| h sweep | the thin area never grows as h decreases, and is empty below min(local size) |
+| before `build_thin` | `STATUS_INVALID_INPUT` |
+| `box_thin_many`, 16³ cells, factor 2 | equal to a brute force over every facet with the same predicate; `thin_tags` equal to `cell_bands` of it |
+| `box_thin_many_device` | equal to the CPU |
+| after `move` / after `analyze` | kept, and equal to the brute force on the moved facets / dropped |
+
 ## Limits
 
 - **An estimate.** Ray thickness carries the cone bias above. The medial value is exact on flat walls and converges as
   O(h) on curved ones.
 - **Separation angle.** It decides what counts as an opposite wall. See the bunny sweep above.
+- **Creases.** The medial value is the local feature size, and the medial axis reaches every convex crease sharper
+  than the separation angle. A facet next to such a crease, or a sliver, gets a small value even on a thick body. With
+  the default, tagging and `thin_regions` mark sharp creases as well as thin walls.
 - **Closed, outward-oriented input.** Rays escape from open surfaces and hit misoriented facets from the wrong side.
   Both are counted in `invalid`.
 

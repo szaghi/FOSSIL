@@ -30,7 +30,7 @@ use penf,                    only : I4P, R8P
 implicit none
 private
 public :: BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
-public :: bvh_box_contact_oac, curve_box_contact_oac, box_tolerance
+public :: bvh_box_contact_oac, curve_box_contact_oac, box_tolerance, bvh_box_thin_oac
 public :: cell_bands, cell_components
 
 integer(I4P), parameter :: BOX_NONE    = 0_I4P !< Contact result: neither cut nor near (inside/outside not decided).
@@ -96,6 +96,51 @@ contains
       endif
    enddo
    endfunction bvh_box_contact_oac
+
+   pure function bvh_box_thin_oac(node, payload, thin_pay, thin_node, lo, hi, tol, factor) result(touch)
+   !< True if the box [lo, hi] (inflated by `tol`, conservative) meets a triangle of the SAH BVH whose local size (min of
+   !< thickness and gap, issue #62) is below factor * h, h the largest side of the box. `thin_pay(idx)` is the local size
+   !< of payload triangle idx, `thin_node(cur)` the minimum over the subtree of node cur: a subtree with no triangle that
+   !< thin is pruned whole. Stops at the first such triangle. The CPU and the device run this same routine.
+   !$acc routine seq
+   type(aabb_node_object),       intent(in) :: node(0:)     !< Tree nodes.
+   type(facet_distance_payload), intent(in) :: payload(:)   !< Triangle payload.
+   real(R8P),                    intent(in) :: thin_pay(:)  !< Local size per payload triangle.
+   real(R8P),                    intent(in) :: thin_node(0:) !< Minimum local size per node.
+   real(R8P),                    intent(in) :: lo(3), hi(3) !< Query box.
+   real(R8P),                    intent(in) :: tol          !< Inflation.
+   real(R8P),                    intent(in) :: factor       !< Threshold factor.
+   logical                                  :: touch        !< Contact with a thin triangle.
+   integer(I4P)                             :: stk(STACK), sp, cur, lc, rc, k, idx !< Work.
+   real(R8P)                                :: v1(3), v2(3), v3(3), thr !< Triangle, threshold.
+
+   touch = .false.
+   thr = factor * max(hi(1) - lo(1), hi(2) - lo(2), hi(3) - lo(3))
+   sp = 1_I4P ; stk(1) = 0_I4P
+   do while (sp > 0_I4P)
+      cur = stk(sp) ; sp = sp - 1_I4P
+      if (thin_node(cur) >= thr) cycle
+      if (bvh_bmin_x_oac(node(cur)) > hi(1) + tol .or. bvh_bmax_x_oac(node(cur)) < lo(1) - tol .or. &
+          bvh_bmin_y_oac(node(cur)) > hi(2) + tol .or. bvh_bmax_y_oac(node(cur)) < lo(2) - tol .or. &
+          bvh_bmin_z_oac(node(cur)) > hi(3) + tol .or. bvh_bmax_z_oac(node(cur)) < lo(3) - tol) cycle
+      do k = 0_I4P, bvh_payload_count_oac(node(cur)) - 1_I4P
+         idx = bvh_payload_first_oac(node(cur)) + k
+         if (thin_pay(idx) >= thr) cycle
+         v1 = payload(idx)%v1 ; v2 = v1 + payload(idx)%e12 ; v3 = v1 + payload(idx)%e13
+         if (box_triangle_overlap(lo, hi, v1, v2, v3, tol)) then
+            touch = .true.
+            return
+         endif
+      enddo
+      lc = bvh_left_child_oac(node(cur)) ; rc = bvh_right_child_oac(node(cur))
+      if (rc > 0_I4P) then
+         sp = sp + 1_I4P ; stk(sp) = rc
+      endif
+      if (lc > 0_I4P) then
+         sp = sp + 1_I4P ; stk(sp) = lc
+      endif
+   enddo
+   endfunction bvh_box_thin_oac
 
    pure function curve_box_contact_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, seg_id, next, u, v, lo, hi, &
                                        radius) result(code)

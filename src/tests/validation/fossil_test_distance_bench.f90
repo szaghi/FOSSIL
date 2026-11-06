@@ -76,6 +76,7 @@ integer                       :: line_mismatch             !< Grid-line crossing
 integer                       :: posed_mismatch            !< Posed queries: device vs CPU mismatches (issue #41).
 integer                       :: deviation_mismatch        !< Surface deviation: device vs CPU mismatches (issue #60).
 integer                       :: feature_mismatch          !< Feature-edge boxes: device vs CPU mismatches (issue #61).
+integer                       :: thin_mismatch             !< Thin-facet boxes: device vs CPU mismatches (issue #62).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -239,6 +240,8 @@ call deviation_case(mismatch=deviation_mismatch)
 rich_ok = rich_ok .and. deviation_mismatch == 0
 call feature_case(mismatch=feature_mismatch)
 rich_ok = rich_ok .and. feature_mismatch == 0
+call thin_case(mismatch=thin_mismatch)
+rich_ok = rich_ok .and. thin_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -329,6 +332,7 @@ print '(A,I0)',      '   line crossings device vs serial mismatches: ', line_mis
 print '(A,I0)',      '   posed device vs serial mismatches: ', posed_mismatch
 print '(A,I0)',      '   deviation device vs serial mismatches: ', deviation_mismatch
 print '(A,I0)',      '   feature device vs serial mismatches: ', feature_mismatch
+print '(A,I0)',      '   thin device vs serial mismatches: ', thin_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -447,6 +451,36 @@ contains
    mismatch = count(t1 .neqv. t2) + count(fd1 /= fd2)
    print '(A,I0,A,I0)', '   feature cells touched: ', count(t1), ' of ', NC**3
    endsubroutine feature_case
+
+   subroutine thin_case(mismatch)
+   !< box_thin_many_device vs box_thin_many (issue #62): the axial-ray thickness of the bench surface (rays=1; open
+   !< surfaces leave huge values, never thin), build_thin, a 24^3 block of cells over its bounding box, the factor set so
+   !< the threshold is the mean finite thickness on the largest cell side.
+   integer, intent(out)     :: mismatch     !< Mismatches.
+   integer(I4P), parameter  :: NC = 24      !< Cells per direction.
+   type(vector_R8P)         :: lo_, hi_     !< Bounding box.
+   real(R8P), allocatable   :: blo(:,:), bhi(:,:), th(:) !< Cell boxes, thickness.
+   logical,   allocatable   :: t1(:), t2(:) !< Touched.
+   real(R8P)                :: h(3), factor !< Cell size, threshold factor.
+   integer(I4P)             :: i, j, k, c, st !< Counters.
+
+   lo_ = surface%get_bmin() ; hi_ = surface%get_bmax()
+   h = [hi_%x - lo_%x, hi_%y - lo_%y, hi_%z - lo_%z] / NC
+   allocate(blo(3, NC**3), bhi(3, NC**3), t1(NC**3), t2(NC**3))
+   c = 0
+   do k = 1, NC ; do j = 1, NC ; do i = 1, NC
+      c = c + 1 ; blo(:, c) = [lo_%x, lo_%y, lo_%z] + h * [i - 1, j - 1, k - 1] ; bhi(:, c) = blo(:, c) + h
+   enddo ; enddo ; enddo
+   call surface%thickness(thickness=th, rays=1_I4P, status=st)
+   factor = sum(th, th < huge(1._R8P)) / max(1, count(th < huge(1._R8P))) / maxval(h)
+   call surface%build_thin(thickness=th, status=st)
+   call surface%box_thin_many(blo, bhi, factor, t1)
+   call surface%enter_device
+   call surface%box_thin_many_device(blo, bhi, factor, t2)
+   call surface%exit_device
+   mismatch = count(t1 .neqv. t2)
+   print '(A,I0,A,I0)', '   thin cells touched: ', count(t1), ' of ', NC**3
+   endsubroutine thin_case
 
    subroutine box_device_case(mismatch)
    !< box_classify_many_device against box_classify_many (issue #38): a box of half-size 1/64 of the

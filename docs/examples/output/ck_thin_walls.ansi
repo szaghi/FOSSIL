@@ -1,0 +1,7 @@
+$ ck_thin_walls
+facets 188, watertight F, thinnest wall  1.64E-03, invalid 0
+h  1.25E-01: facets under h   188, regions   1, area  2.20E+00
+h  6.25E-02: facets under h   131, regions  11, area  6.85E-01
+h  3.12E-02: facets under h    76, regions  10, area  3.01E-01
+h  1.56E-02: facets under h    49, regions   9, area  1.22E-01
+h  7.81E-03: facets under h    26, regions   5, area  6.60E-03

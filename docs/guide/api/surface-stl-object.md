@@ -808,6 +808,28 @@ end program ex_thickness
 
 ---
 
+### `thin_regions`, `build_thin`, `box_thin_many`
+
+```fortran
+call surface%thin_regions(thickness, gap, h, factor, region, region_area, status)
+call surface%build_thin(thickness, gap, status)
+call surface%box_thin_many(lo, hi, factor, touched, status)     ! and box_thin_many_device
+```
+
+**Purpose.** The under-resolution report and the AMR criterion (issue #62); the local size of a facet is
+min(thickness, gap) of the arrays given (from `thickness`). `thin_regions` marks the facets whose local size is below
+`factor * h` and groups them into regions connected through shared edges, sorted by decreasing area: `region(nf)` is 0
+or the region id, `region_area(nr)` the areas. `build_thin` stores the local sizes in the SAH BVH (per triangle, with a
+minimum per node) for `box_thin_many`, which marks the boxes `lo(3, n)`, `hi(3, n)` meeting a facet thinner than
+`factor` times the largest side of the box (conservative); `analyze` drops the stored sizes, `move` keeps them. The
+device twin needs `build_thin` before `enter_device`. `tag_block` takes `thin_factor=`, `thin_band=` and
+`thin_tags=` for the Chebyshev cell distance to those cells.
+
+**See also.** [Thickness and gaps](/guide/advanced/thickness#under-resolution-report),
+[AMR tagging](/guide/advanced/amr-tagging).
+
+---
+
 ## Distance and inside queries
 
 ### `distance`
@@ -1081,7 +1103,8 @@ the cut test is the separating-axis test on the box inflated by
 `tag_block(x, y, z, band, tags, sign_algorithm, status)`: signed tag bands on a
 block of cells given its edges `x(nx+1)`, `y(ny+1)`, `z(nz+1)`; `tags(nx, ny, nz)` is
 0 on cut cells, else the Chebyshev cell distance to the nearest cut cell
-capped at band + 1, negative inside. Box classification and tag bands default
+capped at band + 1, negative inside. Optional extra fields: `feature_band`, `feature_tags` (after `build_features`)
+and `thin_factor`, `thin_band`, `thin_tags` (after `build_thin`). Box classification and tag bands default
 to `SIGN_FAST_WINDING_NUMBER` (issue #39); the point queries keep
 `SIGN_PSEUDO_NORMAL`.
 

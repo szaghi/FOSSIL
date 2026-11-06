@@ -1,0 +1,3 @@
+$ fig_ref_thin_regions
+h = 0.10: 54 facets thinner than h, 1 regions
+h = 0.04: 28 facets thinner than h, 1 regions
