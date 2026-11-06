@@ -768,6 +768,43 @@ that touch a feature edge (conservative, never misses a contact); the device twi
 
 ---
 
+### `thickness`
+
+```fortran
+call surface%thickness(thickness, gap, method, cone_angle, rays, vertex_thickness, vertex_gap, invalid, status)
+```
+
+**Purpose.** The local thickness of the body behind every facet and the gap in front of it (issue #62), `huge` where
+undefined or where nothing is in front. `method=THICKNESS_RAY` (default) is the shape diameter: the lower median of
+`rays` ray lengths (default 31) in a cone of full aperture `cone_angle` (default 60°) around -n (thickness) or +n
+(gap) from the facet centroid. Vertex fields are area-weighted averages of the finite facet values. OpenMP over the
+facets, independent of the thread count.
+
+**Arguments.** All optional, at least one output; `invalid` counts the facets whose rays did not give a value (an open
+or misoriented surface); `status` is `STATUS_OK` or `STATUS_INVALID_INPUT` (empty surface, `rays < 1`, `cone_angle`
+outside [0, 180), no output requested).
+
+**Example.**
+
+```fortran
+program ex_thickness
+use fossil
+use penf, only : I4P, R8P
+implicit none
+type(surface_stl_object) :: part
+real(R8P), allocatable   :: thickness(:), gap(:)
+integer(I4P)             :: invalid
+
+call part%load_from_file(file_name='cube.stl', guess_format=.true.)
+call part%thickness(thickness=thickness, gap=gap, invalid=invalid)
+print '(A,ES10.3,A,I0)', 'thinnest wall ', minval(thickness), ', facets without a value ', invalid
+end program ex_thickness
+```
+
+**See also.** [Thickness and gaps](/guide/advanced/thickness).
+
+---
+
 ## Distance and inside queries
 
 ### `distance`
@@ -1164,7 +1201,7 @@ endprogram ex_winding_number_api
 ### `intersect_ray_first`
 
 ```fortran
-call surface%intersect_ray_first(ray_origin, ray_direction, hit, has_hit, status)
+call surface%intersect_ray_first(ray_origin, ray_direction, hit, has_hit, status, exclude)
 ```
 
 **Purpose.** AABB-tree-accelerated **closest hit** ray query (Möller-
@@ -1181,6 +1218,7 @@ plus all three variants on the [§2.5 feature page](/guide/advanced/ray-queries)
 | `hit`           | `out`        | `type(ray_hit_t)`  | (required) Hit record (`%facet_id`, `%t`, `%point`). **Valid only when `has_hit = .true.`**.   |
 | `has_hit`       | `out`        | `logical`          | (required) `.true.` if any facet was hit.                                                      |
 | `status`        | `out`, opt.  | `integer(I4P)`     | `RAY_STATUS_OK` or `RAY_STATUS_BAD_INPUT`.                                                     |
+| `exclude`       | `in`, opt.   | `integer(I4P)`     | A facet to skip: a ray cast from a facet never hits it at t = 0 (issue #62).                   |
 
 **Example.**
 

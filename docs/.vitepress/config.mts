@@ -53,6 +53,7 @@ const docs = [
       { text: 'Mass properties', link: '/guide/advanced/mass-properties' },
       { text: 'Surface deviation', link: '/guide/advanced/surface-deviation' },
       { text: 'Feature edges', link: '/guide/advanced/feature-edges' },
+      { text: 'Thickness and gaps', link: '/guide/advanced/thickness' },
     ],
   },
   {

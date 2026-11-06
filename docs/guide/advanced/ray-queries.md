@@ -49,13 +49,14 @@ it operates on `facet(:)` directly. Standard surfaces from
 ### Closest hit
 
 ```fortran
-call surface%intersect_ray_first(ray_origin, ray_direction, hit, has_hit, status)
+call surface%intersect_ray_first(ray_origin, ray_direction, hit, has_hit, status, exclude)
    class(surface_stl_object), intent(in)            :: self
    type(vector_R8P),          intent(in)            :: ray_origin
    type(vector_R8P),          intent(in)            :: ray_direction  ! need not be unit
    type(ray_hit_t),           intent(out)           :: hit            ! valid iff has_hit
    logical,                   intent(out)           :: has_hit
    integer(I4P),              intent(out), optional :: status         ! RAY_STATUS_*
+   integer(I4P),              intent(in),  optional :: exclude        ! facet to skip (issue #62)
 ```
 
 `hit` carries `%facet_id`, `%t`, `%point` (= `ray_origin + t·ray_direction`).

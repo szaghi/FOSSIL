@@ -2063,7 +2063,7 @@ contains
    endassociate
    endsubroutine intersect_ray_all_node
 
-   subroutine intersect_ray_first_tree(self, facet, ray_origin, ray_direction, hit, has_hit)
+   subroutine intersect_ray_first_tree(self, facet, ray_origin, ray_direction, hit, has_hit, exclude)
    !< Tree-accelerated closest-hit ray query (issue #18 §2.5).
    !<
    !< Visits children sorted by their slab `t_near` (best-first); prunes any child
@@ -2074,16 +2074,18 @@ contains
    type(vector_R8P),        intent(in)  :: ray_direction  !< Ray direction.
    type(ray_hit_t),         intent(out) :: hit            !< Closest hit (valid only if has_hit).
    logical,                 intent(out) :: has_hit        !< True if any facet was hit.
+   integer(I4P), optional,  intent(in)  :: exclude        !< Facet to skip (the ray source, issue #62).
    real(R8P)                            :: t_best         !< Running best t (start at +inf).
 
    has_hit = .false.
    t_best = MaxR8P
    call self%intersect_ray_first_node(n=0_I4P, facet=facet, ray_origin=ray_origin, &
-                                      ray_direction=ray_direction, hit=hit, has_hit=has_hit, t_best=t_best)
+                                      ray_direction=ray_direction, hit=hit, has_hit=has_hit, t_best=t_best, &
+                                      exclude=exclude)
    endsubroutine intersect_ray_first_tree
 
    recursive subroutine intersect_ray_first_node(self, n, facet, ray_origin, ray_direction, &
-                                                  hit, has_hit, t_best)
+                                                  hit, has_hit, t_best, exclude)
    !< Best-first recursive descent. Children are sorted by their slab `t_near` so
    !< the closest box is visited first; once `t_best` shrinks below a sibling's
    !< `t_near`, that sibling and its subtree are pruned.
@@ -2095,6 +2097,7 @@ contains
    type(ray_hit_t),         intent(inout) :: hit            !< Running closest hit.
    logical,                 intent(inout) :: has_hit        !< True once any hit recorded.
    real(R8P),               intent(inout) :: t_best         !< Running best t (used for pruning).
+   integer(I4P), optional,  intent(in)    :: exclude        !< Facet to skip (issue #62).
    integer(I4P)                           :: child_idx(TREE_RATIO)
    real(R8P)                              :: child_tnear(TREE_RATIO)
    integer(I4P)                           :: nchild
@@ -2114,7 +2117,7 @@ contains
       if (nchild == 0_I4P) then
          call node(n)%intersect_ray_first_facets(facet=facet, ray_origin=ray_origin, &
                                                  ray_direction=ray_direction, hit=hit, &
-                                                 has_hit=has_hit, t_best=t_best)
+                                                 has_hit=has_hit, t_best=t_best, exclude=exclude)
       else
          ! Score children by their own slab t_near, then visit ascending.
          do i = 1_I4P, nchild
@@ -2144,7 +2147,7 @@ contains
             if (child_tnear(i) >= t_best) exit  ! all remaining are pruned
             call self%intersect_ray_first_node(n=child_idx(i), facet=facet, ray_origin=ray_origin, &
                                                ray_direction=ray_direction, hit=hit, has_hit=has_hit, &
-                                               t_best=t_best)
+                                               t_best=t_best, exclude=exclude)
          enddo
       endif
    endassociate

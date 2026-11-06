@@ -423,12 +423,12 @@ contains
    enddo
    endsubroutine intersect_ray_all_facets
 
-   subroutine intersect_ray_first_facets(self, facet, ray_origin, ray_direction, hit, has_hit, t_best)
+   subroutine intersect_ray_first_facets(self, facet, ray_origin, ray_direction, hit, has_hit, t_best, exclude)
    !< Update closest hit using this node's facets (issue #18 §2.5).
    !<
    !< Mutates `hit / has_hit / t_best` if any facet on this node hits at
    !< `0 <= t < t_best`. Caller is responsible for the AABB-level prune (don't
-   !< call this on a node whose AABB the ray missed).
+   !< call this on a node whose AABB the ray missed). The facet `exclude` (issue #62) is skipped.
    class(aabb_node_object), intent(in)    :: self           !< AABB node.
    type(facet_object),      intent(in)    :: facet(:)       !< Facets list.
    type(vector_R8P),        intent(in)    :: ray_origin     !< Ray origin.
@@ -436,6 +436,7 @@ contains
    type(ray_hit_t),         intent(inout) :: hit            !< Running closest hit.
    logical,                 intent(inout) :: has_hit        !< Set true on first hit.
    real(R8P),               intent(inout) :: t_best         !< Running best t.
+   integer(I4P), optional,  intent(in)    :: exclude        !< Facet to skip (the ray source, issue #62).
    integer(I4P)                           :: nf, f, fid     !< Counters.
    real(R8P)                              :: t, u, v        !< Per-facet output.
    logical                                :: facet_hit      !< Per-facet flag.
@@ -444,6 +445,9 @@ contains
    nf = self%aabb%facet_id%ids_number
    do f = 1_I4P, nf
       fid = self%aabb%facet_id%id(f)
+      if (present(exclude)) then
+         if (fid == exclude) cycle
+      endif
       call facet(fid)%intersect_ray(ray_origin=ray_origin, ray_direction=ray_direction, &
                                     t=t, u=u, v=v, hit=facet_hit)
       if (.not. facet_hit) cycle

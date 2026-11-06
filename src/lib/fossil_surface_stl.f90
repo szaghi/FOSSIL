@@ -39,6 +39,8 @@ use fossil_deviation, only : deviation_evaluator_t, deviation_sampled, deviation
                              DEV_STATUS_BAD_INPUT
 use fossil_feature_edges, only : find_feature_edges, FEATURE_EDGE_DEFAULT_ANGLE
 use fossil_feature_bvh, only : build_segment_bvh, feature_box_touch_oac, feature_point_distance_oac
+use fossil_thickness, only : THICKNESS_RAY, THICKNESS_MEDIAL, THICKNESS_DEFAULT_CONE, THICKNESS_DEFAULT_RAYS, &
+                            cone_directions, lower_median, ball_radius
 use fossil_mass_properties, only : moments_accumulator_t, accumulate_tetrahedron, moments_to_properties_3d, symmetric3_eigen
 use fossil_laplacian, only : build_cotangent_laplacian, &
                              LAPL_STATUS_OK, LAPL_STATUS_BAD_INPUT, &
@@ -281,6 +283,7 @@ type :: surface_stl_object
       procedure, pass(self) :: hausdorff                       !< Symmetric Hausdorff distance to another surface (#60).
       procedure, pass(self) :: feature_edges                   !< Sharp, boundary, non-manifold edges, corners (#61).
       procedure, pass(self) :: save_features_into_file         !< Feature edges and corners as legacy VTK (#61).
+      procedure, pass(self) :: thickness => surface_thickness !< Local thickness and gap per facet (#62).
       procedure, pass(self) :: merge_solids                    !< Merge facets with ones of other STL file.
       generic               :: mirror => mirror_by_normal, &
                                          mirror_by_matrix      !< Mirror facets.
@@ -3882,8 +3885,9 @@ contains
    endif
    endsubroutine intersect_ray_all
 
-   subroutine intersect_ray_first(self, ray_origin, ray_direction, hit, has_hit, status)
-   !< Return the closest ray-facet intersection (issue #18 §2.5).
+   subroutine intersect_ray_first(self, ray_origin, ray_direction, hit, has_hit, status, exclude)
+   !< Return the closest ray-facet intersection (issue #18 §2.5); the facet `exclude` is skipped (issue #62: a ray
+   !< cast from a facet never hits it at t = 0, without offsetting the origin).
    !<
    !< Tree-accelerated best-first traversal with `t_best` pruning of sibling
    !< subtrees. Output `hit` is meaningful only when `has_hit = .true.`; the
@@ -3896,8 +3900,10 @@ contains
    type(ray_hit_t),           intent(out)           :: hit            !< Closest hit (if has_hit).
    logical,                   intent(out)           :: has_hit        !< True if any facet was hit.
    integer(I4P),              intent(out), optional :: status         !< Status code.
+   integer(I4P),              intent(in),  optional :: exclude        !< Facet to skip (issue #62).
    real(R8P)                                        :: dir_norm2      !< |dir|^2 for BAD_INPUT guard.
    type(ray_hit_t), allocatable                     :: fallback_hits(:) !< Used only when AABB is absent.
+   integer(I4P)                                     :: k              !< Counter.
 
    has_hit = .false.
    if (present(status)) status = RAY_STATUS_OK
@@ -3912,16 +3918,20 @@ contains
    endif
    if (self%aabb%get_nodes_number() > 0_I4P) then
       call self%aabb%intersect_ray_first_tree(facet=self%facet, ray_origin=ray_origin, &
-                                              ray_direction=ray_direction, hit=hit, has_hit=has_hit)
+                                              ray_direction=ray_direction, hit=hit, has_hit=has_hit, exclude=exclude)
    else
-      ! Fallback: build the all-hits list and pick the first by t.
+      ! Fallback: build the all-hits list and pick the first by t (other than `exclude`).
       call ray_intersect_all_flat(facet=self%facet, ray_origin=ray_origin, ray_direction=ray_direction, &
                                   hits=fallback_hits, status=status)
       if (allocated(fallback_hits)) then
-         if (size(fallback_hits, kind=I4P) > 0_I4P) then
-            hit = fallback_hits(1)
+         do k = 1_I4P, size(fallback_hits, kind=I4P)
+            if (present(exclude)) then
+               if (fallback_hits(k)%facet_id == exclude) cycle
+            endif
+            hit = fallback_hits(k)
             has_hit = .true.
-         endif
+            exit
+         enddo
       endif
    endif
    endsubroutine intersect_ray_first
@@ -4750,6 +4760,142 @@ contains
    touched = tl
    if (present(status)) status = STATUS_OK
    endsubroutine box_feature_many_device
+
+   subroutine surface_thickness(self, thickness, gap, method, cone_angle, rays, vertex_thickness, vertex_gap, invalid, status)
+   !< Local thickness and gap of every facet (issue #62, roadmap #58 WP4); `huge` where undefined or nothing is in front.
+   !<
+   !< - THICKNESS_RAY (default, shape diameter): `rays` rays from the facet centroid in a cone of full aperture
+   !<   `cone_angle` [degrees] around -n (thickness) or +n (gap), the fixed set of `cone_directions`. A thickness ray counts
+   !<   if its first hit (the source facet excluded) leaves the solid (n_hit.d > 0); a gap ray counts if it enters
+   !<   (n_hit.d < 0) or misses (length huge). The value is the lower median of the counted lengths; with fewer than half
+   !<   of the rays counted it is huge and the facet is counted in `invalid`. A cone biases it: a plate of thickness t
+   !<   gives t median(1/cos theta_k), a sphere of radius R 2R median(cos theta_k); `rays=1` casts the axis alone.
+   !< - THICKNESS_MEDIAL: step 2 (issue #62).
+   !< Vertex fields: area-weighted average of the finite values of the incident facets (huge if none). OpenMP over the
+   !< facets; every facet is computed alone, so the result does not depend on the thread count.
+   class(surface_stl_object), intent(in)                :: self                 !< Surface.
+   real(R8P), allocatable,    intent(out), optional     :: thickness(:)         !< Thickness [nf].
+   real(R8P), allocatable,    intent(out), optional     :: gap(:)               !< Gap [nf].
+   integer(I4P),              intent(in),  optional     :: method               !< THICKNESS_RAY or THICKNESS_MEDIAL.
+   real(R8P),                 intent(in),  optional     :: cone_angle           !< Full aperture [degrees] (default 60).
+   integer(I4P),              intent(in),  optional     :: rays                 !< Rays per facet (default 31).
+   real(R8P), allocatable,    intent(out), optional     :: vertex_thickness(:)  !< Thickness per pool vertex.
+   real(R8P), allocatable,    intent(out), optional     :: vertex_gap(:)        !< Gap per pool vertex.
+   integer(I4P),              intent(out), optional     :: invalid              !< Facets with an undefined value.
+   integer(I4P),              intent(out), optional     :: status               !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P), allocatable                               :: th(:), gp(:)         !< Work values.
+   logical,   allocatable                               :: bad(:)               !< Undefined facets.
+   real(R8P)                                            :: cone                 !< Aperture.
+   integer(I4P)                                         :: meth, m, nf, f       !< Options, counters.
+   logical                                              :: want_t, want_g       !< Requested outputs.
+
+   nf = self%facets_number
+   if (present(invalid)) invalid = 0
+   if (present(status)) status = STATUS_OK
+   meth = THICKNESS_RAY ; if (present(method)) meth = method
+   cone = THICKNESS_DEFAULT_CONE ; if (present(cone_angle)) cone = cone_angle
+   m = THICKNESS_DEFAULT_RAYS ; if (present(rays)) m = rays
+   want_t = present(thickness) .or. present(vertex_thickness)
+   want_g = present(gap) .or. present(vertex_gap)
+   if (nf == 0 .or. meth /= THICKNESS_RAY .or. m < 1 .or. cone < 0._R8P .or. cone >= 180._R8P .or. &
+       .not. (want_t .or. want_g)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   allocate(th(nf), gp(nf), bad(nf))
+   th = huge(1._R8P) ; gp = huge(1._R8P) ; bad = .false.
+   !$omp parallel do default(shared) schedule(dynamic, 16) private(f)
+   do f = 1, nf
+      call ray_facet(f)
+   enddo
+   !$omp end parallel do
+   if (present(invalid)) invalid = count(bad)
+   if (present(vertex_thickness)) call to_vertices(th, vertex_thickness)
+   if (present(vertex_gap)) call to_vertices(gp, vertex_gap)
+   if (present(thickness)) call move_alloc(th, thickness)
+   if (present(gap)) call move_alloc(gp, gap)
+   contains
+      subroutine ray_facet(ff)
+      !< Thickness and gap of facet ff by the ray method.
+      integer(I4P), intent(in) :: ff                    !< Facet.
+      real(R8P)                :: nrm(3), dirs(3, m), buf(m), hn(3), dn !< Work.
+      type(vector_R8P)         :: d                     !< Ray direction.
+      type(ray_hit_t)          :: hit                   !< First hit.
+      logical                  :: has_hit               !< Hit flag.
+      integer(I4P)             :: k, nv, nmiss          !< Counters.
+
+      nrm = [self%facet(ff)%normal%x, self%facet(ff)%normal%y, self%facet(ff)%normal%z]
+      if (nrm(1) ** 2 + nrm(2) ** 2 + nrm(3) ** 2 < 0.25_R8P) then   ! degenerate facet: no normal
+         bad(ff) = .true. ; return
+      endif
+      if (want_t) then
+         call cone_directions(-nrm, cone, m, dirs)
+         nv = 0
+         do k = 1, m
+            d%x = dirs(1, k) ; d%y = dirs(2, k) ; d%z = dirs(3, k)
+            call self%intersect_ray_first(ray_origin=self%facet(ff)%centroid, ray_direction=d, hit=hit, &
+                                          has_hit=has_hit, exclude=ff)
+            if (.not. has_hit) cycle
+            hn = [self%facet(hit%facet_id)%normal%x, self%facet(hit%facet_id)%normal%y, self%facet(hit%facet_id)%normal%z]
+            if (hn(1) * dirs(1, k) + hn(2) * dirs(2, k) + hn(3) * dirs(3, k) <= 0._R8P) cycle
+            nv = nv + 1 ; buf(nv) = hit%t
+         enddo
+         if (2 * nv < m) then
+            bad(ff) = .true.
+         else
+            th(ff) = lower_median(buf(1:nv))
+         endif
+      endif
+      if (want_g) then
+         call cone_directions(nrm, cone, m, dirs)
+         nv = 0 ; nmiss = 0
+         do k = 1, m
+            d%x = dirs(1, k) ; d%y = dirs(2, k) ; d%z = dirs(3, k)
+            call self%intersect_ray_first(ray_origin=self%facet(ff)%centroid, ray_direction=d, hit=hit, &
+                                          has_hit=has_hit, exclude=ff)
+            if (.not. has_hit) then
+               nmiss = nmiss + 1 ; cycle
+            endif
+            hn = [self%facet(hit%facet_id)%normal%x, self%facet(hit%facet_id)%normal%y, self%facet(hit%facet_id)%normal%z]
+            dn = hn(1) * dirs(1, k) + hn(2) * dirs(2, k) + hn(3) * dirs(3, k)
+            if (dn >= 0._R8P) cycle
+            nv = nv + 1 ; buf(nv) = hit%t
+         enddo
+         if (2 * (nv + nmiss) < m) then
+            bad(ff) = .true.
+         else
+            buf(nv + 1:nv + nmiss) = huge(1._R8P)
+            gp(ff) = lower_median(buf(1:nv + nmiss))
+         endif
+      endif
+      endsubroutine ray_facet
+
+      subroutine to_vertices(fv, vv)
+      !< Area-weighted average of the finite facet values fv on the pool vertices.
+      real(R8P),              intent(in)  :: fv(:)  !< Facet values.
+      real(R8P), allocatable, intent(out) :: vv(:)  !< Vertex values.
+      real(R8P), allocatable              :: w(:)   !< Weights.
+      real(R8P)                           :: a      !< Facet area.
+      integer(I4P)                        :: ff, j, vid !< Counters.
+
+      allocate(vv(self%vertex_pool%vertex_count()), w(self%vertex_pool%vertex_count()))
+      vv = 0._R8P ; w = 0._R8P
+      do ff = 1, nf
+         if (fv(ff) >= huge(1._R8P)) cycle
+         a = self%facet(ff)%area()
+         do j = 1, 3
+            vid = self%facet(ff)%vertex_id(j)
+            if (vid < 1) cycle
+            vv(vid) = vv(vid) + a * fv(ff) ; w(vid) = w(vid) + a
+         enddo
+      enddo
+      where (w > 0._R8P)
+         vv = vv / w
+      elsewhere
+         vv = huge(1._R8P)
+      endwhere
+      endsubroutine to_vertices
+   endsubroutine surface_thickness
 
    subroutine save_features_into_file(self, file_name, angle, corner_angle, include_boundary, include_nonmanifold, status)
    !< Write the feature edges and corners (issue #61) as a legacy ASCII VTK POLYDATA file, for ParaView: the feature
