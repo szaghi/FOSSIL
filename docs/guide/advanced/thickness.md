@@ -17,6 +17,14 @@ the wrong sign, cells with no fluid, and image points that land across the wall.
 [ambiguous foot points](/guide/advanced/ib-queries) of a query find that afterwards, point by point. Thickness and gap
 find it before the grid exists, for the whole surface.
 
+![a NACA 0012 wing tapering from chord 1 to 0.5, coloured by its medial thickness from teal (thin) to ember (0.12), the facets thinner than h = 1/32 outlined in gold along the trailing edge, the leading edge and the tip cap](../../examples/images/ref-thickness-wing.svg){.fossil-figure}
+
+![the same wing as h halves from 1/4 to 1/128: the facets thinner than h, in ember, shrink to the trailing edge](../../examples/images/anim-thin-regions.svg){.fossil-figure}
+
+On the wing the strip under h = 1/32 runs along the trailing edge and widens towards the tip, where the chord is
+shorter. The leading edge is in it too: its radius of curvature (0.016 of the chord for NACA 0012) bounds the inscribed
+ball there. As h halves, the strip shrinks to the trailing edge, whose thickness tends to zero, so it is never resolved.
+
 ![a plate tapering from 0.05 to 0.45 along its length, coloured by its ray thickness from teal (thin) to ember (thick)](../../examples/images/ref-thickness-ray.svg){.fossil-figure}
 
 ![a flat plate under a tilted one, the upper face of the flat plate coloured by the gap to the tilted plate, from teal (0.15) to ember (0.35); faces with nothing in front are plain](../../examples/images/ref-thickness-gap.svg){.fossil-figure}
@@ -170,6 +178,35 @@ separation angle. The missing closing segment of an open loop gets `huge`.
   and the device. The bench line `thin device vs serial mismatches` of `fossil_test_curve_bench` must be 0.
 - On a NACA 0012 section, the thin regions shrink towards the trailing edge as h decreases, and the trailing edge
   stays thin at every h: its thickness tends to zero.
+
+## Output for inspection
+
+```fortran
+call surface%save_thickness_into_file(file_name, thickness, gap, region, status)
+```
+
+The file is legacy ASCII VTK `POLYDATA`, which ParaView opens directly: the vertex pool as `POINTS`, every facet as a
+triangle in `POLYGONS`, and the cell scalars given. `thickness` and `gap` are written as doubles, -1 where undefined or
+where nothing is in front, and `region` as an int.
+
+From the command line:
+
+```bash
+fossilizer -i part.stl --thickness part-thickness.vtk [--thickness_method ray|medial] [--h 0.01 --thin_factor 1]
+```
+
+```text
+thickness and gaps, medial method
+  facets 48  invalid 0
+  thinnest wall   3.333333333333333E-01
+  narrowest gap  none (nothing in front of any facet)
+  under  1.00000E+00: facets 48  regions 1
+  largest region area   6.000000000000000E+00
+  written to part-thickness.vtk
+```
+
+(the output for `cube-01.stl` with `--h 1`). `src/tests/fossil_test_thickness_cli.f90` checks the summary against the
+library on the same file, and reads the VTK file back: every thickness bit for bit, every gap -1, every region.
 
 ## API
 

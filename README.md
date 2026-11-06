@@ -51,8 +51,11 @@
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/guide/advanced/feature-edges"><img src="docs/examples/images/anim-feature-tagging.svg" alt="Feature edges: cells touching the sharp edges of a part, as the grid refines" width="260"></a><br><b>Feature edges</b><br><sub>cells touching the sharp edges of a part, as the grid refines</sub></td>
 </tr>
 <tr>
+<td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/guide/advanced/thickness"><img src="docs/examples/images/anim-thin-regions.svg" alt="Thickness and gaps: a wing's walls thinner than the cell, shrinking to the trailing edge" width="260"></a><br><b>Thickness and gaps</b><br><sub>a wing's walls thinner than the cell, shrinking to the trailing edge</sub></td>
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/cookbook#unite-two-bodies"><img src="docs/examples/images/anim-boolean.svg" alt="Geometry processing: two cubes, then their union, intersection and differences" width="260"></a><br><b>Geometry processing</b><br><sub>two cubes, then their union, intersection and differences</sub></td>
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/12-gpu"><img src="docs/examples/images/tut12-slice.svg" alt="On the GPU, bit for bit: the device code path on a slice: 0 differences from the host" width="260"></a><br><b>On the GPU, bit for bit</b><br><sub>the device code path on a slice: 0 differences from the host</sub></td>
+</tr>
+<tr>
 <td align="center" width="33%"><a href="https://szaghi.github.io/FOSSIL/manual/tutorial/01-first-surface"><img src="docs/examples/images/tour.svg" alt="Free and portable: the tutorial programs, run one after the other" width="260"></a><br><b>Free and portable</b><br><sub>the tutorial programs, run one after the other</sub></td>
 </tr>
 </table>

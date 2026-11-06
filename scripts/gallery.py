@@ -54,6 +54,8 @@ CARDS = [
      "a decimation sweep coloured by its certified distance from the original"),
     ("Feature edges", "anim-feature-tagging", "/guide/advanced/feature-edges",
      "cells touching the sharp edges of a part, as the grid refines"),
+    ("Thickness and gaps", "anim-thin-regions", "/guide/advanced/thickness",
+     "a wing's walls thinner than the cell, shrinking to the trailing edge"),
     ("Geometry processing", "anim-boolean", "/manual/cookbook#unite-two-bodies",
      "two cubes, then their union, intersection and differences"),
     ("On the GPU, bit for bit", "tut12-slice", "/manual/tutorial/12-gpu",

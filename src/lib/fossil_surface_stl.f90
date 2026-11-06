@@ -288,6 +288,7 @@ type :: surface_stl_object
       procedure, pass(self) :: hausdorff                       !< Symmetric Hausdorff distance to another surface (#60).
       procedure, pass(self) :: feature_edges                   !< Sharp, boundary, non-manifold edges, corners (#61).
       procedure, pass(self) :: save_features_into_file         !< Feature edges and corners as legacy VTK (#61).
+      procedure, pass(self) :: save_thickness_into_file        !< Thickness, gap, thin regions as legacy VTK (#62).
       procedure, pass(self) :: thickness => surface_thickness !< Local thickness and gap per facet (#62).
       procedure, pass(self) :: thin_regions                    !< Facets thinner than factor*h, in regions (#62).
       procedure, pass(self) :: build_thin                      !< Local sizes for the thin tagging (#62).
@@ -5265,6 +5266,76 @@ contains
       endwhere
       endsubroutine to_vertices
    endsubroutine surface_thickness
+
+   subroutine save_thickness_into_file(self, file_name, thickness, gap, region, status)
+   !< Write the surface with per-facet thickness, gap and thin region (issue #62) as a legacy ASCII VTK POLYDATA file, for
+   !< ParaView: the vertex pool as POINTS, every facet as a triangle in POLYGONS, and the cell scalars given (`thickness`
+   !< and `gap` as doubles, -1 where undefined or nothing is in front; `region` as int). Each array, if present, has one
+   !< value per facet (else STATUS_INVALID_INPUT).
+   class(surface_stl_object), intent(in)            :: self         !< Surface.
+   character(*),              intent(in)            :: file_name    !< Output file.
+   real(R8P),                 intent(in),  optional :: thickness(:) !< Thickness per facet.
+   real(R8P),                 intent(in),  optional :: gap(:)       !< Gap per facet.
+   integer(I4P),              intent(in),  optional :: region(:)    !< Thin region per facet.
+   integer(I4P),              intent(out), optional :: status       !< STATUS_OK, STATUS_INVALID_INPUT, STATUS_FILE_OPEN_FAIL.
+   type(vector_R8P)                                 :: c            !< Coordinates.
+   integer(I4P)                                     :: u, ios, i, nf, np !< Work.
+   logical                                          :: bad          !< Input check.
+
+   nf = self%facets_number ; np = self%vertex_pool%vertex_count()
+   bad = nf == 0
+   if (present(thickness)) bad = bad .or. size(thickness) /= nf
+   if (present(gap)) bad = bad .or. size(gap) /= nf
+   if (present(region)) bad = bad .or. size(region) /= nf
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   open(newunit=u, file=file_name, status='replace', action='write', iostat=ios)
+   if (ios /= 0) then
+      if (present(status)) status = STATUS_FILE_OPEN_FAIL
+      return
+   endif
+   write(u, '(A)') '# vtk DataFile Version 3.0'
+   write(u, '(A)') 'FOSSIL thickness and gaps'
+   write(u, '(A)') 'ASCII'
+   write(u, '(A)') 'DATASET POLYDATA'
+   write(u, '(A,I0,A)') 'POINTS ', np, ' double'
+   do i = 1, np
+      c = self%vertex_pool%coord(i)
+      write(u, '(3ES24.16)') c%x, c%y, c%z
+   enddo
+   write(u, '(A,I0,1X,I0)') 'POLYGONS ', nf, 4 * nf
+   do i = 1, nf
+      write(u, '(A,I0,1X,I0,1X,I0)') '3 ', self%facet(i)%vertex_id(1) - 1, self%facet(i)%vertex_id(2) - 1, &
+                                     self%facet(i)%vertex_id(3) - 1
+   enddo
+   if (present(thickness) .or. present(gap) .or. present(region)) write(u, '(A,I0)') 'CELL_DATA ', nf
+   if (present(thickness)) call scalars('thickness', thickness)
+   if (present(gap)) call scalars('gap', gap)
+   if (present(region)) then
+      write(u, '(A)') 'SCALARS region int 1'
+      write(u, '(A)') 'LOOKUP_TABLE default'
+      do i = 1, nf
+         write(u, '(I0)') region(i)
+      enddo
+   endif
+   close(u)
+   if (present(status)) status = STATUS_OK
+   contains
+      subroutine scalars(name, val)
+      !< One double cell scalar, -1 for huge.
+      character(*), intent(in) :: name   !< Name.
+      real(R8P),    intent(in) :: val(:) !< Values.
+      integer(I4P)             :: k      !< Counter.
+
+      write(u, '(A)') 'SCALARS '//name//' double 1'
+      write(u, '(A)') 'LOOKUP_TABLE default'
+      do k = 1, nf
+         write(u, '(ES24.16)') merge(-1._R8P, val(k), val(k) >= huge(1._R8P))
+      enddo
+      endsubroutine scalars
+   endsubroutine save_thickness_into_file
 
    subroutine save_features_into_file(self, file_name, angle, corner_angle, include_boundary, include_nonmanifold, status)
    !< Write the feature edges and corners (issue #61) as a legacy ASCII VTK POLYDATA file, for ParaView: the feature

@@ -5,7 +5,7 @@ program fossiler
 
 use flap, only : command_line_interface
 use fossil, only : surface_stl_object, STATUS_OK, DEV_STATUS_OK, DEV_STATUS_NOT_CONVERGED, FEATURE_EDGE_SHARP, &
-                   FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD
+                   FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, THICKNESS_RAY, THICKNESS_MEDIAL
 use penf, only : I4P, R8P, str
 use vecfor, only : vector_R8P
 
@@ -41,6 +41,10 @@ character(999)                        :: file_name_compare                     !
 real(R8P)                             :: tolerance                             !< Tolerance of the certified deviation (0: default).
 character(999)                        :: file_name_features                    !< VTK file of the feature edges (issue #61).
 real(R8P)                             :: feature_angle                         !< Feature threshold [degrees].
+character(999)                        :: file_name_thickness                   !< VTK file of the thickness (issue #62).
+character(999)                        :: thickness_method                      !< ray or medial.
+real(R8P)                             :: thin_h                                !< Cell size of the thin report (0: none).
+real(R8P)                             :: thin_factor                           !< Threshold factor of the thin report.
 
 call cli_parse
 if (cli%is_passed(switch='--merge')) then
@@ -125,6 +129,7 @@ do s=1, stl_numbers
    if (mass_properties) call print_mass_properties(surface(s))
    if (cli%is_passed(switch='--compare')) call print_deviation(surface(s), trim(adjustl(file_name_compare)))
    if (cli%is_passed(switch='--features')) call print_features(surface(s), trim(adjustl(file_name_features)))
+   if (cli%is_passed(switch='--thickness')) call print_thickness(surface(s), trim(adjustl(file_name_thickness)))
    if (cli%is_passed(switch='--output')) then
       print '(A)', 'save output in: '//trim(adjustl(output))
       call surface(s)%save_into_file(file_name=adjustl(output))
@@ -184,6 +189,40 @@ contains
   call surf%save_features_into_file(file_name=file_name, angle=feature_angle, status=status)
   if (status == STATUS_OK) print '(A)', '  written to '//file_name
   endsubroutine print_features
+
+  subroutine print_thickness(surf, file_name)
+  !< Print the thinnest wall and the narrowest gap, the regions thinner than thin_factor * h if h > 0, and write the
+  !< per-facet values as legacy VTK (issue #62).
+  type(surface_stl_object), intent(in) :: surf      !< Surface.
+  character(*),             intent(in) :: file_name !< VTK file.
+  real(R8P),    allocatable            :: th(:), gp(:), area(:) !< Thickness, gap, region areas.
+  integer(I4P), allocatable            :: region(:) !< Thin regions.
+  integer(I4P)                         :: status, invalid, meth !< Status, invalid facets, method.
+
+  meth = THICKNESS_RAY ; if (trim(adjustl(thickness_method)) == 'medial') meth = THICKNESS_MEDIAL
+  call surf%thickness(thickness=th, gap=gp, method=meth, invalid=invalid, status=status)
+  if (status /= STATUS_OK) then
+     print '(A)', 'thickness: an empty surface'
+     return
+  endif
+  print '(A)', 'thickness and gaps, '//trim(adjustl(thickness_method))//' method'
+  print '(A,I0,A,I0)', '  facets ', surf%get_facets_number(), '  invalid ', invalid
+  if (any(th < huge(1._R8P))) print '(A,ES23.15)', '  thinnest wall ', minval(th)
+  if (any(gp < huge(1._R8P))) then
+     print '(A,ES23.15)', '  narrowest gap ', minval(gp)
+  else
+     print '(A)', '  narrowest gap  none (nothing in front of any facet)'
+  endif
+  if (thin_h > 0._R8P) then
+     call surf%thin_regions(thickness=th, gap=gp, h=thin_h, factor=thin_factor, region=region, region_area=area)
+     print '(A,ES12.5,A,I0,A,I0)', '  under ', thin_factor * thin_h, ': facets ', count(region > 0), '  regions ', size(area)
+     if (size(area) > 0) print '(A,ES23.15)', '  largest region area ', area(1)
+     call surf%save_thickness_into_file(file_name=file_name, thickness=th, gap=gp, region=region, status=status)
+  else
+     call surf%save_thickness_into_file(file_name=file_name, thickness=th, gap=gp, status=status)
+  endif
+  if (status == STATUS_OK) print '(A)', '  written to '//file_name
+  endsubroutine print_thickness
 
   subroutine print_deviation(a, file_name_b)
   !< Print the certified one-sided deviations of a and b from each other and their Hausdorff distance (issue #60).
@@ -333,6 +372,31 @@ contains
                def='features.vtk',                                                         &
                act='store')
 
+  call cli%add(switch='--thickness',                                                             &
+               help='print the thinnest wall and narrowest gap, write them per facet to this legacy VTK file', &
+               required=.false.,                                                                &
+               def='thickness.vtk',                                                             &
+               act='store')
+
+  call cli%add(switch='--thickness_method',          &
+               help='thickness method: ray or medial', &
+               required=.false.,                     &
+               def='ray',                            &
+               choices='ray,medial',                 &
+               act='store')
+
+  call cli%add(switch='--h',                                                   &
+               help='cell size: report the facets thinner than thin_factor*h', &
+               required=.false.,                                            &
+               def='0.0',                                                   &
+               act='store')
+
+  call cli%add(switch='--thin_factor',             &
+               help='threshold factor of --h', &
+               required=.false.,               &
+               def='1.0',                      &
+               act='store')
+
   call cli%add(switch='--feature_angle',                         &
                help='sharp-edge and corner threshold, degrees', &
                required=.false.,                               &
@@ -420,6 +484,10 @@ contains
   call cli%get(        switch='--tolerance',       val=tolerance,           error=error) ; if (error/=0) stop
   call cli%get(        switch='--features',        val=file_name_features,  error=error) ; if (error/=0) stop
   call cli%get(        switch='--feature_angle',   val=feature_angle,       error=error) ; if (error/=0) stop
+  call cli%get(        switch='--thickness',       val=file_name_thickness, error=error) ; if (error/=0) stop
+  call cli%get(        switch='--thickness_method', val=thickness_method,   error=error) ; if (error/=0) stop
+  call cli%get(        switch='--h',               val=thin_h,              error=error) ; if (error/=0) stop
+  call cli%get(        switch='--thin_factor',     val=thin_factor,         error=error) ; if (error/=0) stop
   call cli%get(        switch='--sanitize',        val=sanitize,            error=error) ; if (error/=0) stop
   call cli%get(        switch='--fill_holes',      val=fill_holes,          error=error) ; if (error/=0) stop
   call cli%get(        switch='--max_hole_edges',  val=max_hole_edges,      error=error) ; if (error/=0) stop

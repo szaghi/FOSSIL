@@ -1,0 +1,9 @@
+$ anim_thin_regions
+wing: 3120 facets, medial thickness  0.0000 to  0.1166
+medial thickness; under h = 1/32: 1032 facets, area 0.4134
+h = 1/4: 3120 facets thinner than h, area 2.3974
+h = 1/8: 3120 facets thinner than h, area 2.3974
+h = 1/16: 1995 facets thinner than h, area 1.1325
+h = 1/32: 1032 facets thinner than h, area 0.4134
+h = 1/64: 523 facets thinner than h, area 0.1707
+h = 1/128: 358 facets thinner than h, area 0.0833
