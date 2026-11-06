@@ -219,9 +219,34 @@ contains
       host = locate_triangle(tri=tri, x=tri%px(p_idx), y=tri%py(p_idx))
       if (host == 0_I4P) cycle
       call collect_cavity(tri=tri, p_idx=p_idx, host=host, cavity=cavity, n_cavity=n_cavity)
+      call ensure_capacity(tri=tri, need=tri%n_tri_used + 3_I4P * n_cavity, cavity=cavity)
       call retriangulate_cavity(tri=tri, p_idx=p_idx, cavity=cavity, n_cavity=n_cavity)
    enddo
    endsubroutine dt_insert_points
+
+   subroutine ensure_capacity(tri, need, cavity)
+   !< Grow the triangle store (and the cavity buffer, which can hold every triangle) to at least `need` entries,
+   !< doubling. Bowyer-Watson keeps the deactivated triangles in place, so the store fills with the sum of the cavity
+   !< sizes, not with the live count: an insertion order along a cut curve (dense points on a line) makes large
+   !< cavities and overran the initial 6 (n + 3) entries (heap corruption, issue #63).
+   type(triangulation_t),     intent(inout) :: tri       !< Triangulation.
+   integer(I4P),              intent(in)    :: need      !< Entries needed.
+   integer(I4P), allocatable, intent(inout) :: cavity(:) !< Cavity buffer.
+   type(triangle_t), allocatable            :: grown(:)  !< New store.
+   integer(I4P)                             :: n         !< New size.
+
+   if (need <= tri%n_tri_alloc) return
+   n = max(need, 2_I4P * tri%n_tri_alloc)
+   allocate(grown(n))
+   grown(1:tri%n_tri_used) = tri%tri(1:tri%n_tri_used)
+   call move_alloc(grown, tri%tri)
+   tri%n_tri_alloc = n
+   block
+      integer(I4P), allocatable :: c2(:)
+      allocate(c2(n)) ; c2(1:size(cavity)) = cavity    ! keep the cavity just collected
+      call move_alloc(c2, cavity)
+   endblock
+   endsubroutine ensure_capacity
 
    subroutine install_super_triangle(tri)
    !< Append three super-triangle vertices to the point array and seed the

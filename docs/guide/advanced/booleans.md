@@ -197,6 +197,16 @@ configuration (the boolean dominates the cost: 0.25 s per pair in the debug cove
 pass. Every residual is below 2e-16 and the deviation below 1e-15, with no membership mismatch. As a negative control,
 the union with one facet dropped fails: its volume is off by 6 %, its moments by 14 %, its area by 4 %.
 
+### Defects found by the harness
+
+- **Delaunay store overflow** (fixed, issue #63). The constrained triangulation of a cut facet
+  (`fossil_dt`) allocated its triangle store once, at 6 (n + 3) entries. Bowyer–Watson keeps the triangles it
+  replaces, so the store fills with the sum of the cavity sizes. When the cut points arrive along a curve, as a torus
+  cutting a large cube face does, the cavities are large, and the store was overrun: heap corruption, an abort, or a
+  silently wrong result. The store now grows by doubling. `src/tests/fossil_test_dt_capacity.f90` covers both the
+  triangulation (600 points on an elliptic arc create 27 087 triangles against 3 618 entries) and the boolean that
+  failed.
+
 ## Known limitations
 
 - **Exactness.** The decisions (how two facets meet, which side a vertex
