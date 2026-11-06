@@ -216,6 +216,38 @@ No membership mismatch on 200 points per pair (`src/tests/validation/fossil_val_
 The regression tier, `src/tests/fossil_test_boolean_curved.f90`, runs two 10³ pairs (sphere × torus, cylinder ×
 cube), 1.7 s in the debug coverage build. The first run of this sweep found the defect below.
 
+### Near-degenerate configurations
+
+`src/tests/validation/fossil_val_boolean_degenerate.f90` sets a body against itself, coincident or moved by a tiny
+amount, plus nested bodies and contacts. The bodies are the unit cube and a marching-cubes sphere (24³, 2 972 facets).
+Translations follow a generic direction; rotations turn about a generic axis through the centre. Outcome per case (✓:
+status OK and every identity holds; CDT: `BOOL_STATUS_CDT_FAILED`, allowed; ✗: status OK, identities within 2e-10, but
+the result is not watertight):
+
+| Configuration | 1e-4 | 1e-6 | 1e-8 | 1e-10 | 1e-12 | 1e-14 |
+|---|---|---|---|---|---|---|
+| cube, translated (of the size) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| cube, rotated (rad) | ✓ | ✓ | CDT | ✓ | ✓ | |
+| sphere, translated | ✓ | ✓ | ✗ | CDT | ✓ | ✓ |
+| sphere, rotated | ✓ | ✗ | CDT | ✗ | ✓ | |
+
+Also ✓: the cube and the sphere against themselves, each against itself scaled by 0.5 (nested), the cube against a
+half cube sharing part of a face, contacts at a vertex, along an edge and on a face patch, and the sphere against the
+same sphere re-facetted (25³). 28 of the 31 cases pass; before the fixes below, 23 did, and five of the failures were
+silently wrong volumes, up to 2.3 %.
+
+Where the snap decides: a copy moved by less than 1e-10 of the local edge length is coplanar with the original
+(columns 1e-12 and 1e-14, and the cube at 1e-10), and the result is the original body. A copy moved by more than
+about 1e-6 is an ordinary crossing. In between, the cuts are 1e-10 to 1e-8 apart, and the retriangulation decides
+with fixed tolerances (points merged within 1e-10 per coordinate in the facet's plane, points on a segment within 1e-9 of its
+length) that do not match the exact classification. On the flat cube that only costs a `CDT_FAILED`. On the curved
+sphere three cases come out with holes a few 1e-9 wide, with the volume, the moments and the membership still right. The
+band is relative to the facets, not to the body: a coarser sphere (10³) against itself translated by 1e-6 cracks
+too.
+This remains open: matching the retriangulation's decisions to the classification's (symbolic points with their
+provenance, rather than coordinates compared within tolerances) is a design change. Aligning the tolerances to 1e-10
+was tried, and it brought back a silent 2.3 % volume error on the cube rotated by 1e-8.
+
 ### Defects found by the harness
 
 - **Delaunay store overflow** (fixed, issue #63). The constrained triangulation of a cut facet
