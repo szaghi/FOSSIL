@@ -171,6 +171,32 @@ How the coplanar overlap is handled:
    shared-face table (same or opposite orientation), not by the winding
    number, which is ill-defined on the surface.
 
+## Validation identities
+
+A boolean result can be checked without knowing the answer: each identity below holds for any pair of closed,
+outward-oriented inputs (issue #63, roadmap #58). The test-side module `src/tests/fossil_boolean_harness.f90` runs the
+four ops on one pair and checks them all.
+
+| Identity | Check | Tolerance |
+|---|---|---|
+| Volume | V(A ∪ B) + V(A ∩ B) = V(A) + V(B); V(A − B) = V(A) − V(A ∩ B); V(A △ B) = V(A ∪ B) − V(A ∩ B) | 1e-9 of V(A) + V(B) |
+| Second moments | the same identities on $C = \int x\,x^T$ about the centre of the joint box (so on the inertia tensor $\mathrm{tr}(C)\,I - C$): where the volume is, not only how much | 1e-9 of $\lvert C(A)\rvert + \lvert C(B)\rvert$ |
+| Area | area(A ∪ B) + area(A ∩ B) = area(A) + area(B), without coplanar overlaps | 1e-9 relative |
+| Surface | the result lies on the inputs: its deviation from A and B merged ([surface deviation](/guide/advanced/surface-deviation), sampled lower bound) is 0 to round-off | 1e-9 of the joint diagonal |
+| Membership | at fixed-seed points farther than 1e-6 of the diagonal from both inputs, inside(result) = op(inside(A), inside(B)), solid-angle sign | no mismatch |
+| Validity | ∪, ∩, − without contact: watertight, manifold, V > 0, no self-intersecting facet pair | exact |
+
+The volume and the moments come from signed tetrahedra about a fixed point, so they are defined on the non-manifold
+results of contacts and of △ too. The pass criterion is #33's: a result with status OK satisfies every identity that
+applies; a non-OK status (`BOOL_STATUS_CDT_FAILED`) is allowed and counted.
+
+`src/tests/validation/fossil_val_boolean_identities.f90` runs the harness on the box cases validated so far against
+analytic volumes: the 6 coplanar cases, axis-aligned and rotated, and the 18 regression stress configurations. Its
+regression subset, `src/tests/fossil_test_boolean_identities.f90`, runs 3 rotated coplanar cases and one stress
+configuration (the boolean dominates the cost: 0.25 s per pair in the debug coverage build). All 30 pairs
+pass. Every residual is below 2e-16 and the deviation below 1e-15, with no membership mismatch. As a negative control,
+the union with one facet dropped fails: its volume is off by 6 %, its moments by 14 %, its area by 4 %.
+
 ## Known limitations
 
 - **Exactness.** The decisions (how two facets meet, which side a vertex
