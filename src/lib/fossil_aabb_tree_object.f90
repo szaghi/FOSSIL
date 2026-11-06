@@ -449,7 +449,7 @@ contains
    call self%distance_node(n=0, facet=facet, point=point, best=distance)
    endfunction distance_tree
 
-   subroutine distance_tree_with_region(self, facet, point, distance, closest_facet, closest_region)
+   subroutine distance_tree_with_region(self, facet, point, distance, closest_facet, closest_region, max_distance2)
    !< Best-first traversal that also reports the closest facet id and Voronoi region.
    !<
    !< Used by the pseudo-normal signed-distance path: caller forms
@@ -462,8 +462,11 @@ contains
    real(R8P),               intent(out) :: distance        !< Minimum squared distance.
    integer(I4P),            intent(out) :: closest_facet   !< Facet id holding the closest point (0 if none found).
    integer(I4P),            intent(out) :: closest_region  !< Voronoi region tag of the closest point.
+   real(R8P), optional,     intent(in)  :: max_distance2   !< Search bound (squared): farther facets are pruned, and
+                                                           !< none found leaves closest_facet = 0 (issue #63).
 
    distance       = MaxR8P
+   if (present(max_distance2)) distance = max_distance2
    closest_facet  = 0_I4P
    closest_region = 0_I4P
    call self%distance_node_with_region(n=0, facet=facet, point=point, &

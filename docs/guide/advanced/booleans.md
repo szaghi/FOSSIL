@@ -264,17 +264,43 @@ Both use 12³ marching-cubes bodies.
 
 | Chain | Operations | Final facets | Worst step residual (volume, moments) | Final residual (volume, moments) | Time at -O2 |
 |---|---|---|---|---|---|
-| block − 9 cylinders | 9 | 3 696 | 2.2e-16, 2.5e-16 | 2.2e-16, 1.8e-16 | 0.4 s |
-| block − 25 cylinders | 25 | 10 688 | 1.1e-16, 1.1e-15 | 1.1e-16, 1.1e-15 | 6.2 s |
-| block − 49 cylinders | 49 | 21 944 | 1.1e-16, 7.0e-16 | 1.1e-16, 7.0e-16 | 35 s |
-| ∪ 9 spheres | 8 | 5 820 | 1.1e-16, 8.7e-17 | 1.1e-16, 8.7e-17 | 1.2 s |
-| ∪ 25 spheres | 24 | 16 300 | 6.3e-16, 7.4e-17 | 6.3e-16, 4.8e-17 | 9.6 s |
-| ∪ 49 spheres | 48 | 32 060 | 4.1e-16, 9.0e-17 | 4.1e-16, 4.5e-17 | 40 s |
+| block − 9 cylinders | 9 | 3 696 | 2.2e-16, 2.5e-16 | 2.2e-16, 1.8e-16 | 0.14 s |
+| block − 25 cylinders | 25 | 10 688 | 1.1e-16, 1.1e-15 | 1.1e-16, 1.1e-15 | 1.1 s |
+| block − 49 cylinders | 49 | 21 944 | 1.1e-16, 7.0e-16 | 1.1e-16, 7.0e-16 | 4.6 s |
+| ∪ 9 spheres | 8 | 5 820 | 1.1e-16, 8.7e-17 | 1.1e-16, 8.7e-17 | 0.37 s |
+| ∪ 25 spheres | 24 | 16 300 | 6.3e-16, 7.4e-17 | 6.3e-16, 4.8e-17 | 1.9 s |
+| ∪ 49 spheres | 48 | 32 060 | 4.1e-16, 9.0e-17 | 4.1e-16, 4.5e-17 | 6.3 s |
 
 Every status is OK and every intermediate body is watertight and manifold. The residuals stay at round-off and do
-not grow with the length: there is no drift. The time does grow. One step costs about N^1.8 in the facets of the
-running body (0.09 s at 3 700 facets, 2.0 s at 22 000), so a chain costs about N^2.8; see *Performance*. The
+not grow with the length: there is no drift. One step costs about N^1.2 in the facets of the running body (0.027 s
+at 3 700 facets, 0.22 s at 22 000). Before the fix of *Performance* it was N^1.8 (2.0 s at 22 000), and the 49-step
+chains took 35 s and 40 s. The
 regression tier, `src/tests/fossil_test_boolean_csg.f90`, runs 4-operation chains of both kinds.
+
+### Performance
+
+`src/tests/validation/fossil_val_boolean_perf.f90` times a boolean (best of 3, -O2) against the facet count:
+
+| Case | Facets (A + B) | Time | µs per facet | Before (#63) |
+|---|---|---|---|---|
+| sphere 16³ − small cylinder | 1 656 | 0.021 s | 12.9 | 0.049 s |
+| sphere 32³ − small cylinder | 5 688 | 0.053 s | 9.4 | 0.18 s |
+| sphere 64³ − small cylinder | 22 440 | 0.19 s | 8.4 | 0.76 s |
+| sphere 96³ − small cylinder | 50 808 | 0.43 s | 8.4 | 1.81 s |
+| sphere 16³ − moved copy | 2 680 | 0.064 s | 23.8 | 0.12 s |
+| sphere 32³ − moved copy | 10 744 | 0.26 s | 23.8 | 0.56 s |
+| sphere 64³ − moved copy | 44 248 | 0.80 s | 18.1 | 2.26 s |
+| sphere 96³ − moved copy | 100 984 | 1.65 s | 16.4 | 5.51 s |
+| wrapped bunny − wrapped dragon (each op) | 25 958 | 1.1–1.2 s | 42–46 | 2.7–2.8 s |
+
+The cost per facet is flat in N: the boolean is linear in practice. Selection dominated (about 95 % of the time).
+For every sub-triangle it computed the winding number of both surfaces, although only the other surface's decides,
+and the one of its own surface, at a point lying on that surface, is the expensive query. It also ran an unbounded
+closest-point search for the geometric shared test. Selection now computes only the other surface's winding number,
+none for a shared sub-triangle, and the search stops at the test's own bound, 1e-6 of the longest edge
+(`distance_tree_with_region(max_distance2=)`): same decisions, 2.4–4.2× faster. What remains is mostly the winding
+number queries, one per sub-triangle. Flood-filling the side over the uncut facets would skip most of them; it was not
+done, because one wrong query would then misplace a whole patch.
 
 ### Defects found by the harness
 

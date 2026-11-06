@@ -125,11 +125,11 @@ contains
 
    subroutine tag_and_select(arr, sub_facet, sub_owner, sub_source, facet_a, tree_a, facet_b, tree_b, &
                              op, kept_facet, status)
-   !< For each sub-triangle, query both WN fields at its centroid, apply the
-   !< op-specific selection rule, emit the keepers into `kept_facet`.
+   !< For each sub-triangle, query the other surface's WN field at its centroid (unless it is shared),
+   !< apply the op-specific selection rule, emit the keepers into `kept_facet`.
    !<
    !< Per-sub-triangle WN query is the dominant cost: one `winding_number`
-   !< call per sub-triangle per surface. The hierarchical Barnes-Hut path in
+   !< call per sub-triangle, against the other surface only. The hierarchical Barnes-Hut path in
    !< `fossil_winding_number` keeps each call sub-linear in facet count, so
    !< the boolean's overall cost is approximately
    !<     O(N log N)  where N = total sub-triangles.
@@ -150,6 +150,7 @@ contains
    type(wn_node_t), allocatable                           :: cache_a(:), cache_b(:) !< Winding-number caches, built once.
    logical                                                :: in_a, in_b, keep, flip
    type(vector_R8P)                                       :: c
+   real(R8P)                                              :: max_edge_a, max_edge_b !< Longest edges.
 
    n_sub = size(sub_facet, dim=1)
    ! Build each operand's fast-winding-number cache once (issue #29): the per-call rebuild made
@@ -158,6 +159,7 @@ contains
    call tree_b%build_winding_payload(facet=facet_b, wn=cache_b)
    if (.not. allocated(cache_a)) allocate(cache_a(0:-1))
    if (.not. allocated(cache_b)) allocate(cache_b(0:-1))
+   max_edge_a = longest_edge(facet_a) ; max_edge_b = longest_edge(facet_b)
    cap = max(64_I4P, n_sub)
    allocate(buf(cap))
    used = 0_I4P
@@ -166,8 +168,6 @@ contains
       ! Centroid in 3D — the facet's `centroid` is set by compute_metrix,
       ! which arrangement_retriangulate calls on every emitted sub-facet.
       c    = sub_facet(k)%centroid
-      wn_a = winding_number(facet=facet_a, tree=tree_a, wn=cache_a, point=c)
-      wn_b = winding_number(facet=facet_b, tree=tree_b, wn=cache_b, point=c)
 
       ! Detect "shared boundary" sub-triangles: those lying inside a facet of the OTHER surface that the
       ! arrangement classified coplanar with their parent (exact orient3d pair classification with the
@@ -184,12 +184,25 @@ contains
          if (shared) then
             orient_dot = sub_facet(k)%normal%dotproduct(rhs=arr%facet(partner)%normal)
          elseif (sub_owner(k) == 1_I4P) then
-            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_b, other_tree=tree_b, orient_dot=orient_dot)
+            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_b, other_tree=tree_b, &
+                                        max_edge=max_edge_b, orient_dot=orient_dot)
          else
-            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_a, other_tree=tree_a, orient_dot=orient_dot)
+            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_a, other_tree=tree_a, &
+                                        max_edge=max_edge_a, orient_dot=orient_dot)
          endif
-         in_a = (wn_a > WN_INSIDE_THRESHOLD)
-         in_b = (wn_b > WN_INSIDE_THRESHOLD)
+         ! Only the side of the OTHER surface enters the selection (apply_selection reads in_b for A's
+         ! sub-triangles, in_a for B's), and none when shared: one winding number at most (issue #63; both
+         ! were computed for every sub-triangle, and the queries are most of the boolean's time).
+         in_a = .false. ; in_b = .false.
+         if (.not. shared) then
+            if (sub_owner(k) == 1_I4P) then
+               wn_b = winding_number(facet=facet_b, tree=tree_b, wn=cache_b, point=c)
+               in_b = (wn_b > WN_INSIDE_THRESHOLD)
+            else
+               wn_a = winding_number(facet=facet_a, tree=tree_a, wn=cache_a, point=c)
+               in_a = (wn_a > WN_INSIDE_THRESHOLD)
+            endif
+         endif
 
          call apply_selection(op=op, owner=sub_owner(k), in_a=in_a, in_b=in_b, &
                               shared=shared, orient_dot=orient_dot, &
@@ -339,7 +352,21 @@ contains
    endselect
    endsubroutine apply_selection
 
-   function is_on_other_surface(sub, other_facet, other_tree, orient_dot) result(yes)
+   pure function longest_edge(facet) result(l)
+   !< Longest edge of a facet set.
+   type(facet_object), intent(in) :: facet(:) !< Facets.
+   real(R8P)                      :: l        !< Length.
+   integer(I4P)                   :: i        !< Counter.
+   type(vector_R8P)               :: d        !< Third edge.
+
+   l = 0._R8P
+   do i = 1, size(facet, dim=1)
+      d = facet(i)%vertex(3) - facet(i)%vertex(2)
+      l = max(l, facet(i)%E12%normL2(), facet(i)%E13%normL2(), d%normL2())
+   enddo
+   endfunction longest_edge
+
+   function is_on_other_surface(sub, other_facet, other_tree, max_edge, orient_dot) result(yes)
    !< True iff `sub`'s centroid lies on the OTHER surface (within tolerance)
    !< AND the closest other-surface facet's normal is (anti-)parallel to `sub`'s
    !< normal. Returns the dot product of normals via `orient_dot` for
@@ -360,6 +387,7 @@ contains
    type(facet_object),     intent(in)         :: sub
    type(facet_object),     intent(in)         :: other_facet(:)
    type(aabb_tree_object), intent(in), target :: other_tree
+   real(R8P),              intent(in)         :: max_edge     !< Longest edge of the other surface.
    real(R8P),              intent(out)        :: orient_dot
    logical                                    :: yes
    real(R8P)                                  :: distance_sq, plane_dist, edge_len
@@ -373,9 +401,12 @@ contains
    distance_sq = MaxR8P
    closest_id  = 0_I4P
    region_id   = 0_I4P
+   ! Bounded search (issue #63): only a facet within SHARED_NEAR_TOL of its longest edge can pass, and that edge is
+   ! at most the longest edge of the other surface; an unbounded closest-point search per sub-triangle was most of
+   ! the selection time on pairs of large bodies.
    call other_tree%distance_tree_with_region(facet=other_facet, point=sub%centroid, &
                                               distance=distance_sq, closest_facet=closest_id, &
-                                              closest_region=region_id)
+                                              closest_region=region_id, max_distance2=(SHARED_NEAR_TOL * max_edge)**2)
    if (closest_id <= 0_I4P .or. closest_id > size(other_facet, dim=1)) return
    associate(g => other_facet(closest_id))
       dc = g%vertex(3) - g%vertex(2)
