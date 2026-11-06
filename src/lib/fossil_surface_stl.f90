@@ -1177,6 +1177,10 @@ contains
          self%facets_number = facets_in_number
          call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels(), &
                            aabb_tree_kind=self%aabb%get_tree_kind())
+         if (present(remainder)) then ! the remainder keeps the header and the patch names (issue #66)
+            remainder%header = self%header
+            if (allocated(self%patch_names)) remainder%patch_names = self%patch_names
+         endif
          if (present(remainder)) call remainder%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels(), &
                                                         aabb_tree_kind=self%aabb%get_tree_kind())
       endif
@@ -5649,9 +5653,16 @@ contains
    integer(I4P)                                    :: f        !< Counter.
    integer(I4P)                                    :: istat    !< Allocation status.
    character(len=256)                              :: msg      !< Allocation error message.
+   integer(I4P), allocatable                       :: pmap(:)  !< Other's patch -> self's patch.
 
    if (present(status)) status = STATUS_OK
    if (other%facets_number > 0) then
+      ! patches (issue #66): other's patch ids are mapped into self's table by name (equal names merge)
+      call sync_patch_names(self)
+      allocate(pmap(other%get_patches_number()))
+      do f = 1, size(pmap)
+         pmap(f) = find_or_add_patch(self%patch_names, other%patch_name(f))
+      enddo
       if (self%facets_number > 0) then
          allocate(facet(1:self%facets_number + other%facets_number), stat=istat, errmsg=msg)
          if (istat /= 0) then
@@ -5663,6 +5674,7 @@ contains
          enddo
          do f=1, other%facets_number
             facet(self%facets_number+f) = other%facet(f)
+            facet(self%facets_number+f)%patch = pmap(max(1_I4P, min(other%facet(f)%patch, size(pmap, kind=I4P))))
          enddo
          call move_alloc(from=facet, to=self%facet)
          self%facets_number = self%facets_number + other%facets_number
@@ -5674,6 +5686,7 @@ contains
          endif
          do f=1, other%facets_number
             self%facet(f) = other%facet(f)
+            self%facet(f)%patch = pmap(max(1_I4P, min(other%facet(f)%patch, size(pmap, kind=I4P))))
          enddo
          self%facets_number = other%facets_number
       endif
@@ -5767,6 +5780,7 @@ contains
    integer(I4P)                       :: max_edges_, n_filled, n_skipped, n_open, k, ist, n_new, cursor
    real(R8P)                          :: max_size_, diag, loop_diag
    type(facet_object),    allocatable :: patches(:)
+   integer(I4P)                       :: pid     !< Patch of the filled facets (issue #66).
 
    max_edges_ = 200_I4P   ; if (present(max_hole_edges)) max_edges_ = max_hole_edges
    max_size_  = 0.1_R8P   ; if (present(max_hole_size))  max_size_  = max_hole_size
@@ -5798,6 +5812,11 @@ contains
             if (fst /= 0_I4P) write(stderr, '(A,I0,A)') 'WARNING: fill_holes: fairing failed (CG status ', fst, &
                                                         '), the refined patch is used unfaired'
          endif
+         ! the new facets take the patch of the hole's boundary when it is one patch, else the patch 'filled'
+         call sync_patch_names(self)
+         pid = self%facet(loops(k)%owner(1))%patch
+         if (any(self%facet(loops(k)%owner(:))%patch /= pid)) pid = find_or_add_patch(self%patch_names, 'filled')
+         patch(:)%patch = pid
          patches = [patches, patch]
          n_filled = n_filled + 1_I4P
       enddo

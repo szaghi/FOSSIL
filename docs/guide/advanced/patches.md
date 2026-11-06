@@ -23,6 +23,20 @@ them as named `solid <name> … endsolid` blocks of one ASCII STL, or as one STL
 
 Before issue #66 the ASCII reader stopped with "malformed STL" at the first `endsolid` of a multi-solid file.
 
+## Through the pipeline
+
+The patch id travels with the facet, so every operation that keeps or copies facets keeps it:
+
+- `sanitize`: degenerate and duplicate facets are removed with their ids; of two duplicates in different patches the
+  first one in the file wins.
+- `rotate`, `translate`, `mirror`, `resize` move vertices only.
+- `clip` keeps the patch of every facet, and the remainder keeps the name table.
+- `merge_solids(other)` maps `other`'s patches into the surface's table by name: equal names merge, new names are
+  appended.
+- `fill_holes` gives the new facets the patch of the hole's boundary when every boundary facet is in one patch, and a
+  patch named `filled` otherwise (a hole across a wall/inlet edge has no single right answer; the caller can
+  `set_patch` it).
+
 ## API
 
 See [Patches](/guide/api/surface-stl-object#patches) in the API reference.

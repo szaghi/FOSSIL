@@ -190,6 +190,11 @@ call surface%set_patch(facets=[1_I4P, 2_I4P], name='heated')
 | `facet_patch(f)` | Patch of facet `f` (0 out of range). Elemental. |
 | `set_patch(facets, name)` | Move the facets to the patch `name`, created if new. |
 
+Every operation keeps the patch of the facets it keeps; `merge_solids` merges
+the name tables by name, and `fill_holes` gives new facets the patch of the
+hole's boundary, or the patch `filled` when the boundary spans several
+([details](/guide/advanced/patches#through-the-pipeline)).
+
 **Example.** Three files as three patches, saved as one multi-solid file.
 
 ```fortran
