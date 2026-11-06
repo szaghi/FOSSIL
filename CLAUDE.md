@@ -296,7 +296,11 @@ fobis fetch            # --update to re-fetch
   Faces coplanar by construction but off by round-off (rotated) cross
   exactly: the result keeps the slivers, watertight with the right volume,
   and its rounding to doubles can fold a sliver by an ulp (self-intersecting
-  pairs: the harness reports them for such inputs, `near_degenerate`).
+  pairs; the harness allows them only up to a depth of 1e-12 of the diagonal,
+  measured <= 1e-15). Opt-in `boolean(..., weld=tol)`: B's vertices within
+  tol of A's take A's coordinates bit for bit (unique nearest, never two
+  onto one, B kept non-degenerate; `weld_vertices` in `fossil_boolean`),
+  which merges inputs that share vertices up to round-off; default off.
   Contact-only and touching-symdiff results are non-manifold by definition.
   Validated by identities that need no analytic answer (test-side harness
   `src/tests/fossil_boolean_harness.f90`: volume, second moments, area,

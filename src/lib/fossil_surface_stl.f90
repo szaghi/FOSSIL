@@ -60,7 +60,7 @@ use fossil_remesh, only : compute_remesh => isotropic_remesh, &
 use fossil_boolean, only : compute_boolean => boolean_compute, &
                            BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF, &
                            BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, &
-                           BOOL_STATUS_EMPTY_INPUT
+                           BOOL_STATUS_EMPTY_INPUT, weld_vertices
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 use penf, only : I4P, I8P, R8P, MaxR8P, str
@@ -3546,7 +3546,7 @@ contains
    call compute_self_intersections(facet=self%facet, tree=self%aabb, pairs=pairs, status=status)
    endsubroutine find_self_intersections
 
-   subroutine boolean(self, other, op, status)
+   subroutine boolean(self, other, op, status, weld)
    !< Boolean operation against another surface (issue #18 §1.1).
    !<
    !< On success, `self` is replaced by the result `op(self, other)`. All four
@@ -3585,13 +3585,34 @@ contains
    !< an edge or at a point, and a symmetric difference whose two pieces
    !< touch along the crossing curves, give non-manifold results by
    !< definition (with the right volume).
+   !<
+   !< `weld` (opt-in, default off): before the arrangement, every vertex of B
+   !< within `weld` of a vertex of A takes that vertex's coordinates bit for
+   !< bit, when it is B's vertex's unique nearest, no other vertex of B goes
+   !< to it, and no facet of B becomes degenerate. Inputs that share vertices
+   !< up to round-off then merge (the old snap's output) and the arrangement
+   !< stays exact; without it they give an exact result with slivers.
    class(surface_stl_object),     intent(inout)        :: self     !< Surface A; replaced by `op(A, B)` on success.
    class(surface_stl_object),     intent(in)           :: other    !< Surface B.
    integer(I4P),                  intent(in)           :: op       !< BOOL_UNION / BOOL_INTERSECT / BOOL_DIFFERENCE / BOOL_SYMDIFF.
    integer(I4P),                  intent(out), optional :: status  !< BOOL_STATUS_*.
+   real(R8P),                     intent(in),  optional :: weld    !< Opt-in weld distance (issue #65), default off.
    type(facet_object), allocatable                     :: kept(:)
    integer(I4P)                                        :: bool_status
+   type(surface_stl_object)                            :: welded  !< B with its vertices welded onto A's.
 
+   if (present(weld)) then
+      if (weld > 0._R8P .and. self%facets_number > 0 .and. other%facets_number > 0) then
+         call weld_onto(a=self, b=other, tol=weld, bw=welded)
+         call compute_boolean(facet_a=self%facet,  tree_a=self%aabb, &
+                              facet_b=welded%facet, tree_b=welded%aabb, &
+                              op=op, kept_facet=kept, status=bool_status)
+         if (present(status)) status = bool_status
+         if (bool_status /= BOOL_STATUS_OK) return
+         call self%adopt_facets(facets=kept)
+         return
+      endif
+   endif
    call compute_boolean(facet_a=self%facet,  tree_a=self%aabb, &
                         facet_b=other%facet, tree_b=other%aabb, &
                         op=op, kept_facet=kept, status=bool_status)
@@ -3602,6 +3623,123 @@ contains
    ! AABB tree, connectivity, and pseudo-normals are rebuilt for queries.
    call self%adopt_facets(facets=kept)
    endsubroutine boolean
+
+   subroutine weld_onto(a, b, tol, bw)
+   !< The opt-in weld of `boolean` (issue #65): a copy of b whose vertices within `tol` of a vertex of a take that
+   !< vertex's coordinates bit for bit (`weld_vertices`: the unique nearest, never two vertices of b onto one of a). A
+   !< weld that would make a facet of b degenerate (two equal vertices) is undone, until none does. It is the only
+   !< snapping that keeps the arrangement exact: the welded vertices are then the same input vertex for both surfaces.
+   class(surface_stl_object), intent(in)  :: a, b !< Surfaces.
+   real(R8P),                 intent(in)  :: tol  !< Weld distance.
+   type(surface_stl_object),  intent(out) :: bw   !< Welded copy of b.
+   real(R8P), allocatable                 :: xa(:, :), xb(:, :)
+   integer(I4P), allocatable              :: map(:), vid(:, :)
+   type(facet_object), allocatable        :: f(:)
+   integer(I4P)                           :: i, k, l
+   logical                                :: changed
+   real(R8P)                              :: y(3, 3)
+
+   call unique_vertices(a, xa)
+   call unique_vertices(b, xb, vid)
+   call weld_vertices(xa, xb, tol, map)
+   changed = .true.
+   do while (changed)
+      changed = .false.
+      do i = 1, b%facets_number
+         do k = 1, 3
+            y(:, k) = xb(:, vid(k, i))
+            if (map(vid(k, i)) > 0_I4P) y(:, k) = xa(:, map(vid(k, i)))
+         enddo
+         if (all(y(:, 1) == y(:, 2)) .or. all(y(:, 2) == y(:, 3)) .or. all(y(:, 3) == y(:, 1))) then
+            do k = 1, 3
+               if (map(vid(k, i)) > 0_I4P) then
+                  map(vid(k, i)) = 0_I4P ; changed = .true.
+               endif
+            enddo
+         endif
+      enddo
+   enddo
+   allocate(f(b%facets_number))
+   do i = 1, b%facets_number
+      f(i) = b%facet(i)
+      do k = 1, 3
+         l = vid(k, i)
+         if (map(l) > 0_I4P) then
+            f(i)%vertex(k)%x = xa(1, map(l)) ; f(i)%vertex(k)%y = xa(2, map(l)) ; f(i)%vertex(k)%z = xa(3, map(l))
+         endif
+      enddo
+   enddo
+   call bw%adopt_facets(facets=f)
+   contains
+      subroutine unique_vertices(s, x, ids)
+      !< Distinct vertex coordinates of s (exact), and the index of each facet vertex among them.
+      class(surface_stl_object),           intent(in)  :: s
+      real(R8P), allocatable,              intent(out) :: x(:, :)
+      integer(I4P), allocatable, optional, intent(out) :: ids(:, :)
+      real(R8P), allocatable                           :: all_x(:, :)
+      integer(I4P), allocatable                        :: o(:), w(:)
+      integer(I4P)                                     :: n, m, ii, kk, width, lo, mid, hi, p, q, r
+
+      n = 3_I4P * s%facets_number
+      allocate(all_x(3, n))
+      do ii = 1, s%facets_number
+         do kk = 1, 3
+            all_x(:, 3 * (ii - 1) + kk) = [s%facet(ii)%vertex(kk)%x, s%facet(ii)%vertex(kk)%y, s%facet(ii)%vertex(kk)%z]
+         enddo
+      enddo
+      o = [(ii, ii = 1, n)] ; allocate(w(n))
+      width = 1_I4P
+      do while (width < n)
+         lo = 1_I4P
+         do while (lo <= n)
+            mid = min(lo + width - 1_I4P, n) ; hi = min(lo + 2_I4P * width - 1_I4P, n)
+            p = lo ; q = mid + 1_I4P ; r = lo
+            do while (p <= mid .and. q <= hi)
+               if (lexless(all_x(:, o(q)), all_x(:, o(p)))) then
+                  w(r) = o(q) ; q = q + 1_I4P
+               else
+                  w(r) = o(p) ; p = p + 1_I4P
+               endif
+               r = r + 1_I4P
+            enddo
+            do while (p <= mid)
+               w(r) = o(p) ; p = p + 1_I4P ; r = r + 1_I4P
+            enddo
+            do while (q <= hi)
+               w(r) = o(q) ; q = q + 1_I4P ; r = r + 1_I4P
+            enddo
+            lo = lo + 2_I4P * width
+         enddo
+         o = w
+         width = 2_I4P * width
+      enddo
+      allocate(x(3, n))
+      if (present(ids)) allocate(ids(3, s%facets_number))
+      m = 0_I4P
+      do ii = 1, n
+         if (m == 0_I4P) then
+            m = 1_I4P ; x(:, 1) = all_x(:, o(ii))
+         elseif (any(all_x(:, o(ii)) /= x(:, m))) then
+            m = m + 1_I4P ; x(:, m) = all_x(:, o(ii))
+         endif
+         if (present(ids)) ids(mod(o(ii) - 1_I4P, 3_I4P) + 1_I4P, (o(ii) - 1_I4P) / 3_I4P + 1_I4P) = m
+      enddo
+      x = x(:, 1:m)
+      endsubroutine unique_vertices
+
+      pure function lexless(u, v) result(less)
+      real(R8P), intent(in) :: u(3), v(3)
+      logical               :: less
+
+      if (u(1) /= v(1)) then
+         less = u(1) < v(1)
+      elseif (u(2) /= v(2)) then
+         less = u(2) < v(2)
+      else
+         less = u(3) < v(3)
+      endif
+      endfunction lexless
+   endsubroutine weld_onto
 
    subroutine resolve_self_intersections(self, status)
    !< Self-boolean union — closes §1.2's deferred resolution path.

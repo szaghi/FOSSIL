@@ -54,6 +54,7 @@ private
 public :: BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF
 public :: BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, BOOL_STATUS_EMPTY_INPUT
 public :: boolean_compute
+public :: weld_vertices
 
 ! Op codes — the API surface for `surface%boolean(other, op, status)`.
 integer(I4P), parameter :: BOOL_UNION      = 1_I4P  !< A ∪ B  : keep everything that is inside A or inside B.
@@ -440,6 +441,89 @@ contains
       enddo
       endfunction less
    endsubroutine sort_keys
+
+   subroutine weld_vertices(xa, xb, tol, map)
+   !< The opt-in weld of `surface%boolean(weld=)` (issue #65): map(j) = the point of xa (3, na) nearest to xb(:, j)
+   !< (3, nb) within distance `tol`, or 0. A point of xb with two nearest points of xa at the same distance is not
+   !< welded, nor are two points of xb that would go to one point of xa (the weld never merges B's vertices). The
+   !< points of each set are distinct. Search: xa sorted by x, a window of +-tol.
+   real(R8P),                 intent(in)  :: xa(:, :), xb(:, :) !< Points of A and of B.
+   real(R8P),                 intent(in)  :: tol                !< Weld distance.
+   integer(I4P), allocatable, intent(out) :: map(:)             !< Point of A for each point of B, 0 if none.
+   integer(I4P), allocatable              :: ord(:), used(:)
+   integer(I4P)                           :: na, nb, j, lo, hi, mid, k, best
+   real(R8P)                              :: d2, best2
+   logical                                :: tie
+
+   na = size(xa, dim=2) ; nb = size(xb, dim=2)
+   allocate(map(nb), used(max(1_I4P, na)))
+   map = 0_I4P ; used = 0_I4P
+   if (na == 0_I4P .or. tol <= 0._R8P) return
+   ord = sort_by_x(xa)
+   do j = 1, nb
+      lo = 1_I4P ; hi = na + 1_I4P ! first index with x >= xb(1, j) - tol
+      do while (lo < hi)
+         mid = (lo + hi) / 2_I4P
+         if (xa(1, ord(mid)) < xb(1, j) - tol) then
+            lo = mid + 1_I4P
+         else
+            hi = mid
+         endif
+      enddo
+      best = 0_I4P ; best2 = tol * tol ; tie = .false.
+      do k = lo, na
+         if (xa(1, ord(k)) > xb(1, j) + tol) exit
+         d2 = sum((xa(:, ord(k)) - xb(:, j))**2)
+         if (d2 < best2 .or. (best == 0_I4P .and. d2 <= best2)) then
+            best = ord(k) ; best2 = d2 ; tie = .false.
+         elseif (d2 == best2 .and. best /= 0_I4P) then
+            tie = .true.
+         endif
+      enddo
+      if (best > 0_I4P .and. .not. tie) then
+         map(j) = best ; used(best) = used(best) + 1_I4P
+      endif
+   enddo
+   do j = 1, nb
+      if (map(j) > 0_I4P) then
+         if (used(map(j)) > 1_I4P) map(j) = 0_I4P
+      endif
+   enddo
+   contains
+      function sort_by_x(x) result(o)
+      real(R8P), intent(in)     :: x(:, :)
+      integer(I4P), allocatable :: o(:), w(:)
+      integer(I4P)              :: n, width, a, m, b, i, jj, kk
+
+      n = size(x, dim=2)
+      o = [(i, i = 1, n)] ; allocate(w(n))
+      width = 1_I4P
+      do while (width < n)
+         a = 1_I4P
+         do while (a <= n)
+            m = min(a + width - 1_I4P, n) ; b = min(a + 2_I4P * width - 1_I4P, n)
+            i = a ; jj = m + 1_I4P ; kk = a
+            do while (i <= m .and. jj <= b)
+               if (x(1, o(jj)) < x(1, o(i))) then
+                  w(kk) = o(jj) ; jj = jj + 1_I4P
+               else
+                  w(kk) = o(i) ; i = i + 1_I4P
+               endif
+               kk = kk + 1_I4P
+            enddo
+            do while (i <= m)
+               w(kk) = o(i) ; i = i + 1_I4P ; kk = kk + 1_I4P
+            enddo
+            do while (jj <= b)
+               w(kk) = o(jj) ; jj = jj + 1_I4P ; kk = kk + 1_I4P
+            enddo
+            a = a + 2_I4P * width
+         enddo
+         o = w
+         width = 2_I4P * width
+      enddo
+      endfunction sort_by_x
+   endsubroutine weld_vertices
 
    pure subroutine apply_selection(op, owner, in_a, in_b, shared, orient_dot, &
                                    keep, flip, status)
