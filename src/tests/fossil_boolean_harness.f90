@@ -21,12 +21,16 @@ module fossil_boolean_harness
 !<   of the two facets' penetrations through the other's plane (the lesser of the largest distances on either side),
 !<   relative to the joint diagonal. A fold is short (a sliver through a shared vertex) or shallow (two facets meeting
 !<   along a near-common edge); a real crossing is both long and deep. Validity requires every depth <= `TOL_FOLD`
-!<   (1e-12), so a real defect (depth of the order of a facet) still fails.
+!<   (1e-12), so a real defect (depth of the order of a facet) still fails. Every pair reported by
+!<   `find_self_intersections` (Moller's floating-point test for pairs without a shared vertex) is confirmed by the exact
+!<   `pair_cut` on the result's doubles first: a crossing or a coplanar overlap counts, a false positive does not.
 !< Pass criterion (issue #33's): a result with status OK satisfies every identity that applies; a non-OK status is
 !< allowed and counted. Residuals are relative to V(A) + V(B), |C(A)| + |C(B)|, area(A) + area(B), the joint diagonal.
 use fossil,                 only : surface_stl_object, facet_object, intersection_pair_t, BOOL_UNION, BOOL_INTERSECT, &
                                    BOOL_DIFFERENCE, BOOL_SYMDIFF, BOOL_STATUS_OK, SIGN_SOLID_ANGLE
+use fossil_implicit_points, only : implicit_point_t
 use fossil_mass_properties, only : moments_accumulator_t, accumulate_tetrahedron
+use fossil_tritri_exact,    only : pair_cut, PAIR_CROSSING, PAIR_COPLANAR
 use penf,                   only : I4P, I8P, R8P
 use vecfor,                 only : vector_R8P
 
@@ -59,7 +63,7 @@ type :: boolean_report_t
 endtype boolean_report_t
 
 contains
-   subroutine check_boolean(a, b, rep, npoints, seed, area_identity, contact, corrupt)
+   subroutine check_boolean(a, b, rep, npoints, seed, area_identity, contact, corrupt, weld)
    !< Run the four ops of a against b and fill the report. `corrupt` (negative control only): drop the first facet of
    !< the result of that op before checking it.
    type(surface_stl_object), intent(in)  :: a, b          !< Inputs (closed, outward).
@@ -69,6 +73,7 @@ contains
    logical,                  intent(in)  :: area_identity !< Check the area identity (no coplanar overlaps).
    logical,                  intent(in)  :: contact       !< The inputs touch (validity not required).
    integer(I4P), optional,   intent(in)  :: corrupt       !< Op whose result is damaged (negative control).
+   real(R8P),    optional,   intent(in)  :: weld          !< Passed to `boolean` (issue #65).
    type(surface_stl_object)              :: r, ab         !< Result, A and B merged.
    type(vector_R8P)                      :: bmin, bmax, p !< Joint box, a point.
    real(R8P)                             :: o(3), diag, ca(6), cb(6), cr(6, 4), ar(4), area_ab, dl, du !< Work.
@@ -100,7 +105,7 @@ contains
    rep%member_n = n
    do k = 1, 4
       r = a
-      call r%boolean(other=b, op=OPS(k), status=st)
+      call r%boolean(other=b, op=OPS(k), status=st, weld=weld)
       rep%status(k) = st
       if (st /= BOOL_STATUS_OK) cycle
       if (present(corrupt)) then
@@ -131,8 +136,10 @@ contains
       rep%validity_checked(k) = k <= 3 .and. .not. contact .and. rep%facets(k) > 0
       if (rep%validity_checked(k)) then
          call r%find_self_intersections(pairs=pairs)
-         rep%self_pairs(k) = size(pairs)
+         rep%self_pairs(k) = 0
          do i = 1, size(pairs)
+            if (.not. exact_crossing(r, pairs(i)%a, pairs(i)%b)) cycle ! a false positive of the floating test
+            rep%self_pairs(k) = rep%self_pairs(k) + 1
             rep%fold_depth(k) = max(rep%fold_depth(k), &
                                     min(pair_depth(r, pairs(i)%a, pairs(i)%b), &
                                         norm2([pairs(i)%q%x - pairs(i)%p%x, pairs(i)%q%y - pairs(i)%p%y, &
@@ -193,6 +200,20 @@ contains
          sum(rep%member_bad), '/', rep%member_n, ' self ', sum(rep%self_pairs), ' depth ', maxval(rep%fold_depth), &
          ' pass ', boolean_pass(rep)
    endsubroutine print_report
+
+   function exact_crossing(r, ia, ib) result(yes)
+   !< Facets ia and ib of r share a segment of positive length or overlap coplanar (exact, `pair_cut`).
+   type(surface_stl_object), intent(in) :: r      !< Surface.
+   integer(I4P),             intent(in) :: ia, ib !< Facets.
+   logical                              :: yes    !< Real crossing.
+   type(facet_object), pointer          :: f, g
+   type(implicit_point_t)               :: p, q
+   integer(I4P)                         :: kind
+
+   f => r%facet_at(ia) ; g => r%facet_at(ib)
+   call pair_cut(f%vertex, g%vertex, kind, p, q)
+   yes = kind == PAIR_CROSSING .or. kind == PAIR_COPLANAR
+   endfunction exact_crossing
 
    function pair_depth(r, ia, ib) result(d)
    !< Depth of the crossing of facets ia and ib of r: for each facet, the lesser of its vertices' largest distances on

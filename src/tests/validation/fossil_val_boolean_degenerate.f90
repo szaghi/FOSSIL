@@ -8,9 +8,9 @@
 !< 5. contacts of the cube with a translated cube: at one vertex, along one edge, on a face patch;
 !< 6. coincident curved faces: the sphere against the same sphere re-facetted (25^3 samples).
 !< The harness (fossil_boolean_harness) checks every identity of the four ops. One line per case, then the outcome map:
-!< OK statuses, passes, and for a failing case the identities it misses. Every case must pass except the curved body
-!< against itself moved by 1e-10 .. 1e-6 (translated) or 1e-10 .. 1e-4 rad (rotated), the documented limit of
-!< booleans.md: features between the 1e-10 snap and the 1e-9 tolerances of the retriangulation (measured, not gated).
+!< OK statuses, passes, and for a failing case the identities it misses. Every case must pass (since issue #65: the
+!< exact arrangement closed the band 1e-10 .. 1e-6 of the curved bodies, where the 1e-10 snap and the 1e-9 tolerances
+!< of the retriangulation disagreed). The dense sweep is fossil_val_boolean_sweep.
 program fossil_val_boolean_degenerate
 
 use fossil,                 only : surface_stl_object, BOOL_STATUS_OK
@@ -41,13 +41,13 @@ do body = 1, 2
    do i = 1, size(OFFSETS)
       call make(body, b) ; call b%translate(delta=OFFSETS(i) * dir) ; call b%analyze
       write(label, '(2A,ES7.0)') trim(bname), ' translated ', OFFSETS(i)
-      call run(label, a, b, OFFSETS(i) >= 1e-8_R8P, .false., body == 1 .or. OFFSETS(i) >= 1e-6_R8P .or. OFFSETS(i) < 1e-10_R8P)
+      call run(label, a, b, OFFSETS(i) >= 1e-8_R8P, .false., .true.)
    enddo
    ! 3. rotated copies
    do i = 1, size(ANGLES)
       call make(body, b) ; call b%rotate(axis=axis, angle=ANGLES(i)) ; call b%analyze
       write(label, '(2A,ES7.0)') trim(bname), ' rotated ', ANGLES(i)
-      call run(label, a, b, ANGLES(i) >= 1e-8_R8P, .false., body == 1 .or. ANGLES(i) >= 1e-4_R8P .or. ANGLES(i) < 1e-10_R8P)
+      call run(label, a, b, ANGLES(i) >= 1e-8_R8P, .false., .true.)
    enddo
    ! 4. nested, strictly inside
    call make(body, b) ; call b%resize(factor=vector_R8P(0.5_R8P, 0.5_R8P, 0.5_R8P), respect_centroid=.true.)
@@ -96,7 +96,7 @@ contains
    type(surface_stl_object), intent(in) :: a, b          !< Inputs.
    logical,                  intent(in) :: area_identity !< Check the area identity.
    logical,                  intent(in) :: contact       !< The inputs touch.
-   logical,                  intent(in) :: required      !< Must pass (outside the snap's range).
+   logical,                  intent(in) :: required      !< Must pass.
    type(boolean_report_t)               :: rep           !< Report.
    character(64)                        :: lab64         !< Padded label.
    integer(I4P)                         :: k             !< Counter.
@@ -120,9 +120,10 @@ contains
          print '(A,I0,A,I0,A,ES9.1)', '      op ', k, ': membership mismatches ', rep%member_bad(k), ', deviation ', &
                                      rep%dev_lower(k)
       if (rep%validity_checked(k)) then
-         if (.not. (rep%watertight(k) .and. rep%manifold(k) .and. rep%volume(k) > 0._R8P .and. rep%self_pairs(k) == 0)) &
-            print '(A,I0,A,2L2,ES10.2,A,I0)', '      op ', k, ': watertight, manifold, V ', rep%watertight(k), &
-                                            rep%manifold(k), rep%volume(k), ', self pairs ', rep%self_pairs(k)
+         if (.not. (rep%watertight(k) .and. rep%manifold(k) .and. rep%volume(k) > 0._R8P .and. &
+                    rep%fold_depth(k) <= 1.e-12_R8P)) &
+            print '(A,I0,A,2L2,ES10.2,A,I0,A,ES9.1)', '      op ', k, ': watertight, manifold, V ', rep%watertight(k), &
+                  rep%manifold(k), rep%volume(k), ', self pairs ', rep%self_pairs(k), ', fold depth ', rep%fold_depth(k)
       endif
    enddo
    endsubroutine run
