@@ -13,7 +13,7 @@
 #                                                       scripts/mesh2svg.py draws it into images/NAME.svg (issue #47)
 #   docs/examples/lib/*.f90    modules shared by the programs (fossil_fig: the scene writer), compiled first
 #   docs/examples/files/       input files, copied into the directory where the runs happen, with the test bodies
-#                              src/tests/{dragon,cube-01,naca0012-ascii}.stl
+#                              src/tests/{dragon,bunny,cube-01,naca0012-ascii}.stl
 #   docs/examples/snippets/    generated: <program>.f90 without the markers, and <program>-<region>.f90
 #   docs/examples/images/      generated: <ID>.svg and the casts (scripts/ansi2svg.py)
 #   docs/examples/output/      generated: <ID>.ansi, "$ COMMAND" then its output, the run directory shown as /home/user
@@ -71,7 +71,7 @@ done
 
 # runs, in the order of the files and of the lines
 if [ -d "$ex/files" ]; then cp -R "$ex/files/." "$run_dir/"; fi
-for body in dragon.stl cube-01.stl naca0012-ascii.stl; do cp "$root/src/tests/$body" "$run_dir/"; done # test bodies
+for body in dragon.stl bunny.stl cube-01.stl naca0012-ascii.stl; do cp "$root/src/tests/$body" "$run_dir/"; done # test bodies
 run() { # run [-s] ID COMMAND
   local show=0 status=0
   if [ "$1" = -s ]; then show=1; shift; fi

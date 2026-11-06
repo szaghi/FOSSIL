@@ -278,11 +278,22 @@ fobis fetch            # --update to re-fetch
   overlaps, shared edges and contacts are handled since issue #33 (exact
   orient3d pair classification in `fossil_tritri_exact`, coplanar cuts,
   T-junction closing). Residual: a 1e-10 relative on-plane snap (features
-  below it merge by design); validated on box pairs only
-  (`fossil_test_boolean_coplanar`, `fossil_test_boolean_stress`); contact-only
-  and touching-symdiff results are non-manifold by definition. Intersection
-  points must stay canonical constructions (same bits from every facet pair),
-  because the vertex weld compares coordinates exactly (`EPS` is 0).
+  below it merge by design); contact-only and touching-symdiff results are
+  non-manifold by definition. Intersection points must stay canonical
+  constructions (same bits from every facet pair), because the vertex weld
+  compares coordinates exactly (`EPS` is 0). Validated since issue #63 by
+  identities that need no analytic answer (test-side harness
+  `src/tests/fossil_boolean_harness.f90`: volume, second moments, area,
+  deviation, membership, validity): box pairs, curved bodies, the wrapped
+  bunny and dragon, near-degenerate cases, CSG chains up to 49 operations.
+  Open (owner decision): a curved body against a near-coincident copy whose
+  cuts land 1e-10..1e-8 of the facet size apart can come out with holes a
+  few 1e-9 wide and status OK: the retriangulation's fixed tolerances
+  (2-D merge 1e-10, on-segment 1e-9) disagree with the classification's
+  snap. "Shared" (coplanar overlap) is the exact classification's decision
+  (`coplanar_partner`), with a geometric fallback (normals parallel to
+  1e-15) for faces within the snap that the broad phase never pairs. The
+  selection queries only the other surface's winding number.
 - **`find_self_intersections`**: pairs sharing one vertex are classified exactly (issue #46); pairs sharing an edge
   are skipped, so two sheets crossing along a shared non-manifold edge are not detected, nor coplanar overlaps around
   a shared vertex (unit normals parallel to 1e-12 rad count as coplanar).

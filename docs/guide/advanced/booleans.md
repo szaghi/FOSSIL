@@ -133,6 +133,22 @@ four boolean ops produce:
 All three results match their analytic volume to FP precision (errors
 below 5e-16, in the captions).
 
+**Curved bodies.** The Stanford bunny and the dragon, closed by
+[`alpha_wrap`](/guide/advanced/alpha-wrap), united, then cut in half by a
+second boolean: the union intersected with a box holding the half y < 0.
+The flat section is part of the result. The caption gives the volume
+identity of the union, V(A ∪ B) + V(A ∩ B) − V(A) − V(B), relative to
+V(A) + V(B):
+
+![the union of the wrapped bunny and dragon cut in half by a second boolean, seen from the cut: the flat section through both bodies](../../examples/images/ref-boolean-wrapped.svg){.fossil-figure}
+
+**A CSG chain.** The unit cube drilled by nine cylinders, one difference
+per frame. Each step is checked against an independent boolean: the
+volume removed must be that of the cylinder's part inside the original
+cube. The caption gives the residual of each step:
+
+![the unit cube drilled by a 3 x 3 grid of cylinders, one difference per frame, each with its facet count, volume residual and watertightness](../../examples/images/anim-boolean-csg.svg){.fossil-figure}
+
 ### Coplanar faces
 
 Two unit cubes offset along x only: their y and z faces are coplanar and
@@ -347,12 +363,18 @@ gates its case, the sphere translated by 1e-6.
   constructions, but canonical ones (each built by one formula from
   lexicographically ordered inputs), so every facet that shares a point
   gets the same bits and the result welds exactly.
-- **What is validated.** Coplanar overlaps, shared edges and contacts are
-  tested on box pairs: a 6-case matrix of all four ops, axis-aligned and
-  rotated (`fossil_test_boolean_coplanar`), and 400 booleans on snapped
-  random box pairs, half of them rotated (`fossil_test_boolean_stress`),
-  all with analytic volumes. Curved meshes with coplanar patches have not
-  been stress-tested.
+- **What is validated.** Two kinds of check. Analytic volumes: box pairs with coplanar overlaps, shared edges
+  and contacts, a 6-case matrix of all four ops, axis-aligned and rotated (`fossil_test_boolean_coplanar`), and
+  416 booleans on snapped random box pairs (`fossil_val_boolean_stress`). Identities that hold for any pair (see
+  *Validation identities*): curved marching-cubes bodies, and the wrapped bunny against the wrapped dragon (84
+  pairs). Near-degenerate configurations: 31 cases. CSG chains of up to 49 operations. Every result with status
+  OK satisfied every identity, except the open band below.
+- **Near-coincident curved surfaces (open).** A curved body against a copy of itself moved so that the cuts land
+  between about 1e-10 and 1e-8 of the facet size apart can come out with holes a few 1e-9 wide. The status is OK,
+  and the volume, the moments and the membership are still right; `is_watertight()` is false. Measured on a 24³
+  sphere translated by 1e-8 and rotated by 1e-6 and 1e-10 rad, and on a 10³ sphere translated by 1e-6. The cause
+  is that the retriangulation's fixed tolerances disagree with the exact classification's snap (see
+  *Near-degenerate configurations*). Check `is_watertight()` on the result when the inputs may nearly coincide.
 - **Non-manifold results by definition.** Solids that touch only along an
   edge or at a point give a union (or difference) that is non-manifold
   there, and a symmetric difference whose two pieces `A \ B` and `B \ A`

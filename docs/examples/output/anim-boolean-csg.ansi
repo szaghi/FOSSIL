@@ -1,0 +1,11 @@
+$ anim_boolean_csg
+step 1: 500 facets, volume residual 1.6E-15, watertight T
+step 2: 960 facets, volume residual 7.8E-16, watertight T
+step 3: 1420 facets, volume residual 1.7E-15, watertight T
+step 4: 1880 facets, volume residual 2.0E-15, watertight T
+step 5: 2432 facets, volume residual 4.4E-16, watertight T
+step 6: 2932 facets, volume residual 7.8E-16, watertight T
+step 7: 3400 facets, volume residual 2.6E-15, watertight T
+step 8: 3924 facets, volume residual 1.7E-15, watertight T
+step 9: 4376 facets, volume residual 1.7E-15, watertight T
+worst step residual 2.6E-15
