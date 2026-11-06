@@ -143,3 +143,5 @@ jobs:
     - name: Deploy to GitHub Pages
       id: deployment
       uses: actions/deploy-pages@v4
+      with:
+        timeout: 1800000 # ms (default 600000): the Pages file sync of 759bc91 stayed at syncing_files past 10 min, twice
