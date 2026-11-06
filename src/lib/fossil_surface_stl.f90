@@ -1814,7 +1814,7 @@ contains
 
    recursive subroutine query_many(self, points, distances, closest_points, facets, features, feature_indexes, normals, bodies, &
                                    is_signed, sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, &
-                                   status, pose, curvatures, feature_distances)
+                                   status, pose, curvatures, feature_distances, patches)
    !< Batch rich query (issue #37): `query_point` for every point, OpenMP over the points.
    !<
    !< Every output after `distances` is optional (a caller pays only for what it asks); arrays are
@@ -1852,6 +1852,7 @@ contains
                                                                           !< and outputs.
    real(R8P),                 intent(out), optional :: feature_distances(:) !< Distance to the nearest feature edge [n] (#61).
    real(R8P),                 intent(out), optional :: curvatures(:,:)    !< Mean and Gaussian curvature at the foot [2, n].
+   integer(I4P),              intent(out), optional :: patches(:)         !< Patch of the closest facet [n] (issue #66).
    real(R8P), allocatable                           :: hv(:), kv(:)       !< Per-vertex mean and Gaussian curvature.
    type(vector_R8P)                                 :: cp, pn, cp2        !< Per-point closest point, normal, second foot.
    real(R8P)                                        :: rel_, foot_        !< Resolved tolerances.
@@ -1865,7 +1866,7 @@ contains
                            facets=facets, features=features, feature_indexes=feature_indexes, normals=normals, bodies=bodies, &
                            is_signed=is_signed, sign_algorithm=sign_algorithm, ambiguous=ambiguous, &
                            second_foot_points=second_foot_points, rel_tolerance=rel_tolerance, foot_tolerance=foot_tolerance, &
-                           status=status, curvatures=curvatures, feature_distances=feature_distances)
+                           status=status, curvatures=curvatures, feature_distances=feature_distances, patches=patches)
       if (present(status)) then
          if (status /= STATUS_OK) return
       endif
@@ -1897,6 +1898,7 @@ contains
    if (present(features)) bad = bad .or. size(features) /= n
    if (present(feature_indexes)) bad = bad .or. size(feature_indexes) /= n
    if (present(bodies)) bad = bad .or. size(bodies) /= n
+   if (present(patches)) bad = bad .or. size(patches) /= n
    if (present(ambiguous)) bad = bad .or. size(ambiguous) /= n
    bad = bad .or. bad_shape3(second_foot_points, n)
    if (present(curvatures)) bad = bad .or. size(curvatures, 1) /= 2 .or. size(curvatures, 2) /= n
@@ -1925,6 +1927,10 @@ contains
       if (present(feature_indexes)) feature_indexes(i) = fi
       if (present(normals)) normals(:, i) = [pn%x, pn%y, pn%z]
       if (present(bodies)) bodies(i) = b
+      if (present(patches)) then
+         patches(i) = 0_I4P
+         if (f >= 1_I4P .and. f <= self%facets_number) patches(i) = self%facet(f)%patch
+      endif
       if (present(curvatures)) curvatures(:, i) = foot_curvature(self, f, cp, hv, kv)
    enddo
    !$omp end parallel do
@@ -2480,7 +2486,8 @@ contains
    endsubroutine line_crossings_many_device
 
    recursive subroutine query_many_device(self, points, distances, closest_points, facets, features, feature_indexes, &
-                                          normals, bodies, is_signed, sign_algorithm, status, pose, feature_distances)
+                                          normals, bodies, is_signed, sign_algorithm, status, pose, feature_distances, &
+                                         patches)
    !< `query_many` on the device (issue #37): same arguments, outputs and defaults.
    !<
    !< Requires `enter_device` (else STATUS_INVALID_INPUT and a stderr message). The kernel always
@@ -2500,6 +2507,8 @@ contains
    integer(I4P),              intent(out), optional :: feature_indexes(:) !< Local edge/vertex indexes [n].
    real(R8P),                 intent(out), optional :: normals(:,:)       !< Pseudo-normals [3, n].
    integer(I4P),              intent(out), optional :: bodies(:)          !< Bodies [n].
+   integer(I4P),              intent(out), optional :: patches(:)         !< Patch of the closest facet [n] (issue #66): looked up
+                                                                          !< on the host from the device's facet ids.
    logical,                   intent(in),  optional :: is_signed          !< Signed (default .true.).
    integer(I4P),              intent(in),  optional :: sign_algorithm     !< SIGN_PSEUDO_NORMAL (default) or SIGN_FAST_WINDING_NUMBER.
    integer(I4P),              intent(out), optional :: status             !< STATUS_OK or STATUS_INVALID_INPUT.
@@ -2524,6 +2533,7 @@ contains
       call self%query_many_device(points=body_points(pose, points), distances=distances, closest_points=closest_points, &
                                   facets=facets, features=features, feature_indexes=feature_indexes, normals=normals, &
                                   bodies=bodies, is_signed=is_signed, sign_algorithm=sign_algorithm, status=status, &
+                                  patches=patches, &
                                   feature_distances=feature_distances)
       if (present(status)) then
          if (status /= STATUS_OK) return
@@ -2561,6 +2571,7 @@ contains
    if (present(features)) bad = bad .or. size(features) /= n
    if (present(feature_indexes)) bad = bad .or. size(feature_indexes) /= n
    if (present(bodies)) bad = bad .or. size(bodies) /= n
+   if (present(patches)) bad = bad .or. size(patches) /= n
    signed_ = .true. ; if (present(is_signed)) signed_ = is_signed
    algo = SIGN_PSEUDO_NORMAL ; if (present(sign_algorithm)) algo = sign_algorithm
    bad = bad .or. (algo /= SIGN_PSEUDO_NORMAL .and. algo /= SIGN_FAST_WINDING_NUMBER)
@@ -2637,9 +2648,15 @@ contains
    if (present(features)) features = ftl
    if (present(feature_indexes)) feature_indexes = fil
    if (present(bodies)) bodies = bdl
+   if (present(patches)) then
+      do i = 1, n
+         patches(i) = 0_I4P
+         if (fcl(i) >= 1_I4P .and. fcl(i) <= self%facets_number) patches(i) = self%facet(fcl(i))%patch
+      enddo
+   endif
    endsubroutine query_many_device
 
-   subroutine probe_many(self, points, lengths, probe_points, visible, foot_points, normals, status)
+   subroutine probe_many(self, points, lengths, probe_points, visible, foot_points, normals, status, patches)
    !< Probe points (issue #37): for each point, the point at distance lengths(i) along the
    !< pseudo-normal of its closest feature, from its foot point (closest point): positive lengths go
    !< outward, negative inward. `visible(i)` is true when the open segment from the foot point to
@@ -2656,21 +2673,26 @@ contains
    real(R8P),                 intent(out), optional :: foot_points(:,:)  !< Foot (closest) points [3, n].
    real(R8P),                 intent(out), optional :: normals(:,:)      !< Pseudo-normals [3, n].
    integer(I4P),              intent(out), optional :: status            !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),              intent(out), optional :: patches(:)        !< Patch of the foot point's facet [n] (issue #66).
    type(vector_R8P)                                 :: cp, pn, tip       !< Per-point work.
    real(R8P)                                        :: d, tol            !< Work.
-   integer(I4P)                                     :: i, n              !< Counters.
+   integer(I4P)                                     :: i, n, f           !< Counters, facet.
 
    if (present(status)) status = STATUS_OK
    n = size(points, kind=I4P)
    if (size(lengths) /= n .or. size(probe_points, 1) /= 3 .or. size(probe_points, 2) /= n .or. size(visible) /= n .or. &
-       bad_shape3(foot_points, n) .or. bad_shape3(normals, n)) then
+       bad_shape3(foot_points, n) .or. bad_shape3(normals, n) .or. bad_size(patches, n)) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
    tol = 1.e-9_R8P * vnorm(self%bmax - self%bmin)
-   !$omp parallel do default(shared) schedule(static) private(i, cp, pn, tip, d)
+   !$omp parallel do default(shared) schedule(static) private(i, cp, pn, tip, d, f)
    do i = 1_I4P, n
-      call self%query_point(point=points(i), distance=d, closest_point=cp, normal=pn)
+      call self%query_point(point=points(i), distance=d, closest_point=cp, normal=pn, facet=f)
+      if (present(patches)) then
+         patches(i) = 0_I4P
+         if (f >= 1_I4P .and. f <= self%facets_number) patches(i) = self%facet(f)%patch
+      endif
       tip = cp + lengths(i) * pn
       probe_points(:, i) = [tip%x, tip%y, tip%z]
       visible(i) = segment_clear(self, cp, tip, tol)
@@ -2680,7 +2702,7 @@ contains
    !$omp end parallel do
    endsubroutine probe_many
 
-   subroutine image_points(self, points, images, visible, foot_points, status)
+   subroutine image_points(self, points, images, visible, foot_points, status, patches)
    !< Image points (issue #37): the mirror of each point through its closest point, 2 foot - x
    !< (the ghost-point image of an IB closure), and whether the open segment from the foot point to
    !< the image crosses no facet (see `probe_many`). OpenMP over the points.
@@ -2690,23 +2712,29 @@ contains
    logical,                   intent(out), optional :: visible(:)       !< Segment foot-image crosses no facet [n].
    real(R8P),                 intent(out), optional :: foot_points(:,:) !< Foot points [3, n].
    integer(I4P),              intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),              intent(out), optional :: patches(:)       !< Patch of the foot point's facet [n] (issue #66).
    type(vector_R8P)                                 :: cp, img          !< Per-point work.
    real(R8P)                                        :: d, tol           !< Work.
-   integer(I4P)                                     :: i, n             !< Counters.
+   integer(I4P)                                     :: i, n, f          !< Counters, facet.
    logical                                          :: bad              !< Size check.
 
    if (present(status)) status = STATUS_OK
    n = size(points, kind=I4P)
    bad = size(images, 1) /= 3 .or. size(images, 2) /= n .or. bad_shape3(foot_points, n)
    if (present(visible)) bad = bad .or. size(visible) /= n
+   bad = bad .or. bad_size(patches, n)
    if (bad) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
    tol = 1.e-9_R8P * vnorm(self%bmax - self%bmin)
-   !$omp parallel do default(shared) schedule(static) private(i, cp, img, d)
+   !$omp parallel do default(shared) schedule(static) private(i, cp, img, d, f)
    do i = 1_I4P, n
-      call self%query_point(point=points(i), distance=d, closest_point=cp)
+      call self%query_point(point=points(i), distance=d, closest_point=cp, facet=f)
+      if (present(patches)) then
+         patches(i) = 0_I4P
+         if (f >= 1_I4P .and. f <= self%facets_number) patches(i) = self%facet(f)%patch
+      endif
       img%x = 2._R8P * cp%x - points(i)%x ; img%y = 2._R8P * cp%y - points(i)%y ; img%z = 2._R8P * cp%z - points(i)%z
       images(:, i) = [img%x, img%y, img%z]
       if (present(visible)) visible(i) = segment_clear(self, cp, img, tol)
@@ -3034,6 +3062,16 @@ contains
    bad = .false.
    if (present(a)) bad = size(a, 1) /= 3 .or. size(a, 2) /= n
    endfunction bad_shape3
+
+   pure function bad_size(a, n) result(bad)
+   !< True if the optional integer array a is present and not of size n.
+   integer(I4P), optional, intent(in) :: a(:) !< Array.
+   integer(I4P),           intent(in) :: n    !< Size.
+   logical                            :: bad  !< Result.
+
+   bad = .false.
+   if (present(a)) bad = size(a) /= n
+   endfunction bad_size
 
    subroutine closest_with_region(self, point, d2, facet, region, closest)
    !< Squared distance, closest facet, Voronoi region and closest point (issue #37): the traversal

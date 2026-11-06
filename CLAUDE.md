@@ -278,6 +278,10 @@ fobis fetch            # --update to re-fetch
   The ASCII reader opens a patch per `solid <name>` block (`stl_ascii_next_facet`; before #66 a multi-solid file
   aborted at the first `endsolid`), `load_from_files` one per file, the ASCII writer one block per patch (a
   single patch writes the old file). API: `get_patches_number`, `patch_name`, `facet_patch`, `set_patch`.
+  The facet id travels through every copy; `merge_solids`, `boolean` merge tables by name; `fill_holes` uses the
+  boundary's patch or `filled`; remesh/decimate/smooth lock patch boundaries; `alpha_wrap` takes the nearest input
+  facet's. Queries: `query_many(_device)(patches=)`, `probe_many`, `image_points` (device: host lookup from the
+  returned facet ids; bench line `patch device vs serial mismatches`).
 - `fossil_box_predicates.f90`, `fossil_box_query.f90` — AMR tagging (issue #38): box-triangle separating-axis test (conservative: run on the box inflated by `box_tolerance`, 1e-12 of the problem size, never misses a contact), exact 2-D box-segment test; `bvh_box_contact_oac` / `curve_box_contact_oac` (shared CPU/device traversals), `cell_bands` / `cell_components` (tag-band BFS, 26-connected components). The device box path follows the #20 rules and needs no new device arrays.
 
 ## Coding conventions

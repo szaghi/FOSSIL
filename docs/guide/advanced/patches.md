@@ -57,6 +57,13 @@ every facet keeps a patch:
 - `smooth`: the boundary vertices do not move.
 - `alpha_wrap`: each facet of the wrap takes the patch of the input facet closest to its centroid.
 
+## In the queries
+
+`query_many(patches=)`, `query_many_device(patches=)`, `probe_many(patches=)` and `image_points(patches=)` return
+the patch of the facet that holds each query's closest point: the boundary condition to apply at an image point or a
+forcing point. The device path looks it up on the host from the facet ids the device returns, so it is bit-identical
+to the CPU path (the GPU bench line `patch device vs serial mismatches` is 0).
+
 ## API
 
 See [Patches](/guide/api/surface-stl-object#patches) in the API reference.

@@ -70,6 +70,7 @@ logical                       :: correctness_ok, batch_ok, device_ok, fwn_ok, re
 logical                       :: rich_ok                   !< Rich queries: device equals CPU (issue #37).
 real(R8P)                     :: rich_err                  !< Rich queries: max |device - CPU| over distance, closest point, normal.
 integer(I4P)                  :: rich_id_mismatch          !< Rich queries: facet/feature/index/body mismatches.
+integer(I4P)                  :: patch_mismatch            !< Rich queries: patch mismatches (issue #66).
 integer(I4P)                  :: box_mismatch              !< Box classification: device vs CPU code/inside mismatches (issue #38).
 integer                       :: sign_mismatch             !< Sign benchmark: device vs CPU signed-distance mismatches (issue #39).
 integer                       :: line_mismatch             !< Grid-line crossings: device vs CPU mismatches (issue #40).
@@ -224,8 +225,8 @@ d_probe(1) = -12345._R8P
 call surface%distance_many_device(points=points(1:1), distances=d_probe, is_signed=.true., &
                                   sign_algorithm=SIGN_SOLID_ANGLE, status=refuse_status)
 refuse_ok = (refuse_status == STATUS_INVALID_INPUT .and. d_probe(1) == -12345._R8P)
-call rich_device_case(err=rich_err, id_mismatch=rich_id_mismatch)
-rich_ok = rich_err == 0._R8P .and. rich_id_mismatch == 0_I4P
+call rich_device_case(err=rich_err, id_mismatch=rich_id_mismatch, patch_mismatch=patch_mismatch)
+rich_ok = rich_err == 0._R8P .and. rich_id_mismatch == 0_I4P .and. patch_mismatch == 0_I4P
 call box_device_case(mismatch=box_mismatch)
 rich_ok = rich_ok .and. box_mismatch == 0_I4P
 call surface%exit_device
@@ -326,6 +327,7 @@ print '(A)',         ''
 print '(A)',         'query_many_device vs query_many (issue #37: distance, closest point, normal, ids; both signs):'
 print '(A,ES10.3)',  '   rich device vs serial max err: ', rich_err
 print '(A,I0)',      '   rich id mismatches:      ', rich_id_mismatch
+print '(A,I0)',      '   patch device vs serial mismatches: ', patch_mismatch
 print '(A,I0)',      '   box device vs serial mismatches: ', box_mismatch
 print '(A,I0)',      '   sign bench device vs serial mismatches: ', sign_mismatch
 print '(A,I0)',      '   line crossings device vs serial mismatches: ', line_mismatch
@@ -343,10 +345,13 @@ if (.not. (correctness_ok .and. batch_ok .and. device_ok .and. fwn_ok .and. refu
    error stop 1
 
 contains
-   subroutine rich_device_case(err, id_mismatch)
+   subroutine rich_device_case(err, id_mismatch, patch_mismatch)
    !< query_many_device against query_many on the bench points (surface entered), both signs.
    real(R8P),    intent(out) :: err         !< Max |device - CPU| over distance, closest point, normal.
    integer(I4P), intent(out) :: id_mismatch !< Facet, feature, index, body mismatches.
+   integer(I4P), intent(out) :: patch_mismatch !< Patch mismatches (issue #66; a third of the facets in a 2nd patch).
+   integer(I4P), allocatable :: p1(:), p2(:) !< Patches.
+   integer(I4P)              :: k !< Counter.
    real(R8P),    allocatable :: d1(:), d2(:), c1(:,:), c2(:,:), n1(:,:), n2(:,:) !< Outputs.
    integer(I4P), allocatable :: f1(:), f2(:), t1(:), t2(:), i1(:), i2(:), b1(:), b2(:) !< Outputs.
    integer(I4P)              :: a, nq !< Work.
@@ -355,7 +360,9 @@ contains
    nq = size(points, kind=I4P)
    allocate(d1(nq), d2(nq), c1(3, nq), c2(3, nq), n1(3, nq), n2(3, nq))
    allocate(f1(nq), f2(nq), t1(nq), t2(nq), i1(nq), i2(nq), b1(nq), b2(nq))
-   err = 0._R8P ; id_mismatch = 0_I4P
+   err = 0._R8P ; id_mismatch = 0_I4P ; patch_mismatch = 0_I4P
+   allocate(p1(nq), p2(nq))
+   call surface%set_patch([(k, k = 1_I4P, surface%get_facets_number(), 3_I4P)], 'third')
    do a = 1, 2
       call surface%query_many(points=points, distances=d1, closest_points=c1, facets=f1, features=t1, feature_indexes=i1, &
                               normals=n1, bodies=b1, sign_algorithm=ALGO(a))
@@ -363,6 +370,9 @@ contains
                                      feature_indexes=i2, normals=n2, bodies=b2, sign_algorithm=ALGO(a))
       err = max(err, maxval(abs(d1 - d2)), maxval(abs(c1 - c2)), maxval(abs(n1 - n2)))
       id_mismatch = id_mismatch + count(f1 /= f2 .or. t1 /= t2 .or. i1 /= i2 .or. b1 /= b2, kind=I4P)
+      call surface%query_many(points=points, distances=d1, patches=p1, sign_algorithm=ALGO(a))
+      call surface%query_many_device(points=points, distances=d2, patches=p2, sign_algorithm=ALGO(a))
+      patch_mismatch = patch_mismatch + count(p1 /= p2, kind=I4P)
    enddo
    endsubroutine rich_device_case
 
