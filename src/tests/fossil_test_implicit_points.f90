@@ -9,10 +9,14 @@
 !<    segments in its projection, and on its first (canonical) segment in 3D; reordering the inputs gives the same
 !<    identity and the same rounded bits.
 !< 3. Explicit points agree with fossil_predicates.
+!< 4. Edge-edge points (issue #65, step 2): two lines exactly coplanar on the slanted plane x + y + z = 1 (dyadic
+!<    coordinates, so the plane holds exactly): the point lies on both lines in every projection and on the plane; the
+!<    identity does not depend on the order of the edges or of their endpoints; `ip_lex_compare` is 0 on the same
+!<    point from two constructions only when they coincide.
 program fossil_test_implicit_points
 
-use fossil_implicit_points, only : implicit_point_t, ip_explicit, ip_lpi, ip_ssi, ip_same, ip_approx, &
-                                   ip_orient3d, ip_orient2d, ip_compare
+use fossil_implicit_points, only : implicit_point_t, ip_explicit, ip_lpi, ip_ssi, ip_eei, ip_same, ip_approx, &
+                                   ip_orient3d, ip_orient2d, ip_compare, ip_lex_compare
 use fossil_predicates,      only : orient3d_xyz, orient2d_xy
 use penf,                   only : I4P, I8P, R8P
 
@@ -21,7 +25,7 @@ implicit none
 type(implicit_point_t) :: x1, x2, e
 character(2)           :: tag
 real(R8P)              :: v(30), p(3), q(3), r(3), s(3), t(3), a(3), b(3), c(3), d(3)
-integer(I4P)           :: u, ios, ex, nv, drop, ngold, bad_gold, naive_off, nzero_bad, nagree_bad, k, i
+integer(I4P)           :: u, ios, ex, nv, drop, ngold, bad_gold, naive_off, nzero_bad, nagree_bad, k, i, neei_bad
 integer(I8P)           :: seed
 logical                :: ok
 
@@ -89,7 +93,25 @@ do i = 1, 500
 enddo
 print '(A,I0)', 'explicit points disagreeing with fossil_predicates: ', nagree_bad
 
-ok = ngold > 0 .and. bad_gold == 0 .and. naive_off > 0 .and. nzero_bad == 0 .and. nagree_bad == 0
+neei_bad = 0
+do i = 1, 500
+   a = pv() ; b = pv() ; c = pv() ; d = pv()
+   x1 = ip_eei(a, b, c, d)
+   if (ip_orient3d(x1, a, b, c) /= 0 .or. ip_orient3d(x1, b, c, d) /= 0) neei_bad = neei_bad + 1
+   do drop = 1, 3
+      if (ip_orient2d(x1, ip_explicit(a), ip_explicit(b), drop) /= 0) neei_bad = neei_bad + 1
+      if (ip_orient2d(x1, ip_explicit(c), ip_explicit(d), drop) /= 0) neei_bad = neei_bad + 1
+   enddo
+   x2 = ip_eei(d, c, b, a)
+   if (.not. ip_same(x1, x2) .or. any(ip_approx(x1) /= ip_approx(x2))) neei_bad = neei_bad + 1
+   ! the same point as a line-plane point (line (a, b), a plane through (c, d) off the common plane)
+   x2 = ip_lpi(a, b, c, d, [0.25_R8P, 0.5_R8P, 2._R8P])
+   if (ip_lex_compare(x1, x2) /= 0 .or. ip_same(x1, x2)) neei_bad = neei_bad + 1
+   if (ip_lex_compare(x1, ip_explicit(a)) == 0) neei_bad = neei_bad + 1
+enddo
+print '(A,I0)', 'edge-edge point checks failing: ', neei_bad
+
+ok = ngold > 0 .and. bad_gold == 0 .and. naive_off > 0 .and. nzero_bad == 0 .and. nagree_bad == 0 .and. neei_bad == 0
 print '(A,L1)', 'Are all tests passed? ', ok
 
 contains
@@ -107,6 +129,15 @@ contains
       x(k) = 2._R8P * real(rnd(), R8P) / 2147483647._R8P - 1._R8P
    enddo
    endfunction rv
+
+   function pv() result(x)
+   !< A point of the plane x + y + z = 1 with 20-bit dyadic x, y (z exact).
+   real(R8P) :: x(3)
+
+   x(1) = real(mod(rnd(), 1048576_I8P), R8P) / 1048576._R8P - 0.5_R8P
+   x(2) = real(mod(rnd(), 1048576_I8P), R8P) / 1048576._R8P - 0.5_R8P
+   x(3) = 1._R8P - x(1) - x(2)
+   endfunction pv
 
    pure function isgn(x) result(s)
    real(R8P), intent(in) :: x

@@ -3,54 +3,32 @@
 module fossil_arrangement
 !< FOSSIL, mesh-arrangement scaffolding for booleans (issue #18 §1.1 stage 1).
 !<
-!< This module implements the **input side** of the Mesh Arrangements pipeline
-!< of Zhou, Grinspun, Zorin & Jacobson (*Mesh Arrangements for Solid Geometry*,
-!< SIGGRAPH 2016): given two input surfaces A and B, compute for every facet
-!< the list of intersection segments where it crosses any facet of the other
-!< surface. The output of this stage — a per-facet list of "cuts" — is the
-!< input to the triangulation + WN-tagging + selection stages that follow.
+!< The arrangement of two surfaces A and B for the booleans (Zhou, Grinspun, Zorin, Jacobson, *Mesh Arrangements for
+!< Solid Geometry*, SIGGRAPH 2016), exact since issue #65 (Cherchi, Livesu, Scateni, Attene 2020, *Fast and robust mesh
+!< arrangements using floating-point arithmetic*): no tolerance anywhere.
 !<
-!< Pipeline overview (full §1.1 plan, for context):
+!< 1. `arrangement_initialize`: A's and B's facets, owners, empty cut lists.
+!< 2. `arrangement_collect_intersections`: every pair of facets whose boxes overlap (tree-vs-tree) is classified
+!<    exactly (`pair_cut`, `coplanar_cut` of `fossil_tritri_exact`); a crossing adds a segment between two implicit
+!<    points (`fossil_implicit_points`) to both facets; an exactly coplanar pair records the partner and cuts each
+!<    facet along the portions of the other's edges inside it. The registry then merges the points: one index per
+!<    geometric point, exactly (identity, then exact coordinates), the most specific construction kept, rounded once;
+!<    distinct points get distinct rounded coordinates (`separate_rounded`). Points inside a facet edge go to the
+!<    facet across it (T-junctions, exact collinearity).
+!< 3. `arrangement_retriangulate`: each cut facet is triangulated by `cdt_facet` (exact orient2d on implicit points),
+!<    with its cuts as constraints; sub-triangles keep the parent's orientation and carry their registry vertices and
+!<    which of their edges lie on a cut (for the selection by patches in `fossil_boolean`).
 !<
-!<   stage 1 (this module):
-!<     A, B  -->  arrangement_initialize  -->  arrangement (facets + owners + empty cuts)
-!<     arrangement  -->  arrangement_collect_intersections  -->  cuts populated
-!<
-!<   stage 2 (next PR — triangulation):
-!<     for each facet f with non-empty cuts:
-!<       project f and its cuts to 2D (project_to_plane / lift_from_plane)
-!<       fan-triangulate from a Steiner point, inserting cut endpoints as
-!<         constraints (or run a CDT — see staging note in issue #18)
-!<     output: a flat list of sub-triangles, each tagged by its source facet
-!<
-!<   stage 3 (next PR — tagging):
-!<     for each sub-triangle t with centroid c:
-!<       tag_A(t) = inside(c, A)  via winding_number(c, A) > 0.5
-!<       tag_B(t) = inside(c, B)  via winding_number(c, B) > 0.5
-!<
-!<   stage 4 (next PR — selection):
-!<     UNION:       keep t if (tag_A xor tag_B) or (boundary on outside of other)
-!<     INTERSECT:   keep t if (tag_A and tag_B) ...
-!<     DIFFERENCE:  keep t if (from A and not in B) or (from B and in A, flipped)
-!<     SYMDIFF:     keep t if exactly one of (tag_A, tag_B) is true
-!<
-!<   stage 5 (next PR — stitch):
-!<     adopt selected triangles back into a surface_stl_object, run sanitize_normals.
-!<
-!< This module now provides stages 1 and 2 (initialization, intersection
-!< collection, retriangulation). Stages 3-5 (WN tagging, op-specific
-!< selection, stitching) live in the boolean driver — see
-!< `surface_stl_object%boolean`.
+!< Classification, selection and stitching are in `fossil_boolean`.
 
 use fossil_aabb_node_object, only : aabb_node_object
 use fossil_aabb_tree_object, only : aabb_tree_object
-use fossil_dt,               only : triangulation_t, cdt_build, &
-                                    DT_STATUS_OK, DT_STATUS_RECOVERY_FAILED, &
-                                    DT_STATUS_CROSSING_CONSTRAINTS
+use fossil_cdt_implicit,     only : cdt_facet, CDTI_OK
 use fossil_facet_object,     only : facet_object
+use fossil_implicit_points,  only : implicit_point_t, ip_explicit, ip_approx, ip_orient2d, ip_lex_compare, &
+                                    ip_identity_compare, ip_rank, ip_compare
 use fossil_list_id_object,   only : list_id_object
-use fossil_predicates,       only : orient2d_xy
-use fossil_tritri_exact,     only : pair_classify, coplanar_portion, PAIR_CROSSING, PAIR_COPLANAR
+use fossil_tritri_exact,     only : pair_cut, coplanar_cut, facet_drop, PAIR_CROSSING, PAIR_COPLANAR
 use fossil_utils,            only : EPS
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
@@ -63,6 +41,7 @@ public :: arrangement_initialize
 public :: arrangement_collect_intersections
 public :: arrangement_retriangulate
 public :: coplanar_partner
+public :: cut_sources
 public :: project_to_plane
 public :: lift_from_plane
 public :: ARR_STATUS_OK, ARR_STATUS_CDT_FAILED
@@ -74,23 +53,17 @@ integer(I4P), parameter :: ARR_STATUS_OK         = 0_I4P  !< Retriangulation com
 integer(I4P), parameter :: ARR_STATUS_CDT_FAILED = 1_I4P  !< CDT could not recover one or more constraint segments.
 
 type :: cut_list_t
-   !< Per-facet list of intersection-segment endpoints in **3D world** coordinates.
-   !<
-   !< Each consecutive pair `(point(2*k-1), point(2*k))` is one intersection
-   !< segment. We do not store segments as a separate `segment_t` type because
-   !< the next-stage triangulator only ever consumes the flat point list (each
-   !< endpoint becomes a Steiner point in the facet plane), so the pair
-   !< grouping is implicit in the index parity.
-   !<
-   !< `n_segments` counts segments, not points; total points in `point` is
-   !< `2 * n_segments` (with `point` over-allocated to amortize append cost).
-   integer(I4P)                  :: n_segments = 0_I4P  !< Number of intersection segments stored.
-   type(vector_R8P), allocatable :: point(:)            !< Flat 3D point buffer; pairs of consecutive entries form segments.
-   integer(I4P)                  :: n_steiner = 0_I4P   !< Number of isolated points (issue #33).
-   type(vector_R8P), allocatable :: steiner(:)          !< Points on the facet's edges coming from the neighbour across them.
-   integer(I4P)                  :: n_coplanar = 0_I4P  !< Number of coplanar partners (issue #63).
-   integer(I4P), allocatable     :: coplanar(:)         !< Global indices of the facets of the other surface classified
-                                                        !< coplanar with this one (PAIR_COPLANAR, exact with the snap).
+   !< Per-facet cuts (issue #65): segments between implicit points of the arrangement's registry (`arrangement_t%pts`),
+   !< by index; after `arrangement_collect_intersections` the indices are those of the merged registry (one index per
+   !< geometric point, exactly).
+   integer(I4P)              :: n_segments = 0_I4P  !< Number of intersection segments stored.
+   integer(I4P), allocatable :: seg(:, :)           !< Segment endpoints (2, capacity), registry indices.
+   integer(I4P), allocatable :: src(:)              !< Facet of the other surface that made each segment.
+   integer(I4P)              :: n_steiner = 0_I4P   !< Number of isolated points (issue #33).
+   integer(I4P), allocatable :: steiner(:)          !< Points on the facet's edges coming from the neighbour across them.
+   integer(I4P)              :: n_coplanar = 0_I4P  !< Number of coplanar partners (issue #63).
+   integer(I4P), allocatable :: coplanar(:)         !< Global indices of the facets of the other surface exactly coplanar
+                                                    !< with this one (PAIR_COPLANAR).
 endtype cut_list_t
 
 type :: arrangement_t
@@ -110,6 +83,10 @@ type :: arrangement_t
    type(cut_list_t),   allocatable    :: cut(:)         !< Per-facet intersection-segment list.
    type(aabb_tree_object), pointer    :: tree_a => null() !< Reference to A's AABB tree (not owned).
    type(aabb_tree_object), pointer    :: tree_b => null() !< Reference to B's AABB tree (not owned).
+   integer(I4P)                       :: n_pts = 0_I4P  !< Points in the registry.
+   type(implicit_point_t), allocatable :: pts(:)        !< Registry of the cut points (implicit, issue #65).
+   real(R8P),          allocatable    :: xyz(:, :)      !< Rounded coordinates of the registry points (3, n_pts).
+   integer(I4P),       allocatable    :: corner(:, :)   !< Registry indices of the vertices of every facet (3, n_a + n_b).
 endtype arrangement_t
 
 contains
@@ -179,11 +156,13 @@ contains
    if (arr%tree_a%get_nodes_number() <= 0 .or. arr%tree_b%get_nodes_number() <= 0) then
       ! Brute-force fallback when either tree is empty.
       call collect_brute_force(arr=arr)
+      call merge_points(arr=arr)
       call propagate_edge_points(arr=arr)
       return
    endif
 
    call traverse_cross_pair(arr=arr, na=0_I4P, nb=0_I4P)
+   call merge_points(arr=arr)
    call propagate_edge_points(arr=arr)
    endsubroutine arrangement_collect_intersections
 
@@ -291,55 +270,313 @@ contains
    enddo
    endsubroutine enumerate_leaf_cross_pair
 
+   subroutine register_point(arr, x, id)
+   !< Append an implicit point to the registry (no lookup: `merge_points` merges afterwards).
+   type(arrangement_t),    intent(inout) :: arr !< Arrangement.
+   type(implicit_point_t), intent(in)    :: x   !< Point.
+   integer(I4P),           intent(out)   :: id  !< Its raw index.
+   type(implicit_point_t), allocatable   :: tmp(:)
+
+   if (.not. allocated(arr%pts)) allocate(arr%pts(64))
+   if (arr%n_pts == size(arr%pts)) then
+      allocate(tmp(2 * size(arr%pts))) ; tmp(1:arr%n_pts) = arr%pts(1:arr%n_pts) ; call move_alloc(tmp, arr%pts)
+   endif
+   arr%n_pts = arr%n_pts + 1_I4P
+   arr%pts(arr%n_pts) = x
+   id = arr%n_pts
+   endsubroutine register_point
+
+   subroutine merge_points(arr)
+   !< One registry index per geometric point, exactly (issue #65). The vertices of every facet are registered too (the
+   !< selection connects sub-triangles by registry indices). Points of one identity (`ip_same`) merge first (sort by identity), then points of
+   !< different identities and the same exact coordinates (sort by exact lexicographic order, `ip_lex_compare`):
+   !< for clean inputs the classification already gives one point one identity, this catches the rest. A merged
+   !< point keeps its most specific construction (`ip_rank`: an input vertex first), the same for every facet, and
+   !< its coordinates are rounded once (`ip_approx`).
+   type(arrangement_t), intent(inout)  :: arr
+   integer(I4P), allocatable           :: idx(:), grp(:), ulist(:), gidx(:), fid(:), best(:), map(:)
+   type(implicit_point_t), allocatable :: merged(:)
+   integer(I4P)                        :: n_total, gi, k, n, u, nf, j
+
+   n_total = arr%n_a + arr%n_b
+   allocate(arr%corner(3, n_total)) ; arr%corner = 0_I4P
+   do gi = 1, n_total
+      do k = 1, 3
+         call register_point(arr, ip_explicit(xyz_of(arr%facet(gi)%vertex(k))), arr%corner(k, gi))
+      enddo
+   enddo
+   n = arr%n_pts
+   allocate(arr%xyz(3, 0))
+   if (n == 0_I4P) return
+   allocate(idx(n), grp(n), ulist(n), map(n))
+   idx = [(k, k = 1, n)]
+   call sort_points(arr%pts, idx, 1_I4P)
+   u = 0_I4P
+   do k = 1, n
+      if (k == 1) then
+         u = 1_I4P ; ulist(1) = idx(1)
+      elseif (ip_identity_compare(arr%pts(idx(k - 1)), arr%pts(idx(k))) /= 0_I4P) then
+         u = u + 1_I4P ; ulist(u) = idx(k)
+      endif
+      grp(idx(k)) = u
+   enddo
+   allocate(gidx(u), fid(u), best(u))
+   gidx = ulist(1:u)
+   call sort_points(arr%pts, gidx, 2_I4P)
+   nf = 0_I4P
+   do k = 1, u
+      if (k == 1) then
+         nf = 1_I4P ; best(1) = gidx(1)
+      elseif (ip_lex_compare(arr%pts(gidx(k - 1)), arr%pts(gidx(k))) /= 0_I4P) then
+         nf = nf + 1_I4P ; best(nf) = gidx(k)
+      elseif (ip_rank(arr%pts(gidx(k))) < ip_rank(arr%pts(best(nf)))) then
+         best(nf) = gidx(k)
+      endif
+      fid(grp(gidx(k))) = nf
+   enddo
+   do k = 1, n
+      map(k) = fid(grp(k))
+   enddo
+   allocate(merged(nf))
+   do k = 1, nf
+      merged(k) = arr%pts(best(k))
+   enddo
+   call move_alloc(merged, arr%pts)
+   arr%n_pts = nf
+   deallocate(arr%xyz) ; allocate(arr%xyz(3, nf))
+   do k = 1, nf
+      arr%xyz(:, k) = ip_approx(arr%pts(k))
+   enddo
+   call separate_rounded(arr)
+   do gi = 1, n_total
+      do j = 1, arr%cut(gi)%n_segments
+         arr%cut(gi)%seg(:, j) = map(arr%cut(gi)%seg(:, j))
+      enddo
+      do k = 1, 3
+         if (arr%corner(k, gi) > 0_I4P) arr%corner(k, gi) = map(arr%corner(k, gi))
+      enddo
+   enddo
+   endsubroutine merge_points
+
+   subroutine separate_rounded(arr)
+   !< Distinct registry points get distinct rounded coordinates (issue #65). Two exact points closer than an ulp can
+   !< round to the same doubles (the cut points of faces coplanar by construction but off by round-off); the welded
+   !< result would join their edges (non-manifold, or a crack). Of the points sharing one rounded triple, the most
+   !< specific construction keeps it (an input vertex never moves) and each other one moves its x coordinate by as
+   !< many ulps as its rank in the group, until every triple is unique: the topology of the output is the exact one,
+   !< the geometry moves by a few ulps (the order of the rounding itself).
+   type(arrangement_t), intent(inout) :: arr
+   integer(I4P), allocatable          :: ord(:)
+   integer(I4P)                       :: n, i, j, k, m, pass, t
+   logical                            :: clash
+
+   n = arr%n_pts
+   if (n < 2_I4P) return
+   allocate(ord(n))
+   do pass = 1, 64
+      ord = [(k, k = 1, n)]
+      call sort_xyz(arr%xyz, ord)
+      clash = .false.
+      i = 1_I4P
+      do while (i <= n)
+         j = i
+         do while (j < n)
+            if (any(arr%xyz(:, ord(j + 1)) /= arr%xyz(:, ord(i)))) exit
+            j = j + 1_I4P
+         enddo
+         if (j > i) then
+            clash = .true.
+            do k = i + 1, j ! most specific first (stable: then by index)
+               t = ord(k) ; m = k - 1_I4P
+               do while (m >= i)
+                  if (ip_rank(arr%pts(ord(m))) <= ip_rank(arr%pts(t))) exit
+                  ord(m + 1) = ord(m) ; m = m - 1_I4P
+               enddo
+               ord(m + 1) = t
+            enddo
+            do k = i + 1, j
+               do m = 1, k - i
+                  arr%xyz(1, ord(k)) = nearest(arr%xyz(1, ord(k)), 1._R8P)
+               enddo
+            enddo
+         endif
+         i = j + 1_I4P
+      enddo
+      if (.not. clash) return
+   enddo
+   endsubroutine separate_rounded
+
+   subroutine sort_xyz(xyz, key)
+   !< Bottom-up merge sort of the indices `key` by the lexicographic order of the triples xyz(:, key).
+   real(R8P),    intent(in)    :: xyz(:, :)
+   integer(I4P), intent(inout) :: key(:)
+   integer(I4P), allocatable   :: work(:)
+   integer(I4P)                :: n, width, lo, mid, hi, i, j, k
+
+   n = size(key)
+   allocate(work(n))
+   width = 1_I4P
+   do while (width < n)
+      lo = 1_I4P
+      do while (lo <= n)
+         mid = min(lo + width - 1_I4P, n) ; hi = min(lo + 2_I4P * width - 1_I4P, n)
+         i = lo ; j = mid + 1_I4P ; k = lo
+         do while (i <= mid .and. j <= hi)
+            if (less(key(j), key(i))) then
+               work(k) = key(j) ; j = j + 1_I4P
+            else
+               work(k) = key(i) ; i = i + 1_I4P
+            endif
+            k = k + 1_I4P
+         enddo
+         do while (i <= mid)
+            work(k) = key(i) ; i = i + 1_I4P ; k = k + 1_I4P
+         enddo
+         do while (j <= hi)
+            work(k) = key(j) ; j = j + 1_I4P ; k = k + 1_I4P
+         enddo
+         lo = lo + 2_I4P * width
+      enddo
+      key = work
+      width = 2_I4P * width
+   enddo
+   contains
+      pure function less(a, b) result(l)
+      integer(I4P), intent(in) :: a, b
+      logical                  :: l
+      integer(I4P)             :: c
+
+      l = .false.
+      do c = 1, 3
+         if (xyz(c, a) /= xyz(c, b)) then
+            l = xyz(c, a) < xyz(c, b) ; return
+         endif
+      enddo
+      endfunction less
+   endsubroutine sort_xyz
+
+   subroutine sort_points(pts, key, mode)
+   !< Stable bottom-up merge sort of the indices `key` into `pts`: mode 1 by identity, mode 2 by exact coordinates.
+   type(implicit_point_t), intent(in)    :: pts(:)
+   integer(I4P),           intent(inout) :: key(:)
+   integer(I4P),           intent(in)    :: mode
+   integer(I4P), allocatable             :: work(:)
+   integer(I4P)                          :: n, width, lo, mid, hi, i, j, k
+
+   n = size(key)
+   allocate(work(n))
+   width = 1_I4P
+   do while (width < n)
+      lo = 1_I4P
+      do while (lo <= n)
+         mid = min(lo + width - 1_I4P, n) ; hi = min(lo + 2_I4P * width - 1_I4P, n)
+         i = lo ; j = mid + 1_I4P ; k = lo
+         do while (i <= mid .and. j <= hi)
+            if (cmp(key(j), key(i)) < 0_I4P) then
+               work(k) = key(j) ; j = j + 1_I4P
+            else
+               work(k) = key(i) ; i = i + 1_I4P
+            endif
+            k = k + 1_I4P
+         enddo
+         do while (i <= mid)
+            work(k) = key(i) ; i = i + 1_I4P ; k = k + 1_I4P
+         enddo
+         do while (j <= hi)
+            work(k) = key(j) ; j = j + 1_I4P ; k = k + 1_I4P
+         enddo
+         lo = lo + 2_I4P * width
+      enddo
+      key = work
+      width = 2_I4P * width
+   enddo
+   contains
+      function cmp(a, b) result(c)
+      integer(I4P), intent(in) :: a, b
+      integer(I4P)             :: c
+
+      if (mode == 1_I4P) then
+         c = ip_identity_compare(pts(a), pts(b))
+      else
+         c = ip_lex_compare(pts(a), pts(b))
+      endif
+      endfunction cmp
+   endsubroutine sort_points
+
    subroutine propagate_edge_points(arr)
-   !< Close the T-junctions (issue #33). A cut endpoint lying inside an edge of its facet splits
-   !< that edge in this facet's retriangulation; the facet across the edge (same surface, from
-   !< `fcon_edge`) must split it at the same point, or the result has a crack there and is not
-   !< watertight. Every such point is added to the neighbour as an isolated (Steiner) point. The
-   !< point is the same canonical point, so both sides get identical bits. A point lies inside an
-   !< edge when it differs from both endpoints, its parameter is in (0, 1), and its distance from
-   !< the edge line is below 1e-9 of the edge length.
+   !< Close the T-junctions (issues #33, #65). A cut point lying inside an edge of its facet splits that edge in this
+   !< facet's triangulation; the facet across the edge (same surface, `fcon_edge`) gets it as an isolated point, so
+   !< both sides split the edge at the same registry points. "Inside the edge" is exact: the point is in the closed
+   !< facet, is not one of its vertices (registry index), and is collinear with the edge (`ip_orient2d` = 0).
    type(arrangement_t), intent(inout) :: arr      !< Arrangement.
-   integer(I4P)                       :: gi, k, e, nb, gn
-   type(vector_R8P)                   :: pt, a, b
-   real(R8P)                          :: d(3), w(3), len2, t, dist2
-   real(R8P), parameter               :: REL_TOL = 1.e-9_R8P
+   integer(I4P), allocatable          :: ids(:)
+   integer(I4P)                       :: gi, k, e, nb, gn, n, drop
+   type(implicit_point_t)             :: ce(3)
 
    do gi = 1, arr%n_a + arr%n_b
-      do k = 1, 2 * arr%cut(gi)%n_segments
-         pt = arr%cut(gi)%point(k)
+      if (arr%cut(gi)%n_segments == 0_I4P) cycle
+      call unique_ids(arr%cut(gi), ids, n, with_steiner=.false.)
+      drop = facet_drop(arr%facet(gi)%vertex)
+      if (drop == 0_I4P) cycle
+      do k = 1, 3
+         ce(k) = arr%pts(arr%corner(k, gi))
+      enddo
+      do k = 1, n
+         if (any(arr%corner(:, gi) == ids(k))) cycle
          do e = 1, 3
-            a = arr%facet(gi)%vertex(e)
-            b = arr%facet(gi)%vertex(mod(e, 3) + 1)
-            if (same_point(pt, a) .or. same_point(pt, b)) cycle
-            d = [b%x - a%x, b%y - a%y, b%z - a%z]
-            w = [pt%x - a%x, pt%y - a%y, pt%z - a%z]
-            len2 = sum(d * d)
-            if (len2 <= 0._R8P) cycle
-            t = sum(w * d) / len2
-            if (t <= 0._R8P .or. t >= 1._R8P) cycle
-            dist2 = sum((w - t * d)**2)
-            if (dist2 > (REL_TOL * REL_TOL) * len2) cycle
+            if (ip_orient2d(ce(e), ce(mod(e, 3) + 1), arr%pts(ids(k)), drop) /= 0_I4P) cycle
             nb = arr%facet(gi)%fcon_edge(e)
-            if (nb <= 0_I4P) cycle
-            gn = nb ; if (arr%owner(gi) == 2_I4P) gn = arr%n_a + nb
-            if (gn < 1_I4P .or. gn > arr%n_a + arr%n_b) cycle
-            call append_steiner(cut=arr%cut(gn), p=pt)
+            if (nb > 0_I4P) then
+               gn = nb ; if (arr%owner(gi) == 2_I4P) gn = arr%n_a + nb
+               if (gn >= 1_I4P .and. gn <= arr%n_a + arr%n_b) call append_steiner(cut=arr%cut(gn), id=ids(k))
+            endif
+            exit
          enddo
       enddo
    enddo
    endsubroutine propagate_edge_points
 
-   subroutine append_steiner(cut, p)
-   !< Append an isolated point to a cut list (no duplicates, compared bit for bit).
-   type(cut_list_t), intent(inout) :: cut !< Cut list.
-   type(vector_R8P), intent(in)    :: p   !< Point.
-   type(vector_R8P), allocatable   :: tmp(:)
-   integer(I4P)                    :: i
+   subroutine unique_ids(cut, ids, n, with_steiner)
+   !< Sorted distinct registry indices of a facet's segment endpoints (and isolated points).
+   type(cut_list_t),          intent(in)  :: cut
+   integer(I4P), allocatable, intent(out) :: ids(:)
+   integer(I4P),              intent(out) :: n
+   logical,                   intent(in)  :: with_steiner
+   integer(I4P), allocatable              :: all_ids(:)
+   integer(I4P)                           :: m, k, i, t
 
-   do i = 1, cut%n_steiner
-      if (same_point(cut%steiner(i), p)) return
+   m = 2_I4P * cut%n_segments
+   if (with_steiner) m = m + cut%n_steiner
+   allocate(all_ids(m))
+   if (cut%n_segments > 0_I4P) all_ids(1:2 * cut%n_segments) = reshape(cut%seg(:, 1:cut%n_segments), [2 * cut%n_segments])
+   if (with_steiner .and. cut%n_steiner > 0_I4P) all_ids(2 * cut%n_segments + 1:m) = cut%steiner(1:cut%n_steiner)
+   do k = 2, m ! insertion sort (short lists)
+      t = all_ids(k) ; i = k - 1_I4P
+      do while (i >= 1)
+         if (all_ids(i) <= t) exit
+         all_ids(i + 1) = all_ids(i) ; i = i - 1_I4P
+      enddo
+      all_ids(i + 1) = t
    enddo
+   allocate(ids(m))
+   n = 0_I4P
+   do k = 1, m
+      if (n > 0) then
+         if (ids(n) == all_ids(k)) cycle
+      endif
+      n = n + 1_I4P ; ids(n) = all_ids(k)
+   enddo
+   endsubroutine unique_ids
+
+   subroutine append_steiner(cut, id)
+   !< Append an isolated point (registry index) to a cut list, no duplicates.
+   type(cut_list_t), intent(inout) :: cut !< Cut list.
+   integer(I4P),     intent(in)    :: id  !< Registry index.
+   integer(I4P), allocatable       :: tmp(:)
+
+   if (cut%n_steiner > 0) then
+      if (any(cut%steiner(1:cut%n_steiner) == id)) return
+   endif
    if (.not. allocated(cut%steiner)) then
       allocate(cut%steiner(4))
    elseif (cut%n_steiner == size(cut%steiner)) then
@@ -348,7 +585,7 @@ contains
       call move_alloc(from=tmp, to=cut%steiner)
    endif
    cut%n_steiner = cut%n_steiner + 1_I4P
-   cut%steiner(cut%n_steiner) = p
+   cut%steiner(cut%n_steiner) = id
    endsubroutine append_steiner
 
    subroutine append_partner(cut, g)
@@ -371,80 +608,126 @@ contains
    cut%coplanar(cut%n_coplanar) = g
    endsubroutine append_partner
 
-   function coplanar_partner(arr, gi, sub) result(partner)
-   !< The coplanar partner of facet gi (a facet of the other surface classified PAIR_COPLANAR with it) whose interior
-   !< contains the centroid of the sub-triangle `sub` of gi, or 0 (issue #63). The arrangement cut gi along the
-   !< portions of its partners' edges inside it, so a sub-triangle lies inside a partner or outside it: its centroid
-   !< decides, with exact orient2d on the coordinates in the plane that drops the largest component of gi's normal.
-   !< This replaces a centroid-to-plane distance test that called shared the sub-triangles a few 1e-9 wide beside a
-   !< crossing of two facets a few degrees apart (normals parallel to 0.99 passed), and cracked the result.
+   function coplanar_partner(arr, gi, pid) result(partner)
+   !< The coplanar partner of facet gi (a facet of the other surface exactly coplanar with it) containing the
+   !< sub-triangle of gi with registry vertices `pid`, or 0 (issues #63, #65). The arrangement cut gi along the
+   !< portions of its partners' edges inside it, so a sub-triangle lies inside a partner or outside it: inside iff its
+   !< three vertices are in the closed partner (a convex set), by exact `ip_orient2d` in the projection of gi.
    type(arrangement_t), intent(in) :: arr     !< Arrangement.
    integer(I4P),        intent(in) :: gi      !< Parent facet of the sub-triangle.
-   type(facet_object),  intent(in) :: sub     !< Sub-triangle (metrics computed).
+   integer(I4P),        intent(in) :: pid(3)  !< Registry indices of the sub-triangle's vertices.
    integer(I4P)                    :: partner !< Partner index, 0 if none.
-   integer(I4P)                    :: k, g, i1, i2
-   real(R8P)                       :: n(3), c(3), a(3), b(3), d(3), s1, s2, s3
+   integer(I4P)                    :: k, g, drop, og, j, e
+   type(implicit_point_t)          :: gv(3)
+   logical                         :: inside
 
    partner = 0_I4P
    if (arr%cut(gi)%n_coplanar == 0_I4P) return
-   n = abs([arr%facet(gi)%normal%x, arr%facet(gi)%normal%y, arr%facet(gi)%normal%z])
-   if (n(1) >= n(2) .and. n(1) >= n(3)) then
-      i1 = 2 ; i2 = 3
-   elseif (n(2) >= n(3)) then
-      i1 = 3 ; i2 = 1
-   else
-      i1 = 1 ; i2 = 2
-   endif
-   c = [sub%centroid%x, sub%centroid%y, sub%centroid%z]
+   if (any(pid <= 0_I4P)) return
+   drop = facet_drop(arr%facet(gi)%vertex)
+   if (drop == 0_I4P) return
    do k = 1, arr%cut(gi)%n_coplanar
       g = arr%cut(gi)%coplanar(k)
-      a = [arr%facet(g)%vertex(1)%x, arr%facet(g)%vertex(1)%y, arr%facet(g)%vertex(1)%z]
-      b = [arr%facet(g)%vertex(2)%x, arr%facet(g)%vertex(2)%y, arr%facet(g)%vertex(2)%z]
-      d = [arr%facet(g)%vertex(3)%x, arr%facet(g)%vertex(3)%y, arr%facet(g)%vertex(3)%z]
-      s1 = orient2d_xy(a(i1), a(i2), b(i1), b(i2), c(i1), c(i2))
-      s2 = orient2d_xy(b(i1), b(i2), d(i1), d(i2), c(i1), c(i2))
-      s3 = orient2d_xy(d(i1), d(i2), a(i1), a(i2), c(i1), c(i2))
-      if ((s1 > 0._R8P .and. s2 > 0._R8P .and. s3 > 0._R8P) .or. (s1 < 0._R8P .and. s2 < 0._R8P .and. s3 < 0._R8P)) then
+      do j = 1, 3
+         gv(j) = ip_explicit(xyz_of(arr%facet(g)%vertex(j)))
+      enddo
+      og = ip_orient2d(gv(1), gv(2), gv(3), drop)
+      if (og == 0_I4P) cycle
+      inside = .true.
+      do j = 1, 3
+         do e = 1, 3
+            if (og * ip_orient2d(gv(e), gv(mod(e, 3) + 1), arr%pts(pid(j)), drop) < 0_I4P) then
+               inside = .false. ; exit
+            endif
+         enddo
+         if (.not. inside) exit
+      enddo
+      if (inside) then
          partner = g ; return
       endif
    enddo
    endfunction coplanar_partner
 
-   pure function same_point(a, b) result(same)
-   type(vector_R8P), intent(in) :: a, b
-   logical                      :: same
+   subroutine cut_sources(arr, gi, ip, iq, g, ng)
+   !< Facets of the other surface whose cut segments in facet gi contain the edge (ip, iq) (registry indices): the
+   !< segment and the edge are exactly collinear in gi's projection and the edge's ends are in the closed segment
+   !< (exact coordinate order). One facet when the edge lies inside it, two when it lies on their common edge.
+   type(arrangement_t), intent(in)  :: arr    !< Arrangement.
+   integer(I4P),        intent(in)  :: gi     !< Facet.
+   integer(I4P),        intent(in)  :: ip, iq !< Edge.
+   integer(I4P),        intent(out) :: g(4)   !< Source facets (distinct).
+   integer(I4P),        intent(out) :: ng     !< Their number (at most 4).
+   integer(I4P)                     :: k, a, b, drop, ax, sab
 
-   same = a%x == b%x .and. a%y == b%y .and. a%z == b%z
-   endfunction same_point
+   g = 0_I4P ; ng = 0_I4P
+   drop = facet_drop(arr%facet(gi)%vertex)
+   if (drop == 0_I4P) return
+   do k = 1, arr%cut(gi)%n_segments
+      a = arr%cut(gi)%seg(1, k) ; b = arr%cut(gi)%seg(2, k)
+      if (ng > 0_I4P) then
+         if (any(g(1:ng) == arr%cut(gi)%src(k))) cycle
+      endif
+      if (.not. (ip == a .or. ip == b .or. ip_orient2d(arr%pts(a), arr%pts(b), arr%pts(ip), drop) == 0_I4P)) cycle
+      if (.not. (iq == a .or. iq == b .or. ip_orient2d(arr%pts(a), arr%pts(b), arr%pts(iq), drop) == 0_I4P)) cycle
+      ax = mod(drop, 3_I4P) + 1_I4P
+      sab = ip_compare(arr%pts(a), arr%pts(b), ax)
+      if (sab == 0_I4P) then
+         ax = mod(drop + 1_I4P, 3_I4P) + 1_I4P ; sab = ip_compare(arr%pts(a), arr%pts(b), ax)
+      endif
+      if (.not. within(ip) .or. .not. within(iq)) cycle
+      ng = ng + 1_I4P ; g(ng) = arr%cut(gi)%src(k)
+      if (ng == 4_I4P) return
+   enddo
+   contains
+      function within(c) result(yes)
+      integer(I4P), intent(in) :: c
+      logical                  :: yes
+
+      yes = c == a .or. c == b
+      if (yes) return
+      yes = ip_compare(arr%pts(a), arr%pts(c), ax) == sab .and. ip_compare(arr%pts(c), arr%pts(b), ax) == sab
+      endfunction within
+   endsubroutine cut_sources
+
+   pure function xyz_of(a) result(r)
+   type(vector_R8P), intent(in) :: a
+   real(R8P)                    :: r(3)
+
+   r = [a%x, a%y, a%z]
+   endfunction xyz_of
 
    subroutine collect_pair(arr, gi, gj)
-   !< Intersect facets gi (of A) and gj (of B) with the exact pair classification and append a
-   !< crossing segment to both facets' cut lists. The segment endpoints are canonical points
-   !< (`fossil_tritri_exact`), identical for every pair that produces them. Touching pairs (one
-   !< common point) add no cut. A coplanar pair cuts each facet along the portions of the other
-   !< facet's edges inside it (`coplanar_portion`), so the overlap region becomes a set of
-   !< sub-triangles of its own in both facets.
+   !< Intersect facets gi (of A) and gj (of B) exactly (`pair_cut`, issue #65) and append a crossing segment to both
+   !< facets' cut lists, its endpoints registered as implicit points. Touching pairs (one common point) add no cut. An
+   !< exactly coplanar pair cuts each facet along the portions of the other facet's edges inside it (`coplanar_cut`).
    type(arrangement_t), intent(inout) :: arr    !< Arrangement.
    integer(I4P),        intent(in)    :: gi, gj !< Global facet indices (A, B).
    integer(I4P)                       :: kind   !< PAIR_* code.
-   type(vector_R8P)                   :: p, q   !< Common segment.
-   integer(I4P)                       :: e      !< Edge counter.
+   type(implicit_point_t)             :: p, q   !< Common segment.
+   integer(I4P)                       :: e, ip, iq
    logical                            :: found  !< Coplanar portion found.
 
-   call pair_classify(ta=arr%facet(gi)%vertex, tb=arr%facet(gj)%vertex, kind=kind, p=p, q=q)
+   call pair_cut(ta=arr%facet(gi)%vertex, tb=arr%facet(gj)%vertex, kind=kind, p=p, q=q)
    if (kind == PAIR_CROSSING) then
-      call append_segment(cut=arr%cut(gi), p=p, q=q)
-      call append_segment(cut=arr%cut(gj), p=p, q=q)
+      call register_point(arr, p, ip) ; call register_point(arr, q, iq)
+      call append_segment(cut=arr%cut(gi), ip=ip, iq=iq, g=gj)
+      call append_segment(cut=arr%cut(gj), ip=ip, iq=iq, g=gi)
    elseif (kind == PAIR_COPLANAR) then
       call append_partner(cut=arr%cut(gi), g=gj)
       call append_partner(cut=arr%cut(gj), g=gi)
       do e = 1, 3
-         call coplanar_portion(u=arr%facet(gj)%vertex(e), v=arr%facet(gj)%vertex(mod(e, 3) + 1), &
-                               t=arr%facet(gi)%vertex, found=found, p=p, q=q)
-         if (found) call append_segment(cut=arr%cut(gi), p=p, q=q)
-         call coplanar_portion(u=arr%facet(gi)%vertex(e), v=arr%facet(gi)%vertex(mod(e, 3) + 1), &
-                               t=arr%facet(gj)%vertex, found=found, p=p, q=q)
-         if (found) call append_segment(cut=arr%cut(gj), p=p, q=q)
+         call coplanar_cut(u=arr%facet(gj)%vertex(e), v=arr%facet(gj)%vertex(mod(e, 3) + 1), &
+                           t=arr%facet(gi)%vertex, found=found, p=p, q=q)
+         if (found) then
+            call register_point(arr, p, ip) ; call register_point(arr, q, iq)
+            call append_segment(cut=arr%cut(gi), ip=ip, iq=iq, g=gj)
+         endif
+         call coplanar_cut(u=arr%facet(gi)%vertex(e), v=arr%facet(gi)%vertex(mod(e, 3) + 1), &
+                           t=arr%facet(gj)%vertex, found=found, p=p, q=q)
+         if (found) then
+            call register_point(arr, p, ip) ; call register_point(arr, q, iq)
+            call append_segment(cut=arr%cut(gj), ip=ip, iq=iq, g=gi)
+         endif
       enddo
    endif
    endsubroutine collect_pair
@@ -459,29 +742,24 @@ contains
                 fa%bb(2)%z < fb%bb(1)%z .or. fb%bb(2)%z < fa%bb(1)%z)
    endfunction bboxes_overlap
 
-   subroutine append_segment(cut, p, q)
-   !< Append a 3D intersection segment (p, q) to a cut list, growing the
-   !< buffer geometrically (initial capacity 4 segments = 8 points, doubling
-   !< on overflow).
-   type(cut_list_t), intent(inout) :: cut  !< Cut list to extend.
-   type(vector_R8P), intent(in)    :: p, q !< Segment endpoints.
-   type(vector_R8P), allocatable   :: tmp(:)
-   integer(I4P)                    :: cap, used
+   subroutine append_segment(cut, ip, iq, g)
+   !< Append a segment (registry indices) made by facet g of the other surface to a cut list, growing the buffers.
+   type(cut_list_t), intent(inout) :: cut    !< Cut list to extend.
+   integer(I4P),     intent(in)    :: ip, iq !< Segment endpoints.
+   integer(I4P),     intent(in)    :: g      !< Source facet (global index).
+   integer(I4P), allocatable       :: tmp(:, :), tmp1(:)
 
-   used = 2 * cut%n_segments
-   if (.not. allocated(cut%point)) then
-      allocate(cut%point(8))  ! capacity 4 segments
-   else
-      cap = size(cut%point, dim=1)
-      if (used + 2 > cap) then
-         allocate(tmp(2 * cap))
-         tmp(1:used) = cut%point(1:used)
-         call move_alloc(from=tmp, to=cut%point)
-      endif
+   if (.not. allocated(cut%seg)) then
+      allocate(cut%seg(2, 4), cut%src(4))
+   elseif (cut%n_segments == size(cut%seg, dim=2)) then
+      allocate(tmp(2, 2 * cut%n_segments), tmp1(2 * cut%n_segments))
+      tmp(:, 1:cut%n_segments) = cut%seg(:, 1:cut%n_segments)
+      tmp1(1:cut%n_segments) = cut%src(1:cut%n_segments)
+      call move_alloc(from=tmp, to=cut%seg) ; call move_alloc(from=tmp1, to=cut%src)
    endif
-   cut%point(used + 1) = p
-   cut%point(used + 2) = q
-   cut%n_segments      = cut%n_segments + 1
+   cut%n_segments = cut%n_segments + 1_I4P
+   cut%seg(:, cut%n_segments) = [ip, iq]
+   cut%src(cut%n_segments) = g
    endsubroutine append_segment
 
    pure subroutine project_to_plane(facet, p3d, u, v)
@@ -538,307 +816,130 @@ contains
    p3d     = facet%vertex(1) + e12_hat * u + v_axis * v
    endsubroutine lift_from_plane
 
-   subroutine arrangement_retriangulate(arr, sub_facet, sub_owner, sub_source, status)
-   !< Walk every facet in `arr`; for those with non-empty cuts, retriangulate
-   !< them along the cut segments using the constrained Delaunay triangulator
-   !< (`fossil_dt%cdt_build`). Facets with no cuts pass through unchanged.
+   subroutine arrangement_retriangulate(arr, sub_facet, sub_owner, sub_source, status, sub_pid, sub_cut)
+   !< Split every facet with cuts (segments, isolated points or coplanar partners) by the exact constrained
+   !< triangulation on implicit points (`fossil_cdt_implicit`, issue #65); the other facets pass through unchanged.
    !<
-   !< Output is a flat parallel-array trio:
-   !<   - `sub_facet(:)`  — every emitted sub-triangle (or pass-through facet),
-   !<                       with `compute_metrix` already called.
-   !<   - `sub_owner(:)`  — 1 if the sub-triangle came from surface A, 2 from B
-   !<                       (inherited from the parent facet's owner tag).
-   !<   - `sub_source(:)` — global index of the parent facet in `arr%facet`,
-   !<                       so callers can trace each sub-triangle back to its
-   !<                       origin if needed.
+   !< Output (parallel arrays):
+   !<   - `sub_facet(:)`  — every sub-triangle or pass-through facet, metrics computed;
+   !<   - `sub_owner(:)`  — 1 if it comes from surface A, 2 from B;
+   !<   - `sub_source(:)` — global index of its parent facet in `arr%facet`;
+   !<   - `sub_pid(3, :)` — registry indices of its vertices;
+   !<   - `sub_cut(3, :)` — edge k (opposite vertex k) lies on a cut (a constraint of the facet's triangulation).
    !<
-   !< Per-facet algorithm:
-   !<   1. Project the 3 facet vertices into the facet's local 2D frame
-   !<      (project_to_plane). They become CDT input points 1, 2, 3.
-   !<   2. For each cut segment (p, q): project both endpoints to 2D, dedup
-   !<      against existing input points (within EPS in 2D), append the
-   !<      surviving new points; record (idx_p, idx_q) as a CDT constraint.
-   !<   3. Run cdt_build with the 2D points + segment constraints. Status
-   !<      DT_STATUS_RECOVERY_FAILED bubbles up as ARR_STATUS_CDT_FAILED so
-   !<      the boolean driver can decide how to handle it.
-   !<   4. For each output sub-triangle, take its 3 vertices from the exact 3D
-   !<      points they were projected from (no lift: issue #33), build a fresh facet_object, copy the parent's
-   !<      normal (the lift preserves the plane, so all sub-facets share the
-   !<      parent's normal direction), call compute_metrix, append to output.
-   !<
-   !< Pass-through (empty cuts) emits the parent facet unchanged. We deep-copy
-   !< via intrinsic assignment so downstream selection can mutate without
-   !< aliasing back into `arr`.
+   !< Per facet: its three vertices are points 1, 2, 3, then the distinct registry points of its cuts; the constraints
+   !< are its cut segments (split at the points on them by the triangulator). The projection drops an axis where the
+   !< facet is exactly non-degenerate (`facet_drop`). A sub-triangle has the orientation of its parent (the
+   !< triangulator keeps that of points 1, 2, 3 exactly); its vertices are the registry points rounded once
+   !< (`arr%xyz`), the same bits in every facet that shares them. A triangulation failure (a degenerate facet with cuts,
+   !< crossing constraints from a self-intersecting input) returns ARR_STATUS_CDT_FAILED.
    type(arrangement_t),             intent(in)            :: arr
    type(facet_object), allocatable, intent(out)           :: sub_facet(:)
    integer(I4P),       allocatable, intent(out)           :: sub_owner(:)
    integer(I4P),       allocatable, intent(out)           :: sub_source(:)
    integer(I4P),                    intent(out), optional :: status
-   integer(I4P)                                           :: gi, i, k, n_total, n_pts, n_segs, n_cuts
-   integer(I4P)                                           :: cdt_status, sub_v(3), n_sub
-   real(R8P), allocatable                                 :: pts2d(:,:)
-   type(vector_R8P), allocatable                          :: pts3d(:)   !< Exact 3D point of each 2D point.
-   integer(I4P), allocatable                              :: segs(:,:)
-   type(triangulation_t)                                  :: tri
-   type(vector_R8P)                                       :: p3d
-   real(R8P)                                              :: u, v
-   integer(I4P)                                           :: idx_p, idx_q
-   integer(I4P)                                           :: n_before   !< Points before a lookup.
-   integer(I4P)                                           :: n_st       !< Isolated points of the facet.
-   ! Output accumulator, doubled on demand.
+   integer(I4P),       allocatable, intent(out), optional :: sub_pid(:, :)
+   logical,            allocatable, intent(out), optional :: sub_cut(:, :)
+   integer(I4P)                                           :: gi, i, k, n_total, n, nl, ntri, st, drop, a, b
+   integer(I4P), allocatable                              :: ids(:), gid(:), lsegs(:, :), tris(:, :)
+   type(implicit_point_t), allocatable                    :: lp(:)
+   type(facet_object)                                     :: f
    type(facet_object), allocatable                        :: buf_facet(:)
-   integer(I4P),       allocatable                        :: buf_owner(:), buf_source(:)
+   integer(I4P),       allocatable                        :: buf_owner(:), buf_source(:), buf_pid(:, :)
+   logical,            allocatable                        :: buf_cut(:, :), tcon(:, :), tmp_c(:, :)
    integer(I4P)                                           :: cap, used
 
    if (present(status)) status = ARR_STATUS_OK
-
-   ! Initial accumulator capacity — most facets pass through, so we grow
-   ! geometrically from the original facet count.
    n_total = arr%n_a + arr%n_b
    cap = max(64_I4P, n_total)
-   allocate(buf_facet(cap), buf_owner(cap), buf_source(cap))
+   allocate(buf_facet(cap), buf_owner(cap), buf_source(cap), buf_pid(3, cap), buf_cut(3, cap))
    used = 0_I4P
-
    do gi = 1, n_total
-      n_cuts = arr%cut(gi)%n_segments
-      n_st   = arr%cut(gi)%n_steiner
-      if (n_cuts == 0_I4P .and. n_st == 0_I4P) then
-         ! Pass-through.
-         call push(buf_facet, buf_owner, buf_source, used, cap, &
-                   arr%facet(gi), arr%owner(gi), gi)
+      if (arr%cut(gi)%n_segments == 0_I4P .and. arr%cut(gi)%n_steiner == 0_I4P .and. &
+          arr%cut(gi)%n_coplanar == 0_I4P) then
+         call grow_cut
+         call push(buf_facet, buf_owner, buf_source, used, cap, arr%facet(gi), arr%owner(gi), gi, buf_pid)
+         buf_pid(:, used) = arr%corner(:, gi) ; buf_cut(:, used) = .false.
          cycle
       endif
-
-      ! --- Build CDT input: 3 facet vertices + cut endpoints (deduped). ---
-      ! Maximum points = 3 + 2 * n_cuts ; segments = n_cuts.
-      n_pts = 0_I4P ; n_segs = 0_I4P
-      if (allocated(pts2d)) deallocate(pts2d)
-      if (allocated(pts3d)) deallocate(pts3d)
-      if (allocated(segs))  deallocate(segs)
-      allocate(pts2d(2, 3 + 2 * n_cuts + n_st))
-      allocate(pts3d(3 + 2 * n_cuts + n_st))
-      allocate(segs(2, n_cuts + 3_I4P))
-
-      ! Three facet vertices first (so they keep stable indices 1, 2, 3).
+      call unique_ids(arr%cut(gi), ids, n, with_steiner=.true.)
+      if (allocated(lp)) deallocate(lp)
+      if (allocated(gid)) deallocate(gid)
+      allocate(lp(3 + n), gid(3 + n))
       do i = 1, 3
-         call project_to_plane(facet=arr%facet(gi), p3d=arr%facet(gi)%vertex(i), &
-                               u=pts2d(1, i), v=pts2d(2, i))
-         pts3d(i) = arr%facet(gi)%vertex(i)
+         lp(i) = ip_explicit(xyz_of(arr%facet(gi)%vertex(i)))
+         gid(i) = arr%corner(i, gi)
       enddo
-      n_pts = 3_I4P
-
-      ! Cut endpoints: project, dedup against existing points (within EPS),
-      ! record (start_idx, end_idx) as a constraint segment.
-      do k = 1, n_cuts
-         ! a new 2D point keeps its exact 3D source; a deduplicated one keeps the first source
-         n_before = n_pts
-         call project_to_plane(facet=arr%facet(gi), p3d=arr%cut(gi)%point(2*k - 1), u=u, v=v)
-         idx_p = find_or_append_2d(pts2d=pts2d, n_pts=n_pts, x=u, y=v)
-         if (n_pts > n_before) pts3d(idx_p) = arr%cut(gi)%point(2*k - 1)
-         n_before = n_pts
-         call project_to_plane(facet=arr%facet(gi), p3d=arr%cut(gi)%point(2*k), u=u, v=v)
-         idx_q = find_or_append_2d(pts2d=pts2d, n_pts=n_pts, x=u, y=v)
-         if (n_pts > n_before) pts3d(idx_q) = arr%cut(gi)%point(2*k)
-         if (idx_p == idx_q) cycle  ! degenerate zero-length cut after dedup
-         n_segs = n_segs + 1
-         segs(1, n_segs) = idx_p
-         segs(2, n_segs) = idx_q
+      nl = 3_I4P
+      do k = 1, n
+         if (any(gid(1:3) == ids(k))) cycle
+         nl = nl + 1_I4P ; lp(nl) = arr%pts(ids(k)) ; gid(nl) = ids(k)
       enddo
-
-      ! Isolated points on the facet's edges, from the neighbours' cuts (T-junctions).
-      do k = 1, n_st
-         n_before = n_pts
-         call project_to_plane(facet=arr%facet(gi), p3d=arr%cut(gi)%steiner(k), u=u, v=v)
-         idx_p = find_or_append_2d(pts2d=pts2d, n_pts=n_pts, x=u, y=v)
-         if (n_pts > n_before) pts3d(idx_p) = arr%cut(gi)%steiner(k)
+      if (allocated(lsegs)) deallocate(lsegs)
+      allocate(lsegs(2, max(1_I4P, arr%cut(gi)%n_segments)))
+      k = 0_I4P
+      do i = 1, arr%cut(gi)%n_segments
+         a = local(arr%cut(gi)%seg(1, i)) ; b = local(arr%cut(gi)%seg(2, i))
+         if (a == b .or. a == 0_I4P .or. b == 0_I4P) cycle
+         k = k + 1_I4P ; lsegs(:, k) = [a, b]
       enddo
-
-      ! The facet's own edges are constraints too (issue #63): Bowyer-Watson with a finite super-triangle
-      ! does not keep a hull edge when a point lies close inside it (a cut 3.5e-5 from a unit edge on two
-      ! cubes rotated by 1e-4 rad apart), and the facet across that edge keeps it: a crack. Split at the
-      ! points lying on them (cut endpoints, T-junction points) like the cuts.
-      do i = 1, 3
-         n_segs = n_segs + 1
-         segs(1, n_segs) = i
-         segs(2, n_segs) = mod(i, 3) + 1
-      enddo
-
-      ! --- Split constraints at the points lying on them (collinear overlapping cuts, cuts along
-      ! the facet's edges through other points): the CDT needs disjoint constraint interiors. ---
-      call split_constraints(pts2d=pts2d(:, 1:n_pts), segs=segs, n_segs=n_segs)
-
-      ! --- Run CDT. ---
-      call cdt_build(tri=tri, points=pts2d(:, 1:n_pts), segments=segs(:, 1:n_segs), status=cdt_status)
-      if (cdt_status /= DT_STATUS_OK) then
-         ! Recovery failed for this facet's cuts. We could fall back to the
-         ! original facet (better than nothing) or propagate the error. The
-         ! boolean driver treats this as a global failure so the user knows
-         ! the result is incorrect rather than silently degraded.
+      drop = facet_drop(arr%facet(gi)%vertex)
+      if (drop == 0_I4P) then
          if (present(status)) status = ARR_STATUS_CDT_FAILED
          return
       endif
-
-      ! --- Emit sub-triangles. ---
-      n_sub = tri%num_triangles()
-      do k = 1, n_sub
-         call tri%triangle_vertices(k=k, v=sub_v)
-         call build_subfacet_from_uv(arr=arr, gi=gi, pts3d=pts3d, sub_v=sub_v, &
-                                     buf_facet=buf_facet, buf_owner=buf_owner, &
-                                     buf_source=buf_source, used=used, cap=cap)
+      call cdt_facet(pts=lp(1:nl), drop=drop, segs=lsegs(:, 1:k), tris=tris, ntri=ntri, status=st, tcon=tcon)
+      if (st /= CDTI_OK) then
+         if (present(status)) status = ARR_STATUS_CDT_FAILED
+         return
+      endif
+      do k = 1, ntri
+         do i = 1, 3
+            if (tris(i, k) <= 3_I4P) then
+               f%vertex(i) = arr%facet(gi)%vertex(tris(i, k))
+            else
+               f%vertex(i)%x = arr%xyz(1, gid(tris(i, k)))
+               f%vertex(i)%y = arr%xyz(2, gid(tris(i, k)))
+               f%vertex(i)%z = arr%xyz(3, gid(tris(i, k)))
+            endif
+         enddo
+         call f%compute_metrix
+         call grow_cut
+         call push(buf_facet, buf_owner, buf_source, used, cap, f, arr%owner(gi), gi, buf_pid)
+         buf_pid(:, used) = gid(tris(:, k)) ; buf_cut(:, used) = tcon(:, k)
       enddo
    enddo
-
-   ! Trim accumulators to exact size.
-   allocate(sub_facet (used))
-   allocate(sub_owner (used))
-   allocate(sub_source(used))
+   allocate(sub_facet(used), sub_owner(used), sub_source(used))
    sub_facet (1:used) = buf_facet (1:used)
    sub_owner (1:used) = buf_owner (1:used)
    sub_source(1:used) = buf_source(1:used)
+   if (present(sub_pid)) then
+      allocate(sub_pid(3, used)) ; sub_pid = buf_pid(:, 1:used)
+   endif
+   if (present(sub_cut)) then
+      allocate(sub_cut(3, used)) ; sub_cut = buf_cut(:, 1:used)
+   endif
+   contains
+      subroutine grow_cut
+      !< Keep `buf_cut` as long as the accumulator (grown by `push` when full).
+      if (used == cap) then
+         allocate(tmp_c(3, 2 * cap)) ; tmp_c(:, 1:used) = buf_cut(:, 1:used) ; call move_alloc(tmp_c, buf_cut)
+      endif
+      endsubroutine grow_cut
+
+      pure function local(id) result(l)
+      !< Local index of registry point id in the facet's list (0 if absent).
+      integer(I4P), intent(in) :: id
+      integer(I4P)             :: l
+
+      do l = 1, nl
+         if (gid(l) == id) return
+      enddo
+      l = 0_I4P
+      endfunction local
    endsubroutine arrangement_retriangulate
 
-   subroutine split_constraints(pts2d, segs, n_segs)
-   !< Replace every constraint segment by the chain of its sub-segments between the points that
-   !< lie on it, then drop duplicates (issue #33). Points of a coplanar overlap lie on the edges
-   !< and diagonals of the facets, and collinear cuts overlap; the CDT needs constraints whose
-   !< interiors contain no point and do not overlap. A point is on segment (a, b) when its distance
-   !< from the line is below 1e-9 |b - a| and its parameter is strictly inside (0, 1): the points
-   !< meant to lie there are at round-off distance, distinct points are far apart.
-   real(R8P),                 intent(in)    :: pts2d(:, :)   !< Points (2, n).
-   integer(I4P), allocatable, intent(inout) :: segs(:, :)    !< Constraints (2, capacity).
-   integer(I4P),              intent(inout) :: n_segs        !< Number of constraints.
-   integer(I4P), allocatable                :: out(:, :), on(:)
-   real(R8P),    allocatable                :: t(:)
-   integer(I4P)                             :: s, c, n_on, n_out, i, j, a, b, it
-   real(R8P)                                :: dx, dy, len2, tc, dist2
-   logical                                  :: dup
-   real(R8P), parameter                     :: REL_TOL = 1.e-9_R8P
-
-   if (n_segs == 0_I4P) return
-   allocate(on(size(pts2d, dim=2)), t(size(pts2d, dim=2)))
-   allocate(out(2, n_segs * (size(pts2d, dim=2) + 1)))
-   n_out = 0_I4P
-   do s = 1, n_segs
-      a = segs(1, s) ; b = segs(2, s)
-      dx = pts2d(1, b) - pts2d(1, a) ; dy = pts2d(2, b) - pts2d(2, a)
-      len2 = dx * dx + dy * dy
-      if (len2 <= 0._R8P) cycle
-      n_on = 0_I4P
-      do c = 1, size(pts2d, dim=2)
-         if (c == a .or. c == b) cycle
-         tc = ((pts2d(1, c) - pts2d(1, a)) * dx + (pts2d(2, c) - pts2d(2, a)) * dy) / len2
-         if (tc <= 0._R8P .or. tc >= 1._R8P) cycle
-         dist2 = ((pts2d(1, c) - pts2d(1, a)) * dy - (pts2d(2, c) - pts2d(2, a)) * dx)**2 / len2
-         if (dist2 > (REL_TOL * REL_TOL) * len2) cycle
-         n_on = n_on + 1_I4P ; on(n_on) = c ; t(n_on) = tc
-      enddo
-      ! insertion sort of the points on the segment by parameter
-      do i = 2, n_on
-         j = i
-         do while (j > 1)
-            if (t(j - 1) <= t(j)) exit
-            tc = t(j) ; t(j) = t(j - 1) ; t(j - 1) = tc
-            it = on(j) ; on(j) = on(j - 1) ; on(j - 1) = it
-            j = j - 1
-         enddo
-      enddo
-      call emit(a, merge(on(1), b, n_on > 0))
-      do i = 1, n_on - 1
-         call emit(on(i), on(i + 1))
-      enddo
-      if (n_on > 0) call emit(on(n_on), b)
-   enddo
-   if (n_out > size(segs, dim=2)) then
-      deallocate(segs) ; allocate(segs(2, n_out))
-   endif
-   segs(:, 1:n_out) = out(:, 1:n_out)
-   n_segs = n_out
-   contains
-      subroutine emit(p1, p2)
-      integer(I4P), intent(in) :: p1, p2
-      integer(I4P)             :: k
-
-      if (p1 == p2) return
-      dup = .false.
-      do k = 1, n_out
-         if ((out(1, k) == p1 .and. out(2, k) == p2) .or. (out(1, k) == p2 .and. out(2, k) == p1)) then
-            dup = .true. ; exit
-         endif
-      enddo
-      if (dup) return
-      n_out = n_out + 1_I4P
-      out(1, n_out) = p1 ; out(2, n_out) = p2
-      endsubroutine emit
-   endsubroutine split_constraints
-
-   function find_or_append_2d(pts2d, n_pts, x, y) result(idx)
-   !< Look up (x, y) in `pts2d(:, 1:n_pts)` within tolerance; if found return
-   !< its index, otherwise append and return the new index.
-   !<
-   !< Tolerance: scale-aware — `max(|coord|, 1) * DEDUP_REL_TOL`. Cannot use
-   !< the project-wide `EPS` because it is hardcoded to 0 in `fossil_utils`
-   !< (a known pre-existing oddity), which would defeat the whole purpose of
-   !< this dedup pass. The relative tolerance `1e-10` accommodates the
-   !< inevitable round-off in `project_to_plane` while still distinguishing
-   !< genuinely different points whose 2D coordinates differ at the eighth
-   !< significant digit or further apart.
-   real(R8P),    intent(inout) :: pts2d(:, :)
-   integer(I4P), intent(inout) :: n_pts
-   real(R8P),    intent(in)    :: x, y
-   integer(I4P)                :: idx
-   integer(I4P)                :: i
-   real(R8P)                   :: tol_x, tol_y
-   real(R8P), parameter        :: DEDUP_REL_TOL = 1.0e-10_R8P
-
-   tol_x = max(abs(x), 1._R8P) * DEDUP_REL_TOL
-   tol_y = max(abs(y), 1._R8P) * DEDUP_REL_TOL
-   do i = 1, n_pts
-      if (abs(pts2d(1, i) - x) <= tol_x .and. abs(pts2d(2, i) - y) <= tol_y) then
-         idx = i ; return
-      endif
-   enddo
-   n_pts = n_pts + 1
-   pts2d(1, n_pts) = x
-   pts2d(2, n_pts) = y
-   idx = n_pts
-   endfunction find_or_append_2d
-
-   subroutine build_subfacet_from_uv(arr, gi, pts3d, sub_v, buf_facet, buf_owner, &
-                                     buf_source, used, cap)
-   !< Build one CDT sub-triangle as a facet from the **exact 3D points** its 2D vertices came from
-   !< (the parent's vertices and the canonical cut endpoints, issue #33), not by lifting the 2D
-   !< coordinates back: a lift changes the last bits, and the vertices shared with neighbouring
-   !< sub-facets and with the other surface must be bit-identical to weld. The parent's normal
-   !< orientation is kept, then the result is pushed to the output accumulator.
-   type(arrangement_t),             intent(in)    :: arr
-   integer(I4P),                    intent(in)    :: gi
-   type(vector_R8P),                intent(in)    :: pts3d(:)
-   integer(I4P),                    intent(in)    :: sub_v(3)
-   type(facet_object), allocatable, intent(inout) :: buf_facet(:)
-   integer(I4P),       allocatable, intent(inout) :: buf_owner(:), buf_source(:)
-   integer(I4P),                    intent(inout) :: used, cap
-   type(facet_object)                             :: f
-   integer(I4P)                                   :: i
-
-   do i = 1, 3
-      f%vertex(i) = pts3d(sub_v(i))
-   enddo
-   ! Inherit parent's normal direction (the lift preserves the plane, so the
-   ! geometric normal will be ±parent's normal; copying it sets the orientation
-   ! correctly for sub-triangles emitted in the same CCW sense as the CDT).
-   f%normal = arr%facet(gi)%normal
-   call f%compute_metrix
-   ! `compute_metrix` recomputes the normal from vertex order; if it ended up
-   ! anti-parallel to the parent (i.e. the CDT emitted the sub-triangle in
-   ! CW order relative to the parent's outward normal), flip to restore.
-   if (f%normal%dotproduct(rhs=arr%facet(gi)%normal) < 0._R8P) then
-      call f%reverse_normal
-      call f%compute_metrix
-   endif
-   call push(buf_facet, buf_owner, buf_source, used, cap, f, arr%owner(gi), gi)
-   endsubroutine build_subfacet_from_uv
-
-   subroutine push(buf_facet, buf_owner, buf_source, used, cap, f, owner, source)
+   subroutine push(buf_facet, buf_owner, buf_source, used, cap, f, owner, source, buf_pid)
    !< Append (f, owner, source) to the parallel-array accumulator, doubling
    !< capacity on overflow.
    type(facet_object), allocatable, intent(inout) :: buf_facet(:)
@@ -846,10 +947,14 @@ contains
    integer(I4P),                    intent(inout) :: used, cap
    type(facet_object),              intent(in)    :: f
    integer(I4P),                    intent(in)    :: owner, source
+   integer(I4P),       allocatable, intent(inout) :: buf_pid(:, :)
    type(facet_object), allocatable                :: tmp_f(:)
-   integer(I4P),       allocatable                :: tmp_i(:)
+   integer(I4P),       allocatable                :: tmp_i(:), tmp_p(:, :)
 
    if (used == cap) then
+      allocate(tmp_p(3, 2 * cap))
+      tmp_p(:, 1:used) = buf_pid(:, 1:used)
+      call move_alloc(from=tmp_p, to=buf_pid)
       cap = 2 * cap
       allocate(tmp_f(cap))
       tmp_f(1:used) = buf_facet(1:used)

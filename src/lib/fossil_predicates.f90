@@ -46,6 +46,7 @@ module fossil_predicates
 !<       thread-safe under read-after-write semantics; the values it computes
 !<       depend only on the host's IEEE 754 round-to-nearest mode.
 
+use, intrinsic :: ieee_arithmetic, only : ieee_fma
 use penf,   only : I4P, I8P, R8P
 use vecfor, only : vector_R8P
 
@@ -138,14 +139,16 @@ contains
    !< `(7 + 56 eps) eps |permanent|`. Conclusive for all but near-coplanar inputs, at the cost
    !< of the naive test; when it is conclusive the result is the same double as before.
    !<
-   !< Stage 2, exact: by multilinearity det[a - d; b - d; c - d] = [a, b, c] - [d, b, c] -
+   !< Stage 2, exact: an exact zero when the four points share a coordinate plane; when the nine
+   !< differences are exact (error-free subtraction test), det is the sum of 6 products of three
+   !< of them; otherwise, by multilinearity det[a - d; b - d; c - d] = [a, b, c] - [d, b, c] -
    !< [a, d, c] - [a, b, d], with [p, q, r] = p . (q x r): 24 products of three input
-   !< coordinates, no differences. Each coordinate is split by bit masks into four pieces of
-   !< at most 17 significant bits (`split4`), so every product of three pieces is exact (at
-   !< most 51 bits); the exact products are summed into a nonoverlapping expansion with
-   !< error-free sums (`grow_expansion`), whose largest component carries the exact sign. As
-   !< in `orient2d_xy`, the split uses no multiplication: the products it feeds are exact, so
-   !< FMA contraction (nvfortran's default) cannot change the result.
+   !< coordinates. Each product of three doubles is made an exact sum of four doubles by
+   !< error-free products (`ieee_fma` gives the exact error of a rounded product, issue #65;
+   !< it was 64 bit-mask pieces per product before), summed into a nonoverlapping expansion with
+   !< error-free sums (`grow_expansion`), whose largest component carries the exact sign. FMA
+   !< contraction cannot change the result: every rounded product feeds only an explicit
+   !< `ieee_fma` that recovers its exact error. Host only (not a device routine).
    real(R8P), intent(in) :: a(3), b(3), c(3), d(3) !< Points (x, y, z).
    real(R8P)             :: sign_volume            !< Its sign is exact.
    real(R8P), parameter  :: EPS_HALF = epsilon(1._R8P) / 2._R8P                !< Unit roundoff.
@@ -170,11 +173,30 @@ contains
       return
    endif
 
+   ! exact zero: the four points on one coordinate plane (axis-aligned inputs, issue #65)
+   do i = 1, 3
+      if (a(i) == d(i) .and. b(i) == d(i) .and. c(i) == d(i)) then
+         sign_volume = 0._R8P ; return
+      endif
+   enddo
    n = 0_I4P
+   ! stage 2a: when the nine differences are exact (error-free subtraction, no multiplication), the determinant is
+   ! the sum of 6 products of three of them (64 pieces each instead of 24 products of input coordinates)
+   if (diff_exact(a(1), d(1), adx) .and. diff_exact(b(1), d(1), bdx) .and. diff_exact(c(1), d(1), cdx) .and. &
+       diff_exact(a(2), d(2), ady) .and. diff_exact(b(2), d(2), bdy) .and. diff_exact(c(2), d(2), cdy) .and. &
+       diff_exact(a(3), d(3), adz) .and. diff_exact(b(3), d(3), bdz) .and. diff_exact(c(3), d(3), cdz)) then
+      call add_product3(adz, bdx, cdy, 1._R8P, e, n)
+      call add_product3(adz, cdx, bdy, -1._R8P, e, n)
+      call add_product3(bdz, cdx, ady, 1._R8P, e, n)
+      call add_product3(bdz, adx, cdy, -1._R8P, e, n)
+      call add_product3(cdz, adx, bdy, 1._R8P, e, n)
+      call add_product3(cdz, bdx, ady, -1._R8P, e, n)
+   else
    call add_triple(a, b, c, 1._R8P, e, n)
    call add_triple(d, b, c, -1._R8P, e, n)
    call add_triple(a, d, c, -1._R8P, e, n)
    call add_triple(a, b, d, -1._R8P, e, n)
+   endif
    sign_volume = 0._R8P
    do i = n, 1_I4P, -1_I4P ! components in increasing magnitude: the last nonzero one is the largest
       if (e(i) /= 0._R8P) then
@@ -183,6 +205,16 @@ contains
       endif
    enddo
    contains
+      pure function diff_exact(x, y, dxy) result(exact)
+      !< The double dxy = x - y is exact (Knuth's two-difference error term is zero; additions only).
+      real(R8P), intent(in) :: x, y, dxy
+      logical               :: exact
+      real(R8P)             :: bvirt, avirt, bround, around
+
+      bvirt = x - dxy ; avirt = dxy + bvirt ; bround = bvirt - y ; around = x - avirt
+      exact = around + bround == 0._R8P
+      endfunction diff_exact
+
       pure subroutine add_triple(p, q, r, s, e, n)
       !< Add s [p, q, r] = s p . (q x r) (s = +-1) to the expansion e(1:n), exactly.
       real(R8P),    intent(in)    :: p(3), q(3), r(3), s !< Rows and sign.
@@ -202,21 +234,16 @@ contains
       real(R8P),    intent(in)    :: x, y, z, s !< Factors and sign.
       real(R8P),    intent(inout) :: e(:)       !< Expansion.
       integer(I4P), intent(inout) :: n          !< Its length.
-      real(R8P)                   :: xx(4), yy(4), zz(4) !< Pieces.
-      integer(I4P)                :: k, l, m    !< Counters.
+      real(R8P)                   :: p, pe, q, qe, r, re !< x y = p + pe, p z = q + qe, pe z = r + re (exact).
 
       if (x == 0._R8P .or. y == 0._R8P .or. z == 0._R8P) return
-      call split4(x, xx) ; call split4(y, yy) ; call split4(z, zz)
-      do k = 1, 4
-         if (xx(k) == 0._R8P) cycle
-         do l = 1, 4
-            if (yy(l) == 0._R8P) cycle
-            do m = 1, 4
-               if (zz(m) == 0._R8P) cycle
-               call grow_expansion(e, n, s * (xx(k) * yy(l) * zz(m)))
-            enddo
-         enddo
-      enddo
+      p = x * y ; pe = ieee_fma(x, y, -p)
+      q = p * z ; qe = ieee_fma(p, z, -q)
+      r = pe * z ; re = ieee_fma(pe, z, -r)
+      if (re /= 0._R8P) call grow_expansion(e, n, s * re)
+      if (r /= 0._R8P) call grow_expansion(e, n, s * r)
+      if (qe /= 0._R8P) call grow_expansion(e, n, s * qe)
+      call grow_expansion(e, n, s * q)
       endsubroutine add_product3
    endfunction orient3d_xyz
 

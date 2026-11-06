@@ -8,12 +8,15 @@ module fossil_implicit_points
 !< - IPK_EXPLICIT: an input vertex x;
 !< - IPK_LPI: the line through p, q meets the plane through r, s, t;
 !< - IPK_SSI: segment (a, b) meets segment (c, d), both in one plane, solved in the coordinate plane that drops axis
-!<   `drop`: the point of the line (a, b) whose projection lies on the projected line (c, d).
+!<   `drop`: the point of the line (a, b) whose projection lies on the projected line (c, d);
+!< - IPK_EEI: the lines (a, b) and (c, d), exactly coplanar (orient3d(a, b, c, d) = 0) and not parallel, meet: the
+!<   identity depends on the two edges only, not on a projection or on the facets they bound.
 !< Each point has homogeneous coordinates (X, W), polynomials in the input coordinates:
 !< - explicit: X = x, W = 1;
 !< - LPI: n = (s - r) x (t - r), W = n . (q - p), X = W p + (n . (r - p)) (q - p);
 !< - SSI: with u = b - a, v = d - c, w = c - a in the kept axes (i, j): W = u_i v_j - u_j v_i,
-!<   X = W a + (w_i v_j - w_j v_i) u.
+!<   X = W a + (w_i v_j - w_j v_i) u;
+!< - EEI: with m = u x v, W = m . m, X = W a + ((w x v) . m) u.
 !< The defining inputs are put in a canonical order first (endpoints and segments lexicographically, the plane's
 !< three points lexicographically), so one geometric construction is one point, and `ip_approx` rounds it by one
 !< formula: equal identities give equal bits.
@@ -24,17 +27,19 @@ module fossil_implicit_points
 !< expansion arithmetic (nonoverlapping sums of doubles, Shewchuk 1997), exactly. Products are made exact by
 !< splitting each factor by bit masks into three 18-bit pieces, so FMA contraction cannot change a result (as in
 !< `fossil_predicates`). The sign is exact barring overflow and underflow of the intermediate products.
+use fossil_predicates, only : orient2d_xy, orient3d_xyz
 use penf, only : I4P, I8P, R8P
 
 implicit none
 private
-public :: implicit_point_t, IPK_EXPLICIT, IPK_LPI, IPK_SSI
-public :: ip_explicit, ip_lpi, ip_ssi, ip_same, ip_approx
-public :: ip_orient3d, ip_orient2d, ip_compare
+public :: implicit_point_t, IPK_EXPLICIT, IPK_LPI, IPK_SSI, IPK_EEI
+public :: ip_explicit, ip_lpi, ip_ssi, ip_eei, ip_same, ip_approx
+public :: ip_orient3d, ip_orient2d, ip_compare, ip_lex_compare, ip_identity_compare, ip_rank
 
 integer(I4P), parameter :: IPK_EXPLICIT = 1_I4P !< Input vertex.
 integer(I4P), parameter :: IPK_LPI      = 2_I4P !< Line-plane intersection.
 integer(I4P), parameter :: IPK_SSI      = 3_I4P !< Coplanar segment-segment intersection.
+integer(I4P), parameter :: IPK_EEI      = 4_I4P !< Intersection of two exactly coplanar lines (edge-edge).
 
 type :: implicit_point_t
    !< An implicit point: its kind, its defining input points (canonical order) and, for IPK_SSI, the dropped axis.
@@ -111,6 +116,15 @@ contains
    p%v(:, 1:2) = s1 ; p%v(:, 3:4) = s2
    endfunction ip_ssi
 
+   pure function ip_eei(a0, b0, c0, d0) result(p)
+   !< The lines (a0, b0) and (c0, d0), exactly coplanar and not parallel, meet (canonical order of both).
+   real(R8P), intent(in)  :: a0(3), b0(3), c0(3), d0(3) !< Edges.
+   type(implicit_point_t) :: p                           !< Point.
+
+   p = ip_ssi(a0, b0, c0, d0, 1_I4P)
+   p%kind = IPK_EEI ; p%drop = 0_I4P
+   endfunction ip_eei
+
    pure function ip_same(a, b) result(same)
    !< The same construction (identity): same kind, defining points and axis, bit for bit.
    type(implicit_point_t), intent(in) :: a, b !< Points.
@@ -145,6 +159,14 @@ contains
    type(rerr_t)                       :: rx(3), rw, rd
    type(expn_t)                       :: hx(3), hw, d
 
+   if (p%kind == IPK_EXPLICIT) then ! input vertex: Shewchuk's exact orient3d
+      sg = rsgn(orient3d_xyz(a, b, c, p%v(:, 1))) ; return
+   endif
+   if (p%kind == IPK_LPI) then ! on its own plane by construction
+      if (same_plane(p%v(:, 3:5), a, b, c)) then
+         sg = 0_I4P ; return
+      endif
+   endif
    ! det[a - P; b - P; c - P] W^3 = det[W a - X; W b - X; W c - X]; sign(W^3) = sign(W)
    call homog_r(p, rx, rw)
    rd = det3_r(rw, rx, a, b, c)
@@ -166,6 +188,12 @@ contains
    integer(I4P)                       :: i, j, s1, s2, s3, s4
 
    i = mod(drop, 3_I4P) + 1_I4P ; j = mod(drop + 1_I4P, 3_I4P) + 1_I4P
+   if (p%kind == IPK_EXPLICIT .and. q%kind == IPK_EXPLICIT .and. r%kind == IPK_EXPLICIT) then
+      sg = rsgn(orient2d_xy(p%v(i, 1), p%v(j, 1), q%v(i, 1), q%v(j, 1), r%v(i, 1), r%v(j, 1))) ; return
+   endif
+   if (collinear_by_construction(p, q, r)) then ! three points of one input line: collinear in 3D, so here
+      sg = 0_I4P ; return
+   endif
    call homog_r(p, px, pw) ; call homog_r(q, qx, qw) ; call homog_r(r, rx, rw)
    ! det [[Xp_i, Xp_j, Wp], [Xq_i, Xq_j, Wq], [Xr_i, Xr_j, Wr]] = orient2d Wp Wq Wr
    d = px(i) * (qx(j) * rw - rx(j) * qw) - qx(i) * (px(j) * rw - rx(j) * pw) + rx(i) * (px(j) * qw - qx(j) * pw)
@@ -178,7 +206,7 @@ contains
    sg = x_sign(e) * x_sign(ew) * x_sign(fw) * x_sign(gw)
    endfunction ip_orient2d
 
-   function ip_compare(p, q, axis) result(sg)
+   recursive function ip_compare(p, q, axis) result(sg)
    !< Exact sign of p_axis - q_axis.
    type(implicit_point_t), intent(in) :: p, q !< Points.
    integer(I4P),           intent(in) :: axis !< Axis (1..3).
@@ -187,6 +215,19 @@ contains
    type(expn_t)                       :: ex(3), ew, fx(3), fw, e
    integer(I4P)                       :: s1, s2, s3
 
+   if (p%kind == IPK_EXPLICIT .and. q%kind == IPK_EXPLICIT) then
+      sg = rsgn(p%v(axis, 1) - q%v(axis, 1)) ; return ! exact: the sign of a difference of doubles
+   endif
+   if (q%kind == IPK_EXPLICIT) then ! sign(X_p - x W_p) sign(W_p)
+      call homog_r(p, px, pw)
+      d = px(axis) - pw * r_of(q%v(axis, 1))
+      s1 = r_sign(d) ; s2 = r_sign(pw)
+      if (s1 /= 2_I4P .and. s2 /= 2_I4P) then
+         sg = s1 * s2 ; return
+      endif
+   elseif (p%kind == IPK_EXPLICIT) then
+      sg = -ip_compare(q, p, axis) ; return
+   endif
    call homog_r(p, px, pw) ; call homog_r(q, qx, qw)
    d = px(axis) * qw - qx(axis) * pw
    s1 = r_sign(d) ; s2 = r_sign(pw) ; s3 = r_sign(qw)
@@ -197,6 +238,57 @@ contains
    e = ex(axis) * fw - fx(axis) * ew
    sg = x_sign(e) * x_sign(ew) * x_sign(fw)
    endfunction ip_compare
+
+   function ip_lex_compare(p, q) result(sg)
+   !< Exact lexicographic order of p and q (x, then y, then z): -1, 0 (the same point), 1. On a line it is monotone
+   !< along the line, so it orders collinear points.
+   type(implicit_point_t), intent(in) :: p, q !< Points.
+   integer(I4P)                       :: sg   !< -1, 0, 1.
+   integer(I4P)                       :: k
+
+   sg = 0_I4P
+   if (ip_same(p, q)) return
+   do k = 1, 3
+      sg = ip_compare(p, q, k)
+      if (sg /= 0_I4P) return
+   enddo
+   endfunction ip_lex_compare
+
+   pure function ip_identity_compare(p, q) result(sg)
+   !< A total order of identities (kind, axis, defining coordinates), 0 iff `ip_same`.
+   type(implicit_point_t), intent(in) :: p, q !< Points.
+   integer(I4P)                       :: sg   !< -1, 0, 1.
+   integer(I4P)                       :: k, c
+
+   sg = 0_I4P
+   if (p%kind /= q%kind) then
+      sg = merge(-1_I4P, 1_I4P, p%kind < q%kind) ; return
+   endif
+   if (p%drop /= q%drop) then
+      sg = merge(-1_I4P, 1_I4P, p%drop < q%drop) ; return
+   endif
+   do c = 1, 5
+      do k = 1, 3
+         if (p%v(k, c) /= q%v(k, c)) then
+            sg = merge(-1_I4P, 1_I4P, p%v(k, c) < q%v(k, c)) ; return
+         endif
+      enddo
+   enddo
+   endfunction ip_identity_compare
+
+   elemental function ip_rank(p) result(r)
+   !< Preference among constructions of the same point: an input vertex, then an edge-edge point, a segment-segment
+   !< point, a line-plane point (the most specific construction is the one every facet pair agrees on).
+   type(implicit_point_t), intent(in) :: p !< Point.
+   integer(I4P)                       :: r !< 1 (preferred) .. 4.
+
+   select case (p%kind)
+   case (IPK_EXPLICIT) ; r = 1_I4P
+   case (IPK_EEI)      ; r = 2_I4P
+   case (IPK_SSI)      ; r = 3_I4P
+   case default        ; r = 4_I4P
+   endselect
+   endfunction ip_rank
 
    ! homogeneous coordinates -----------------------------------------------------------------------------------------
    pure subroutine homog_r(p, x, w)
@@ -230,6 +322,21 @@ contains
           (r_of(p%v(j, 2)) - r_of(p%v(j, 1))) * (r_of(p%v(i, 4)) - r_of(p%v(i, 3)))
       t = (r_of(p%v(i, 3)) - r_of(p%v(i, 1))) * (r_of(p%v(j, 4)) - r_of(p%v(j, 3))) - &
           (r_of(p%v(j, 3)) - r_of(p%v(j, 1))) * (r_of(p%v(i, 4)) - r_of(p%v(i, 3)))
+      do k = 1, 3
+         x(k) = w * r_of(p%v(k, 1)) + t * (r_of(p%v(k, 2)) - r_of(p%v(k, 1)))
+      enddo
+   case (IPK_EEI)
+      do k = 1, 3
+         d(k) = r_of(p%v(k, 2)) - r_of(p%v(k, 1)) ! u
+         e(k) = r_of(p%v(k, 4)) - r_of(p%v(k, 3)) ! v
+      enddo
+      n(1) = d(2) * e(3) - d(3) * e(2) ; n(2) = d(3) * e(1) - d(1) * e(3) ; n(3) = d(1) * e(2) - d(2) * e(1) ! m
+      w = n(1) * n(1) + n(2) * n(2) + n(3) * n(3)
+      do k = 1, 3
+         d(k) = r_of(p%v(k, 3)) - r_of(p%v(k, 1)) ! w = c - a (u no longer needed here)
+      enddo
+      ! (w x v) . m
+      t = (d(2) * e(3) - d(3) * e(2)) * n(1) + (d(3) * e(1) - d(1) * e(3)) * n(2) + (d(1) * e(2) - d(2) * e(1)) * n(3)
       do k = 1, 3
          x(k) = w * r_of(p%v(k, 1)) + t * (r_of(p%v(k, 2)) - r_of(p%v(k, 1)))
       enddo
@@ -267,6 +374,20 @@ contains
           (x_of(p%v(j, 2)) - x_of(p%v(j, 1))) * (x_of(p%v(i, 4)) - x_of(p%v(i, 3)))
       t = (x_of(p%v(i, 3)) - x_of(p%v(i, 1))) * (x_of(p%v(j, 4)) - x_of(p%v(j, 3))) - &
           (x_of(p%v(j, 3)) - x_of(p%v(j, 1))) * (x_of(p%v(i, 4)) - x_of(p%v(i, 3)))
+      do k = 1, 3
+         x(k) = w * x_of(p%v(k, 1)) + t * (x_of(p%v(k, 2)) - x_of(p%v(k, 1)))
+      enddo
+   case (IPK_EEI)
+      do k = 1, 3
+         d(k) = x_of(p%v(k, 2)) - x_of(p%v(k, 1))
+         e(k) = x_of(p%v(k, 4)) - x_of(p%v(k, 3))
+      enddo
+      n(1) = d(2) * e(3) - d(3) * e(2) ; n(2) = d(3) * e(1) - d(1) * e(3) ; n(3) = d(1) * e(2) - d(2) * e(1)
+      w = n(1) * n(1) + n(2) * n(2) + n(3) * n(3)
+      do k = 1, 3
+         d(k) = x_of(p%v(k, 3)) - x_of(p%v(k, 1))
+      enddo
+      t = (d(2) * e(3) - d(3) * e(2)) * n(1) + (d(3) * e(1) - d(1) * e(3)) * n(2) + (d(1) * e(2) - d(2) * e(1)) * n(3)
       do k = 1, 3
          x(k) = w * x_of(p%v(k, 1)) + t * (x_of(p%v(k, 2)) - x_of(p%v(k, 1)))
       enddo
@@ -482,6 +603,78 @@ contains
    bits = iand(bits, not(LOW35))
    t = transfer(bits, t)
    endfunction truncate18
+
+   pure function same_plane(w, a, b, c) result(same)
+   !< The plane points w (canonical order) are a, b, c in some order.
+   real(R8P), intent(in) :: w(3, 3), a(3), b(3), c(3)
+   logical               :: same
+   real(R8P)             :: t(3, 3)
+
+   t(:, 1) = a ; t(:, 2) = b ; t(:, 3) = c
+   call sort3(t)
+   same = all(t == w)
+   endfunction same_plane
+
+   pure function collinear_by_construction(p, q, r) result(yes)
+   !< p, q, r lie on one input line by construction: a line (u, v) carried by a non-explicit one of them (the line of
+   !< a line-plane point, either segment of an edge-edge point, the first of a segment-segment one), on which every one
+   !< of them lies
+   !< (an explicit point equal to u or v, a constructed point carrying the same line).
+   type(implicit_point_t), intent(in) :: p, q, r
+   logical                            :: yes
+   real(R8P)                          :: lines(3, 2, 6)
+   integer(I4P)                       :: nl, k
+
+   yes = .false. ; nl = 0_I4P
+   call carried(p, lines, nl) ; call carried(q, lines, nl) ; call carried(r, lines, nl)
+   do k = 1, nl
+      if (on_line(p, lines(:, :, k)) .and. on_line(q, lines(:, :, k)) .and. on_line(r, lines(:, :, k))) then
+         yes = .true. ; return
+      endif
+   enddo
+   contains
+      pure subroutine carried(x, lines, nl)
+      type(implicit_point_t), intent(in)    :: x
+      real(R8P),              intent(inout) :: lines(3, 2, 6)
+      integer(I4P),           intent(inout) :: nl
+
+      select case (x%kind)
+      case (IPK_LPI)
+         nl = nl + 1_I4P ; lines(:, :, nl) = x%v(:, 1:2)
+      case (IPK_EEI)
+         nl = nl + 1_I4P ; lines(:, :, nl) = x%v(:, 1:2)
+         nl = nl + 1_I4P ; lines(:, :, nl) = x%v(:, 3:4)
+      case (IPK_SSI) ! on its first segment in 3D only
+         nl = nl + 1_I4P ; lines(:, :, nl) = x%v(:, 1:2)
+      endselect
+      endsubroutine carried
+
+      pure function on_line(x, l) result(on)
+      type(implicit_point_t), intent(in) :: x
+      real(R8P),              intent(in) :: l(3, 2)
+      logical                            :: on
+
+      select case (x%kind)
+      case (IPK_EXPLICIT)
+         on = all(x%v(:, 1) == l(:, 1)) .or. all(x%v(:, 1) == l(:, 2))
+      case (IPK_LPI)
+         on = all(x%v(:, 1:2) == l)
+      case (IPK_EEI)
+         on = all(x%v(:, 1:2) == l) .or. all(x%v(:, 3:4) == l)
+      case default ! an SSI point lies on its first segment in 3D only
+         on = all(x%v(:, 1:2) == l)
+      endselect
+      endfunction on_line
+   endfunction collinear_by_construction
+
+   pure function rsgn(x) result(s)
+   real(R8P), intent(in) :: x
+   integer(I4P)          :: s
+
+   s = 0_I4P
+   if (x > 0._R8P) s = 1_I4P
+   if (x < 0._R8P) s = -1_I4P
+   endfunction rsgn
 
    ! ordering helpers ---------------------------------------------------------------------------------------------------
    pure function lex_less(a, b) result(less)

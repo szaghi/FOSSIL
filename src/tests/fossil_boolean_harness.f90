@@ -15,7 +15,13 @@ module fossil_boolean_harness
 !< - membership: at `npoints` fixed-seed points of the joint box farther than 1e-6 of its diagonal from A and B,
 !<   inside(result) = op(inside(A), inside(B)), all by the solid-angle sign;
 !< - validity (U, I, D of a configuration without contact, non-empty): watertight, manifold, V > 0, no
-!<   self-intersecting facet pair.
+!<   self-intersecting facet pair deeper than round-off. Since issue #65 the arrangement is exact and keeps the slivers
+!<   of near-degenerate inputs; rounding the result to doubles can fold a sliver by an ulp. So a self-intersecting pair
+!<   is counted (`self_pairs`) and measured: its depth is the smaller of the length of the intersection segment and
+!<   of the two facets' penetrations through the other's plane (the lesser of the largest distances on either side),
+!<   relative to the joint diagonal. A fold is short (a sliver through a shared vertex) or shallow (two facets meeting
+!<   along a near-common edge); a real crossing is both long and deep. Validity requires every depth <= `TOL_FOLD`
+!<   (1e-12), so a real defect (depth of the order of a facet) still fails.
 !< Pass criterion (issue #33's): a result with status OK satisfies every identity that applies; a non-OK status is
 !< allowed and counted. Residuals are relative to V(A) + V(B), |C(A)| + |C(B)|, area(A) + area(B), the joint diagonal.
 use fossil,                 only : surface_stl_object, facet_object, intersection_pair_t, BOOL_UNION, BOOL_INTERSECT, &
@@ -31,6 +37,7 @@ public :: boolean_report_t, check_boolean, boolean_pass, print_report, moments, 
 integer(I4P), parameter :: OPS(4) = [BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF] !< The four ops.
 character(1), parameter :: OPN(4) = ['U', 'I', 'D', 'S']                                         !< Their letters.
 real(R8P),    parameter :: TOL_IDENTITY = 1e-9_R8P                                               !< Relative tolerance.
+real(R8P),    parameter :: TOL_FOLD = 1e-12_R8P     !< Largest relative depth of a self-intersection (a rounding fold).
 
 type :: boolean_report_t
    !< Outcome of the four ops on one pair.
@@ -48,6 +55,7 @@ type :: boolean_report_t
    logical      :: validity_checked(4) = .false. !< Validity required for this op.
    logical      :: watertight(4) = .false., manifold(4) = .false. !< Topology per op.
    integer(I4P) :: self_pairs(4) = 0        !< Self-intersecting pairs per op (validity ops only).
+   real(R8P)    :: fold_depth(4) = 0._R8P   !< Deepest self-intersecting pair per op (relative), see TOL_FOLD.
 endtype boolean_report_t
 
 contains
@@ -124,6 +132,12 @@ contains
       if (rep%validity_checked(k)) then
          call r%find_self_intersections(pairs=pairs)
          rep%self_pairs(k) = size(pairs)
+         do i = 1, size(pairs)
+            rep%fold_depth(k) = max(rep%fold_depth(k), &
+                                    min(pair_depth(r, pairs(i)%a, pairs(i)%b), &
+                                        norm2([pairs(i)%q%x - pairs(i)%p%x, pairs(i)%q%y - pairs(i)%p%y, &
+                                               pairs(i)%q%z - pairs(i)%p%z])) / diag)
+         enddo
       endif
    enddo
    if (all(rep%status([1, 2]) == BOOL_STATUS_OK)) then
@@ -160,7 +174,7 @@ contains
       if (rep%status(k) /= BOOL_STATUS_OK) cycle
       ok = ok .and. rep%member_bad(k) == 0 .and. rep%dev_lower(k) <= TOL_IDENTITY
       if (rep%validity_checked(k)) ok = ok .and. rep%watertight(k) .and. rep%manifold(k) .and. &
-                                         rep%volume(k) > 0._R8P .and. rep%self_pairs(k) == 0
+                                         rep%volume(k) > 0._R8P .and. rep%fold_depth(k) <= TOL_FOLD
    enddo
    endfunction boolean_pass
 
@@ -174,10 +188,49 @@ contains
    do k = 1, 4
       sts(k:k) = merge(OPN(k), 'x', rep%status(k) == BOOL_STATUS_OK)
    enddo
-   print '(A,1X,A4,A,ES8.1,A,ES8.1,A,ES8.1,A,ES8.1,A,I0,A,I0,A,L1)', label, sts, ' vol ', maxval(rep%vol_res), &
+   print '(A,1X,A4,A,ES8.1,A,ES8.1,A,ES8.1,A,ES8.1,A,I0,A,I0,A,I0,A,ES8.1,A,L1)', label, sts, ' vol ', maxval(rep%vol_res), &
          ' mom ', maxval(rep%mom_res), ' area ', rep%area_res, ' dev ', maxval(rep%dev_lower), ' memb ', &
-         sum(rep%member_bad), '/', rep%member_n, ' pass ', boolean_pass(rep)
+         sum(rep%member_bad), '/', rep%member_n, ' self ', sum(rep%self_pairs), ' depth ', maxval(rep%fold_depth), &
+         ' pass ', boolean_pass(rep)
    endsubroutine print_report
+
+   function pair_depth(r, ia, ib) result(d)
+   !< Depth of the crossing of facets ia and ib of r: for each facet, the lesser of its vertices' largest distances on
+   !< either side of the other's plane; the smaller of the two.
+   type(surface_stl_object), intent(in) :: r      !< Surface.
+   integer(I4P),             intent(in) :: ia, ib !< Facets.
+   real(R8P)                            :: d      !< Depth.
+
+   d = min(pen(ia, ib), pen(ib, ia))
+   contains
+      function pen(i, j) result(p)
+      integer(I4P), intent(in)    :: i, j
+      real(R8P)                   :: p, n(3), o(3), x(3), sd, hi, lo
+      type(facet_object), pointer :: f, g
+      integer(I4P)                :: k
+
+      f => r%facet_at(i) ; g => r%facet_at(j)
+      o = [g%vertex(1)%x, g%vertex(1)%y, g%vertex(1)%z]
+      n = cross3([g%vertex(2)%x, g%vertex(2)%y, g%vertex(2)%z] - o, [g%vertex(3)%x, g%vertex(3)%y, g%vertex(3)%z] - o)
+      p = 0._R8P
+      if (norm2(n) == 0._R8P) return
+      n = n / norm2(n)
+      hi = 0._R8P ; lo = 0._R8P
+      do k = 1, 3
+         x = [f%vertex(k)%x, f%vertex(k)%y, f%vertex(k)%z]
+         sd = dot_product(n, x - o)
+         hi = max(hi, sd) ; lo = min(lo, sd)
+      enddo
+      p = min(hi, -lo)
+      endfunction pen
+
+      pure function cross3(a, b) result(c)
+      real(R8P), intent(in) :: a(3), b(3)
+      real(R8P)             :: c(3)
+
+      c = [a(2) * b(3) - a(3) * b(2), a(3) * b(1) - a(1) * b(3), a(1) * b(2) - a(2) * b(1)]
+      endfunction cross3
+   endfunction pair_depth
 
    subroutine joint_box(a, b, bmin, bmax)
    !< Bounding box of a and b, inflated by 5 %.

@@ -3568,23 +3568,23 @@ contains
    !<         convex-flip-greedy recovery (see fossil_dt docstring); on
    !<         degenerate inputs, returns BOOL_STATUS_CDT_FAILED.
    !<
-   !< ## Coplanar faces, shared edges, contacts (issue #33)
+   !< ## Coplanar faces, shared edges, contacts (issues #33, #65)
    !<
-   !< Handled: facet pairs are classified exactly (`fossil_tritri_exact`,
-   !< orient3d signs with a 1e-10 relative on-plane snap); coplanar pairs cut
-   !< each other along the parts of their edges inside the other facet; cut
-   !< endpoints on a facet edge are inserted in the facet across it (no
-   !< T-junctions); sub-triangles on the other surface use the shared-face
-   !< table. Intersection points are canonical constructions, so the result
-   !< welds exactly. Validated on box pairs: fossil_test_boolean_coplanar (6
-   !< cases x 4 ops, axis-aligned and rotated) and fossil_test_boolean_stress
-   !< (400 booleans on snapped random box pairs), all with analytic volumes.
+   !< Exact since issue #65, with no tolerance: facet pairs are classified by
+   !< exact orient3d signs, cut points are implicit points (constructions,
+   !< rounded once, the same bits for every facet that shares them), each cut
+   !< facet is triangulated with exact orient2d, and the selection decides
+   !< each patch (sub-triangles between cuts) once, exactly at a cut edge.
+   !< Exactly coplanar faces cut each other along the parts of their edges
+   !< inside the other facet and use the shared-face table.
    !<
-   !< Residual: features smaller than the snap (1e-10 of the local edge
-   !< length) merge by design; curved meshes with coplanar patches are not
-   !< stress-tested; solids touching only along an edge or at a point, and a
-   !< symmetric difference whose two pieces touch along the crossing curves,
-   !< give non-manifold results by definition (with the right volume).
+   !< Faces coplanar by construction but off by round-off (after a rotation)
+   !< are no longer merged: they cross exactly, the result keeps the slivers
+   !< (watertight, the right volume), and its rounding to doubles can fold a
+   !< sliver by an ulp (a self-intersecting pair). Solids touching only along
+   !< an edge or at a point, and a symmetric difference whose two pieces
+   !< touch along the crossing curves, give non-manifold results by
+   !< definition (with the right volume).
    class(surface_stl_object),     intent(inout)        :: self     !< Surface A; replaced by `op(A, B)` on success.
    class(surface_stl_object),     intent(in)           :: other    !< Surface B.
    integer(I4P),                  intent(in)           :: op       !< BOOL_UNION / BOOL_INTERSECT / BOOL_DIFFERENCE / BOOL_SYMDIFF.

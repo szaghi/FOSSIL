@@ -254,7 +254,7 @@ fobis fetch            # --update to re-fetch
 - `fossil_aabb_object.f90` / `fossil_aabb_node_object.f90` — AABB primitives
 - `fossil_block_object.f90` / `fossil_block_aabb_object.f90` — structured mesh block with AABB (`extrapolate_distances` deprecated, issue #32)
 - `fossil_distance_field.f90` — `distance_field_object` (re-exported by `fossil`, issue #32): signed-distance field on a rectilinear grid; narrow band via `distance_many(_device)`, flood-fill signs, fast sweeping in hyperplane order (OpenMP bit-exact). It imports the surface/facet modules, never `fossil` (circular). `fossil_ib_generator` is built on it. `initialize` without `z` makes a 2-D field for a curve source; `compute_band` / `compute_signs` / `compute` / `default_band` are generics over `surface=` / `curve=`.
-- `fossil_curve_object.f90`, `fossil_segment_bvh.f90`, `fossil_curve_slice.f90` — 2-D geometry (issue #36): `curve_object` stores (u, v) as SoA arrays in the plane normal to `normal_axis` (u, v = the other axes in cyclic order); the solid is on the left of every segment (outer loops CCW, holes CW), signed distance negative inside; open loops allowed (`# open` in the ASCII format). The segment BVH's traversals are `_oac` kernels shared by the CPU and the device. `slice_surface` cuts an STL by an axis-aligned plane (canonical crossings, no tolerances). `fossil_predicates%orient2d` and `orient3d` (`orient3d_xyz`) are exact (filter + exact expansion with a bit-mask split, safe under nvfortran FMA contraction; orient3d: 24 triple products of input coordinates, 17-bit pieces; no `predicates_initialize` needed).
+- `fossil_curve_object.f90`, `fossil_segment_bvh.f90`, `fossil_curve_slice.f90` — 2-D geometry (issue #36): `curve_object` stores (u, v) as SoA arrays in the plane normal to `normal_axis` (u, v = the other axes in cyclic order); the solid is on the left of every segment (outer loops CCW, holes CW), signed distance negative inside; open loops allowed (`# open` in the ASCII format). The segment BVH's traversals are `_oac` kernels shared by the CPU and the device. `slice_surface` cuts an STL by an axis-aligned plane (canonical crossings, no tolerances). `fossil_predicates%orient2d` and `orient3d` (`orient3d_xyz`) are exact (filter + exact expansion with a bit-mask split, safe under nvfortran FMA contraction; orient3d, host only: exact zero on a shared coordinate plane, 6 triple products of exact differences or 24 of input coordinates, each exact as four doubles by `ieee_fma` error-free products since issue #65; no `predicates_initialize` needed).
 - Issue #42 (WP6): `distance_field_object%gradient_diagnostic` (eikonal q per node), `wall_distance_many(_device)` (BVH started at cutoff^2; curve twin). `query_many(curvatures=)` (foot curvature: (H, K) from `jet_curvature` — cubic fit over the 2-ring, O(h^2) pointwise; the #18 cotangent / angle-defect operators stall near 15 % at valence-5 vertices — by barycentric weights; 2-D turning angle; CPU only), `surface_markers` (remesh to sqrt(3) dx + one calibration pass) / `curve_markers` (exact arc-length resampling). `isotropic_remesh(preserve_features)` re-detects features after each split (else crease midpoints were relaxed off and edges chamfered).
 - `fossil_rigid_pose.f90` — moving bodies (issue #41): `rigid_pose_t` / `rigid_pose_2d_t`; optional `pose=` on the point queries (body-frame, CPU and device), `move(pose)` with `aabb_tree%refit` / `segment_bvh%refit_vertices` (O(N); `aabb_node%set_box` writes the box only — `node%initialize` wipes children), `state_changes`; `fossil_swept_cells.f90`: `swept_cells_2d(curve, ...)` / `swept_cells_3d(surface, ...)` (free routines, not TBPs: the module uses curve/surface/cut_cells_3d) — swept volume = cut-cell volume change (exact), face apertures time-averaged (translation exact via breakpoints: 2-D per face, 3-D per grid plane — mesh vertex on the moving plane, mesh edge on a moving grid line, grid node on a triangle; area quadratic per piece, 2-point Gauss; `exact=.false.` forces Gauss. Rotation: Gauss-Legendre `nq`, nq-vs-2nq estimate), `wall` = -sum A_f n_f, `residual` = rigid-field volume balance; `pose_interpolate` (screw motion), `gauss_legendre_01`.
 - `fossil_mass_properties.f90` — mass properties (issue #59, roadmap #58 WP1): pure free routines (compensated moment accumulator over signed tetrahedra, cyclic Jacobi `symmetric3_eigen`); `surface%mass_properties(mass, center, inertia, principal_moments, principal_axes, density, about, volume, status)` sums about the bounding-box centre (a body at 1e6 keeps its tensor), vertices only, rejects non-watertight or V <= 0 (`STATUS_INVALID_INPUT`). `compute_centroid` uses the same vertex-only tetrahedra (it scaled with the facet size before #59). `inertia_to_world` (R I R^T), `principal_frame` (rigid_pose_t); 2-D twin `curve%mass_properties` (Green sums per unit depth: `second_moments` = [int u^2, int v^2, int uv] about the centroid, `polar_moment`, `principal_angle` of the long axis).
@@ -269,7 +269,10 @@ fobis fetch            # --update to re-fetch
   `ip_orient3d` (implicit vs explicit plane), `ip_orient2d` (three implicit points in a projection), `ip_compare`
   (coordinate order): homogeneous (X, W) polynomials, a running-error filter in doubles, then exact expansion
   arithmetic (18-bit bit-mask splits, FMA-safe). Golden signs in `src/tests/implicit_points_golden.txt` (exact
-  rational reference).
+  rational reference). Also `IPK_EEI` (two exactly coplanar lines), `ip_lex_compare` (exact lexicographic order),
+  `ip_identity_compare`, `ip_rank`. `fossil_cdt_implicit%cdt_facet`: constrained triangulation of a facet on implicit
+  points (insertion by split, Sloan recovery: exact orient2d for validity; Lawson incircle on rounded coordinates for
+  quality only).
 - `fossil_box_predicates.f90`, `fossil_box_query.f90` — AMR tagging (issue #38): box-triangle separating-axis test (conservative: run on the box inflated by `box_tolerance`, 1e-12 of the problem size, never misses a contact), exact 2-D box-segment test; `bvh_box_contact_oac` / `curve_box_contact_oac` (shared CPU/device traversals), `cell_bands` / `cell_components` (tag-band BFS, 26-connected components). The device box path follows the #20 rules and needs no new device arrays.
 
 ## Coding conventions
@@ -282,26 +285,22 @@ fobis fetch            # --update to re-fetch
 
 ## Known limitations
 
-- **`surface%boolean` / `surface%resolve_self_intersections`**: coplanar
-  overlaps, shared edges and contacts are handled since issue #33 (exact
-  orient3d pair classification in `fossil_tritri_exact`, coplanar cuts,
-  T-junction closing). Residual: a 1e-10 relative on-plane snap (features
-  below it merge by design); contact-only and touching-symdiff results are
-  non-manifold by definition. Intersection points must stay canonical
-  constructions (same bits from every facet pair), because the vertex weld
-  compares coordinates exactly (`EPS` is 0). Validated since issue #63 by
-  identities that need no analytic answer (test-side harness
+- **`surface%boolean` / `surface%resolve_self_intersections`**: exact
+  arrangement since issue #65, no tolerance anywhere: cut points are
+  implicit points (`fossil_implicit_points`), pairs are classified by
+  `pair_cut` / `coplanar_cut` (`fossil_tritri_exact`), the registry merges
+  points exactly and gives distinct points distinct rounded coordinates,
+  facets are triangulated by `cdt_facet` (`fossil_cdt_implicit`, exact
+  orient2d), and the selection goes by patches (exact decision at a cut
+  edge, `local_inside`; winding number only for a patch without cuts).
+  Faces coplanar by construction but off by round-off (rotated) cross
+  exactly: the result keeps the slivers, watertight with the right volume,
+  and its rounding to doubles can fold a sliver by an ulp (self-intersecting
+  pairs: the harness reports them for such inputs, `near_degenerate`).
+  Contact-only and touching-symdiff results are non-manifold by definition.
+  Validated by identities that need no analytic answer (test-side harness
   `src/tests/fossil_boolean_harness.f90`: volume, second moments, area,
-  deviation, membership, validity): box pairs, curved bodies, the wrapped
-  bunny and dragon, near-degenerate cases, CSG chains up to 49 operations.
-  Open (owner decision): a curved body against a near-coincident copy whose
-  cuts land 1e-10..1e-8 of the facet size apart can come out with holes a
-  few 1e-9 wide and status OK: the retriangulation's fixed tolerances
-  (2-D merge 1e-10, on-segment 1e-9) disagree with the classification's
-  snap. "Shared" (coplanar overlap) is the exact classification's decision
-  (`coplanar_partner`), with a geometric fallback (normals parallel to
-  1e-15) for faces within the snap that the broad phase never pairs. The
-  selection queries only the other surface's winding number.
+  deviation, membership, validity).
 - **`find_self_intersections`**: pairs sharing one vertex are classified exactly (issue #46); pairs sharing an edge
   are skipped, so two sheets crossing along a shared non-manifold edge are not detected, nor coplanar overlaps around
   a shared vertex (unit normals parallel to 1e-12 rad count as coplanar).

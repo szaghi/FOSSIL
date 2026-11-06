@@ -2,6 +2,10 @@
 module fossil_tritri_exact
 !< FOSSIL, triangle-triangle intersection with exact predicates and canonical points (issue #33).
 !<
+!< Two families. `pair_cut` / `coplanar_cut` (issue #65, used by the boolean arrangement) are exact with no snap and
+!< return implicit points (`fossil_implicit_points`): see their comments. `pair_classify` / `coplanar_portion` (issue
+!< #33, still used by `fossil_alpha_wrap`) snap and return rounded points, as described below.
+!<
 !< `pair_classify` decides how two triangles meet from the exact signs of Shewchuk's `orient3d`
 !< (each triangle's vertices against the other's plane), never from floating-point distances:
 !<  - PAIR_SEPARATED: no common point (all signs of one triangle strictly on one side, or the two
@@ -26,9 +30,10 @@ module fossil_tritri_exact
 !< Each formula orders its inputs lexicographically first, so every triangle pair that produces
 !< the same geometric point produces the same bits: the facets of both surfaces that share a cut
 !< endpoint get identical vertices, which an exact-equality vertex weld then joins.
-use fossil_predicates, only : orient3d
-use penf,              only : I4P, R8P
-use vecfor,            only : vector_R8P
+use fossil_implicit_points, only : implicit_point_t, ip_explicit, ip_lpi, ip_eei, ip_lex_compare, ip_rank
+use fossil_predicates,      only : orient3d, orient2d_xy
+use penf,                   only : I4P, R8P
+use vecfor,                 only : vector_R8P
 
 implicit none
 private
@@ -37,6 +42,7 @@ public :: pair_classify
 public :: coplanar_portion
 public :: edge_plane_point, edge_edge_point
 public :: lex_less
+public :: pair_cut, coplanar_cut, facet_drop
 
 integer(I4P), parameter :: PAIR_SEPARATED = 0_I4P !< No common point.
 integer(I4P), parameter :: PAIR_CROSSING  = 1_I4P !< Common segment of positive length.
@@ -308,6 +314,245 @@ contains
       cand(nc) = x
       endsubroutine add
    endsubroutine coplanar_portion
+
+   ! exact cuts on implicit points (issue #65) ------------------------------------------------------------------------
+   subroutine pair_cut(ta, tb, kind, p, q)
+   !< `pair_classify` without the snap and with implicit points (issue #65): the signs are the exact orient3d signs,
+   !< the section points are constructions (an input vertex, an edge-edge point when the edge is exactly coplanar with
+   !< an edge of the other triangle, else a line-plane point), the order along the planes' line is the exact
+   !< lexicographic order, and of two coincident candidates the more specific construction is kept (`ip_rank`), so
+   !< every pair that produces a point produces the same identity.
+   type(vector_R8P),       intent(in)  :: ta(3) !< First triangle.
+   type(vector_R8P),       intent(in)  :: tb(3) !< Second triangle.
+   integer(I4P),           intent(out) :: kind  !< PAIR_* code.
+   type(implicit_point_t), intent(out) :: p, q  !< Common segment (crossing) or point (touching).
+   integer(I4P)                        :: sa(3), sb(3), na, nb, i, c
+   type(implicit_point_t)              :: xa(2), xb(2), alo, ahi, blo, bhi
+
+   kind = PAIR_SEPARATED
+   do i = 1, 3
+      sb(i) = isgn(orient3d(ta(1), ta(2), ta(3), tb(i)))
+      sa(i) = isgn(orient3d(tb(1), tb(2), tb(3), ta(i)))
+   enddo
+   if (all(sb == 0_I4P)) then
+      kind = PAIR_COPLANAR ; return
+   endif
+   if (all(sb == 1_I4P) .or. all(sb == -1_I4P)) return
+   if (all(sa == 1_I4P) .or. all(sa == -1_I4P)) return
+   call section_ip(t=ta, s=sa, other=tb, x=xa, n=na)
+   call section_ip(t=tb, s=sb, other=ta, x=xb, n=nb)
+   if (na == 0_I4P .or. nb == 0_I4P) return
+   call ends(xa, na, alo, ahi)
+   call ends(xb, nb, blo, bhi)
+   c = ip_lex_compare(alo, blo)
+   if (c > 0_I4P) then
+      p = alo
+   elseif (c < 0_I4P) then
+      p = blo
+   else
+      p = preferred(alo, blo)
+   endif
+   c = ip_lex_compare(ahi, bhi)
+   if (c < 0_I4P) then
+      q = ahi
+   elseif (c > 0_I4P) then
+      q = bhi
+   else
+      q = preferred(ahi, bhi)
+   endif
+   c = ip_lex_compare(p, q)
+   if (c > 0_I4P) return
+   if (c == 0_I4P) then
+      kind = PAIR_TOUCHING ; p = preferred(p, q) ; q = p
+   else
+      kind = PAIR_CROSSING
+   endif
+   contains
+      subroutine ends(x, n, lo, hi)
+      type(implicit_point_t), intent(in)  :: x(2)
+      integer(I4P),           intent(in)  :: n
+      type(implicit_point_t), intent(out) :: lo, hi
+
+      lo = x(1) ; hi = x(1)
+      if (n == 2_I4P) then
+         if (ip_lex_compare(x(2), x(1)) < 0_I4P) then
+            lo = x(2)
+         else
+            hi = x(2)
+         endif
+      endif
+      endsubroutine ends
+   endsubroutine pair_cut
+
+   subroutine section_ip(t, s, other, x, n)
+   !< Points of triangle t on the plane of `other` (exact signs s): vertices with a zero sign, crossings of edges with
+   !< opposite strict signs.
+   type(vector_R8P),       intent(in)  :: t(3), other(3)
+   integer(I4P),           intent(in)  :: s(3)
+   type(implicit_point_t), intent(out) :: x(2)
+   integer(I4P),           intent(out) :: n
+   integer(I4P)                        :: i, j
+
+   n = 0_I4P
+   do i = 1, 3
+      if (s(i) == 0_I4P .and. n < 2_I4P) then
+         n = n + 1_I4P ; x(n) = ip_explicit(arr3(t(i)))
+      endif
+   enddo
+   do i = 1, 3
+      j = mod(i, 3) + 1
+      if (s(i) * s(j) < 0_I4P .and. n < 2_I4P) then
+         n = n + 1_I4P ; x(n) = crossing_ip(u=t(i), v=t(j), other=other)
+      endif
+   enddo
+   endsubroutine section_ip
+
+   function crossing_ip(u, v, other) result(x)
+   !< Edge (u, v), strictly across the plane of `other`, meets it: on the line of an edge of `other` exactly coplanar
+   !< with (u, v), the edge-edge point; on two such lines, their common vertex; else the line-plane point.
+   type(vector_R8P), intent(in) :: u, v, other(3)
+   type(implicit_point_t)       :: x
+   integer(I4P)                 :: k, l, hits, last_k
+
+   hits = 0_I4P ; last_k = 0_I4P
+   do k = 1, 3
+      l = mod(k, 3) + 1
+      if (orient3d(other(k), other(l), u, v) == 0._R8P) then
+         hits = hits + 1_I4P
+         if (hits == 2_I4P) then
+            if (mod(last_k, 3) + 1 == k) then
+               x = ip_explicit(arr3(other(k)))
+            else
+               x = ip_explicit(arr3(other(last_k)))
+            endif
+            return
+         endif
+         last_k = k
+      endif
+   enddo
+   if (hits == 1_I4P) then
+      x = ip_eei(arr3(u), arr3(v), arr3(other(last_k)), arr3(other(mod(last_k, 3) + 1)))
+   else
+      x = ip_lpi(arr3(u), arr3(v), arr3(other(1)), arr3(other(2)), arr3(other(3)))
+   endif
+   endfunction crossing_ip
+
+   subroutine coplanar_cut(u, v, t, found, p, q)
+   !< `coplanar_portion` without the snap and with implicit points (issue #65): the portion of segment (u, v) inside
+   !< triangle t, all exactly coplanar. Candidates: u and v inside the closed t, vertices of t strictly inside (u, v),
+   !< proper crossings with t's edges (edge-edge points); the portion is the pair of extreme candidates in exact
+   !< lexicographic order. In-plane signs are exact orient2d of exact coordinate copies in the projection that drops
+   !< `facet_drop(t)`.
+   type(vector_R8P),       intent(in)  :: u, v   !< Segment.
+   type(vector_R8P),       intent(in)  :: t(3)   !< Triangle.
+   logical,                intent(out) :: found  !< The portion has positive length.
+   type(implicit_point_t), intent(out) :: p, q   !< Portion endpoints.
+   type(implicit_point_t)              :: cand(9)
+   integer(I4P)                        :: nc, k, l, m, drop, ori, ilo, ihi, su(3), sv(3), ax
+   real(R8P)                           :: au(3), av(3), at(3, 3)
+
+   found = .false.
+   au = arr3(u) ; av = arr3(v)
+   do k = 1, 3 ; at(:, k) = arr3(t(k)) ; enddo
+   drop = facet_drop(t)
+   if (drop == 0_I4P) return
+   ori = o2p(at(:, 1), at(:, 2), at(:, 3), drop)
+   nc = 0_I4P
+   do k = 1, 3
+      l = mod(k, 3) + 1
+      su(k) = ori * o2p(at(:, k), at(:, l), au, drop)
+      sv(k) = ori * o2p(at(:, k), at(:, l), av, drop)
+   enddo
+   if (all(su >= 0_I4P)) call add(ip_explicit(au))
+   if (all(sv >= 0_I4P)) call add(ip_explicit(av))
+   ax = maxloc(abs(av - au), dim=1)
+   do k = 1, 3
+      l = mod(k, 3) + 1
+      if (o2p(au, av, at(:, k), drop) == 0_I4P) then
+         if ((at(ax, k) - au(ax)) * (av(ax) - at(ax, k)) > 0._R8P) call add(ip_explicit(at(:, k)))
+      endif
+      if (su(k) * sv(k) < 0_I4P) then
+         if (o2p(au, av, at(:, k), drop) * o2p(au, av, at(:, l), drop) < 0_I4P) &
+            call add(ip_eei(au, av, at(:, k), at(:, l)))
+      endif
+   enddo
+   if (nc < 2_I4P) return
+   ilo = 1_I4P ; ihi = 1_I4P
+   do m = 2, nc
+      if (ip_lex_compare(cand(m), cand(ilo)) < 0_I4P) ilo = m
+      if (ip_lex_compare(cand(m), cand(ihi)) > 0_I4P) ihi = m
+   enddo
+   if (ip_lex_compare(cand(ilo), cand(ihi)) == 0_I4P) return
+   p = cand(ilo) ; q = cand(ihi) ; found = .true.
+   contains
+      subroutine add(x)
+      type(implicit_point_t), intent(in) :: x
+      integer(I4P)                       :: i
+
+      do i = 1, nc
+         if (ip_lex_compare(cand(i), x) == 0_I4P) return
+      enddo
+      nc = nc + 1_I4P ; cand(nc) = x
+      endsubroutine add
+   endsubroutine coplanar_cut
+
+   function facet_drop(t) result(drop)
+   !< An axis whose dropping keeps triangle t non-degenerate, exactly: the axes by decreasing |normal component|, the
+   !< first with a nonzero exact orient2d of the projection (0 if t is degenerate).
+   type(vector_R8P), intent(in) :: t(3) !< Triangle.
+   integer(I4P)                 :: drop !< Axis (1..3), 0 if none.
+   type(vector_R8P)             :: n
+   real(R8P)                    :: a(3, 3), w(3)
+   integer(I4P)                 :: k, order(3)
+
+   do k = 1, 3 ; a(:, k) = arr3(t(k)) ; enddo
+   n = cross(t(2) - t(1), t(3) - t(1))
+   w = abs([n%x, n%y, n%z])
+   order(1) = maxloc(w, dim=1) ; w(order(1)) = -1._R8P
+   order(2) = maxloc(w, dim=1) ; w(order(2)) = -1._R8P
+   order(3) = maxloc(w, dim=1)
+   do k = 1, 3
+      drop = order(k)
+      if (o2p(a(:, 1), a(:, 2), a(:, 3), drop) /= 0_I4P) return
+   enddo
+   drop = 0_I4P
+   endfunction facet_drop
+
+   function o2p(a, b, c, drop) result(s)
+   !< Exact sign of the orientation of a, b, c in the kept axes (drop + 1, drop + 2) mod 3.
+   real(R8P),    intent(in) :: a(3), b(3), c(3)
+   integer(I4P), intent(in) :: drop
+   integer(I4P)             :: s
+   integer(I4P)             :: i, j
+
+   i = mod(drop, 3_I4P) + 1_I4P ; j = mod(drop + 1_I4P, 3_I4P) + 1_I4P
+   s = isgn(orient2d_xy(a(i), a(j), b(i), b(j), c(i), c(j)))
+   endfunction o2p
+
+   pure function preferred(a, b) result(c)
+   !< Of two coincident constructions, the more specific (`ip_rank`), else a.
+   type(implicit_point_t), intent(in) :: a, b
+   type(implicit_point_t)             :: c
+
+   c = a
+   if (ip_rank(b) < ip_rank(a)) c = b
+   endfunction preferred
+
+   pure function arr3(a) result(r)
+   type(vector_R8P), intent(in) :: a
+   real(R8P)                    :: r(3)
+
+   r = [a%x, a%y, a%z]
+   endfunction arr3
+
+   pure function isgn(v) result(s)
+   real(R8P), intent(in) :: v
+   integer(I4P)          :: s
+
+   s = 0_I4P
+   if (v > 0._R8P) s = 1_I4P
+   if (v < 0._R8P) s = -1_I4P
+   endfunction isgn
 
    ! private helpers
    function orient_in_plane(a, b, c, drop, tol) result(s)

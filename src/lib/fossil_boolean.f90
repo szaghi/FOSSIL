@@ -29,15 +29,24 @@ module fossil_boolean
 !< contacts are handled since issue #33 (shared-boundary sub-triangles,
 !< see `apply_selection`). `BOOL_STATUS_NOT_IMPLEMENTED` is returned only
 !< for an op code that is none of the four.
+!<
+!< Since issue #65 the arrangement is exact (implicit points, no snap) and the selection goes by patches: the
+!< sub-triangles of a surface connected across edges on no cut are all inside or all outside the other surface, decided
+!< once, exactly at a cut edge (`local_inside`) or, for a patch without cuts, by the winding number at a large
+!< sub-triangle. Shared (coplanar) sub-triangles are decided exactly (`coplanar_partner`). Faces coplanar by
+!< construction but off by round-off are no longer merged: they cross exactly, and the result keeps the slivers
+!< (watertight, the right volume; its rounding to doubles can fold a sliver by an ulp).
 
 use fossil_arrangement,    only : arrangement_t, arrangement_initialize, &
                                   arrangement_collect_intersections, &
-                                  arrangement_retriangulate, coplanar_partner, &
+                                  arrangement_retriangulate, coplanar_partner, cut_sources, &
                                   ARR_STATUS_OK, ARR_STATUS_CDT_FAILED
 use fossil_aabb_tree_object, only : aabb_tree_object, wn_node_t
 use fossil_facet_object,   only : facet_object
+use fossil_implicit_points, only : ip_orient3d
+use fossil_predicates,     only : orient3d
 use fossil_winding_number, only : winding_number
-use penf,                  only : I4P, R8P, MaxR8P
+use penf,                  only : I4P, R8P
 use vecfor,                only : vector_R8P
 
 implicit none
@@ -93,7 +102,8 @@ contains
    integer(I4P),                    intent(out), optional :: status
    type(arrangement_t)                                    :: arr
    type(facet_object), allocatable                        :: sub_facet(:)
-   integer(I4P),       allocatable                        :: sub_owner(:), sub_source(:)
+   integer(I4P),       allocatable                        :: sub_owner(:), sub_source(:), sub_pid(:, :)
+   logical,            allocatable                        :: sub_cut(:, :)
    integer(I4P)                                           :: arr_status
 
    if (present(status)) status = BOOL_STATUS_OK
@@ -109,7 +119,8 @@ contains
                                         facet_b=facet_b, tree_b=tree_b)
    call arrangement_collect_intersections(arr=arr)
    call arrangement_retriangulate(arr=arr, sub_facet=sub_facet, sub_owner=sub_owner, &
-                                  sub_source=sub_source, status=arr_status)
+                                  sub_source=sub_source, status=arr_status, sub_pid=sub_pid, &
+                                  sub_cut=sub_cut)
    if (arr_status /= ARR_STATUS_OK) then
       if (present(status)) status = BOOL_STATUS_CDT_FAILED
       allocate(kept_facet(0))
@@ -117,26 +128,30 @@ contains
    endif
 
    ! Stage 4 — tag + select.
-   call tag_and_select(arr=arr, sub_facet=sub_facet, sub_owner=sub_owner, sub_source=sub_source, &
+   call tag_and_select(arr=arr, sub_facet=sub_facet, sub_owner=sub_owner, sub_source=sub_source, sub_pid=sub_pid, &
+                       sub_cut=sub_cut, &
                        facet_a=facet_a, tree_a=tree_a, &
                        facet_b=facet_b, tree_b=tree_b, &
                        op=op, kept_facet=kept_facet, status=status)
    endsubroutine boolean_compute
 
-   subroutine tag_and_select(arr, sub_facet, sub_owner, sub_source, facet_a, tree_a, facet_b, tree_b, &
-                             op, kept_facet, status)
-   !< For each sub-triangle, query the other surface's WN field at its centroid (unless it is shared),
-   !< apply the op-specific selection rule, emit the keepers into `kept_facet`.
+   subroutine tag_and_select(arr, sub_facet, sub_owner, sub_source, sub_pid, sub_cut, facet_a, tree_a, facet_b, &
+                             tree_b, op, kept_facet, status)
+   !< Classify the sub-triangles and keep those the op selects (issue #65: by patches).
    !<
-   !< Per-sub-triangle WN query is the dominant cost: one `winding_number`
-   !< call per sub-triangle, against the other surface only. The hierarchical Barnes-Hut path in
-   !< `fossil_winding_number` keeps each call sub-linear in facet count, so
-   !< the boolean's overall cost is approximately
-   !<     O(N log N)  where N = total sub-triangles.
+   !< - Shared: a sub-triangle inside a coplanar partner of its parent (exact, `coplanar_partner`).
+   !< - Patches: the sub-triangles of one surface connected across edges that lie on no cut (registry indices,
+   !<   `sub_cut` from the triangulations). The other surface crosses a surface only along cuts, so a patch is all
+   !<   inside or all outside it (or touching it without crossing): one decision per patch, by the other surface's
+   !<   winding number at the centroid of a large sub-triangle of the patch (the most decisive of its `N_PROBES`
+   !<   largest non-shared ones). A sliver 1e-12 thick takes its patch's decision; its own centroid, at round-off
+   !<   distance from the other surface, would not settle it.
    type(arrangement_t),             intent(in)            :: arr
    type(facet_object),              intent(in)            :: sub_facet(:)
    integer(I4P),                    intent(in)            :: sub_owner(:)
    integer(I4P),                    intent(in)            :: sub_source(:)
+   integer(I4P),                    intent(in)            :: sub_pid(:, :)
+   logical,                         intent(in)            :: sub_cut(:, :)
    type(facet_object),              intent(in)            :: facet_a(:)
    type(aabb_tree_object),          intent(in), target    :: tree_a
    type(facet_object),              intent(in)            :: facet_b(:)
@@ -144,71 +159,91 @@ contains
    integer(I4P),                    intent(in)            :: op
    type(facet_object), allocatable, intent(out)           :: kept_facet(:)
    integer(I4P),                    intent(out), optional :: status
-   type(facet_object), allocatable                        :: buf(:), tmp(:)
-   integer(I4P)                                           :: cap, used, k, n_sub
-   real(R8P)                                              :: wn_a, wn_b
+   integer(I4P), parameter                                :: N_PROBES = 3_I4P
+   type(facet_object), allocatable                        :: buf(:)
+   integer(I4P)                                           :: used, k, n_sub, partner, p, j, np
+   integer(I4P), allocatable                              :: patch(:), part(:), probe(:, :)
+   real(R8P),    allocatable                              :: probe_area(:, :), best(:)
+   real(R8P)                                              :: wn, orient_dot, ar
+   logical,      allocatable                              :: inside(:), decided(:)
    type(wn_node_t), allocatable                           :: cache_a(:), cache_b(:) !< Winding-number caches, built once.
-   logical                                                :: in_a, in_b, keep, flip
-   type(vector_R8P)                                       :: c
-   real(R8P)                                              :: max_edge_a, max_edge_b !< Longest edges.
+   logical                                                :: keep, flip, shared, in_a, in_b
 
+   if (present(status)) status = BOOL_STATUS_OK
    n_sub = size(sub_facet, dim=1)
-   ! Build each operand's fast-winding-number cache once (issue #29): the per-call rebuild made
-   ! every query O(N).
    call tree_a%build_winding_payload(facet=facet_a, wn=cache_a)
    call tree_b%build_winding_payload(facet=facet_b, wn=cache_b)
    if (.not. allocated(cache_a)) allocate(cache_a(0:-1))
    if (.not. allocated(cache_b)) allocate(cache_b(0:-1))
-   max_edge_a = longest_edge(facet_a) ; max_edge_b = longest_edge(facet_b)
-   cap = max(64_I4P, n_sub)
-   allocate(buf(cap))
-   used = 0_I4P
-
+   allocate(part(n_sub))
    do k = 1, n_sub
-      ! Centroid in 3D — the facet's `centroid` is set by compute_metrix,
-      ! which arrangement_retriangulate calls on every emitted sub-facet.
-      c    = sub_facet(k)%centroid
-
-      ! Detect "shared boundary" sub-triangles: those lying inside a facet of the OTHER surface that the
-      ! arrangement classified coplanar with their parent (exact orient3d pair classification with the
-      ! on-plane snap, issue #33). The WN cannot tell (it is ~1 rather than 0.5 on the boundary). The
-      ! geometric centroid-to-plane test remains as the fallback for pairs the broad phase never met, with
-      ! normals parallel to 1e-15 (it misfired at 0.99 on tiny sub-triangles beside crossings, issue #63).
-      block
-         logical      :: shared
-         real(R8P)    :: orient_dot
-         integer(I4P) :: partner
-         partner = coplanar_partner(arr=arr, gi=sub_source(k), sub=sub_facet(k))
-         shared = partner > 0_I4P
-         orient_dot = 0._R8P
-         if (shared) then
-            orient_dot = sub_facet(k)%normal%dotproduct(rhs=arr%facet(partner)%normal)
-         elseif (sub_owner(k) == 1_I4P) then
-            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_b, other_tree=tree_b, &
-                                        max_edge=max_edge_b, orient_dot=orient_dot)
+      part(k) = coplanar_partner(arr=arr, gi=sub_source(k), pid=sub_pid(:, k))
+   enddo
+   call build_patches(sub_owner, sub_pid, sub_cut, patch, np)
+   ! probes: the N_PROBES largest non-shared sub-triangles of each patch
+   allocate(probe(N_PROBES, np), probe_area(N_PROBES, np))
+   probe = 0_I4P ; probe_area = -1._R8P
+   do k = 1, n_sub
+      if (part(k) > 0_I4P) cycle
+      p = patch(k) ; ar = sub_facet(k)%area()
+      do j = 1, N_PROBES
+         if (ar > probe_area(j, p)) then
+            probe(j + 1:N_PROBES, p) = probe(j:N_PROBES - 1, p)
+            probe_area(j + 1:N_PROBES, p) = probe_area(j:N_PROBES - 1, p)
+            probe(j, p) = k ; probe_area(j, p) = ar
+            exit
+         endif
+      enddo
+   enddo
+   allocate(inside(np), decided(np), best(np))
+   inside = .false. ; decided = .false. ; best = -1._R8P
+   ! exact decision at a cut edge of the patch, when it has one
+   do k = 1, n_sub
+      if (part(k) > 0_I4P) cycle
+      p = patch(k)
+      if (decided(p)) cycle
+      do j = 1, 3
+         if (.not. sub_cut(j, k)) cycle
+         call local_inside(arr, sub_source(k), sub_pid(:, k), j, in_a, decided(p))
+         if (decided(p)) then
+            inside(p) = in_a ; exit
+         endif
+      enddo
+   enddo
+   do p = 1, np
+      if (decided(p)) cycle
+      do j = 1, N_PROBES
+         k = probe(j, p)
+         if (k == 0_I4P) exit
+         if (sub_owner(k) == 1_I4P) then
+            wn = winding_number(facet=facet_b, tree=tree_b, wn=cache_b, point=sub_facet(k)%centroid)
          else
-            shared = is_on_other_surface(sub=sub_facet(k), other_facet=facet_a, other_tree=tree_a, &
-                                        max_edge=max_edge_a, orient_dot=orient_dot)
+            wn = winding_number(facet=facet_a, tree=tree_a, wn=cache_a, point=sub_facet(k)%centroid)
          endif
-         ! Only the side of the OTHER surface enters the selection (apply_selection reads in_b for A's
-         ! sub-triangles, in_a for B's), and none when shared: one winding number at most (issue #63; both
-         ! were computed for every sub-triangle, and the queries are most of the boolean's time).
-         in_a = .false. ; in_b = .false.
-         if (.not. shared) then
-            if (sub_owner(k) == 1_I4P) then
-               wn_b = winding_number(facet=facet_b, tree=tree_b, wn=cache_b, point=c)
-               in_b = (wn_b > WN_INSIDE_THRESHOLD)
-            else
-               wn_a = winding_number(facet=facet_a, tree=tree_a, wn=cache_a, point=c)
-               in_a = (wn_a > WN_INSIDE_THRESHOLD)
-            endif
+         if (abs(wn - WN_INSIDE_THRESHOLD) > best(p)) then
+            best(p) = abs(wn - WN_INSIDE_THRESHOLD) ; inside(p) = wn > WN_INSIDE_THRESHOLD ; decided(p) = .true.
          endif
+         if (best(p) > 0.5_R8P - WN_BOUNDARY_TOL) exit ! decisive: no need for the next probe
+      enddo
+   enddo
 
-         call apply_selection(op=op, owner=sub_owner(k), in_a=in_a, in_b=in_b, &
-                              shared=shared, orient_dot=orient_dot, &
-                              keep=keep, flip=flip, status=status)
-      endblock
-
+   allocate(buf(max(1_I4P, n_sub)))
+   used = 0_I4P
+   do k = 1, n_sub
+      partner = part(k)
+      shared = partner > 0_I4P
+      orient_dot = 0._R8P
+      if (shared) orient_dot = arr%facet(sub_source(k))%normal%dotproduct(rhs=arr%facet(partner)%normal)
+      in_a = .false. ; in_b = .false.
+      if (.not. shared) then
+         if (sub_owner(k) == 1_I4P) then
+            in_b = inside(patch(k))
+         else
+            in_a = inside(patch(k))
+         endif
+      endif
+      call apply_selection(op=op, owner=sub_owner(k), in_a=in_a, in_b=in_b, shared=shared, orient_dot=orient_dot, &
+                           keep=keep, flip=flip, status=status)
       if (present(status)) then
          if (status /= BOOL_STATUS_OK) then
             allocate(kept_facet(0))
@@ -216,12 +251,6 @@ contains
          endif
       endif
       if (.not. keep) cycle
-      if (used == cap) then
-         cap = 2 * cap
-         allocate(tmp(cap))
-         tmp(1:used) = buf(1:used)
-         call move_alloc(from=tmp, to=buf)
-      endif
       used = used + 1
       buf(used) = sub_facet(k)
       if (flip) then
@@ -229,10 +258,188 @@ contains
          call buf(used)%compute_metrix
       endif
    enddo
-
    allocate(kept_facet(used))
    kept_facet(1:used) = buf(1:used)
    endsubroutine tag_and_select
+
+   subroutine local_inside(arr, gi, pid, e, inside, ok)
+   !< Exact side of the sub-triangle (registry vertices `pid`) of facet gi beside its cut edge e (opposite vertex e)
+   !< with respect to the other surface (issue #65). The edge lies on the other surface: inside one facet g of it, or
+   !< on the common edge of two, g1 and g2 (`cut_sources`). With r the sub-triangle's opposite vertex and in(r, g) the
+   !< exact orient3d sign (+1 on g's inner side, outward normals): one facet, inside iff in(r, g) > 0; two facets,
+   !< convex edge (g2's far vertex on g1's inner side) inside iff both signs >= 0 and one > 0, reflex edge inside iff
+   !< one sign > 0, flat edge as one facet. `ok` is false when the sources do not settle it.
+   type(arrangement_t), intent(in)  :: arr
+   integer(I4P),        intent(in)  :: gi, pid(3), e
+   logical,             intent(out) :: inside, ok
+   integer(I4P)                     :: g(4), ng, r, s1, s2, cvx, k
+   real(R8P)                        :: a(3), b(3), c(3)
+
+   inside = .false. ; ok = .false.
+   call cut_sources(arr, gi, pid(mod(e, 3) + 1), pid(mod(e + 1, 3) + 1), g, ng)
+   if (ng == 0_I4P) return
+   r = pid(e)
+   s1 = side(g(1), r)
+   if (ng == 1_I4P) then
+      if (s1 == 0_I4P) return
+      inside = s1 > 0_I4P ; ok = .true. ; return
+   endif
+   s2 = side(g(2), r)
+   ! convexity: the vertex of g2 not on g1's edge, against g1
+   cvx = 0_I4P
+   do k = 1, 3
+      cvx = vertex_side(g(1), arr%facet(g(2))%vertex(k)%x, arr%facet(g(2))%vertex(k)%y, arr%facet(g(2))%vertex(k)%z)
+      if (cvx /= 0_I4P) exit
+   enddo
+   if (cvx > 0_I4P) then
+      inside = s1 >= 0_I4P .and. s2 >= 0_I4P .and. (s1 > 0_I4P .or. s2 > 0_I4P)
+   elseif (cvx < 0_I4P) then
+      inside = s1 > 0_I4P .or. s2 > 0_I4P
+   else
+      if (s1 == 0_I4P) return
+      inside = s1 > 0_I4P
+   endif
+   ok = s1 /= 0_I4P .or. s2 /= 0_I4P
+   contains
+      function side(gg, rr) result(sg)
+      integer(I4P), intent(in) :: gg, rr
+      integer(I4P)             :: sg
+
+      a = [arr%facet(gg)%vertex(1)%x, arr%facet(gg)%vertex(1)%y, arr%facet(gg)%vertex(1)%z]
+      b = [arr%facet(gg)%vertex(2)%x, arr%facet(gg)%vertex(2)%y, arr%facet(gg)%vertex(2)%z]
+      c = [arr%facet(gg)%vertex(3)%x, arr%facet(gg)%vertex(3)%y, arr%facet(gg)%vertex(3)%z]
+      sg = ip_orient3d(arr%pts(rr), a, b, c)
+      endfunction side
+
+      function vertex_side(gg, x, y, z) result(sg)
+      integer(I4P), intent(in) :: gg
+      real(R8P),    intent(in) :: x, y, z
+      integer(I4P)             :: sg
+      real(R8P)                :: d
+
+      d = orient3d(arr%facet(gg)%vertex(1), arr%facet(gg)%vertex(2), arr%facet(gg)%vertex(3), vector_R8P(x, y, z))
+      sg = 0_I4P
+      if (d > 0._R8P) sg = 1_I4P
+      if (d < 0._R8P) sg = -1_I4P
+      endfunction vertex_side
+   endsubroutine local_inside
+
+   subroutine build_patches(owner, pid, cut, patch, np)
+   !< Patches: union-find of the sub-triangles of each surface over the edges (registry index pairs) that no
+   !< triangulation marked as a cut; patch(k) in 1..np.
+   integer(I4P),              intent(in)  :: owner(:), pid(:, :)
+   logical,                   intent(in)  :: cut(:, :)
+   integer(I4P), allocatable, intent(out) :: patch(:)
+   integer(I4P),              intent(out) :: np
+   integer(I4P), allocatable              :: key(:, :), ord(:), parent(:), root_id(:)
+   integer(I4P)                           :: n, k, e, h, i, j, a, b
+   logical,      allocatable              :: hcut(:)
+   logical                                :: any_cut
+
+   n = size(owner)
+   allocate(key(3, 3 * n), hcut(3 * n), ord(3 * n), parent(n))
+   h = 0_I4P
+   do k = 1, n
+      do e = 1, 3
+         a = pid(mod(e, 3) + 1, k) ; b = pid(mod(e + 1, 3) + 1, k)
+         h = h + 1_I4P
+         key(:, h) = [owner(k), min(a, b), max(a, b)] ; hcut(h) = cut(e, k) ; ord(h) = h
+      enddo
+   enddo
+   call sort_keys(key, ord)
+   parent = [(k, k = 1, n)]
+   i = 1_I4P
+   do while (i <= h)
+      j = i
+      do while (j < h)
+         if (any(key(:, ord(j + 1)) /= key(:, ord(i)))) exit
+         j = j + 1_I4P
+      enddo
+      any_cut = any(hcut(ord(i:j)))
+      if (.not. any_cut) then
+         do k = i + 1, j
+            call unite((ord(i) - 1_I4P) / 3_I4P + 1_I4P, (ord(k) - 1_I4P) / 3_I4P + 1_I4P)
+         enddo
+      endif
+      i = j + 1_I4P
+   enddo
+   allocate(patch(n), root_id(n))
+   root_id = 0_I4P ; np = 0_I4P
+   do k = 1, n
+      a = find(k)
+      if (root_id(a) == 0_I4P) then
+         np = np + 1_I4P ; root_id(a) = np
+      endif
+      patch(k) = root_id(a)
+   enddo
+   contains
+      recursive function find(x) result(r)
+      integer(I4P), intent(in) :: x
+      integer(I4P)             :: r
+
+      r = x
+      do while (parent(r) /= r)
+         parent(r) = parent(parent(r)) ; r = parent(r)
+      enddo
+      endfunction find
+
+      subroutine unite(x, y)
+      integer(I4P), intent(in) :: x, y
+      integer(I4P)             :: rx, ry
+
+      rx = find(x) ; ry = find(y)
+      if (rx /= ry) parent(max(rx, ry)) = min(rx, ry)
+      endsubroutine unite
+   endsubroutine build_patches
+
+   subroutine sort_keys(key, ord)
+   !< Bottom-up merge sort of `ord` by the integer triples key(:, ord(:)) (lexicographic).
+   integer(I4P), intent(in)    :: key(:, :)
+   integer(I4P), intent(inout) :: ord(:)
+   integer(I4P), allocatable   :: work(:)
+   integer(I4P)                :: n, width, lo, mid, hi, i, j, k
+
+   n = size(ord)
+   allocate(work(n))
+   width = 1_I4P
+   do while (width < n)
+      lo = 1_I4P
+      do while (lo <= n)
+         mid = min(lo + width - 1_I4P, n) ; hi = min(lo + 2_I4P * width - 1_I4P, n)
+         i = lo ; j = mid + 1_I4P ; k = lo
+         do while (i <= mid .and. j <= hi)
+            if (less(ord(j), ord(i))) then
+               work(k) = ord(j) ; j = j + 1_I4P
+            else
+               work(k) = ord(i) ; i = i + 1_I4P
+            endif
+            k = k + 1_I4P
+         enddo
+         do while (i <= mid)
+            work(k) = ord(i) ; i = i + 1_I4P ; k = k + 1_I4P
+         enddo
+         do while (j <= hi)
+            work(k) = ord(j) ; j = j + 1_I4P ; k = k + 1_I4P
+         enddo
+         lo = lo + 2_I4P * width
+      enddo
+      ord = work
+      width = 2_I4P * width
+   enddo
+   contains
+      pure function less(x, y) result(l)
+      integer(I4P), intent(in) :: x, y
+      logical                  :: l
+      integer(I4P)             :: c
+
+      l = .false.
+      do c = 1, 3
+         if (key(c, x) /= key(c, y)) then
+            l = key(c, x) < key(c, y) ; return
+         endif
+      enddo
+      endfunction less
+   endsubroutine sort_keys
 
    pure subroutine apply_selection(op, owner, in_a, in_b, shared, orient_dot, &
                                    keep, flip, status)
@@ -351,73 +558,5 @@ contains
       if (present(status)) status = BOOL_STATUS_NOT_IMPLEMENTED
    endselect
    endsubroutine apply_selection
-
-   pure function longest_edge(facet) result(l)
-   !< Longest edge of a facet set.
-   type(facet_object), intent(in) :: facet(:) !< Facets.
-   real(R8P)                      :: l        !< Length.
-   integer(I4P)                   :: i        !< Counter.
-   type(vector_R8P)               :: d        !< Third edge.
-
-   l = 0._R8P
-   do i = 1, size(facet, dim=1)
-      d = facet(i)%vertex(3) - facet(i)%vertex(2)
-      l = max(l, facet(i)%E12%normL2(), facet(i)%E13%normL2(), d%normL2())
-   enddo
-   endfunction longest_edge
-
-   function is_on_other_surface(sub, other_facet, other_tree, max_edge, orient_dot) result(yes)
-   !< True iff `sub`'s centroid lies on the OTHER surface (within tolerance)
-   !< AND the closest other-surface facet's normal is (anti-)parallel to `sub`'s
-   !< normal. Returns the dot product of normals via `orient_dot` for
-   !< `apply_selection` to disambiguate same-vs-opposite orientation.
-   !<
-   !< Tests, relative to L = the longest edge of the closest other facet (issue #33):
-   !<   - on that facet's plane: |n . (c - v1)| <= `SHARED_PLANE_TOL` * L (1e-9). The plane distance
-   !<     is accurate to round-off; the tree's squared distance is not (it cancels: a point lying
-   !<     on the facet gets d^2 ~ eps L^2, i.e. d ~ 1e-8 L, which the former absolute 1e-9 test on d
-   !<     rejected for about half of the shared sub-triangles);
-   !<   - on the facet itself (not only its plane): d <= `SHARED_NEAR_TOL` * L (1e-6). Coplanar
-   !<     overlaps are cut by the arrangement, so a sub-triangle is either inside the other facet
-   !<     or away from it by a fraction of its own size;
-   !<   - normal parallelism: `|orient_dot| > SHARED_NORM_TOL` = 1 - 1e-15 (angle below ~4.5e-8 rad, issue #63).
-   !< The fallback of `coplanar_partner` for faces within the on-plane snap whose facet boxes are disjoint, so that the
-   !< pair never reached the exact classification (a face and its copy moved by 1e-12). It was 0.99 (8 degrees): it
-   !< called shared the sub-triangles a few 1e-9 wide beside a crossing of two facets a few degrees apart.
-   type(facet_object),     intent(in)         :: sub
-   type(facet_object),     intent(in)         :: other_facet(:)
-   type(aabb_tree_object), intent(in), target :: other_tree
-   real(R8P),              intent(in)         :: max_edge     !< Longest edge of the other surface.
-   real(R8P),              intent(out)        :: orient_dot
-   logical                                    :: yes
-   real(R8P)                                  :: distance_sq, plane_dist, edge_len
-   integer(I4P)                               :: closest_id, region_id
-   type(vector_R8P)                           :: dc
-   real(R8P), parameter :: SHARED_PLANE_TOL = 1.0e-9_R8P
-   real(R8P), parameter :: SHARED_NEAR_TOL  = 1.0e-6_R8P
-   real(R8P), parameter :: SHARED_NORM_TOL  = 1._R8P - 1.e-15_R8P
-
-   yes = .false. ; orient_dot = 0._R8P
-   distance_sq = MaxR8P
-   closest_id  = 0_I4P
-   region_id   = 0_I4P
-   ! Bounded search (issue #63): only a facet within SHARED_NEAR_TOL of its longest edge can pass, and that edge is
-   ! at most the longest edge of the other surface; an unbounded closest-point search per sub-triangle was most of
-   ! the selection time on pairs of large bodies.
-   call other_tree%distance_tree_with_region(facet=other_facet, point=sub%centroid, &
-                                              distance=distance_sq, closest_facet=closest_id, &
-                                              closest_region=region_id, max_distance2=(SHARED_NEAR_TOL * max_edge)**2)
-   if (closest_id <= 0_I4P .or. closest_id > size(other_facet, dim=1)) return
-   associate(g => other_facet(closest_id))
-      dc = g%vertex(3) - g%vertex(2)
-      edge_len = max(g%E12%normL2(), g%E13%normL2(), dc%normL2())
-      if (distance_sq > (SHARED_NEAR_TOL * edge_len)**2) return
-      dc = sub%centroid - g%vertex(1)
-      plane_dist = abs(g%normal%dotproduct(rhs=dc))
-      if (plane_dist > SHARED_PLANE_TOL * edge_len) return
-      orient_dot = sub%normal%dotproduct(rhs=g%normal)
-   end associate
-   yes = (abs(orient_dot) > SHARED_NORM_TOL)
-   endfunction is_on_other_surface
 
 endmodule fossil_boolean

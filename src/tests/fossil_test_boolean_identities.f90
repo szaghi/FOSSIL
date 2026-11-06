@@ -7,7 +7,7 @@
 !< 2. the second seeded configuration of fossil_test_boolean_stress (same generator, same seed; rotated).
 !< Regression subset (the 2 s budget); every case, axis-aligned too, is src/tests/validation/fossil_val_boolean_identities.f90.
 !< Every pair must pass (nothing new found on these). Area identity only without coplanar face planes; validity only
-!< without contact.
+!< without contact; self-intersections only as rounding folds (depth <= 1e-12 of the diagonal, issue #65).
 !< 3. Negative control: the union of the generic case with one facet dropped fails the harness (volume, moments,
 !<    deviation or validity), so the harness detects a wrong result.
 program fossil_test_boolean_identities
