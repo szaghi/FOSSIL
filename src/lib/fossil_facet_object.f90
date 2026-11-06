@@ -1006,7 +1006,8 @@ contains
       !< coordinate triple), producing silent garbage.
       character(*),     intent(in)  :: prefix         !< Record prefix string.
       type(vector_R8P), intent(out) :: record         !< Record data.
-      character(FRLEN)              :: facet_record   !< Facet record string buffer.
+      character(1024)               :: facet_record   !< Line buffer (longer than any STL line: an 80-character
+                                                      !< buffer cut 17-digit coordinates, issue #66).
       character(len=:), allocatable :: trimmed        !< Line with leading whitespace removed.
       integer(I4P)                  :: prefix_len     !< Cached prefix length.
       integer(I4P)                  :: read_ios       !< I/O status for the line read.

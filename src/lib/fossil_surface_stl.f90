@@ -6585,7 +6585,7 @@ contains
    integer(I4P),                  intent(in)    :: file_unit !< Open ASCII unit.
    character(FRLEN), allocatable, intent(inout) :: names(:)  !< Patch names met so far.
    integer(I4P),                  intent(inout) :: p         !< Current patch.
-   character(FRLEN)                             :: line      !< Line buffer.
+   character(1024)                              :: line      !< Line buffer.
    character(len=:), allocatable                :: t         !< Line without leading blanks.
    integer(I4P)                                 :: ios       !< I/O status.
 
@@ -6679,7 +6679,8 @@ contains
    integer(I4P), intent(in)  :: file_unit     !< Open file unit.
    logical,      intent(in)  :: is_ascii      !< Format flag.
    integer(I4P), intent(out) :: facets_number !< Count.
-   character(FRLEN)          :: facet_record  !< Line buffer for ASCII scan.
+   character(1024)           :: facet_record  !< Line buffer for ASCII scan (longer than any STL line).
+   character(FRLEN)          :: binary_header !< The 80-byte binary header.
 
    facets_number = 0
    rewind(file_unit)
@@ -6689,7 +6690,7 @@ contains
          if (index(string=facet_record, substring='facet normal') > 0) facets_number = facets_number + 1
       enddo
    else
-      read(file_unit, end=10, err=10) facet_record
+      read(file_unit, end=10, err=10) binary_header
       read(file_unit, end=10, err=10) facets_number
    endif
    10 rewind(file_unit)
