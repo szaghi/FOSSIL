@@ -115,6 +115,9 @@ contains
    integer(I4P)                                          :: heap_size
    integer(I4P)                                          :: nf_alive, st
    integer(I4P)                                          :: e_top, va, vb
+   logical,       allocatable                            :: v_bnd(:)        !< On a patch boundary (issue #66).
+   real(R8P)                                             :: tgt(3)          !< Collapse target.
+   integer(I4P)                                          :: f, k
 
    if (present(status)) status = DEC_STATUS_OK
    if (.not. allocated(facet)) then
@@ -141,6 +144,22 @@ contains
 
    allocate(facet_alive(nf_in), source=.true.)
    nf_alive = nf_in
+   ! patches (issue #66): a vertex whose facets are in two patches is on a patch boundary; boundaries stay where they
+   ! are: two boundary vertices never merge, and an interior vertex merges onto a boundary one at its place
+   allocate(v_bnd(nv), source=.false.)
+   block
+      integer(I4P), allocatable :: vp(:)
+      allocate(vp(nv), source=0_I4P)
+      do f = 1, nf_in
+         do k = 1, 3
+            if (vp(f_v(k, f)) == 0_I4P) then
+               vp(f_v(k, f)) = facet(f)%patch
+            elseif (vp(f_v(k, f)) /= facet(f)%patch) then
+               v_bnd(f_v(k, f)) = .true.
+            endif
+         enddo
+      enddo
+   endblock
 
    ! --- Stage 2: build per-vertex incidence (which facets touch each vertex). ---
    call build_v2f(f_v=f_v, nv=nv, &
@@ -182,9 +201,16 @@ contains
          e_alive(e_top) = .false.
          cycle
       endif
+      tgt = e_target(:, e_top)
+      if (v_bnd(va) .and. v_bnd(vb)) then
+         e_alive(e_top) = .false.
+         cycle
+      endif
+      if (v_bnd(va)) tgt = vcoord(:, va)
+      if (v_bnd(vb)) tgt = vcoord(:, vb)
       ! Try the collapse; if rejected by safety checks, mark this edge dead
       ! and continue (its cost would not change, so no point re-queuing).
-      if (.not. try_collapse(va=va, vb=vb, target=e_target(:, e_top), &
+      if (.not. try_collapse(va=va, vb=vb, target=tgt, &
                               f_v=f_v, vcoord=vcoord, vertex_alive=vertex_alive, &
                               facet_alive=facet_alive, &
                               v2f_head=v2f_head, v2f_count=v2f_count, v2f_cap=v2f_cap, v2f_val=v2f_val, &
@@ -197,6 +223,7 @@ contains
          e_alive(e_top) = .false.
          cycle
       endif
+      v_bnd(va) = v_bnd(va) .or. v_bnd(vb) ! va survives at the boundary vertex's place
       e_alive(e_top) = .false.
    enddo
 
@@ -1157,6 +1184,7 @@ contains
       ! Reset connectivity / pool ids — caller's adopt_facets re-runs analyze.
       out(k)%vertex_id = 0_I4P
       out(k)%fcon_edge = 0_I4P
+      out(k)%patch = facet(f)%patch ! surviving facets keep their patch (issue #66)
       call out(k)%compute_metrix
    enddo
    call move_alloc(from=out, to=facet)

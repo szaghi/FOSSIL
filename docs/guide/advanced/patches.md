@@ -44,6 +44,19 @@ its parent facet's patch, so the area of a patch in the result is the area of it
 other body, as the operation selects. The other surface's patches join the table by name before the arrangement:
 `A ∪ B` of a body with patches `low`, `high` and one with `b_low`, `b_high` has all four, and equal names merge.
 
+## Through remeshing
+
+Patch boundaries are kept where they are, like the sharp edges of [feature edges](/guide/advanced/feature-edges), and
+every facet keeps a patch:
+
+- `isotropic_remesh`: the vertices of the edges between two patches are locked (whatever `preserve_features` says),
+  so those edges are never flipped or collapsed; a split facet's halves keep its patch, and a midpoint on a boundary
+  edge becomes a boundary vertex.
+- `decimate`: two boundary vertices never merge, and an interior vertex merges onto a boundary one at its place; the
+  boundary vertices are the input ones exactly.
+- `smooth`: the boundary vertices do not move.
+- `alpha_wrap`: each facet of the wrap takes the patch of the input facet closest to its centroid.
+
 ## API
 
 See [Patches](/guide/api/surface-stl-object#patches) in the API reference.

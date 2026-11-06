@@ -112,8 +112,10 @@ contains
    integer(I4P)                                    :: meth, n_iter, it
    real(R8P)                                       :: lam, mu_val
    logical                                         :: had_degenerate
-   type(vector_R8P), allocatable                   :: coord(:)
+   type(vector_R8P), allocatable                   :: coord(:), coord0(:)
    integer(I4P)                                    :: n_vertices, f, vi, lv
+   logical,          allocatable                   :: fixed(:)  !< Patch-boundary vertices (issue #66).
+   integer(I4P),     allocatable                   :: vp(:)     !< First patch met per vertex.
 
    if (present(status)) status = SMOOTH_STATUS_OK
    meth   = SMOOTH_METHOD_TAUBIN;     if (present(method))     meth = method
@@ -150,19 +152,37 @@ contains
       coord(vi) = pool%coord(vid=vi)
    enddo
 
+   ! patch boundaries stay where they are (issue #66): a vertex whose facets are in two patches is reset after each step
+   allocate(fixed(n_vertices), source=.false.) ; allocate(vp(n_vertices), source=0_I4P)
+   do f = 1_I4P, size(facet, kind=I4P)
+      do lv = 1_I4P, 3_I4P
+         vi = pool%facet_vid(facet_id=f, local_v=lv)
+         if (vi == 0_I4P) cycle
+         if (vp(vi) == 0_I4P) then
+            vp(vi) = facet(f)%patch
+         elseif (vp(vi) /= facet(f)%patch) then
+            fixed(vi) = .true.
+         endif
+      enddo
+   enddo
+   coord0 = coord
+
    had_degenerate = .false.
    select case (meth)
    case (SMOOTH_METHOD_EXPLICIT)
       do it = 1_I4P, n_iter
          call apply_laplacian_step(facet=facet, pool=pool, coord=coord, &
                                    step=lam, had_degenerate=had_degenerate)
+         call keep_fixed
       enddo
    case (SMOOTH_METHOD_TAUBIN)
       do it = 1_I4P, n_iter
          call apply_laplacian_step(facet=facet, pool=pool, coord=coord, &
                                    step=lam,    had_degenerate=had_degenerate)
+         call keep_fixed
          call apply_laplacian_step(facet=facet, pool=pool, coord=coord, &
                                    step=mu_val, had_degenerate=had_degenerate)
+         call keep_fixed
       enddo
    endselect
 
@@ -179,6 +199,15 @@ contains
 
    deallocate(coord)
    if (had_degenerate .and. present(status)) status = SMOOTH_STATUS_DEGENERATE
+   contains
+      subroutine keep_fixed
+      !< Patch-boundary vertices back to their place.
+      integer(I4P) :: i
+
+      do i = 1_I4P, n_vertices
+         if (fixed(i)) coord(i) = coord0(i)
+      enddo
+      endsubroutine keep_fixed
    endsubroutine smooth_mesh
 
    subroutine apply_laplacian_step(facet, pool, coord, step, had_degenerate)

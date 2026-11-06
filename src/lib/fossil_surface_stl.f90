@@ -4387,6 +4387,18 @@ contains
                   alpha=alpha_eff, offset=offset_eff, max_iterations=max_iterations, &
                   wrapped_facets=wrap_facets, status=status)
    if (.not. allocated(wrap_facets)) allocate(wrap_facets(0))
+   ! patches (issue #66): each wrapped facet takes the patch of the input facet closest to its centroid
+   block
+      integer(I4P) :: k, fi
+      real(R8P)    :: dd
+      do k = 1, size(wrap_facets)
+         call wrap_facets(k)%compute_metrix
+         call self%compute_distance(point=wrap_facets(k)%centroid, distance=dd, facet_index=fi)
+         if (fi >= 1 .and. fi <= self%facets_number) wrap_facets(k)%patch = self%facet(fi)%patch
+      enddo
+   endblock
+   wrapped%header = self%header
+   if (allocated(self%patch_names)) wrapped%patch_names = self%patch_names
    call wrapped%adopt_facets(facets=wrap_facets)
    endsubroutine alpha_wrap
 

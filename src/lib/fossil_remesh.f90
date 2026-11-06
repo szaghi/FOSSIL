@@ -78,6 +78,8 @@ contains
    logical,      allocatable                                        :: facet_alive(:)
    logical,      allocatable                                        :: vertex_locked(:)
    logical,      allocatable                                        :: new_lock(:)
+   integer(I4P), allocatable                                        :: f_p(:)   !< Patch per facet slot (issue #66).
+   logical                                                          :: patched  !< More than one patch.
    real(R8P)                                                        :: L
 
    if (present(status)) status = REM_STATUS_OK
@@ -100,6 +102,13 @@ contains
    endif
    allocate(facet_alive(nf_in), source=.true.)
    nf_alive = nf_in
+   ! patches (issue #66): every facet keeps the patch of the facet it comes from, and the patch boundaries are locked
+   ! like sharp features (vertices fixed, edges never flipped), whatever `preserve_features` says
+   allocate(f_p(nf_in))
+   do it = 1, nf_in
+      f_p(it) = facet(it)%patch
+   enddo
+   patched = any(f_p /= f_p(1))
 
    ! Stage 2: target edge length.
    if (target_length > 0._R8P) then
@@ -115,21 +124,21 @@ contains
    ! collapse / flip / relax checks treat them as unlocked).
    call build_vertex_lock(f_v=f_v, vcoord=vcoord, nv=nv, &
                           preserve_features=preserve_features, &
-                          vertex_locked=vertex_locked)
+                          vertex_locked=vertex_locked, f_p=f_p)
 
    ! Stage 3: outer loop. Steps 3-6 wire split + collapse + flip + relax;
    ! step 7 threads vertex_locked into collapse / flip / relax.
    do it = 1, iterations
       call apply_split_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
-                            nv=nv, nf_alive=nf_alive)
+                            nv=nv, nf_alive=nf_alive, f_p=f_p)
       ! Grow vertex_locked to match the new nv. Midpoints inserted on a sharp
       ! edge lie on the crease too: re-detect the features on the split mesh
       ! and lock them, or the relax pass pulls them off the crease and chamfers
       ! every sharp edge (a cube lost 6 % of its area, issue #42).
       call grow_lock(vertex_locked=vertex_locked, new_size=nv)
-      if (preserve_features) then
-         call build_vertex_lock(f_v=f_v, vcoord=vcoord, nv=nv, preserve_features=.true., &
-                                vertex_locked=new_lock, alive=facet_alive)
+      if (preserve_features .or. patched) then
+         call build_vertex_lock(f_v=f_v, vcoord=vcoord, nv=nv, preserve_features=preserve_features, &
+                                vertex_locked=new_lock, alive=facet_alive, f_p=f_p)
          vertex_locked = vertex_locked .or. new_lock(1:size(vertex_locked))
       endif
       call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
@@ -144,7 +153,7 @@ contains
    enddo
 
    ! Stage final: materialize.
-   call materialize(facet=facet, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive)
+   call materialize(facet=facet, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, f_p=f_p)
    endsubroutine isotropic_remesh
 
    subroutine run_split_only(facet, target_length, n_iterations)
@@ -270,7 +279,7 @@ contains
    enddo
    endsubroutine collect_state
 
-   subroutine materialize(facet, f_v, vcoord, facet_alive)
+   subroutine materialize(facet, f_v, vcoord, facet_alive, f_p)
    !< Rebuild the public facet array from surviving alive facets, with each
    !< facet's metrix recomputed from the (possibly moved) vertex positions.
    !<
@@ -286,6 +295,7 @@ contains
    integer(I4P),                    intent(in)    :: f_v(:, :)
    real(R8P),                       intent(in)    :: vcoord(:, :)
    logical,                         intent(in)    :: facet_alive(:)
+   integer(I4P),          optional, intent(in)    :: f_p(:) !< Patch per facet slot.
    type(facet_object), allocatable                :: out(:)
    integer(I4P)                                   :: f, n_out, k, j
 
@@ -303,6 +313,7 @@ contains
       enddo
       out(k)%vertex_id = 0_I4P  ! caller's adopt_facets re-runs analyze
       out(k)%fcon_edge = 0_I4P
+      if (present(f_p)) out(k)%patch = f_p(f)
       call out(k)%compute_metrix
    enddo
    call move_alloc(from=out, to=facet)
@@ -458,7 +469,7 @@ contains
    ! Step 3: split pass
    ! ===========================================================================
 
-   subroutine ensure_facet_capacity(f_v, facet_alive, used, needed)
+   subroutine ensure_facet_capacity(f_v, facet_alive, used, needed, f_p)
    !< Ensure `f_v` and `facet_alive` have logical size at least `needed`.
    !< Geometric growth: if reallocation is required, grow to `2 * needed`
    !< (so subsequent appends amortize to O(1) per call).
@@ -466,7 +477,8 @@ contains
    logical,      allocatable, intent(inout) :: facet_alive(:)
    integer(I4P),              intent(in)    :: used    !< Currently-occupied slot count.
    integer(I4P),              intent(in)    :: needed  !< Required logical size.
-   integer(I4P), allocatable                :: new_fv(:, :)
+   integer(I4P), allocatable, intent(inout), optional :: f_p(:) !< Patch per facet slot, grown alongside.
+   integer(I4P), allocatable                :: new_fv(:, :), new_p(:)
    logical,      allocatable                :: new_alive(:)
    integer(I4P)                             :: cap, new_cap
 
@@ -479,13 +491,20 @@ contains
    allocate(new_alive(new_cap), source=.false.)
    new_alive(1:used) = facet_alive(1:used)
    call move_alloc(from=new_alive, to=facet_alive)
+   if (present(f_p)) then
+      if (allocated(f_p)) then
+         allocate(new_p(new_cap), source=1_I4P)
+         new_p(1:min(used, size(f_p))) = f_p(1:min(used, size(f_p)))
+         call move_alloc(from=new_p, to=f_p)
+      endif
+   endif
    endsubroutine ensure_facet_capacity
 
    ! ===========================================================================
    ! Step 7: feature lock helpers
    ! ===========================================================================
 
-   subroutine build_vertex_lock(f_v, vcoord, nv, preserve_features, vertex_locked, alive)
+   subroutine build_vertex_lock(f_v, vcoord, nv, preserve_features, vertex_locked, alive, f_p)
    !< Allocate `vertex_locked(nv)` and populate it. When `preserve_features
    !< = .false.`, every entry stays `.false.` (no locks; the lock-aware
    !< checks downstream are no-ops). When `.true.`, walk every interior
@@ -500,6 +519,7 @@ contains
    logical,                   intent(in)  :: preserve_features
    logical,      allocatable, intent(out) :: vertex_locked(:)
    logical,      optional,    intent(in)  :: alive(:) !< Live facets (default: all; set after the first pass).
+   integer(I4P), optional,    intent(in)  :: f_p(:)   !< Patch per facet slot: patch boundaries are locked (issue #66).
    integer(I4P), allocatable              :: e_v(:, :), e_facets(:, :)
    integer(I4P)                           :: ne, e
    real(R8P)                              :: cos_thr
@@ -507,13 +527,22 @@ contains
    logical, allocatable                   :: facet_alive(:)
 
    allocate(vertex_locked(nv), source=.false.)
-   if (.not. preserve_features) return
-
    ! All input facets are alive before the first pass; later calls pass the live set.
    allocate(facet_alive(size(f_v, dim=2)), source=.true.)
    if (present(alive)) facet_alive = alive(1:size(f_v, dim=2))
-   call build_edges_with_facets(f_v=f_v, facet_alive=facet_alive, &
-                                 e_v=e_v, e_facets=e_facets, ne=ne)
+   if (present(f_p)) then ! patch boundaries: an edge between facets of two patches (issue #66)
+      call build_edges_with_facets(f_v=f_v, facet_alive=facet_alive, e_v=e_v, e_facets=e_facets, ne=ne)
+      do e = 1, ne
+         if (e_facets(1, e) == 0_I4P .or. e_facets(2, e) == 0_I4P) cycle
+         if (f_p(e_facets(1, e)) /= f_p(e_facets(2, e))) then
+            vertex_locked(e_v(1, e)) = .true.
+            vertex_locked(e_v(2, e)) = .true.
+         endif
+      enddo
+   endif
+   if (.not. preserve_features) return
+   if (.not. allocated(e_v)) call build_edges_with_facets(f_v=f_v, facet_alive=facet_alive, &
+                                                         e_v=e_v, e_facets=e_facets, ne=ne)
 
    cos_thr = feature_cos(FEATURE_DIHEDRAL_DEG)
 
@@ -553,7 +582,7 @@ contains
    call move_alloc(from=new_lock, to=vertex_locked)
    endsubroutine grow_lock
 
-   subroutine apply_split_pass(L, f_v, vcoord, facet_alive, nv, nf_alive)
+   subroutine apply_split_pass(L, f_v, vcoord, facet_alive, nv, nf_alive, f_p)
    !< Walk every alive facet's edges; for each edge longer than 4*L/3, split
    !< by inserting a midpoint vertex and replacing the (up to 2) incident
    !< facets with sub-facets.
@@ -574,6 +603,7 @@ contains
    logical,      allocatable, intent(inout) :: facet_alive(:)
    integer(I4P),              intent(inout) :: nv
    integer(I4P),              intent(inout) :: nf_alive
+   integer(I4P), allocatable, intent(inout), optional :: f_p(:) !< Patch per facet slot (issue #66).
    integer(I4P), allocatable                :: e_v(:, :), e_facets(:, :)
    integer(I4P)                             :: ne, e, va, vb, f1, f2, w1, w2, vm, used
    real(R8P)                                :: thr, dx, dy, dz, len_e
@@ -610,12 +640,12 @@ contains
       if (f1 > 0_I4P) then
          w1 = facet_apex(f_v=f_v, f=f1, va=va, vb=vb)
          call replace_facet_with_split(f_v=f_v, facet_alive=facet_alive, nf_alive=nf_alive, &
-                                       used=used, f_old=f1, va=va, vb=vb, vm=vm, w=w1)
+                                       used=used, f_old=f1, va=va, vb=vb, vm=vm, w=w1, f_p=f_p)
       endif
       if (f2 > 0_I4P) then
          w2 = facet_apex(f_v=f_v, f=f2, va=va, vb=vb)
          call replace_facet_with_split(f_v=f_v, facet_alive=facet_alive, nf_alive=nf_alive, &
-                                       used=used, f_old=f2, va=va, vb=vb, vm=vm, w=w2)
+                                       used=used, f_old=f2, va=va, vb=vb, vm=vm, w=w2, f_p=f_p)
       endif
    enddo
    endsubroutine apply_split_pass
@@ -1224,7 +1254,7 @@ contains
    v_idx = nv
    endsubroutine append_vertex
 
-   subroutine replace_facet_with_split(f_v, facet_alive, nf_alive, used, f_old, va, vb, vm, w)
+   subroutine replace_facet_with_split(f_v, facet_alive, nf_alive, used, f_old, va, vb, vm, w, f_p)
    !< Replace facet `f_old` (with vertices va, vb, w in some CCW order) by
    !< two new facets that share the apex `w` and the new midpoint `vm`:
    !<   sub_a = orig with vb-slot replaced by vm
@@ -1237,6 +1267,7 @@ contains
    integer(I4P),              intent(inout) :: nf_alive
    integer(I4P),              intent(inout) :: used
    integer(I4P),              intent(in)    :: f_old, va, vb, vm, w
+   integer(I4P), allocatable, intent(inout), optional :: f_p(:) !< Patch per facet slot: the halves inherit f_old's.
    integer(I4P)                             :: orig(3), new_a(3), new_b(3), k, slot_va, slot_vb
    integer(I4P)                             :: f_a, f_b
 
@@ -1250,13 +1281,13 @@ contains
    new_a = orig ; new_a(slot_vb) = vm
    new_b = orig ; new_b(slot_va) = vm
    if (w == 0_I4P .and. .false.) return  ! suppress unused-variable warning
-   call append_facet(f_v=f_v, facet_alive=facet_alive, used=used, vrt=new_a, f_idx=f_a)
-   call append_facet(f_v=f_v, facet_alive=facet_alive, used=used, vrt=new_b, f_idx=f_b)
+   call append_facet(f_v=f_v, facet_alive=facet_alive, used=used, vrt=new_a, f_idx=f_a, f_p=f_p, f_from=f_old)
+   call append_facet(f_v=f_v, facet_alive=facet_alive, used=used, vrt=new_b, f_idx=f_b, f_p=f_p, f_from=f_old)
    facet_alive(f_old) = .false.
    nf_alive = nf_alive + 1
    endsubroutine replace_facet_with_split
 
-   subroutine append_facet(f_v, facet_alive, used, vrt, f_idx)
+   subroutine append_facet(f_v, facet_alive, used, vrt, f_idx, f_p, f_from)
    !< Append a new facet (vertex IDs `vrt`) at slot `used + 1`. Grows the
    !< arrays geometrically when needed via `ensure_facet_capacity`.
    !< `used` is the current high-water mark of slot usage (NOT the count
@@ -1266,11 +1297,16 @@ contains
    integer(I4P),              intent(inout) :: used
    integer(I4P),              intent(in)    :: vrt(3)
    integer(I4P),              intent(out)   :: f_idx
+   integer(I4P), allocatable, intent(inout), optional :: f_p(:)  !< Patch per facet slot.
+   integer(I4P),              intent(in),    optional :: f_from  !< Facet whose patch the new one takes.
 
-   call ensure_facet_capacity(f_v=f_v, facet_alive=facet_alive, used=used, needed=used + 1)
+   call ensure_facet_capacity(f_v=f_v, facet_alive=facet_alive, used=used, needed=used + 1, f_p=f_p)
    used = used + 1
    f_idx = used
    f_v(:, f_idx) = vrt
+   if (present(f_p) .and. present(f_from)) then
+      if (allocated(f_p)) f_p(f_idx) = f_p(f_from)
+   endif
    facet_alive(f_idx) = .true.
    endsubroutine append_facet
 
