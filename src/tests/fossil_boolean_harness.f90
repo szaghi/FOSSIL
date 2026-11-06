@@ -26,7 +26,7 @@ use vecfor,                 only : vector_R8P
 
 implicit none
 private
-public :: boolean_report_t, check_boolean, boolean_pass, print_report, OPS, OPN, TOL_IDENTITY
+public :: boolean_report_t, check_boolean, boolean_pass, print_report, moments, OPS, OPN, TOL_IDENTITY
 
 integer(I4P), parameter :: OPS(4) = [BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF] !< The four ops.
 character(1), parameter :: OPN(4) = ['U', 'I', 'D', 'S']                                         !< Their letters.

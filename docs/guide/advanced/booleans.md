@@ -248,6 +248,34 @@ This remains open: matching the retriangulation's decisions to the classificatio
 provenance, rather than coordinates compared within tolerances) is a design change. Aligning the tolerances to 1e-10
 was tried, and it brought back a silent 2.3 % volume error on the cube rotated by 1e-8.
 
+### CSG chains
+
+`src/tests/validation/fossil_val_boolean_csg.f90` runs chains of booleans whose exact volume and second moments
+follow from independent booleans (test-side module `src/tests/fossil_boolean_csg.f90`). Every step is checked, so
+drift along the chain would show:
+
+- **Drilled block:** the unit cube minus k² disjoint vertical capped cylinders on a k × k grid, each through the
+  block. Step j must give V(R_j) = V(R_j−1) − V(cube ∩ C_j), with the intersection computed separately against the
+  original cube.
+- **Sphere lattice:** the union of k² spheres on a grid, radius 0.6 of the spacing. Neighbours along the rows and
+  columns overlap and diagonal ones do not, so step j must add V(S_j) minus the overlaps with its earlier neighbours.
+
+Both use 12³ marching-cubes bodies.
+
+| Chain | Operations | Final facets | Worst step residual (volume, moments) | Final residual (volume, moments) | Time at -O2 |
+|---|---|---|---|---|---|
+| block − 9 cylinders | 9 | 3 696 | 2.2e-16, 2.5e-16 | 2.2e-16, 1.8e-16 | 0.4 s |
+| block − 25 cylinders | 25 | 10 688 | 1.1e-16, 1.1e-15 | 1.1e-16, 1.1e-15 | 6.2 s |
+| block − 49 cylinders | 49 | 21 944 | 1.1e-16, 7.0e-16 | 1.1e-16, 7.0e-16 | 35 s |
+| ∪ 9 spheres | 8 | 5 820 | 1.1e-16, 8.7e-17 | 1.1e-16, 8.7e-17 | 1.2 s |
+| ∪ 25 spheres | 24 | 16 300 | 6.3e-16, 7.4e-17 | 6.3e-16, 4.8e-17 | 9.6 s |
+| ∪ 49 spheres | 48 | 32 060 | 4.1e-16, 9.0e-17 | 4.1e-16, 4.5e-17 | 40 s |
+
+Every status is OK and every intermediate body is watertight and manifold. The residuals stay at round-off and do
+not grow with the length: there is no drift. The time does grow. One step costs about N^1.8 in the facets of the
+running body (0.09 s at 3 700 facets, 2.0 s at 22 000), so a chain costs about N^2.8; see *Performance*. The
+regression tier, `src/tests/fossil_test_boolean_csg.f90`, runs 4-operation chains of both kinds.
+
 ### Defects found by the harness
 
 - **Delaunay store overflow** (fixed, issue #63). The constrained triangulation of a cut facet
