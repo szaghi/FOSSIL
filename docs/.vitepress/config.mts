@@ -54,6 +54,7 @@ const docs = [
       { text: 'Surface deviation', link: '/guide/advanced/surface-deviation' },
       { text: 'Feature edges', link: '/guide/advanced/feature-edges' },
       { text: 'Thickness and gaps', link: '/guide/advanced/thickness' },
+      { text: 'Named patches', link: '/guide/advanced/patches' },
     ],
   },
   {

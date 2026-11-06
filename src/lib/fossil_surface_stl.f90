@@ -163,6 +163,7 @@ type :: surface_stl_object
    real(R8P),                       private :: area=0._R8P     !< Total surface area (sum of facet areas; issue #7).
    type(vector_R8P),                private :: centroid        !< Centroid of STL surface.
    character(FRLEN),                private :: header=''       !< STL file header (preserved across load/save).
+   character(FRLEN), allocatable,   private :: patch_names(:)  !< Patch names, indexed by facet%patch (issue #66).
    type(vertex_pool_object),        private :: vertex_pool     !< Unique-vertex pool (issue #5 stage 1: derived artifact).
    ! Issue #20 §Step 5 -- device-residency state for the GPU distance path. The
    ! flat `pnormal_payload(:)` holds per-facet pseudo-normals (7 vectors per
@@ -199,6 +200,10 @@ type :: surface_stl_object
       procedure, pass(self) :: get_area          !< Return total surface area (issue #7).
       procedure, pass(self) :: get_centroid      !< Return centroid.
       procedure, pass(self) :: get_header        !< Return STL header.
+      procedure, pass(self) :: get_patches_number !< Number of patches (issue #66).
+      procedure, pass(self) :: patch_name         !< Name of a patch.
+      procedure, pass(self) :: facet_patch        !< Patch of a facet.
+      procedure, pass(self) :: set_patch          !< Assign facets to a named patch.
       procedure, pass(self) :: get_non_manifold_edges_number  !< Return count of edges with 3+ incident facets.
       procedure, pass(self) :: get_degenerate_facets_removed  !< Return count of facets dropped by the last degenerate-facet pass.
       procedure, pass(self) :: get_duplicate_facets_removed   !< Return count of facets dropped by the last duplicate-facet pass.
@@ -215,6 +220,7 @@ type :: surface_stl_object
       procedure, pass(self) :: adopt_facets      !< Take ownership of an allocatable facet array via move_alloc.
       ! file I/O (moved from file_stl_object)
       procedure, pass(self) :: load_from_file       !< Load STL from a file path (ASCII or binary, auto-detected).
+      procedure, pass(self) :: load_from_files      !< Load several STL files, one patch per file (issue #66).
       procedure, pass(self) :: save_into_file       !< Save STL to a file path.
       procedure, pass(self) :: save_aabb_into_file  !< Save the AABB tree leaves as separate STL files.
       ! public methods
@@ -419,6 +425,93 @@ contains
    c = self%centroid
    endfunction get_centroid
 
+   pure function get_patches_number(self) result(n)
+   !< Number of patches (issue #66): one per `solid` block of an ASCII file, one per file of `load_from_files`, 1 for a
+   !< binary file or a surface built otherwise.
+   class(surface_stl_object), intent(in) :: self !< Surface STL.
+   integer(I4P)                          :: n    !< Patches.
+
+   n = 1_I4P
+   if (allocated(self%patch_names)) n = max(1_I4P, int(size(self%patch_names), I4P))
+   endfunction get_patches_number
+
+   pure function patch_name(self, i) result(name)
+   !< Name of patch i (the `solid` name it was read with; patch 1 defaults to the header).
+   class(surface_stl_object), intent(in) :: self !< Surface STL.
+   integer(I4P),              intent(in) :: i    !< Patch.
+   character(len=:), allocatable         :: name !< Name ('' if out of range).
+
+   name = ''
+   if (allocated(self%patch_names)) then
+      if (i >= 1 .and. i <= size(self%patch_names)) name = trim(self%patch_names(i))
+   elseif (i == 1_I4P) then
+      name = trim(self%header)
+   endif
+   endfunction patch_name
+
+   elemental function facet_patch(self, i) result(p)
+   !< Patch of facet i (0 if out of range).
+   class(surface_stl_object), intent(in) :: self !< Surface STL.
+   integer(I4P),              intent(in) :: i    !< Facet.
+   integer(I4P)                          :: p    !< Patch.
+
+   p = 0_I4P
+   if (i >= 1 .and. i <= self%facets_number) p = self%facet(i)%patch
+   endfunction facet_patch
+
+   subroutine set_patch(self, facets, name)
+   !< Assign the facets `facets` to the patch named `name`, created if new (issue #66).
+   class(surface_stl_object), intent(inout) :: self      !< Surface STL.
+   integer(I4P),              intent(in)    :: facets(:) !< Facet ids.
+   character(*),              intent(in)    :: name      !< Patch name.
+   integer(I4P)                             :: p, k      !< Patch, counter.
+
+   call sync_patch_names(self)
+   p = find_or_add_patch(self%patch_names, name)
+   do k = 1, size(facets)
+      if (facets(k) >= 1 .and. facets(k) <= self%facets_number) self%facet(facets(k))%patch = p
+   enddo
+   endsubroutine set_patch
+
+   subroutine sync_patch_names(self)
+   !< Make the patch table cover every facet's patch id (issue #66): created as [header] when absent, extended with
+   !< 'patch_<k>' names for ids beyond it; ids below 1 become 1.
+   class(surface_stl_object), intent(inout) :: self !< Surface STL.
+   character(FRLEN)                         :: extra !< New name.
+   integer(I4P)                             :: f, pmax !< Counter, largest id.
+
+   if (.not. allocated(self%patch_names)) then
+      allocate(self%patch_names(1)) ; self%patch_names(1) = self%header
+   endif
+   if (size(self%patch_names) == 0) then
+      deallocate(self%patch_names) ; allocate(self%patch_names(1)) ; self%patch_names(1) = self%header
+   endif
+   pmax = 1_I4P
+   do f = 1, self%facets_number
+      if (self%facet(f)%patch < 1_I4P) self%facet(f)%patch = 1_I4P
+      pmax = max(pmax, self%facet(f)%patch)
+   enddo
+   do while (size(self%patch_names) < pmax)
+      extra = 'patch_'//trim(str(int(size(self%patch_names), I4P) + 1_I4P, .true.))
+      self%patch_names = [self%patch_names, extra]
+   enddo
+   endsubroutine sync_patch_names
+
+   function find_or_add_patch(names, name) result(p)
+   !< Index of `name` in `names`, appended if absent.
+   character(FRLEN), allocatable, intent(inout) :: names(:) !< Patch names.
+   character(*),                  intent(in)    :: name     !< Name.
+   integer(I4P)                                 :: p        !< Index.
+   character(FRLEN)                             :: nm       !< Padded name.
+
+   nm = name
+   do p = 1, size(names)
+      if (names(p) == nm) return
+   enddo
+   names = [names, nm]
+   p = size(names)
+   endfunction find_or_add_patch
+
    pure function get_header(self) result(h)
    !< Return STL header (the 80-char "solid <name>" string).
    class(surface_stl_object), intent(in) :: self !< File STL.
@@ -583,6 +676,7 @@ contains
       self%facets_number = 0
    endif
    call self%analyze(aabb_refinement_levels=aabb_refinement_levels, aabb_tree_kind=aabb_tree_kind)
+   call sync_patch_names(self)
    endsubroutine adopt_facets
 
    ! public methods
@@ -1633,6 +1727,7 @@ contains
    self%area    = 0._R8P
    self%centroid = vector_R8P(0._R8P, 0._R8P, 0._R8P)
    self%header  = ''
+   if (allocated(self%patch_names)) deallocate(self%patch_names)
    endsubroutine destroy
 
    function distance(self, point, is_signed, sign_algorithm, is_square_root)
@@ -6257,6 +6352,8 @@ contains
    integer(I4P)                                          :: f, ff                  !< Counters.
    integer(I4P)                                          :: istat                  !< Allocation status.
    character(len=256)                                    :: msg                    !< Allocation error message.
+   character(FRLEN), allocatable                         :: names(:)               !< Patch names met (issue #66).
+   integer(I4P)                                          :: p                      !< Current patch.
 
    if (present(status)) status = STATUS_OK
    is_ascii_ = .true. ; if (present(is_ascii)) is_ascii_ = is_ascii
@@ -6266,11 +6363,13 @@ contains
    endif
    call stl_load_facets_number(file_unit=file_unit, is_ascii=is_ascii_, facets_number=facets_number)
    call stl_load_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header)
+   names = [self%header] ; p = 1_I4P
    if (present(clip_min).and.present(clip_max)) then
       ! two-pass: count, then re-read and keep facets inside the AABB
       ff = 0
       do f=1, facets_number
          if (is_ascii_) then
+            call stl_ascii_next_facet(file_unit, names, p)
             call facet_clip%load_from_file_ascii(file_unit=file_unit)
          else
             call facet_clip%load_from_file_binary(file_unit=file_unit)
@@ -6281,6 +6380,7 @@ contains
                                     v3=facet_clip%vertex(3))) ff = ff + 1
       enddo
       call stl_load_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header)
+      names = [self%header] ; p = 1_I4P
       allocate(facets(1:ff), stat=istat, errmsg=msg)
       if (istat /= 0) then
          if (present(status)) then ; status = STATUS_ALLOC_FAIL ; close(file_unit) ; return ; endif
@@ -6289,6 +6389,7 @@ contains
       ff = 0
       do f=1, facets_number
          if (is_ascii_) then
+            call stl_ascii_next_facet(file_unit, names, p)
             call facet_clip%load_from_file_ascii(file_unit=file_unit)
          else
             call facet_clip%load_from_file_binary(file_unit=file_unit)
@@ -6300,6 +6401,7 @@ contains
             ff = ff + 1
             facets(ff) = facet_clip
             facets(ff)%id = ff
+            facets(ff)%patch = p
          endif
       enddo
    else
@@ -6310,11 +6412,13 @@ contains
       endif
       do f=1, facets_number
          if (is_ascii_) then
+            call stl_ascii_next_facet(file_unit, names, p)
             call facets(f)%load_from_file_ascii(file_unit=file_unit)
          else
             call facets(f)%load_from_file_binary(file_unit=file_unit)
          endif
          facets(f)%id = f
+         facets(f)%patch = p
       enddo
    endif
    close(file_unit)
@@ -6340,8 +6444,72 @@ contains
       enddo
    endif
 
+   if (allocated(self%patch_names)) deallocate(self%patch_names)
+   call move_alloc(names, self%patch_names)
    call self%adopt_facets(facets=facets, aabb_refinement_levels=aabb_refinement_levels, aabb_tree_kind=aabb_tree_kind)
    endsubroutine load_from_file
+
+   subroutine load_from_files(self, file_names, guess_format, aabb_refinement_levels, aabb_tree_kind, status)
+   !< Load several STL files into one surface, one patch per file (issue #66), in the order given; a multi-solid ASCII
+   !< file contributes its blocks as patches. A patch takes its `solid` name, or the file name when that is empty;
+   !< equal names merge. The header is the first patch's name.
+   class(surface_stl_object), intent(inout)        :: self                   !< Surface STL.
+   character(*),              intent(in)           :: file_names(:)          !< STL file paths.
+   logical,                   intent(in), optional :: guess_format           !< Auto-detect each format (default .true.).
+   integer(I4P),              intent(in), optional :: aabb_refinement_levels !< AABB refinement levels passed to analyze.
+   integer(I4P),              intent(in), optional :: aabb_tree_kind         !< AABB_TREE_OCTREE or AABB_TREE_SAH_BVH.
+   integer(I4P),              intent(out), optional :: status                !< As `load_from_file`.
+   type(surface_stl_object)                        :: part                   !< One file.
+   type(facet_object), allocatable                 :: facets(:), tmp(:)      !< All facets.
+   character(FRLEN), allocatable                   :: names(:)               !< Patch names.
+   integer(I4P), allocatable                       :: map(:)                 !< Part patch -> patch.
+   integer(I4P)                                    :: k, q, f, n, st         !< Counters, status.
+   logical                                         :: guess                  !< Effective guess flag.
+   character(len=:), allocatable                   :: nm                     !< Patch name.
+
+   if (present(status)) status = STATUS_OK
+   guess = .true. ; if (present(guess_format)) guess = guess_format
+   allocate(facets(0), names(0))
+   do k = 1, size(file_names)
+      call part%load_from_file(file_name=trim(file_names(k)), guess_format=guess, status=st)
+      if (st /= STATUS_OK) then
+         if (present(status)) then ; status = st ; return ; endif
+         error stop 'surface_stl_object%load_from_files: cannot load '//trim(file_names(k))
+      endif
+      allocate(map(part%get_patches_number()))
+      do q = 1, size(map)
+         nm = part%patch_name(q)
+         if (len_trim(nm) == 0) nm = basename_of(trim(file_names(k)))
+         map(q) = find_or_add_patch(names, nm)
+      enddo
+      n = size(facets)
+      allocate(tmp(n + part%facets_number))
+      if (n > 0) tmp(1:n) = facets
+      do f = 1, part%facets_number
+         tmp(n + f) = part%facet(f)
+         tmp(n + f)%patch = map(part%facet(f)%patch)
+         tmp(n + f)%id = n + f
+      enddo
+      call move_alloc(tmp, facets)
+      deallocate(map)
+      call part%destroy
+   enddo
+   call self%destroy
+   if (size(names) > 0) self%header = names(1)
+   call move_alloc(names, self%patch_names)
+   call self%adopt_facets(facets=facets, aabb_refinement_levels=aabb_refinement_levels, aabb_tree_kind=aabb_tree_kind)
+   contains
+      pure function basename_of(path) result(b)
+      character(*), intent(in)      :: path
+      character(len=:), allocatable :: b
+      integer(I4P)                  :: i, j
+
+      i = index(path, '/', back=.true.)
+      b = path(i + 1:)
+      j = index(b, '.', back=.true.)
+      if (j > 1) b = b(1:j - 1)
+      endfunction basename_of
+   endsubroutine load_from_files
 
    subroutine save_into_file(self, file_name, is_ascii, status)
    !< Save the surface to an STL file.
@@ -6352,12 +6520,25 @@ contains
    integer(I4P)                                    :: file_unit !< File unit.
    logical                                         :: is_ascii_ !< Effective ASCII flag.
    integer(I4P)                                    :: f, istat  !< Counter and open status.
+   integer(I4P)                                    :: p         !< Patch.
 
    if (present(status)) status = STATUS_OK
    is_ascii_ = .true. ; if (present(is_ascii)) is_ascii_ = is_ascii
    call stl_open_for_write(file_name=file_name, file_unit=file_unit, is_ascii=is_ascii_, status=istat)
    if (istat /= 0) then
       if (present(status)) then ; status = istat ; return ; endif
+   endif
+   if (is_ascii_ .and. self%get_patches_number() > 1_I4P) then
+      ! one solid block per patch, facets in their order (issue #66)
+      do p = 1, self%get_patches_number()
+         write(file_unit, '(A)') 'solid '//self%patch_name(p)
+         do f=1, self%facets_number
+            if (self%facet(f)%patch == p) call self%facet(f)%save_into_file_ascii(file_unit=file_unit)
+         enddo
+         write(file_unit, '(A)') 'endsolid '//self%patch_name(p)
+      enddo
+      close(file_unit)
+      return
    endif
    call stl_save_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header, facets_number=self%facets_number)
    if (is_ascii_) then
@@ -6396,6 +6577,36 @@ contains
    endsubroutine save_aabb_into_file
 
    ! internal I/O helpers (module-private; not exposed as TBPs)
+
+   subroutine stl_ascii_next_facet(file_unit, names, p)
+   !< Position an ASCII STL unit on the next `facet` line (issue #66): skip blank and `endsolid` lines; a `solid <name>`
+   !< line opens the patch of that name (equal names merge), which becomes the current patch `p`. A file with one
+   !< `solid` block (the first line, read as the header) reads as before.
+   integer(I4P),                  intent(in)    :: file_unit !< Open ASCII unit.
+   character(FRLEN), allocatable, intent(inout) :: names(:)  !< Patch names met so far.
+   integer(I4P),                  intent(inout) :: p         !< Current patch.
+   character(FRLEN)                             :: line      !< Line buffer.
+   character(len=:), allocatable                :: t         !< Line without leading blanks.
+   integer(I4P)                                 :: ios       !< I/O status.
+
+   do
+      read(file_unit, '(A)', iostat=ios) line
+      if (ios /= 0) return ! the facet reader reports it
+      t = trim(adjustl(line))
+      if (len(t) == 0) cycle
+      if (len(t) >= 8) then
+         if (t(1:8) == 'endsolid') cycle
+      endif
+      if (len(t) >= 5) then
+         if (t(1:5) == 'solid') then
+            p = find_or_add_patch(names, trim(adjustl(t(6:))))
+            cycle
+         endif
+      endif
+      backspace(file_unit)
+      return
+   enddo
+   endsubroutine stl_ascii_next_facet
 
    subroutine stl_open_for_read(file_name, file_unit, is_ascii, guess_format, status)
    !< Open an STL file for reading; auto-detect format via size identity if requested.

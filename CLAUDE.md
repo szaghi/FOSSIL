@@ -273,6 +273,11 @@ fobis fetch            # --update to re-fetch
   `ip_identity_compare`, `ip_rank`. `fossil_cdt_implicit%cdt_facet`: constrained triangulation of a facet on implicit
   points (insertion by split, Sloan recovery: exact orient2d for validity; Lawson incircle on rounded coordinates for
   quality only).
+- Named patches (issue #66, roadmap #58 WP6): `facet_object%patch` (default 1) indexes the surface's private
+  `patch_names(:)` (default [header]); `sync_patch_names` (called by `adopt_facets`) extends the table to every id.
+  The ASCII reader opens a patch per `solid <name>` block (`stl_ascii_next_facet`; before #66 a multi-solid file
+  aborted at the first `endsolid`), `load_from_files` one per file, the ASCII writer one block per patch (a
+  single patch writes the old file). API: `get_patches_number`, `patch_name`, `facet_patch`, `set_patch`.
 - `fossil_box_predicates.f90`, `fossil_box_query.f90` — AMR tagging (issue #38): box-triangle separating-axis test (conservative: run on the box inflated by `box_tolerance`, 1e-12 of the problem size, never misses a contact), exact 2-D box-segment test; `bvh_box_contact_oac` / `curve_box_contact_oac` (shared CPU/device traversals), `cell_bands` / `cell_components` (tag-band BFS, 26-connected components). The device box path follows the #20 rules and needs no new device arrays.
 
 ## Coding conventions

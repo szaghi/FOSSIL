@@ -106,6 +106,9 @@ end program ex_load_octree
   degenerate, duplicate, or inconsistently-oriented facets. Call
   [`sanitize`](#sanitize) immediately after loading user-supplied input.
 - Repeated calls reuse the surface — the previous content is destroyed first.
+- An ASCII file with several `solid <name> … endsolid` blocks gives one
+  [patch](#patches) per block, named after it (issue #66; before, the reader
+  stopped at the first `endsolid`). A binary file is one patch.
 
 **See also.** [`save_into_file`](#save_into_file),
 [`sanitize`](#sanitize),
@@ -155,9 +158,57 @@ end program ex_save_into_file
 - The STL format is lossy w.r.t. connectivity — the file stores only triangles.
   After a save / load round trip you must call [`analyze`](#analyze) (or rely
   on `load_from_file`'s internal analyse) to rebuild connectivity.
+- With several [patches](#patches), ASCII output is one `solid <name>` block
+  per patch (facets in their order within it); a single-patch surface writes
+  the one block it always did. Binary STL has no names: all patches are
+  written as one.
 
 **See also.** [`load_from_file`](#load_from_file),
 [`set_header`](#getters-and-predicates).
+
+---
+
+### Patches
+
+Named boundary patches (issue #66; [reference page](/guide/advanced/patches)).
+Each facet carries a patch id (`facet%patch`), an index into the surface's
+name table.
+
+```fortran
+call surface%load_from_files(file_names=['wall.stl  ', 'inlet.stl ', 'outlet.stl'])
+n    = surface%get_patches_number()
+name = surface%patch_name(i)
+p    = surface%facet_patch(f)
+call surface%set_patch(facets=[1_I4P, 2_I4P], name='heated')
+```
+
+| Procedure | Notes |
+| --------- | ----- |
+| `load_from_files(file_names, guess_format, aabb_refinement_levels, aabb_tree_kind, status)` | One patch per file (or per `solid` block of a multi-solid file), named after its `solid` name or, if empty, the file name; equal names merge. |
+| `get_patches_number()` | Number of patches (1 for a binary or single-solid file). |
+| `patch_name(i)` | Name of patch `i` (`''` out of range). |
+| `facet_patch(f)` | Patch of facet `f` (0 out of range). Elemental. |
+| `set_patch(facets, name)` | Move the facets to the patch `name`, created if new. |
+
+**Example.** Three files as three patches, saved as one multi-solid file.
+
+```fortran
+program ex_patches_io
+use fossil
+use penf, only : I4P
+implicit none
+type(surface_stl_object) :: body
+integer(I4P)             :: i
+
+call body%load_from_files(file_names=['wall.stl  ', 'inlet.stl ', 'outlet.stl'])
+do i = 1, body%get_patches_number()
+   print '(I0,1X,A)', i, body%patch_name(i)
+enddo
+call body%save_into_file(file_name='body.stl', is_ascii=.true.)
+end program ex_patches_io
+```
+
+**See also.** [Named patches](/guide/advanced/patches).
 
 ---
 

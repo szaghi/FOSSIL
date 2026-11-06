@@ -75,6 +75,7 @@ type :: facet_object
    !   edge 3 = vertex(3)→vertex(1)
    ! Named parameters EDGE_12, EDGE_23, EDGE_31 are exported for readability.
    integer(I4P)         :: id                   !< Facet global ID.
+   integer(I4P)         :: patch=1_I4P          !< Patch (named boundary) id: index into the surface's patch names (issue #66).
    integer(I4P)         :: fcon_edge(3)=0_I4P   !< Connected face ID along each edge (0 = disconnected).
    type(list_id_object) :: vertex_nearby(3)     !< List of vertices "nearby", list of vertices global ID nearby them.
    ! pseudo normals
@@ -475,6 +476,7 @@ contains
    self%det            = 0._R8P
    self%bb             = vector_R8P(0._R8P, 0._R8P, 0._R8P)
    self%id             = 0_I4P
+   self%patch          = 1_I4P
    self%fcon_edge      = 0_I4P
    self%edge_pnormal   = vector_R8P(0._R8P, 0._R8P, 0._R8P)
    self%vertex_pnormal = vector_R8P(0._R8P, 0._R8P, 0._R8P)

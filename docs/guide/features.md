@@ -34,6 +34,7 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 | Surface deviation: one-sided and symmetric Hausdorff distance, mean, rms, per-vertex distance | `surface%deviation`, `surface%hausdorff`, `curve%deviation`, `curve%hausdorff` | [Surface deviation](/guide/advanced/surface-deviation) | |
 | Feature edges: sharp, boundary and non-manifold edges, corners, polylines; refinement and distances along them; 2-D corners | `surface%feature_edges`, `build_features`, `box_feature_many`, `tag_block(feature_tags=)`, `query_many(feature_distances=)`, `curve%feature_corners` | [Feature edges](/guide/advanced/feature-edges) | |
 | Local thickness and gaps per facet: ray (shape diameter) and medial (shrinking ball); thin regions under a cell size; refinement of thin walls | `surface%thickness`, `thin_regions`, `build_thin`, `box_thin_many`, `tag_block(thin_tags=)`, `curve%thickness` | [Thickness and gaps](/guide/advanced/thickness) | |
+| Named patches: one per `solid` block or per file, kept on every facet; multi-solid ASCII output | `load_from_files`, `get_patches_number`, `patch_name`, `facet_patch`, `set_patch` | [Named patches](/guide/advanced/patches) | |
 
 ## Distance and signs
 
