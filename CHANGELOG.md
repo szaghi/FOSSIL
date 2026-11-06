@@ -4,6 +4,105 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.2.0] — 2026-11-06
+### Added
+- **surface**: Mass properties of a closed body
+
+- **pose**: Inertia in the world frame and the principal frame
+
+- **curve**: Mass properties of the region bounded by a curve
+
+- **cli**: Fossilizer --mass_properties
+
+- **surface**: Sampled deviation from another surface
+
+- **surface**: Certified upper bound of the surface deviation
+
+- **device**: Surface deviation on the device
+
+- **curve**: Deviation and Hausdorff distance of curves
+
+- **cli**: Fossilizer --compare
+
+- **surface**: Feature edges, corners and polylines
+
+- **amr**: Refinement along feature edges
+
+- **query**: Distance to the nearest feature edge
+
+- **curve**: Corners, corner tags and distances
+
+- **cli**: Feature edges as VTK, fossilizer --features
+
+- **surface**: Ray thickness and gap per facet
+
+- **surface**: Medial thickness and gap, the shrinking ball
+
+- **amr**: Thin regions and refinement of walls thinner than the cell
+
+- **curve**: Thickness and gaps of curves, thin runs and tags
+
+- **cli**: Thickness as VTK, fossilizer --thickness
+
+- **predicates**: Implicit points and exact predicates on them
+
+- **boolean**: Exact arrangement on implicit points, selection by patches
+
+- **boolean**: Opt-in exact vertex weld
+
+- **surface**: Named patches, read and written
+
+- **surface**: Named patches through the pipeline
+
+- **boolean**: Named patches through booleans
+
+- **remesh**: Named patches through remeshing
+
+- **query**: Patch of the closest facet in the IB queries
+
+- **curve**: Named patches on 2-D curves
+
+- **distance**: Distance between two bodies
+
+- **distance**: Body-body distance with poses
+
+- **distance**: Pairs of bodies closer than a cutoff
+
+- **curve**: Distance between two curves
+
+
+### Documentation
+- Date the GPU validation of the device build on 8c78a46
+
+- Booleans validated by identities, limits from the evidence
+
+- **boolean**: The exact arrangement, the weld, the degenerate map
+
+- **patches**: Named patches, cookbook, tutorial, figures, CLI
+
+- **distance**: Body-body distance, cookbook, tutorial, figures, CLI
+
+
+### Fixed
+- **surface**: The centroid of the enclosed volume
+
+- **dt**: Grow the Delaunay triangle store
+
+- **boolean**: Near-coincident surfaces crack or lose volume
+
+- **predicates**: Exact products without ieee_fma
+
+- **io**: ASCII STL lines longer than 80 characters lost digits
+
+- **surface**: An empty patch writes no solid block
+
+
+### Performance
+- **aabb**: Distribute facets to the octree in linear time
+
+- **boolean**: One bounded query per sub-triangle in the selection
+
+
 ## [2.1.0] — 2026-11-05
 ### Added
 - **alpha-wrap**: Carve on a cell grid, wrap on the offset surface
