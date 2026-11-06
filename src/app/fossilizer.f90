@@ -40,6 +40,7 @@ real(R8P)                             :: density                               !
 character(999)                        :: file_name_compare                     !< Surface to compare with (issue #60).
 real(R8P)                             :: tolerance                             !< Tolerance of the certified deviation (0: default).
 character(999)                        :: file_name_features                    !< VTK file of the feature edges (issue #61).
+character(999)                        :: file_name_distance                    !< Body to measure the distance to (issue #67).
 character(999)                        :: patches_prefix                        !< File prefix of one STL per patch (issue #66).
 real(R8P)                             :: feature_angle                         !< Feature threshold [degrees].
 character(999)                        :: file_name_thickness                   !< VTK file of the thickness (issue #62).
@@ -129,6 +130,7 @@ do s=1, stl_numbers
    endif
    if (mass_properties) call print_mass_properties(surface(s))
    if (cli%is_passed(switch='--compare')) call print_deviation(surface(s), trim(adjustl(file_name_compare)))
+   if (cli%is_passed(switch='--distance')) call print_distance(surface(s), trim(adjustl(file_name_distance)))
    if (cli%is_passed(switch='--features')) call print_features(surface(s), trim(adjustl(file_name_features)))
    if (cli%is_passed(switch='--patches')) call print_patches(surface(s), trim(adjustl(patches_prefix)))
    if (cli%is_passed(switch='--thickness')) call print_thickness(surface(s), trim(adjustl(file_name_thickness)))
@@ -290,6 +292,28 @@ contains
   if (any(status == DEV_STATUS_NOT_CONVERGED)) print '(A)', '  (work cap reached: the bounds are valid but wider)'
   endsubroutine print_deviation
 
+  subroutine print_distance(a, file_name_b)
+  !< Print the distance between this body and another one, its closest facets and points (issue #67).
+  type(surface_stl_object), intent(in) :: a            !< This surface.
+  character(*),             intent(in) :: file_name_b  !< The other surface's file.
+  type(surface_stl_object)             :: b            !< The other surface.
+  real(R8P)                            :: d, pa(3), pb(3) !< Distance, closest points.
+  integer(I4P)                         :: fa, fb, status  !< Closest facets, status.
+  logical                              :: hit          !< Touching or crossing.
+
+  call b%load_from_file(file_name=file_name_b, guess_format=.true.)
+  call a%distance_to(b, distance=d, point_self=pa, point_other=pb, facet_self=fa, facet_other=fb, intersecting=hit, &
+                     status=status)
+  if (status /= STATUS_OK) then
+     print '(A)', 'distance: an empty surface'
+     return
+  endif
+  print '(A,A)',          'distance to ', file_name_b
+  print '(A,ES23.15,A,L1)', '  distance ', d, '  touching or crossing ', hit
+  print '(A,I0,A,3ES23.15)', '  this  facet ', fa, ' point ', pa
+  print '(A,I0,A,3ES23.15)', '  other facet ', fb, ' point ', pb
+  endsubroutine print_distance
+
   subroutine cli_parse()
   !< Build and parse command line interface.
   integer(I4P) :: error               !< Error trapping flag.
@@ -411,6 +435,12 @@ contains
                def='patch_',                                                                     &
                act='store')
 
+  call cli%add(switch='--distance',                                                      &
+               help='print the distance to the body of this file, its closest facets and points', &
+               required=.false.,                                                         &
+               def='other.stl',                                                          &
+               act='store')
+
   call cli%add(switch='--features',                                                            &
                help='print the feature edges and corners, write them to this legacy VTK file', &
                required=.false.,                                                           &
@@ -528,6 +558,7 @@ contains
   call cli%get(        switch='--compare',         val=file_name_compare,   error=error) ; if (error/=0) stop
   call cli%get(        switch='--tolerance',       val=tolerance,           error=error) ; if (error/=0) stop
   call cli%get(        switch='--features',        val=file_name_features,  error=error) ; if (error/=0) stop
+  call cli%get(        switch='--distance',        val=file_name_distance,  error=error) ; if (error/=0) stop
   call cli%get(        switch='--patches',         val=patches_prefix,      error=error) ; if (error/=0) stop
   call cli%get(        switch='--feature_angle',   val=feature_angle,       error=error) ; if (error/=0) stop
   call cli%get(        switch='--thickness',       val=file_name_thickness, error=error) ; if (error/=0) stop

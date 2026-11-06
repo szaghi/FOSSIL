@@ -330,6 +330,19 @@ The body must be closed (`status` says so otherwise). The tensor is about the ce
 point; the principal moments are sorted ascending, here the block's three diagonal entries. See
 [mass properties](/guide/advanced/mass-properties).
 
+### How close are my two bodies?
+
+<<< @/examples/snippets/ck_body_distance.f90
+
+<<< @/examples/output/ck_body_distance.ansi{ansi}
+
+![the unit cube and a second unit cube turned 45 degrees about the vertical axis, a corner pointing at the first cube's face x = 1: the closest pair, on the face (yellow) and at the corner (teal), joined by a segment](../examples/images/ck-body-distance.svg){.fossil-figure}
+
+`distance_to` returns the least distance over all pairs of facets, the two facets and the points that realize it, and
+`intersecting` when the bodies touch or cross (0, decided exactly). `pose_other=` places the second body without
+moving it or rebuilding its tree, here the corner of the turned cube at x = 2 − sqrt(2)/2. For many bodies,
+`proximity_pairs(cutoff=)` lists the pairs closer than the cutoff. See [body–body distance](/guide/advanced/body-distance).
+
 ### Query a rotated body without rebuilding it
 
 <<< @/examples/snippets/ck_pose.f90

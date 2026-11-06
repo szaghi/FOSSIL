@@ -42,6 +42,22 @@ call a%distance_to(b, distance=d, point_self=pa, point_other=pb, facet_self=fa, 
 call a%distance_to(b, distance=d, pose_self=pose_a, pose_other=pose_b) ! moving bodies, trees as built
 ```
 
+![a cube of side 0.25 approaching the dragon on a screw motion, half a turn about (1, 1, 1): each frame the closest pair joined by a segment and the gap, down to the first contact](../../examples/images/anim-body-distance.svg){.fossil-figure}
+
+Each frame calls `distance_to(..., pose_other=)` with the cube's tree as built (`fig` only moves a copy to draw it);
+the program is `docs/examples/src/anim_body_distance.f90`.
+
+## Command line
+
+`fossilizer --distance other.stl` prints, for each input, the distance to the body of `other.stl`, whether they touch
+or cross, and the two closest facets and points:
+
+```bash
+fossilizer -i a.stl --distance b.stl
+```
+
+`src/tests/fossil_test_distance_cli.f90` reads the distance back for a cube against a copy 0.25 away and against itself.
+
 ## Validation
 
 `src/tests/fossil_test_body_distance.f90`: cubes apart (exact distance), touching at a vertex, an edge, a face, and

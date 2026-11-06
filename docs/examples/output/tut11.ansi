@@ -8,3 +8,5 @@ the placed dragon is a closed body: F
 mass  6.0274E+01, centre of mass -0.0203 -0.0306 -0.1039
 principal moments 2.0049E+00 3.4901E+00 4.9239E+00
 moved wrap against inertia_to_world:  3.63E-16
+gap to the cube  0.50539 (facets 1077, 48), touching F
+posed = moved, bit for bit: T

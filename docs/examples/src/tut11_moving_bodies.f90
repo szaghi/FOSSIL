@@ -10,7 +10,7 @@ use vecfor, only : vector_R8P, ex_R8P, ey_R8P, ez_R8P
 implicit none
 integer(I4P), parameter       :: n = 24                        ! cell centres per direction
 real(R8P),    parameter       :: pi = 4._R8P * atan(1._R8P)
-type(surface_stl_object)      :: surface, moved, wrap
+type(surface_stl_object)      :: surface, moved, wrap, box
 type(curve_object)            :: section
 type(rigid_pose_t)            :: p0, p1
 type(rigid_pose_2d_t)         :: q0, q1
@@ -19,7 +19,9 @@ type(vector_R8P), allocatable :: centres(:)
 real(R8P),        allocatable :: d_posed(:), d_moved(:)
 logical,          allocatable :: fresh(:), dead(:)
 real(R8P)                     :: h, x(49), mass, centre(3), moments(3), inertia(3,3), inertia1(3,3)
-integer(I4P)                  :: i, j, k, c, checked, status
+integer(I4P)                  :: i, j, k, c, checked, status, fa, fb
+real(R8P)                     :: gap, gap1
+logical                       :: hit
 
 call surface%load_from_file(file_name='dragon-placed.stl', guess_format=.true.)
 h = 1.2_R8P / n
@@ -73,4 +75,13 @@ call wrap%mass_properties(inertia=inertia1, density=1000._R8P)
 print '(A,ES9.2)', 'moved wrap against inertia_to_world: ', maxval(abs(inertia1 - inertia_to_world(inertia, p1))) / &
                                                            maxval(abs(inertia))
 !endregion inertia
+!region gap
+call box%load_from_file(file_name='cube-01.stl', guess_format=.true.)  ! a unit cube beside the dragon
+call box%translate(x=0.7_R8P, y=-0.5_R8P, z=-0.5_R8P)
+call box%analyze
+call surface%distance_to(box, distance=gap, facet_self=fa, facet_other=fb, intersecting=hit, pose_self=p1)
+print '(A,F8.5,A,I0,A,I0,A,L1)', 'gap to the cube ', gap, ' (facets ', fa, ', ', fb, '), touching ', hit
+call moved%distance_to(box, distance=gap1)                              ! the moved copy of the queries
+print '(A,L1)', 'posed = moved, bit for bit: ', gap == gap1
+!endregion gap
 endprogram tut11_moving_bodies

@@ -1,0 +1,6 @@
+$ ck_body_distance
+distance   0.2929, expected 1 - sqrt(2)/2 =   0.2929
+on a   1.0000  0.5000  0.0000  facet 3
+on b   1.2929  0.5000  0.0000  facet 1
+touching or crossing F
+0.4 closer: distance   0.0000, touching or crossing T

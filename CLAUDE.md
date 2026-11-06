@@ -288,7 +288,11 @@ fobis fetch            # --update to re-fetch
 - `fossil_body_distance.f90` — body-body distance (issue #67, roadmap #58 WP7): `tri_tri_distance` (0 when `pair_cut`
   says the triangles meet, coplanar overlap by exact orient2d; else min of 6 vertex-triangle + 9 edge-edge, Ericson),
   `body_distance` (best-first descent of two AABB trees, heap by box distance, tie rule smallest (facet_a, facet_b):
-  bit-identical to `body_distance_brute`), `surface%distance_to`. CPU only.
+  bit-identical to `body_distance_brute`), `surface%distance_to(other, ..., pose_self, pose_other)` (poses: facets
+  moved by `to_world`, node bounds = box of the 8 moved corners; equal to `move` bit for bit), `proximity_pairs(cutoff)`
+  over `facet_body` bodies and the free `proximity_pairs_of(surfaces, cutoff)` (box broad phase). Curve twin
+  `curve%distance_to` (exact orient2d contact, box-filtered loop over segment pairs, same tie rule).
+  `fossilizer --distance other.stl`. CPU only.
 - `fossil_box_predicates.f90`, `fossil_box_query.f90` — AMR tagging (issue #38): box-triangle separating-axis test (conservative: run on the box inflated by `box_tolerance`, 1e-12 of the problem size, never misses a contact), exact 2-D box-segment test; `bvh_box_contact_oac` / `curve_box_contact_oac` (shared CPU/device traversals), `cell_bands` / `cell_components` (tag-band BFS, 26-connected components). The device box path follows the #20 rules and needs no new device arrays.
 
 ## Coding conventions

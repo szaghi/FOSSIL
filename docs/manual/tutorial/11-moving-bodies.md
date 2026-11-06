@@ -61,11 +61,29 @@ A body moved by the fluid, not along prescribed poses, needs its mass properties
 The animation integrates Euler's equations with the inertia tensor `mass_properties` returns for a T-handle: a spin
 about the intermediate principal axis is unstable, and the handle flips over periodically (the tennis-racket effect).
 
+## Distance between bodies
+
+Two bodies in the same flow need the gap between them: for contact, for a lubrication correction when it falls to a
+few cells, for a collision.
+
+<<< @/examples/snippets/tut11_moving_bodies-gap.f90
+
+- `distance_to(other, distance=, point_self=, point_other=, facet_self=, facet_other=, intersecting=)` is the least
+  distance over all pairs of facets of the two bodies, with the pair that realizes it; 0 and `intersecting` when they
+  touch or cross, decided exactly. The two trees are descended together, best first, and the result is bit-identical
+  to the loop over all pairs.
+- `pose_self=` and `pose_other=` take the bodies where `move` would put them, with the trees as built: the result
+  equals the one of the moved copy, bit for bit. `proximity_pairs(cutoff=)` lists the pairs of bodies closer than
+  a cutoff. See [body–body distance](/guide/advanced/body-distance).
+
+![a cube of side 0.25 approaching the dragon on a screw motion, half a turn about (1, 1, 1): each frame the closest pair joined by a segment and the gap, down to the first contact](../../examples/images/anim-body-distance.svg){.fossil-figure}
+
 ## Running it
 
 <<< @/examples/output/tut11.ansi{ansi}
 
 - The body-frame distances equal those of the moved and refitted copy to 1e-14.
+- The gap to the cube with `pose_self=` equals the gap of the moved copy bit for bit.
 - Of the 13824 cell centres, 96 become fluid and 98 become solid; only 992 needed the second query.
 - The section translated by 0.02 sweeps 131 cells, 16 of which go from solid to fluid. The swept areas sum to zero,
   as a rigid translation keeps the area.
@@ -79,8 +97,9 @@ about the intermediate principal axis is unstable, and the handle flips over per
 
 ::: tip What you learned
 `pose=` queries a moving body without touching its tree, `move` refits a copy for grid-aligned queries,
-`state_changes` finds fresh and dead cells, and `swept_cells_2d`/`swept_cells_3d` give the swept geometry of a step.
-Reference: [Moving bodies](/guide/advanced/moving-bodies).
+`state_changes` finds fresh and dead cells, `swept_cells_2d`/`swept_cells_3d` give the swept geometry of a step, and
+`distance_to` the gap between two bodies. Reference: [Moving bodies](/guide/advanced/moving-bodies),
+[Body–body distance](/guide/advanced/body-distance).
 :::
 
 Next: [12. On the GPU](./12-gpu).

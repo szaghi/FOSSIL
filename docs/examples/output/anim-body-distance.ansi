@@ -1,0 +1,28 @@
+$ anim_body_distance
+WARNING: sanitize: 54 hole(s) filled
+WARNING: sanitize: 136 boundary edge(s) not forming a closed loop
+WARNING: sanitize: 62 duplicate facet(s) removed
+WARNING: sanitize: 188 facet(s) with 1 disconnected edge remain
+WARNING: sanitize: 14 facet(s) with 2 disconnected edges remain
+WARNING: sanitize: 54 non-manifold edge(s) (3+ incident facets) detected
+step  0: gap  0.8840
+step  1: gap  0.8348
+step  2: gap  0.7839
+step  3: gap  0.7336
+step  4: gap  0.6845
+step  5: gap  0.6366
+step  6: gap  0.5900
+step  7: gap  0.5456
+step  8: gap  0.5036
+step  9: gap  0.4635
+step 10: gap  0.4251
+step 11: gap  0.3876
+step 12: gap  0.3441
+step 13: gap  0.2936
+step 14: gap  0.2394
+step 15: gap  0.1838
+step 16: gap  0.1311
+step 17: gap  0.0863
+step 18: gap  0.0439
+step 19: gap  0.0273
+step 20: contact, distance_to = 0

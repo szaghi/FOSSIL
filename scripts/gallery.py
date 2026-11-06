@@ -58,6 +58,8 @@ CARDS = [
      "a wing's walls thinner than the cell, shrinking to the trailing edge"),
     ("Named patches", "anim-patches", "/guide/advanced/patches",
      "query points around a body, each coloured by the patch of its closest facet"),
+    ("Body-body distance", "anim-body-distance", "/guide/advanced/body-distance",
+     "a cube closing on the dragon on a screw motion, its closest pair down to contact"),
     ("Booleans", "anim-boolean-csg", "/guide/advanced/booleans",
      "a block drilled nine times, each step checked by an independent boolean"),
     ("On the GPU, bit for bit", "tut12-slice", "/manual/tutorial/12-gpu",

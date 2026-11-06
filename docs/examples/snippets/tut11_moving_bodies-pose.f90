@@ -6,7 +6,7 @@ use vecfor, only : vector_R8P, ex_R8P, ey_R8P, ez_R8P
 implicit none
 integer(I4P), parameter       :: n = 24                        ! cell centres per direction
 real(R8P),    parameter       :: pi = 4._R8P * atan(1._R8P)
-type(surface_stl_object)      :: surface, moved, wrap
+type(surface_stl_object)      :: surface, moved, wrap, box
 type(curve_object)            :: section
 type(rigid_pose_t)            :: p0, p1
 type(rigid_pose_2d_t)         :: q0, q1
@@ -15,7 +15,9 @@ type(vector_R8P), allocatable :: centres(:)
 real(R8P),        allocatable :: d_posed(:), d_moved(:)
 logical,          allocatable :: fresh(:), dead(:)
 real(R8P)                     :: h, x(49), mass, centre(3), moments(3), inertia(3,3), inertia1(3,3)
-integer(I4P)                  :: i, j, k, c, checked, status
+integer(I4P)                  :: i, j, k, c, checked, status, fa, fb
+real(R8P)                     :: gap, gap1
+logical                       :: hit
 
 call surface%load_from_file(file_name='dragon-placed.stl', guess_format=.true.)
 h = 1.2_R8P / n
