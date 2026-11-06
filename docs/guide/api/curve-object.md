@@ -32,9 +32,10 @@ endprogram curve_tour
 
 | Method | Purpose |
 |---|---|
-| `adopt_loops(u, v, loop_sizes, normal_axis, closed, status)` | Build from vertex arrays: `loop_sizes(l)` vertices per loop, closed implicitly unless `closed(l)` is false. `STATUS_INVALID_INPUT` on inconsistent sizes, a bad axis, or non-finite coordinates. |
-| `load_from_file(file_name, normal_axis, status)` | ASCII loop format: `u v` per line, blank lines between loops, `#` comments; `# open` before a loop marks it open; a repeated closing vertex is dropped. |
-| `save_into_file(file_name, status)` | Write the ASCII loop format, bit-exact on reload. |
+| `adopt_loops(u, v, loop_sizes, normal_axis, closed, status, patches, patch_names)` | Build from vertex arrays: `loop_sizes(l)` vertices per loop, closed implicitly unless `closed(l)` is false. `STATUS_INVALID_INPUT` on inconsistent sizes, a bad axis, or non-finite coordinates. |
+| `load_from_file(file_name, normal_axis, status)` | ASCII loop format: `u v` per line, blank lines between loops, `#` comments; `# open` before a loop marks it open; `# patch <name>` puts the segments that follow in a named patch (issue #66); a repeated closing vertex is dropped. |
+| `get_patches_number()`, `patch_name(i)`, `segment_patch(i)`, `set_patch(segments, name)` | Named patches (issue #66): one per `# patch` name, one unnamed by default; carried through `repair` and `slice_surface` (the patch of the facet a segment is cut from). |
+| `save_into_file(file_name, status)` | Write the ASCII loop format, bit-exact on reload; `# patch` directives only when the curve has named patches. |
 | `destroy` | Reset to an empty curve. |
 
 ## Metrics and validity
@@ -65,8 +66,9 @@ endprogram curve_tour
 | `distance_many(points, distances, is_signed, sign_algorithm, status)` | Batch over `points(2, n)`, OpenMP; bit-exact with `compute_distance`. |
 | `enter_device`, `exit_device`, `distance_many_device(...)`, `get_is_on_device` | The same batch on the device (OpenACC). |
 | `query_many(points, distances, closest_points, segments, vertices, normals, bodies, is_signed, sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status, pose, curvatures)` | Rich batch (issue #37); `query_many_device` on the device. `curvatures`: curvature at the foot point (issue #42, CPU). |
-| `probe_many(points, lengths, probe_points, visible, foot_points, normals, status)` | Probe points along the normal; exact visibility. |
-| `image_points(points, images, visible, foot_points, status)` | Mirror through the closest point; exact visibility. |
+| `probe_many(points, lengths, probe_points, visible, foot_points, normals, status, patches)` | Probe points along the normal; exact visibility. |
+| `image_points(points, images, visible, foot_points, status, patches)` | Mirror through the closest point; exact visibility. |
+| `patches=` on `query_many`, `query_many_device`, `probe_many`, `image_points` | Patch of the closest segment (issue #66); the device path looks it up on the host from the device's segment ids, bit-identical. |
 | `get_bodies_number`, `loop_body(l)` | Bodies: outer loops with their holes; islands and open loops are their own. |
 | `box_classify_many(lo, hi, codes, radius, sign_algorithm, inside, status)` | Classify boxes `lo(2, n)`, `hi(2, n)`: `BOX_CUT` (exact), `BOX_NEAR`, `BOX_INSIDE`, `BOX_OUTSIDE` (issue #38); `box_classify_many_device` on the device. |
 | `box_intersects_curve(lo, hi)` | True if the closed box meets the curve (exact). |

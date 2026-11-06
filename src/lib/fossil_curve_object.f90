@@ -84,6 +84,8 @@ type :: curve_object
    integer(I4P), allocatable :: loop_body_(:)       !< Body of each loop [nl] (issue #37).
    integer(I4P), allocatable :: vertex_body(:)      !< Body of each vertex/segment [nv] (device-mappable, issue #37).
    integer(I4P)              :: bodies_number = 0_I4P !< Number of bodies.
+   integer(I4P), allocatable :: seg_patch(:)         !< Patch of each segment [nv] (issue #66; segment i = i -> next(i)).
+   character(64), allocatable :: patch_names(:)      !< Patch names (default one unnamed patch).
    real(R8P)                 :: bmin(2) = 0._R8P    !< Bounding box minimum (u, v).
    real(R8P)                 :: bmax(2) = 0._R8P    !< Bounding box maximum (u, v).
    real(R8P)                 :: area = 0._R8P       !< Total signed area (solid area for a valid curve).
@@ -98,6 +100,10 @@ type :: curve_object
    contains
       ! public methods
       procedure, pass(self) :: adopt_loops          !< Build the curve from vertex arrays and loop sizes.
+      procedure, pass(self) :: get_patches_number   !< Number of patches (issue #66).
+      procedure, pass(self) :: patch_name           !< Name of a patch.
+      procedure, pass(self) :: segment_patch        !< Patch of a segment.
+      procedure, pass(self) :: set_patch            !< Assign segments to a named patch.
       procedure, pass(self) :: box_classify_many    !< Classify boxes: cut, near, inside, outside (issue #38).
       procedure, pass(self) :: box_intersects_curve !< True if a box meets the curve (issue #38).
       procedure, pass(self) :: box_classify_many_device !< box_classify_many on the device (issue #38).
@@ -170,7 +176,65 @@ endtype curve_evaluator_t
 
 contains
    ! public methods
-   subroutine adopt_loops(self, u, v, loop_sizes, normal_axis, closed, status)
+   pure function get_patches_number(self) result(n)
+   !< Number of patches (issue #66): one per `# patch <name>` directive met, 1 by default.
+   class(curve_object), intent(in) :: self !< Curve.
+   integer(I4P)                    :: n    !< Patches.
+
+   n = 1_I4P
+   if (allocated(self%patch_names)) n = max(1_I4P, int(size(self%patch_names), I4P))
+   endfunction get_patches_number
+
+   pure function patch_name(self, i) result(name)
+   !< Name of patch i ('' if unnamed or out of range).
+   class(curve_object), intent(in) :: self !< Curve.
+   integer(I4P),        intent(in) :: i    !< Patch.
+   character(len=:), allocatable   :: name !< Name.
+
+   name = ''
+   if (allocated(self%patch_names)) then
+      if (i >= 1 .and. i <= size(self%patch_names)) name = trim(self%patch_names(i))
+   endif
+   endfunction patch_name
+
+   elemental function segment_patch(self, i) result(p)
+   !< Patch of segment i (i -> next(i)); 0 out of range.
+   class(curve_object), intent(in) :: self !< Curve.
+   integer(I4P),        intent(in) :: i    !< Segment.
+   integer(I4P)                    :: p    !< Patch.
+
+   p = 0_I4P
+   if (allocated(self%seg_patch)) then
+      if (i >= 1 .and. i <= size(self%seg_patch)) p = self%seg_patch(i)
+   endif
+   endfunction segment_patch
+
+   subroutine set_patch(self, segments, name)
+   !< Assign the segments `segments` to the patch named `name`, created if new (issue #66).
+   class(curve_object), intent(inout) :: self        !< Curve.
+   integer(I4P),        intent(in)    :: segments(:) !< Segment ids.
+   character(*),        intent(in)    :: name        !< Patch name.
+   character(64)                      :: nm          !< Padded name.
+   integer(I4P)                       :: p, k        !< Patch, counter.
+
+   if (.not. allocated(self%seg_patch)) allocate(self%seg_patch(self%nv), source=1_I4P)
+   if (.not. allocated(self%patch_names)) then
+      allocate(self%patch_names(1)) ; self%patch_names = ''
+   endif
+   nm = name
+   p = 0_I4P
+   do k = 1, size(self%patch_names)
+      if (self%patch_names(k) == nm) p = k
+   enddo
+   if (p == 0_I4P) then
+      self%patch_names = [self%patch_names, nm] ; p = size(self%patch_names)
+   endif
+   do k = 1, size(segments)
+      if (segments(k) >= 1 .and. segments(k) <= self%nv) self%seg_patch(segments(k)) = p
+   enddo
+   endsubroutine set_patch
+
+   subroutine adopt_loops(self, u, v, loop_sizes, normal_axis, closed, status, patches, patch_names)
    !< Build the curve from vertex coordinates and loop sizes.
    !<
    !< `u(:)`, `v(:)` hold the vertices of loop 1, then loop 2, ... ; `loop_sizes(l)` is the number
@@ -185,6 +249,8 @@ contains
    integer(I4P),        intent(in),  optional :: normal_axis   !< Plane normal axis (default 3).
    logical,             intent(in),  optional :: closed(:)     !< Loop closed (default all .true.).
    integer(I4P),        intent(out), optional :: status        !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),        intent(in),  optional :: patches(:)    !< Patch of each segment (by its first vertex), issue #66.
+   character(*),        intent(in),  optional :: patch_names(:) !< Patch names.
    integer(I4P)                               :: axis, l       !< Resolved axis, counter.
 
    call self%destroy
@@ -213,6 +279,21 @@ contains
       self%loop_start(l + 1) = self%loop_start(l) + loop_sizes(l)
    enddo
    call self%analyze
+   ! patches (issue #66): one unnamed patch unless given
+   allocate(self%seg_patch(self%nv), source=1_I4P)
+   if (present(patches)) then
+      if (size(patches) == self%nv) self%seg_patch = max(1_I4P, patches)
+   endif
+   if (present(patch_names)) then
+      allocate(self%patch_names(max(1, size(patch_names))))
+      self%patch_names = ''
+      if (size(patch_names) > 0) self%patch_names(1:size(patch_names)) = patch_names
+   else
+      allocate(self%patch_names(1)) ; self%patch_names = ''
+   endif
+   do while (size(self%patch_names) < maxval([1_I4P, self%seg_patch]))
+      self%patch_names = [self%patch_names, repeat(' ', 64)]
+   enddo
    endsubroutine adopt_loops
 
    subroutine box_classify_many(self, lo, hi, codes, radius, sign_algorithm, inside, status)
@@ -1218,7 +1299,7 @@ contains
 
    recursive subroutine query_many(self, points, distances, closest_points, segments, vertices, normals, bodies, is_signed, &
                                    sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status, pose, &
-                                   curvatures, feature_distances, feature_angle)
+                                   curvatures, feature_distances, feature_angle, patches)
    !< Batched rich query (issue #37), CPU, OpenMP over the points: distance (signed by default),
    !< closest point, closest segment, closest vertex (0 in a segment interior), pseudo-normal of the
    !< closest feature (segment normal or vertex bisector), body. Every output after `distances` is
@@ -1253,6 +1334,7 @@ contains
    real(R8P),           intent(out), optional :: feature_distances(:) !< Distance to the nearest corner [n] (issue #61).
    real(R8P),           intent(in),  optional :: feature_angle      !< Corner threshold [degrees] (default 30).
    real(R8P),           intent(out), optional :: curvatures(:)      !< Curvature at the foot point [n].
+   integer(I4P),        intent(out), optional :: patches(:)         !< Patch of the closest segment [n] (issue #66).
    real(R8P)                                  :: cp(2), nn(2), cp2(2), rel_, foot_ !< Per-point outputs, tolerances.
    logical                                    :: amb, want_amb      !< Ambiguity.
    integer(I4P)                               :: sg, vx, b, i, n    !< Per-point outputs, counters.
@@ -1261,6 +1343,7 @@ contains
    if (present(pose)) then ! body-frame query (issue #41), outputs mapped back to the world frame
       call self%query_many(points=body_points2(pose, points), distances=distances, closest_points=closest_points, &
                            segments=segments, vertices=vertices, normals=normals, bodies=bodies, is_signed=is_signed, &
+                           patches=patches, &
                            sign_algorithm=sign_algorithm, ambiguous=ambiguous, second_foot_points=second_foot_points, &
                            rel_tolerance=rel_tolerance, foot_tolerance=foot_tolerance, status=status, curvatures=curvatures, &
                            feature_distances=feature_distances, feature_angle=feature_angle)
@@ -1286,6 +1369,12 @@ contains
        .not. rich_sizes_ok(size(distances, kind=I4P), closest_points=second_foot_points)) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
+   endif
+   if (present(patches)) then
+      if (size(patches) /= size(distances)) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
    endif
    if (present(ambiguous)) then
       if (size(ambiguous) /= size(distances)) then
@@ -1318,6 +1407,7 @@ contains
                            distances(i), cp(1), cp(2), sg, vx, nn(1), nn(2), b)
       if (present(closest_points)) closest_points(:, i) = cp
       if (present(segments)) segments(i) = sg
+      if (present(patches)) patches(i) = self%segment_patch(sg)
       if (present(vertices)) vertices(i) = vx
       if (present(normals)) normals(:, i) = nn
       if (present(bodies)) bodies(i) = b
@@ -1450,7 +1540,7 @@ contains
    endsubroutine curve_markers
 
    recursive subroutine query_many_device(self, points, distances, closest_points, segments, vertices, normals, bodies, &
-                                          is_signed, sign_algorithm, status, pose, feature_distances, feature_angle)
+                                          is_signed, sign_algorithm, status, pose, feature_distances, feature_angle, patches)
    !< `query_many` on the device (issue #37): same contract and kernel. Requires `enter_device`.
    !< Every output is computed into local arrays (no absent optional in device code), the
    !< requested ones copied out on the host; #20 pointer aliases. GPU validation pending.
@@ -1468,6 +1558,7 @@ contains
    type(rigid_pose_2d_t), intent(in), optional :: pose              !< Pose of the curve (issue #41).
    real(R8P),           intent(out), optional :: feature_distances(:) !< Distance to the nearest corner [n] (issue #61).
    real(R8P),           intent(in),  optional :: feature_angle      !< Corner threshold [degrees] (default 30).
+   integer(I4P),        intent(out), optional :: patches(:)         !< Patch of the closest segment [n] (issue #66), host lookup.
    real(R8P),    allocatable :: dd(:), cpl(:,:), nml(:,:) !< Device-side outputs.
    integer(I4P), allocatable :: sgl(:), vxl(:), bdl(:)    !< Device-side outputs.
    logical                   :: signed_, fwn              !< Resolved options.
@@ -1481,7 +1572,7 @@ contains
       call self%query_many_device(points=body_points2(pose, points), distances=distances, closest_points=closest_points, &
                                   segments=segments, vertices=vertices, normals=normals, bodies=bodies, is_signed=is_signed, &
                                   sign_algorithm=sign_algorithm, status=status, feature_distances=feature_distances, &
-                                  feature_angle=feature_angle)
+                                  feature_angle=feature_angle, patches=patches)
       if (present(status)) then
          if (status /= STATUS_OK) return
       endif
@@ -1499,7 +1590,7 @@ contains
       call corner_distances(self, points, feature_angle, feature_distances, device=.true.)
    endif
    if (.not. resolve_batch_options(self, points, distances, is_signed, sign_algorithm, status, signed_, fwn)) return
-   if (.not. rich_sizes_ok(size(distances, kind=I4P), closest_points, segments, vertices, normals, bodies)) then
+   if (.not. rich_sizes_ok(size(distances, kind=I4P), closest_points, segments, vertices, normals, bodies, patches)) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
@@ -1536,9 +1627,10 @@ contains
    if (present(vertices)) vertices = vxl
    if (present(normals)) normals = nml
    if (present(bodies)) bodies = bdl
+   if (present(patches)) patches = self%segment_patch(sgl)
    endsubroutine query_many_device
 
-   subroutine probe_many(self, points, lengths, probe_points, visible, foot_points, normals, status)
+   subroutine probe_many(self, points, lengths, probe_points, visible, foot_points, normals, status, patches)
    !< Probe points (issue #37): for each point (u, v), the point at distance lengths(i) along the
    !< pseudo-normal of its closest feature from its foot point (+ outward, - inward), and whether
    !< the segment from the foot point to the probe point crosses no segment of the curve other than
@@ -1552,13 +1644,14 @@ contains
    real(R8P),           intent(out), optional :: foot_points(:,:)  !< Foot points [2, n].
    real(R8P),           intent(out), optional :: normals(:,:)      !< Pseudo-normals [2, n].
    integer(I4P),        intent(out), optional :: status            !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),        intent(out), optional :: patches(:)        !< Patch of the closest segment [n] (issue #66).
    real(R8P)                                  :: d, cp(2), nn(2), tip(2) !< Per-point work.
    integer(I4P)                               :: i, n, sg, vx      !< Work.
 
    if (present(status)) status = STATUS_OK
    n = size(points, 2, kind=I4P)
    if (size(points, 1) /= 2 .or. size(lengths) /= n .or. size(probe_points, 1) /= 2 .or. size(probe_points, 2) /= n .or. &
-       size(visible) /= n .or. .not. rich_sizes_ok(n, closest_points=foot_points, normals=normals)) then
+       size(visible) /= n .or. .not. rich_sizes_ok(n, closest_points=foot_points, normals=normals, patches=patches)) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
@@ -1571,11 +1664,12 @@ contains
       visible(i) = path_clear(self, cp, tip, sg, vx)
       if (present(foot_points)) foot_points(:, i) = cp
       if (present(normals)) normals(:, i) = nn
+      if (present(patches)) patches(i) = self%segment_patch(sg)
    enddo
    !$omp end parallel do
    endsubroutine probe_many
 
-   subroutine image_points(self, points, images, visible, foot_points, status)
+   subroutine image_points(self, points, images, visible, foot_points, status, patches)
    !< Image points (issue #37): the mirror of each point through its closest point, 2 foot - x, and
    !< whether the segment foot-image crosses no other segment (exact, see `probe_many`).
    class(curve_object), intent(in)            :: self             !< Curve.
@@ -1584,6 +1678,7 @@ contains
    logical,             intent(out), optional :: visible(:)       !< Segment foot-image crosses nothing [n].
    real(R8P),           intent(out), optional :: foot_points(:,:) !< Foot points [2, n].
    integer(I4P),        intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),        intent(out), optional :: patches(:)       !< Patch of the closest segment [n] (issue #66).
    real(R8P)                                  :: d, cp(2), img(2) !< Per-point work.
    integer(I4P)                               :: i, n, sg, vx     !< Work.
    logical                                    :: bad              !< Size check.
@@ -1591,7 +1686,7 @@ contains
    if (present(status)) status = STATUS_OK
    n = size(points, 2, kind=I4P)
    bad = size(points, 1) /= 2 .or. size(images, 1) /= 2 .or. size(images, 2) /= n .or. &
-         .not. rich_sizes_ok(n, closest_points=foot_points)
+         .not. rich_sizes_ok(n, closest_points=foot_points, patches=patches)
    if (present(visible)) bad = bad .or. size(visible) /= n
    if (bad) then
       if (present(status)) status = STATUS_INVALID_INPUT
@@ -1604,6 +1699,7 @@ contains
       images(:, i) = img
       if (present(visible)) visible(i) = path_clear(self, cp, img, sg, vx)
       if (present(foot_points)) foot_points(:, i) = cp
+      if (present(patches)) patches(i) = self%segment_patch(sg)
    enddo
    !$omp end parallel do
    endsubroutine image_points
@@ -2203,7 +2299,8 @@ contains
    !<
    !< One vertex `u v` per line; loops are separated by one or more blank lines; text after `#`
    !< is a comment, except the directive `# open` before a loop's first vertex, which marks the loop
-   !< open (a polyline). A closed loop whose last vertex repeats its first exactly is closed
+   !< open (a polyline), and `# patch <name>` (issue #66), which puts the segments starting at the
+   !< vertices that follow in the named patch (it does not end the loop). A closed loop whose last vertex repeats its first exactly is closed
    !< explicitly: the repeated vertex is dropped. Gnuplot plots the file as it is (`plot 'file' w l`).
    !< `status`: STATUS_FILE_NOT_FOUND, STATUS_FILE_OPEN_FAIL, STATUS_INVALID_INPUT (unreadable
    !< line or invalid data), else STATUS_OK.
@@ -2214,6 +2311,10 @@ contains
    real(R8P),    allocatable                  :: u(:), v(:)  !< Vertices read.
    integer(I4P), allocatable                  :: sizes(:)    !< Loop sizes read.
    logical,      allocatable                  :: closed(:)   !< Loop closed flags read.
+   integer(I4P), allocatable                  :: vp(:)       !< Patch of each vertex's segment (issue #66).
+   character(64), allocatable                 :: names(:)    !< Patch names met.
+   integer(I4P)                               :: p           !< Current patch (0: none yet).
+   character(1024)                            :: directive   !< Text after '#'.
    logical                                    :: open_next   !< Next loop is open.
    character(1024)                            :: line        !< Line buffer.
    real(R8P)                                  :: a, b        !< Pair read.
@@ -2232,14 +2333,19 @@ contains
       if (present(status)) status = STATUS_FILE_OPEN_FAIL
       return
    endif
-   allocate(u(64), v(64), sizes(8), closed(8))
-   n = 0_I4P ; nl = 0_I4P ; cur = 0_I4P ; open_next = .false.
+   allocate(u(64), v(64), sizes(8), closed(8), vp(64), names(0))
+   n = 0_I4P ; nl = 0_I4P ; cur = 0_I4P ; open_next = .false. ; p = 0_I4P
    do
       read(unit, '(A)', iostat=ios) line
       if (ios /= 0) exit
       h = index(line, '#')
       if (h > 0) then
          if (adjustl(line(h+1:)) == 'open' .and. len_trim(line(1:h-1)) == 0) open_next = .true.
+         directive = adjustl(line(h+1:))
+         if (directive(1:6) == 'patch ' .and. len_trim(line(1:h-1)) == 0) then
+            p = name_index(trim(adjustl(directive(7:))))
+            cycle ! a patch directive does not end the loop (other comment-only lines still do)
+         endif
          line(h:) = ' '
       endif
       if (len_trim(line) == 0) then
@@ -2252,18 +2358,34 @@ contains
          exit
       endif
       if (n == size(u)) then
-         u = [u, u] ; v = [v, v]
+         u = [u, u] ; v = [v, v] ; vp = [vp, vp]
       endif
-      n = n + 1_I4P ; u(n) = a ; v(n) = b ; cur = cur + 1_I4P
+      if (p == 0_I4P) p = name_index('')
+      n = n + 1_I4P ; u(n) = a ; v(n) = b ; vp(n) = p ; cur = cur + 1_I4P
    enddo
    close(unit)
    if (status_ == STATUS_OK) then
       call close_loop
+      if (size(names) == 0) names = [repeat(' ', 64)]
       call self%adopt_loops(u=u(1:n), v=v(1:n), loop_sizes=sizes(1:nl), normal_axis=normal_axis, closed=closed(1:nl), &
-                            status=status_)
+                            status=status_, patches=vp(1:n), patch_names=names)
    endif
    if (present(status)) status = status_
    contains
+      function name_index(nm) result(q)
+      !< Index of patch `nm`, added if new.
+      character(*), intent(in) :: nm
+      integer(I4P)             :: q
+      character(64)            :: pad
+
+      pad = nm
+      do q = 1, size(names)
+         if (names(q) == pad) return
+      enddo
+      names = [names, pad]
+      q = size(names)
+      endfunction name_index
+
       subroutine close_loop
       !< End the current loop: drop an explicit closing vertex, record the size.
       if (cur == 0_I4P) return
@@ -2385,11 +2507,13 @@ contains
    integer(I4P),        intent(out), optional :: loops_open      !< Loops still open after repair.
    type :: chain_t
       real(R8P), allocatable :: u(:), v(:) !< Vertices.
+      integer(I4P), allocatable :: p(:)    !< Patch of the segment starting at each vertex (issue #66).
       logical                :: closed     !< Closed.
       logical                :: alive      !< Not merged into another chain.
    endtype chain_t
    type(chain_t), allocatable :: ch(:)        !< Loops as chains.
    real(R8P),     allocatable :: nu(:), nv(:) !< Rebuilt vertices.
+   integer(I4P),  allocatable :: np_(:), tp(:) !< Rebuilt and work patches.
    integer(I4P),  allocatable :: sizes(:)     !< Rebuilt loop sizes.
    logical,       allocatable :: closed(:)    !< Rebuilt closed flags.
    real(R8P),     allocatable :: tu(:), tv(:) !< Work vertices.
@@ -2404,6 +2528,7 @@ contains
    do l = 1, self%nl
       ch(l)%u = self%u(self%loop_start(l):self%loop_start(l + 1) - 1)
       ch(l)%v = self%v(self%loop_start(l):self%loop_start(l + 1) - 1)
+      ch(l)%p = self%seg_patch(self%loop_start(l):self%loop_start(l + 1) - 1)
       ch(l)%closed = self%loop_closed(l)
       ch(l)%alive = .true.
    enddo
@@ -2440,8 +2565,12 @@ contains
          else
             if (best_end == 1_I4P) then
                ch(best)%u = ch(best)%u(size(ch(best)%u):1:-1) ; ch(best)%v = ch(best)%v(size(ch(best)%v):1:-1)
+               ch(best)%p = reversed_patches(ch(best)%p)
             endif
             ch(l)%u = [ch(l)%u, ch(best)%u] ; ch(l)%v = [ch(l)%v, ch(best)%v]
+            ! the joining segment (end of l -> start of best) takes the patch of l's last segment
+            if (size(ch(l)%p) > 1) ch(l)%p(size(ch(l)%p)) = ch(l)%p(size(ch(l)%p) - 1)
+            ch(l)%p = [ch(l)%p, ch(best)%p]
             ch(best)%alive = .false.
          endif
          exit ! restart the scan: chain indices and ends changed
@@ -2452,13 +2581,14 @@ contains
       if (.not. ch(l)%alive) cycle
       n = size(ch(l)%u)
       if (n == 0) cycle
-      allocate(tu(n), tv(n))
-      k = 1_I4P ; tu(1) = ch(l)%u(1) ; tv(1) = ch(l)%v(1)
+      allocate(tu(n), tv(n), tp(n))
+      k = 1_I4P ; tu(1) = ch(l)%u(1) ; tv(1) = ch(l)%v(1) ; tp(1) = ch(l)%p(1)
       do i = 2, n
          if (hypot(ch(l)%u(i) - tu(k), ch(l)%v(i) - tv(k)) <= tolerance) then
             merged = merged + 1_I4P
+            tp(k) = ch(l)%p(i) ! the segment leaving the merged vertex survives
          else
-            k = k + 1_I4P ; tu(k) = ch(l)%u(i) ; tv(k) = ch(l)%v(i)
+            k = k + 1_I4P ; tu(k) = ch(l)%u(i) ; tv(k) = ch(l)%v(i) ; tp(k) = ch(l)%p(i)
          endif
       enddo
       if (ch(l)%closed .and. k > 1_I4P) then
@@ -2466,8 +2596,8 @@ contains
             merged = merged + 1_I4P ; k = k - 1_I4P
          endif
       endif
-      ch(l)%u = tu(1:k) ; ch(l)%v = tv(1:k)
-      deallocate(tu, tv)
+      ch(l)%u = tu(1:k) ; ch(l)%v = tv(1:k) ; ch(l)%p = tp(1:k)
+      deallocate(tu, tv, tp)
    enddo
    ! 3. drop degenerate loops
    do l = 1, size(ch)
@@ -2493,12 +2623,17 @@ contains
       if (closed(l)) then
          if ((mod(tmp%nesting_depth(l), 2_I4P) == 0_I4P) .neqv. (tmp%loop_area(l) > 0._R8P)) then
             nu(first:last) = nu(last:first:-1) ; nv(first:last) = nv(last:first:-1)
+            np_(first:last) = reversed_patches(np_(first:last))
             reversed = reversed + 1_I4P
          endif
       endif
       first = last + 1_I4P
    enddo
-   call self%adopt_loops(u=nu, v=nv, loop_sizes=sizes, normal_axis=axis, closed=closed)
+   block
+      character(64), allocatable :: names(:)
+      names = self%patch_names
+      call self%adopt_loops(u=nu, v=nv, loop_sizes=sizes, normal_axis=axis, closed=closed, patches=np_, patch_names=names)
+   endblock
    if (present(gaps_closed)) gaps_closed = gaps
    if (present(vertices_merged)) vertices_merged = merged
    if (present(loops_removed)) loops_removed = removed
@@ -2514,16 +2649,29 @@ contains
          if (.not. ch(q)%alive) cycle
          nt = nt + size(ch(q)%u, kind=I4P) ; nl2 = nl2 + 1_I4P
       enddo
-      allocate(nu(nt), nv(nt), sizes(nl2), closed(nl2))
+      allocate(nu(nt), nv(nt), sizes(nl2), closed(nl2), np_(nt))
       nt = 0_I4P ; nl2 = 0_I4P
       do q = 1, size(ch)
          if (.not. ch(q)%alive) cycle
          nl2 = nl2 + 1_I4P
          sizes(nl2) = size(ch(q)%u, kind=I4P) ; closed(nl2) = ch(q)%closed
          nu(nt + 1:nt + sizes(nl2)) = ch(q)%u ; nv(nt + 1:nt + sizes(nl2)) = ch(q)%v
+         np_(nt + 1:nt + sizes(nl2)) = ch(q)%p
          nt = nt + sizes(nl2)
       enddo
       endsubroutine pack_chains
+
+      pure function reversed_patches(pp) result(rp)
+      !< Segment patches of a reversed vertex sequence: segment j of the reversed sequence is segment n-j of the
+      !< original (the last entry, an open chain's unused one or a closed loop's closing segment, stays).
+      integer(I4P), intent(in)  :: pp(:)
+      integer(I4P)              :: rp(size(pp))
+      integer(I4P)              :: m
+
+      m = size(pp)
+      rp = pp
+      if (m > 1) rp(1:m - 1) = pp(m - 1:1:-1)
+      endfunction reversed_patches
    endsubroutine repair
 
    subroutine save_into_file(self, file_name, status)
@@ -2531,9 +2679,12 @@ contains
    class(curve_object), intent(in)            :: self      !< Curve.
    character(*),        intent(in)            :: file_name !< File name.
    integer(I4P),        intent(out), optional :: status    !< STATUS_OK or STATUS_FILE_OPEN_FAIL.
-   integer(I4P)                               :: unit, ios, l, i !< Work.
+   integer(I4P)                               :: unit, ios, l, i, last !< Work.
+   logical                                    :: named   !< Write patch directives (issue #66).
 
    if (present(status)) status = STATUS_OK
+   named = self%get_patches_number() > 1_I4P
+   if (.not. named .and. allocated(self%patch_names)) named = len_trim(self%patch_names(1)) > 0
    open(newunit=unit, file=file_name, status='replace', action='write', iostat=ios)
    if (ios /= 0) then
       if (present(status)) status = STATUS_FILE_OPEN_FAIL
@@ -2543,7 +2694,12 @@ contains
    do l = 1, self%nl
       if (l > 1_I4P) write(unit, '(A)') ''
       if (.not. self%loop_closed(l)) write(unit, '(A)') '# open'
+      last = 0_I4P
       do i = self%loop_start(l), self%loop_start(l + 1) - 1
+         if (named .and. self%segment_patch(i) /= last) then
+            write(unit, '(A)') '# patch '//self%patch_name(self%segment_patch(i))
+            last = self%segment_patch(i)
+         endif
          write(unit, '(2ES26.17E3)') self%u(i), self%v(i)
       enddo
    enddo
@@ -3038,7 +3194,7 @@ contains
    enddo
    endfunction path_clear
 
-   pure function rich_sizes_ok(n, closest_points, segments, vertices, normals, bodies) result(good)
+   pure function rich_sizes_ok(n, closest_points, segments, vertices, normals, bodies, patches) result(good)
    !< True if every present rich output has the right size for n points.
    integer(I4P),           intent(in) :: n                   !< Points.
    real(R8P),    optional, intent(in) :: closest_points(:,:) !< [2, n].
@@ -3046,6 +3202,7 @@ contains
    integer(I4P), optional, intent(in) :: vertices(:)         !< [n].
    real(R8P),    optional, intent(in) :: normals(:,:)        !< [2, n].
    integer(I4P), optional, intent(in) :: bodies(:)           !< [n].
+   integer(I4P), optional, intent(in) :: patches(:)          !< [n].
    logical                            :: good                !< Result.
 
    good = .true.
@@ -3053,6 +3210,7 @@ contains
    if (present(normals)) good = good .and. size(normals, 1) == 2 .and. size(normals, 2) == n
    if (present(segments)) good = good .and. size(segments) == n
    if (present(vertices)) good = good .and. size(vertices) == n
+   if (present(patches)) good = good .and. size(patches) == n
    if (present(bodies)) good = good .and. size(bodies) == n
    endfunction rich_sizes_ok
 

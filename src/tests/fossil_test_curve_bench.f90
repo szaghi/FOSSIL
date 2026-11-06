@@ -129,6 +129,13 @@ contains
    ids = count(s1 /= s2 .or. x1 /= x2 .or. b1 /= b2)
    print '(A,A,A,ES10.3,A,I0)', '   ', nm, 'rich device vs serial max err: ', err, '  id mismatches ', ids
    ok = ok .and. err == 0._R8P .and. ids == 0
+   ! patches (issue #66): a third of the segments in a second patch, the device's patches against the CPU's
+   if (cur%get_patches_number() == 1_I4P) call cur%set_patch([(ids, ids = 1, cur%get_vertices_number(), 3)], 'third')
+   call cur%query_many(points=p, distances=d1, segments=s1, patches=x1, sign_algorithm=algo)
+   call cur%query_many_device(points=p, distances=d2, patches=x2, sign_algorithm=algo)
+   ids = count(x1 /= x2)
+   print '(A,A,A,I0)', '   ', nm, 'patch device vs serial mismatches: ', ids
+   ok = ok .and. ids == 0
    endsubroutine rich
 
    subroutine sign_bench

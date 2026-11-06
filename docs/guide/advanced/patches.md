@@ -64,6 +64,25 @@ the patch of the facet that holds each query's closest point: the boundary condi
 forcing point. The device path looks it up on the host from the facet ids the device returns, so it is bit-identical
 to the CPU path (the GPU bench line `patch device vs serial mismatches` is 0).
 
+## 2-D curves
+
+A curve carries a patch per segment (segment i runs from vertex i to the next). In the loop format, a line
+`# patch <name>` puts the segments starting at the vertices that follow in that patch; it does not end the loop. A
+curve without directives has one unnamed patch and is written back without them. `repair` keeps every segment's
+patch through joins, merges and reversals; `slice_surface` gives each segment the patch of the facet it is cut from,
+and the curve takes the surface's names. `query_many(_device)(patches=)`, `probe_many(patches=)` and
+`image_points(patches=)` return the patch of the closest segment (device: host lookup, bit-identical). API:
+`get_patches_number`, `patch_name`, `segment_patch`, `set_patch`.
+
+```text
+# patch wall
+0 0
+1 0
+1 1
+# patch inlet
+0 1
+```
+
 ## API
 
 See [Patches](/guide/api/surface-stl-object#patches) in the API reference.

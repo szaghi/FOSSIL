@@ -54,6 +54,7 @@ contains
    integer(I4P),             intent(out), optional :: status          !< STATUS_OK or STATUS_INVALID_INPUT.
    type(facet_object), pointer                     :: f               !< Facet cursor.
    real(R8P),    allocatable                       :: s(:,:)          !< Segments [su, sv, eu, ev; n].
+   integer(I4P), allocatable                       :: sp(:), lp(:)    !< Patch of each segment, of each loop vertex (#66).
    real(R8P),    allocatable                       :: lu(:), lv(:)    !< Loop vertices.
    integer(I4P), allocatable                       :: sizes(:)        !< Loop sizes.
    logical,      allocatable                       :: closed(:)       !< Loop closed flags.
@@ -70,7 +71,7 @@ contains
    endif
    merge_ = .false. ; if (present(merge_collinear)) merge_ = merge_collinear
    low_ = .false. ; if (present(on_plane_low)) low_ = on_plane_low
-   allocate(s(4, max(1, surface%get_facets_number())))
+   allocate(s(4, max(1, surface%get_facets_number())), sp(max(1, surface%get_facets_number())))
    n = 0_I4P
    do i = 1, surface%get_facets_number()
       f => surface%facet_at(i)
@@ -94,10 +95,19 @@ contains
       if (all(pa == pb)) cycle ! the facet touches the plane at a vertex
       n = n + 1_I4P
       s(:, n) = [pa, pb]
+      sp(n) = f%patch ! each segment takes the patch of the facet it is cut from (issue #66)
    enddo
-   call chain(s(:, 1:n), lu, lv, sizes, closed, nopen)
-   if (merge_) call drop_collinear(lu, lv, sizes, closed)
-   call curve%adopt_loops(u=lu, v=lv, loop_sizes=sizes, normal_axis=normal_axis, closed=closed)
+   call chain(s(:, 1:n), lu, lv, sizes, closed, nopen, sp(1:n), lp)
+   if (merge_) call drop_collinear(lu, lv, sizes, closed, lp)
+   block
+      character(64), allocatable :: names(:)
+      allocate(names(surface%get_patches_number()))
+      do i = 1, size(names)
+         names(i) = surface%patch_name(i)
+      enddo
+      call curve%adopt_loops(u=lu, v=lv, loop_sizes=sizes, normal_axis=normal_axis, closed=closed, patches=lp, &
+                             patch_names=names)
+   endblock
    if (present(open_loops)) open_loops = nopen
    endsubroutine slice_surface
 
@@ -155,7 +165,7 @@ contains
    enddo
    endfunction lex_less
 
-   subroutine chain(s, lu, lv, sizes, closed, nopen)
+   subroutine chain(s, lu, lv, sizes, closed, nopen, sp, lp)
    !< Chain directed segments into loops by exact endpoint equality.
    !<
    !< Segment starts are sorted lexicographically; the successor of a segment is a not yet used
@@ -167,12 +177,14 @@ contains
    integer(I4P), allocatable, intent(out) :: sizes(:)     !< Loop sizes.
    logical,      allocatable, intent(out) :: closed(:)    !< Loop closed flags.
    integer(I4P),              intent(out) :: nopen        !< Open chains.
+   integer(I4P),              intent(in)  :: sp(:)        !< Patch of each segment.
+   integer(I4P), allocatable, intent(out) :: lp(:)        !< Patch of the segment starting at each loop vertex.
    integer(I4P), allocatable              :: ord(:)       !< Segments sorted by start.
    logical,      allocatable              :: used(:), has_pred(:) !< Flags.
    integer(I4P)                           :: n, i, k, cur, nv, nl, pass, start !< Work.
 
    n = size(s, dim=2, kind=I4P)
-   allocate(lu(2 * n), lv(2 * n), sizes(n), closed(n), used(n), has_pred(n)) ! an open chain adds its end point
+   allocate(lu(2 * n), lv(2 * n), sizes(n), closed(n), used(n), has_pred(n), lp(2 * n)) ! an open chain adds its end point
    allocate(ord(n))
    ord = [(i, i = 1, n)]
    call sort_starts(s, ord)
@@ -192,19 +204,19 @@ contains
          cur = start
          do
             used(cur) = .true.
-            nv = nv + 1_I4P ; lu(nv) = s(1, cur) ; lv(nv) = s(2, cur) ; sizes(nl) = sizes(nl) + 1_I4P
+            nv = nv + 1_I4P ; lu(nv) = s(1, cur) ; lv(nv) = s(2, cur) ; lp(nv) = sp(cur) ; sizes(nl) = sizes(nl) + 1_I4P
             k = find_start(s, ord, s(3:4, cur), used)
             if (k == 0_I4P) exit
             cur = k
          enddo
          closed(nl) = all(s(3:4, cur) == s(1:2, start))
          if (.not. closed(nl)) then ! keep the final end point of an open chain
-            nv = nv + 1_I4P ; lu(nv) = s(3, cur) ; lv(nv) = s(4, cur) ; sizes(nl) = sizes(nl) + 1_I4P
+            nv = nv + 1_I4P ; lu(nv) = s(3, cur) ; lv(nv) = s(4, cur) ; lp(nv) = sp(cur) ; sizes(nl) = sizes(nl) + 1_I4P
             nopen = nopen + 1_I4P
          endif
       enddo
    enddo
-   lu = lu(1:nv) ; lv = lv(1:nv) ; sizes = sizes(1:nl) ; closed = closed(1:nl)
+   lu = lu(1:nv) ; lv = lv(1:nv) ; lp = lp(1:nv) ; sizes = sizes(1:nl) ; closed = closed(1:nl)
    endsubroutine chain
 
    pure function find_start(s, ord, p, used) result(k)
@@ -285,17 +297,19 @@ contains
       endfunction before
    endsubroutine sort_starts
 
-   pure subroutine drop_collinear(lu, lv, sizes, closed)
+   pure subroutine drop_collinear(lu, lv, sizes, closed, lp)
    !< Remove vertices between two collinear segments running the same way (exact orient2d_xy);
    !< the end vertices of open loops are kept, as is any loop that would drop below 3 vertices.
    real(R8P),    allocatable, intent(inout) :: lu(:), lv(:) !< Loop vertices.
    integer(I4P), allocatable, intent(inout) :: sizes(:)     !< Loop sizes.
    logical,                   intent(in)    :: closed(:)    !< Loop closed flags.
+   integer(I4P), allocatable, intent(inout) :: lp(:)        !< Segment patches: a vertex where the patch changes stays.
    real(R8P),    allocatable                :: nu(:), nv(:) !< Kept vertices.
+   integer(I4P), allocatable                :: np_(:)       !< Kept patches.
    logical,      allocatable                :: keep(:)      !< Keep flags of a loop.
    integer(I4P)                             :: l, first, m, i, ip, in, k, kept !< Work.
 
-   allocate(nu(size(lu)), nv(size(lv)))
+   allocate(nu(size(lu)), nv(size(lv)), np_(size(lp)))
    first = 1_I4P ; k = 0_I4P
    do l = 1, size(sizes)
       m = sizes(l)
@@ -305,6 +319,7 @@ contains
          do i = 1, m
             if (.not. closed(l) .and. (i == 1_I4P .or. i == m)) cycle
             ip = first + mod(i - 2_I4P + m, m) ; in = first + mod(i, m)
+            if (lp(ip) /= lp(first + i - 1)) cycle
             if (orient2d_xy(lu(ip), lv(ip), lu(first + i - 1), lv(first + i - 1), lu(in), lv(in)) == 0._R8P .and. &
                 (lu(first + i - 1) - lu(ip)) * (lu(in) - lu(first + i - 1)) + &
                 (lv(first + i - 1) - lv(ip)) * (lv(in) - lv(first + i - 1)) > 0._R8P) keep(i) = .false.
@@ -315,12 +330,12 @@ contains
       do i = 1, m
          if (.not. keep(i)) cycle
          k = k + 1_I4P ; kept = kept + 1_I4P
-         nu(k) = lu(first + i - 1) ; nv(k) = lv(first + i - 1)
+         nu(k) = lu(first + i - 1) ; nv(k) = lv(first + i - 1) ; np_(k) = lp(first + i - 1)
       enddo
       first = first + m
       sizes(l) = kept
       deallocate(keep)
    enddo
-   lu = nu(1:k) ; lv = nv(1:k)
+   lu = nu(1:k) ; lv = nv(1:k) ; lp = np_(1:k)
    endsubroutine drop_collinear
 endmodule fossil_curve_slice
