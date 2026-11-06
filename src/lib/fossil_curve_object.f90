@@ -104,6 +104,7 @@ type :: curve_object
       procedure, pass(self) :: patch_name           !< Name of a patch.
       procedure, pass(self) :: segment_patch        !< Patch of a segment.
       procedure, pass(self) :: set_patch            !< Assign segments to a named patch.
+      procedure, pass(self) :: distance_to          !< Distance to another curve, with the closest pair (issue #67).
       procedure, pass(self) :: box_classify_many    !< Classify boxes: cut, near, inside, outside (issue #38).
       procedure, pass(self) :: box_intersects_curve !< True if a box meets the curve (issue #38).
       procedure, pass(self) :: box_classify_many_device !< box_classify_many on the device (issue #38).
@@ -208,6 +209,132 @@ contains
       if (i >= 1 .and. i <= size(self%seg_patch)) p = self%seg_patch(i)
    endif
    endfunction segment_patch
+
+   subroutine distance_to(self, other, distance, point_self, point_other, segment_self, segment_other, intersecting, &
+                          status, pose_self, pose_other)
+   !< Distance between this curve and `other` (issue #67, the 2-D twin of `surface%distance_to`): the minimum over their
+   !< segment pairs, 0 with `intersecting` when two segments cross or touch (exact orient2d), else the minimum of the
+   !< four endpoint-segment distances; the closest segments (ties: the smallest pair) and the witness points. Every pair
+   !< is evaluated in order behind a box pre-filter (curves are small: no tree descent). Poses (`rigid_pose_2d_t`) place
+   !< the curves as `move` would (to_world of each vertex).
+   class(curve_object),   intent(in)            :: self, other    !< Curves.
+   real(R8P),             intent(out)           :: distance       !< Distance.
+   real(R8P),             intent(out), optional :: point_self(2), point_other(2) !< Witness points.
+   integer(I4P),          intent(out), optional :: segment_self, segment_other   !< Closest segments.
+   logical,               intent(out), optional :: intersecting   !< The curves touch or cross.
+   integer(I4P),          intent(out), optional :: status         !< STATUS_OK, STATUS_INVALID_INPUT (empty curve).
+   type(rigid_pose_2d_t), intent(in),  optional :: pose_self, pose_other !< Poses.
+   real(R8P)                                    :: d2, best, a0(2), a1(2), b0(2), b1(2), pa(2), pb(2), qa(2), qb(2)
+   integer(I4P)                                 :: i, j, ia, ib
+   logical                                      :: meet, hit
+
+   if (present(status)) status = STATUS_OK
+   distance = huge(1._R8P)
+   if (self%nv == 0 .or. other%nv == 0) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   best = huge(1._R8P) ; ia = 0 ; ib = 0 ; meet = .false. ; pa = 0._R8P ; pb = 0._R8P
+   do i = 1, self%nv
+      if (self%next(i) == 0) cycle
+      a0 = place(self, i, pose_self) ; a1 = place(self, self%next(i), pose_self)
+      do j = 1, other%nv
+         if (other%next(j) == 0) cycle
+         b0 = place(other, j, pose_other) ; b1 = place(other, other%next(j), pose_other)
+         if (max(0._R8P, min(b0(1), b1(1)) - max(a0(1), a1(1)), min(a0(1), a1(1)) - max(b0(1), b1(1)))**2 + &
+             max(0._R8P, min(b0(2), b1(2)) - max(a0(2), a1(2)), min(a0(2), a1(2)) - max(b0(2), b1(2)))**2 > &
+             best * (1._R8P + 1.e-10_R8P)) cycle
+         call segment_pair(a0, a1, b0, b1, d2, qa, qb, hit)
+         if (d2 < best .or. (d2 == best .and. (i < ia .or. (i == ia .and. j < ib)))) then
+            best = d2 ; ia = i ; ib = j ; pa = qa ; pb = qb ; meet = hit
+         endif
+      enddo
+   enddo
+   distance = sqrt(best)
+   if (present(point_self)) point_self = pa
+   if (present(point_other)) point_other = pb
+   if (present(segment_self)) segment_self = ia
+   if (present(segment_other)) segment_other = ib
+   if (present(intersecting)) intersecting = meet
+   contains
+      function place(c, k, pose) result(x)
+      class(curve_object),             intent(in) :: c
+      integer(I4P),                    intent(in) :: k
+      type(rigid_pose_2d_t), optional, intent(in) :: pose
+      real(R8P)                                   :: x(2)
+
+      x = [c%u(k), c%v(k)]
+      if (present(pose)) x = to_world(pose, x)
+      endfunction place
+   endsubroutine distance_to
+
+   subroutine segment_pair(a0, a1, b0, b1, d2, pa, pb, meet)
+   !< Squared distance between segments (a0, a1) and (b0, b1) with witness points; 0 and `meet` when they cross or touch
+   !< (exact orient2d, collinear overlaps included).
+   real(R8P), intent(in)  :: a0(2), a1(2), b0(2), b1(2)
+   real(R8P), intent(out) :: d2, pa(2), pb(2)
+   logical,   intent(out) :: meet
+   integer(I4P)           :: s1, s2, s3, s4
+   real(R8P)              :: c(2), dd, x(2)
+   integer(I4P)           :: k
+
+   s1 = sgn(orient2d_xy(b0(1), b0(2), b1(1), b1(2), a0(1), a0(2)))
+   s2 = sgn(orient2d_xy(b0(1), b0(2), b1(1), b1(2), a1(1), a1(2)))
+   s3 = sgn(orient2d_xy(a0(1), a0(2), a1(1), a1(2), b0(1), b0(2)))
+   s4 = sgn(orient2d_xy(a0(1), a0(2), a1(1), a1(2), b1(1), b1(2)))
+   meet = (s1 * s2 < 0 .and. s3 * s4 < 0) .or. (s1 == 0 .and. within(b0, b1, a0)) .or. (s2 == 0 .and. within(b0, b1, a1)) &
+          .or. (s3 == 0 .and. within(a0, a1, b0)) .or. (s4 == 0 .and. within(a0, a1, b1))
+   if (meet) then
+      d2 = 0._R8P
+      if (s1 == 0 .and. within(b0, b1, a0)) then
+         x = a0
+      elseif (s2 == 0 .and. within(b0, b1, a1)) then
+         x = a1
+      elseif (s3 == 0 .and. within(a0, a1, b0)) then
+         x = b0
+      elseif (s4 == 0 .and. within(a0, a1, b1)) then
+         x = b1
+      else ! proper crossing: the point on (a0, a1)
+         x = a0 + (orient2d_xy(b0(1), b0(2), b1(1), b1(2), a0(1), a0(2)) / &
+             (orient2d_xy(b0(1), b0(2), b1(1), b1(2), a0(1), a0(2)) - orient2d_xy(b0(1), b0(2), b1(1), b1(2), a1(1), a1(2)))) * &
+             (a1 - a0)
+      endif
+      pa = x ; pb = x
+      return
+   endif
+   d2 = huge(1._R8P)
+   do k = 1, 4
+      select case (k)
+      case (1) ; c = closest(b0, b1, a0) ; dd = sum((a0 - c)**2) ; if (dd < d2) then ; d2 = dd ; pa = a0 ; pb = c ; endif
+      case (2) ; c = closest(b0, b1, a1) ; dd = sum((a1 - c)**2) ; if (dd < d2) then ; d2 = dd ; pa = a1 ; pb = c ; endif
+      case (3) ; c = closest(a0, a1, b0) ; dd = sum((b0 - c)**2) ; if (dd < d2) then ; d2 = dd ; pa = c ; pb = b0 ; endif
+      case (4) ; c = closest(a0, a1, b1) ; dd = sum((b1 - c)**2) ; if (dd < d2) then ; d2 = dd ; pa = c ; pb = b1 ; endif
+      endselect
+   enddo
+   contains
+      pure function sgn(x) result(s)
+      real(R8P), intent(in) :: x
+      integer(I4P)          :: s
+
+      s = 0_I4P ; if (x > 0._R8P) s = 1_I4P ; if (x < 0._R8P) s = -1_I4P
+      endfunction sgn
+
+      pure function within(p, q, r) result(yes)
+      real(R8P), intent(in) :: p(2), q(2), r(2)
+      logical               :: yes
+
+      yes = r(1) >= min(p(1), q(1)) .and. r(1) <= max(p(1), q(1)) .and. r(2) >= min(p(2), q(2)) .and. r(2) <= max(p(2), q(2))
+      endfunction within
+
+      pure function closest(p, q, r) result(x)
+      real(R8P), intent(in) :: p(2), q(2), r(2)
+      real(R8P)             :: x(2), d(2), l2, t
+
+      d = q - p ; l2 = sum(d * d)
+      t = 0._R8P ; if (l2 > 0._R8P) t = min(1._R8P, max(0._R8P, sum((r - p) * d) / l2))
+      x = p + t * d
+      endfunction closest
+   endsubroutine segment_pair
 
    subroutine set_patch(self, segments, name)
    !< Assign the segments `segments` to the patch named `name`, created if new (issue #66).

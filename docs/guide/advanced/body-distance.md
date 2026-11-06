@@ -27,6 +27,11 @@ walls come within a few cells, and collision response.
 - **Many bodies:** `proximity_pairs(cutoff, pairs, distances)` gives the pairs of bodies of one surface (its shells,
   `facet_body`) closer than `cutoff`, and `proximity_pairs_of(surfaces, cutoff, ...)` the pairs of a list of surfaces:
   pairs whose bounding boxes are farther than `cutoff` are skipped, the others get `distance_to`.
+- **Curves** (2-D twin): `curve%distance_to(other, distance, point_self, point_other, segment_self, segment_other,
+  intersecting, pose_self, pose_other)`. Two segments meet when the exact `orient2d` says they cross or touch
+  (collinear overlaps included); otherwise their distance is the least of the four endpoint–segment distances. The
+  segment pairs are evaluated in order behind a box test, with the same tie rule; poses (`rigid_pose_2d_t`) move the
+  endpoints as `move` does, so the result equals the one after `move`, bit for bit.
 - CPU only: one query per pair of bodies, not a batch over points.
 
 ## Example
@@ -42,8 +47,11 @@ call a%distance_to(b, distance=d, pose_self=pose_a, pose_other=pose_b) ! moving 
 `src/tests/fossil_test_body_distance.f90`: cubes apart (exact distance), touching at a vertex, an edge, a face, and
 overlapping (0, intersecting), faces 1e-12 apart, and a sphere against a torus at six rigid motions, bit-identical to
 brute force. `src/tests/validation/fossil_val_body_distance.f90`: the bunny (20 000 facets) against the dragon (5 000)
-under 20 motions, bit-identical to brute force.
+under 20 motions, bit-identical to brute force. `src/tests/fossil_test_curve_distance_to.f90`: squares apart (exact
+distance), touching at a corner, along a side, and crossing, and a circle against a square at six poses, equal to the
+result after `move`.
 
 ## API
 
-See [`distance_to`](/guide/api/surface-stl-object#distance-to).
+See [`distance_to`](/guide/api/surface-stl-object#distance-to) and the curve's
+[queries](/guide/api/curve-object#queries).
