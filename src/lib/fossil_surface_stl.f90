@@ -37,9 +37,10 @@ use fossil_alpha_wrap, only : awrap_run, &
 use fossil_csr_matrix, only : csr_matrix_t
 use fossil_deviation, only : deviation_evaluator_t, deviation_sampled, deviation_certified, DEV_STATUS_OK, &
                              DEV_STATUS_BAD_INPUT
-use fossil_feature_edges, only : find_feature_edges, FEATURE_EDGE_DEFAULT_ANGLE
+use fossil_feature_edges, only : find_feature_edges, FEATURE_EDGE_DEFAULT_ANGLE, feature_cos
 use fossil_feature_bvh, only : build_segment_bvh, feature_box_touch_oac, feature_point_distance_oac
 use fossil_thickness, only : THICKNESS_RAY, THICKNESS_MEDIAL, THICKNESS_DEFAULT_CONE, THICKNESS_DEFAULT_RAYS, &
+                            THICKNESS_DEFAULT_SEPARATION, &
                             cone_directions, lower_median, ball_radius
 use fossil_mass_properties, only : moments_accumulator_t, accumulate_tetrahedron, moments_to_properties_3d, symmetric3_eigen
 use fossil_laplacian, only : build_cotangent_laplacian, &
@@ -4761,7 +4762,8 @@ contains
    if (present(status)) status = STATUS_OK
    endsubroutine box_feature_many_device
 
-   subroutine surface_thickness(self, thickness, gap, method, cone_angle, rays, vertex_thickness, vertex_gap, invalid, status)
+   subroutine surface_thickness(self, thickness, gap, method, cone_angle, rays, vertex_thickness, vertex_gap, invalid, status, &
+                                separation_angle)
    !< Local thickness and gap of every facet (issue #62, roadmap #58 WP4); `huge` where undefined or nothing is in front.
    !<
    !< - THICKNESS_RAY (default, shape diameter): `rays` rays from the facet centroid in a cone of full aperture
@@ -4770,7 +4772,16 @@ contains
    !<   (n_hit.d < 0) or misses (length huge). The value is the lower median of the counted lengths; with fewer than half
    !<   of the rays counted it is huge and the facet is counted in `invalid`. A cone biases it: a plate of thickness t
    !<   gives t median(1/cos theta_k), a sphere of radius R 2R median(cos theta_k); `rays=1` casts the axis alone.
-   !< - THICKNESS_MEDIAL: step 2 (issue #62).
+   !< - THICKNESS_MEDIAL (shrinking ball): the diameter 2r of the largest ball tangent to the facet at its centroid p, on
+   !<   the side of -n (thickness) or +n (gap), with no surface point inside. The ball starts at r = min(R0, t_axis/2)
+   !<   (R0 the bounding-box diagonal, t_axis the first hit of the axial ray: an upper bound, the ball's diameter along the
+   !<   axis cannot pass that wall, so the medial value never exceeds the axial chord). The ball centred at c = p -+ r n
+   !<   shrinks to the ball through p and q, the closest surface point to c, tangent at p (`ball_radius`), until q is on
+   !<   its sphere (|c - q| >= r (1 - 1e-12)), or until the new ball would see p and q under a separation angle below
+   !<   `separation_angle` (default 30 degrees; Ma et al.'s denoising test: q is then a tessellation neighbour on the same
+   !<   smooth sheet, or a bump of a scanned mesh, and the ball keeps its radius). One batched `query_many` per iteration
+   !<   over the facets not converged. A gap ball still at R0 has nothing in front: huge. A facet still moving after 64
+   !<   iterations is undefined (huge, counted in `invalid`). Exact on a plate (t).
    !< Vertex fields: area-weighted average of the finite values of the incident facets (huge if none). OpenMP over the
    !< facets; every facet is computed alone, so the result does not depend on the thread count.
    class(surface_stl_object), intent(in)                :: self                 !< Surface.
@@ -4783,7 +4794,9 @@ contains
    real(R8P), allocatable,    intent(out), optional     :: vertex_gap(:)        !< Gap per pool vertex.
    integer(I4P),              intent(out), optional     :: invalid              !< Facets with an undefined value.
    integer(I4P),              intent(out), optional     :: status               !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),                 intent(in),  optional     :: separation_angle     !< Medial denoising angle [degrees].
    real(R8P), allocatable                               :: th(:), gp(:)         !< Work values.
+   real(R8P)                                            :: sep                  !< Separation angle.
    logical,   allocatable                               :: bad(:)               !< Undefined facets.
    real(R8P)                                            :: cone                 !< Aperture.
    integer(I4P)                                         :: meth, m, nf, f       !< Options, counters.
@@ -4795,20 +4808,27 @@ contains
    meth = THICKNESS_RAY ; if (present(method)) meth = method
    cone = THICKNESS_DEFAULT_CONE ; if (present(cone_angle)) cone = cone_angle
    m = THICKNESS_DEFAULT_RAYS ; if (present(rays)) m = rays
+   sep = THICKNESS_DEFAULT_SEPARATION ; if (present(separation_angle)) sep = separation_angle
    want_t = present(thickness) .or. present(vertex_thickness)
    want_g = present(gap) .or. present(vertex_gap)
-   if (nf == 0 .or. meth /= THICKNESS_RAY .or. m < 1 .or. cone < 0._R8P .or. cone >= 180._R8P .or. &
+   if (nf == 0 .or. (meth /= THICKNESS_RAY .and. meth /= THICKNESS_MEDIAL) .or. m < 1 .or. cone < 0._R8P .or. &
+       cone >= 180._R8P .or. sep < 0._R8P .or. sep >= 180._R8P .or. &
        .not. (want_t .or. want_g)) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
    allocate(th(nf), gp(nf), bad(nf))
    th = huge(1._R8P) ; gp = huge(1._R8P) ; bad = .false.
-   !$omp parallel do default(shared) schedule(dynamic, 16) private(f)
-   do f = 1, nf
-      call ray_facet(f)
-   enddo
-   !$omp end parallel do
+   if (meth == THICKNESS_RAY) then
+      !$omp parallel do default(shared) schedule(dynamic, 16) private(f)
+      do f = 1, nf
+         call ray_facet(f)
+      enddo
+      !$omp end parallel do
+   else
+      if (want_t) call medial(-1._R8P, th)
+      if (want_g) call medial(1._R8P, gp)
+   endif
    if (present(invalid)) invalid = count(bad)
    if (present(vertex_thickness)) call to_vertices(th, vertex_thickness)
    if (present(vertex_gap)) call to_vertices(gp, vertex_gap)
@@ -4869,6 +4889,84 @@ contains
          endif
       endif
       endsubroutine ray_facet
+
+      subroutine medial(side, val)
+      !< Shrinking ball on the side `side` n of every facet (-1 thickness, +1 gap); val = 2r.
+      real(R8P), intent(in)    :: side   !< -1 or +1.
+      real(R8P), intent(inout) :: val(:) !< Diameters [nf] (huge on entry).
+      integer(I4P), parameter       :: MAXIT = 64     !< Iteration cap.
+      real(R8P),    allocatable     :: r(:), pc(:,:), dir(:,:), dq(:), q(:,:) !< Radii, centroids, directions, queries.
+      integer(I4P), allocatable     :: act(:)         !< Facets not converged.
+      type(vector_R8P), allocatable :: c(:)           !< Ball centres.
+      type(vector_R8P)              :: bmn, bmx       !< Bounding box.
+      real(R8P)                     :: r0, rn         !< Initial and new radius.
+      real(R8P)                     :: cos_sep        !< Cosine of the separation angle.
+      real(R8P)                     :: w(3)           !< q - c'.
+      type(vector_R8P)              :: dd             !< Axial direction.
+      type(ray_hit_t)               :: hh             !< Axial hit.
+      logical                       :: has            !< Hit flag.
+      integer(I4P)                  :: na, it, k, ff, nk !< Counters.
+
+      cos_sep = feature_cos(sep)
+      bmn = self%bmin ; bmx = self%bmax
+      r0 = sqrt((bmx%x - bmn%x) ** 2 + (bmx%y - bmn%y) ** 2 + (bmx%z - bmn%z) ** 2)
+      allocate(r(nf), pc(3, nf), dir(3, nf), act(nf))
+      na = 0
+      do ff = 1, nf
+         pc(:, ff) = [self%facet(ff)%centroid%x, self%facet(ff)%centroid%y, self%facet(ff)%centroid%z]
+         dir(:, ff) = side * [self%facet(ff)%normal%x, self%facet(ff)%normal%y, self%facet(ff)%normal%z]
+         r(ff) = r0
+         if (dir(1, ff) ** 2 + dir(2, ff) ** 2 + dir(3, ff) ** 2 < 0.25_R8P) then
+            bad(ff) = .true.
+         else
+            na = na + 1 ; act(na) = ff
+         endif
+      enddo
+      ! start: half the axial chord, an upper bound (the diameter along the axis cannot pass the first wall it meets)
+      !$omp parallel do default(shared) schedule(dynamic, 16) private(k, ff, dd, hh, has)
+      do k = 1, na
+         ff = act(k)
+         dd%x = dir(1, ff) ; dd%y = dir(2, ff) ; dd%z = dir(3, ff)
+         call self%intersect_ray_first(ray_origin=self%facet(ff)%centroid, ray_direction=dd, hit=hh, has_hit=has, &
+                                       exclude=ff)
+         if (has) r(ff) = min(r0, 0.5_R8P * hh%t)
+      enddo
+      !$omp end parallel do
+      do it = 1, MAXIT
+         if (na == 0) exit
+         allocate(c(na), dq(na), q(3, na))
+         do k = 1, na
+            ff = act(k)
+            c(k)%x = pc(1, ff) + r(ff) * dir(1, ff) ; c(k)%y = pc(2, ff) + r(ff) * dir(2, ff)
+            c(k)%z = pc(3, ff) + r(ff) * dir(3, ff)
+         enddo
+         call self%query_many(points=c, distances=dq, closest_points=q, is_signed=.false.)
+         nk = 0
+         do k = 1, na
+            ff = act(k)
+            if (dq(k) >= r(ff) * (1._R8P - 1e-12_R8P)) cycle               ! q on the sphere: converged
+            rn = ball_radius(pc(:, ff), dir(:, ff), q(:, k))
+            if (rn >= r(ff)) cycle                                          ! no progress left (round-off)
+            ! separation angle at the new centre c' between p and q (the angle of their normals if the ball touches both):
+            ! below `separation_angle` q lies on the same smooth sheet as p (a tessellation neighbour or a bump, not an
+            ! opposite wall), so the ball stops here. cos = (p - c').(q - c') / rn^2, with p - c' = -rn dir
+            w = q(:, k) - pc(:, ff) - rn * dir(:, ff)
+            if (-(dir(1, ff) * w(1) + dir(2, ff) * w(2) + dir(3, ff) * w(3)) > cos_sep * rn) cycle
+            r(ff) = rn
+            nk = nk + 1 ; act(nk) = ff
+         enddo
+         na = nk
+         deallocate(c, dq, q)
+      enddo
+      do k = 1, na                                                         ! still moving after MAXIT
+         bad(act(k)) = .true. ; r(act(k)) = huge(1._R8P)
+      enddo
+      do ff = 1, nf
+         if (bad(ff) .or. r(ff) >= huge(1._R8P)) cycle
+         if (side > 0._R8P .and. r(ff) >= r0) cycle                         ! nothing in front
+         val(ff) = 2._R8P * r(ff)
+      enddo
+      endsubroutine medial
 
       subroutine to_vertices(fv, vv)
       !< Area-weighted average of the finite facet values fv on the pool vertices.

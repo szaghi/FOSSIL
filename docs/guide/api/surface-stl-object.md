@@ -771,18 +771,21 @@ that touch a feature edge (conservative, never misses a contact); the device twi
 ### `thickness`
 
 ```fortran
-call surface%thickness(thickness, gap, method, cone_angle, rays, vertex_thickness, vertex_gap, invalid, status)
+call surface%thickness(thickness, gap, method, cone_angle, rays, vertex_thickness, vertex_gap, invalid, status, &
+                       separation_angle)
 ```
 
 **Purpose.** The local thickness of the body behind every facet and the gap in front of it (issue #62), `huge` where
 undefined or where nothing is in front. `method=THICKNESS_RAY` (default) is the shape diameter: the lower median of
 `rays` ray lengths (default 31) in a cone of full aperture `cone_angle` (default 60°) around -n (thickness) or +n
-(gap) from the facet centroid. Vertex fields are area-weighted averages of the finite facet values. OpenMP over the
-facets, independent of the thread count.
+(gap) from the facet centroid. `method=THICKNESS_MEDIAL` is the shrinking ball: the diameter of the largest ball
+tangent to the facet at its centroid with no surface point inside (the local feature size), never above the axial
+chord; `separation_angle` (default 30°) is its denoising angle. Vertex fields are area-weighted averages of the finite
+facet values. OpenMP over the facets, independent of the thread count.
 
 **Arguments.** All optional, at least one output; `invalid` counts the facets whose rays did not give a value (an open
 or misoriented surface); `status` is `STATUS_OK` or `STATUS_INVALID_INPUT` (empty surface, `rays < 1`, `cone_angle`
-outside [0, 180), no output requested).
+or `separation_angle` outside [0, 180), no output requested).
 
 **Example.**
 

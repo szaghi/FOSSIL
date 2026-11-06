@@ -1,0 +1,4 @@
+$ anim_shrinking_ball
+x =  0.30: 1 shrinks, diameter  0.11995, thickness()  0.11995
+x =  0.70: 2 shrinks, diameter  0.07393, thickness()  0.07393
+x =  0.93: 3 shrinks, diameter  0.02004, thickness()  0.02004

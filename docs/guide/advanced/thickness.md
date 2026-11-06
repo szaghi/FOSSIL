@@ -62,19 +62,74 @@ depend on any single one.
 [`segment_sdf`](/guide/advanced/sdf-segmentation) keeps its own shape diameter (120°, an origin offset, no
 orientation test), unchanged: it is a segmentation feature, not a measurement.
 
+## Medial method
+
+The medial method is the *shrinking ball* of Ma, Bae and Choi (2012). The thickness at a facet is the
+diameter $2r$ of the largest ball tangent to the facet at its centroid $p$, on the side of $-n$, with no surface point
+inside. The gap is the same ball on the side of $+n$. It is the local feature size, the distance to the medial axis:
+the definition that does not depend on a cone.
+
+![the shrinking ball at three points of a NACA 0012 section: each ball starts at half the axial chord and shrinks onto the opposite side; near the trailing edge it ends small](../../examples/images/anim-shrinking-ball.svg){.fossil-figure}
+
+- **Start.** $r = \min(R_0, t_\text{axis}/2)$, with $R_0$ the bounding-box diagonal and $t_\text{axis}$ the first hit
+  of the axial ray. This is an upper bound: the ball's diameter along the axis cannot pass the first wall it meets. So
+  **the medial value never exceeds the axial chord**.
+- **Shrink.** The ball centred at $c = p - r\,n$ (or $p + r\,n$ for the gap). If the closest surface point $q$ to $c$
+  is inside it, the ball becomes the one through $p$ and $q$, tangent at $p$:
+  $r \leftarrow |p - q|^2 / \big(2\,a\cdot(q - p)\big)$, with $a$ the unit direction from $p$ to the centre
+  (`ball_radius` in `fossil_thickness`). The radius strictly decreases.
+- **Stop.** When $q$ is on the sphere ($|c - q| \ge r(1 - 10^{-12})$). Or when the new ball would see $p$ and $q$
+  under a separation angle below `separation_angle` (default 30°, the feature-edge threshold). This is Ma et al.'s
+  denoising test. Below that angle $q$ is a tessellation neighbour on the same smooth sheet, or a bump of a scanned
+  mesh, not an opposite wall, and the ball keeps its radius.
+- **Batched.** Each iteration is one `query_many` over the facets not yet converged, OpenMP-parallel and
+  deterministic. A facet still moving after 64 iterations is `huge` and counted in `invalid`. A gap ball still at
+  $R_0$ has nothing in front: `huge`.
+
+### Ray and medial compared
+
+| Body | Ray (default cone) | Ray, `rays=1` | Medial |
+|---|---|---|---|
+| plate of thickness $t$ | $1.072\,t$ | $t$ | $t$, exact |
+| faceted sphere, radius 1, 1280 facets | $0.933 \cdot 2$, to 0.6 % | $2$, to 0.45 % | $2$, 4.8 % below; 1.8 % on 5120 facets |
+| NACA 0012, $0.1 < x < 0.9$ | | | $2 y_t\sqrt{1 + y_t'^2}$ to 7.3e-4 |
+| two boxes 0.2 apart, gap | $0.2/\cos\theta_{16}$ | $0.2$ | $0.2$, exact |
+
+On a faceted sphere the medial value converges as O(h), from below. The ball is tangent at the facet centroid,
+which is offset from the circumcentre, so its centre misses the sphere's centre by O(h), and the polyhedron's facets
+stop it there.
+
+On a blobby body the two methods measure different things. The ray gives the chord along the normal, and the medial
+the local feature size, which curvature bounds well below the chord. `src/tests/validation/fossil_val_thickness.f90`
+on the Stanford bunny (69 451 facets, not watertight), with the ratio ray / medial over the facets where both are
+finite:
+
+| `separation_angle` | thickness ratio, quantiles 5 / 50 / 95 % | facets with a medial gap | medial time (-O2) |
+|---|---|---|---|
+| 30° (default) | 1.10 / 2.46 / 8.81 | 50 109 | 10.3 s |
+| 60° | 1.08 / 1.65 / 5.72 | 32 652 | 8.0 s |
+| 90° | 1.02 / 1.36 / 4.50 | 18 025 | 5.9 s |
+
+The ray method takes 11.3 s there (31 rays per side). Its 401 invalid facets are where the bunny's holes let the
+rays escape. A larger separation angle keeps only contacts with walls facing away from $p$. That is closer to "the
+wall opposite", at the price of the corner-limited local feature size. The medial gap is finite on most facets of a
+non-convex body: it is the exterior local feature size, of the body's own scale away from narrow passages.
+
 ## API
 
 ```fortran
-call surface%thickness(thickness, gap, method, cone_angle, rays, vertex_thickness, vertex_gap, invalid, status)
+call surface%thickness(thickness, gap, method, cone_angle, rays, vertex_thickness, vertex_gap, invalid, status, &
+                       separation_angle)
 !  thickness(nf), gap(nf)         per facet, huge where undefined or nothing is in front
-!  method                         THICKNESS_RAY (default)
-!  cone_angle, rays               the cone: full aperture [degrees] (default 60), rays per facet (default 31)
+!  method                         THICKNESS_RAY (default) or THICKNESS_MEDIAL
+!  cone_angle, rays               ray method: full aperture [degrees] (default 60), rays per facet (default 31)
+!  separation_angle               medial method: denoising angle [degrees] (default 30)
 !  vertex_thickness, vertex_gap   per vertex of the vertex pool
 !  invalid                        facets whose rays gave no value
 ```
 
 Every argument is optional, and at least one output is required. The constants `THICKNESS_RAY`, `THICKNESS_MEDIAL`,
-`THICKNESS_DEFAULT_CONE` and `THICKNESS_DEFAULT_RAYS` come from `use fossil`.
+`THICKNESS_DEFAULT_CONE`, `THICKNESS_DEFAULT_RAYS` and `THICKNESS_DEFAULT_SEPARATION` come from `use fossil`.
 
 ## Validation
 
@@ -89,14 +144,28 @@ Every argument is optional, and at least one output is required. The constants `
 | `exclude` | equal, facet and $t$ bit for bit, to the first other hit of `intersect_ray_all` |
 | 1 and 4 OpenMP threads | bit-identical |
 
+`src/tests/fossil_test_thickness_medial.f90`:
+
+| Case | Result |
+|---|---|
+| the plate | $t$ to 2.8e-16, equal to the axial ray |
+| the faceted sphere | $2$ from below, 4.8e-2 (O(h)), never above the axial chord |
+| an extruded NACA 0012 (100 points per side), mid-span facets with $0.1 < x < 0.9$ | the closed form $2 y_t\sqrt{1 + y_t'^2}$ (the circle centred on the chord, tangent at $(x, \pm y_t)$) to 7.3e-4 |
+| two unit boxes 0.2 apart | gap $0.2$ to 2.8e-16 on the facing faces, `huge` on the others |
+| 1 and 4 OpenMP threads | bit-identical |
+
 ## Limits
 
-- **An estimate.** Ray thickness carries the cone bias above.
+- **An estimate.** Ray thickness carries the cone bias above. The medial value is exact on flat walls and converges as
+  O(h) on curved ones.
+- **Separation angle.** It decides what counts as an opposite wall. See the bunny sweep above.
 - **Closed, outward-oriented input.** Rays escape from open surfaces and hit misoriented facets from the wrong side.
   Both are counted in `invalid`.
 
 ## References
 
+- J. Ma, S. W. Bae, S. Choi, *3D medial axis point approximation using nearest neighbors and the normal field*, The
+  Visual Computer 28 (2012). The shrinking ball and its separation-angle denoising.
 - L. Shapira, A. Shamir, D. Cohen-Or, *Consistent mesh partitioning and skeletonisation using the shape diameter
   function*, The Visual Computer 24 (2008).
 

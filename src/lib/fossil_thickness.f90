@@ -14,13 +14,14 @@ use penf, only : I4P, R8P
 
 implicit none
 private
-public :: THICKNESS_RAY, THICKNESS_MEDIAL, THICKNESS_DEFAULT_CONE, THICKNESS_DEFAULT_RAYS
+public :: THICKNESS_RAY, THICKNESS_MEDIAL, THICKNESS_DEFAULT_CONE, THICKNESS_DEFAULT_RAYS, THICKNESS_DEFAULT_SEPARATION
 public :: cone_cosines, cone_directions, lower_median, ball_radius
 
 integer(I4P), parameter :: THICKNESS_RAY          = 1_I4P   !< Ray method (shape diameter).
 integer(I4P), parameter :: THICKNESS_MEDIAL       = 2_I4P   !< Medial method (shrinking ball).
 real(R8P),    parameter :: THICKNESS_DEFAULT_CONE = 60._R8P !< Default full cone aperture [degrees].
 integer(I4P), parameter :: THICKNESS_DEFAULT_RAYS = 31_I4P  !< Default rays per facet.
+real(R8P),    parameter :: THICKNESS_DEFAULT_SEPARATION = 30._R8P !< Default medial separation angle [degrees].
 real(R8P),    parameter :: PI = 3.141592653589793_R8P       !< Pi.
 real(R8P),    parameter :: GOLDEN_ANGLE = PI * (3._R8P - 2.23606797749979_R8P) !< Golden angle [rad].
 
