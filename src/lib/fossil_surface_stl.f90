@@ -14,7 +14,8 @@ use fossil_facet_object, only : facet_object, pnormal_payload_t,                
                                 triangle_point_distance
 use fossil_list_id_object, only : list_id_object
 use fossil_rigid_pose, only : rigid_pose_t, to_body, to_world, rotate, pose_interpolate, pose_log_3d
-use fossil_ccd, only : ccd_evaluator_t, ccd_advance, motion_bound_3d, CCD_INVALID_INPUT
+use fossil_ccd, only : ccd_evaluator_t, ccd_advance, motion_bound_3d, CCD_INVALID_INPUT, CCD_CONTACT, CCD_SEPARATE, &
+                      CCD_INITIAL_CONTACT, CCD_NOT_CONVERGED
 use fossil_box_query, only : bvh_box_contact_oac, bvh_box_thin_oac, box_tolerance, cell_bands, cell_components, &
                              BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_box_predicates, only : box_triangle_overlap
@@ -72,7 +73,7 @@ use vecfor, only : ex_R8P, ey_R8P, ez_R8P, mirror_matrix_R8P, rotation_matrix_R8
 implicit none
 private
 public :: surface_stl_object
-public :: proximity_pairs_of
+public :: proximity_pairs_of, first_impact
 public :: intersection_pair_t, SELFINT_CROSSING, SELFINT_TOUCHING, SELFINT_COPLANAR, SELFINT_EDGE_FOLD, SELFINT_SHEETS
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 public :: FEATURE_FACE, FEATURE_EDGE, FEATURE_VERTEX
@@ -6808,6 +6809,99 @@ contains
       enddo
    enddo
    endsubroutine proximity_pairs_of
+
+   subroutine first_impact(surfaces, poses0, poses1, toi, pair, status, tolerance, directional, tested)
+   !< The earliest contact among several moving bodies over a step (issue #73): body i moves from poses0(i) to
+   !< poses1(i) along `pose_interpolate`. Broad phase: the box of each body at s = 0 grown by its motion bound mu_i and
+   !< by tolerance / 2 contains it over the whole step, so pairs whose grown boxes do not overlap stay farther than the
+   !< tolerance. Every other pair has a lower bound on its time of impact, max(0, box distance at s = 0 - tolerance) /
+   !< (mu_i + mu_j) (the first advancement step); pairs run `time_of_impact` in the order of these bounds and the search
+   !< stops when the next bound exceeds the best contact. Ties go to the smallest pair (i, j), so the result equals the
+   !< loop over all pairs. status: CCD_CONTACT / CCD_INITIAL_CONTACT (pair = [i, j], i < j), CCD_SEPARATE (toi = 1,
+   !< pair = 0), CCD_NOT_CONVERGED (a pair hit the cap before the best contact: toi its certified lower bound),
+   !< CCD_INVALID_INPUT (size mismatch). Default tolerance: 1e-6 of the largest bounding-box diagonal. `tested`: the
+   !< pairs that ran `time_of_impact`.
+   type(surface_stl_object), intent(in), target    :: surfaces(:)    !< Bodies.
+   type(rigid_pose_t),       intent(in)            :: poses0(:)      !< Poses at s = 0.
+   type(rigid_pose_t),       intent(in)            :: poses1(:)      !< Poses at s = 1.
+   real(R8P),                intent(out)           :: toi            !< Earliest time of contact.
+   integer(I4P),             intent(out)           :: pair(2)        !< Its pair.
+   integer(I4P),             intent(out)           :: status         !< CCD_* status.
+   real(R8P),                intent(in),  optional :: tolerance      !< Contact tolerance.
+   logical,                  intent(in),  optional :: directional    !< Directional steps (see time_of_impact).
+   integer(I4P),             intent(out), optional :: tested         !< Pairs that ran time_of_impact.
+   real(R8P),                allocatable           :: mu(:), lo(:, :), hi(:, :), bound(:) !< Bounds, boxes at s = 0.
+   integer(I4P),             allocatable           :: cand(:, :), order(:) !< Candidate pairs, their order.
+   type(vector_R8P)                                :: l, h           !< Boxes.
+   real(R8P)                                       :: tol, g, t, c(3), w(3), half !< Work.
+   integer(I4P)                                    :: n, i, j, k, m, nc, st, ntest !< Counters.
+
+   toi = 1._R8P ; pair = 0_I4P ; status = CCD_SEPARATE ; ntest = 0_I4P
+   n = size(surfaces, kind=I4P)
+   if (size(poses0) /= n .or. size(poses1) /= n) then
+      status = CCD_INVALID_INPUT ; toi = 0._R8P
+      if (present(tested)) tested = 0_I4P
+      return
+   endif
+   allocate(mu(n), lo(3, n), hi(3, n)) ; tol = 0._R8P
+   do i = 1, n
+      mu(i) = 0._R8P ; lo(:, i) = huge(1._R8P) ; hi(:, i) = -huge(1._R8P)
+      if (surfaces(i)%facets_number == 0) cycle
+      mu(i) = motion_bound_3d(poses0(i), poses1(i), facet_xs(surfaces(i), 1), facet_xs(surfaces(i), 2), &
+                              facet_xs(surfaces(i), 3))
+      l = surfaces(i)%bmin ; h = surfaces(i)%bmax
+      l = h - l ; tol = max(tol, l%normL2()) ; l = surfaces(i)%bmin
+      do k = 0, 7
+         c = [merge(h%x, l%x, btest(k, 0)), merge(h%y, l%y, btest(k, 1)), merge(h%z, l%z, btest(k, 2))]
+         w = to_world(poses0(i), c)
+         lo(:, i) = min(lo(:, i), w) ; hi(:, i) = max(hi(:, i), w)
+      enddo
+      lo(:, i) = lo(:, i) - 4._R8P * spacing(abs(lo(:, i))) ; hi(:, i) = hi(:, i) + 4._R8P * spacing(abs(hi(:, i)))
+   enddo
+   tol = 1.e-6_R8P * tol ; if (present(tolerance)) tol = tolerance
+   half = 0.5_R8P * tol
+   ! broad phase on the grown boxes; lower bounds of the candidates
+   allocate(cand(2, n * (n - 1) / 2), bound(n * (n - 1) / 2)) ; nc = 0_I4P
+   do i = 1, n
+      if (surfaces(i)%facets_number == 0) cycle
+      do j = i + 1, n
+         if (surfaces(j)%facets_number == 0) cycle
+         if (any(lo(:, j) - mu(j) - half > hi(:, i) + mu(i) + half) .or. &
+             any(lo(:, i) - mu(i) - half > hi(:, j) + mu(j) + half)) cycle
+         g = norm2(max(0._R8P, lo(:, j) - hi(:, i), lo(:, i) - hi(:, j)))
+         nc = nc + 1_I4P ; cand(:, nc) = [i, j]
+         if (mu(i) + mu(j) > 0._R8P) then
+            bound(nc) = max(0._R8P, g - tol) / (mu(i) + mu(j))
+         else
+            bound(nc) = merge(0._R8P, huge(1._R8P), g <= tol) ! no motion: only an initial contact
+         endif
+      enddo
+   enddo
+   ! candidates by (bound, i, j): insertion sort of an index (deterministic)
+   allocate(order(nc))
+   do k = 1, nc
+      order(k) = k ; m = k
+      do while (m > 1)
+         if (bound(order(m - 1)) < bound(order(m)) .or. (bound(order(m - 1)) == bound(order(m)) .and. &
+             order(m - 1) < order(m))) exit
+         order([m - 1, m]) = order([m, m - 1]) ; m = m - 1
+      enddo
+   enddo
+   do k = 1, nc
+      m = order(k)
+      if (bound(m) > toi) exit
+      i = cand(1, m) ; j = cand(2, m)
+      call surfaces(i)%time_of_impact(surfaces(j), poses0(i), poses1(i), poses0(j), poses1(j), t, st, tolerance=tol, &
+                                      directional=directional)
+      ntest = ntest + 1_I4P
+      if (st == CCD_SEPARATE) cycle
+      if (t < toi .or. (t == toi .and. (status == CCD_SEPARATE .or. i < pair(1) .or. &
+                                        (i == pair(1) .and. j < pair(2))))) then
+         toi = t ; pair = [i, j] ; status = st
+      endif
+   enddo
+   if (present(tested)) tested = ntest
+   endsubroutine first_impact
 
    subroutine load_from_files(self, file_names, guess_format, aabb_refinement_levels, aabb_tree_kind, status)
    !< Load several STL files into one surface, one patch per file (issue #66), in the order given; a multi-solid ASCII

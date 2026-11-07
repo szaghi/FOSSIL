@@ -32,7 +32,7 @@ use fossil_line_query,         only : curve_line_crossings_oac, line_crossing_be
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
 use fossil_cut_moments,        only : MOMENTS_MAX
 use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate, pose_interpolate, pose_angle_2d
-use fossil_ccd,                only : ccd_evaluator_t, ccd_advance, motion_bound_2d, CCD_INVALID_INPUT
+use fossil_ccd,                only : ccd_evaluator_t, ccd_advance, motion_bound_2d, CCD_INVALID_INPUT, CCD_SEPARATE
 use fossil_predicates,         only : orient2d_xy
 use fossil_mass_properties,    only : moments_accumulator_t, accumulate_segment, moments_to_properties_2d, symmetric2_eigen
 use fossil_feature_edges,      only : FEATURE_EDGE_DEFAULT_ANGLE, feature_cos
@@ -49,7 +49,7 @@ use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 
 implicit none
 private
-public :: curve_object
+public :: curve_object, first_impact_2d
 public :: cut_cells_2d_t
 public :: CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, CURVE_ZERO_AREA_LOOP, CURVE_WRONG_ORIENTATION
 public :: CURVE_OPEN_LOOP, CURVE_SELF_INTERSECTING
@@ -337,6 +337,88 @@ contains
    if (present(segment_other)) segment_other = ev%sb
    if (present(iterations) .and. status == CCD_INVALID_INPUT) iterations = 0_I4P
    endsubroutine time_of_impact
+
+   subroutine first_impact_2d(curves, poses0, poses1, toi, pair, status, tolerance, directional, tested)
+   !< The earliest contact among several moving curves over a step (issue #73, the 2-D twin of `first_impact`): broad
+   !< phase on the boxes at s = 0 grown by mu_i + tolerance / 2, candidates in the order of their lower bounds
+   !< max(0, box distance - tolerance) / (mu_i + mu_j), stop when the next bound exceeds the best contact; ties to the
+   !< smallest pair: the result equals the loop over all pairs.
+   type(curve_object),    intent(in), target    :: curves(:)   !< Bodies.
+   type(rigid_pose_2d_t), intent(in)            :: poses0(:)   !< Poses at s = 0.
+   type(rigid_pose_2d_t), intent(in)            :: poses1(:)   !< Poses at s = 1.
+   real(R8P),             intent(out)           :: toi         !< Earliest time of contact.
+   integer(I4P),          intent(out)           :: pair(2)     !< Its pair.
+   integer(I4P),          intent(out)           :: status      !< CCD_* status.
+   real(R8P),             intent(in),  optional :: tolerance   !< Contact tolerance.
+   logical,               intent(in),  optional :: directional !< Directional steps (see time_of_impact).
+   integer(I4P),          intent(out), optional :: tested      !< Pairs that ran time_of_impact.
+   real(R8P),             allocatable           :: mu(:), lo(:, :), hi(:, :), bound(:) !< Bounds, boxes at s = 0.
+   integer(I4P),          allocatable           :: cand(:, :), order(:) !< Candidate pairs, their order.
+   real(R8P)                                    :: tol, g, t, w(2), half !< Work.
+   integer(I4P)                                 :: n, i, j, k, m, nc, st, ntest !< Counters.
+
+   toi = 1._R8P ; pair = 0_I4P ; status = CCD_SEPARATE ; ntest = 0_I4P
+   n = size(curves, kind=I4P)
+   if (size(poses0) /= n .or. size(poses1) /= n) then
+      status = CCD_INVALID_INPUT ; toi = 0._R8P
+      if (present(tested)) tested = 0_I4P
+      return
+   endif
+   allocate(mu(n), lo(2, n), hi(2, n)) ; tol = 0._R8P
+   do i = 1, n
+      mu(i) = 0._R8P ; lo(:, i) = huge(1._R8P) ; hi(:, i) = -huge(1._R8P)
+      if (curves(i)%nv == 0) cycle
+      mu(i) = motion_bound_2d(poses0(i), poses1(i), curves(i)%u(1:curves(i)%nv), curves(i)%v(1:curves(i)%nv))
+      tol = max(tol, norm2(curves(i)%bmax - curves(i)%bmin))
+      do k = 0, 3
+         w = to_world(poses0(i), [merge(curves(i)%bmax(1), curves(i)%bmin(1), btest(k, 0)), &
+                                  merge(curves(i)%bmax(2), curves(i)%bmin(2), btest(k, 1))])
+         lo(:, i) = min(lo(:, i), w) ; hi(:, i) = max(hi(:, i), w)
+      enddo
+      lo(:, i) = lo(:, i) - 4._R8P * spacing(abs(lo(:, i))) ; hi(:, i) = hi(:, i) + 4._R8P * spacing(abs(hi(:, i)))
+   enddo
+   tol = 1.e-6_R8P * tol ; if (present(tolerance)) tol = tolerance
+   half = 0.5_R8P * tol
+   allocate(cand(2, n * (n - 1) / 2), bound(n * (n - 1) / 2)) ; nc = 0_I4P
+   do i = 1, n
+      if (curves(i)%nv == 0) cycle
+      do j = i + 1, n
+         if (curves(j)%nv == 0) cycle
+         if (any(lo(:, j) - mu(j) - half > hi(:, i) + mu(i) + half) .or. &
+             any(lo(:, i) - mu(i) - half > hi(:, j) + mu(j) + half)) cycle
+         g = norm2(max(0._R8P, lo(:, j) - hi(:, i), lo(:, i) - hi(:, j)))
+         nc = nc + 1_I4P ; cand(:, nc) = [i, j]
+         if (mu(i) + mu(j) > 0._R8P) then
+            bound(nc) = max(0._R8P, g - tol) / (mu(i) + mu(j))
+         else
+            bound(nc) = merge(0._R8P, huge(1._R8P), g <= tol)
+         endif
+      enddo
+   enddo
+   allocate(order(nc))
+   do k = 1, nc
+      order(k) = k ; m = k
+      do while (m > 1)
+         if (bound(order(m - 1)) < bound(order(m)) .or. (bound(order(m - 1)) == bound(order(m)) .and. &
+             order(m - 1) < order(m))) exit
+         order([m - 1, m]) = order([m, m - 1]) ; m = m - 1
+      enddo
+   enddo
+   do k = 1, nc
+      m = order(k)
+      if (bound(m) > toi) exit
+      i = cand(1, m) ; j = cand(2, m)
+      call curves(i)%time_of_impact(curves(j), poses0(i), poses1(i), poses0(j), poses1(j), t, st, tolerance=tol, &
+                                    directional=directional)
+      ntest = ntest + 1_I4P
+      if (st == CCD_SEPARATE) cycle
+      if (t < toi .or. (t == toi .and. (status == CCD_SEPARATE .or. i < pair(1) .or. &
+                                        (i == pair(1) .and. j < pair(2))))) then
+         toi = t ; pair = [i, j] ; status = st
+      endif
+   enddo
+   if (present(tested)) tested = ntest
+   endsubroutine first_impact_2d
 
    subroutine segment_pair(a0, a1, b0, b1, d2, pa, pb, meet)
    !< Squared distance between segments (a0, a1) and (b0, b1) with witness points; 0 and `meet` when they cross or touch

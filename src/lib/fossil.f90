@@ -60,13 +60,14 @@ use fossil_thickness, only : THICKNESS_RAY, THICKNESS_MEDIAL, THICKNESS_DEFAULT_
                             THICKNESS_DEFAULT_SEPARATION
 use fossil_deviation, only : DEV_STATUS_OK, DEV_STATUS_BAD_INPUT, DEV_STATUS_NOT_CONVERGED
 use fossil_box_query, only : BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
-use fossil_curve_object, only : curve_object, cut_cells_2d_t, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, &
+use fossil_curve_object, only : curve_object, first_impact_2d, cut_cells_2d_t, CURVE_VALID, CURVE_TOO_FEW_VERTICES, &
+                               CURVE_ZERO_LENGTH_SEGMENT, &
                                CURVE_ZERO_AREA_LOOP, CURVE_WRONG_ORIENTATION, CURVE_OPEN_LOOP, CURVE_SELF_INTERSECTING
 
 implicit none
 private
 public :: facet_object
-public :: surface_stl_object, proximity_pairs_of
+public :: surface_stl_object, proximity_pairs_of, first_impact
 public :: distance_field_object, FAR_VALUE
 public :: slice_surface
 public :: cut_cells_3d_t, cut_cells_3d
@@ -95,7 +96,8 @@ public :: inertia_to_world, principal_frame
 public :: FEATURE_EDGE_SHARP, FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, FEATURE_EDGE_DEFAULT_ANGLE
 public :: DEV_STATUS_OK, DEV_STATUS_BAD_INPUT, DEV_STATUS_NOT_CONVERGED
 public :: THICKNESS_RAY, THICKNESS_MEDIAL, THICKNESS_DEFAULT_CONE, THICKNESS_DEFAULT_RAYS, THICKNESS_DEFAULT_SEPARATION
-public :: curve_object, cut_cells_2d_t, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, CURVE_ZERO_AREA_LOOP, &
+public :: curve_object, first_impact_2d, cut_cells_2d_t, CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, &
+          CURVE_ZERO_AREA_LOOP, &
           CURVE_WRONG_ORIENTATION, CURVE_OPEN_LOOP, CURVE_SELF_INTERSECTING
 public :: intersection_pair_t, SELFINT_CROSSING, SELFINT_TOUCHING, SELFINT_COPLANAR, SELFINT_EDGE_FOLD, SELFINT_SHEETS
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
