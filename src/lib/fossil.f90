@@ -40,7 +40,14 @@ use fossil_block_locate, only : LOC_INSIDE, LOC_OUTSIDE, LOC_WARPED, LOC_DEGENER
 use fossil_block_stencil, only : STENCIL_CENTRED, STENCIL_SHIFTED, STENCIL_REDUCED, STENCIL_FAILED, STENCIL_MAX
 use fossil_block_geometry, only : CELL_VALID, CELL_SINGULAR, CELL_INVALID, CELL_UNDETERMINED
 use fossil_overset, only : wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2d, block_logical_t, block_real_t, &
-                           hole_map, hole_map_2d, xray_flags, xray_flags_2d
+                           hole_map, hole_map_2d, xray_flags, xray_flags_2d, donor_set_t, overlap_matrix, &
+                           overlap_matrix_2d, donor_candidates, donor_candidates_2d, PAIR_NONE, PAIR_OVERLAP, PAIR_SHARED, &
+                           overset_mask_t, classify, classify_2d, SELECT_EXPLICIT, SELECT_IMPLICIT, fringe_levels, &
+                           fringe_levels_2d, overlap_width, overlap_width_2d, ORPHAN_NONE, ORPHAN_NO_CANDIDATE, &
+                           ORPHAN_STENCIL_HOLE, ORPHAN_RECEPTOR_DONOR, ORPHAN_BOUNDARY, ORPHAN_WALL, FRINGE_INNER_1, &
+                           FRINGE_INNER_2, FRINGE_OUTER_1, FRINGE_OUTER_2, wall_projection, wall_projection_2d, &
+                           exposed_points, connectivity_t, build_connectivity, save_connectivity, &
+                           cell_centre_block, cell_centre_block_2d
 use fossil_rigid_pose, only : rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, &
                              pose_2d, pose_compose, pose_inverse, to_body, to_world, rotate, pose_interpolate
 use fossil_swept_cells, only : swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
@@ -71,6 +78,12 @@ public :: locate_in_blocks, locate_in_blocks_2d, LOC_INSIDE, LOC_OUTSIDE, LOC_WA
 public :: STENCIL_CENTRED, STENCIL_SHIFTED, STENCIL_REDUCED, STENCIL_FAILED, STENCIL_MAX
 public :: wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2d, block_logical_t, block_real_t
 public :: hole_map, hole_map_2d, xray_flags, xray_flags_2d
+public :: donor_set_t, overlap_matrix, overlap_matrix_2d, donor_candidates, donor_candidates_2d, PAIR_NONE, PAIR_OVERLAP
+public :: PAIR_SHARED, overset_mask_t, classify, classify_2d, SELECT_EXPLICIT, SELECT_IMPLICIT, fringe_levels
+public :: fringe_levels_2d, overlap_width, overlap_width_2d, ORPHAN_NONE, ORPHAN_NO_CANDIDATE, ORPHAN_STENCIL_HOLE
+public :: ORPHAN_RECEPTOR_DONOR, ORPHAN_BOUNDARY, ORPHAN_WALL, FRINGE_INNER_1, FRINGE_INNER_2, FRINGE_OUTER_1, FRINGE_OUTER_2
+public :: wall_projection, wall_projection_2d, exposed_points, connectivity_t, build_connectivity, save_connectivity
+public :: cell_centre_block, cell_centre_block_2d
 public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose
 public :: pose_inverse, to_body, to_world, rotate, pose_interpolate
 public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01

@@ -60,8 +60,9 @@ Three families (`methods/hole-cutting.md`), all measured against the first:
 | `xray_flags` | object X-rays (Meakin): the exact crossings of the wall along a raster of lines parallel to an axis; a point takes the parity of the crossings below it on the nearest ray | no: wrong only within the raster spacing of the wall |
 
 A point exactly on the wall is a field point (signed distance 0 is not inside), so a body-fitted block never blanks
-its own wall. Which cutter cuts which block is the caller's choice; the default lets a cutter cut every block except
-those that contributed its patches.
+its own wall. Which cutter cuts which block is the caller's choice (`cuts=`, default every block). Pass the blocks
+that contributed the cutter's patches as not cut when they move with a pose: their wall vertices, mapped to the world
+frame and back, land off the wall by round-off and would be blanked.
 
 ## Donor candidates
 
@@ -87,8 +88,9 @@ device the blocks are entered once (`enter_device`) and every block pair runs th
 - **implicit** (Lee & Baeder, `methods/implicit-hole-cutting.md`): a point receives when a candidate's donor cell is
   smaller than its own cells; overlap-boundary points always receive; points within a wall-normal immunity layer
   never receive;
-- **wall distance** (Oh et al. 2024, `methods/wall-distance-hole-cutting.md`): a point receives from the block in
-  which it is closer to the wall, relative to the block's wall spacing.
+- **wall distance** (Oh et al. 2024, `methods/wall-distance-hole-cutting.md`): `donor_candidates(..., wall=)`
+  returns the exact wall distance of every vertex, so a caller can classify by it before the donor search; FOSSIL
+  does not fix the threshold (a policy).
 
 A receptor is **valid** when its donor stencil of width q (WP2's stencils) holds no hole, and, for explicit
 interpolation, no receptor either (Chesshire & Henshaw); an invalid candidate gives way to the next one. Validity
@@ -133,6 +135,39 @@ search and weights only; the grid is never moved.
 and vertex, donor block, stencil corner, ξ, width per direction, low-order flag, quality); `save_connectivity` writes
 it as plain text, one receptor per line, in the form the founding codes share (`definitions/domain-connectivity.md`).
 
+## API
+
+```fortran
+call wall_cutter(blocks, cutter, gap=gap, shared=shared)                  ! 2-D: wall_cutter_2d -> curve_object
+call hole_flags(blocks, cutter, holes, offset=0, cuts=cuts, device=.true.) ! exact; or hole_map / xray_flags
+call blocks(b)%build_search()                                             ! every block, then (device) enter_device
+call overlap_matrix(blocks, pair, shared=shared)
+call donor_candidates(blocks, donors, pair=pair, wall=cutter, device=, shifts=, poses=, previous=)
+call classify(blocks, donors, masks, SELECT_EXPLICIT, q, holes=holes, layers=, immune=, explicit_interpolation=)
+call fringe_levels(blocks, masks) ; call overlap_width(blocks, masks, d)
+call wall_projection(blocks, a, b, shift, max_distance)                    ! shifts(a, b)%v = shift
+call exposed_points(masks_old, masks_new, exposed, violations)
+call build_connectivity(masks, donors, q, 3, conn) ; call save_connectivity(conn, 'connectivity.txt')
+```
+
+The mask `masks(b)%iota(v)` is 1 (field), 0 (hole) or −k (receptor from block k) at the linear vertex index v (i
+fastest); `masks(b)%donor(v)` is the chosen candidate in `donors(b)`, `orphan(v)` an `ORPHAN_*` cause, `fringe(v)` a
+`FRINGE_*` level. A cell-centred solver passes the blocks of its cell centres.
+
+## Measured
+
+- `fossil_test_overset_*`: holes equal to exact inside tests (2-D, 3-D, device = CPU); the hole map with the crossing
+  parity equal to the exact flags, PEGASUS 5's line of sight missing 12 holes in a lens 0.008 thick on 0.06 elements;
+  candidates equal to a brute force; the cylinder's receptor rings exact; circular pairs counted one per row; each
+  orphan cause produced on purpose; overlap width of concentric annuli 0.5; the projection removes the concave-wall
+  orphans and puts convex-wall donors on the wall (η below 1e-7); the incremental search equal to the search from
+  scratch, bit for bit; a 0.6 h step exposes points without a hole becoming a field point, a 3.6 h step does.
+- `fossil_val_overset`: interpolation through the assembly converges at the stencil width, q = 2, 3, 4 at orders 2.0,
+  3.2, 4.4 (a smooth function) and 2.0, 3.2, 4.5 (an isentropic vortex across the overlap), no orphan; a spherical
+  shell of 64 × 32 × 16 cells in a 49³ background assembles in about 1.2 s on one core (holes 1.1 s, candidates 0.09
+  s, classification 0.05 s).
+- GPU (RTX 4070): hole flags and donor candidates equal to the CPU, bit for bit.
+
 ## Proved and measured
 
 | Claim | Kind |
@@ -140,8 +175,8 @@ it as plain text, one receptor per line, in the form the founding codes share (`
 | hole flags on closed walls | exact (winding number), CPU = device bit for bit |
 | hole map with crossing parity, X-rays on their rays | exact; X-rays between rays measured (errors within the raster spacing) |
 | donor candidates | WP2's location; equal to a brute force; CPU = device bit for bit |
-| classification fixed point | independent of the iteration order (tested); circular pairs detected |
-| interpolation order through the overlap | measured: the rate equals q when the overlap suffices, one order lower with a stencil one point short |
+| classification fixed point | Jacobi iteration, independent of the block order (tested); circular pairs detected |
+| interpolation order through the overlap | measured: the rate equals q (fixed overlap); the order loss of a stencil one point short needs a discretization, left to the solver |
 
 ## Left out
 

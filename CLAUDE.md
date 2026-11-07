@@ -280,6 +280,25 @@ fobis fetch            # --update to re-fetch
   order-matched xi by Newton on the stencil's isoparametric map: q = 4 converges at 4, the trilinear xi caps it at 2).
   `quality` (equiangle skewness, orthogonality, aspect, warp, certified min J / mean J). Validation:
   `fossil_val_curvilinear_block` (spherical shell 128 x 64 x 32 with poles, C-grid 800 x 200).
+- `fossil_overset.f90` — overset assembly kernels (issue #72, roadmap #68 WP3; design in `docs/guide/advanced/overset.md`),
+  on sets of `curvilinear_block_t` / `_2d_t` (points = vertices; cell-centred data: the cell-centre blocks with a ghost
+  or extrapolated layer). `wall_cutter(_2d)`: wall faces (TOPO_BOUNDARY named `wall`) -> surface/curve, shorter
+  diagonal, solid inside, overlapping patches trimmed (coarser patch's elements whose centroid lies within the
+  tolerance of the finer patch dropped; `shared` walls). `hole_flags(_2d)`: FWN signed distance < offset (on the wall:
+  field), CPU/device bit-exact, `cuts=` (exclude the posed owner blocks), `poses=`/`cutter_pose=`. `hole_map(_2d)`:
+  Cartesian map, exact BOX_CUT, paint from corners, line of sight along a grid axis with exact crossing parity (exact;
+  `pegasus=.true.` shows PEGASUS 5's thin-body failure); `xray_flags(_2d)`. `donor_candidates(_2d)`: all candidates per
+  vertex (WP2 location per block pair; `device=` with block `enter_device` persistent state; `shifts=` wall
+  projection; `poses=`; `previous=` walks), quality (donor/receptor volume, ratio, certified min J), wall distance;
+  `overlap_matrix` (PAIR_NONE/OVERLAP/SHARED). `classify(_2d)`: SELECT_EXPLICIT (hole rings) / SELECT_IMPLICIT
+  (ratio < 1), mandatory = faces named `overlap`, immune wall layers, stencil validity (no hole; explicit: no receptor,
+  mandatory vertices count as receptors), Jacobi fixed point (block-order independent), circular pairs; iota 1 / 0 /
+  -k, orphans ORPHAN_* by cause. `fringe_levels` (SUGGAR node rules), `overlap_width` (Chesshire's d),
+  `wall_projection(_2d)` (shift to the donor wall, nudged 1e-9 into the fluid, linear decay), `exposed_points`
+  (Meakin & Suhs violations), `connectivity_t` / `build_connectivity` / `save_connectivity`. Bench lines `hole flags`
+  and `donor candidates device vs serial mismatches`. Validation `fossil_val_overset` (twilight-zone orders q through
+  a cylinder assembly; 3-D sphere assembly timed). nvfortran 26.9: no self-referencing array growth
+  (`v = reshape(v, ..., pad=v)` corrupted the heap).
 - `fossil_implicit_points.f90` — implicit points and exact predicates on them (issue #65, the boolean's exact
   arrangement): `implicit_point_t` of kind `IPK_EXPLICIT` (input vertex), `IPK_LPI` (line p,q meets plane r,s,t),
   `IPK_SSI` (coplanar segments meeting, solved in the projection dropping `drop`), canonical input order (one

@@ -72,6 +72,8 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 | Curvilinear structured blocks: topology records (seams, cuts, poles, periodic, interfaces) and their detection | `curvilinear_block_t`, `curvilinear_block_2d_t`, `detect_topology` | [Curvilinear blocks](/guide/advanced/curvilinear-blocks) | |
 | Exact cell geometry, certified cell validity, quality metrics | `geometry`, `validity`, `quality` | [Curvilinear blocks](/guide/advanced/curvilinear-blocks) | |
 | Point location in curvilinear blocks (robust, walking, GPU) and Lagrange stencils of width q | `locate_many`, `locate_many_device`, `locate_in_blocks`, `stencils` | [Curvilinear blocks](/guide/advanced/curvilinear-blocks) | |
+| Overset cutters and hole cutting: wall cutters with trimming, exact hole flags (CPU and GPU), hole maps, X-rays | `wall_cutter`, `hole_flags`, `hole_map`, `xray_flags` | [Overset assembly](/guide/advanced/overset) | |
+| Overset donors and classification: candidates with quality (CPU and GPU), pair matrix, explicit and implicit selection, fringes, orphans by cause, overlap width, wall projection, moving grids, connectivity output | `donor_candidates`, `classify`, `fringe_levels`, `wall_projection`, `exposed_points`, `build_connectivity` | [Overset assembly](/guide/advanced/overset) | |
 | Rigid poses, body-frame queries, O(N) tree refit | `rigid_pose_t`, `pose=`, `move` | [Moving bodies](/guide/advanced/moving-bodies) | [11](/manual/tutorial/11-moving-bodies) |
 | Swept geometry of a time step: exact swept volumes, time-averaged apertures | `swept_cells_2d`, `swept_cells_3d` | [Moving bodies](/guide/advanced/moving-bodies) | [11](/manual/tutorial/11-moving-bodies) |
 

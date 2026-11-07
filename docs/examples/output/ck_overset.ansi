@@ -1,0 +1,5 @@
+$ ck_overset
+background: holes 137, receptors 56
+O-grid: receptors 33, orphans 0
+INNER 1 fringe 56, receptor list 89
+first receptor: block 1, donor cell 34 20  1, xi  0.3333  1.0000

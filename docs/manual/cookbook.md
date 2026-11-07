@@ -228,6 +228,21 @@ after the seam. The width-4 stencil reaches across the seam through the record (
 weights use the order-matched ξ, so the interpolation is fourth order on the curved grid. 3-D blocks
 (`curvilinear_block_t`) work the same way. See [Curvilinear blocks](/guide/advanced/curvilinear-blocks).
 
+### Assemble an overset grid
+
+<<< @/examples/snippets/ck_overset.f90
+
+<<< @/examples/output/ck_overset.ansi{ansi}
+
+![a cylinder O-grid over a Cartesian background: the background vertices inside the cylinder are holes, the ring around them receives from the O-grid, the O-grid's outer ring receives from the background](../examples/images/ck-overset.svg){.fossil-figure}
+
+The O-grid's wall becomes the cutter, which blanks the background vertices inside the cylinder (the O-grid itself is
+not cut: `cuts`). Every vertex is located in the other block, and `classify_2d` picks the donors: the ring of
+background vertices next to the holes and the O-grid's `overlap` boundary receive, from stencils of width 3 that hold
+no hole and no receptor. No vertex is left an orphan; `build_connectivity` lists the 89 receptors with their donor
+cells and local coordinates, as a flow solver reads them. FOSSIL does not choose the assembly policy: the rule, the
+stencil width and the fringe depth are the caller's. See [Overset assembly](/guide/advanced/overset).
+
 ## Curves
 
 ### Cut a 2-D section of an STL

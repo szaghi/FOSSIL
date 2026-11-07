@@ -66,6 +66,16 @@ module fossil_overset
 !< previous donor cell in that block (WP2's walk, which returns what the robust path returns, bit for bit).
 !< `exposed_points` lists the vertices that were holes or receptors and became field points, and counts the holes
 !< that became field points without being receptors first (D(n+1) and H(n) must not meet).
+!<
+!< Connectivity (`build_connectivity`, `save_connectivity`): the classes and, per receptor, the donor block, the
+!< donor cell (the stencil corner cell), xi, the width per direction and the volume ratio, written as plain text
+!< (one receptor per line), the form the founding codes share.
+!<
+!< Cell-centred data (`cell_centre_block`, `cell_centre_block_2d`): the block of the cell centres of a block, with the
+!< outer layer on its boundary: dual vertex (i, j, k), i = 1..ni+1, is the mean of the vertices i-1..i (clamped to
+!< 1..ni) in each direction, so the interior vertices are the cell centres (vertex means), the boundary layer the face
+!< centres, the edge midpoints and the corners: the dual block covers the whole block. A solver with ghost cells
+!< passes its own cell centres instead.
 use penf,                      only : I4P, R8P
 use vecfor,                    only : vector_R8P
 use fossil_facet_object,       only : facet_object
@@ -90,6 +100,7 @@ public :: fringe_levels, fringe_levels_2d, overlap_width, overlap_width_2d
 public :: ORPHAN_NONE, ORPHAN_NO_CANDIDATE, ORPHAN_STENCIL_HOLE, ORPHAN_RECEPTOR_DONOR, ORPHAN_BOUNDARY, ORPHAN_WALL
 public :: FRINGE_INNER_1, FRINGE_INNER_2, FRINGE_OUTER_1, FRINGE_OUTER_2
 public :: wall_projection, wall_projection_2d, exposed_points
+public :: connectivity_t, build_connectivity, save_connectivity, cell_centre_block, cell_centre_block_2d
 
 integer(I4P), parameter :: ORPHAN_NONE           = 0_I4P !< Not an orphan.
 integer(I4P), parameter :: ORPHAN_NO_CANDIDATE   = 1_I4P !< No donor cell anywhere: insufficient overlap.
@@ -152,6 +163,20 @@ type :: cls_t
    integer(I4P), allocatable :: order(:)         !< Candidates of each vertex in preference order [nc].
    integer(I4P), allocatable :: nodes(:,:)       !< Donor stencil nodes (linear, 0 unused) [q^d, nc].
 endtype cls_t
+
+type :: connectivity_t
+   !< The standard output of an assembly: the classes per block and the receptor list.
+   type(overset_mask_t), allocatable :: masks(:)           !< Classes per block.
+   integer(I4P)                      :: n = 0_I4P          !< Receptors.
+   integer(I4P),         allocatable :: receptor_block(:)  !< Receptor block [n].
+   integer(I4P),         allocatable :: receptor_vertex(:) !< Receptor vertex (linear index) [n].
+   integer(I4P),         allocatable :: donor_block(:)     !< Donor block [n].
+   integer(I4P),         allocatable :: corner(:,:)        !< Donor cell (stencil corner cell) [3, n].
+   real(R8P),            allocatable :: xi(:,:)            !< Local coordinates in the donor cell [3, n].
+   integer(I4P),         allocatable :: width(:,:)         !< Stencil width per direction [3, n].
+   logical,              allocatable :: low_order(:)       !< Width below the requested q [n].
+   real(R8P),            allocatable :: quality(:)         !< Donor / receptor volume ratio [n].
+endtype connectivity_t
 
 type :: ray_t
    !< Exact crossings of one X-ray.
@@ -1891,6 +1916,106 @@ contains
       enddo
    enddo
    endsubroutine wall_projection_2d
+
+   ! ---------------------------------------------------------------------------------------------------- connectivity
+   subroutine build_connectivity(masks, donors, q, dm, conn)
+   !< The receptor list of a classification (q: the stencil width used; dm: 2 or 3).
+   type(overset_mask_t), intent(in)  :: masks(:)  !< Classes.
+   type(donor_set_t),    intent(in)  :: donors(:) !< Candidates.
+   integer(I4P),         intent(in)  :: q, dm     !< Width, dimension.
+   type(connectivity_t), intent(out) :: conn      !< Connectivity.
+   integer(I4P)                      :: a, v, c, n !< Counters.
+
+   conn%masks = masks ; n = 0_I4P
+   do a = 1, size(masks, kind=I4P)
+      n = n + count(masks(a)%iota < 0 .and. masks(a)%donor > 0)
+   enddo
+   conn%n = n
+   allocate(conn%receptor_block(n), conn%receptor_vertex(n), conn%donor_block(n), conn%corner(3, n), conn%xi(3, n), &
+            conn%width(3, n), conn%low_order(n), conn%quality(n))
+   conn%corner = 1_I4P ; conn%xi = 0._R8P ; conn%width = 1_I4P ; n = 0_I4P
+   do a = 1, size(masks, kind=I4P)
+      do v = 1, size(masks(a)%iota, kind=I4P)
+         if (masks(a)%iota(v) >= 0 .or. masks(a)%donor(v) <= 0) cycle
+         n = n + 1_I4P ; c = masks(a)%donor(v)
+         conn%receptor_block(n) = a ; conn%receptor_vertex(n) = v ; conn%donor_block(n) = donors(a)%block(c)
+         conn%corner(1:dm, n) = donors(a)%cell(1:dm, c) ; conn%xi(1:dm, n) = donors(a)%xi(1:dm, c)
+         conn%width(1:dm, n) = q ; conn%low_order(n) = .false. ; conn%quality(n) = donors(a)%ratio(c)
+      enddo
+   enddo
+   endsubroutine build_connectivity
+
+   subroutine save_connectivity(conn, file_name, status)
+   !< Write the connectivity as plain text: a header with the counts per block and class, then one receptor per line
+   !< (receptor block, vertex, donor block, corner i j k, xi(3), width(3), low order, quality).
+   type(connectivity_t), intent(in)            :: conn      !< Connectivity.
+   character(*),         intent(in)            :: file_name !< File.
+   integer(I4P),         intent(out), optional :: status    !< 0, or the iostat of the open.
+   integer                                     :: u, ios, a, r !< Unit, status, counters.
+
+   open(newunit=u, file=file_name, status='replace', action='write', iostat=ios)
+   if (present(status)) status = int(ios, I4P)
+   if (ios /= 0) return
+   write(u, '(A)') '# FOSSIL overset connectivity (issue #72)'
+   do a = 1, size(conn%masks)
+      write(u, '(A,I0,A,I0,A,I0,A,I0,A,I0)') '# block ', a, ' field ', count(conn%masks(a)%iota == 1), ' holes ', &
+         count(conn%masks(a)%iota == 0), ' receptors ', count(conn%masks(a)%iota < 0), ' orphans ', &
+         count(conn%masks(a)%orphan > 0)
+   enddo
+   write(u, '(A,I0)') '# receptors ', conn%n
+   do r = 1, conn%n
+      write(u, '(3(I0,1X),3(I0,1X),3(ES24.16,1X),3(I0,1X),L1,1X,ES24.16)') conn%receptor_block(r), &
+         conn%receptor_vertex(r), conn%donor_block(r), conn%corner(:, r), conn%xi(:, r), conn%width(:, r), &
+         conn%low_order(r), conn%quality(r)
+   enddo
+   close(u)
+   endsubroutine save_connectivity
+
+   ! ------------------------------------------------------------------------------------------- cell-centred blocks
+   subroutine cell_centre_block(blk, dual)
+   !< The block of the cell centres of a 3-D block, with its boundary layer (module notes).
+   type(curvilinear_block_t), intent(in)    :: blk  !< Block.
+   type(curvilinear_block_t), intent(inout) :: dual !< Dual block.
+   real(R8P), allocatable                   :: x(:,:,:), y(:,:,:), z(:,:,:) !< Dual vertices.
+   integer(I4P)                             :: i, j, k, i0, i1, j0, j1, k0, k1 !< Counters.
+   real(R8P)                                :: w !< Weight.
+
+   allocate(x(blk%ni + 1, blk%nj + 1, blk%nk + 1), y(blk%ni + 1, blk%nj + 1, blk%nk + 1), &
+            z(blk%ni + 1, blk%nj + 1, blk%nk + 1))
+   do k = 1, blk%nk + 1
+      k0 = max(k - 1_I4P, 1_I4P) ; k1 = min(k, blk%nk)
+      do j = 1, blk%nj + 1
+         j0 = max(j - 1_I4P, 1_I4P) ; j1 = min(j, blk%nj)
+         do i = 1, blk%ni + 1
+            i0 = max(i - 1_I4P, 1_I4P) ; i1 = min(i, blk%ni)
+            w = 1._R8P / ((i1 - i0 + 1) * (j1 - j0 + 1) * (k1 - k0 + 1))
+            x(i, j, k) = w * sum(blk%x(i0:i1, j0:j1, k0:k1)) ; y(i, j, k) = w * sum(blk%y(i0:i1, j0:j1, k0:k1))
+            z(i, j, k) = w * sum(blk%z(i0:i1, j0:j1, k0:k1))
+         enddo
+      enddo
+   enddo
+   call dual%initialize(x, y, z, name=blk%name // '_cells')
+   endsubroutine cell_centre_block
+
+   subroutine cell_centre_block_2d(blk, dual)
+   !< The block of the cell centres of a 2-D block, with its boundary layer (module notes).
+   type(curvilinear_block_2d_t), intent(in)    :: blk  !< Block.
+   type(curvilinear_block_2d_t), intent(inout) :: dual !< Dual block.
+   real(R8P), allocatable                      :: u(:,:), v(:,:) !< Dual vertices.
+   integer(I4P)                                :: i, j, i0, i1, j0, j1 !< Counters.
+   real(R8P)                                   :: w !< Weight.
+
+   allocate(u(blk%ni + 1, blk%nj + 1), v(blk%ni + 1, blk%nj + 1))
+   do j = 1, blk%nj + 1
+      j0 = max(j - 1_I4P, 1_I4P) ; j1 = min(j, blk%nj)
+      do i = 1, blk%ni + 1
+         i0 = max(i - 1_I4P, 1_I4P) ; i1 = min(i, blk%ni)
+         w = 1._R8P / ((i1 - i0 + 1) * (j1 - j0 + 1))
+         u(i, j) = w * sum(blk%u(i0:i1, j0:j1)) ; v(i, j) = w * sum(blk%v(i0:i1, j0:j1))
+      enddo
+   enddo
+   call dual%initialize(u, v, name=blk%name // '_cells')
+   endsubroutine cell_centre_block_2d
 
    ! ------------------------------------------------------------------------------------------------------- utilities
    pure function pt3(blk, p) result(x)
