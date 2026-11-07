@@ -17,6 +17,10 @@ module fossil_ccd
 !< time). Each step with d_k > tol advances at least tol / (2 mu): at most ceiling(2 mu / tol) steps. The distance
 !< comes from an extension of `ccd_evaluator_t` (no body type here; an internal procedure as actual argument made
 !< gfortran put trampolines on an executable stack, issue #60).
+!<
+!< `directional=.true.`: the evaluator's `safe_step` (C2A's per-pair directional bound, e.g. `body_safe_step`) gives a
+!< second certified step from s_k; the loop takes the larger of the two, so it never takes more steps than the plain
+!< bound. The default `safe_step` gives none.
 use penf,              only : I4P, R8P
 use fossil_rigid_pose, only : rigid_pose_t, rigid_pose_2d_t, pose_log_3d, pose_angle_2d
 
@@ -36,7 +40,8 @@ integer(I4P), parameter :: CCD_MAX_ITERATIONS  = 1000_I4P !< Default iteration c
 type, abstract :: ccd_evaluator_t
    !< Distance between two moving bodies at the step parameter s (extended by the caller).
    contains
-      procedure(ccd_eval_interface), deferred, pass(self) :: distance !< d(s).
+      procedure(ccd_eval_interface), deferred, pass(self) :: distance  !< d(s).
+      procedure,                           pass(self) :: safe_step => ccd_safe_step_none !< Directional step (none).
 endtype ccd_evaluator_t
 
 abstract interface
@@ -50,7 +55,7 @@ abstract interface
 endinterface
 
 contains
-   subroutine ccd_advance(evaluator, mu, tolerance, toi, status, distance, iterations, max_iterations)
+   subroutine ccd_advance(evaluator, mu, tolerance, toi, status, distance, iterations, max_iterations, directional)
    !< Time of first contact by conservative advancement (see the module notes). The evaluator's last call is at toi
    !< (with mu = 0, at s = 0: d is constant).
    class(ccd_evaluator_t), intent(inout)         :: evaluator      !< Distance d(s).
@@ -61,11 +66,14 @@ contains
    real(R8P),              intent(out), optional :: distance       !< d(toi).
    integer(I4P),           intent(out), optional :: iterations     !< Advancement steps (evaluations after s = 0).
    integer(I4P),           intent(in),  optional :: max_iterations !< Cap (default CCD_MAX_ITERATIONS).
-   real(R8P)                                     :: s, d, s_next, d_next !< Iterates.
+   logical,                intent(in),  optional :: directional    !< Also the evaluator's directional step.
+   real(R8P)                                     :: s, d, s_next, d_next, dt, dt_dir !< Iterates, steps.
+   logical                                       :: dir            !< Directional.
    integer(I4P)                                  :: it, cap        !< Counters.
 
    toi = 0._R8P ; d = huge(1._R8P) ; it = 0_I4P
    cap = CCD_MAX_ITERATIONS ; if (present(max_iterations)) cap = max_iterations
+   dir = .false. ; if (present(directional)) dir = directional
    s = 0._R8P
    if (.not. (tolerance > 0._R8P) .or. .not. (mu >= 0._R8P) .or. cap < 1_I4P) then
       status = CCD_INVALID_INPUT
@@ -78,7 +86,12 @@ contains
       else
          status = CCD_NOT_CONVERGED
          do while (it < cap)
-            s_next = min(1._R8P, s + (d - 0.5_R8P * tolerance) / mu)
+            dt = (d - 0.5_R8P * tolerance) / mu
+            if (dir) then
+               call evaluator%safe_step(s, tolerance, 1._R8P - s, dt_dir)
+               dt = max(dt, dt_dir)
+            endif
+            s_next = min(1._R8P, s + dt)
             if (.not. (s_next > s)) exit ! the step is below the resolution of s: not converged
             it = it + 1_I4P
             call evaluator%distance(s_next, d_next)
@@ -97,6 +110,17 @@ contains
    if (present(distance)) distance = d
    if (present(iterations)) iterations = it
    endsubroutine ccd_advance
+
+   subroutine ccd_safe_step_none(self, s, tolerance, cap, step)
+   !< No directional step (the default): step = -1.
+   class(ccd_evaluator_t), intent(inout) :: self      !< Evaluator.
+   real(R8P),              intent(in)    :: s         !< Step parameter.
+   real(R8P),              intent(in)    :: tolerance !< Contact tolerance.
+   real(R8P),              intent(in)    :: cap       !< Largest step wanted (1 - s).
+   real(R8P),              intent(out)   :: step      !< Safe step.
+
+   step = -1._R8P
+   endsubroutine ccd_safe_step_none
 
    pure function motion_bound_3d(p0, p1, x, y, z) result(mu)
    !< Bound on the speed |dx/ds| of the vertices (x, y, z) (body frame) moved by `pose_interpolate(p0, p1, s)`, s in

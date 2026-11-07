@@ -31,7 +31,7 @@ use fossil_box_query,          only : curve_box_contact_oac, curve_box_thin_oac,
 use fossil_line_query,         only : curve_line_crossings_oac, line_crossing_before_2d
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
 use fossil_cut_moments,        only : MOMENTS_MAX
-use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate, pose_interpolate
+use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate, pose_interpolate, pose_angle_2d
 use fossil_ccd,                only : ccd_evaluator_t, ccd_advance, motion_bound_2d, CCD_INVALID_INPUT
 use fossil_predicates,         only : orient2d_xy
 use fossil_mass_properties,    only : moments_accumulator_t, accumulate_segment, moments_to_properties_2d, symmetric2_eigen
@@ -178,8 +178,12 @@ type, extends(ccd_evaluator_t) :: curve_ccd_evaluator_t
    type(rigid_pose_2d_t)        :: b0, b1      !< Poses of B at s = 0, 1.
    real(R8P)                    :: pa(2) = 0._R8P, pb(2) = 0._R8P !< Witness points of the last call.
    integer(I4P)                 :: sa = 0_I4P, sb = 0_I4P         !< Closest segments of the last call.
+   real(R8P)                    :: tha = 0._R8P, thb = 0._R8P     !< Rotation angles over the step (absolute values).
+   real(R8P)                    :: dta(2) = 0._R8P, dtb(2) = 0._R8P !< Translations over the step.
+   integer(I4P)                 :: pairs = 0_I4P                  !< Segment pairs of the directional steps.
    contains
-      procedure, pass(self) :: distance => curve_ccd_distance !< d(s).
+      procedure, pass(self) :: distance => curve_ccd_distance   !< d(s).
+      procedure, pass(self) :: safe_step => curve_ccd_safe_step !< Directional step (C2A, per segment pair).
 endtype curve_ccd_evaluator_t
 
 type, extends(deviation_evaluator_2d_t) :: curve_evaluator_t
@@ -284,10 +288,12 @@ contains
    endsubroutine distance_to
 
    subroutine time_of_impact(self, other, pose_self0, pose_self1, pose_other0, pose_other1, toi, status, tolerance, &
-                             distance, point_self, point_other, segment_self, segment_other, iterations, max_iterations)
+                             distance, point_self, point_other, segment_self, segment_other, iterations, max_iterations, &
+                             directional, pairs)
    !< Time of first contact of this curve and `other` over a step (issue #73, the 2-D twin of
    !< `surface%time_of_impact`): conservative advancement over `distance_to` along `pose_interpolate`, mu =
    !< motion_bound_2d(self) + motion_bound_2d(other). Default tolerance: 1e-6 of the larger bounding-box diagonal.
+   !< `directional=.true.` adds the per-segment-pair directional step; `pairs` counts its exact pair evaluations.
    class(curve_object),   intent(in), target    :: self           !< Curve A.
    class(curve_object),   intent(in), target    :: other          !< Curve B.
    type(rigid_pose_2d_t), intent(in)            :: pose_self0, pose_self1   !< Poses of A at s = 0, 1.
@@ -300,6 +306,8 @@ contains
    integer(I4P),          intent(out), optional :: segment_self, segment_other   !< Closest segments at toi.
    integer(I4P),          intent(out), optional :: iterations     !< Advancement steps.
    integer(I4P),          intent(in),  optional :: max_iterations !< Cap (default CCD_MAX_ITERATIONS).
+   logical,               intent(in),  optional :: directional    !< Directional step too (default .false.).
+   integer(I4P),          intent(out), optional :: pairs          !< Exact pair evaluations of the directional steps.
    type(curve_ccd_evaluator_t)                  :: ev             !< Distance at s.
    real(R8P)                                    :: mu, tol, d     !< Bound, tolerance, distance.
 
@@ -313,8 +321,15 @@ contains
       if (present(tolerance)) tol = tolerance
       ev%a => self ; ev%b => other
       ev%a0 = pose_self0 ; ev%a1 = pose_self1 ; ev%b0 = pose_other0 ; ev%b1 = pose_other1
-      call ccd_advance(ev, mu, tol, toi, status, distance=d, iterations=iterations, max_iterations=max_iterations)
+      ev%tha = abs(atan2(sin(pose_angle_2d(pose_self1) - pose_angle_2d(pose_self0)), &
+                         cos(pose_angle_2d(pose_self1) - pose_angle_2d(pose_self0))))
+      ev%thb = abs(atan2(sin(pose_angle_2d(pose_other1) - pose_angle_2d(pose_other0)), &
+                         cos(pose_angle_2d(pose_other1) - pose_angle_2d(pose_other0))))
+      ev%dta = pose_self1%t - pose_self0%t ; ev%dtb = pose_other1%t - pose_other0%t
+      call ccd_advance(ev, mu, tol, toi, status, distance=d, iterations=iterations, max_iterations=max_iterations, &
+                       directional=directional)
    endif
+   if (present(pairs)) pairs = ev%pairs
    if (present(distance)) distance = d
    if (present(point_self)) point_self = ev%pa
    if (present(point_other)) point_other = ev%pb
@@ -2534,6 +2549,51 @@ contains
                            segment_other=self%sb, pose_self=pose_interpolate(self%a0, self%a1, s), &
                            pose_other=pose_interpolate(self%b0, self%b1, s))
    endsubroutine curve_ccd_distance
+
+   subroutine curve_ccd_safe_step(self, s, tolerance, cap, step)
+   !< The directional safe step at s (issue #73): over the segment pairs (each convex), the gap along the witness
+   !< direction n closes at most at c = n . (dt_a - dt_b) + |theta_a| rho_a + |theta_b| rho_b (rho: the larger |x_b| of the
+   !< segment's ends, the distance to the rotation centre); the pair's step is (d - tol / 2) / c. Pairs whose plain step
+   !< (box distance over the plain speed) is already >= the best are skipped.
+   class(curve_ccd_evaluator_t), intent(inout) :: self      !< Evaluator.
+   real(R8P),                    intent(in)    :: s         !< Step parameter.
+   real(R8P),                    intent(in)    :: tolerance !< Contact tolerance.
+   real(R8P),                    intent(in)    :: cap       !< Largest step wanted (1 - s).
+   real(R8P),                    intent(out)   :: step      !< Safe step.
+   type(rigid_pose_2d_t)                       :: pa, pb    !< Current poses.
+   real(R8P)                                   :: a0(2), a1(2), b0(2), b1(2), ra, rb, c, g, d2, qa(2), qb(2), d, n(2), half
+   integer(I4P)                                :: i, j      !< Segments.
+   logical                                     :: hit       !< Contact.
+
+   pa = pose_interpolate(self%a0, self%a1, s) ; pb = pose_interpolate(self%b0, self%b1, s)
+   step = cap ; half = 0.5_R8P * tolerance
+   do i = 1, self%a%nv
+      if (self%a%next(i) == 0) cycle
+      ra = max(hypot(self%a%u(i), self%a%v(i)), hypot(self%a%u(self%a%next(i)), self%a%v(self%a%next(i))))
+      a0 = to_world(pa, [self%a%u(i), self%a%v(i)])
+      a1 = to_world(pa, [self%a%u(self%a%next(i)), self%a%v(self%a%next(i))])
+      do j = 1, self%b%nv
+         if (self%b%next(j) == 0) cycle
+         rb = max(hypot(self%b%u(j), self%b%v(j)), hypot(self%b%u(self%b%next(j)), self%b%v(self%b%next(j))))
+         b0 = to_world(pb, [self%b%u(j), self%b%v(j)])
+         b1 = to_world(pb, [self%b%u(self%b%next(j)), self%b%v(self%b%next(j))])
+         c = norm2(self%dta) + norm2(self%dtb) + self%tha * ra + self%thb * rb
+         if (.not. (c > 0._R8P)) cycle ! the pair does not move: its distance stays above tol (d_k > tol)
+         g = sqrt(max(0._R8P, min(b0(1), b1(1)) - max(a0(1), a1(1)), min(a0(1), a1(1)) - max(b0(1), b1(1)))**2 + &
+                  max(0._R8P, min(b0(2), b1(2)) - max(a0(2), a1(2)), min(a0(2), a1(2)) - max(b0(2), b1(2)))**2)
+         if ((g - half) / c >= step) cycle
+         self%pairs = self%pairs + 1_I4P
+         call segment_pair(a0, a1, b0, b1, d2, qa, qb, hit)
+         d = sqrt(d2)
+         if (hit .or. d <= half) then
+            step = 0._R8P ; return
+         endif
+         n = (qb - qa) / d
+         c = dot_product(n, self%dta - self%dtb) + self%tha * ra + self%thb * rb
+         if (c > 0._R8P) step = min(step, (d - half) / c)
+      enddo
+   enddo
+   endsubroutine curve_ccd_safe_step
 
    subroutine load_from_file(self, file_name, normal_axis, status)
    !< Load the curve from the ASCII loop format.

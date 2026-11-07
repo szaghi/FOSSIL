@@ -18,13 +18,23 @@ module fossil_body_distance
 !< Poses (step 2): with `pose_a` / `pose_b` the facets are evaluated where `move` would put them (`to_world` of each
 !< vertex, the same bits) and each tree node is bounded by the box of its 8 moved corners, a conservative bound: the
 !< trees are not refitted, and the result equals the one after `move`, bit for bit.
+!<
+!< `body_safe_step` (issue #73, the directional bound of C2A): over the facet pairs of two bodies moving along
+!< `pose_interpolate` (axis k, angle theta, translation dt per body), the largest step that keeps every pair at least
+!< tol / 2 apart, by the separating-plane bound of each pair (a triangle is convex): with the witness direction n from a
+!< to b at distance d_ij, the gap along n bounds d_ij from below at every s and closes at most at c_ij = n . (dt_a -
+!< dt_b) + theta_a rho_a + theta_b rho_b (rho: the largest distance of the triangle's vertices to the rotation axis
+!< through the body origin); the pair's step is (d_ij - tol / 2) / c_ij (unbounded if c_ij <= 0). Node pairs whose
+!< plain bound (box distance - tol / 2) / (mu_a + mu_b), mu = |dt| + theta rho_max(node box), is already >= the best
+!< step are pruned: a pair's directional step is never below its plain one. Depth-first with an explicit stack; the
+!< result (a minimum) does not depend on the visiting order.
 use fossil_aabb_node_object, only : aabb_node_object
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object,     only : facet_object
 use fossil_implicit_points,  only : implicit_point_t, ip_approx
 use fossil_list_id_object,   only : list_id_object
 use fossil_predicates,       only : orient2d_xy
-use fossil_rigid_pose,       only : rigid_pose_t, to_world
+use fossil_rigid_pose,       only : rigid_pose_t, to_world, rotate
 use fossil_triangle_closest, only : triangle_closest_st
 use fossil_tritri_exact,     only : pair_cut, facet_drop, PAIR_SEPARATED, PAIR_COPLANAR
 use penf,                    only : I4P, R8P
@@ -32,7 +42,7 @@ use vecfor,                  only : vector_R8P
 
 implicit none
 private
-public :: tri_tri_distance, body_distance, body_distance_brute, closest_on_triangle, closest_segment_segment
+public :: tri_tri_distance, body_distance, body_distance_brute, closest_on_triangle, closest_segment_segment, body_safe_step
 
 integer(I4P), parameter :: MAX_CHILDREN = 8_I4P   !< Children buffer (octree fan-out).
 real(R8P),    parameter :: PRUNE_REL = 1.e-10_R8P !< Relative margin of the pruning test (bounds are not compared
@@ -410,6 +420,181 @@ contains
       endif
       endfunction heap_less
    endsubroutine body_distance
+
+   subroutine body_safe_step(fa, ta, fb, tb, pose_a, pose_b, ka, tha, dta, kb, thb, dtb, tolerance, cap, step, pairs)
+   !< The directional safe step of two moving bodies at the poses pose_a, pose_b (see the module notes), at most cap.
+   type(facet_object),     intent(in)            :: fa(:), fb(:)   !< Facets (body frames).
+   type(aabb_tree_object), intent(in), target    :: ta, tb         !< Their trees (body frames).
+   type(rigid_pose_t),     intent(in)            :: pose_a, pose_b !< Current poses.
+   real(R8P),              intent(in)            :: ka(3), kb(3)   !< Unit rotation axes over the step.
+   real(R8P),              intent(in)            :: tha, thb       !< Rotation angles over the step (>= 0).
+   real(R8P),              intent(in)            :: dta(3), dtb(3) !< Translations over the step.
+   real(R8P),              intent(in)            :: tolerance      !< Contact tolerance.
+   real(R8P),              intent(in)            :: cap            !< Largest step wanted (1 - s).
+   real(R8P),              intent(out)           :: step           !< Safe step (0 if a pair is within tol / 2).
+   integer(I4P),           intent(out), optional :: pairs          !< Facet pairs evaluated exactly.
+   integer(I4P), allocatable                     :: stk(:, :), tmp(:, :) !< Node-pair stack.
+   integer(I4P)                                  :: ns, na, nb, ca(MAX_CHILDREN), cb(MAX_CHILDREN), nca, ncb, i, j, k, l
+   integer(I4P)                                  :: np             !< Pairs evaluated.
+   type(aabb_node_object), pointer               :: nda, ndb       !< Nodes.
+   type(list_id_object)                          :: la, lb         !< Facet lists.
+   real(R8P)                                     :: half, bound    !< tol / 2, node bound.
+
+   step = cap ; np = 0_I4P ; half = 0.5_R8P * tolerance
+   if (size(fa) > 0 .and. size(fb) > 0) then
+      if (ta%get_nodes_number() <= 0 .or. tb%get_nodes_number() <= 0) then ! no trees: every pair
+         do i = 1, size(fa, kind=I4P)
+            do j = 1, size(fb, kind=I4P)
+               call pair_safe_step(fa, fb, i, j, pose_a, pose_b, ka, tha, dta, kb, thb, dtb, half, step, np)
+            enddo
+         enddo
+      else
+         allocate(stk(2, 64)) ; ns = 1_I4P ; stk(:, 1) = [0_I4P, 0_I4P]
+         do while (ns > 0_I4P .and. step > 0._R8P)
+            na = stk(1, ns) ; nb = stk(2, ns) ; ns = ns - 1_I4P
+            nda => ta%node_at(i=na) ; ndb => tb%node_at(i=nb)
+            bound = node_plain_step(nda, ndb, pose_a, pose_b, ka, tha, dta, kb, thb, dtb, half)
+            if (bound >= step) cycle
+            call ta%enumerate_children(n=na, out_idx=ca, nchild=nca)
+            call tb%enumerate_children(n=nb, out_idx=cb, nchild=ncb)
+            if (nca == 0 .and. ncb == 0) then
+               if (.not. nda%has_facets() .or. .not. ndb%has_facets()) cycle
+               la = nda%facet_id() ; lb = ndb%facet_id()
+               do k = 1, la%ids_number
+                  do l = 1, lb%ids_number
+                     call pair_safe_step(fa, fb, la%id(k), lb%id(l), pose_a, pose_b, ka, tha, dta, kb, thb, dtb, half, &
+                                         step, np)
+                  enddo
+               enddo
+            else
+               if (ns + max(nca, ncb) > size(stk, 2)) then
+                  allocate(tmp(2, 2 * size(stk, 2) + max(nca, ncb))) ; tmp(:, 1:ns) = stk(:, 1:ns)
+                  call move_alloc(tmp, stk)
+               endif
+               if (ncb == 0 .or. (nca > 0 .and. node_box_volume(nda) >= node_box_volume(ndb))) then
+                  do i = 1, nca
+                     if (.not. node_live(ta, ca(i))) cycle
+                     ns = ns + 1_I4P ; stk(:, ns) = [ca(i), nb]
+                  enddo
+               else
+                  do j = 1, ncb
+                     if (.not. node_live(tb, cb(j))) cycle
+                     ns = ns + 1_I4P ; stk(:, ns) = [na, cb(j)]
+                  enddo
+               endif
+            endif
+         enddo
+      endif
+   endif
+   if (present(pairs)) pairs = np
+   endsubroutine body_safe_step
+
+   subroutine pair_safe_step(fa, fb, i, j, pose_a, pose_b, ka, tha, dta, kb, thb, dtb, half, step, np)
+   !< Lower step to facet pair (i, j)'s directional step if smaller (plain pre-filter first).
+   type(facet_object), intent(in)    :: fa(:), fb(:)   !< Facets.
+   integer(I4P),       intent(in)    :: i, j           !< Pair.
+   type(rigid_pose_t), intent(in)    :: pose_a, pose_b !< Current poses.
+   real(R8P),          intent(in)    :: ka(3), kb(3), tha, thb, dta(3), dtb(3) !< Motion over the step.
+   real(R8P),          intent(in)    :: half           !< tol / 2.
+   real(R8P),          intent(inout) :: step           !< Best step.
+   integer(I4P),       intent(inout) :: np             !< Pairs evaluated.
+   real(R8P)                         :: a(3, 3), b(3, 3), ra, rb, dd, qa(3), qb(3), d, n(3), c, g2
+   logical                           :: mt
+   integer(I4P)                      :: k
+
+   if (i < 1 .or. i > size(fa) .or. j < 1 .or. j > size(fb)) return
+   ra = 0._R8P ; rb = 0._R8P
+   do k = 1, 3
+      a(:, k) = [fa(i)%vertex(k)%x, fa(i)%vertex(k)%y, fa(i)%vertex(k)%z]
+      b(:, k) = [fb(j)%vertex(k)%x, fb(j)%vertex(k)%y, fb(j)%vertex(k)%z]
+      ra = max(ra, axis_distance(ka, rotate(pose_a, a(:, k)))) ; rb = max(rb, axis_distance(kb, rotate(pose_b, b(:, k))))
+      a(:, k) = to_world(pose_a, a(:, k)) ; b(:, k) = to_world(pose_b, b(:, k))
+   enddo
+   ! plain pre-filter: box distance over the pair's plain speed
+   g2 = sqrt(max(0._R8P, minval(b(1, :)) - maxval(a(1, :)), minval(a(1, :)) - maxval(b(1, :)))**2 + &
+             max(0._R8P, minval(b(2, :)) - maxval(a(2, :)), minval(a(2, :)) - maxval(b(2, :)))**2 + &
+             max(0._R8P, minval(b(3, :)) - maxval(a(3, :)), minval(a(3, :)) - maxval(b(3, :)))**2)
+   c = norm2(dta) + norm2(dtb) + tha * ra + thb * rb
+   if (c > 0._R8P) then
+      if ((g2 - half) / c >= step) return
+   else
+      return ! the pair does not move relative to each other: its distance stays d_ij > tol / 2 (d_k > tol)
+   endif
+   np = np + 1_I4P
+   call tri_tri_distance(a, b, dd, qa, qb, mt)
+   d = sqrt(dd)
+   if (mt .or. d <= half) then
+      step = 0._R8P ; return
+   endif
+   n = (qb - qa) / d
+   c = dot_product(n, dta - dtb) + tha * ra + thb * rb
+   if (c > 0._R8P) step = min(step, (d - half) / c)
+   endsubroutine pair_safe_step
+
+   function node_plain_step(x, y, pose_a, pose_b, ka, tha, dta, kb, thb, dtb, half) result(st)
+   !< (box distance - tol / 2) / (mu_x + mu_y) of two nodes at the current poses (huge if they do not move).
+   type(aabb_node_object), intent(in) :: x, y           !< Nodes.
+   type(rigid_pose_t),     intent(in) :: pose_a, pose_b !< Current poses.
+   real(R8P),              intent(in) :: ka(3), kb(3), tha, thb, dta(3), dtb(3) !< Motion over the step.
+   real(R8P),              intent(in) :: half           !< tol / 2.
+   real(R8P)                          :: st             !< Plain step bound.
+   type(vector_R8P)                   :: l1, h1, l2, h2 !< Boxes.
+   real(R8P)                          :: mu             !< Speed bound.
+
+   l1 = x%bmin() ; h1 = x%bmax() ; l2 = y%bmin() ; h2 = y%bmax()
+   mu = norm2(dta) + norm2(dtb) + tha * box_rho(ka, pose_a, l1, h1) + thb * box_rho(kb, pose_b, l2, h2)
+   call moved_box(pose_a, l1, h1) ; call moved_box(pose_b, l2, h2)
+   if (mu > 0._R8P) then
+      st = (sqrt(box_distance2(l1, h1, l2, h2)) - half) / mu
+   else
+      st = huge(1._R8P)
+   endif
+   endfunction node_plain_step
+
+   pure function box_rho(k, pose, lo, hi) result(r)
+   !< Largest distance to the axis k (through the body origin) of the 8 corners of a body-frame box, rotated by the pose.
+   real(R8P),          intent(in) :: k(3)   !< Unit axis.
+   type(rigid_pose_t), intent(in) :: pose   !< Pose.
+   type(vector_R8P),   intent(in) :: lo, hi !< Box.
+   real(R8P)                      :: r      !< Distance.
+   integer(I4P)                   :: c      !< Corner.
+
+   r = 0._R8P
+   do c = 0, 7
+      r = max(r, axis_distance(k, rotate(pose, [merge(hi%x, lo%x, btest(c, 0)), merge(hi%y, lo%y, btest(c, 1)), &
+                                                merge(hi%z, lo%z, btest(c, 2))])))
+   enddo
+   endfunction box_rho
+
+   pure function axis_distance(k, y) result(r)
+   !< |k x y|: distance of y to the axis k through the origin.
+   real(R8P), intent(in) :: k(3), y(3) !< Unit axis, point.
+   real(R8P)             :: r          !< Distance.
+
+   r = norm2([k(2) * y(3) - k(3) * y(2), k(3) * y(1) - k(1) * y(3), k(1) * y(2) - k(2) * y(1)])
+   endfunction axis_distance
+
+   function node_live(t, n) result(ok)
+   !< Node n of t exists and is allocated.
+   type(aabb_tree_object), intent(in), target :: t  !< Tree.
+   integer(I4P),           intent(in)         :: n  !< Node.
+   logical                                    :: ok !< Live.
+   type(aabb_node_object), pointer            :: nd !< Node.
+
+   nd => t%node_at(i=n)
+   ok = associated(nd)
+   if (ok) ok = nd%is_allocated()
+   endfunction node_live
+
+   pure function node_box_volume(x) result(v)
+   !< Volume of a node's box.
+   type(aabb_node_object), intent(in) :: x  !< Node.
+   real(R8P)                          :: v  !< Volume.
+   type(vector_R8P)                   :: lo, hi
+
+   lo = x%bmin() ; hi = x%bmax()
+   v = (hi%x - lo%x) * (hi%y - lo%y) * (hi%z - lo%z)
+   endfunction node_box_volume
 
    subroutine body_distance_brute(fa, fb, d2, ia, ib, pa, pb, meet, pose_a, pose_b)
    !< The reference: every facet pair, the same pair function and tie rule as `body_distance`.

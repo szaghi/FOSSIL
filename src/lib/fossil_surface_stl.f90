@@ -13,7 +13,7 @@ use fossil_facet_object, only : facet_object, pnormal_payload_t,                
                                 pnormal_x_oac, pnormal_y_oac, pnormal_z_oac,                   &
                                 triangle_point_distance
 use fossil_list_id_object, only : list_id_object
-use fossil_rigid_pose, only : rigid_pose_t, to_body, to_world, rotate, pose_interpolate
+use fossil_rigid_pose, only : rigid_pose_t, to_body, to_world, rotate, pose_interpolate, pose_log_3d
 use fossil_ccd, only : ccd_evaluator_t, ccd_advance, motion_bound_3d, CCD_INVALID_INPUT
 use fossil_box_query, only : bvh_box_contact_oac, bvh_box_thin_oac, box_tolerance, cell_bands, cell_components, &
                              BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
@@ -37,7 +37,7 @@ use fossil_alpha_wrap, only : awrap_run, &
                               AWRAP_STATUS_OK, AWRAP_STATUS_BAD_INPUT, &
                               AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
 use fossil_csr_matrix, only : csr_matrix_t
-use fossil_body_distance, only : body_distance
+use fossil_body_distance, only : body_distance, body_safe_step
 use fossil_deviation, only : deviation_evaluator_t, deviation_sampled, deviation_certified, DEV_STATUS_OK, &
                              DEV_STATUS_BAD_INPUT
 use fossil_feature_edges, only : find_feature_edges, FEATURE_EDGE_DEFAULT_ANGLE, feature_cos
@@ -348,8 +348,13 @@ type, extends(ccd_evaluator_t) :: surface_ccd_evaluator_t
    type(rigid_pose_t)                 :: b0, b1      !< Poses of B at s = 0, 1.
    real(R8P)                          :: pa(3) = 0._R8P, pb(3) = 0._R8P !< Witness points of the last call.
    integer(I4P)                       :: fa = 0_I4P, fb = 0_I4P         !< Closest facets of the last call.
+   real(R8P)                          :: ka(3) = 0._R8P, kb(3) = 0._R8P !< Rotation axes over the step.
+   real(R8P)                          :: tha = 0._R8P, thb = 0._R8P     !< Rotation angles over the step.
+   real(R8P)                          :: dta(3) = 0._R8P, dtb(3) = 0._R8P !< Translations over the step.
+   integer(I4P)                       :: pairs = 0_I4P                  !< Facet pairs of the directional steps.
    contains
-      procedure, pass(self) :: distance => surface_ccd_distance !< d(s).
+      procedure, pass(self) :: distance => surface_ccd_distance   !< d(s).
+      procedure, pass(self) :: safe_step => surface_ccd_safe_step !< Directional step (C2A, `body_safe_step`).
 endtype surface_ccd_evaluator_t
 
 contains
@@ -4994,6 +4999,21 @@ contains
                            pose_self=pose_interpolate(self%a0, self%a1, s), pose_other=pose_interpolate(self%b0, self%b1, s))
    endsubroutine surface_ccd_distance
 
+   subroutine surface_ccd_safe_step(self, s, tolerance, cap, step)
+   !< The directional safe step at s over the facet pairs of the two bodies (`body_safe_step`).
+   class(surface_ccd_evaluator_t), intent(inout) :: self      !< Evaluator.
+   real(R8P),                      intent(in)    :: s         !< Step parameter.
+   real(R8P),                      intent(in)    :: tolerance !< Contact tolerance.
+   real(R8P),                      intent(in)    :: cap       !< Largest step wanted (1 - s).
+   real(R8P),                      intent(out)   :: step      !< Safe step.
+   integer(I4P)                                  :: np        !< Pairs evaluated.
+
+   call body_safe_step(self%a%facet(1:self%a%facets_number), self%a%aabb, self%b%facet(1:self%b%facets_number), &
+                       self%b%aabb, pose_interpolate(self%a0, self%a1, s), pose_interpolate(self%b0, self%b1, s), &
+                       self%ka, self%tha, self%dta, self%kb, self%thb, self%dtb, tolerance, cap, step, pairs=np)
+   self%pairs = self%pairs + np
+   endsubroutine surface_ccd_safe_step
+
    subroutine deviation_mesh(surf, v, fv)
    !< The vertex-pool vertices and the facets (pool indices) of a surface.
    type(surface_stl_object),  intent(in)  :: surf     !< Surface.
@@ -6650,14 +6670,16 @@ contains
    endsubroutine distance_to
 
    subroutine time_of_impact(self, other, pose_self0, pose_self1, pose_other0, pose_other1, toi, status, tolerance, &
-                             distance, point_self, point_other, facet_self, facet_other, iterations, max_iterations)
+                             distance, point_self, point_other, facet_self, facet_other, iterations, max_iterations, &
+                             directional, pairs)
    !< Time of first contact of this body and `other` over a step (issue #73): each body moves from its pose at s = 0 to
    !< its pose at s = 1 along `pose_interpolate`; conservative advancement (`fossil_ccd%ccd_advance`) over `distance_to`
    !< with the bound mu = motion_bound_3d(self) + motion_bound_3d(other): d >= tolerance / 2 on [0, toi] (no earlier
    !< contact, no tunnelling), d(toi) <= tolerance on CCD_CONTACT. `status`: CCD_CONTACT, CCD_SEPARATE (toi = 1),
    !< CCD_INITIAL_CONTACT (toi = 0), CCD_NOT_CONVERGED (cap hit: toi a certified lower bound), CCD_INVALID_INPUT (an
    !< empty body, tolerance <= 0). Default tolerance: 1e-6 of the larger bounding-box diagonal. The witnesses (world
-   !< frame) and the closest facets are those at toi.
+   !< frame) and the closest facets are those at toi. `directional=.true.` adds C2A's per-pair directional step
+   !< (`body_safe_step`, the larger of the two certified steps is taken); `pairs` counts its exact pair evaluations.
    class(surface_stl_object), intent(in), target    :: self           !< Body A.
    class(surface_stl_object), intent(in), target    :: other          !< Body B.
    type(rigid_pose_t),        intent(in)            :: pose_self0, pose_self1   !< Poses of A at s = 0, 1.
@@ -6670,6 +6692,8 @@ contains
    integer(I4P),              intent(out), optional :: facet_self, facet_other     !< Closest facets at toi.
    integer(I4P),              intent(out), optional :: iterations     !< Advancement steps.
    integer(I4P),              intent(in),  optional :: max_iterations !< Cap (default CCD_MAX_ITERATIONS).
+   logical,                   intent(in),  optional :: directional    !< Directional step too (default .false.).
+   integer(I4P),              intent(out), optional :: pairs          !< Exact pair evaluations of the directional steps.
    type(surface_ccd_evaluator_t)                    :: ev             !< Distance at s.
    real(R8P)                                        :: mu, tol, d     !< Bound, tolerance, distance.
    type(vector_R8P)                                 :: da, db         !< Bounding-box diagonals.
@@ -6685,8 +6709,12 @@ contains
       if (present(tolerance)) tol = tolerance
       ev%a => self ; ev%b => other
       ev%a0 = pose_self0 ; ev%a1 = pose_self1 ; ev%b0 = pose_other0 ; ev%b1 = pose_other1
-      call ccd_advance(ev, mu, tol, toi, status, distance=d, iterations=iterations, max_iterations=max_iterations)
+      call pose_log_3d(pose_self0, pose_self1, ev%ka, ev%tha) ; ev%dta = pose_self1%t - pose_self0%t
+      call pose_log_3d(pose_other0, pose_other1, ev%kb, ev%thb) ; ev%dtb = pose_other1%t - pose_other0%t
+      call ccd_advance(ev, mu, tol, toi, status, distance=d, iterations=iterations, max_iterations=max_iterations, &
+                       directional=directional)
    endif
+   if (present(pairs)) pairs = ev%pairs
    if (present(distance)) distance = d
    if (present(point_self)) point_self = ev%pa
    if (present(point_other)) point_other = ev%pb
