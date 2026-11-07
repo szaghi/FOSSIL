@@ -10,10 +10,12 @@ module fossil_block_locate
 !<
 !< - 2-D: a valid or singular cell is convex with straight edges, so containment (closed) is decided exactly by
 !<   orient2d against its four edges; xi by the closed-form inverse of the bilinear map (a quadratic in eta), then two
-!<   Newton steps, clamped to [0, 1], and exactly 0 or 1 for a point exactly on an edge. An invalid cell contains the point if the inverse has a root in [0, 1]^2 (warped).
+!<   Newton steps, clamped to [0, 1], and exactly 0 or 1 for a point exactly on an edge. An invalid cell contains the
+!<   point if the inverse has a root in [0, 1]^2 (warped).
 !< - 3-D: Newton on the trilinear map from the cell centre (at most NEWTON_MAX steps, xi kept in [-1, 2]), converged
 !<   when the residual is below 1e-14 of the cell size plus the rounding of the coordinates; inside when xi is in
-!<   [0, 1]^3 within XI_TOL.
+!<   [0, 1]^3 within XI_TOL. An unconverged Newton reports LOC_NOT_CONVERGED only if its last iterate stays within NEAR
+!<   of the cell (a point outside the block but inside a cell box drives the iterate away: not in that cell).
 !<
 !< The kernels are free `_oac` procedures (`!$acc routine seq`) on plain arrays, so the CPU and the device run the same
 !< code (issue #20 rules): no type-bound calls, no array-valued functions.
@@ -23,7 +25,7 @@ use fossil_block_geometry, only : CELL_VALID, CELL_SINGULAR, CELL_INVALID, CELL_
 
 implicit none
 private
-public :: cell_bvh_t, build_cell_bvh, locate_point_3d_oac, locate_point_2d_oac, newton_3d_oac, inverse_2d_oac
+public :: in_box3, cell_bvh_t, build_cell_bvh, locate_point_3d_oac, locate_point_2d_oac, newton_3d_oac, inverse_2d_oac
 public :: LOC_INSIDE, LOC_OUTSIDE, LOC_WARPED, LOC_DEGENERATE, LOC_NOT_CONVERGED, XI_TOL, NEWTON_MAX, LOC_STACK
 
 integer(I4P), parameter :: LOC_INSIDE        = 1_I4P !< A valid cell contains the point.
@@ -33,6 +35,7 @@ integer(I4P), parameter :: LOC_DEGENERATE    = 4_I4P !< Only an undetermined cel
 integer(I4P), parameter :: LOC_NOT_CONVERGED = 5_I4P !< The 3-D inverse did not converge in a candidate.
 real(R8P),    parameter :: XI_TOL            = 1e-12_R8P !< 3-D containment tolerance on xi.
 integer(I4P), parameter :: NEWTON_MAX        = 40_I4P  !< Newton steps at most.
+real(R8P),    parameter :: NEAR              = 0.25_R8P !< An unconverged iterate this far outside the cell: not in it.
 integer(I4P), parameter :: LOC_STACK         = 64_I4P  !< Traversal stack.
 integer(I4P), parameter :: LEAF              = 4_I4P   !< Cells per leaf at most.
 
@@ -154,7 +157,8 @@ contains
    top = 1_I4P ; stack(1) = 1_I4P
    do while (top > 0)
       nd = stack(top) ; top = top - 1_I4P
-      if (any(p < node_lo(:, nd)) .or. any(p > node_hi(:, nd))) cycle
+      if (p(1) < node_lo(1, nd) .or. p(2) < node_lo(2, nd) .or. p(3) < node_lo(3, nd) .or. &
+          p(1) > node_hi(1, nd) .or. p(2) > node_hi(2, nd) .or. p(3) > node_hi(3, nd)) cycle
       if (left(nd) /= 0) then
          top = top + 1_I4P ; stack(top) = right(nd) ; top = top + 1_I4P ; stack(top) = left(nd)
          cycle
@@ -162,17 +166,19 @@ contains
       do k = first(nd), last(nd)
          c = order(k)
          if (cell /= 0 .and. c > cell) cycle
-         if (any(p < cell_lo(:, c)) .or. any(p > cell_hi(:, c))) cycle
+         if (p(1) < cell_lo(1, c) .or. p(2) < cell_lo(2, c) .or. p(3) < cell_lo(3, c) .or. &
+             p(1) > cell_hi(1, c) .or. p(2) > cell_hi(2, c) .or. p(3) > cell_hi(3, c)) cycle
          call corners_flat_3d(c, ni, nj, x, y, z, cc)
          call newton_3d_oac(cc, p, q, conv)
          st = cstat(c)
-         if (conv .and. all(q >= -XI_TOL) .and. all(q <= 1._R8P + XI_TOL)) then
+         if (conv .and. in_box3(q, XI_TOL)) then
             if (st == CELL_VALID .or. st == CELL_SINGULAR) then
                cell = c ; xi = q
             elseif (alt == 0 .or. alt_st == LOC_NOT_CONVERGED .or. c < alt) then
                alt = c ; alt_xi = q ; alt_st = merge(LOC_WARPED, LOC_DEGENERATE, st == CELL_INVALID)
             endif
-         elseif (.not. conv) then
+         elseif (.not. conv .and. in_box3(q, NEAR)) then
+            ! unconverged near the cell: undecided; an iterate driven away from the cell means the point is not in it
             if (alt == 0 .or. (alt_st == LOC_NOT_CONVERGED .and. c < alt)) then
                alt = c ; alt_xi = q ; alt_st = LOC_NOT_CONVERGED
             endif
@@ -211,7 +217,7 @@ contains
    top = 1_I4P ; stack(1) = 1_I4P
    do while (top > 0)
       nd = stack(top) ; top = top - 1_I4P
-      if (any(p < node_lo(:, nd)) .or. any(p > node_hi(:, nd))) cycle
+      if (p(1) < node_lo(1, nd) .or. p(2) < node_lo(2, nd) .or. p(1) > node_hi(1, nd) .or. p(2) > node_hi(2, nd)) cycle
       if (left(nd) /= 0) then
          top = top + 1_I4P ; stack(top) = right(nd) ; top = top + 1_I4P ; stack(top) = left(nd)
          cycle
@@ -219,7 +225,7 @@ contains
       do k = first(nd), last(nd)
          c = order(k)
          if (cell /= 0 .and. c > cell) cycle
-         if (any(p < cell_lo(:, c)) .or. any(p > cell_hi(:, c))) cycle
+         if (p(1) < cell_lo(1, c) .or. p(2) < cell_lo(2, c) .or. p(1) > cell_hi(1, c) .or. p(2) > cell_hi(2, c)) cycle
          call corners_flat_2d(c, ni, u, v, cc)
          if (cstat(c) == CELL_VALID .or. cstat(c) == CELL_SINGULAR) then
             o(1) = orient * orient2d_xy(cc(1, 1), cc(2, 1), cc(1, 2), cc(2, 2), p(1), p(2)) ! eta = 0
@@ -233,10 +239,10 @@ contains
             call inverse_2d_oac(cc, p, q, found)
             cell = c ; xi = min(max(q, 0._R8P), 1._R8P)
             ! a point exactly on an edge (of positive length) gets that edge's coordinate exactly
-            if (o(1) == 0._R8P .and. any(cc(:, 1) /= cc(:, 2))) xi(2) = 0._R8P
-            if (o(3) == 0._R8P .and. any(cc(:, 3) /= cc(:, 4))) xi(2) = 1._R8P
-            if (o(4) == 0._R8P .and. any(cc(:, 1) /= cc(:, 3))) xi(1) = 0._R8P
-            if (o(2) == 0._R8P .and. any(cc(:, 2) /= cc(:, 4))) xi(1) = 1._R8P
+            if (o(1) == 0._R8P .and. (cc(1, 1) /= cc(1, 2) .or. cc(2, 1) /= cc(2, 2))) xi(2) = 0._R8P
+            if (o(3) == 0._R8P .and. (cc(1, 3) /= cc(1, 4) .or. cc(2, 3) /= cc(2, 4))) xi(2) = 1._R8P
+            if (o(4) == 0._R8P .and. (cc(1, 1) /= cc(1, 3) .or. cc(2, 1) /= cc(2, 3))) xi(1) = 0._R8P
+            if (o(2) == 0._R8P .and. (cc(1, 2) /= cc(1, 4) .or. cc(2, 2) /= cc(2, 4))) xi(1) = 1._R8P
          elseif (alt == 0 .or. c < alt) then
             call inverse_2d_oac(cc, p, q, found)
             if (found) then
@@ -294,37 +300,43 @@ contains
    real(R8P), intent(in)  :: p(3)     !< Point.
    real(R8P), intent(out) :: xi(3)    !< Local coordinates.
    logical,   intent(out) :: conv     !< Converged.
-   real(R8P)              :: xp(3), jac(3, 3), r(3), d(3), det, tol, scl !< Work.
-   integer(I4P)           :: it, a   !< Counters.
+   real(R8P)              :: xp(3), jac(3, 3), r(3), d(3), det, tol, scl, lo, hi !< Work.
+   integer(I4P)           :: it, a, k !< Counters.
 
    xi = 0.5_R8P ; conv = .false.
+   ! scalar loops, not maxval/minval of row sections: nvfortran 26.9 host code got maxval(abs(cc(a, :))) wrong here
+   ! (1.147 against 1.494 on the device, issue #71), which moved the stopping test by one Newton step
    scl = 0._R8P ; tol = 0._R8P
    do a = 1, 3
-      scl = max(scl, maxval(cc(a, :)) - minval(cc(a, :)))
-      tol = max(tol, maxval(abs(cc(a, :))))
+      lo = cc(a, 1) ; hi = cc(a, 1)
+      do k = 2, 8
+         lo = min(lo, cc(a, k)) ; hi = max(hi, cc(a, k))
+      enddo
+      scl = max(scl, hi - lo) ; tol = max(tol, abs(lo), abs(hi), abs(p(a)))
    enddo
-   tol = 1e-14_R8P * scl + 8._R8P * epsilon(1._R8P) * max(tol, maxval(abs(p)))
+   tol = 1e-14_R8P * scl + 8._R8P * epsilon(1._R8P) * tol
    do it = 1, NEWTON_MAX
       call trilinear_eval(cc, xi, xp, jac)
       r = xp - p
-      if (maxval(abs(r)) <= tol) then
+      if (max(abs(r(1)), abs(r(2)), abs(r(3))) <= tol) then
          conv = .true. ; return
       endif
       det = jac(1, 1) * (jac(2, 2) * jac(3, 3) - jac(3, 2) * jac(2, 3)) &
           + jac(2, 1) * (jac(3, 2) * jac(1, 3) - jac(1, 2) * jac(3, 3)) &
           + jac(3, 1) * (jac(1, 2) * jac(2, 3) - jac(2, 2) * jac(1, 3))
       if (det == 0._R8P) return
+      det = 1._R8P / det ! one explicit reciprocal: the CPU and the device compilers have nothing left to reorder
       ! d = J^-1 r by Cramer: d_a = det(J with column a replaced by r) / det
       d(1) = (r(1) * (jac(2, 2) * jac(3, 3) - jac(3, 2) * jac(2, 3)) + r(2) * (jac(3, 2) * jac(1, 3) - jac(1, 2) * jac(3, 3)) &
-             + r(3) * (jac(1, 2) * jac(2, 3) - jac(2, 2) * jac(1, 3))) / det
+             + r(3) * (jac(1, 2) * jac(2, 3) - jac(2, 2) * jac(1, 3))) * det
       d(2) = (jac(1, 1) * (r(2) * jac(3, 3) - r(3) * jac(2, 3)) + jac(2, 1) * (r(3) * jac(1, 3) - r(1) * jac(3, 3)) &
-             + jac(3, 1) * (r(1) * jac(2, 3) - r(2) * jac(1, 3))) / det
+             + jac(3, 1) * (r(1) * jac(2, 3) - r(2) * jac(1, 3))) * det
       d(3) = (jac(1, 1) * (jac(2, 2) * r(3) - jac(3, 2) * r(2)) + jac(2, 1) * (jac(3, 2) * r(1) - jac(1, 2) * r(3)) &
-             + jac(3, 1) * (jac(1, 2) * r(2) - jac(2, 2) * r(1))) / det
+             + jac(3, 1) * (jac(1, 2) * r(2) - jac(2, 2) * r(1))) * det
       xi = min(max(xi - d, -1._R8P), 2._R8P)
    enddo
    call trilinear_eval(cc, xi, xp, jac)
-   conv = maxval(abs(xp - p)) <= tol
+   conv = max(abs(xp(1) - p(1)), abs(xp(2) - p(2)), abs(xp(3) - p(3))) <= tol
    endsubroutine newton_3d_oac
 
    pure subroutine trilinear_eval(cc, xi, x, jac)
@@ -388,8 +400,17 @@ contains
       if (det == 0._R8P) exit
       xi = xi - [(j22 * x(1) - j12 * x(2)) / det, (-j21 * x(1) + j11 * x(2)) / det]
    enddo
-   found = all(xi >= -1e-12_R8P) .and. all(xi <= 1._R8P + 1e-12_R8P)
+   found = xi(1) >= -1e-12_R8P .and. xi(2) >= -1e-12_R8P .and. xi(1) <= 1._R8P + 1e-12_R8P .and. xi(2) <= 1._R8P + 1e-12_R8P
    endsubroutine inverse_2d_oac
+
+   pure logical function in_box3(q, tol) result(yes)
+   !$acc routine seq
+   !< q in [-tol, 1 + tol]^3 (scalar comparisons).
+   real(R8P), intent(in) :: q(3), tol !< Point, tolerance.
+
+   yes = q(1) >= -tol .and. q(2) >= -tol .and. q(3) >= -tol .and. &
+         q(1) <= 1._R8P + tol .and. q(2) <= 1._R8P + tol .and. q(3) <= 1._R8P + tol
+   endfunction in_box3
 
    pure real(R8P) function dist01(t) result(dd)
    !$acc routine seq

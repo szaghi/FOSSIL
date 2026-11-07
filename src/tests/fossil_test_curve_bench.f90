@@ -21,6 +21,7 @@ use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, T
 use penf,   only : I4P, I8P, R8P
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d, device_line_mismatches_2d
 use fossil, only : rigid_pose_2d_t, pose_2d, to_world
+use fossil, only : curvilinear_block_2d_t, detect_topology_2d
 
 implicit none
 
@@ -57,6 +58,7 @@ call sign_bench
 call deviation_case(c)
 call feature_case(c)
 call thin_case(c)
+call block_case
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
@@ -255,6 +257,36 @@ contains
    print '(A,I0)', 'thin device vs serial mismatches: ', bad
    ok = ok .and. bad == 0 .and. count(t1) > 0
    endsubroutine thin_case
+
+   subroutine block_case
+   !< Point location in a curvilinear block on the device against the CPU (issue #71): a 2-D O-grid of 129 x 33
+   !< vertices around the unit cylinder, 20000 points in its box; cells, xi (bit for bit) and statuses.
+   type(curvilinear_block_2d_t) :: blk(1)                 !< Block.
+   real(R8P),    allocatable    :: bu(:,:), bv(:,:), pu(:), pv(:), x1(:,:), x2(:,:) !< Vertices, points, xi.
+   integer(I4P), allocatable    :: c1(:,:), c2(:,:), s1(:), s2(:) !< Results.
+   integer(I4P)                 :: i, j, n, bad          !< Counters.
+   real(R8P)                    :: r, rr(2)              !< Work.
+
+   allocate(bu(129, 33), bv(129, 33))
+   do j = 1, 33
+      r = 1._R8P + 2._R8P * ((j - 1._R8P) / 32) ** 1.4_R8P
+      do i = 1, 129
+         bu(i, j) = r * cos(2 * PI * (i - 1) / 128) ; bv(i, j) = r * sin(2 * PI * (i - 1) / 128)
+      enddo
+   enddo
+   bu(129,:) = bu(1,:) ; bv(129,:) = bv(1,:)
+   call blk(1)%initialize(bu, bv) ; call detect_topology_2d(blk) ; call blk(1)%build_search
+   allocate(pu(20000), pv(20000))
+   do n = 1, 20000
+      call random_number(rr) ; pu(n) = 6.2_R8P * rr(1) - 3.1_R8P ; pv(n) = 6.2_R8P * rr(2) - 3.1_R8P
+   enddo
+   call blk(1)%locate_many(pu, pv, c1, x1, s1)
+   call blk(1)%locate_many_device(pu, pv, c2, x2, s2)
+   bad = count(any(c1 /= c2, dim=1) .or. any(x1 /= x2, dim=1) .or. s1 /= s2)
+   print '(A,I0,A,I0)', 'block location: points inside ', count(s1 == 1), ' of ', size(s1)
+   print '(A,I0)', 'block location device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0 .and. count(s1 == 1) > 10000
+   endsubroutine block_case
 
    subroutine box(cur, p, h, algo, nm)
    !< box_classify_many_device vs box_classify_many (issue #38): a box of half-size h around every

@@ -44,6 +44,7 @@ use vecfor,              only : vector_R8P
 use fossil_distance_field, only : distance_field_object
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_3d, device_line_mismatches_3d
 use fossil,              only : rigid_pose_t, pose_from_axis_angle, to_world
+use fossil,              only : curvilinear_block_t, detect_topology
 
 implicit none
 
@@ -78,6 +79,7 @@ integer                       :: posed_mismatch            !< Posed queries: dev
 integer                       :: deviation_mismatch        !< Surface deviation: device vs CPU mismatches (issue #60).
 integer                       :: feature_mismatch          !< Feature-edge boxes: device vs CPU mismatches (issue #61).
 integer                       :: thin_mismatch             !< Thin-facet boxes: device vs CPU mismatches (issue #62).
+integer                       :: block_mismatch            !< Block location: device vs CPU mismatches (issue #71).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -243,6 +245,8 @@ call feature_case(mismatch=feature_mismatch)
 rich_ok = rich_ok .and. feature_mismatch == 0
 call thin_case(mismatch=thin_mismatch)
 rich_ok = rich_ok .and. thin_mismatch == 0
+call block_case(mismatch=block_mismatch)
+rich_ok = rich_ok .and. block_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -335,6 +339,7 @@ print '(A,I0)',      '   posed device vs serial mismatches: ', posed_mismatch
 print '(A,I0)',      '   deviation device vs serial mismatches: ', deviation_mismatch
 print '(A,I0)',      '   feature device vs serial mismatches: ', feature_mismatch
 print '(A,I0)',      '   thin device vs serial mismatches: ', thin_mismatch
+print '(A,I0)',      '   block location device vs serial mismatches: ', block_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -491,6 +496,46 @@ contains
    mismatch = count(t1 .neqv. t2)
    print '(A,I0,A,I0)', '   thin cells touched: ', count(t1), ' of ', NC**3
    endsubroutine thin_case
+
+   subroutine block_case(mismatch)
+   !< Point location in a curvilinear block on the device against the CPU (issue #71): a wavy 3-D O-grid of
+   !< 65 x 17 x 17 vertices with its seam, 50000 points in its box; cells, xi (bit for bit) and statuses. Timed.
+   integer, intent(out)      :: mismatch               !< Mismatches.
+   type(curvilinear_block_t) :: blk(1)                 !< Block.
+   real(R8P),    allocatable :: bx(:,:,:), by(:,:,:), bz(:,:,:), pu(:), pv(:), pw(:), x1(:,:), x2(:,:) !< Data.
+   integer(I4P), allocatable :: c1(:,:), c2(:,:), s1(:), s2(:) !< Results.
+   integer(I4P)              :: i, j, k, n             !< Counters.
+   integer(I8P)              :: t0, t1, t2, rate       !< Clock.
+   real(R8P)                 :: r, rr(3), pi2          !< Work.
+
+   pi2 = 2 * acos(-1._R8P)
+   allocate(bx(65, 17, 17), by(65, 17, 17), bz(65, 17, 17))
+   do k = 1, 17
+      do j = 1, 17
+         do i = 1, 65
+            r = (1._R8P + 0.12_R8P * (j - 1)) * (1._R8P + 0.05_R8P * sin(3 * pi2 * (i - 1) / 64 + 0.4_R8P * k))
+            bx(i, j, k) = r * cos(pi2 * (i - 1) / 64) ; by(i, j, k) = r * sin(pi2 * (i - 1) / 64)
+            bz(i, j, k) = 0.1_R8P * (k - 1) + 0.03_R8P * cos(pi2 * (i - 1) / 64) * j
+         enddo
+      enddo
+   enddo
+   bx(65,:,:) = bx(1,:,:) ; by(65,:,:) = by(1,:,:) ; bz(65,:,:) = bz(1,:,:)
+   call blk(1)%initialize(bx, by, bz) ; call detect_topology(blk) ; call blk(1)%build_search
+   allocate(pu(50000), pv(50000), pw(50000))
+   do n = 1, 50000
+      call random_number(rr) ; pu(n) = 6.4_R8P * rr(1) - 3.2_R8P ; pv(n) = 6.4_R8P * rr(2) - 3.2_R8P
+      pw(n) = 2.1_R8P * rr(3)
+   enddo
+   call system_clock(t0, rate)
+   call blk(1)%locate_many(pu, pv, pw, c1, x1, s1)
+   call system_clock(t1)
+   call blk(1)%locate_many_device(pu, pv, pw, c2, x2, s2)
+   call system_clock(t2)
+   mismatch = count(any(c1 /= c2, dim=1) .or. any(x1 /= x2, dim=1) .or. s1 /= s2)
+   print '(A,I0,A,I0,A,F9.2,A,F9.2,A)', 'block location: inside ', count(s1 == 1), ' of ', size(s1), ', serial ', &
+         1e3_R8P * (t1 - t0) / rate, ' ms, device ', 1e3_R8P * (t2 - t1) / rate, ' ms (with copies)'
+   if (count(s1 == 1) < 10000) mismatch = mismatch + 1
+   endsubroutine block_case
 
    subroutine box_device_case(mismatch)
    !< box_classify_many_device against box_classify_many (issue #38): a box of half-size 1/64 of the

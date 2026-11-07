@@ -80,6 +80,7 @@ type :: curvilinear_block_t
       procedure, pass(self) :: validity => validity_3d        !< Certified cell validity.
       procedure, pass(self) :: build_search => build_search_3d !< Validity, orientation and the cell-box hierarchy.
       procedure, pass(self) :: locate_many => locate_many_3d  !< Robust location of points.
+      procedure, pass(self) :: locate_many_device => locate_many_device_3d !< Robust location on the device.
 endtype curvilinear_block_t
 
 type :: curvilinear_block_2d_t
@@ -104,6 +105,7 @@ type :: curvilinear_block_2d_t
       procedure, pass(self) :: validity => validity_2d        !< Exact cell validity.
       procedure, pass(self) :: build_search => build_search_2d !< Validity, orientation and the cell-box hierarchy.
       procedure, pass(self) :: locate_many => locate_many_2d  !< Robust location of points.
+      procedure, pass(self) :: locate_many_device => locate_many_device_2d !< Robust location on the device.
 endtype curvilinear_block_2d_t
 
 type :: vx_t
@@ -594,6 +596,76 @@ contains
    if (present(jumps)) jumps = nj
    if (present(fallbacks)) fallbacks = nf
    endsubroutine locate_many_2d
+
+   subroutine locate_many_device_3d(self, px, py, pz, cell, xi, status)
+   !< The robust location on the device (OpenACC; serial without it), bit-identical to `locate_many`: the block's
+   !< arrays are copied to plain local arrays and entered for the call (issue #20 rules: no derived-type members in the
+   !< compute region).
+   class(curvilinear_block_t), intent(in)  :: self          !< Block.
+   real(R8P),                  intent(in)  :: px(:), py(:), pz(:) !< Points.
+   integer(I4P), allocatable,  intent(out) :: cell(:,:)     !< Cells [3, n].
+   real(R8P),    allocatable,  intent(out) :: xi(:,:)       !< Local coordinates [3, n].
+   integer(I4P), allocatable,  intent(out) :: status(:)     !< LOC_* [n].
+   real(R8P),    allocatable               :: vx(:), vy(:), vz(:), nlo(:,:), nhi(:,:), clo(:,:), chi(:,:), xs(:,:) !< Copies.
+   real(R8P),    allocatable               :: qx(:), qy(:), qz(:) !< Points.
+   integer(I4P), allocatable               :: cst(:), lft(:), rgt(:), fst(:), lst(:), ord(:), lin(:), sts(:) !< Copies.
+   integer(I4P)                            :: n, m, ni, nj, nnode !< Counters.
+   real(R8P)                               :: p3(3)         !< Point.
+
+   n = size(px, kind=I4P) ; ni = self%ni ; nj = self%nj ; nnode = self%search%nnode
+   vx = reshape(self%x, [size(self%x)]) ; vy = reshape(self%y, [size(self%y)]) ; vz = reshape(self%z, [size(self%z)])
+   cst = self%cell_status ; nlo = self%search%node_lo ; nhi = self%search%node_hi ; lft = self%search%left
+   rgt = self%search%right ; fst = self%search%first ; lst = self%search%last ; ord = self%search%order
+   clo = self%search%cell_lo ; chi = self%search%cell_hi ; qx = px ; qy = py ; qz = pz
+   allocate(lin(n), xs(3, n), sts(n))
+   !$acc data copyin(vx, vy, vz, cst, nlo, nhi, lft, rgt, fst, lst, ord, clo, chi, qx, qy, qz) copyout(lin, xs, sts)
+   !$acc parallel loop private(p3)
+   do m = 1, n
+      p3(1) = qx(m) ; p3(2) = qy(m) ; p3(3) = qz(m)
+      call locate_point_3d_oac(p3, ni, nj, vx, vy, vz, cst, nnode, nlo, nhi, lft, rgt, fst, lst, ord, clo, chi, &
+                               lin(m), xs(:, m), sts(m))
+   enddo
+   !$acc end data
+   allocate(cell(3, n))
+   do m = 1, n
+      cell(:, m) = linear_to_ijk(lin(m), self%ni, self%nj)
+   enddo
+   call move_alloc(xs, xi) ; call move_alloc(sts, status)
+   endsubroutine locate_many_device_3d
+
+   subroutine locate_many_device_2d(self, pu, pv, cell, xi, status)
+   !< The robust 2-D location on the device (OpenACC; serial without it), bit-identical to `locate_many`.
+   class(curvilinear_block_2d_t), intent(in)  :: self      !< Block.
+   real(R8P),                     intent(in)  :: pu(:), pv(:) !< Points.
+   integer(I4P), allocatable,     intent(out) :: cell(:,:) !< Cells [2, n].
+   real(R8P),    allocatable,     intent(out) :: xi(:,:)   !< Local coordinates [2, n].
+   integer(I4P), allocatable,     intent(out) :: status(:) !< LOC_* [n].
+   real(R8P),    allocatable                  :: vu(:), vv(:), nlo(:,:), nhi(:,:), clo(:,:), chi(:,:), xs(:,:) !< Copies.
+   real(R8P),    allocatable                  :: qu(:), qv(:) !< Points.
+   integer(I4P), allocatable                  :: cst(:), lft(:), rgt(:), fst(:), lst(:), ord(:), lin(:), sts(:) !< Copies.
+   integer(I4P)                               :: n, m, ni, nnode !< Counters.
+   real(R8P)                                  :: o, p2(2)  !< Orientation, point.
+
+   n = size(pu, kind=I4P) ; ni = self%ni ; nnode = self%search%nnode ; o = self%orient
+   vu = reshape(self%u, [size(self%u)]) ; vv = reshape(self%v, [size(self%v)])
+   cst = self%cell_status ; nlo = self%search%node_lo ; nhi = self%search%node_hi ; lft = self%search%left
+   rgt = self%search%right ; fst = self%search%first ; lst = self%search%last ; ord = self%search%order
+   clo = self%search%cell_lo ; chi = self%search%cell_hi ; qu = pu ; qv = pv
+   allocate(lin(n), xs(2, n), sts(n))
+   !$acc data copyin(vu, vv, cst, nlo, nhi, lft, rgt, fst, lst, ord, clo, chi, qu, qv) copyout(lin, xs, sts)
+   !$acc parallel loop private(p2)
+   do m = 1, n
+      p2(1) = qu(m) ; p2(2) = qv(m)
+      call locate_point_2d_oac(p2, ni, vu, vv, cst, o, nnode, nlo, nhi, lft, rgt, fst, lst, ord, clo, chi, &
+                               lin(m), xs(:, m), sts(m))
+   enddo
+   !$acc end data
+   allocate(cell(2, n)) ; cell = 0_I4P
+   do m = 1, n
+      if (lin(m) > 0) cell(:, m) = [mod(lin(m) - 1_I4P, ni - 1_I4P) + 1_I4P, (lin(m) - 1_I4P) / (ni - 1_I4P) + 1_I4P]
+   enddo
+   call move_alloc(xs, xi) ; call move_alloc(sts, status)
+   endsubroutine locate_many_device_2d
 
    subroutine walk_3d(self, p, c0, cell, xi, done, jumps)
    !< Stencil jumping from cell c0: Newton in the current cell, then a jump towards the largest excursion of xi out of
