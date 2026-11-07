@@ -71,6 +71,20 @@ public :: hole_map, hole_map_2d, xray_flags, xray_flags_2d
 public :: donor_set_t, overlap_matrix, overlap_matrix_2d, donor_candidates, donor_candidates_2d
 public :: PAIR_NONE, PAIR_OVERLAP, PAIR_SHARED
 public :: overset_mask_t, classify, classify_2d, SELECT_EXPLICIT, SELECT_IMPLICIT
+public :: fringe_levels, fringe_levels_2d, overlap_width, overlap_width_2d
+public :: ORPHAN_NONE, ORPHAN_NO_CANDIDATE, ORPHAN_STENCIL_HOLE, ORPHAN_RECEPTOR_DONOR, ORPHAN_BOUNDARY, ORPHAN_WALL
+public :: FRINGE_INNER_1, FRINGE_INNER_2, FRINGE_OUTER_1, FRINGE_OUTER_2
+
+integer(I4P), parameter :: ORPHAN_NONE           = 0_I4P !< Not an orphan.
+integer(I4P), parameter :: ORPHAN_NO_CANDIDATE   = 1_I4P !< No donor cell anywhere: insufficient overlap.
+integer(I4P), parameter :: ORPHAN_STENCIL_HOLE   = 2_I4P !< Every candidate's stencil hits a hole.
+integer(I4P), parameter :: ORPHAN_RECEPTOR_DONOR = 3_I4P !< The stencils hold receptors (explicit interpolation).
+integer(I4P), parameter :: ORPHAN_BOUNDARY       = 4_I4P !< The stencils fail near a block boundary.
+integer(I4P), parameter :: ORPHAN_WALL           = 5_I4P !< A wall vertex outside every donor (curved-wall mismatch).
+integer(I4P), parameter :: FRINGE_INNER_1        = 1_I4P !< Shares a cell with a hole.
+integer(I4P), parameter :: FRINGE_INNER_2        = 2_I4P !< Shares a cell with an INNER 1 vertex.
+integer(I4P), parameter :: FRINGE_OUTER_1        = 11_I4P !< On an overlap boundary.
+integer(I4P), parameter :: FRINGE_OUTER_2        = 12_I4P !< Shares a cell with an OUTER 1 vertex.
 
 integer(I4P), parameter :: SELECT_EXPLICIT = 1_I4P !< Holes from cutters; the hole fringe and overlap boundaries receive.
 integer(I4P), parameter :: SELECT_IMPLICIT = 2_I4P !< Lee & Baeder: a point receives when a smaller donor cell exists.
@@ -107,8 +121,8 @@ type :: overset_mask_t
    !< Classification of the vertices of one block (linear vertex index, i fastest).
    integer(I4P), allocatable :: iota(:)   !< 1 field, 0 hole, -k receptor from block k.
    integer(I4P), allocatable :: donor(:)  !< Chosen candidate (index into the block's donor_set_t), 0 if none.
-   integer(I4P), allocatable :: orphan(:) !< Orphan cause (0: none; ORPHAN_* from step 7, 1 = no valid donor).
-   integer(I4P), allocatable :: fringe(:) !< Fringe level (0: none).
+   integer(I4P), allocatable :: orphan(:) !< ORPHAN_* (mandatory vertices without a valid donor).
+   integer(I4P), allocatable :: fringe(:) !< FRINGE_* level (0: none), from fringe_levels.
 endtype overset_mask_t
 
 type :: cls_t
@@ -117,6 +131,7 @@ type :: cls_t
    logical,      allocatable :: hole(:)          !< Holes [nv].
    logical,      allocatable :: mandatory(:)     !< Overlap-boundary vertices [nv].
    logical,      allocatable :: immune(:)        !< Never receptors [nv].
+   logical,      allocatable :: wall(:)          !< On a wall face [nv].
    logical,      allocatable :: desired(:)       !< Want a donor by the selection rule [nv].
    integer(I4P), allocatable :: order(:)         !< Candidates of each vertex in preference order [nc].
    integer(I4P), allocatable :: nodes(:,:)       !< Donor stencil nodes (linear, 0 unused) [q^d, nc].
@@ -1307,9 +1322,12 @@ contains
    integer(I4P)                                    :: r, nimm      !< Counters.
 
    nimm = 0_I4P ; if (present(immune)) nimm = immune
-   allocate(cl%mandatory(product(cl%n)), cl%immune(product(cl%n))) ; cl%mandatory = .false. ; cl%immune = .false.
+   allocate(cl%mandatory(product(cl%n)), cl%immune(product(cl%n)), cl%wall(product(cl%n)))
+   cl%mandatory = .false. ; cl%immune = .false. ; cl%wall = .false.
    do r = 1, blk%nrec
       if (blk%rec(r)%kind /= TOPO_BOUNDARY) cycle
+      if (trim(blk%rec(r)%name) == name_or(wall_name, 'wall')) &
+         call mark_range(cl%n, blk%rec(r)%face, blk%rec(r)%lo, blk%rec(r)%hi, 1_I4P, cl%wall)
       if (trim(blk%rec(r)%name) == name_or(overlap_name, 'overlap')) &
          call mark_range(cl%n, blk%rec(r)%face, blk%rec(r)%lo, blk%rec(r)%hi, 1_I4P, cl%mandatory)
       if (trim(blk%rec(r)%name) == name_or(wall_name, 'wall') .and. nimm > 0) &
@@ -1327,9 +1345,12 @@ contains
    integer(I4P)                                       :: r, nimm      !< Counters.
 
    nimm = 0_I4P ; if (present(immune)) nimm = immune
-   allocate(cl%mandatory(product(cl%n)), cl%immune(product(cl%n))) ; cl%mandatory = .false. ; cl%immune = .false.
+   allocate(cl%mandatory(product(cl%n)), cl%immune(product(cl%n)), cl%wall(product(cl%n)))
+   cl%mandatory = .false. ; cl%immune = .false. ; cl%wall = .false.
    do r = 1, blk%nrec
       if (blk%rec(r)%kind /= TOPO_BOUNDARY) cycle
+      if (trim(blk%rec(r)%name) == name_or(wall_name, 'wall')) &
+         call mark_range(cl%n, blk%rec(r)%face, blk%rec(r)%lo, blk%rec(r)%hi, 1_I4P, cl%wall)
       if (trim(blk%rec(r)%name) == name_or(overlap_name, 'overlap')) &
          call mark_range(cl%n, blk%rec(r)%face, blk%rec(r)%lo, blk%rec(r)%hi, 1_I4P, cl%mandatory)
       if (trim(blk%rec(r)%name) == name_or(wall_name, 'wall') .and. nimm > 0) &
@@ -1429,7 +1450,7 @@ contains
                   masks(a)%iota(v) = -b ; masks(a)%donor(v) = c ; exit
                endif
             enddo
-            if (masks(a)%iota(v) == 1 .and. cl(a)%mandatory(v)) masks(a)%orphan(v) = 1_I4P
+            if (masks(a)%iota(v) == 1 .and. cl(a)%mandatory(v)) masks(a)%orphan(v) = orphan_cause(cl, old, donors, a, v, expl)
          enddo
          changed = changed .or. any(masks(a)%iota /= old(a)%iota)
       enddo
@@ -1453,6 +1474,183 @@ contains
       circular = ncirc / 2_I4P
    endif
    endsubroutine classify_core
+
+   integer(I4P) function orphan_cause(cl, old, donors, a, v, expl) result(cause)
+   !< Why the mandatory vertex v of block a has no valid donor (the first cause found, in the order of the codes).
+   type(cls_t),          intent(in) :: cl(:)     !< Descriptors.
+   type(overset_mask_t), intent(in) :: old(:)    !< Classes the validity was tested against.
+   type(donor_set_t),    intent(in) :: donors(:) !< Candidates.
+   integer(I4P),         intent(in) :: a, v      !< Block, vertex.
+   logical,              intent(in) :: expl      !< Explicit interpolation.
+   integer(I4P)                     :: c, b, u, nd !< Counters.
+   logical                          :: hole, rec, fail, any_inside !< Causes seen.
+
+   hole = .false. ; rec = .false. ; fail = .false. ; any_inside = .false.
+   do c = donors(a)%start(v), donors(a)%start(v + 1) - 1
+      if (donors(a)%status(c) /= LOC_INSIDE) cycle
+      any_inside = .true. ; b = donors(a)%block(c)
+      if (cl(a)%nodes(1, c) < 0) then
+         fail = .true. ; cycle
+      endif
+      do u = 1, size(cl(a)%nodes, 1, I4P)
+         nd = cl(a)%nodes(u, c)
+         if (nd == 0) cycle
+         if (old(b)%iota(nd) == 0) hole = .true.
+         if (expl .and. (old(b)%iota(nd) < 0 .or. cl(b)%mandatory(nd))) rec = .true.
+      enddo
+   enddo
+   if (.not. any_inside) then
+      cause = merge(ORPHAN_WALL, ORPHAN_NO_CANDIDATE, cl(a)%wall(v))
+   elseif (hole) then
+      cause = ORPHAN_STENCIL_HOLE
+   elseif (rec) then
+      cause = ORPHAN_RECEPTOR_DONOR
+   else
+      cause = ORPHAN_BOUNDARY
+   endif
+   endfunction orphan_cause
+
+   subroutine fringe_levels(blocks, masks, levels)
+   !< Fringe levels of the vertices of 3-D blocks (SUGGAR's node rules): INNER 1 shares a cell with a hole, INNER 2
+   !< with an INNER 1 vertex; OUTER 1 is a mandatory receptor (overlap boundary: iota < 0 or orphan on it), OUTER 2
+   !< shares a cell with an OUTER 1 vertex. levels (default 2) caps the depth.
+   type(curvilinear_block_t), intent(in)           :: blocks(:) !< Blocks.
+   type(overset_mask_t),      intent(inout)        :: masks(:)  !< Classification (fringe set here).
+   integer(I4P),              intent(in), optional :: levels    !< Depth (1 or 2).
+   integer(I4P)                                    :: a, nl     !< Counters.
+
+   nl = 2_I4P ; if (present(levels)) nl = levels
+   do a = 1, size(blocks, kind=I4P)
+      call fringe_core([blocks(a)%ni, blocks(a)%nj, blocks(a)%nk], outer_flags_3d(blocks(a)), masks(a), nl)
+   enddo
+   endsubroutine fringe_levels
+
+   subroutine fringe_levels_2d(blocks, masks, levels)
+   !< Fringe levels of the vertices of 2-D blocks (as fringe_levels).
+   type(curvilinear_block_2d_t), intent(in)           :: blocks(:) !< Blocks.
+   type(overset_mask_t),         intent(inout)        :: masks(:)  !< Classification.
+   integer(I4P),                 intent(in), optional :: levels    !< Depth (1 or 2).
+   integer(I4P)                                       :: a, nl     !< Counters.
+
+   nl = 2_I4P ; if (present(levels)) nl = levels
+   do a = 1, size(blocks, kind=I4P)
+      call fringe_core([blocks(a)%ni, blocks(a)%nj, 1_I4P], outer_flags_2d(blocks(a)), masks(a), nl)
+   enddo
+   endsubroutine fringe_levels_2d
+
+   function outer_flags_3d(blk) result(f)
+   !< Overlap-boundary vertices of a 3-D block (records named 'overlap').
+   type(curvilinear_block_t), intent(in) :: blk  !< Block.
+   logical, allocatable                  :: f(:) !< Flags.
+   integer(I4P)                          :: r    !< Counter.
+
+   allocate(f(blk%ni * blk%nj * blk%nk)) ; f = .false.
+   do r = 1, blk%nrec
+      if (blk%rec(r)%kind == TOPO_BOUNDARY .and. trim(blk%rec(r)%name) == 'overlap') &
+         call mark_range([blk%ni, blk%nj, blk%nk], blk%rec(r)%face, blk%rec(r)%lo, blk%rec(r)%hi, 1_I4P, f)
+   enddo
+   endfunction outer_flags_3d
+
+   function outer_flags_2d(blk) result(f)
+   !< Overlap-boundary vertices of a 2-D block (records named 'overlap').
+   type(curvilinear_block_2d_t), intent(in) :: blk  !< Block.
+   logical, allocatable                     :: f(:) !< Flags.
+   integer(I4P)                             :: r    !< Counter.
+
+   allocate(f(blk%ni * blk%nj)) ; f = .false.
+   do r = 1, blk%nrec
+      if (blk%rec(r)%kind == TOPO_BOUNDARY .and. trim(blk%rec(r)%name) == 'overlap') &
+         call mark_range([blk%ni, blk%nj, 1_I4P], blk%rec(r)%face, blk%rec(r)%lo, blk%rec(r)%hi, 1_I4P, f)
+   enddo
+   endfunction outer_flags_2d
+
+   subroutine fringe_core(n, outer, mask, nl)
+   !< Node fringe rules on one block.
+   integer(I4P),         intent(in)    :: n(3)     !< Vertices per direction.
+   logical,              intent(in)    :: outer(:) !< Overlap-boundary vertices.
+   type(overset_mask_t), intent(inout) :: mask     !< Classification.
+   integer(I4P),         intent(in)    :: nl       !< Depth.
+   logical, allocatable                :: s1(:), s2(:) !< Seeds, rings.
+
+   mask%fringe = 0_I4P
+   s1 = mask%iota == 0 ; call cell_ring(n, s1, s2)
+   where (s2 .and. mask%iota /= 0) mask%fringe = FRINGE_INNER_1
+   if (nl > 1) then
+      s1 = mask%fringe == FRINGE_INNER_1 ; call cell_ring(n, s1, s2)
+      where (s2 .and. mask%iota /= 0 .and. mask%fringe == 0) mask%fringe = FRINGE_INNER_2
+   endif
+   where (outer .and. mask%iota /= 0 .and. mask%fringe == 0) mask%fringe = FRINGE_OUTER_1
+   if (nl > 1) then
+      s1 = outer ; call cell_ring(n, s1, s2)
+      where (s2 .and. mask%iota /= 0 .and. mask%fringe == 0) mask%fringe = FRINGE_OUTER_2
+   endif
+   endsubroutine fringe_core
+
+   pure subroutine cell_ring(n, seed, ring)
+   !< The vertices sharing a cell with a seed vertex (seeds included).
+   integer(I4P),         intent(in)  :: n(3)    !< Vertices per direction.
+   logical,              intent(in)  :: seed(:) !< Seeds.
+   logical, allocatable, intent(out) :: ring(:) !< Ring.
+
+   allocate(ring(size(seed)))
+   call hole_rings(n, seed, 1_I4P, ring)
+   ring = ring .or. seed
+   endsubroutine cell_ring
+
+   subroutine overlap_width(blocks, masks, d)
+   !< Chesshire's overlap width per block pair: the smallest distance between a receptor of a from b and a receptor
+   !< of b from a (huge if either set is empty).
+   type(curvilinear_block_t), intent(in)  :: blocks(:) !< Blocks.
+   type(overset_mask_t),      intent(in)  :: masks(:)  !< Classification.
+   real(R8P), allocatable,    intent(out) :: d(:,:)    !< Widths [nb, nb].
+   type(block_real_t), allocatable        :: x(:), y(:), z(:) !< Flat coordinates.
+   integer(I4P)                           :: a, nb     !< Counters.
+
+   nb = size(blocks, kind=I4P) ; allocate(x(nb), y(nb), z(nb))
+   do a = 1, nb
+      x(a)%v = reshape(blocks(a)%x, [size(blocks(a)%x)]) ; y(a)%v = reshape(blocks(a)%y, [size(blocks(a)%y)])
+      z(a)%v = reshape(blocks(a)%z, [size(blocks(a)%z)])
+   enddo
+   call width_core(x, y, z, masks, d)
+   endsubroutine overlap_width
+
+   subroutine overlap_width_2d(blocks, masks, d)
+   !< Chesshire's overlap width per pair of 2-D blocks (as overlap_width).
+   type(curvilinear_block_2d_t), intent(in)  :: blocks(:) !< Blocks.
+   type(overset_mask_t),         intent(in)  :: masks(:)  !< Classification.
+   real(R8P), allocatable,       intent(out) :: d(:,:)    !< Widths [nb, nb].
+   type(block_real_t), allocatable           :: x(:), y(:), z(:) !< Flat coordinates.
+   integer(I4P)                              :: a, nb     !< Counters.
+
+   nb = size(blocks, kind=I4P) ; allocate(x(nb), y(nb), z(nb))
+   do a = 1, nb
+      x(a)%v = reshape(blocks(a)%u, [size(blocks(a)%u)]) ; y(a)%v = reshape(blocks(a)%v, [size(blocks(a)%v)])
+      allocate(z(a)%v(size(x(a)%v))) ; z(a)%v = 0._R8P
+   enddo
+   call width_core(x, y, z, masks, d)
+   endsubroutine overlap_width_2d
+
+   subroutine width_core(x, y, z, masks, d)
+   !< The overlap widths from flat coordinates.
+   type(block_real_t),     intent(in)  :: x(:), y(:), z(:) !< Coordinates per block.
+   type(overset_mask_t),   intent(in)  :: masks(:)  !< Classification.
+   real(R8P), allocatable, intent(out) :: d(:,:)    !< Widths.
+   integer(I4P)                        :: a, b, v, u, nb !< Counters.
+
+   nb = size(masks, kind=I4P) ; allocate(d(nb, nb)) ; d = huge(1._R8P)
+   do a = 1, nb
+      do b = a + 1, nb
+         do v = 1, size(masks(a)%iota, kind=I4P)
+            if (masks(a)%iota(v) /= -b) cycle
+            do u = 1, size(masks(b)%iota, kind=I4P)
+               if (masks(b)%iota(u) /= -a) cycle
+               d(a, b) = min(d(a, b), norm2([x(a)%v(v) - x(b)%v(u), y(a)%v(v) - y(b)%v(u), z(a)%v(v) - z(b)%v(u)]))
+            enddo
+         enddo
+         d(b, a) = d(a, b)
+      enddo
+   enddo
+   endsubroutine width_core
 
    pure subroutine hole_rings(n, hole, nl, ring)
    !< Vertices within nl index rings (Chebyshev) of a hole, holes excluded.
