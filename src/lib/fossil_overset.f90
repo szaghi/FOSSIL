@@ -18,6 +18,18 @@ module fossil_overset
 !< fast winding number (negative inside), is below `offset` (default 0: inside; a vertex on the wall is a field
 !< point). `cuts(b)` selects the blocks the cutter cuts (default all). device=.true. runs the same kernels on the GPU
 !< (the cutter is entered and left around the call if it is not on the device already), bit-identical.
+!<
+!< Hole map (`hole_map`, Chiu & Meakin / PEGASUS 5): a Cartesian map of n elements per direction over the cutter's
+!< box enlarged by one element; the elements the wall meets are cut (exact BOX_CUT), the others are painted outside
+!< from the corner elements through face neighbours, the rest inside. A vertex in an uncut element takes its status;
+!< in a cut element it looks along a grid axis (+x, -x, +y, ... in turn) to the first uncut element of the column
+!< and takes that element's status, flipped by the parity of the exact wall crossings in between (`line_crossings`,
+!< #40): exact. pegasus=.true. instead takes the status of a face-neighbour element only if no crossing lies in
+!< between (the PEGASUS 5 line of sight), and leaves the vertex a field point otherwise (`unresolved` counts them):
+!< inside a body thinner than the map no such neighbour exists and the hole is not cut.
+!< X-rays (`xray_flags`, Meakin): the exact crossings of the wall along the lines parallel to z through a raster of
+!< n(1) x n(2) points over the cutter's box; a vertex takes the side of its nearest ray at its own z (inside if the
+!< last crossing below it enters the solid): exact on the rays, wrong only near the wall between rays.
 
 use penf,                      only : I4P, R8P
 use vecfor,                    only : vector_R8P
@@ -26,10 +38,12 @@ use fossil_surface_stl_object, only : surface_stl_object, SIGN_FWN => SIGN_FAST_
 use fossil_curve_object,       only : curve_object
 use fossil_curvilinear_block,  only : curvilinear_block_t, curvilinear_block_2d_t, TOPO_BOUNDARY
 use fossil_predicates,         only : orient2d_xy
+use fossil_box_query,          only : BOX_CUT
 
 implicit none
 private
 public :: wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2d, block_logical_t, block_real_t
+public :: hole_map, hole_map_2d, xray_flags, xray_flags_2d
 
 type :: block_logical_t
    !< Logical values per vertex of a block (linear vertex index, i fastest).
@@ -40,6 +54,13 @@ type :: block_real_t
    !< Real values per vertex of a block (linear vertex index, i fastest).
    real(R8P), allocatable :: v(:) !< Values.
 endtype block_real_t
+
+type :: ray_t
+   !< Exact crossings of one X-ray.
+   integer(I4P)              :: n = 0_I4P !< Crossings.
+   real(R8P),    allocatable :: t(:)      !< Parameters, sorted.
+   logical,      allocatable :: ent(:)    !< Entering the solid.
+endtype ray_t
 
 type :: tri_list_t
    !< Wall triangles of one block.
@@ -520,6 +541,322 @@ contains
    enddo
    if (entered) call cutter%exit_device
    endsubroutine hole_flags_2d
+
+   ! -------------------------------------------------------------------------------------- hole map and object X-rays
+   subroutine hole_map(blocks, cutter, holes, n, cuts, pegasus, unresolved)
+   !< Hole flags from a Cartesian hole map (module notes).
+   type(curvilinear_block_t),          intent(in)            :: blocks(:)  !< Blocks.
+   type(surface_stl_object),           intent(in)            :: cutter     !< Cutter.
+   type(block_logical_t), allocatable, intent(out)           :: holes(:)   !< Holes per block.
+   integer(I4P),                       intent(in)            :: n(3)       !< Map elements per direction.
+   logical,                            intent(in),  optional :: cuts(:)    !< Blocks cut (default all).
+   logical,                            intent(in),  optional :: pegasus    !< PEGASUS 5 line of sight.
+   integer(I4P),                       intent(out), optional :: unresolved !< Vertices left unresolved (pegasus).
+   real(R8P),    allocatable :: lo(:,:), hi(:,:)  !< Element boxes.
+   integer(I4P), allocatable :: codes(:)          !< BOX_* codes.
+   integer(I4P), allocatable :: state(:,:,:)      !< 0 cut, 1 outside, 2 inside.
+   real(R8P)                 :: b0(3), b1(3), h(3), p(3) !< Map box, spacing, point.
+   integer(I4P)              :: i, j, k, e, b, nv, m, ijk(3), nu !< Counters.
+   logical                   :: peg, ins, ok   !< Flags.
+   type(vector_R8P)          :: bmin, bmax     !< Cutter box.
+
+   peg = .false. ; if (present(pegasus)) peg = pegasus
+   bmin = cutter%get_bmin() ; bmax = cutter%get_bmax()
+   h = ([bmax%x, bmax%y, bmax%z] - [bmin%x, bmin%y, bmin%z]) / (n - 2)
+   b0 = [bmin%x, bmin%y, bmin%z] - h ; b1 = b0 + h * n
+   allocate(lo(3, product(n)), hi(3, product(n)), codes(product(n)), state(n(1), n(2), n(3))) ; e = 0_I4P
+   do k = 1, n(3)
+      do j = 1, n(2)
+         do i = 1, n(1)
+            e = e + 1_I4P ; lo(:, e) = b0 + h * [i - 1, j - 1, k - 1] ; hi(:, e) = b0 + h * [i, j, k]
+         enddo
+      enddo
+   enddo
+   call cutter%box_classify_many(lo, hi, codes)
+   state = reshape(merge(0_I4P, 2_I4P, codes == BOX_CUT), n)
+   call paint_outside(state)
+   allocate(holes(size(blocks))) ; nu = 0_I4P
+   do b = 1, size(blocks, kind=I4P)
+      nv = blocks(b)%ni * blocks(b)%nj * blocks(b)%nk
+      allocate(holes(b)%v(nv)) ; holes(b)%v = .false.
+      if (present(cuts)) then
+         if (.not. cuts(b)) cycle
+      endif
+      m = 0_I4P
+      do k = 1, blocks(b)%nk
+         do j = 1, blocks(b)%nj
+            do i = 1, blocks(b)%ni
+               m = m + 1_I4P ; p = [blocks(b)%x(i, j, k), blocks(b)%y(i, j, k), blocks(b)%z(i, j, k)]
+               if (any(p < b0) .or. any(p >= b1)) cycle
+               ijk = min(int((p - b0) / h) + 1_I4P, n)
+               if (state(ijk(1), ijk(2), ijk(3)) /= 0) then
+                  holes(b)%v(m) = state(ijk(1), ijk(2), ijk(3)) == 2
+               elseif (cutter%distance(point=vector_R8P(p(1), p(2), p(3)), is_signed=.false., is_square_root=.true.) &
+                       == 0._R8P) then
+                  holes(b)%v(m) = .false. ! on the wall: a field point
+               else
+                  call line_of_sight_3d(cutter, state, b0, h, p, ijk, peg, ins, ok)
+                  holes(b)%v(m) = ins .and. ok
+                  if (.not. ok) nu = nu + 1_I4P
+               endif
+            enddo
+         enddo
+      enddo
+   enddo
+   if (present(unresolved)) unresolved = nu
+   endsubroutine hole_map
+
+   subroutine paint_outside(state)
+   !< Paint state 2 (uncut) elements face-connected to the corner elements as 1 (outside), breadth first.
+   integer(I4P), intent(inout) :: state(:,:,:) !< 0 cut, 1 outside, 2 inside (on entry: uncut).
+   integer(I4P), allocatable   :: queue(:,:)   !< Queue.
+   integer(I4P)                :: n(3), head, tail, c(3), d, s, q(3), a, e !< Work.
+
+   n = shape(state) ; allocate(queue(3, product(n))) ; head = 1_I4P ; tail = 0_I4P
+   do e = 0, 7
+      c = merge(n, [1, 1, 1], [btest(e, 0), btest(e, 1), btest(e, 2)])
+      if (state(c(1), c(2), c(3)) == 2) then
+         state(c(1), c(2), c(3)) = 1 ; tail = tail + 1_I4P ; queue(:, tail) = c
+      endif
+   enddo
+   do while (head <= tail)
+      c = queue(:, head) ; head = head + 1_I4P
+      do d = 1, 3
+         do s = -1, 1, 2
+            q = c ; q(d) = q(d) + s
+            if (q(d) < 1 .or. q(d) > n(d)) cycle
+            a = state(q(1), q(2), q(3))
+            if (a /= 2) cycle
+            state(q(1), q(2), q(3)) = 1 ; tail = tail + 1_I4P ; queue(:, tail) = q
+         enddo
+      enddo
+   enddo
+   endsubroutine paint_outside
+
+   subroutine line_of_sight_3d(cutter, state, b0, h, p, ijk, peg, ins, ok)
+   !< Status of the vertex p in the cut element ijk by a line of sight along a grid axis (module notes).
+   type(surface_stl_object), intent(in)  :: cutter       !< Cutter.
+   integer(I4P),             intent(in)  :: state(:,:,:) !< Element states.
+   real(R8P),                intent(in)  :: b0(3), h(3), p(3) !< Map origin, spacing, point.
+   integer(I4P),             intent(in)  :: ijk(3)       !< Element of p.
+   logical,                  intent(in)  :: peg          !< PEGASUS 5 rule.
+   logical,                  intent(out) :: ins, ok      !< Inside, resolved.
+   real(R8P),    allocatable             :: t(:)         !< Crossings.
+   integer(I4P), allocatable             :: fac(:)       !< Facets.
+   logical,      allocatable             :: ent(:)       !< Entering flags.
+   integer(I4P)                          :: d, s, q(3), nc, na, nb, steps !< Work.
+   real(R8P)                             :: tend         !< End of the segment along the axis.
+
+   ins = .false. ; ok = .false.
+   do d = 1, 3
+      na = mod(d, 3_I4P) + 1_I4P ; nb = mod(d + 1_I4P, 3_I4P) + 1_I4P
+      do s = 1, -1, -2
+         q = ijk ; steps = 0_I4P
+         do
+            q(d) = q(d) + s ; steps = steps + 1_I4P
+            if (q(d) < 1 .or. q(d) > size(state, d)) exit
+            if (state(q(1), q(2), q(3)) /= 0) exit
+            if (peg) exit
+         enddo
+         if (q(d) < 1 .or. q(d) > size(state, d)) cycle
+         if (state(q(1), q(2), q(3)) == 0) cycle
+         tend = b0(d) + h(d) * (q(d) - 0.5_R8P)
+         call cutter%line_crossings(d, p(na), p(nb), min(p(d), tend), max(p(d), tend), t, fac, ent, nc)
+         if (any(t == p(d))) then ! on the wall: a field point
+            ok = .true. ; ins = .false. ; return
+         endif
+         if (peg .and. nc > 0) cycle
+         ins = (state(q(1), q(2), q(3)) == 2) .neqv. (mod(nc, 2_I4P) == 1)
+         ok = .true. ; return
+      enddo
+   enddo
+   endsubroutine line_of_sight_3d
+
+   subroutine xray_flags(blocks, cutter, holes, n, cuts)
+   !< Hole flags from object X-rays along z (module notes).
+   type(curvilinear_block_t),          intent(in)           :: blocks(:) !< Blocks.
+   type(surface_stl_object),           intent(in)           :: cutter    !< Cutter.
+   type(block_logical_t), allocatable, intent(out)          :: holes(:)  !< Holes per block.
+   integer(I4P),                       intent(in)           :: n(2)      !< Rays in x and y.
+   logical,                            intent(in), optional :: cuts(:)   !< Blocks cut (default all).
+   type(ray_t), allocatable :: rays(:,:)   !< Crossings per ray.
+   integer(I4P), allocatable :: fac(:)     !< Facets.
+   real(R8P)                :: b0(3), b1(3), h(2), p(3) !< Box, spacing, point.
+   integer(I4P)             :: i, j, k, b, m, r(2), c, nv !< Counters.
+   type(vector_R8P)         :: bmin, bmax  !< Cutter box.
+
+   bmin = cutter%get_bmin() ; bmax = cutter%get_bmax()
+   b0 = [bmin%x, bmin%y, bmin%z] ; b1 = [bmax%x, bmax%y, bmax%z] ; h = (b1(1:2) - b0(1:2)) / (n - 1)
+   allocate(rays(n(1), n(2)))
+   do j = 1, n(2)
+      do i = 1, n(1)
+         call cutter%line_crossings(3_I4P, b0(1) + h(1) * (i - 1), b0(2) + h(2) * (j - 1), b0(3) - 1._R8P, &
+                                    b1(3) + 1._R8P, rays(i, j)%t, fac, rays(i, j)%ent, rays(i, j)%n)
+      enddo
+   enddo
+   allocate(holes(size(blocks)))
+   do b = 1, size(blocks, kind=I4P)
+      nv = blocks(b)%ni * blocks(b)%nj * blocks(b)%nk
+      allocate(holes(b)%v(nv)) ; holes(b)%v = .false.
+      if (present(cuts)) then
+         if (.not. cuts(b)) cycle
+      endif
+      m = 0_I4P
+      do k = 1, blocks(b)%nk
+         do j = 1, blocks(b)%nj
+            do i = 1, blocks(b)%ni
+               m = m + 1_I4P ; p = [blocks(b)%x(i, j, k), blocks(b)%y(i, j, k), blocks(b)%z(i, j, k)]
+               if (any(p < b0) .or. any(p > b1)) cycle
+               r = nint((p(1:2) - b0(1:2)) / h) + 1_I4P
+               c = count(rays(r(1), r(2))%t(1:rays(r(1), r(2))%n) < p(3))
+               if (c > 0) holes(b)%v(m) = rays(r(1), r(2))%ent(c)
+            enddo
+         enddo
+      enddo
+   enddo
+   endsubroutine xray_flags
+
+   subroutine hole_map_2d(blocks, cutter, holes, n, cuts, pegasus, unresolved)
+   !< Hole flags from a 2-D Cartesian hole map (as hole_map).
+   type(curvilinear_block_2d_t),       intent(in)            :: blocks(:)  !< Blocks.
+   type(curve_object),                 intent(in)            :: cutter     !< Cutter.
+   type(block_logical_t), allocatable, intent(out)           :: holes(:)   !< Holes per block.
+   integer(I4P),                       intent(in)            :: n(2)       !< Map elements per direction.
+   logical,                            intent(in),  optional :: cuts(:)    !< Blocks cut (default all).
+   logical,                            intent(in),  optional :: pegasus    !< PEGASUS 5 line of sight.
+   integer(I4P),                       intent(out), optional :: unresolved !< Vertices left unresolved.
+   real(R8P),    allocatable :: lo(:,:), hi(:,:)  !< Element boxes.
+   integer(I4P), allocatable :: codes(:)          !< BOX_* codes.
+   integer(I4P), allocatable :: state(:,:,:)      !< 0 cut, 1 outside, 2 inside.
+   real(R8P)                 :: b0(2), b1(2), h(2), p(2), bb(2) !< Map box, spacing, point.
+   integer(I4P)              :: i, j, e, b, nv, m, ij(2), nu !< Counters.
+   logical                   :: peg, ins, ok   !< Flags.
+
+   peg = .false. ; if (present(pegasus)) peg = pegasus
+   bb = cutter%get_bmin() ; b0 = bb ; bb = cutter%get_bmax()
+   h = (bb - b0) / (n - 2) ; b0 = b0 - h ; b1 = b0 + h * n
+   allocate(lo(2, product(n)), hi(2, product(n)), codes(product(n)), state(n(1), n(2), 1)) ; e = 0_I4P
+   do j = 1, n(2)
+      do i = 1, n(1)
+         e = e + 1_I4P ; lo(:, e) = b0 + h * [i - 1, j - 1] ; hi(:, e) = b0 + h * [i, j]
+      enddo
+   enddo
+   call cutter%box_classify_many(lo, hi, codes)
+   state = reshape(merge(0_I4P, 2_I4P, codes == BOX_CUT), [n(1), n(2), 1])
+   call paint_outside(state)
+   allocate(holes(size(blocks))) ; nu = 0_I4P
+   do b = 1, size(blocks, kind=I4P)
+      nv = blocks(b)%ni * blocks(b)%nj
+      allocate(holes(b)%v(nv)) ; holes(b)%v = .false.
+      if (present(cuts)) then
+         if (.not. cuts(b)) cycle
+      endif
+      m = 0_I4P
+      do j = 1, blocks(b)%nj
+         do i = 1, blocks(b)%ni
+            m = m + 1_I4P ; p = [blocks(b)%u(i, j), blocks(b)%v(i, j)]
+            if (any(p < b0) .or. any(p >= b1)) cycle
+            ij = min(int((p - b0) / h) + 1_I4P, n)
+            if (state(ij(1), ij(2), 1) /= 0) then
+               holes(b)%v(m) = state(ij(1), ij(2), 1) == 2
+            elseif (on_curve(cutter, p)) then
+               holes(b)%v(m) = .false. ! on the wall: a field point
+            else
+               call line_of_sight_2d(cutter, state(:,:,1), b0, h, p, ij, peg, ins, ok)
+               holes(b)%v(m) = ins .and. ok
+               if (.not. ok) nu = nu + 1_I4P
+            endif
+         enddo
+      enddo
+   enddo
+   if (present(unresolved)) unresolved = nu
+   endsubroutine hole_map_2d
+
+   logical function on_curve(cutter, p) result(yes)
+   !< The point is exactly on the curve (distance 0).
+   type(curve_object), intent(in) :: cutter !< Curve.
+   real(R8P),          intent(in) :: p(2)   !< Point.
+   real(R8P)                      :: d(1)   !< Distance.
+
+   call cutter%distance_many(points=reshape(p, [2, 1]), distances=d, is_signed=.false.)
+   yes = d(1) == 0._R8P
+   endfunction on_curve
+
+   subroutine line_of_sight_2d(cutter, state, b0, h, p, ij, peg, ins, ok)
+   !< Status of the vertex p in the cut element ij by a line of sight along a grid axis (as line_of_sight_3d).
+   type(curve_object), intent(in)  :: cutter     !< Cutter.
+   integer(I4P),       intent(in)  :: state(:,:) !< Element states.
+   real(R8P),          intent(in)  :: b0(2), h(2), p(2) !< Map origin, spacing, point.
+   integer(I4P),       intent(in)  :: ij(2)      !< Element of p.
+   logical,            intent(in)  :: peg        !< PEGASUS 5 rule.
+   logical,            intent(out) :: ins, ok    !< Inside, resolved.
+   real(R8P),    allocatable       :: t(:)       !< Crossings.
+   integer(I4P), allocatable       :: seg(:)     !< Segments.
+   logical,      allocatable       :: ent(:)     !< Entering flags.
+   integer(I4P)                    :: d, s, q(2), nc !< Work.
+   real(R8P)                       :: tend       !< End of the segment along the axis.
+
+   ins = .false. ; ok = .false.
+   do d = 1, 2
+      do s = 1, -1, -2
+         q = ij
+         do
+            q(d) = q(d) + s
+            if (q(d) < 1 .or. q(d) > size(state, d)) exit
+            if (state(q(1), q(2)) /= 0) exit
+            if (peg) exit
+         enddo
+         if (q(d) < 1 .or. q(d) > size(state, d)) cycle
+         if (state(q(1), q(2)) == 0) cycle
+         tend = b0(d) + h(d) * (q(d) - 0.5_R8P)
+         call cutter%line_crossings(d, p(3 - d), min(p(d), tend), max(p(d), tend), t, seg, ent, nc)
+         if (any(t == p(d))) then
+            ok = .true. ; ins = .false. ; return
+         endif
+         if (peg .and. nc > 0) cycle
+         ins = (state(q(1), q(2)) == 2) .neqv. (mod(nc, 2_I4P) == 1)
+         ok = .true. ; return
+      enddo
+   enddo
+   endsubroutine line_of_sight_2d
+
+   subroutine xray_flags_2d(blocks, cutter, holes, n, cuts)
+   !< Hole flags from object X-rays along v through n points in u (as xray_flags).
+   type(curvilinear_block_2d_t),       intent(in)           :: blocks(:) !< Blocks.
+   type(curve_object),                 intent(in)           :: cutter    !< Cutter.
+   type(block_logical_t), allocatable, intent(out)          :: holes(:)  !< Holes per block.
+   integer(I4P),                       intent(in)           :: n         !< Rays.
+   logical,                            intent(in), optional :: cuts(:)   !< Blocks cut (default all).
+   type(ray_t), allocatable :: rays(:)     !< Crossings per ray.
+   integer(I4P), allocatable :: seg(:)     !< Segments.
+   real(R8P)                :: b0(2), b1(2), h, p(2) !< Box, spacing, point.
+   integer(I4P)             :: i, j, b, m, r, c, nv !< Counters.
+
+   b0 = cutter%get_bmin() ; b1 = cutter%get_bmax() ; h = (b1(1) - b0(1)) / (n - 1)
+   allocate(rays(n))
+   do i = 1, n
+      call cutter%line_crossings(2_I4P, b0(1) + h * (i - 1), b0(2) - 1._R8P, b1(2) + 1._R8P, rays(i)%t, seg, &
+                                 rays(i)%ent, rays(i)%n)
+   enddo
+   allocate(holes(size(blocks)))
+   do b = 1, size(blocks, kind=I4P)
+      nv = blocks(b)%ni * blocks(b)%nj
+      allocate(holes(b)%v(nv)) ; holes(b)%v = .false.
+      if (present(cuts)) then
+         if (.not. cuts(b)) cycle
+      endif
+      m = 0_I4P
+      do j = 1, blocks(b)%nj
+         do i = 1, blocks(b)%ni
+            m = m + 1_I4P ; p = [blocks(b)%u(i, j), blocks(b)%v(i, j)]
+            if (any(p < b0) .or. any(p > b1)) cycle
+            r = nint((p(1) - b0(1)) / h) + 1_I4P
+            c = count(rays(r)%t(1:rays(r)%n) < p(2))
+            if (c > 0) holes(b)%v(m) = rays(r)%ent(c)
+         enddo
+      enddo
+   enddo
+   endsubroutine xray_flags_2d
 
    ! ------------------------------------------------------------------------------------------------------- utilities
    pure function pt3(blk, p) result(x)

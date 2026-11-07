@@ -39,7 +39,8 @@ use fossil_curvilinear_block, only : curvilinear_block_t, curvilinear_block_2d_t
 use fossil_block_locate, only : LOC_INSIDE, LOC_OUTSIDE, LOC_WARPED, LOC_DEGENERATE, LOC_NOT_CONVERGED
 use fossil_block_stencil, only : STENCIL_CENTRED, STENCIL_SHIFTED, STENCIL_REDUCED, STENCIL_FAILED, STENCIL_MAX
 use fossil_block_geometry, only : CELL_VALID, CELL_SINGULAR, CELL_INVALID, CELL_UNDETERMINED
-use fossil_overset, only : wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2d, block_logical_t, block_real_t
+use fossil_overset, only : wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2d, block_logical_t, block_real_t, &
+                           hole_map, hole_map_2d, xray_flags, xray_flags_2d
 use fossil_rigid_pose, only : rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, &
                              pose_2d, pose_compose, pose_inverse, to_body, to_world, rotate, pose_interpolate
 use fossil_swept_cells, only : swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
@@ -69,6 +70,7 @@ public :: CELL_VALID, CELL_SINGULAR, CELL_INVALID, CELL_UNDETERMINED
 public :: locate_in_blocks, locate_in_blocks_2d, LOC_INSIDE, LOC_OUTSIDE, LOC_WARPED, LOC_DEGENERATE, LOC_NOT_CONVERGED
 public :: STENCIL_CENTRED, STENCIL_SHIFTED, STENCIL_REDUCED, STENCIL_FAILED, STENCIL_MAX
 public :: wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2d, block_logical_t, block_real_t
+public :: hole_map, hole_map_2d, xray_flags, xray_flags_2d
 public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose
 public :: pose_inverse, to_body, to_world, rotate, pose_interpolate
 public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
