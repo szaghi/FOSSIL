@@ -31,7 +31,8 @@ use fossil_box_query,          only : curve_box_contact_oac, curve_box_thin_oac,
 use fossil_line_query,         only : curve_line_crossings_oac, line_crossing_before_2d
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
 use fossil_cut_moments,        only : MOMENTS_MAX
-use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate
+use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate, pose_interpolate
+use fossil_ccd,                only : ccd_evaluator_t, ccd_advance, motion_bound_2d, CCD_INVALID_INPUT
 use fossil_predicates,         only : orient2d_xy
 use fossil_mass_properties,    only : moments_accumulator_t, accumulate_segment, moments_to_properties_2d, symmetric2_eigen
 use fossil_feature_edges,      only : FEATURE_EDGE_DEFAULT_ANGLE, feature_cos
@@ -106,6 +107,7 @@ type :: curve_object
       procedure, pass(self) :: segment_patch        !< Patch of a segment.
       procedure, pass(self) :: set_patch            !< Assign segments to a named patch.
       procedure, pass(self) :: distance_to          !< Distance to another curve, with the closest pair (issue #67).
+      procedure, pass(self) :: time_of_impact       !< Time of first contact with another moving curve (issue #73).
       procedure, pass(self) :: box_classify_many    !< Classify boxes: cut, near, inside, outside (issue #38).
       procedure, pass(self) :: box_intersects_curve !< True if a box meets the curve (issue #38).
       procedure, pass(self) :: box_classify_many_device !< box_classify_many on the device (issue #38).
@@ -167,6 +169,18 @@ type :: curve_object
       ! private methods
       procedure, pass(self), private :: analyze     !< Derived data: topology, metrics, normals.
 endtype curve_object
+
+type, extends(ccd_evaluator_t) :: curve_ccd_evaluator_t
+   !< The distance of two moving curves at the step parameter s, for `fossil_ccd` (issue #73).
+   class(curve_object), pointer :: a => null() !< Body A.
+   class(curve_object), pointer :: b => null() !< Body B.
+   type(rigid_pose_2d_t)        :: a0, a1      !< Poses of A at s = 0, 1.
+   type(rigid_pose_2d_t)        :: b0, b1      !< Poses of B at s = 0, 1.
+   real(R8P)                    :: pa(2) = 0._R8P, pb(2) = 0._R8P !< Witness points of the last call.
+   integer(I4P)                 :: sa = 0_I4P, sb = 0_I4P         !< Closest segments of the last call.
+   contains
+      procedure, pass(self) :: distance => curve_ccd_distance !< d(s).
+endtype curve_ccd_evaluator_t
 
 type, extends(deviation_evaluator_2d_t) :: curve_evaluator_t
    !< A curve seen through its batched closest-point query, for `fossil_deviation` (issue #60).
@@ -268,6 +282,46 @@ contains
       if (present(pose)) x = to_world(pose, x)
       endfunction place
    endsubroutine distance_to
+
+   subroutine time_of_impact(self, other, pose_self0, pose_self1, pose_other0, pose_other1, toi, status, tolerance, &
+                             distance, point_self, point_other, segment_self, segment_other, iterations, max_iterations)
+   !< Time of first contact of this curve and `other` over a step (issue #73, the 2-D twin of
+   !< `surface%time_of_impact`): conservative advancement over `distance_to` along `pose_interpolate`, mu =
+   !< motion_bound_2d(self) + motion_bound_2d(other). Default tolerance: 1e-6 of the larger bounding-box diagonal.
+   class(curve_object),   intent(in), target    :: self           !< Curve A.
+   class(curve_object),   intent(in), target    :: other          !< Curve B.
+   type(rigid_pose_2d_t), intent(in)            :: pose_self0, pose_self1   !< Poses of A at s = 0, 1.
+   type(rigid_pose_2d_t), intent(in)            :: pose_other0, pose_other1 !< Poses of B at s = 0, 1.
+   real(R8P),             intent(out)           :: toi            !< Time of first contact in [0, 1].
+   integer(I4P),          intent(out)           :: status         !< CCD_* status.
+   real(R8P),             intent(in),  optional :: tolerance      !< Contact tolerance.
+   real(R8P),             intent(out), optional :: distance       !< d(toi).
+   real(R8P),             intent(out), optional :: point_self(2), point_other(2) !< Witness points at toi.
+   integer(I4P),          intent(out), optional :: segment_self, segment_other   !< Closest segments at toi.
+   integer(I4P),          intent(out), optional :: iterations     !< Advancement steps.
+   integer(I4P),          intent(in),  optional :: max_iterations !< Cap (default CCD_MAX_ITERATIONS).
+   type(curve_ccd_evaluator_t)                  :: ev             !< Distance at s.
+   real(R8P)                                    :: mu, tol, d     !< Bound, tolerance, distance.
+
+   toi = 0._R8P ; d = 0._R8P
+   if (self%nv == 0 .or. other%nv == 0) then
+      status = CCD_INVALID_INPUT
+   else
+      mu = motion_bound_2d(pose_self0, pose_self1, self%u(1:self%nv), self%v(1:self%nv)) + &
+           motion_bound_2d(pose_other0, pose_other1, other%u(1:other%nv), other%v(1:other%nv))
+      tol = 1.e-6_R8P * max(norm2(self%bmax - self%bmin), norm2(other%bmax - other%bmin))
+      if (present(tolerance)) tol = tolerance
+      ev%a => self ; ev%b => other
+      ev%a0 = pose_self0 ; ev%a1 = pose_self1 ; ev%b0 = pose_other0 ; ev%b1 = pose_other1
+      call ccd_advance(ev, mu, tol, toi, status, distance=d, iterations=iterations, max_iterations=max_iterations)
+   endif
+   if (present(distance)) distance = d
+   if (present(point_self)) point_self = ev%pa
+   if (present(point_other)) point_other = ev%pb
+   if (present(segment_self)) segment_self = ev%sa
+   if (present(segment_other)) segment_other = ev%sb
+   if (present(iterations) .and. status == CCD_INVALID_INPUT) iterations = 0_I4P
+   endsubroutine time_of_impact
 
    subroutine segment_pair(a0, a1, b0, b1, d2, pa, pb, meet)
    !< Squared distance between segments (a0, a1) and (b0, b1) with witness points; 0 and `meet` when they cross or touch
@@ -2469,6 +2523,17 @@ contains
                                  is_signed=.false.)
    endif
    endsubroutine curve_evaluator_eval
+
+   subroutine curve_ccd_distance(self, s, d)
+   !< Distance of the two curves at the poses `pose_interpolate` gives at s, with the witnesses (`distance_to`).
+   class(curve_ccd_evaluator_t), intent(inout) :: self !< Evaluator.
+   real(R8P),                    intent(in)    :: s    !< Step parameter.
+   real(R8P),                    intent(out)   :: d    !< Distance.
+
+   call self%a%distance_to(self%b, d, point_self=self%pa, point_other=self%pb, segment_self=self%sa, &
+                           segment_other=self%sb, pose_self=pose_interpolate(self%a0, self%a1, s), &
+                           pose_other=pose_interpolate(self%b0, self%b1, s))
+   endsubroutine curve_ccd_distance
 
    subroutine load_from_file(self, file_name, normal_axis, status)
    !< Load the curve from the ASCII loop format.

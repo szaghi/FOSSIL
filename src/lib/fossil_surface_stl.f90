@@ -13,7 +13,8 @@ use fossil_facet_object, only : facet_object, pnormal_payload_t,                
                                 pnormal_x_oac, pnormal_y_oac, pnormal_z_oac,                   &
                                 triangle_point_distance
 use fossil_list_id_object, only : list_id_object
-use fossil_rigid_pose, only : rigid_pose_t, to_body, to_world, rotate
+use fossil_rigid_pose, only : rigid_pose_t, to_body, to_world, rotate, pose_interpolate
+use fossil_ccd, only : ccd_evaluator_t, ccd_advance, motion_bound_3d, CCD_INVALID_INPUT
 use fossil_box_query, only : bvh_box_contact_oac, bvh_box_thin_oac, box_tolerance, cell_bands, cell_components, &
                              BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_box_predicates, only : box_triangle_overlap
@@ -225,6 +226,7 @@ type :: surface_stl_object
       procedure, pass(self) :: load_from_file       !< Load STL from a file path (ASCII or binary, auto-detected).
       procedure, pass(self) :: load_from_files      !< Load several STL files, one patch per file (issue #66).
       procedure, pass(self) :: distance_to          !< Distance to another body, with the closest pair (issue #67).
+      procedure, pass(self) :: time_of_impact       !< Time of first contact with another moving body (issue #73).
       procedure, pass(self) :: proximity_pairs      !< Pairs of bodies of the surface closer than a cutoff (issue #67).
       procedure, pass(self) :: save_into_file       !< Save STL to a file path.
       procedure, pass(self) :: save_aabb_into_file  !< Save the AABB tree leaves as separate STL files.
@@ -337,6 +339,18 @@ type, extends(deviation_evaluator_t) :: surface_evaluator_t
    contains
       procedure, pass(self) :: eval => surface_evaluator_eval !< Unsigned distances and closest points.
 endtype surface_evaluator_t
+
+type, extends(ccd_evaluator_t) :: surface_ccd_evaluator_t
+   !< The distance of two moving surfaces at the step parameter s, for `fossil_ccd` (issue #73).
+   class(surface_stl_object), pointer :: a => null() !< Body A.
+   class(surface_stl_object), pointer :: b => null() !< Body B.
+   type(rigid_pose_t)                 :: a0, a1      !< Poses of A at s = 0, 1.
+   type(rigid_pose_t)                 :: b0, b1      !< Poses of B at s = 0, 1.
+   real(R8P)                          :: pa(3) = 0._R8P, pb(3) = 0._R8P !< Witness points of the last call.
+   integer(I4P)                       :: fa = 0_I4P, fb = 0_I4P         !< Closest facets of the last call.
+   contains
+      procedure, pass(self) :: distance => surface_ccd_distance !< d(s).
+endtype surface_ccd_evaluator_t
 
 contains
    ! accessors (pure, scalar/vector return — inlined by gfortran/ifort at -O2, no data copy)
@@ -4970,6 +4984,16 @@ contains
    endif
    endsubroutine surface_evaluator_eval
 
+   subroutine surface_ccd_distance(self, s, d)
+   !< Distance of the two bodies at the poses `pose_interpolate` gives at s, with the witnesses (`distance_to`).
+   class(surface_ccd_evaluator_t), intent(inout) :: self !< Evaluator.
+   real(R8P),                      intent(in)    :: s    !< Step parameter.
+   real(R8P),                      intent(out)   :: d    !< Distance.
+
+   call self%a%distance_to(self%b, d, point_self=self%pa, point_other=self%pb, facet_self=self%fa, facet_other=self%fb, &
+                           pose_self=pose_interpolate(self%a0, self%a1, s), pose_other=pose_interpolate(self%b0, self%b1, s))
+   endsubroutine surface_ccd_distance
+
    subroutine deviation_mesh(surf, v, fv)
    !< The vertex-pool vertices and the facets (pool indices) of a surface.
    type(surface_stl_object),  intent(in)  :: surf     !< Surface.
@@ -6624,6 +6648,71 @@ contains
    if (present(facet_other)) facet_other = ib
    if (present(intersecting)) intersecting = meet
    endsubroutine distance_to
+
+   subroutine time_of_impact(self, other, pose_self0, pose_self1, pose_other0, pose_other1, toi, status, tolerance, &
+                             distance, point_self, point_other, facet_self, facet_other, iterations, max_iterations)
+   !< Time of first contact of this body and `other` over a step (issue #73): each body moves from its pose at s = 0 to
+   !< its pose at s = 1 along `pose_interpolate`; conservative advancement (`fossil_ccd%ccd_advance`) over `distance_to`
+   !< with the bound mu = motion_bound_3d(self) + motion_bound_3d(other): d >= tolerance / 2 on [0, toi] (no earlier
+   !< contact, no tunnelling), d(toi) <= tolerance on CCD_CONTACT. `status`: CCD_CONTACT, CCD_SEPARATE (toi = 1),
+   !< CCD_INITIAL_CONTACT (toi = 0), CCD_NOT_CONVERGED (cap hit: toi a certified lower bound), CCD_INVALID_INPUT (an
+   !< empty body, tolerance <= 0). Default tolerance: 1e-6 of the larger bounding-box diagonal. The witnesses (world
+   !< frame) and the closest facets are those at toi.
+   class(surface_stl_object), intent(in), target    :: self           !< Body A.
+   class(surface_stl_object), intent(in), target    :: other          !< Body B.
+   type(rigid_pose_t),        intent(in)            :: pose_self0, pose_self1   !< Poses of A at s = 0, 1.
+   type(rigid_pose_t),        intent(in)            :: pose_other0, pose_other1 !< Poses of B at s = 0, 1.
+   real(R8P),                 intent(out)           :: toi            !< Time of first contact in [0, 1].
+   integer(I4P),              intent(out)           :: status         !< CCD_* status.
+   real(R8P),                 intent(in),  optional :: tolerance      !< Contact tolerance.
+   real(R8P),                 intent(out), optional :: distance       !< d(toi).
+   real(R8P),                 intent(out), optional :: point_self(3), point_other(3) !< Witness points at toi.
+   integer(I4P),              intent(out), optional :: facet_self, facet_other     !< Closest facets at toi.
+   integer(I4P),              intent(out), optional :: iterations     !< Advancement steps.
+   integer(I4P),              intent(in),  optional :: max_iterations !< Cap (default CCD_MAX_ITERATIONS).
+   type(surface_ccd_evaluator_t)                    :: ev             !< Distance at s.
+   real(R8P)                                        :: mu, tol, d     !< Bound, tolerance, distance.
+   type(vector_R8P)                                 :: da, db         !< Bounding-box diagonals.
+
+   toi = 0._R8P ; d = 0._R8P
+   if (self%facets_number == 0 .or. other%facets_number == 0) then
+      status = CCD_INVALID_INPUT
+   else
+      mu = motion_bound_3d(pose_self0, pose_self1, facet_xs(self, 1), facet_xs(self, 2), facet_xs(self, 3)) + &
+           motion_bound_3d(pose_other0, pose_other1, facet_xs(other, 1), facet_xs(other, 2), facet_xs(other, 3))
+      da = self%bmax - self%bmin ; db = other%bmax - other%bmin
+      tol = 1.e-6_R8P * max(da%normL2(), db%normL2())
+      if (present(tolerance)) tol = tolerance
+      ev%a => self ; ev%b => other
+      ev%a0 = pose_self0 ; ev%a1 = pose_self1 ; ev%b0 = pose_other0 ; ev%b1 = pose_other1
+      call ccd_advance(ev, mu, tol, toi, status, distance=d, iterations=iterations, max_iterations=max_iterations)
+   endif
+   if (present(distance)) distance = d
+   if (present(point_self)) point_self = ev%pa
+   if (present(point_other)) point_other = ev%pb
+   if (present(facet_self)) facet_self = ev%fa
+   if (present(facet_other)) facet_other = ev%fb
+   if (present(iterations) .and. status == CCD_INVALID_INPUT) iterations = 0_I4P
+   endsubroutine time_of_impact
+
+   pure function facet_xs(surface, axis) result(c)
+   !< The coordinate `axis` (1-3) of the three vertices of every facet [3 nf] (body frame).
+   class(surface_stl_object), intent(in) :: surface !< Surface.
+   integer,                   intent(in) :: axis    !< Coordinate.
+   real(R8P), allocatable                :: c(:)    !< Coordinates.
+   integer(I4P)                          :: i, k    !< Counters.
+
+   allocate(c(3 * surface%facets_number))
+   do i = 1, surface%facets_number
+      do k = 1, 3
+         select case (axis)
+         case (1) ; c(3 * (i - 1) + k) = surface%facet(i)%vertex(k)%x
+         case (2) ; c(3 * (i - 1) + k) = surface%facet(i)%vertex(k)%y
+         case default ; c(3 * (i - 1) + k) = surface%facet(i)%vertex(k)%z
+         endselect
+      enddo
+   enddo
+   endfunction facet_xs
 
    subroutine proximity_pairs(self, cutoff, pairs, distances, status)
    !< The pairs of bodies of this surface (`facet_body`: outer shells with their cavities) closer than `cutoff`
