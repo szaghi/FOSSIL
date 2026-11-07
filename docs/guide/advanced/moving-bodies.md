@@ -146,8 +146,13 @@ call swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status
   dimensions); `sw%exact` reports which path ran and `sw%evaluations`
   how many aperture evaluations it took (per face in 2-D, per plane in
   3-D).
-- **Otherwise (rotation): Gauss–Legendre at `nq` nodes** (default 4), on copies moved
-  to the node poses. With the screw motion, `error_estimate` is the
+- **2-D rotation: exact** (issue #69, see *Exact rotation* below). The screw motion with a rotation takes
+  certified breakpoints per face and Gauss–Legendre doubled to round-off on every piece; the residual
+  falls to round-off (1.7e-16 to 6.3e-16 on the cases below, where 4-node Gauss left 1.7e-4 to
+  1.4e-2). `sw%evaluations` is the largest number of evaluations per face (92 for the square, 1838
+  for the 200-vertex NACA 0012).
+- **Otherwise (3-D rotation, explicit node poses, or `exact=.false.`): Gauss–Legendre at `nq` nodes**
+  (default 4), on copies moved to the node poses. With the screw motion, `error_estimate` is the
   largest face change between `nq` and `2 nq` nodes.
 
 **Exact rotation (design, issue #69).** The Gauss path converges algebraically under rotation (rate 2–3,
@@ -211,7 +216,8 @@ fluid at the other.
 | fresh / dead: cube translated, rotated about an off-centre axis, general poses; square, pitching NACA 0012 | 0 errors against the analytic change of membership; the band skips 9–60 % of the second queries |
 | swept, 2-D translation: square (every face vs analytic), non-convex heptagon, heptagon at a rotated pose | faces to 8.3e-17; uniform-flow residual ≤ 1.7e-16 in every cell; walls sum to ≤ 1.4e-16 |
 | swept, 2-D negative control: Gauss with 4 nodes, no breakpoints | residual 9.0e-3 |
-| swept, 2-D rotation: off-centre square, pitching NACA 0012; nq = 2, 4, 8, 16 | residual 5.6e-3 → 1.6e-4 (rate ≈ 2.3) and 1.5e-3 → 1.6e-6 (rate ≈ 3.4) |
+| swept, 2-D rotation, Gauss (`exact=.false.`): off-centre square, pitching NACA 0012; nq = 2, 4, 8, 16 | residual 5.6e-3 → 1.6e-4 (rate ≈ 2.3) and 1.5e-3 → 1.6e-6 (rate ≈ 3.4) |
+| swept, 2-D rotation, exact (issue #69): square 0.4 rad off-centre + shift, square 1.2 rad + shift, NACA 0012 pitching 0.15 rad | residual 1.7e-16, 1.8e-16, 6.3e-16; walls sum ≤ 1.9e-16; Gauss nq = 16 ≥ 4× closer to the exact faces than nq = 4 |
 | swept, 3-D translation: unit cube (every face vs analytic) | faces to 5.6e-17; uniform-flow residual 2.5e-17; walls sum to ≤ 8.3e-17 |
 | swept, 3-D translation: cube and L-prism at a pose rotated about (1, 1, 1), 32-face cone | uniform-flow residual 7.6e-17, 3.0e-16, 1.9e-16 |
 | swept, 3-D translation without one breakpoint class (vertex / edge-line / node-triangle) | residual up to 5.7e-4 / 1.4e-3 / 1.3e-5: each class is needed |

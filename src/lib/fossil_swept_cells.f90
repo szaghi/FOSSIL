@@ -104,7 +104,9 @@ contains
    !< Swept geometry of `curve` between `pose0` and `pose1` on the block with cell edges x(nx+1),
    !< y(ny+1) (issue #41 step 5; see the module notes). `nq` (default 4) Gauss-Legendre nodes for the
    !< rotating case; `poses(nq)` the poses at the nodes (`gauss_legendre_01`) instead of the screw
-   !< motion; `exact` (default .true.) uses the exact integration for a pure translation.
+   !< motion; `exact` (default .true.) uses the exact integration for a pure translation and, since issue #69,
+   !< for the screw motion with a rotation (certified breakpoints, Gauss doubled to round-off on every piece;
+   !< `sw%exact` false if a piece did not converge at 64 nodes).
    !< `status = STATUS_INVALID_INPUT` on bad edges, nq < 1 or a poses size other than nq.
    !< `check_input` (default .false., issue #44): look for self-intersections of the curve first
    !< (`self_intersections`, one BVH pass); if any, `sw%self_intersecting` and a warning on stderr: the
@@ -127,6 +129,7 @@ contains
    integer(I4P)             :: nx, ny, n, i, j       !< Work.
    real(R8P)                :: d(2), dth             !< Displacement, rotation angle.
    logical                  :: translation, screw    !< Paths.
+   logical                  :: rotation_exact        !< Exact rotation path requested (default).
 
    if (present(status)) status = STATUS_OK
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
@@ -172,7 +175,10 @@ contains
    d = pose1%t - pose0%t
    dth = pose_angle_2d(pose1) - pose_angle_2d(pose0) ; dth = atan2(sin(dth), cos(dth))
    translation = all(pose1%r == pose0%r) .and. .not. present(poses)
-   if (present(exact)) translation = translation .and. exact
+   rotation_exact = .true.
+   if (present(exact)) then
+      translation = translation .and. exact ; rotation_exact = exact
+   endif
    screw = .not. present(poses)
    allocate(res(nx, ny)) ; res = 0._R8P
    if (translation) then
@@ -183,6 +189,9 @@ contains
             res(i, j) = d(1) * (sw%face_u(i + 1, j) - sw%face_u(i, j)) + d(2) * (sw%face_v(i, j + 1) - sw%face_v(i, j))
          enddo
       enddo
+   elseif (screw .and. rotation_exact .and. dth /= 0._R8P) then
+      ! exact rotation (issue #69): certified breakpoints per face, Gauss doubled to round-off on every piece
+      call faces_rotation_2d(curve, pose0, pose1, x, y, sw%face_u, sw%face_v, res, sw%evaluations, sw%exact)
    else
       call faces_gauss_2d(curve, pose0, pose1, x, y, n, sw%face_u, sw%face_v, res, poses)
       sw%evaluations = n
@@ -202,6 +211,287 @@ contains
       enddo
    enddo
    endsubroutine swept_cells_2d
+
+   subroutine faces_rotation_2d(curve, pose0, pose1, x, y, fu, fv, flux, nev, exact)
+   !< Exact time-averaged fluid lengths and rigid-field outflows of every face under the screw motion of
+   !< `pose_interpolate` with a rotation (issue #69; see the moving-bodies reference page, "Exact rotation"). A face
+   !< outside the box swept by the body's bounding circle is fluid throughout (closed form). Every other face gets its
+   !< breakpoints, the zeros of g(s) = (p0 + p1 s) cos phi + (q0 + q1 s) sin phi + k0 + k1 s isolated with the bound
+   !< on |g''| (`isolate_zeros`): a wall vertex crossing the face's line inside its span, an end node crossing a wall
+   !< segment inside it. On every piece between breakpoints the fluid length and the outflow are analytic: Gauss-
+   !< Legendre doubled from 2 nodes until two values agree to round-off (at most 64; else exact = .false.).
+   type(curve_object),    intent(in)  :: curve        !< Curve (body frame).
+   type(rigid_pose_2d_t), intent(in)  :: pose0, pose1 !< End poses.
+   real(R8P),             intent(in)  :: x(:), y(:)   !< Cell edges.
+   real(R8P),             intent(out) :: fu(:,:), fv(:,:) !< Time-averaged fluid lengths.
+   real(R8P),             intent(out) :: flux(:,:)    !< Time integral of the rigid-field outflow per cell.
+   integer(I4P),          intent(out) :: nev          !< Largest number of evaluations per face.
+   logical,               intent(out) :: exact        !< Every piece converged.
+   real(R8P),    allocatable :: vu(:), vv(:), ou(:,:), ov(:,:), bp(:)
+   integer(I4P), allocatable :: nxt(:)
+   real(R8P)                 :: th0, dth, t0(2), dt(2), cen(2), rho, cbox(2, 2), uv(2), ss, cc(2), cmax
+   integer(I4P)              :: nx, ny, nv, i, j, k, nb, ne
+   logical                   :: ok
+
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
+   nv = curve%get_vertices_number()
+   allocate(vu(nv), vv(nv), nxt(nv), ou(nx + 1, ny), ov(nx, ny + 1))
+   do k = 1_I4P, nv
+      uv = curve%get_vertex(k) ; vu(k) = uv(1) ; vv(k) = uv(2) ; nxt(k) = curve%get_next(k)
+   enddo
+   th0 = pose_angle_2d(pose0) ; dth = pose_angle_2d(pose1) - th0 ; dth = atan2(sin(dth), cos(dth))
+   t0 = pose0%t ; dt = pose1%t - pose0%t
+   ! the box swept by the body's bounding circle: centre path C(s) = R(th(s)) cen + t(s), |C''| <= dth^2 |cen|
+   cen = 0.5_R8P * ([minval(vu), minval(vv)] + [maxval(vu), maxval(vv)])
+   rho = sqrt(maxval((vu - cen(1))**2 + (vv - cen(2))**2))
+   cbox(:, 1) = huge(1._R8P) ; cbox(:, 2) = -huge(1._R8P)
+   do k = 0_I4P, 64_I4P
+      ss = real(k, R8P) / 64._R8P
+      cc = rot2(th0 + ss * dth, cen) + t0 + ss * dt
+      cbox(:, 1) = min(cbox(:, 1), cc) ; cbox(:, 2) = max(cbox(:, 2), cc)
+   enddo
+   cmax = rho + dth**2 * norm2(cen) / (8._R8P * 64._R8P**2) + 1e-12_R8P * (rho + norm2(cen) + norm2(t0) + norm2(dt))
+   cbox(:, 1) = cbox(:, 1) - cmax ; cbox(:, 2) = cbox(:, 2) + cmax
+   nev = 0_I4P ; exact = .true.
+   ! faces u = x_i, v in [y_j, y_j+1]
+   do j = 1_I4P, ny
+      do i = 1_I4P, nx + 1_I4P
+         if (x(i) < cbox(1, 1) .or. x(i) > cbox(1, 2) .or. y(j + 1) < cbox(2, 1) .or. y(j) > cbox(2, 2)) then
+            fu(i, j) = y(j + 1) - y(j) ! fluid throughout
+            ou(i, j) = closed_outflow(2_I4P, y(j), y(j + 1))
+            cycle
+         endif
+         call face_events(1_I4P, x(i), y(j), y(j + 1), bp, nb)
+         call integrate_face(1_I4P, x(i), y(j), y(j + 1), bp, nb, fu(i, j), ou(i, j), ne, ok)
+         nev = max(nev, ne) ; exact = exact .and. ok
+      enddo
+   enddo
+   ! faces v = y_j, u in [x_i, x_i+1]
+   do j = 1_I4P, ny + 1_I4P
+      do i = 1_I4P, nx
+         if (y(j) < cbox(2, 1) .or. y(j) > cbox(2, 2) .or. x(i + 1) < cbox(1, 1) .or. x(i) > cbox(1, 2)) then
+            fv(i, j) = x(i + 1) - x(i)
+            ov(i, j) = closed_outflow(1_I4P, x(i), x(i + 1))
+            cycle
+         endif
+         call face_events(2_I4P, y(j), x(i), x(i + 1), bp, nb)
+         call integrate_face(2_I4P, y(j), x(i), x(i + 1), bp, nb, fv(i, j), ov(i, j), ne, ok)
+         nev = max(nev, ne) ; exact = exact .and. ok
+      enddo
+   enddo
+   do j = 1_I4P, ny
+      do i = 1_I4P, nx
+         flux(i, j) = ou(i + 1, j) - ou(i, j) + ov(i, j + 1) - ov(i, j)
+      enddo
+   enddo
+   contains
+      function closed_outflow(lax, lo, hi) result(o)
+      !< Time integral of the rigid-field outflow through a face fluid throughout: the face along `lax` from lo to hi.
+      !< Face u = x_i (lax = 2): int u_x dl = -dth (m - t_v(s) l) + d_u l; face v = y_j (lax = 1): dth (m - t_u l) +
+      !< d_v l; with l = hi - lo, m = (hi^2 - lo^2) / 2 and the mean of t(s) over the step.
+      integer(I4P), intent(in) :: lax
+      real(R8P),    intent(in) :: lo, hi
+      real(R8P)                :: o, l, m
+
+      l = hi - lo ; m = 0.5_R8P * (hi - lo) * (hi + lo)
+      if (lax == 2_I4P) then
+         o = -dth * (m - (t0(2) + 0.5_R8P * dt(2)) * l) + dt(1) * l
+      else
+         o = dth * (m - (t0(1) + 0.5_R8P * dt(1)) * l) + dt(2) * l
+      endif
+      endfunction closed_outflow
+
+      subroutine face_events(nax, a, lo, hi, b, m)
+      !< Breakpoints in (0, 1) of the face on the line normal to `nax` (1: u = a, 2: v = a), span [lo, hi].
+      integer(I4P),           intent(in)  :: nax
+      real(R8P),              intent(in)  :: a, lo, hi
+      real(R8P), allocatable, intent(out) :: b(:)
+      integer(I4P),           intent(out) :: m
+      real(R8P), allocatable              :: tmp(:), z(:)
+      real(R8P)                           :: co(6), w0(2), w1(2), d(2), xs(2), r(2), lam, node(2)
+      integer(I4P)                        :: q, nz, kk, e
+
+      allocate(tmp(0)) ; m = 0_I4P
+      ! wall vertices crossing the line: X_nax(s) = a, the other coordinate inside [lo, hi]
+      do q = 1_I4P, nv
+         if (nax == 1_I4P) then
+            co = [vu(q), 0._R8P, -vv(q), 0._R8P, t0(1) - a, dt(1)]
+         else
+            co = [vv(q), 0._R8P, vu(q), 0._R8P, t0(2) - a, dt(2)]
+         endif
+         call isolate_zeros(co, th0, dth, z, nz)
+         do kk = 1_I4P, nz
+            xs = rot2(th0 + z(kk) * dth, [vu(q), vv(q)]) + t0 + z(kk) * dt
+            if (xs(3 - nax) >= lo .and. xs(3 - nax) <= hi) tmp = [tmp, z(kk)]
+         enddo
+      enddo
+      ! the end nodes crossing wall segments: orient2d(X_q, X_q', N) = (R d) x (N - t(s)) - d x q
+      do e = 1_I4P, 2_I4P
+         if (nax == 1_I4P) then
+            node = [a, merge(lo, hi, e == 1_I4P)]
+         else
+            node = [merge(lo, hi, e == 1_I4P), a]
+         endif
+         w0 = node - t0 ; w1 = -dt
+         do q = 1_I4P, nv
+            if (nxt(q) == 0_I4P) cycle
+            d = [vu(nxt(q)) - vu(q), vv(nxt(q)) - vv(q)]
+            co = [d(1) * w0(2) - d(2) * w0(1), d(1) * w1(2) - d(2) * w1(1), &
+                  -(d(1) * w0(1) + d(2) * w0(2)), -(d(1) * w1(1) + d(2) * w1(2)), &
+                  -(d(1) * vv(q) - d(2) * vu(q)), 0._R8P]
+            call isolate_zeros(co, th0, dth, z, nz)
+            do kk = 1_I4P, nz
+               xs = rot2(th0 + z(kk) * dth, [vu(q), vv(q)]) + t0 + z(kk) * dt
+               r = rot2(th0 + z(kk) * dth, d)
+               lam = dot_product(node - xs, r) / dot_product(r, r)
+               if (lam >= 0._R8P .and. lam <= 1._R8P) tmp = [tmp, z(kk)]
+            enddo
+         enddo
+      enddo
+      m = size(tmp, kind=I4P)
+      call sort_unique(tmp, m)
+      b = tmp(1:m)
+      endsubroutine face_events
+
+      subroutine integrate_face(nax, a, lo, hi, b, m, avg, out, ne, conv)
+      !< Time averages over [0, 1] of the fluid length and of the rigid-field outflow of one face, piece by piece.
+      integer(I4P), intent(in)  :: nax
+      real(R8P),    intent(in)  :: a, lo, hi
+      real(R8P),    intent(in)  :: b(:)
+      integer(I4P), intent(in)  :: m
+      real(R8P),    intent(out) :: avg, out
+      integer(I4P), intent(out) :: ne
+      logical,      intent(out) :: conv
+      real(R8P)                 :: sa, sb, l1, o1, l2, o2, scl, sco
+      integer(I4P)              :: q, ng
+
+      avg = 0._R8P ; out = 0._R8P ; ne = 0_I4P ; conv = .true.
+      scl = hi - lo ; sco = scl * (abs(dth) * (maxval(abs([x, y])) + norm2(t0) + norm2(dt)) + norm2(dt))
+      do q = 0_I4P, m
+         sa = 0._R8P ; if (q > 0_I4P) sa = b(q)
+         sb = 1._R8P ; if (q < m) sb = b(q + 1)
+         if (sb <= sa) cycle
+         ng = 2_I4P
+         call piece(nax, a, lo, hi, sa, sb, ng, l1, o1) ; ne = ne + ng
+         do
+            ng = 2_I4P * ng
+            call piece(nax, a, lo, hi, sa, sb, ng, l2, o2) ; ne = ne + ng
+            if (abs(l2 - l1) <= 64._R8P * epsilon(1._R8P) * scl * (sb - sa) .and. &
+                abs(o2 - o1) <= 64._R8P * epsilon(1._R8P) * sco * (sb - sa)) exit
+            if (ng >= 64_I4P) then
+               conv = .false. ; exit
+            endif
+            l1 = l2 ; o1 = o2
+         enddo
+         avg = avg + l2 ; out = out + o2
+      enddo
+      endsubroutine integrate_face
+
+      subroutine piece(nax, a, lo, hi, sa, sb, ng, l, o)
+      !< ng-point Gauss-Legendre over [sa, sb] of the fluid length and the outflow of one face (moved copies).
+      integer(I4P), intent(in)  :: nax, ng
+      real(R8P),    intent(in)  :: a, lo, hi, sa, sb
+      real(R8P),    intent(out) :: l, o
+      type(curve_object)        :: cq
+      real(R8P), allocatable    :: sq(:), wq(:)
+      real(R8P)                 :: ll, mm, sn, tq(2)
+      integer(I4P)              :: q
+
+      call gauss_legendre_01(ng, sq, wq)
+      l = 0._R8P ; o = 0._R8P
+      do q = 1_I4P, ng
+         sn = sa + (sb - sa) * sq(q)
+         cq = curve ; call cq%move(pose_interpolate(pose0, pose1, sn))
+         tq = t0 + sn * dt
+         if (nax == 1_I4P) then ! face u = a along v
+            call face_measure(cq, 2_I4P, a, lo, hi, ll, mm)
+            o = o + (sb - sa) * wq(q) * (-dth * (mm - tq(2) * ll) + dt(1) * ll)
+         else                   ! face v = a along u
+            call face_measure(cq, 1_I4P, a, lo, hi, ll, mm)
+            o = o + (sb - sa) * wq(q) * (dth * (mm - tq(1) * ll) + dt(2) * ll)
+         endif
+         l = l + (sb - sa) * wq(q) * ll
+      enddo
+      endsubroutine piece
+   endsubroutine faces_rotation_2d
+
+   pure function rot2(th, p) result(r)
+   !< p rotated by th.
+   real(R8P), intent(in) :: th, p(2)
+   real(R8P)             :: r(2)
+
+   r = [cos(th) * p(1) - sin(th) * p(2), sin(th) * p(1) + cos(th) * p(2)]
+   endfunction rot2
+
+   subroutine isolate_zeros(co, phi0, dphi, z, nz)
+   !< Zeros in (0, 1) of g(s) = (p0 + p1 s) cos phi + (q0 + q1 s) sin phi + k0 + k1 s, phi = phi0 + s dphi, with
+   !< co = [p0, p1, q0, q1, k0, k1] (issue #69). |g''| <= M = 2 |dphi| |(p1, q1)| + dphi^2 max|(p, q)| (the norm of
+   !< an affine function is largest at an end): on [sa, sb] (h = sb - sa) with end values of one sign, both larger
+   !< than M h^2/8 plus the evaluation error, g has no zero; otherwise the interval is halved. A sign change is
+   !< refined by bisection to one ulp; an interval down to 1e-15 without a certificate gives a breakpoint at its
+   !< middle (a tangency, or g within round-off of zero: harmless extra breakpoints).
+   real(R8P),              intent(in)  :: co(6), phi0, dphi
+   real(R8P), allocatable, intent(out) :: z(:)
+   integer(I4P),           intent(out) :: nz
+   integer(I4P), parameter             :: NSTACK = 4096
+   real(R8P)                           :: big_m, err, st(2, NSTACK), sa, sb, ga, gb, sm, gm, lo, hi, glo
+   integer(I4P)                        :: top
+
+   allocate(z(0)) ; nz = 0_I4P
+   big_m = 2._R8P * abs(dphi) * norm2(co([2, 4])) + &
+           dphi**2 * max(norm2([co(1), co(3)]), norm2([co(1) + co(2), co(3) + co(4)]))
+   err = 16._R8P * epsilon(1._R8P) * (abs(co(1)) + abs(co(2)) + abs(co(3)) + abs(co(4)) + abs(co(5)) + abs(co(6)))
+   top = 1_I4P ; st(:, 1) = [0._R8P, 1._R8P]
+   do while (top > 0_I4P)
+      sa = st(1, top) ; sb = st(2, top) ; top = top - 1_I4P
+      ga = g(sa) ; gb = g(sb)
+      if (ga * gb < 0._R8P .and. abs(ga) > err .and. abs(gb) > err .and. big_m * (sb - sa)**2 / 8._R8P < err) then
+         ! one sign change, g nearly linear here: bisection to one ulp
+         lo = sa ; hi = sb ; glo = ga
+         do while (nearest(lo, 1._R8P) < hi)
+            sm = 0.5_R8P * (lo + hi)
+            if (sm <= lo .or. sm >= hi) exit
+            gm = g(sm)
+            if (gm == 0._R8P) then
+               lo = sm ; hi = sm ; exit
+            endif
+            if ((gm > 0._R8P) .eqv. (glo > 0._R8P)) then
+               lo = sm ; glo = gm
+            else
+               hi = sm
+            endif
+         enddo
+         call add(0.5_R8P * (lo + hi))
+         cycle
+      endif
+      if (ga * gb > 0._R8P .and. min(abs(ga), abs(gb)) > big_m * (sb - sa)**2 / 8._R8P + err) cycle ! no zero
+      if (sb - sa < 1e-15_R8P) then
+         call add(0.5_R8P * (sa + sb)) ; cycle
+      endif
+      if (top + 2_I4P > NSTACK) then ! cannot happen for |g''| bounded; keep a breakpoint rather than drop one
+         call add(0.5_R8P * (sa + sb)) ; cycle
+      endif
+      sm = 0.5_R8P * (sa + sb)
+      top = top + 1_I4P ; st(:, top) = [sm, sb]
+      top = top + 1_I4P ; st(:, top) = [sa, sm]
+   enddo
+   contains
+      function g(s) result(v)
+      real(R8P), intent(in) :: s
+      real(R8P)             :: v, ph
+
+      ph = phi0 + s * dphi
+      v = (co(1) + co(2) * s) * cos(ph) + (co(3) + co(4) * s) * sin(ph) + co(5) + co(6) * s
+      endfunction g
+
+      subroutine add(s)
+      real(R8P), intent(in) :: s
+
+      if (s > 0._R8P .and. s < 1._R8P) then
+         z = [z, s] ; nz = nz + 1_I4P
+      endif
+      endsubroutine add
+   endsubroutine isolate_zeros
 
    subroutine faces_translation_2d(c0, d, x, y, fu, fv, nev)
    !< Exact time-averaged fluid lengths of every face under the translation s d of the curve c0

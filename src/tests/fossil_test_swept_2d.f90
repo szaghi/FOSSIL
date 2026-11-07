@@ -13,7 +13,7 @@ program fossil_test_swept_2d
 !< - negative control: the same motions with the Gauss path (`exact=.false.`, 4 nodes, no
 !<   breakpoints) leave residuals far above round-off;
 !< - refusals: decreasing edges, nq = 0, a poses size other than nq.
-!< Rotation (step 5b, Gauss-Legendre):
+!< Rotation (step 5b, Gauss-Legendre; `exact=.false.` since issue #69 made the exact path the default):
 !< - a square rotating about an off-centre point while translating, and a NACA 0012 pitching about
 !<   its quarter chord: the largest uniform-flow residual falls with nq = 2, 4, 8, 16 (printed with
 !<   the observed rate; the integrand has kinks, so the rate is algebraic) and the nq-vs-2nq estimate
@@ -101,7 +101,7 @@ allocate(pq(4))
 do i = 1, 4
    pq(i) = pose_interpolate(p0, p1, sq_(i))
 enddo
-call swept_cells_2d(c, p0, p1, x, y, sw, nq=4_I4P, status=st)
+call swept_cells_2d(c, p0, p1, x, y, sw, nq=4_I4P, exact=.false., status=st)
 call swept_cells_2d(c, p0, p1, x, y, sw2, nq=4_I4P, poses=pq, status=st2)
 pm = pose_interpolate(p0, p1, 0.5_R8P)
 pe0 = pose_interpolate(p0, p1, 0._R8P) ; pe1 = pose_interpolate(p0, p1, 1._R8P)
@@ -124,7 +124,7 @@ contains
 
    good = .true.
    do k = 1, 4
-      call swept_cells_2d(c, p0, p1, x, y, sw, nq=2_I4P**k, status=s_)
+      call swept_cells_2d(c, p0, p1, x, y, sw, nq=2_I4P**k, exact=.false., status=s_)
       r(k) = maxval(abs(sw%residual), mask=sw%alpha0 >= 0._R8P .and. sw%alpha1 >= 0._R8P)
       e(k) = sw%error_estimate
       good = good .and. s_ == STATUS_OK .and. .not. sw%exact
