@@ -25,6 +25,7 @@ use fossil_implicit_points,  only : implicit_point_t, ip_approx
 use fossil_list_id_object,   only : list_id_object
 use fossil_predicates,       only : orient2d_xy
 use fossil_rigid_pose,       only : rigid_pose_t, to_world
+use fossil_triangle_closest, only : triangle_closest_st
 use fossil_tritri_exact,     only : pair_cut, facet_drop, PAIR_SEPARATED, PAIR_COPLANAR
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
@@ -158,92 +159,102 @@ contains
    endfunction coplanar_meet
 
    pure function closest_on_triangle(p, t) result(c)
-   !< Closest point of triangle t (vertices as columns) to p, by its Voronoi regions (Ericson, Real-Time Collision
-   !< Detection, 5.1.5); the region tests are on dot products, the point a convex combination of the vertices.
+   !< Closest point of triangle t (vertices as columns) to p: the point kernel of the distance queries
+   !< (`triangle_closest_st`: Eberly's solve, or for needle triangles the residual form `robust_st`, issue #39), so the
+   !< distance is accurate to ~eps L on needles too (issue #69; the Voronoi-region form of Ericson 5.1.5 used before
+   !< lost up to 1e-10 on needles of aspect 1e8).
    real(R8P), intent(in) :: p(3), t(3, 3)
    real(R8P)             :: c(3)
-   real(R8P)             :: ab(3), ac(3), ap(3), bp(3), cp(3), d1, d2, d3, d4, d5, d6, va, vb, vc, v, w, den
+   type(vector_R8P)      :: v1, e12, e13, q
+   real(R8P)             :: a, b, cc, det, sq, tq, d2
 
-   ab = t(:, 2) - t(:, 1) ; ac = t(:, 3) - t(:, 1) ; ap = p - t(:, 1)
-   d1 = dot_product(ab, ap) ; d2 = dot_product(ac, ap)
-   if (d1 <= 0._R8P .and. d2 <= 0._R8P) then
-      c = t(:, 1) ; return
-   endif
-   bp = p - t(:, 2)
-   d3 = dot_product(ab, bp) ; d4 = dot_product(ac, bp)
-   if (d3 >= 0._R8P .and. d4 <= d3) then
-      c = t(:, 2) ; return
-   endif
-   vc = d1 * d4 - d3 * d2
-   if (vc <= 0._R8P .and. d1 >= 0._R8P .and. d3 <= 0._R8P) then
-      v = d1 / (d1 - d3) ; c = t(:, 1) + v * ab ; return
-   endif
-   cp = p - t(:, 3)
-   d5 = dot_product(ab, cp) ; d6 = dot_product(ac, cp)
-   if (d6 >= 0._R8P .and. d5 <= d6) then
-      c = t(:, 3) ; return
-   endif
-   vb = d5 * d2 - d1 * d6
-   if (vb <= 0._R8P .and. d2 >= 0._R8P .and. d6 <= 0._R8P) then
-      w = d2 / (d2 - d6) ; c = t(:, 1) + w * ac ; return
-   endif
-   va = d3 * d6 - d5 * d4
-   if (va <= 0._R8P .and. (d4 - d3) >= 0._R8P .and. (d5 - d6) >= 0._R8P) then
-      w = (d4 - d3) / ((d4 - d3) + (d5 - d6)) ; c = t(:, 2) + w * (t(:, 3) - t(:, 2)) ; return
-   endif
-   den = va + vb + vc
-   if (den <= 0._R8P) then ! degenerate triangle: its closest vertex
-      c = t(:, 1)
-      if (sum((p - t(:, 2))**2) < sum((p - c)**2)) c = t(:, 2)
-      if (sum((p - t(:, 3))**2) < sum((p - c)**2)) c = t(:, 3)
-      return
-   endif
-   v = vb / den ; w = vc / den
-   c = t(:, 1) + v * ab + w * ac
+   v1%x = t(1, 1) ; v1%y = t(2, 1) ; v1%z = t(3, 1)
+   e12%x = t(1, 2) - t(1, 1) ; e12%y = t(2, 2) - t(2, 1) ; e12%z = t(3, 2) - t(3, 1)
+   e13%x = t(1, 3) - t(1, 1) ; e13%y = t(2, 3) - t(2, 1) ; e13%z = t(3, 3) - t(3, 1)
+   q%x = p(1) ; q%y = p(2) ; q%z = p(3)
+   a = e12%x * e12%x + e12%y * e12%y + e12%z * e12%z
+   b = e12%x * e13%x + e12%y * e13%y + e12%z * e13%z
+   cc = e13%x * e13%x + e13%y * e13%y + e13%z * e13%z
+   det = a * cc - b * b
+   call triangle_closest_st(v1=v1, e12=e12, e13=e13, a=a, b=b, c=cc, det=det, point=q, sq=sq, tq=tq, distance=d2)
+   c = t(:, 1) + sq * (t(:, 2) - t(:, 1)) + tq * (t(:, 3) - t(:, 1))
    endfunction closest_on_triangle
 
    pure subroutine closest_segment_segment(p1, q1, p2, q2, c1, c2)
-   !< Closest points c1 on segment (p1, q1) and c2 on (p2, q2) (Ericson 5.1.9: clamped parameters, a robust branch
-   !< for parallel or degenerate segments).
+   !< Closest points c1 on segment (p1, q1) and c2 on (p2, q2), stable for near-parallel segments (issue #69; Ericson
+   !< 5.1.9 used before solves through a e - b^2 = |d1 x d2|^2 and lost ~eps L / angle). The longer segment is the
+   !< reference (say 1, direction d1). The distance from x2(t) to segment 1 is |P (x2(t) - p1)|, P the projector on the
+   !< plane normal to d1, while the foot s(t) = d1 . (x2(t) - p1) / |d1|^2 (linear in t) is in [0, 1]; elsewhere it
+   !< is the distance to p1 or q1. So the minimum is the least of: a point-to-segment distance in that plane, over
+   !< the t interval where s(t) is in [0, 1] (projections cost ~eps L, and a tiny projected segment makes the error
+   !< of t harmless), and the distances from p1 and q1 to segment 2. Ties keep the first candidate in that order.
    real(R8P), intent(in)  :: p1(3), q1(3), p2(3), q2(3)
    real(R8P), intent(out) :: c1(3), c2(3)
-   real(R8P)              :: d1(3), d2(3), r(3), a, e, f, c, b, den, s, t
+   real(R8P)              :: a1(3), b1(3), a2(3), b2(3), d1(3), d2(3), aa, s0, s1, tlo, thi, t, s, w0(3), e(3), ee
+   real(R8P)              :: best, dd, x(3)
+   logical                :: swap
 
-   d1 = q1 - p1 ; d2 = q2 - p2 ; r = p1 - p2
-   a = dot_product(d1, d1) ; e = dot_product(d2, d2) ; f = dot_product(d2, r)
-   if (a <= 0._R8P .and. e <= 0._R8P) then
+   swap = sum((q2 - p2)**2) > sum((q1 - p1)**2)
+   if (swap) then
+      a1 = p2 ; b1 = q2 ; a2 = p1 ; b2 = q1
+   else
+      a1 = p1 ; b1 = q1 ; a2 = p2 ; b2 = q2
+   endif
+   d1 = b1 - a1 ; d2 = b2 - a2 ; aa = dot_product(d1, d1)
+   if (aa <= 0._R8P) then ! both degenerate
       c1 = p1 ; c2 = p2 ; return
    endif
-   if (a <= 0._R8P) then
-      s = 0._R8P ; t = clamp01(f / e)
-   else
-      c = dot_product(d1, r)
-      if (e <= 0._R8P) then
-         t = 0._R8P ; s = clamp01(-c / a)
-      else
-         b = dot_product(d1, d2)
-         den = a * e - b * b
-         if (den > 0._R8P) then
-            s = clamp01((b * f - c * e) / den)
-         else
-            s = 0._R8P ! parallel: any s; the clamping below finds the closest pair
-         endif
-         t = (b * s + f) / e
-         if (t < 0._R8P) then
-            t = 0._R8P ; s = clamp01(-c / a)
-         elseif (t > 1._R8P) then
-            t = 1._R8P ; s = clamp01((b - c) / a)
-         endif
+   best = huge(1._R8P)
+   ! interior candidate: t where the foot on segment 1 is inside, s(t) = s0 + t (s1 - s0)
+   s0 = dot_product(d1, a2 - a1) / aa ; s1 = dot_product(d1, b2 - a1) / aa
+   tlo = 0._R8P ; thi = 1._R8P
+   if (s1 /= s0) then
+      tlo = max(0._R8P, min((0._R8P - s0) / (s1 - s0), (1._R8P - s0) / (s1 - s0)))
+      thi = min(1._R8P, max((0._R8P - s0) / (s1 - s0), (1._R8P - s0) / (s1 - s0)))
+   elseif (s0 < 0._R8P .or. s0 > 1._R8P) then
+      tlo = 1._R8P ; thi = 0._R8P ! never inside
+   endif
+   if (tlo <= thi) then
+      w0 = proj(a2 - a1) ; e = proj(d2) ; ee = dot_product(e, e)
+      t = tlo
+      if (ee > 0._R8P) t = min(thi, max(tlo, -dot_product(w0, e) / ee))
+      x = a2 + t * d2 ; s = min(1._R8P, max(0._R8P, dot_product(d1, x - a1) / aa))
+      dd = sum(((a1 + s * d1) - x)**2)
+      if (dd < best) then
+         best = dd ; c1 = a1 + s * d1 ; c2 = x
       endif
    endif
-   c1 = p1 + s * d1 ; c2 = p2 + t * d2
+   ! the end points of segment 1 against segment 2
+   call point_segment(a1, a2, d2, x) ; dd = sum((a1 - x)**2)
+   if (dd < best) then
+      best = dd ; c1 = a1 ; c2 = x
+   endif
+   call point_segment(b1, a2, d2, x) ; dd = sum((b1 - x)**2)
+   if (dd < best) then
+      best = dd ; c1 = b1 ; c2 = x
+   endif
+   if (swap) then
+      x = c1 ; c1 = c2 ; c2 = x
+   endif
    contains
-      pure function clamp01(x) result(y)
-      real(R8P), intent(in) :: x
-      real(R8P)             :: y
+      pure function proj(v) result(w)
+      !< Component of v normal to d1.
+      real(R8P), intent(in) :: v(3)
+      real(R8P)             :: w(3)
 
-      y = min(1._R8P, max(0._R8P, x))
-      endfunction clamp01
+      w = v - (dot_product(v, d1) / aa) * d1
+      endfunction proj
+
+      pure subroutine point_segment(q, o, d, f)
+      !< Foot f of q on the segment o + [0, 1] d.
+      real(R8P), intent(in)  :: q(3), o(3), d(3)
+      real(R8P), intent(out) :: f(3)
+      real(R8P)              :: dd2, u
+
+      dd2 = dot_product(d, d) ; u = 0._R8P
+      if (dd2 > 0._R8P) u = min(1._R8P, max(0._R8P, dot_product(q - o, d) / dd2))
+      f = o + u * d
+      endsubroutine point_segment
    endsubroutine closest_segment_segment
 
    subroutine body_distance(fa, ta, fb, tb, d2, ia, ib, pa, pb, meet, pose_a, pose_b)

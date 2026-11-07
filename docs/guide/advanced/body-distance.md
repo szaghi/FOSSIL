@@ -58,6 +58,24 @@ fossilizer -i a.stl --distance b.stl
 
 `src/tests/fossil_test_distance_cli.f90` reads the distance back for a cube against a copy 0.25 away and against itself.
 
+## Accuracy
+
+The pair distance rests on two closest-point kernels, both checked against quadruple precision
+(`src/tests/fossil_test_segment_distance_accuracy.f90`, 4000 fixed-seed cases each):
+
+- **Segment–segment** (`closest_segment_segment`). The longer segment is the reference: the distance from a point of
+  the other to it is a distance in the plane normal to its direction, while the foot stays inside it, so the least
+  distance is a point-to-segment distance in that plane, or an endpoint distance. Each projection costs ~ε L, so
+  near-parallel segments (angles down to 1e-15) stay within 0.62 ε L of the reference. The textbook solve (Ericson
+  5.1.9) used until issue #69 goes through a e − b² = |d₁ × d₂|² and lost ~ε L / angle: 139 of the 4000 cases were
+  more than 16 ε L off, some by more than 1e5 ε L.
+- **Point–triangle** (`closest_on_triangle`). It calls the point kernel of the distance queries,
+  `triangle_closest_st` (Eberly's solve, the residual form `robust_st` on needles, issue #39): within 33 ε L on
+  needles of aspect up to 1e8. The Voronoi-region form (Ericson 5.1.5) used until issue #69 had 113 cases over
+  64 ε L.
+
+Both paths of `body_distance` (the descent and `body_distance_brute`) call the same kernels, so they stay bit-identical.
+
 ## Validation
 
 `src/tests/fossil_test_body_distance.f90`: cubes apart (exact distance), touching at a vertex, an edge, a face, and
