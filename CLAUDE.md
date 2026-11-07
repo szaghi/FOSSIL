@@ -330,6 +330,17 @@ fobis fetch            # --update to re-fetch
   over `facet_body` bodies and the free `proximity_pairs_of(surfaces, cutoff)` (box broad phase). Curve twin
   `curve%distance_to` (exact orient2d contact, box-filtered loop over segment pairs, same tie rule).
   `fossilizer --distance other.stl`. CPU only.
+- `fossil_ccd.f90` — continuous collision detection (issue #73, roadmap #68 WP4; design in
+  `docs/guide/advanced/collision.md`): the motion of `pose_interpolate` (rotation about the axis through the BODY-FRAME
+  origin, angle and translation linear in s) has the exact speed bound `motion_bound_3d/_2d` (|dt| + |theta| max_v rho_v,
+  rho = distance to that axis); `ccd_advance` (Mirtich's conservative advancement over an abstract `ccd_evaluator_t`:
+  steps (d - tol/2) / mu, d >= tol/2 on [0, toi], d(toi) <= tol, no tunnelling; CCD_CONTACT / SEPARATE /
+  INITIAL_CONTACT / NOT_CONVERGED (cap 1000, toi a certified lower bound) / INVALID_INPUT). `surface%time_of_impact`,
+  `curve%time_of_impact` (over `distance_to` with poses; default tol 1e-6 of the larger bbox diagonal);
+  `directional=.true.` adds C2A's per-pair separating-plane step (`body_safe_step` in `fossil_body_distance`; valid per
+  convex triangle / segment pair only, never for a whole non-convex body) and takes the larger certified step (default
+  off). `first_impact` / `first_impact_2d`: swept-box broad phase, candidates by lower bound, equal to the loop over all
+  pairs. CPU only. Validation `fossil_val_ccd`.
 - `fossil_box_predicates.f90`, `fossil_box_query.f90` — AMR tagging (issue #38): box-triangle separating-axis test (conservative: run on the box inflated by `box_tolerance`, 1e-12 of the problem size, never misses a contact), exact 2-D box-segment test; `bvh_box_contact_oac` / `curve_box_contact_oac` (shared CPU/device traversals), `cell_bands` / `cell_components` (tag-band BFS, 26-connected components). The device box path follows the #20 rules and needs no new device arrays.
 
 ## Coding conventions

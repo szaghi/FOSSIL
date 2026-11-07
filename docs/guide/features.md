@@ -36,6 +36,7 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 | Local thickness and gaps per facet: ray (shape diameter) and medial (shrinking ball); thin regions under a cell size; refinement of thin walls | `surface%thickness`, `thin_regions`, `build_thin`, `box_thin_many`, `tag_block(thin_tags=)`, `curve%thickness` | [Thickness and gaps](/guide/advanced/thickness) | |
 | Named patches: one per `solid` block or per file, kept on every facet; multi-solid ASCII output | `load_from_files`, `get_patches_number`, `patch_name`, `facet_patch`, `set_patch` | [Named patches](/guide/advanced/patches) | |
 | Distance between two bodies: closest facets and points, contact; bit-identical to brute force | `surface%distance_to` | [Body–body distance](/guide/advanced/body-distance) | |
+| Time of first contact of moving bodies over a step: certified (never late, no tunnelling), several bodies, 2-D twins | `surface%time_of_impact`, `curve%time_of_impact`, `first_impact`, `first_impact_2d` | [Continuous collision detection](/guide/advanced/collision) | |
 
 ## Distance and signs
 

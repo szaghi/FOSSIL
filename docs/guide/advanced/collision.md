@@ -96,17 +96,21 @@ in 2-D), each of them convex, inside the descent of the two trees, as C2A does w
 - its safe step is (d_ij − η tol) / c_ij (unbounded if c_ij ≤ 0), and the step is the minimum over all pairs;
 - a node pair whose plain-bound step (box distance over the node μ) is already above the best is pruned.
 
-`directional=.true.` selects it. The plain bound stays the default unless the measures of step 5 show the descent
-pays for itself.
+`directional=.true.` selects it: the loop takes the larger of the plain and the directional step, both certified, so
+it never takes more steps than the plain bound. It is off by default: on large bodies a directional step evaluates
+tens of thousands of facet pairs exactly (see Measured). Turn it on when bodies slide along each other: the plain
+bound cannot tell tangential motion from approach, and at a gap just above the tolerance it advances by about
+(gap − tol/2)/μ per step until the cap.
 
 ## Several bodies
 
 `first_impact(surfaces, poses0, poses1, ...)` gives the earliest contact among N bodies and its pair:
 
-- **broad phase:** the box of each body at s = 0 grown by μ contains it over the whole step (conservative); only pairs
-  of overlapping swept boxes go on;
-- every remaining pair has a lower bound on its contact time, (box distance at s = 0 − η tol) / (μ_A + μ_B); pairs are
-  run in the order of these bounds, and the search stops when the next bound exceeds the best contact found;
+- **broad phase:** the box of each body at s = 0 grown by μ contains it over the whole step; grown by tol/2 more, two
+  boxes that do not overlap keep their bodies farther than the tolerance, so only pairs of overlapping boxes go on;
+- every remaining pair has a lower bound on its time of impact, max(0, box distance at s = 0 − tol) / (μ_A + μ_B)
+  (the first advancement step, or 0 when the bodies may start within the tolerance); pairs run in the order of these
+  bounds, and the search stops when the next bound exceeds the best contact found;
 - ties go to the lexicographically smallest pair, so the result equals the brute force over all pairs, bit for bit.
 
 ## API
@@ -114,17 +118,30 @@ pays for itself.
 | Routine | Arguments |
 |---|---|
 | `motion_bound_3d(p0, p1, x, y, z)` / `motion_bound_2d(p0, p1, u, v)` | μ of a vertex set |
-| `ccd_advance(evaluator, mu, tolerance, toi, status, distance, iterations, max_iterations)` | the loop over an abstract distance evaluator (`ccd_evaluator_t`) |
-| `surface%time_of_impact(other, pose_self0, pose_self1, pose_other0, pose_other1, toi, status, ...)` | optional: `tolerance`, `distance`, `point_self`, `point_other`, `facet_self`, `facet_other`, `iterations`, `max_iterations`, `directional` |
+| `ccd_advance(evaluator, mu, tolerance, toi, status, distance, iterations, max_iterations, directional)` | the loop over an abstract distance evaluator (`ccd_evaluator_t`) |
+| `surface%time_of_impact(other, pose_self0, pose_self1, pose_other0, pose_other1, toi, status, ...)` | optional: `tolerance`, `distance`, `point_self`, `point_other`, `facet_self`, `facet_other`, `iterations`, `max_iterations`, `directional`, `pairs` (exact pair evaluations of the directional steps) |
 | `curve%time_of_impact(...)` | the 2-D twin (`segment_self`, `segment_other`) |
-| `first_impact(surfaces, poses0, poses1, toi, pair, status, tolerance)` / `first_impact_2d` | several bodies |
+| `first_impact(surfaces, poses0, poses1, toi, pair, status, tolerance, directional, tested)` / `first_impact_2d` | several bodies (`tested`: pairs that ran `time_of_impact`) |
 
 ## Proved and measured
 
-- **Proved:** the speed bound, the Lipschitz bound, the guarantee and the iteration bound above (up to the rounding
-  of the distance query).
-- **Measured (steps 4-7):** toi against a brute-force first contact (dense sampling, then bisection); iterations of
-  the plain and the directional bound on head-on, oblique and grazing approaches; time per query.
+**Proved:** the speed bound, the Lipschitz bound, the guarantee and the iteration bound above (up to the rounding of
+the distance query); the directional step per convex pair.
+
+**Measured** (`fossil_test_ccd_*`, `fossil_val_ccd`, tolerance 1e-6):
+
+| Case | Plain steps | Directional steps | Note |
+|---|---|---|---|
+| translation head-on (cubes, squares) | 1 | 1 | toi in [(1 − tol)/3, 1/3] |
+| oblique, 45° to a face | 12 | 1 | |
+| quarter turn onto a post | 25 | 25 | toi 1.1e-6 below the analytic angle |
+| cube vs cube, turning and translating | 11 | 9-10 | within 1e-7 of the bisected brute force |
+| bunny (5 000 facets) vs dragon (2 000), 8 steps | 7-35 | about half | plain 0.51 s, directional 7.5 s in all; 5e4-2e5 exact pairs per query |
+| sliding past a face at a gap of 2-256 tol | 1000 (cap) | 7 | plain: `CCD_NOT_CONVERGED`, a certified lower bound |
+| a plate 1e-3 thick crossed within one step | 1 | 1 | apart at both end poses |
+
+Every result keeps d ≥ tol/2 at the samples of [0, toi] and d(toi) ≤ tol. Six spheres over 10 sub-steps:
+`first_impact` equals the loop over all pairs bit for bit, testing 78 of 150 pairs.
 
 ## Left out
 

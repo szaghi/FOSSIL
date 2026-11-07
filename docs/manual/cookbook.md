@@ -387,6 +387,20 @@ point; the principal moments are sorted ascending, here the block's three diagon
 moving it or rebuilding its tree, here the corner of the turned cube at x = 2 − sqrt(2)/2. For many bodies,
 `proximity_pairs(cutoff=)` lists the pairs closer than the cutoff. See [body–body distance](/guide/advanced/body-distance).
 
+### When do my moving bodies first touch?
+
+<<< @/examples/snippets/ck_ccd.f90
+
+<<< @/examples/output/ck_ccd.ansi{ansi}
+
+![the cube at rest, the moving cube at the start of its step (ghost) and at the time of first contact (solid), turned about its own corner, its leading edge touching the resting cube: the witness points on the two cubes](../examples/images/ck-ccd.svg){.fossil-figure}
+
+`time_of_impact` moves each body from its pose at s = 0 to its pose at s = 1 (the motion of `pose_interpolate`: the
+rotation about the body's own origin, angle and translation linear in s) and returns the first s at which they come
+within the tolerance (default 1e-6 of the larger box diagonal), never later than the true contact: a plate 1e-3 thick
+crossed within one step, apart at both ends, is still caught. `first_impact` gives the earliest contact among several
+bodies. See [continuous collision detection](/guide/advanced/collision).
+
 ### Query a rotated body without rebuilding it
 
 <<< @/examples/snippets/ck_pose.f90
