@@ -59,7 +59,13 @@ module fossil_overset
 !< the wall normal into the fluid, so the rounding of the foot point never leaves it outside the donor block's exact
 !< containment test. The shifted points serve the donor search only
 !< (`donor_candidates(..., shifts=)`); the grid never moves.
-
+!<
+!< Moving grids (Noack's SUGGAR, Henshaw & Schwendeman, Meakin & Suhs): a block moving with a body keeps its vertices
+!< in the body frame and takes a pose (`poses=` of donor_candidates and hole_flags; the cutter's own pose is
+!< `cutter_pose=`), so its search structures are built once. `previous=` starts every location from the vertex's
+!< previous donor cell in that block (WP2's walk, which returns what the robust path returns, bit for bit).
+!< `exposed_points` lists the vertices that were holes or receptors and became field points, and counts the holes
+!< that became field points without being receptors first (D(n+1) and H(n) must not meet).
 use penf,                      only : I4P, R8P
 use vecfor,                    only : vector_R8P
 use fossil_facet_object,       only : facet_object
@@ -71,6 +77,7 @@ use fossil_box_query,          only : BOX_CUT
 use fossil_block_locate,       only : LOC_INSIDE, LOC_OUTSIDE
 use fossil_block_geometry,     only : hex_volume, quad_area, hex_validity, quad_validity
 use fossil_block_stencil,      only : STENCIL_FAILED
+use fossil_rigid_pose,         only : rigid_pose_t, rigid_pose_2d_t, to_body, to_world
 
 implicit none
 private
@@ -82,7 +89,7 @@ public :: overset_mask_t, classify, classify_2d, SELECT_EXPLICIT, SELECT_IMPLICI
 public :: fringe_levels, fringe_levels_2d, overlap_width, overlap_width_2d
 public :: ORPHAN_NONE, ORPHAN_NO_CANDIDATE, ORPHAN_STENCIL_HOLE, ORPHAN_RECEPTOR_DONOR, ORPHAN_BOUNDARY, ORPHAN_WALL
 public :: FRINGE_INNER_1, FRINGE_INNER_2, FRINGE_OUTER_1, FRINGE_OUTER_2
-public :: wall_projection, wall_projection_2d
+public :: wall_projection, wall_projection_2d, exposed_points
 
 integer(I4P), parameter :: ORPHAN_NONE           = 0_I4P !< Not an orphan.
 integer(I4P), parameter :: ORPHAN_NO_CANDIDATE   = 1_I4P !< No donor cell anywhere: insufficient overlap.
@@ -534,7 +541,7 @@ contains
    endfunction mean_len
 
    ! ------------------------------------------------------------------------------------------------------ hole flags
-   subroutine hole_flags(blocks, cutter, holes, offset, cuts, device, distances)
+   subroutine hole_flags(blocks, cutter, holes, offset, cuts, device, distances, poses, cutter_pose)
    !< Hole flags of every vertex of the 3-D blocks against the cutter (module notes).
    type(curvilinear_block_t),          intent(in)            :: blocks(:)    !< Blocks.
    type(surface_stl_object),           intent(inout)         :: cutter       !< Cutter.
@@ -543,7 +550,10 @@ contains
    logical,                            intent(in),  optional :: cuts(:)      !< Blocks cut (default all).
    logical,                            intent(in),  optional :: device       !< On the GPU.
    type(block_real_t),    allocatable, intent(out), optional :: distances(:) !< Signed distances per block.
+   type(rigid_pose_t),                 intent(in),  optional :: poses(:)     !< Pose of each block (body frame).
+   type(rigid_pose_t),                 intent(in),  optional :: cutter_pose  !< Pose of the cutter.
    type(vector_R8P), allocatable :: p(:)  !< Points.
+   real(R8P)                     :: w(3)  !< World point.
    real(R8P),        allocatable :: d(:)  !< Distances.
    real(R8P)                     :: off   !< Offset.
    logical                       :: dev, entered !< Device flags.
@@ -567,16 +577,18 @@ contains
       do k = 1, blocks(b)%nk
          do j = 1, blocks(b)%nj
             do i = 1, blocks(b)%ni
-               n = n + 1_I4P ; p(n) = vector_R8P(blocks(b)%x(i, j, k), blocks(b)%y(i, j, k), blocks(b)%z(i, j, k))
+               n = n + 1_I4P ; w = [blocks(b)%x(i, j, k), blocks(b)%y(i, j, k), blocks(b)%z(i, j, k)]
+               if (present(poses)) w = to_world(poses(b), w)
+               p(n) = vector_R8P(w(1), w(2), w(3))
             enddo
          enddo
       enddo
       if (dev) then
          call cutter%distance_many_device(points=p, distances=d, is_signed=.true., sign_algorithm=SIGN_FWN, &
-                                          is_square_root=.true.)
+                                          is_square_root=.true., pose=cutter_pose)
       else
          call cutter%distance_many(points=p, distances=d, is_signed=.true., sign_algorithm=SIGN_FWN, &
-                                   is_square_root=.true.)
+                                   is_square_root=.true., pose=cutter_pose)
       endif
       holes(b)%v = d < off
       if (present(distances)) call move_alloc(d, distances(b)%v)
@@ -586,7 +598,7 @@ contains
    if (entered) call cutter%exit_device
    endsubroutine hole_flags
 
-   subroutine hole_flags_2d(blocks, cutter, holes, offset, cuts, device, distances)
+   subroutine hole_flags_2d(blocks, cutter, holes, offset, cuts, device, distances, poses, cutter_pose)
    !< Hole flags of every vertex of the 2-D blocks against the cutter (module notes).
    type(curvilinear_block_2d_t),       intent(in)            :: blocks(:)    !< Blocks.
    type(curve_object),                 intent(inout)         :: cutter       !< Cutter.
@@ -595,6 +607,8 @@ contains
    logical,                            intent(in),  optional :: cuts(:)      !< Blocks cut (default all).
    logical,                            intent(in),  optional :: device       !< On the GPU.
    type(block_real_t),    allocatable, intent(out), optional :: distances(:) !< Signed distances per block.
+   type(rigid_pose_2d_t),              intent(in),  optional :: poses(:)     !< Pose of each block (body frame).
+   type(rigid_pose_2d_t),              intent(in),  optional :: cutter_pose  !< Pose of the cutter.
    real(R8P),        allocatable :: p(:,:), d(:) !< Points, distances.
    real(R8P)                     :: off   !< Offset.
    logical                       :: dev, entered !< Device flags.
@@ -618,12 +632,13 @@ contains
       do j = 1, blocks(b)%nj
          do i = 1, blocks(b)%ni
             n = n + 1_I4P ; p(:, n) = [blocks(b)%u(i, j), blocks(b)%v(i, j)]
+            if (present(poses)) p(:, n) = to_world(poses(b), p(:, n))
          enddo
       enddo
       if (dev) then
-         call cutter%distance_many_device(points=p, distances=d, is_signed=.true., sign_algorithm=SIGN_FWN)
+         call cutter%distance_many_device(points=p, distances=d, is_signed=.true., sign_algorithm=SIGN_FWN, pose=cutter_pose)
       else
-         call cutter%distance_many(points=p, distances=d, is_signed=.true., sign_algorithm=SIGN_FWN)
+         call cutter%distance_many(points=p, distances=d, is_signed=.true., sign_algorithm=SIGN_FWN, pose=cutter_pose)
       endif
       holes(b)%v = d < off
       if (present(distances)) call move_alloc(d, distances(b)%v)
@@ -997,7 +1012,7 @@ contains
    px = px(1:n) ; py = py(1:n) ; pz = pz(1:n)
    endsubroutine boundary_points_3d
 
-   subroutine donor_candidates(blocks, donors, pair, wall, device, shifts)
+   subroutine donor_candidates(blocks, donors, pair, wall, device, shifts, poses, previous)
    !< Donor candidates of every vertex of every 3-D block (build_search done) (module notes).
    type(curvilinear_block_t), target,  intent(inout)        :: blocks(:) !< Blocks.
    type(donor_set_t),    allocatable,  intent(out)          :: donors(:) !< Candidates per receptor block.
@@ -1006,7 +1021,11 @@ contains
    logical,                            intent(in), optional :: device    !< Location on the GPU.
    type(block_real_t),                 intent(in), optional :: shifts(:,:) !< Search shifts [nb, nb] (wall_projection):
                                                                        !< shifts(a, b)%v(3 nv) for receptors of a in b.
+   type(rigid_pose_t),                 intent(in), optional :: poses(:)  !< Pose of each block (vertices in body frame).
+   type(donor_set_t),                  intent(in), optional :: previous(:) !< Previous candidates (walk starts).
    real(R8P),    allocatable :: px(:), py(:), pz(:), xi(:,:), vol(:,:,:), cand_xi(:,:,:), qx(:), qy(:), qz(:) !< Work.
+   real(R8P)                 :: pw(3) !< Point in the donor frame.
+   integer(I4P), allocatable :: starts(:,:) !< Walk starts.
    integer(I4P), allocatable :: cell(:,:), st(:), cand_cell(:,:,:), cand_st(:,:), cnt(:) !< Work.
    real(R8P),    allocatable :: dw(:) !< Wall distances.
    integer(I4P), allocatable :: bw(:) !< Wall bodies.
@@ -1028,14 +1047,23 @@ contains
             if (pair(a, b) == PAIR_NONE) cycle
          endif
          qx = px ; qy = py ; qz = pz
+         if (present(poses)) then
+            do k = 1, nv
+               pw = to_body(poses(b), to_world(poses(a), [px(k), py(k), pz(k)]))
+               qx(k) = pw(1) ; qy(k) = pw(2) ; qz(k) = pw(3)
+            enddo
+         endif
          if (present(shifts)) then
             if (allocated(shifts(a, b)%v)) then
-               qx = px + shifts(a, b)%v(1:3 * nv:3) ; qy = py + shifts(a, b)%v(2:3 * nv:3)
-               qz = pz + shifts(a, b)%v(3:3 * nv:3)
+               qx = qx + shifts(a, b)%v(1:3 * nv:3) ; qy = qy + shifts(a, b)%v(2:3 * nv:3)
+               qz = qz + shifts(a, b)%v(3:3 * nv:3)
             endif
          endif
          if (dev) then
             call blocks(b)%locate_many_device(qx, qy, qz, cell, xi, st)
+         elseif (present(previous)) then
+            call previous_starts(previous(a), b, 3_I4P, nv, starts)
+            call blocks(b)%locate_many(qx, qy, qz, cell, xi, st, walk=.true., start=starts)
          else
             call blocks(b)%locate_many(qx, qy, qz, cell, xi, st)
          endif
@@ -1140,7 +1168,7 @@ contains
    enddo
    endsubroutine overlap_matrix_2d
 
-   subroutine donor_candidates_2d(blocks, donors, pair, wall, device, shifts)
+   subroutine donor_candidates_2d(blocks, donors, pair, wall, device, shifts, poses, previous)
    !< Donor candidates of every vertex of every 2-D block (as donor_candidates).
    type(curvilinear_block_2d_t), target, intent(inout)        :: blocks(:) !< Blocks.
    type(donor_set_t),    allocatable,    intent(out)          :: donors(:) !< Candidates per receptor block.
@@ -1148,7 +1176,11 @@ contains
    type(curve_object),                   intent(in), optional :: wall      !< Wall (for the wall distances).
    logical,                              intent(in), optional :: device    !< Location on the GPU.
    type(block_real_t),                   intent(in), optional :: shifts(:,:) !< Search shifts [nb, nb]: (2 nv).
+   type(rigid_pose_2d_t),                intent(in), optional :: poses(:)  !< Pose of each block (body frame).
+   type(donor_set_t),                    intent(in), optional :: previous(:) !< Previous candidates (walk starts).
    real(R8P),    allocatable :: pu(:), pv(:), xi(:,:), ar(:,:), cand_xi(:,:,:), pts(:,:), dw(:), qu(:), qv(:) !< Work.
+   real(R8P)                 :: pw2(2) !< Point in the donor frame.
+   integer(I4P), allocatable :: starts(:,:) !< Walk starts.
    integer(I4P), allocatable :: cell(:,:), st(:), cand_cell(:,:,:), cand_st(:,:), cnt(:), bw(:) !< Work.
    logical                   :: dev  !< Device.
    integer(I4P)              :: a, b, nb, nv, v, c, i, j, nc, slot, cs !< Counters.
@@ -1166,13 +1198,22 @@ contains
             if (pair(a, b) == PAIR_NONE) cycle
          endif
          qu = pu ; qv = pv
+         if (present(poses)) then
+            do i = 1, nv
+               pw2 = to_body(poses(b), to_world(poses(a), [pu(i), pv(i)]))
+               qu(i) = pw2(1) ; qv(i) = pw2(2)
+            enddo
+         endif
          if (present(shifts)) then
             if (allocated(shifts(a, b)%v)) then
-               qu = pu + shifts(a, b)%v(1:2 * nv:2) ; qv = pv + shifts(a, b)%v(2:2 * nv:2)
+               qu = qu + shifts(a, b)%v(1:2 * nv:2) ; qv = qv + shifts(a, b)%v(2:2 * nv:2)
             endif
          endif
          if (dev) then
             call blocks(b)%locate_many_device(qu, qv, cell, xi, st)
+         elseif (present(previous)) then
+            call previous_starts(previous(a), b, 2_I4P, nv, starts)
+            call blocks(b)%locate_many(qu, qv, cell, xi, st, walk=.true., start=starts)
          else
             call blocks(b)%locate_many(qu, qv, cell, xi, st)
          endif
@@ -1719,6 +1760,39 @@ contains
       key(j + 1) = t
    enddo
    endsubroutine sort_by_volume
+
+   pure subroutine previous_starts(prev, b, dm, nv, starts)
+   !< Walk start cells in block b: each vertex's previous candidate cell there (0 if none: the robust path).
+   type(donor_set_t),         intent(in)  :: prev        !< Previous candidates of the receptor block.
+   integer(I4P),              intent(in)  :: b, dm, nv   !< Donor block, dimension, vertices.
+   integer(I4P), allocatable, intent(out) :: starts(:,:) !< Start cells [dm, nv].
+   integer(I4P)                           :: v, c        !< Counters.
+
+   allocate(starts(dm, nv)) ; starts = 0_I4P
+   do v = 1, min(nv, size(prev%start, kind=I4P) - 1_I4P)
+      do c = prev%start(v), prev%start(v + 1) - 1
+         if (prev%block(c) == b) then
+            starts(:, v) = prev%cell(1:dm, c) ; exit
+         endif
+      enddo
+   enddo
+   endsubroutine previous_starts
+
+   subroutine exposed_points(old, new, exposed, violations)
+   !< Vertices that were holes or receptors in `old` and are field points in `new` (Henshaw & Schwendeman), and the
+   !< count of holes that became field points directly (Meakin & Suhs: D(n+1) and H(n) must not meet).
+   type(overset_mask_t),               intent(in)            :: old(:), new(:) !< Classifications at n and n + 1.
+   type(block_logical_t), allocatable, intent(out)           :: exposed(:)     !< Exposed vertices per block.
+   integer(I4P),                       intent(out), optional :: violations     !< Holes become field points.
+   integer(I4P)                                              :: a, nviol       !< Counters.
+
+   allocate(exposed(size(old))) ; nviol = 0_I4P
+   do a = 1, size(old, kind=I4P)
+      exposed(a)%v = old(a)%iota <= 0 .and. new(a)%iota == 1
+      nviol = nviol + count(old(a)%iota == 0 .and. new(a)%iota == 1)
+   enddo
+   if (present(violations)) violations = nviol
+   endsubroutine exposed_points
 
    ! ------------------------------------------------------------------------------------------------- wall projection
    subroutine wall_projection(blocks, a, b, shift, max_distance, wall_name)
