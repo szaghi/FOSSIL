@@ -33,6 +33,9 @@ use fossil_cut_moments, only : MOMENTS_MAX, mono_count, mono_exponents
 use fossil_cut_graph, only : cut_links_t, cut_links_2d, srd_t, srd_neighbourhoods, SRD_REGULAR, SRD_COMPLETE, SRD_INCOMPLETE, &
                             SRD_NO_VOLUME, frd_t, frd_neighbourhoods, merge_t, merge_targets, MERGE_NONE, MERGE_OK, MERGE_CHAIN, &
                             MERGE_CYCLE, MERGE_ALONE
+use fossil_curvilinear_block, only : curvilinear_block_t, curvilinear_block_2d_t, topo_record_t, detect_topology, &
+                                     detect_topology_2d, record_map, TOPO_BOUNDARY, TOPO_ABUT, TOPO_PERIODIC, TOPO_SINGULAR, &
+                                     BLOCK_STATUS_OK, BLOCK_STATUS_BAD_INPUT
 use fossil_rigid_pose, only : rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, &
                              pose_2d, pose_compose, pose_inverse, to_body, to_world, rotate, pose_interpolate
 use fossil_swept_cells, only : swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
@@ -56,6 +59,8 @@ public :: cut_cells_3d_t, cut_cells_3d
 public :: cut_coarsen_3d, cut_coarsen_2d, MOMENTS_MAX, mono_count, mono_exponents
 public :: cut_links_t, cut_links_2d, srd_t, srd_neighbourhoods, SRD_REGULAR, SRD_COMPLETE, SRD_INCOMPLETE, SRD_NO_VOLUME
 public :: frd_t, frd_neighbourhoods, merge_t, merge_targets, MERGE_NONE, MERGE_OK, MERGE_CHAIN, MERGE_CYCLE, MERGE_ALONE
+public :: curvilinear_block_t, curvilinear_block_2d_t, topo_record_t, detect_topology, detect_topology_2d, record_map
+public :: TOPO_BOUNDARY, TOPO_ABUT, TOPO_PERIODIC, TOPO_SINGULAR, BLOCK_STATUS_OK, BLOCK_STATUS_BAD_INPUT
 public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose
 public :: pose_inverse, to_body, to_world, rotate, pose_interpolate
 public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01

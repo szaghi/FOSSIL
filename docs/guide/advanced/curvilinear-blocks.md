@@ -91,7 +91,10 @@ interior into the donor's exterior.
    A C-grid's wake cut gives two records on the same face, with the index
    reversal; an O-grid seam one record on each of its two faces.
 4. Periodic records are found the same way for each translation passed in
-   `translations`; rotational periodicity is given by hand (`add_record`).
+   `translations`, with + and − t on every face; rotational periodicity is
+   given by hand (`add_record`). Exact matching needs both x + t and x − t to
+   land exactly on the partner (true for dyadic coordinates); grids whose
+   periodic faces differ by round-off need a tolerance.
 
 Vertices that match nothing are physical boundary. The user can also give the
 records by hand, and every record **round-trips**: mapped vertices coincide.
