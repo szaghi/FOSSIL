@@ -17,7 +17,7 @@ use fossil_rigid_pose, only : rigid_pose_t, to_body, to_world, rotate
 use fossil_box_query, only : bvh_box_contact_oac, bvh_box_thin_oac, box_tolerance, cell_bands, cell_components, &
                              BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_box_predicates, only : box_triangle_overlap
-use fossil_line_query, only : bvh_line_crossings_oac, tri_line_hit_oac, sort_crossings_oac
+use fossil_line_query, only : bvh_line_crossings_oac, tri_line_hit_oac, sort_crossings_oac, line_crossing_before
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil_winding_number, only : compute_winding_number => winding_number, WN_FOUR_PI => FOUR_PI, WN_DEFAULT_BETA => DEFAULT_BETA
@@ -2324,8 +2324,9 @@ contains
    !< centre at which the grid line first meets the wall, in [0, 1], or -1 if it does not meet it
    !< before that centre (also at the block ends: pad the block with ghost cells). `inside(i, j, k)`
    !< is the parity of the crossings along the x line from outside the surface box: exact
-   !< topology (every crossing counted once on a watertight surface), so it equals the
-   !< point-in-solid test except for a centre within round-off of the wall. `bad_lines` (optional)
+   !< topology (every crossing counted once on a watertight surface) and, since issue #69, the
+   !< exact position of each crossing against the centre (orient3d): it equals the point-in-solid
+   !< test, a centre on the wall counting as past it (taken at x + eps). `bad_lines` (optional)
    !< counts the lines whose entering/leaving flags do not alternate (open or non-manifold input).
    !< `status = STATUS_INVALID_INPUT` on bad coordinates or shapes.
    class(surface_stl_object), intent(in)            :: self            !< Surface.
@@ -2394,7 +2395,8 @@ contains
       integer(I4P)              :: n, m, q, nc !< Work.
 
       nc = size(c, kind=I4P)
-      call line_crossings_core(self, ax, a, b, min(c(1), cmin) - 1._R8P, c(nc), t, f, e, n)
+      ! the whole line: a crossing rounded past the last centre can still be before it exactly
+      call line_crossings_core(self, ax, a, b, min(c(1), cmin) - 1._R8P, huge(1._R8P), t, f, e, n)
       do q = 1_I4P, n
          if (e(q) .neqv. (mod(q, 2_I4P) == 1_I4P)) then
             nb = nb + 1_I4P
@@ -2407,7 +2409,6 @@ contains
             if (t(m + 1) >= c(q)) exit
             m = m + 1_I4P
          enddo
-         if (present(ins)) ins(q) = mod(m, 2_I4P) == 1_I4P
          if (q > 1_I4P .and. m > 0_I4P) then ! last crossing in [c(q-1), c(q)]
             if (t(m) >= c(q - 1)) fr(1, q) = (c(q) - t(m)) / (c(q) - c(q - 1))
          endif
@@ -2415,7 +2416,46 @@ contains
             if (t(m + 1) <= c(q + 1)) fr(2, q) = (t(m + 1) - c(q)) / (c(q + 1) - c(q))
          endif
       enddo
+      if (present(ins)) call exact_parity(ax, a, b, c, t, f, e, n, ins)
       endsubroutine sweep
+
+      subroutine exact_parity(ax, a, b, c, t, f, e, n, ins)
+      !< Inside flags of the centres c by the parity of the crossings exactly before them (issue #69; the rounded
+      !< parameters decided it before, so a centre within round-off of the wall could land on either side). Each
+      !< crossing is placed among the sorted centres by its rounded parameter, then moved by the exact test, which is
+      !< monotone along the line: about two orient3d per crossing. A centre on the wall counts as past it.
+      integer(I4P), intent(in)  :: ax       !< Axis.
+      real(R8P),    intent(in)  :: a, b     !< Line position.
+      real(R8P),    intent(in)  :: c(:)     !< Centres.
+      real(R8P),    intent(in)  :: t(:)     !< Crossing parameters.
+      integer(I4P), intent(in)  :: f(:)     !< Facets.
+      logical,      intent(in)  :: e(:)     !< Entering flags.
+      integer(I4P), intent(in)  :: n        !< Crossings.
+      logical,      intent(out) :: ins(:)   !< Inside flags.
+      integer(I4P)              :: hist(0:size(c)), k, j, q, nc, cnt
+      real(R8P)                 :: tri(3, 3)
+
+      nc = size(c, kind=I4P)
+      hist = 0_I4P
+      do k = 1_I4P, n
+         tri = reshape(self%tri_vertices(:, f(k)), [3, 3])
+         j = count(c < t(k), kind=I4P) ! centres the crossing is (by its rounded parameter) not before
+         do while (j > 0_I4P)
+            if (.not. line_crossing_before(tri, ax, a, b, c(j), e(k))) exit
+            j = j - 1_I4P
+         enddo
+         do while (j < nc)
+            if (line_crossing_before(tri, ax, a, b, c(j + 1), e(k))) exit
+            j = j + 1_I4P
+         enddo
+         hist(j) = hist(j) + 1_I4P ! before the centres j+1..nc
+      enddo
+      cnt = 0_I4P
+      do q = 1_I4P, nc
+         cnt = cnt + hist(q - 1)
+         ins(q) = mod(cnt, 2_I4P) == 1_I4P
+      enddo
+      endsubroutine exact_parity
    endsubroutine cell_wall_fractions
 
    subroutine line_crossings_many(self, axis, a, b, t0, t1, t, facets, entering, counts, overflow, status)

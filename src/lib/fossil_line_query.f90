@@ -29,16 +29,74 @@ use fossil_aabb_node_object, only : aabb_node_object, bvh_bmin_x_oac, bvh_bmin_y
                                     bvh_bmax_y_oac, bvh_bmax_z_oac, bvh_left_child_oac, bvh_right_child_oac, &
                                     bvh_payload_first_oac, bvh_payload_count_oac
 use fossil_aabb_tree_object, only : facet_distance_payload
-use fossil_predicates,       only : orient2d_xy
+use fossil_predicates,       only : orient2d_xy, orient3d_xyz
 use penf,                    only : I4P, R8P
 
 implicit none
 private
+public :: line_crossing_before, line_crossing_before_2d
 public :: tri_line_hit_oac, seg_line_hit_oac, bvh_line_crossings_oac, curve_line_crossings_oac, sort_crossings_oac
 
 integer(I4P), parameter :: STACK = 256_I4P !< Traversal stack (> BVH depth cap + 2).
 
 contains
+   function line_crossing_before(tri, axis, a, b, c, entering) result(before)
+   !< The crossing of triangle tri with the line along `axis` at (a, b) lies before the point of the line at coordinate
+   !< c, exactly (issue #69): host only. With n = (B - A) x (C - A) and P the point, orient3d(A, B, C, P) =
+   !< -n_axis (c - t), t the exact crossing parameter, and the crossing enters (n_axis < 0) or leaves (n_axis > 0):
+   !< the sign of c - t is one exact orient3d. A point on the triangle's plane (P on the wall) counts as past the
+   !< crossing: P is taken at c + eps along the line.
+   real(R8P),    intent(in) :: tri(3, 3) !< Triangle vertices (columns), as the crossing kernel saw them.
+   integer(I4P), intent(in) :: axis     !< Line axis.
+   real(R8P),    intent(in) :: a, b     !< Line position (cyclic order, see the module header).
+   real(R8P),    intent(in) :: c        !< Point coordinate along the axis.
+   logical,      intent(in) :: entering !< The crossing enters the solid.
+   logical                  :: before   !< Crossing at t <= c (t = c counts as before).
+   real(R8P)                :: p(3), o
+
+   select case (axis)
+   case (1_I4P) ; p = [c, a, b]
+   case (2_I4P) ; p = [b, c, a]
+   case default ; p = [a, b, c]
+   endselect
+   o = orient3d_xyz(tri(:, 1), tri(:, 2), tri(:, 3), p)
+   if (o == 0._R8P) then
+      before = .true.
+   elseif (entering) then
+      before = o > 0._R8P
+   else
+      before = o < 0._R8P
+   endif
+   endfunction line_crossing_before
+
+   function line_crossing_before_2d(pu, pv, qu, qv, axis, a, c, entering) result(before)
+   !< 2-D twin of `line_crossing_before`: the crossing of the segment p -> q with the line along `axis` (1: v = a, 2:
+   !< u = a) lies before the point of the line at coordinate c, exactly. For P on the line, orient2d(p, q, P) =
+   !< -(q_v - p_v) (c - t) along u and (q_u - p_u) (c - t) along v, and with the module's entering convention (the
+   !< solid on the left) both give: entering, before iff orient2d > 0; leaving, iff < 0. A point on the segment counts
+   !< as past the crossing (c + eps).
+   real(R8P),    intent(in) :: pu, pv, qu, qv !< Segment.
+   integer(I4P), intent(in) :: axis           !< Line axis.
+   real(R8P),    intent(in) :: a              !< Line position.
+   real(R8P),    intent(in) :: c              !< Point coordinate along the axis.
+   logical,      intent(in) :: entering       !< The crossing enters the solid.
+   logical                  :: before         !< Crossing at t <= c.
+   real(R8P)                :: o
+
+   if (axis == 1_I4P) then
+      o = orient2d_xy(pu, pv, qu, qv, c, a)
+   else
+      o = orient2d_xy(pu, pv, qu, qv, a, c)
+   endif
+   if (o == 0._R8P) then
+      before = .true.
+   elseif (entering) then
+      before = o > 0._R8P
+   else
+      before = o < 0._R8P
+   endif
+   endfunction line_crossing_before_2d
+
    pure subroutine tri_line_hit_oac(tv, axis, a, b, hit, t, enter)
    !< Crossing of the line along `axis` at (a, b) with the triangle tv = [A, B, C] (9 coordinates).
    !$acc routine seq

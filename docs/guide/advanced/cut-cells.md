@@ -175,6 +175,7 @@ endprogram cut_geometry
 | 3-D piece measures: thin plate; hollow box; inclusion in the void, above a plate, beside a wall | exact volumes (0.5 and 0.499 of the cell; 98 and 1; 0.992; 0.782; 0.792) |
 | `orient3d`: near-coplanar grid (6144 points), coplanar dyadic points | exact signs and zeros (the naive determinant is wrong on 2022) |
 | line crossings, device path vs CPU | 0 mismatches (device path run on the host) |
+| centre inside flags within 3 ulp of a tilted face: tetrahedron (3-D), triangle (2-D), quadruple-precision reference | 0 of 3168 and 0 of 3200 wrong (249 and 295 before issue #69) |
 
 ## Limitations
 
@@ -187,10 +188,14 @@ endprogram cut_geometry
   the face parities beyond the cells it flags), and cells whose edge states
   do not close.
 - **Points exactly on the surface.**
-  - The inside flag of a cell centre comes from the crossings along its x
-    line. Whether a crossing lies before or after the centre is decided on
-    the rounded crossing position, so a centre within round-off of the wall
-    can land on either side.
+  - The inside flag of a cell centre is the parity of the crossings along
+    its x line before it. Since issue #69 "before" is exact: with
+    n = (B − A) × (C − A), orient3d(A, B, C, P) = −n_x (c − t), so one
+    `orient3d` and the crossing's entering flag decide it (2-D: one
+    `orient2d`). A centre on the wall counts as past the crossing (taken at
+    x + ε). Before #69 the rounded crossing position decided it, and on a
+    tilted tetrahedron 249 of 3168 centres within 3 ulp of a face landed on
+    the wrong side (295 of 3200 in 2-D).
   - The tie-break of the line crossings orders the two transverse
     perturbations cyclically per axis. That is exact for the crossing counts
     of each line, but not one global perturbation.

@@ -1148,7 +1148,8 @@ symbolic tie-break): on a watertight surface every crossing is counted once.
 **Related.** `line_crossings_many(axis, a, b, t0, t1, t, facets, entering, counts, overflow)`
 and its device twin (fixed buffers, bit-exact);
 `cell_wall_fractions(x, y, z, frac, inside, bad_lines)`: the fraction toward each of
-the six neighbours of every cell centre and the parity inside flags;
+the six neighbours of every cell centre and the parity inside flags (exact
+since issue #69: each crossing's position against a centre is one `orient3d`);
 `cut_cells_3d(surface, x, y, z, cut)` (module procedure): face fractions and cell
 volumes. See [Cut-cell geometry](/guide/advanced/cut-cells).
 

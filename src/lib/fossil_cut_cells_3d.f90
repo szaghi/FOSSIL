@@ -54,6 +54,7 @@ module fossil_cut_cells_3d
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t
 use fossil_curve_slice,        only : slice_surface
 use fossil_facet_object,       only : facet_object
+use fossil_line_query,         only : line_crossing_before
 use fossil_predicates,         only : orient2d_xy
 use fossil_surface_stl_object, only : surface_stl_object, STATUS_OK, STATUS_INVALID_INPUT
 use penf,                      only : I4P, R8P
@@ -867,16 +868,23 @@ contains
    endsubroutine cell_pieces
 
    logical function inside_parity(surface, p)
-   !< The point p inside the solid: odd number of exact crossings of the line along z below it.
+   !< The point p inside the solid: odd number of exact crossings of the line along z below it. Which crossings lie
+   !< below p is decided exactly (issue #69, `line_crossing_before`; the rounded parameter decided it before), a point
+   !< on the wall counting as above it.
    type(surface_stl_object), intent(in) :: surface !< Surface.
    real(R8P),                intent(in) :: p(3)    !< Point.
    real(R8P),    allocatable :: t(:)     !< Crossings.
    integer(I4P), allocatable :: fc(:)    !< Facets.
    logical,      allocatable :: en(:)    !< Entering flags.
-   integer(I4P)              :: n        !< Number of crossings.
+   integer(I4P)              :: n, k, m  !< Number of crossings, work.
 
-   call surface%line_crossings(3_I4P, p(1), p(2), -huge(1._R8P), p(3), t, fc, en, n)
-   inside_parity = mod(n, 2_I4P) == 1_I4P
+   call surface%line_crossings(3_I4P, p(1), p(2), -huge(1._R8P), huge(1._R8P), t, fc, en, n)
+   m = 0_I4P
+   do k = 1_I4P, n
+      if (line_crossing_before(reshape(surface%tri_vertices(:, fc(k)), [3, 3]), 3_I4P, p(1), p(2), p(3), en(k))) &
+         m = m + 1_I4P
+   enddo
+   inside_parity = mod(m, 2_I4P) == 1_I4P
    endfunction inside_parity
 
    pure integer(I4P) function edge_index(k, sides)

@@ -28,7 +28,7 @@ module fossil_curve_object
 !< exact `orient2d_xy` crossing test, so every loop gets the same answer from every query.
 use fossil_box_query,          only : curve_box_contact_oac, curve_box_thin_oac, cell_bands, cell_components, BOX_NONE, &
                                      BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
-use fossil_line_query,         only : curve_line_crossings_oac
+use fossil_line_query,         only : curve_line_crossings_oac, line_crossing_before_2d
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
 use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate
 use fossil_predicates,         only : orient2d_xy
@@ -1209,7 +1209,8 @@ contains
       integer(I4P)              :: n, m, q, nc !< Work.
 
       nc = size(c, kind=I4P)
-      call curve_crossings_core(self, ax, a, min(c(1), cmin) - 1._R8P, c(nc), t, g, e, n)
+      ! the whole line: a crossing rounded past the last centre can still be before it exactly
+      call curve_crossings_core(self, ax, a, min(c(1), cmin) - 1._R8P, huge(1._R8P), t, g, e, n)
       do q = 1_I4P, n
          if (e(q) .neqv. (mod(q, 2_I4P) == 1_I4P)) then
             nb = nb + 1_I4P
@@ -1222,7 +1223,6 @@ contains
             if (t(m + 1) >= c(q)) exit
             m = m + 1_I4P
          enddo
-         if (present(ins)) ins(q) = mod(m, 2_I4P) == 1_I4P
          if (q > 1_I4P .and. m > 0_I4P) then
             if (t(m) >= c(q - 1)) fr(1, q) = (c(q) - t(m)) / (c(q) - c(q - 1))
          endif
@@ -1230,7 +1230,43 @@ contains
             if (t(m + 1) <= c(q + 1)) fr(2, q) = (t(m + 1) - c(q)) / (c(q + 1) - c(q))
          endif
       enddo
+      if (present(ins)) call exact_parity(ax, a, c, t, g, e, n, ins)
       endsubroutine sweep
+
+      subroutine exact_parity(ax, a, c, t, g, e, n, ins)
+      !< Inside flags of the centres c by the parity of the crossings exactly before them (issue #69): each crossing is
+      !< placed by its rounded parameter, then moved by the exact test, monotone along the line.
+      integer(I4P), intent(in)  :: ax     !< Axis.
+      real(R8P),    intent(in)  :: a      !< Line position.
+      real(R8P),    intent(in)  :: c(:)   !< Centres.
+      real(R8P),    intent(in)  :: t(:)   !< Crossing parameters.
+      integer(I4P), intent(in)  :: g(:)   !< Segments (start vertices).
+      logical,      intent(in)  :: e(:)   !< Entering flags.
+      integer(I4P), intent(in)  :: n      !< Crossings.
+      logical,      intent(out) :: ins(:) !< Inside flags.
+      integer(I4P)              :: hist(0:size(c)), k, j, q, nc, cnt, s0, s1
+
+      nc = size(c, kind=I4P)
+      hist = 0_I4P
+      do k = 1_I4P, n
+         s0 = g(k) ; s1 = self%next(s0)
+         j = count(c < t(k), kind=I4P)
+         do while (j > 0_I4P)
+            if (.not. line_crossing_before_2d(self%u(s0), self%v(s0), self%u(s1), self%v(s1), ax, a, c(j), e(k))) exit
+            j = j - 1_I4P
+         enddo
+         do while (j < nc)
+            if (line_crossing_before_2d(self%u(s0), self%v(s0), self%u(s1), self%v(s1), ax, a, c(j + 1), e(k))) exit
+            j = j + 1_I4P
+         enddo
+         hist(j) = hist(j) + 1_I4P
+      enddo
+      cnt = 0_I4P
+      do q = 1_I4P, nc
+         cnt = cnt + hist(q - 1)
+         ins(q) = mod(cnt, 2_I4P) == 1_I4P
+      enddo
+      endsubroutine exact_parity
    endsubroutine cell_wall_fractions
 
    subroutine cut_cells(self, x, y, cut, status)
