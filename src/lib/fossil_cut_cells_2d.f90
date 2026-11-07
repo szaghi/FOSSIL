@@ -59,6 +59,7 @@ type :: cut_cells_2d_t
                                                     !< then horizontal ones (i, j) = (nx + 1) ny + i + (j - 1) nx.
    real(R8P),    allocatable :: piece_iv_lo(:)      !< Interval start along its edge (v on a vertical edge, u on a horizontal).
    real(R8P),    allocatable :: piece_iv_hi(:)      !< Interval end.
+   logical,      allocatable :: node_in(:,:)        !< Grid node inside the solid [nx+1, ny+1] (perturbed, exact; #70).
 endtype cut_cells_2d_t
 
 type :: xing_t
@@ -90,12 +91,13 @@ type :: ctx_t
    integer(I4P),  allocatable :: pci(:), pcj(:)   !< Piece cells.
    real(R8P),     allocatable :: pap(:,:)         !< Piece apertures [4, capacity].
    integer(I4P)               :: niv = 0_I4P      !< Piece intervals in the buffers.
+   logical                    :: with_iv = .true. !< Record them.
    integer(I4P),  allocatable :: ivp(:), ive(:)   !< Interval piece, edge.
    real(R8P),     allocatable :: ivl(:), ivh(:)   !< Interval range.
 endtype ctx_t
 
 contains
-   subroutine compute_cut_cells_2d(u, v, next, x, y, cc, status)
+   subroutine compute_cut_cells_2d(u, v, next, x, y, cc, status, with_iv)
    !< Cut cells of the curve (u, v, next) on the block of edges x(nx+1), y(ny+1).
    !<
    !< Segment i runs from vertex i to vertex next(i) (next(i) = 0: no segment). `status` = 0, or 1 on
@@ -105,6 +107,7 @@ contains
    real(R8P),            intent(in)  :: x(:), y(:) !< Cell edges (strictly increasing).
    type(cut_cells_2d_t), intent(out) :: cc         !< Cut cells.
    integer(I4P),         intent(out) :: status     !< 0 ok, 1 bad edges.
+   logical,              intent(in)  :: with_iv    !< Record the fluid edge intervals of the pieces (issue #70).
    type(ctx_t)  :: cx                  !< Working data.
    integer(I4P) :: nx, ny, nxs, nps, ne, ncell, c, npb !< Work.
 
@@ -121,13 +124,14 @@ contains
             cc%wet_centroid(2, nx, ny), cc%wet_normal(2, nx, ny), cc%pieces(nx, ny), cc%first_piece(nx, ny), &
             cc%closed(nx, ny))
    call node_flags(u, v, next, x, y, cx%node_in)
+   cc%node_in = cx%node_in
    call walk_all(u, v, next, x, y, cx%xs, nxs, cx%ps, nps)
    ne = (nx + 1_I4P) * ny + nx * (ny + 1_I4P) ; ncell = nx * ny
    call index_crossings(cx%xs, nxs, ne, cx%xstart, cx%xord)
    call index_pieces(cx%ps, nps, ncell, cx%pstart, cx%pord)
    allocate(cx%pa(16), cx%pcx(16), cx%pcy(16), cx%pwl(16), cx%pwx(16), cx%pwy(16), cx%pci(16), cx%pcj(16), cx%pap(4, 16))
    allocate(cx%ivp(16), cx%ive(16), cx%ivl(16), cx%ivh(16))
-   cx%npb = 0_I4P ; cx%niv = 0_I4P
+   cx%npb = 0_I4P ; cx%niv = 0_I4P ; cx%with_iv = with_iv
    do c = 1_I4P, ncell
       call one_cell(c, cx, cc)
    enddo
@@ -627,6 +631,7 @@ contains
    integer(I4P), intent(in)    :: ip, ed !< Piece, edge id.
    real(R8P),    intent(in)    :: lo, hi !< Range.
 
+   if (.not. cx%with_iv) return
    if (cx%niv == size(cx%ivp)) then
       cx%ivp = [cx%ivp, cx%ivp] ; cx%ive = [cx%ive, cx%ive] ; cx%ivl = [cx%ivl, cx%ivl] ; cx%ivh = [cx%ivh, cx%ivh]
    endif

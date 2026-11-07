@@ -1269,27 +1269,31 @@ contains
       endsubroutine exact_parity
    endsubroutine cell_wall_fractions
 
-   subroutine cut_cells(self, x, y, cut, status)
+   subroutine cut_cells(self, x, y, cut, status, intervals)
    !< Exact cut cells of the block with cell edges x(nx+1), y(ny+1) (u, v) (issue #40): fluid area
    !< fraction, edge apertures, fluid centroid, wetted length, centroid and normal integral, and the
    !< fluid pieces of every cell (`fossil_cut_cells_2d`; the fluid is outside the solid). Exact
    !< topology with the symbolic tie-break of the line crossings; the measures are exact to round-off.
    !< Cells whose boundary does not close (open loops) are flagged in `cut%closed` with no measures.
-   !< `status = STATUS_INVALID_INPUT` on bad edges.
+   !< `status = STATUS_INVALID_INPUT` on bad edges. `intervals = .false.` skips the fluid edge intervals of the pieces
+   !< (`piece_iv_*`, needed by `cut_links_2d`; issue #70).
    class(curve_object),  intent(in)            :: self   !< Curve.
    real(R8P),            intent(in)            :: x(:), y(:) !< Cell edges (u, v), strictly increasing.
    type(cut_cells_2d_t), intent(out)           :: cut    !< Cut cells.
    integer(I4P),         intent(out), optional :: status !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,              intent(in),  optional :: intervals !< Record the fluid edge intervals (default .true.).
    integer(I4P)                                :: st     !< Module status.
+   logical                                     :: wi     !< With the intervals.
 
    if (present(status)) status = STATUS_OK
+   wi = .true. ; if (present(intervals)) wi = intervals
    if (self%nv > 0_I4P) then
-      call compute_cut_cells_2d(self%u, self%v, self%next, x, y, cut, st)
+      call compute_cut_cells_2d(self%u, self%v, self%next, x, y, cut, st, wi)
    else
       block
          real(R8P)    :: uu(0), vv(0)
          integer(I4P) :: nn(0)
-         call compute_cut_cells_2d(uu, vv, nn, x, y, cut, st)
+         call compute_cut_cells_2d(uu, vv, nn, x, y, cut, st, wi)
       end block
    endif
    if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT

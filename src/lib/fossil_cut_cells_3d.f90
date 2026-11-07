@@ -26,7 +26,7 @@ module fossil_cut_cells_3d
 !< the boundary of the fluid: the clipped wall polygons (with on-plane flags from the coordinates: a
 !< vertex on a cell plane lies on that face, two flags of two axes put it on a cell edge) and the fluid
 !< intervals of the 12 cell edges. Since issue #70 the corner states are the exact parities of the
-!< perturbed nodes (`column_parity`) and the piercings of an edge its exact crossings under the global
+!< perturbed nodes (`edge_fractions`) and the piercings of an edge its exact crossings under the global
 !< perturbation (`tri_line_hit_oac`, kept when `line_crossing_before` puts them between the perturbed
 !< corners), so the states alternate from one corner to the other; crossings at one rounded position are
 !< reordered by that alternation. Before #70 the piercings were the polygon vertices on the edge, one per
@@ -104,6 +104,11 @@ type :: cut_cells_3d_t
    real(R8P),    allocatable :: piece_wet_centroid(:,:) !< Wetted centroid of each piece [3, np].
    real(R8P),    allocatable :: piece_wet_normal(:,:) !< Outward (solid to fluid) normal integral of each piece [3, np].
    real(R8P),    allocatable :: piece_face(:,:)     !< Fluid fraction of the cell faces per piece [6 (-x, +x, -y, +y, -z, +z), np].
+   real(R8P),    allocatable :: edge_x(:,:,:)       !< Fluid fraction of the cell edges along x [nx, ny+1, nz+1] (issue #70,
+                                                    !< with `edges=.true.`; edge_y, edge_z likewise).
+   real(R8P),    allocatable :: edge_y(:,:,:)       !< Fluid fraction of the cell edges along y [nx+1, ny, nz+1].
+   real(R8P),    allocatable :: edge_z(:,:,:)       !< Fluid fraction of the cell edges along z [nx+1, ny+1, nz].
+   logical,      allocatable :: node_in(:,:,:)      !< Grid node inside the solid [nx+1, ny+1, nz+1] (perturbed, exact).
 endtype cut_cells_3d_t
 
 type :: pierce_t
@@ -115,7 +120,7 @@ type :: pierce_t
 endtype pierce_t
 
 contains
-   subroutine cut_cells_3d(surface, x, y, z, cut, status, links)
+   subroutine cut_cells_3d(surface, x, y, z, cut, status, links, edges)
    !< Cut cells of `surface` on the block with cell edges x(nx+1), y(ny+1), z(nz+1) (issue #40).
    !<
    !< Step 4: the face fluid fractions, centroids and pieces of every grid face (see the module
@@ -125,7 +130,9 @@ contains
    type(cut_cells_3d_t),     intent(out)           :: cut        !< Cut cells.
    integer(I4P),             intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
    type(cut_links_t),        intent(out), optional :: links      !< Links between the pieces (issue #70).
+   logical,                  intent(in),  optional :: edges      !< Also the fluid fractions of the cell edges (issue #70).
    type(cut_cells_2d_t), allocatable :: px(:), py(:), pz(:) !< Plane sections kept for the links.
+   logical              :: all_edges !< Edge fractions asked.
    integer(I4P),         allocatable :: piv_piece(:), piv_edge(:) !< Fluid edge intervals of the pieces of multi-piece
    real(R8P),            allocatable :: piv_lo(:), piv_hi(:)      !< cells: piece, cell edge (1-12), range.
    integer(I4P)         :: nx, ny, nz, i, j, k, st, f !< Work.
@@ -156,7 +163,7 @@ contains
    ! planes x = x_i: (u, v) = (y, z)
    do i = 1, nx + 1
       call slice_surface(surface=surface, normal_axis=1_I4P, level=x(i), curve=sec, on_plane_low=.true.)
-      call sec%cut_cells(x=y, y=z, cut=c2, status=st)
+      call sec%cut_cells(x=y, y=z, cut=c2, status=st, intervals=present(links))
       if (present(links)) px(i) = c2
       do k = 1, nz
          do j = 1, ny
@@ -169,7 +176,7 @@ contains
    ! planes y = y_j: (u, v) = (z, x)
    do j = 1, ny + 1
       call slice_surface(surface=surface, normal_axis=2_I4P, level=y(j), curve=sec, on_plane_low=.true.)
-      call sec%cut_cells(x=z, y=x, cut=c2, status=st)
+      call sec%cut_cells(x=z, y=x, cut=c2, status=st, intervals=present(links))
       if (present(links)) py(j) = c2
       do k = 1, nz
          do i = 1, nx
@@ -182,7 +189,7 @@ contains
    ! planes z = z_k: (u, v) = (x, y)
    do k = 1, nz + 1
       call slice_surface(surface=surface, normal_axis=3_I4P, level=z(k), curve=sec, on_plane_low=.true.)
-      call sec%cut_cells(x=x, y=y, cut=c2, status=st)
+      call sec%cut_cells(x=x, y=y, cut=c2, status=st, intervals=present(links))
       if (present(links)) pz(k) = c2
       do j = 1, ny
          do i = 1, nx
@@ -192,6 +199,9 @@ contains
          enddo
       enddo
    enddo
+   ! grid nodes (issue #70), and the cell edges if asked: exact crossings along the grid lines
+   all_edges = .false. ; if (present(edges)) all_edges = edges ! no short-circuit in Fortran: never edges if absent
+   call edge_fractions(surface, x, y, z, cut, all_edges)
    ! cells: clipped triangles
    allocate(acc(11, nx, ny, nz)) ; acc = 0._R8P
    do f = 1, surface%get_facets_number()
@@ -280,8 +290,6 @@ contains
    integer(I4P), allocatable   :: pcel(:,:)               !< Cells of all pieces [3, capacity].
    integer(I4P)                :: npb                     !< Pieces so far.
    real(R8P)                   :: tot(17), h(3)           !< Cell totals, cell size.
-   logical,      allocatable   :: node_in(:,:,:)          !< Exact inside flags of the (perturbed) grid nodes.
-   logical,      allocatable   :: need(:,:)               !< Node columns that a cut cell needs.
    integer(I4P)                :: cs(8), q                !< Corner states, corner.
 
    nx = cut%nx ; ny = cut%ny ; nz = cut%nz
@@ -350,20 +358,7 @@ contains
       endif
       m = f + 1
    enddo
-   ! corner states: the exact inside flags of the perturbed nodes (issue #70), one z line per needed column
-   allocate(need(nx + 1, ny + 1), node_in(nx + 1, ny + 1, nz + 1)) ; need = .false. ; node_in = .false.
-   do k = 1, nz
-      do j = 1, ny
-         do i = 1, nx
-            if (cnt(i + nx * ((j - 1) + ny * (k - 1))) > 0_I4P) need(i:i + 1, j:j + 1) = .true.
-         enddo
-      enddo
-   enddo
-   do j = 1, ny + 1
-      do i = 1, nx + 1
-         if (need(i, j)) call column_parity(surface, x(i), y(j), z, node_in(i, j, :))
-      enddo
-   enddo
+   ! corner states: the exact inside flags of the perturbed nodes (issue #70, `edge_fractions`)
    do k = 1, nz
       do j = 1, ny
          do i = 1, nx
@@ -378,7 +373,7 @@ contains
                cut%pieces(i, j, k) = merge(1_I4P, 0_I4P, cut%alpha(i, j, k) > 0.5_R8P)
             else
                do q = 1, 8
-                  cs(q) = merge(0_I4P, 1_I4P, node_in(i + mod(q - 1, 2), j + mod((q - 1) / 2, 2), k + (q - 1) / 4))
+                  cs(q) = merge(0_I4P, 1_I4P, cut%node_in(i + mod(q - 1, 2), j + mod((q - 1) / 2, 2), k + (q - 1) / 4))
                enddo
                call cell_pieces(tri, nrm, lst(start(c):start(c + 1) - 1), &
                                 [x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], cs, np, pm, cpp, cpe, cpl, cph)
@@ -1194,30 +1189,121 @@ contains
    enddo
    endfunction split_closes
 
-   subroutine column_parity(surface, xa, yb, z, inside)
-   !< Exact inside flags of the nodes (xa, yb, z(k)) of a grid column (issue #70): the parity of the crossings of
-   !< the z line before each node, decided by `line_crossing_before` under the global perturbation, a node on the
-   !< wall taken at P + (eps1, eps2, eps3). The same test as the node parities of #69, so the corner states of
-   !< every cell agree with the crossings of its edges.
-   type(surface_stl_object), intent(in)  :: surface   !< Surface.
-   real(R8P),                intent(in)  :: xa, yb    !< Column.
-   real(R8P),                intent(in)  :: z(:)      !< Nodes.
-   logical,                  intent(out) :: inside(:) !< Inside flags.
-   real(R8P),    allocatable :: t(:)     !< Crossings.
-   integer(I4P), allocatable :: fc(:)    !< Facets.
-   logical,      allocatable :: en(:)    !< Entering flags.
-   integer(I4P)              :: n, k, m, kk !< Work.
+   subroutine edge_fractions(surface, x, y, z, cut, all_edges)
+   !< Inside flags of the grid nodes and fluid fractions of the cell edges along z (issue #70), from the exact crossings
+   !< of the z lines (`line_fractions`); with all_edges, the x and y lines too, for edge_x and edge_y.
+   type(surface_stl_object), intent(in)    :: surface          !< Surface.
+   real(R8P),                intent(in)    :: x(:), y(:), z(:) !< Cell edges.
+   type(cut_cells_3d_t),     intent(inout) :: cut              !< Cut cells.
+   logical,                  intent(in)    :: all_edges        !< Edges along x and y too.
+   integer(I4P)              :: nx, ny, nz, i, j, k            !< Work.
+   real(R8P),    allocatable :: fr(:)                          !< Fractions of one line.
+   logical,      allocatable :: nd(:)                          !< Node flags of one line.
 
-   call surface%line_crossings(3_I4P, xa, yb, -huge(1._R8P), huge(1._R8P), t, fc, en, n)
-   do k = 1, size(z)
-      m = 0_I4P
-      do kk = 1_I4P, n
-         if (line_crossing_before(reshape(surface%tri_vertices(:, fc(kk)), [3, 3]), 3_I4P, xa, yb, z(k), en(kk))) &
-            m = m + 1_I4P
+   nx = cut%nx ; ny = cut%ny ; nz = cut%nz
+   allocate(cut%node_in(nx + 1, ny + 1, nz + 1), cut%edge_z(nx + 1, ny + 1, nz))
+   do j = 1, ny + 1 ! z lines at (x, y): every node, and the edges along z
+      do i = 1, nx + 1
+         call line_fractions(surface, 3_I4P, x(i), y(j), z, fr, nd)
+         cut%edge_z(i, j, :) = fr ; cut%node_in(i, j, :) = nd
       enddo
-      inside(k) = mod(m, 2_I4P) == 1_I4P
    enddo
-   endsubroutine column_parity
+   if (.not. all_edges) then
+      deallocate(cut%edge_z) ; return
+   endif
+   allocate(cut%edge_x(nx, ny + 1, nz + 1), cut%edge_y(nx + 1, ny, nz + 1))
+   do k = 1, nz + 1 ! x lines at (y, z)
+      do j = 1, ny + 1
+         call line_fractions(surface, 1_I4P, y(j), z(k), x, fr, nd)
+         cut%edge_x(:, j, k) = fr
+      enddo
+   enddo
+   do k = 1, nz + 1 ! y lines at (z, x)
+      do i = 1, nx + 1
+         call line_fractions(surface, 2_I4P, z(k), x(i), y, fr, nd)
+         cut%edge_y(i, :, k) = fr
+      enddo
+   enddo
+   endsubroutine edge_fractions
+
+   subroutine line_fractions(surface, axis, a, b, e, frac, inside)
+   !< Fluid fraction of the segments [e(s), e(s+1)] of the grid line along `axis` at (a, b) and the inside flags of
+   !< its nodes e(s) (issue #70). The nodes are the perturbed grid points of #69: a crossing lies in segment s when it
+   !< is after the perturbed e(s) and before the perturbed e(s+1) (`line_crossing_before`, exact); the first node's
+   !< flag is the parity of the crossings before it, the next ones flip at each crossing. Lengths use the rounded
+   !< crossing positions, clamped to the segment.
+   type(surface_stl_object), intent(in)  :: surface   !< Surface.
+   integer(I4P),             intent(in)  :: axis      !< Line axis.
+   real(R8P),                intent(in)  :: a, b      !< Line position (cyclic order, see `fossil_line_query`).
+   real(R8P),                intent(in)  :: e(:)      !< Nodes along the line (strictly increasing).
+   real(R8P), allocatable,   intent(out) :: frac(:)   !< Fluid fractions [size(e) - 1].
+   logical,   allocatable,   intent(out) :: inside(:) !< Node inside flags [size(e)].
+   real(R8P),    allocatable :: t(:)                  !< Crossings.
+   integer(I4P), allocatable :: fc(:), seg(:)         !< Facets, segment of each crossing (0: before e(1), ns+1: after).
+   logical,      allocatable :: en(:)                 !< Entering flags.
+   integer(I4P)              :: n, ns, c, sg, m       !< Work.
+   real(R8P)                 :: tri(3, 3), pos, tc, fl !< Work.
+   logical                   :: st                    !< Inside state.
+
+   ns = size(e, kind=I4P) - 1_I4P
+   allocate(frac(ns), inside(ns + 1))
+   call surface%line_crossings(axis, a, b, -huge(1._R8P), huge(1._R8P), t, fc, en, n)
+   allocate(seg(n))
+   m = 0_I4P
+   do c = 1, n
+      tri = reshape(surface%tri_vertices(:, fc(c)), [3, 3])
+      sg = max(0_I4P, min(ns + 1_I4P, col_index(t(c), e))) ! from the rounded position, then exactly
+      do while (sg >= 1_I4P)
+         if (.not. line_crossing_before(tri, axis, a, b, e(sg), en(c))) exit
+         sg = sg - 1_I4P
+      enddo
+      do while (sg <= ns)
+         if (line_crossing_before(tri, axis, a, b, e(sg + 1), en(c))) exit
+         sg = sg + 1_I4P
+      enddo
+      seg(c) = sg
+      if (sg == 0_I4P) m = m + 1_I4P
+   enddo
+   st = mod(m, 2_I4P) == 1_I4P
+   inside(1) = st
+   c = 1_I4P
+   do sg = 1, ns
+      pos = e(sg) ; fl = 0._R8P
+      do c = 1, n
+         if (seg(c) /= sg) cycle
+         tc = min(max(t(c), e(sg)), e(sg + 1))
+         if (.not. st) fl = fl + (tc - pos)
+         pos = tc ; st = .not. st
+      enddo
+      if (.not. st) fl = fl + (e(sg + 1) - pos)
+      frac(sg) = fl / (e(sg + 1) - e(sg))
+      inside(sg + 1) = st
+   enddo
+   endsubroutine line_fractions
+
+   pure integer(I4P) function col_index(w, e) result(k)
+   !< Segment of w: 0 if w <= e(1), s if e(s) < w <= e(s+1), size(e) beyond.
+   real(R8P), intent(in) :: w    !< Coordinate.
+   real(R8P), intent(in) :: e(:) !< Nodes.
+   integer(I4P)          :: lo, hi, mid !< Bisection.
+
+   if (w <= e(1)) then
+      k = 0_I4P ; return
+   endif
+   if (w > e(size(e))) then
+      k = size(e, kind=I4P) ; return
+   endif
+   lo = 1_I4P ; hi = size(e, kind=I4P)
+   do while (hi - lo > 1_I4P)
+      mid = (lo + hi) / 2_I4P
+      if (w > e(mid)) then
+         lo = mid
+      else
+         hi = mid
+      endif
+   enddo
+   k = lo
+   endfunction col_index
 
    pure integer(I4P) function edge_index(k, sides)
    !< Cell edge (1-12) along axis k at the sides (0 low, 1 high) of the two other axes.

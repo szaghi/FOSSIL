@@ -207,10 +207,28 @@ nested edges checked) is built from the fine one, never recomputed:
 
 ## Edge fractions
 
-The fluid length of each cell edge (3-D: `edge_x(nx, ny + 1, nz + 1)`,
-`edge_y`, `edge_z`; 2-D: the node inside flags), from the exact edge
-crossings the pieces already use. Embedded-boundary constrained transport needs
-them (llm-wiki `div-free-amr/wiki/methods/embedded-boundary-constrained-transport.md`).
+`cut_cells_3d(..., edges=.true.)` gives the fluid fraction of every cell edge, `edge_x(nx, ny + 1, nz + 1)`,
+`edge_y(nx + 1, ny, nz + 1)` and `edge_z(nx + 1, ny + 1, nz)` (one query per grid line, off by default:
+the swept geometry calls the cut cells many times and needs no edges). Every call gives the inside flag of
+every grid node, `node_in(nx + 1, ny + 1, nz + 1)` (the z lines); the 2-D cut cells give
+`node_in(nx + 1, ny + 1)` (their edges are the apertures). Embedded-boundary constrained transport needs the edge fractions (llm-wiki
+`div-free-amr/wiki/methods/embedded-boundary-constrained-transport.md`).
+
+- **Exact topology.** Every grid line is queried once (`line_crossings`). A
+  crossing belongs to the segment between two nodes when it lies after the
+  perturbed lower node and before the perturbed upper one (`line_crossing_before`,
+  one exact `orient3d`, ties by the global perturbation of issue #69). The
+  first node's flag is the parity of the crossings before it; the next ones
+  flip at each crossing. Lengths use the rounded crossing positions.
+- The same node flags are the corner states of the 3-D pieces.
+- **Measured** (`fossil_test_cut_edges`): against the apertures of the plane
+  sections' 2-D cut cells (a separate code path: `slice_surface` and the 2-D
+  walk), on the tilted wedge, the L-prism (generic and aligned), cube-01
+  through its faces and 6 lattice tetrahedra: 209 132 edges agree to
+  4.3·10⁻¹⁵. Of 60 231 node flags, 7 differ, all at nodes exactly on the
+  surface of a lattice tetrahedron, where the sections decide on rounded
+  crossing points ([limitations](./cut-cells#limitations)); the 3-D flags are
+  exact predicates on the input triangles.
 
 ## Left out
 
