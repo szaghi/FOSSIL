@@ -23,6 +23,7 @@ use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil_winding_number, only : compute_winding_number => winding_number, WN_FOUR_PI => FOUR_PI, WN_DEFAULT_BETA => DEFAULT_BETA
 use fossil_hole_filling,   only : boundary_loop_t, extract_boundary_loops, triangulate_loop, refine_patch, fair_patch
 use fossil_self_intersection, only : intersection_pair_t, SELFINT_CROSSING, SELFINT_TOUCHING, SELFINT_COPLANAR, &
+                                     SELFINT_EDGE_FOLD, SELFINT_SHEETS, &
                                      compute_self_intersections => find_self_intersections
 use fossil_marching_cubes, only : compute_isosurface => extract_isosurface, MC_STATUS_OK
 use fossil_decimate, only : compute_decimate => decimate, &
@@ -71,7 +72,7 @@ implicit none
 private
 public :: surface_stl_object
 public :: proximity_pairs_of
-public :: intersection_pair_t, SELFINT_CROSSING, SELFINT_TOUCHING, SELFINT_COPLANAR
+public :: intersection_pair_t, SELFINT_CROSSING, SELFINT_TOUCHING, SELFINT_COPLANAR, SELFINT_EDGE_FOLD, SELFINT_SHEETS
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 public :: FEATURE_FACE, FEATURE_EDGE, FEATURE_VERTEX
 public :: sign_algorithm_from_string

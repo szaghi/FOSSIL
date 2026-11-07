@@ -32,8 +32,10 @@ the input.
    the traversal code.
 2. **Pool-aware adjacency filter.** The shared vertices of the pair are
    counted by vertex-pool ID (exact coordinate equality when the pool is
-   not in use). Two facets sharing an **edge** meet along it, as expected:
-   skipped.
+   not in use). Two facets sharing an **edge** meet along it, as expected;
+   they are a defect only when exactly coplanar and folded over it (both
+   free vertices on the same side of the edge, exact `orient2d`):
+   `SELFINT_EDGE_FOLD` (issue #69).
 3. **Narrow phase.** No shared vertex (issue #69): the exact `pair_cut`
    of the boolean (`fossil_tritri_exact`, exact `orient3d` signs and
    implicit section points). A common segment of positive length is a
@@ -55,10 +57,22 @@ the input.
    (`SELFINT_COPLANAR`), a common edge segment from the vertex is a touch
    (`include_touching`).
 
-Not detected yet (issue #69, next step): two sheets crossing along a
-**shared edge** (a non-manifold edge with four facets, e.g. two cubes
-merged so that their face edges coincide), and a coplanar pair folded
-over its shared edge.
+4. **Non-manifold edges** (issue #69). Sheets crossing along a shared
+   edge (e.g. two cubes merged so that one passes through the other along a
+   common edge) meet only on the edge, so no pair test sees them. A pass
+   over the edges with 4 or more facets orders the facets around each
+   edge by the angle of their half-planes, exactly (`orient3d` on input
+   vertices), and notes whether each traverses the edge forwards or
+   backwards. Embedded oriented sheets alternate around the edge (the
+   winding number of the wedges stays in {w, w + 1}); two adjacent facets
+   with the same direction bound a wedge wound twice, where the sheets
+   cross. Each such pair is reported as `SELFINT_SHEETS`, with the edge as
+   `p`–`q`. Fans with unequal numbers of forward and backward facets (an
+   orientation or boundary defect, not a crossing) and fans with two
+   facets in the same half-plane (folds, reported pairwise) are skipped.
+
+Not reported: duplicate facets (three shared vertices), which
+`remove_duplicate_facets` handles.
 
 ## Pipeline (resolution)
 
@@ -91,7 +105,10 @@ Each record carries:
 
 - `pairs(i)%a`, `pairs(i)%b` — facet IDs with `a < b`.
 - `pairs(i)%kind` — `SELFINT_CROSSING` (a common segment of positive
-  length), `SELFINT_COPLANAR` (coplanar, overlapping interiors) or, with
+  length), `SELFINT_COPLANAR` (coplanar, overlapping interiors),
+  `SELFINT_EDGE_FOLD` (sharing an edge, coplanar, folded over it),
+  `SELFINT_SHEETS` (adjacent around a non-manifold edge with the same
+  direction: the sheets cross along the edge) or, with
   `include_touching`, `SELFINT_TOUCHING` (one common point, or coplanar
   boundaries meeting without area).
 - `pairs(i)%p`, `pairs(i)%q` — segment endpoints in world coordinates

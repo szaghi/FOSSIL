@@ -324,13 +324,13 @@ fobis fetch            # --update to re-fetch
   Contact-only and touching-symdiff results are non-manifold by definition.
   Validated by identities that need no analytic answer (test-side harness
   `src/tests/fossil_boolean_harness.f90`: volume, second moments, area,
-  deviation, membership, validity; self-intersections confirmed by the
-  exact `pair_cut`, since `find_self_intersections`' floating test reports
-  false crossings on slivers): curved bodies, the dense degenerate sweep
+  deviation, membership, validity; self-intersections by the exact
+  `find_self_intersections` since issue #69): curved bodies, the dense degenerate sweep
   (`fossil_val_boolean_sweep`, 360 cases, 1e-4..1e-14), CSG chains.
-- **`find_self_intersections`**: pairs sharing one vertex are classified exactly (issue #46); pairs sharing an edge
-  are skipped, so two sheets crossing along a shared non-manifold edge are not detected, nor coplanar overlaps around
-  a shared vertex (unit normals parallel to 1e-12 rad count as coplanar).
+- **`find_self_intersections`**: every decision exact since issue #69 (`pair_cut` narrow phase, coplanar overlaps
+  in the projection, exact coplanar pairs at a shared vertex, folds over a shared edge, sheets crossing along a
+  non-manifold edge by the exact fan order); duplicate facets (three shared vertices) are left to
+  `remove_duplicate_facets`.
 
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands

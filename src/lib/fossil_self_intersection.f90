@@ -65,6 +65,9 @@ integer(I4P), parameter :: MAX_CHILDREN = 8_I4P  !< Buffer size for `enumerate_c
 integer(I4P), parameter, public :: SELFINT_CROSSING = 1_I4P !< The facets share a segment of positive length.
 integer(I4P), parameter, public :: SELFINT_TOUCHING = 2_I4P !< They meet at one point, or along a coplanar boundary.
 integer(I4P), parameter, public :: SELFINT_COPLANAR = 3_I4P !< Coplanar, interiors overlapping (positive area).
+integer(I4P), parameter, public :: SELFINT_EDGE_FOLD = 4_I4P !< Sharing an edge, coplanar, folded over it.
+integer(I4P), parameter, public :: SELFINT_SHEETS = 5_I4P    !< Adjacent around a non-manifold edge with the same direction:
+                                                             !< the sheets through the edge cross there.
 integer(I4P), parameter :: COPLANAR_APART = 0_I4P, COPLANAR_TOUCH = 1_I4P, COPLANAR_OVERLAP = 2_I4P
 
 type :: intersection_pair_t
@@ -72,7 +75,8 @@ type :: intersection_pair_t
    !< plus the intersection segment endpoints in world coordinates.
    integer(I4P)     :: a = 0_I4P  !< First facet id (always the smaller of the two).
    integer(I4P)     :: b = 0_I4P  !< Second facet id.
-   integer(I4P)     :: kind = 1_I4P !< SELFINT_CROSSING, SELFINT_TOUCHING (include_touching), SELFINT_COPLANAR.
+   integer(I4P)     :: kind = 1_I4P !< SELFINT_CROSSING, SELFINT_TOUCHING (include_touching), SELFINT_COPLANAR,
+                                    !< SELFINT_EDGE_FOLD, SELFINT_SHEETS.
    type(vector_R8P) :: p          !< Segment start.
    type(vector_R8P) :: q          !< Segment end.
 endtype intersection_pair_t
@@ -114,6 +118,9 @@ contains
       call traverse_node_pair(facet=facet, tree=tree, na=0_I4P, nb=0_I4P, touching=touching, &
                               buf=buf, nfound=nfound)
    endif
+
+   ! Sheets crossing along non-manifold edges: a pass over the edge fans (issue #69).
+   call edge_fans(facet=facet, buf=buf, nfound=nfound)
 
    ! Trim the accumulator down to the exact size.
    allocate(pairs(nfound))
@@ -292,15 +299,20 @@ contains
    case (1_I4P)
       ! the shared vertex lies on both planes: if the other two vertices of either facet are strictly on one side
       ! of the other's plane, the facets meet at that vertex alone. This exact filter skips orient3d on the shared
-      ! vertex (always zero, the slow exact path), which every pair of a fan around a vertex would take.
-      if (off_plane_one_side(t=fa%vertex, s=fb%vertex)) return
-      if (off_plane_one_side(t=fb%vertex, s=fa%vertex)) return
-      call shared_vertex_crossing(ta=fa%vertex, tb=fb%vertex, hit=hit, p=p, q=q, coplanar=coplanar)
+      ! vertex (always zero, the slow exact path), which every pair of a fan around a vertex would take. A pair on
+      ! one axis-aligned plane is coplanar without orient3d (flat fans: orient3d's zeros take its slow exact path).
+      coplanar = axis_coplanar(fa%vertex, fb%vertex)
+      if (.not. coplanar) then
+         if (off_plane_one_side(t=fa%vertex, s=fb%vertex)) return
+         if (off_plane_one_side(t=fb%vertex, s=fa%vertex)) return
+         call shared_vertex_crossing(ta=fa%vertex, tb=fb%vertex, hit=hit, p=p, q=q, coplanar=coplanar)
+      endif
       if (coplanar) then
          ! exactly coplanar (issue #69; skipped to 1e-12 rad before): a defect iff the interiors overlap, a touch if
          ! they meet beyond the shared vertex along a common edge segment (with include_touching)
          p = (fa%vertex(1) + fa%vertex(2) + fa%vertex(3)) / 3._R8P
          q = (fb%vertex(1) + fb%vertex(2) + fb%vertex(3)) / 3._R8P
+         if (.not. touching .and. .not. boxes_interiors_meet(fa%vertex, fb%vertex)) return
          select case (coplanar_relation(fa%vertex, fb%vertex))
          case (COPLANAR_OVERLAP)
             hit = .true. ; kind = SELFINT_COPLANAR
@@ -310,10 +322,327 @@ contains
             endif
          endselect
       endif
+   case (2_I4P)
+      ! sharing an edge: they meet along it, a defect only if coplanar and folded over it (issue #69); sheets crossing
+      ! at a non-manifold edge are found by `edge_fans`
+      call edge_fold(ta=fa%vertex, tb=fb%vertex, hit=hit, p=p, q=q)
+      if (hit) kind = SELFINT_EDGE_FOLD
    case default
-      p = fa%vertex(1) ; q = p ! sharing an edge (or a duplicate): they meet along it
+      p = fa%vertex(1) ; q = p ! a duplicate facet (three shared vertices): left to remove_duplicate_facets
    endselect
    endsubroutine test_pair
+
+   subroutine edge_fold(ta, tb, hit, p, q)
+   !< Two triangles sharing an edge (e0, e1) are folded over it when they are exactly coplanar (orient3d of the free
+   !< vertex of tb on the plane of ta is zero) and their free vertices lie on the same side of the edge line in that
+   !< plane (exact orient2d in the projection that keeps ta non-degenerate): their interiors overlap.
+   type(vector_R8P), intent(in)  :: ta(3), tb(3) !< The triangles.
+   logical,          intent(out) :: hit          !< Folded.
+   type(vector_R8P), intent(out) :: p, q         !< The shared edge, if folded.
+   integer(I4P)                  :: fa, fb, i, j, drop, u, v, n
+   logical                       :: sa(3), sb(3)
+   real(R8P)                     :: e0(3), e1(3), wa(3), wb(3)
+
+   hit = .false. ; p = ta(1) ; q = p
+   sa = .false. ; sb = .false. ; n = 0_I4P
+   do i = 1, 3
+      do j = 1, 3
+         if (vertex_coincident(ta(i), tb(j))) then
+            sa(i) = .true. ; sb(j) = .true. ; n = n + 1_I4P
+         endif
+      enddo
+   enddo
+   if (n /= 2_I4P) return
+   fa = findloc(sa, .false., dim=1) ; fb = findloc(sb, .false., dim=1)
+   if (.not. axis_coplanar(ta, tb)) then
+      if (orient3d(ta(1), ta(2), ta(3), tb(fb)) /= 0._R8P) return
+   endif
+   drop = facet_drop(ta)
+   if (drop == 0_I4P) return
+   u = mod(drop, 3_I4P) + 1_I4P ; v = mod(drop + 1_I4P, 3_I4P) + 1_I4P
+   i = mod(fa, 3_I4P) + 1_I4P ; j = mod(fa + 1_I4P, 3_I4P) + 1_I4P
+   e0 = [ta(i)%x, ta(i)%y, ta(i)%z] ; e1 = [ta(j)%x, ta(j)%y, ta(j)%z]
+   wa = [ta(fa)%x, ta(fa)%y, ta(fa)%z] ; wb = [tb(fb)%x, tb(fb)%y, tb(fb)%z]
+   i = o2([e0(u), e0(v)], [e1(u), e1(v)], [wa(u), wa(v)])
+   j = o2([e0(u), e0(v)], [e1(u), e1(v)], [wb(u), wb(v)])
+   hit = i /= 0_I4P .and. i == j
+   if (hit) then
+      p%x = e0(1) ; p%y = e0(2) ; p%z = e0(3) ; q%x = e1(1) ; q%y = e1(2) ; q%z = e1(3)
+   endif
+   endsubroutine edge_fold
+
+   subroutine edge_fans(facet, buf, nfound)
+   !< Sheets crossing along a non-manifold edge (issue #69). Around an edge (p0, p1) the incident facets are ordered by
+   !< the angle of their half-planes, exactly (orient3d on input vertices), and each traverses the edge p0 -> p1
+   !< (+1) or p1 -> p0 (-1). Embedded oriented sheets through the edge alternate around it (the winding number of
+   !< the wedges stays in {w, w + 1}); two cyclically adjacent facets with the same direction bound a wedge wound
+   !< twice: the sheets cross there, and the pair is reported (SELFINT_SHEETS, p-q the edge). Only fans of 4 or more
+   !< facets with as many +1 as -1 are examined (an unbalanced fan is an orientation or boundary defect, not a
+   !< crossing), and a fan with two facets in the same half-plane is skipped (coplanar folds, reported pairwise).
+   !< Vertex identity: exact coordinates.
+   type(facet_object),                     intent(in)    :: facet(:) !< Facets.
+   type(intersection_pair_t), allocatable, intent(inout) :: buf(:)   !< Accumulator.
+   integer(I4P),                           intent(inout) :: nfound   !< Records in buf.
+   real(R8P),    allocatable                             :: xyz(:,:)
+   integer(I4P), allocatable                             :: vid(:), ord(:), ekey(:,:), eord(:)
+   integer(I4P)                                          :: n, i, k, a, b, first, last
+
+   n = size(facet, dim=1)
+   if (n < 4_I4P) return
+   allocate(xyz(3, 3 * n), vid(3 * n))
+   do i = 1, n
+      do k = 1, 3
+         xyz(:, 3 * (i - 1) + k) = [facet(i)%vertex(k)%x, facet(i)%vertex(k)%y, facet(i)%vertex(k)%z]
+      enddo
+   enddo
+   ! vertex ids: equal coordinates, equal id
+   call sort_columns_real(xyz, ord)
+   k = 0_I4P
+   do i = 1, 3 * n
+      if (i == 1) then
+         k = 1_I4P
+      elseif (any(xyz(:, ord(i)) /= xyz(:, ord(i - 1)))) then
+         k = k + 1_I4P
+      endif
+      vid(ord(i)) = k
+   enddo
+   ! edges (min id, max id, facet, direction +1 if the facet goes min -> max)
+   allocate(ekey(4, 3 * n))
+   do i = 1, n
+      do k = 1, 3
+         a = vid(3 * (i - 1) + k) ; b = vid(3 * (i - 1) + mod(k, 3_I4P) + 1_I4P)
+         ekey(:, 3 * (i - 1) + k) = [min(a, b), max(a, b), i, merge(1_I4P, -1_I4P, a < b)]
+      enddo
+   enddo
+   call sort_columns_int(ekey(1:3, :), eord)
+   first = 1_I4P
+   do while (first <= 3 * n)
+      last = first
+      do while (last < 3 * n)
+         if (any(ekey(1:2, eord(last + 1)) /= ekey(1:2, eord(first)))) exit
+         last = last + 1_I4P
+      enddo
+      if (last - first + 1 >= 4_I4P .and. ekey(1, eord(first)) /= ekey(2, eord(first))) &
+         call one_fan(xyz, vid, ekey, eord(first:last), buf, nfound)
+      first = last + 1_I4P
+   enddo
+   endsubroutine edge_fans
+
+   subroutine one_fan(xyz, vid, ekey, slots, buf, nfound)
+   !< Order the facets of one edge fan around the edge and report adjacent pairs with the same direction (edge_fans).
+   real(R8P),                              intent(in)    :: xyz(:,:)  !< Vertex coordinates, 3 slots per facet.
+   integer(I4P),                           intent(in)    :: vid(:)    !< Vertex ids of the slots.
+   integer(I4P),                           intent(in)    :: ekey(:,:) !< Edge records (min id, max id, facet, dir).
+   integer(I4P),                           intent(in)    :: slots(:)  !< The edge records of this fan.
+   type(intersection_pair_t), allocatable, intent(inout) :: buf(:)    !< Accumulator.
+   integer(I4P),                           intent(inout) :: nfound    !< Records in buf.
+   integer(I4P)                                          :: m, r, t, u, c, tmp
+   integer(I4P)                                          :: half(size(slots)), fan(size(slots)), dirs(size(slots))
+   real(R8P)                                             :: p0(3), p1(3), w(3, size(slots)), aux(3), wt(3)
+   type(vector_R8P)                                      :: vp, vq
+   logical                                               :: tie
+   real(R8P)                                             :: sg
+
+   m = size(slots)
+   if (sum(ekey(4, slots)) /= 0_I4P) return
+   do t = 1, m
+      fan(t) = ekey(3, slots(t)) ; dirs(t) = ekey(4, slots(t))
+      do u = 1, 3
+         c = 3 * (fan(t) - 1) + u
+         if (vid(c) == ekey(1, slots(t))) then
+            p0 = xyz(:, c)
+         elseif (vid(c) == ekey(2, slots(t))) then
+            p1 = xyz(:, c)
+         else
+            w(:, t) = xyz(:, c)
+         endif
+      enddo
+   enddo
+   ! halves about the reference half-plane (facet 1): 1 (0, pi), 2 (pi, 2 pi), 0 on it, 3 opposite (pi)
+   aux = p0 + cross3(p1 - p0, w(:, 1) - p0)
+   if (o3(p0, p1, w(:, 1), aux) == 0._R8P) return
+   if (o3(p0, p1, aux, w(:, 1)) == 0._R8P) return
+   half(1) = 0_I4P
+   do t = 2, m
+      sg = o3(p0, p1, w(:, 1), w(:, t))
+      if (sg > 0._R8P) then
+         half(t) = 1_I4P
+      elseif (sg < 0._R8P) then
+         half(t) = 2_I4P
+      elseif (o3(p0, p1, aux, w(:, t)) == o3(p0, p1, aux, w(:, 1))) then
+         return ! the same half-plane as facet 1: a tie
+      else
+         half(t) = 3_I4P
+      endif
+   enddo
+   ! insertion sort around the edge; any tie (two facets in one half-plane) skips the fan
+   do t = 2, m
+      u = t
+      do while (u > 1)
+         if (.not. fan_before(half(u), half(u - 1), p0, p1, w(:, u), w(:, u - 1), tie)) then
+            if (tie) return
+            exit
+         endif
+         tmp = fan(u) ; fan(u) = fan(u - 1) ; fan(u - 1) = tmp
+         tmp = dirs(u) ; dirs(u) = dirs(u - 1) ; dirs(u - 1) = tmp
+         tmp = half(u) ; half(u) = half(u - 1) ; half(u - 1) = tmp
+         wt = w(:, u) ; w(:, u) = w(:, u - 1) ; w(:, u - 1) = wt
+         u = u - 1
+      enddo
+   enddo
+   do t = 2, m
+      if (.not. fan_before(half(t - 1), half(t), p0, p1, w(:, t - 1), w(:, t), tie)) return
+   enddo
+   vp%x = p0(1) ; vp%y = p0(2) ; vp%z = p0(3) ; vq%x = p1(1) ; vq%y = p1(2) ; vq%z = p1(3)
+   do t = 1, m
+      r = mod(t, m) + 1_I4P
+      if (dirs(t) == dirs(r)) call push_pair(buf=buf, nfound=nfound, a=min(fan(t), fan(r)), b=max(fan(t), fan(r)), &
+                                             kind=SELFINT_SHEETS, p=vp, q=vq)
+   enddo
+   endsubroutine one_fan
+
+   function fan_before(h1, h2, p0, p1, w1, w2, tie) result(yes)
+   !< Free vertex w1 (half h1) strictly before w2 (half h2) around the edge p0-p1; tie: the same half-plane.
+   integer(I4P), intent(in)  :: h1, h2           !< Halves (0 reference, 1 (0, pi), 3 pi, 2 (pi, 2 pi)).
+   real(R8P),    intent(in)  :: p0(3), p1(3)     !< Edge.
+   real(R8P),    intent(in)  :: w1(3), w2(3)     !< Free vertices.
+   logical,      intent(out) :: tie              !< Same half-plane.
+   logical                   :: yes
+   integer(I4P), parameter   :: RANKS(0:3) = [0_I4P, 1_I4P, 3_I4P, 2_I4P]
+   real(R8P)                 :: o
+
+   tie = .false.
+   if (RANKS(h1) /= RANKS(h2)) then
+      yes = RANKS(h1) < RANKS(h2) ; return
+   endif
+   if (h1 == 0_I4P .or. h1 == 3_I4P) then
+      tie = .true. ; yes = .false. ; return
+   endif
+   o = o3(p0, p1, w1, w2)
+   tie = o == 0._R8P
+   yes = o > 0._R8P
+   endfunction fan_before
+
+   function o3(a1, a2, a3, a4) result(sg)
+   !< Exact sign of orient3d as -1, 0, 1 (real), on plain coordinates.
+   real(R8P), intent(in) :: a1(3), a2(3), a3(3), a4(3)
+   real(R8P)             :: sg
+   type(vector_R8P)      :: v1, v2, v3, v4
+   real(R8P)             :: d
+
+   v1%x = a1(1) ; v1%y = a1(2) ; v1%z = a1(3) ; v2%x = a2(1) ; v2%y = a2(2) ; v2%z = a2(3)
+   v3%x = a3(1) ; v3%y = a3(2) ; v3%z = a3(3) ; v4%x = a4(1) ; v4%y = a4(2) ; v4%z = a4(3)
+   d = orient3d(v1, v2, v3, v4)
+   sg = 0._R8P
+   if (d > 0._R8P) sg = 1._R8P
+   if (d < 0._R8P) sg = -1._R8P
+   endfunction o3
+
+   pure function cross3(x, y) result(z)
+   !< Cross product.
+   real(R8P), intent(in) :: x(3), y(3)
+   real(R8P)             :: z(3)
+
+   z = [x(2) * y(3) - x(3) * y(2), x(3) * y(1) - x(1) * y(3), x(1) * y(2) - x(2) * y(1)]
+   endfunction cross3
+
+   subroutine sort_columns_real(a, ord)
+   !< Stable merge sort of the columns of a, lexicographic: ord(1) is the smallest column.
+   real(R8P),                 intent(in)  :: a(:,:) !< Columns to sort.
+   integer(I4P), allocatable, intent(out) :: ord(:) !< Permutation.
+   integer(I4P), allocatable              :: tmp(:)
+   integer(I4P)                           :: n, width, lo, mid, hi, i, j, k
+
+   n = size(a, dim=2)
+   allocate(ord(n), tmp(n))
+   ord = [(i, i = 1, n)]
+   width = 1_I4P
+   do while (width < n)
+      lo = 1_I4P
+      do while (lo <= n)
+         mid = min(lo + width - 1_I4P, n) ; hi = min(lo + 2_I4P * width - 1_I4P, n)
+         i = lo ; j = mid + 1_I4P ; k = lo
+         do while (i <= mid .and. j <= hi)
+            if (col_less_real(a(:, ord(j)), a(:, ord(i)))) then
+               tmp(k) = ord(j) ; j = j + 1_I4P
+            else
+               tmp(k) = ord(i) ; i = i + 1_I4P
+            endif
+            k = k + 1_I4P
+         enddo
+         if (i <= mid) tmp(k:hi) = ord(i:mid)
+         if (j <= hi) tmp(k:hi) = ord(j:hi)
+         ord(lo:hi) = tmp(lo:hi)
+         lo = lo + 2_I4P * width
+      enddo
+      width = 2_I4P * width
+   enddo
+   endsubroutine sort_columns_real
+
+   subroutine sort_columns_int(a, ord)
+   !< Stable merge sort of the columns of a, lexicographic: ord(1) is the smallest column.
+   integer(I4P),              intent(in)  :: a(:,:) !< Columns to sort.
+   integer(I4P), allocatable, intent(out) :: ord(:) !< Permutation.
+   integer(I4P), allocatable              :: tmp(:)
+   integer(I4P)                           :: n, width, lo, mid, hi, i, j, k
+
+   n = size(a, dim=2)
+   allocate(ord(n), tmp(n))
+   ord = [(i, i = 1, n)]
+   width = 1_I4P
+   do while (width < n)
+      lo = 1_I4P
+      do while (lo <= n)
+         mid = min(lo + width - 1_I4P, n) ; hi = min(lo + 2_I4P * width - 1_I4P, n)
+         i = lo ; j = mid + 1_I4P ; k = lo
+         do while (i <= mid .and. j <= hi)
+            if (col_less_int(a(:, ord(j)), a(:, ord(i)))) then
+               tmp(k) = ord(j) ; j = j + 1_I4P
+            else
+               tmp(k) = ord(i) ; i = i + 1_I4P
+            endif
+            k = k + 1_I4P
+         enddo
+         if (i <= mid) tmp(k:hi) = ord(i:mid)
+         if (j <= hi) tmp(k:hi) = ord(j:hi)
+         ord(lo:hi) = tmp(lo:hi)
+         lo = lo + 2_I4P * width
+      enddo
+      width = 2_I4P * width
+   enddo
+   endsubroutine sort_columns_int
+
+   pure function col_less_real(x, y) result(less)
+   !< x < y lexicographically.
+   real(R8P), intent(in) :: x(:), y(:)
+   logical               :: less
+   integer(I4P)          :: c
+
+   less = .false.
+   do c = 1, size(x)
+      if (x(c) < y(c)) then
+         less = .true. ; return
+      elseif (x(c) > y(c)) then
+         return
+      endif
+   enddo
+   endfunction col_less_real
+
+   pure function col_less_int(x, y) result(less)
+   !< x < y lexicographically.
+   integer(I4P), intent(in) :: x(:), y(:)
+   logical                  :: less
+   integer(I4P)             :: c
+
+   less = .false.
+   do c = 1, size(x)
+      if (x(c) < y(c)) then
+         less = .true. ; return
+      elseif (x(c) > y(c)) then
+         return
+      endif
+   enddo
+   endfunction col_less_int
 
    subroutine disjoint_pair(ta, tb, touching, hit, kind, p, q)
    !< Exact narrow phase of two triangles with no vertex in common (issue #69): `pair_cut` (exact orient3d signs,
@@ -331,7 +660,11 @@ contains
 
    hit = .false. ; kind = SELFINT_CROSSING
    p = ta(1) ; q = p
-   call pair_cut(ta, tb, pk, ip, iq)
+   if (axis_coplanar(ta, tb)) then
+      pk = PAIR_COPLANAR ! on one axis-aligned plane: exact, without pair_cut's orient3d zeros
+   else
+      call pair_cut(ta, tb, pk, ip, iq)
+   endif
    select case (pk)
    case (PAIR_CROSSING)
       hit = .true.
@@ -341,6 +674,7 @@ contains
       hit = .true. ; kind = SELFINT_TOUCHING
       p = to_vector(ip_approx(ip)) ; q = p
    case (PAIR_COPLANAR)
+      if (.not. touching .and. .not. boxes_interiors_meet(ta, tb)) return ! cannot overlap with positive area
       rel = coplanar_relation(ta, tb)
       if (rel == COPLANAR_OVERLAP) then
          hit = .true. ; kind = SELFINT_COPLANAR
@@ -409,12 +743,51 @@ contains
       endsubroutine separate
    endfunction coplanar_relation
 
+   pure function boxes_interiors_meet(ta, tb) result(yes)
+   !< The interiors of the bounding boxes of two coplanar triangles meet in their plane (exact comparisons). Coplanar
+   !< triangles overlap with positive area only if they do. An axis separates when the closed intervals of the two
+   !< triangles at most touch; an axis on which both intervals are a single point (the plane normal to it) does not.
+   type(vector_R8P), intent(in) :: ta(3), tb(3) !< The triangles.
+   logical                      :: yes
+
+   yes = .not. (apart(min(ta(1)%x, ta(2)%x, ta(3)%x), max(ta(1)%x, ta(2)%x, ta(3)%x),   &
+                      min(tb(1)%x, tb(2)%x, tb(3)%x), max(tb(1)%x, tb(2)%x, tb(3)%x)) .or. &
+                apart(min(ta(1)%y, ta(2)%y, ta(3)%y), max(ta(1)%y, ta(2)%y, ta(3)%y),   &
+                      min(tb(1)%y, tb(2)%y, tb(3)%y), max(tb(1)%y, tb(2)%y, tb(3)%y)) .or. &
+                apart(min(ta(1)%z, ta(2)%z, ta(3)%z), max(ta(1)%z, ta(2)%z, ta(3)%z),   &
+                      min(tb(1)%z, tb(2)%z, tb(3)%z), max(tb(1)%z, tb(2)%z, tb(3)%z)))
+   contains
+      pure logical function apart(alo, ahi, blo, bhi)
+      !< Intervals [alo, ahi], [blo, bhi] at most touching, unless both are one point.
+      real(R8P), intent(in) :: alo, ahi, blo, bhi
+
+      apart = .false.
+      if (alo == ahi .and. blo == bhi) return
+      apart = ahi <= blo .or. bhi <= alo
+      endfunction apart
+   endfunction boxes_interiors_meet
+
+   pure function axis_coplanar(ta, tb) result(yes)
+   !< The six vertices share one coordinate: both triangles lie on one axis-aligned plane (exact).
+   type(vector_R8P), intent(in) :: ta(3), tb(3) !< The triangles.
+   logical                      :: yes
+
+   yes = (ta(2)%x == ta(1)%x .and. ta(3)%x == ta(1)%x .and. tb(1)%x == ta(1)%x .and. tb(2)%x == ta(1)%x .and. &
+          tb(3)%x == ta(1)%x) .or. &
+         (ta(2)%y == ta(1)%y .and. ta(3)%y == ta(1)%y .and. tb(1)%y == ta(1)%y .and. tb(2)%y == ta(1)%y .and. &
+          tb(3)%y == ta(1)%y) .or. &
+         (ta(2)%z == ta(1)%z .and. ta(3)%z == ta(1)%z .and. tb(1)%z == ta(1)%z .and. tb(2)%z == ta(1)%z .and. &
+          tb(3)%z == ta(1)%z)
+   endfunction axis_coplanar
+
    function o2(a, b, c) result(sg)
-   !< Exact sign (-1, 0, 1) of the 2-D orientation of a, b, c.
+   !< Exact sign (-1, 0, 1) of the 2-D orientation of a, b, c (0 at once if two of them coincide).
    real(R8P), intent(in) :: a(2), b(2), c(2)
    integer(I4P)          :: sg
    real(R8P)             :: d
 
+   sg = 0_I4P
+   if (all(c == a) .or. all(c == b) .or. all(a == b)) return
    d = orient2d_xy(a(1), a(2), b(1), b(2), c(1), c(2))
    sg = 0_I4P
    if (d > 0._R8P) sg = 1_I4P

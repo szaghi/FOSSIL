@@ -1877,7 +1877,7 @@ overview on the [§1.2 feature page](/guide/advanced/self-intersection).
 
 Each `pairs(i)` record has fields `%a` and `%b` (facet IDs with
 `a < b`), `%kind` (`SELFINT_CROSSING`, `SELFINT_COPLANAR`,
-`SELFINT_TOUCHING`) and `%p` and `%q` (segment endpoints in world
+`SELFINT_EDGE_FOLD`, `SELFINT_SHEETS`, `SELFINT_TOUCHING`) and `%p` and `%q` (segment endpoints in world
 coordinates).
 
 **Example.**
