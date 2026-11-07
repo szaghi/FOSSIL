@@ -468,7 +468,7 @@ contains
    real(R8P),    allocatable   :: vol(:)              !< Solid volume of closed wall sets.
    integer(I4P)                :: cstate(8)           !< Corner states: -1 unknown, 0 solid, 1 fluid.
    integer(I4P)                :: nt, np, q, v, w, e, a, natom, niv, npc, nc, kk !< Work.
-   logical                     :: ok, changed         !< Consistency, propagation.
+   logical                     :: ok                  !< Consistency.
    real(R8P)                   :: tt, la, lb, tc      !< Crossing position, edge line, kernel parameter.
    logical                     :: hit, en             !< Crossing, entering.
 
@@ -590,18 +590,6 @@ contains
       if (ri /= rj) parent(max(ri, rj)) = min(ri, rj)
       endsubroutine unite
 
-      subroutine propagate(ca, cb)
-      !< Equal states at the two corners of an edge without piercings.
-      integer(I4P), intent(in) :: ca, cb !< Corners.
-
-      if (cstate(ca) == -1_I4P .and. cstate(cb) /= -1_I4P) then
-         cstate(ca) = cstate(cb) ; changed = .true.
-      elseif (cstate(cb) == -1_I4P .and. cstate(ca) /= -1_I4P) then
-         cstate(cb) = cstate(ca) ; changed = .true.
-      elseif (cstate(ca) /= cstate(cb)) then
-         ok = .false.
-      endif
-      endsubroutine propagate
 
       subroutine set_corner(cc, st)
       !< Set (or check) a corner state.

@@ -129,10 +129,40 @@ open; FOSSIL's is:
   factors of [Giuliani et al. 2022](https://doi.org/10.1016/j.jcp.2022.111305)
   (§3.1): η^nb_p = (τ hᵈ − |I_p|) / Σ_{j∈N_p∖p} |I_j| for small p, else 0, and
   η^self_p = 1 − (1/N^ov_p) Σ_{k≠p, p∈N_k} η^nb_k.
-- **Gate:** unit column sums of the redistribution matrix (the conservation
-  criterion of Giuliani et al.: Σ_{p ∋ j} 1/N^ov_j = 1 for every j), the
-  threshold reached by every complete neighbourhood, x̂ the weighted centroid
-  of its members, and the same result with the cells traversed in reverse.
+- Each neighbourhood depends on its own piece only, so the result does not
+  depend on the order in which pieces are visited.
+
+```fortran
+program srd_example
+use fossil, only : curve_object, cut_cells_2d_t, cut_links_t, cut_links_2d, srd_t, srd_neighbourhoods, SRD_COMPLETE
+use penf,   only : I4P, R8P
+implicit none
+type(curve_object)   :: curve
+type(cut_cells_2d_t) :: cut
+type(cut_links_t)    :: links
+type(srd_t)          :: srd
+real(R8P)            :: x(11)
+integer(I4P)         :: i, p
+
+x = [(0.1_R8P * i, i = 0, 10)]
+call curve%adopt_loops(u=[-1._R8P, 0.58_R8P, 0.58_R8P, -1._R8P], v=[-1._R8P, -1._R8P, 2._R8P, 2._R8P], loop_sizes=[4_I4P])
+call curve%cut_cells(x=x, y=x, cut=cut)
+call cut_links_2d(cut, links)
+call srd_neighbourhoods(links, cut%piece_cell, cut%piece_area, cut%piece_centroid, cut%piece_wet_normal, x, x, srd)
+do p = 1, srd%np ! 3-D: the same call with cut3%piece_volume, ..., z=z
+   if (srd%status(p) == SRD_COMPLETE) print '(I4,A,10I4)', p, ' merges with', srd%member(srd%start(p) + 1:srd%start(p + 1) - 1)
+enddo
+endprogram srd_example
+```
+
+Measured (`fossil_test_cut_srd`; 2-D circle, thin plate and half-plane, 3-D tilted
+wedge, cone and thin plate, τ = ½, 327 small pieces): every piece with volume is
+in exactly N^ov_j neighbourhoods and the column sums are 1 exactly; Σ V̂ is the
+total fluid volume to 10⁻¹⁴; x̂ is the weighted centroid of the members to
+round-off; no neighbourhood is incomplete; 0 ≤ η^nb ≤ 1 and 0 < η^self ≤ 1;
+on the half-plane x < 0.58 (cells of 0.1, fraction 0.2) every small cell merges
+with the cell across its +x face only, the wall normal; no neighbourhood crosses
+a plate.
 
 ## Neighbourhoods for flux redistribution
 
@@ -145,9 +175,16 @@ by Barrio Sanchez et al. as a monotone index path through valid cells.
   step towards the target cell's offset, never away, through pieces that are
   trusted and have volume.
 - **Weights:** κ_j / Σ κ over the reached set, p included (κ = |I| / hᵈ).
-- **Gate:** equality with brute-force enumeration of the monotone paths,
-  weights summing to 1, and a wall between two cells of the block cutting the
-  path.
+- A piece filling its cell has itself only, weight 1; a zero-volume piece has
+  no set.
+- `frd_neighbourhoods(links, piece_cell, piece_volume, x, y, frd, z=)` gives
+  `frd_t` (`start`, `member` with the piece first, `weight`).
+- **Measured** (`fossil_test_cut_frd`; 2-D circle and thin plate, 3-D tilted
+  wedge and thin plate, 654 cut pieces): every set equals a brute-force
+  fixpoint that pulls pieces in from the cell grid (a formulation independent
+  of the library's breadth-first search); the weights sum to 1 to 8.9·10⁻¹⁶;
+  no set crosses a plate where the block lies within the plate (near its ends
+  a monotone path goes around).
 
 ## Merge targets
 
@@ -169,8 +206,26 @@ Two families, both reported per piece:
   factor to the solver.
 - **Fresh and dead pieces** of a moving body come from `swept_cells_2d/3d`
   (`cleared`, `covered`): the caller passes the pieces to serve as a mask and
-  the cells that may not serve as targets (covered at the end of the step for a
-  dead piece), and the same rules apply on the cut cells at the right pose.
+  the pieces that may not serve as targets (for a dead piece, the pieces of the
+  covered cells), and the same rules apply on the cut cells at the right pose.
+- A piece is **suitable** as a target if it has volume, is not small and is
+  not excluded. An unsuitable single target (a small one, or a dying neighbour
+  of a dying piece) starts a chain followed to the first suitable piece
+  (`final_target`, status `MERGE_CHAIN`); a chain that loops or ends is
+  reported (`MERGE_CYCLE`), a piece with no linked piece with volume too
+  (`MERGE_ALONE`).
+- `merge_targets(links, piece_cell, piece_volume, wet_normal, x, y, mt, z=, tau=, mask=, exclude=)`
+  gives `merge_t` (`status`, `target`, `final_target`, `mix_start`,
+  `mix_piece`, `mix_weight`).
+- **Measured** (`fossil_test_cut_merge`; 2-D half-plane, circle and a
+  translating circle, 3-D tilted wedge, 250 served pieces): on the
+  half-plane x < 0.58 every small cell targets the cell across its +x face,
+  also as its only normal-directed target, weight 1; every target is linked
+  and suitable or ends a chain at a suitable piece; normal-directed targets lie
+  at the offsets with o_a ∈ {0, sign n_a}, at most 2ᵈ − 1, in distinct cells,
+  weights summing to 1 to 2.2·10⁻¹⁶; the 15 fresh pieces of the moving circle
+  (at the end pose) and its 18 dead ones (at the start pose, the covered cells
+  excluded) all get targets, no cycle and no lone piece.
 
 ## Moments and quadrature
 
