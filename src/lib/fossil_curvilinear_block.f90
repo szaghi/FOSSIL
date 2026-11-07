@@ -72,6 +72,8 @@ type :: curvilinear_block_t
    integer(I4P),        allocatable :: cell_status(:)         !< Cell validity, linear cell index (build_search).
    real(R8P)                        :: orient = 1._R8P        !< Handedness (build_search).
    type(cell_bvh_t)                 :: search                 !< Cell-box hierarchy (build_search).
+   logical                          :: on_device = .false.    !< Arrays mapped by enter_device.
+   real(R8P),           allocatable :: flat_x(:), flat_y(:), flat_z(:) !< Flat vertex copies (device).
    contains
       procedure, pass(self) :: initialize => initialize_3d    !< Set the vertices.
       procedure, pass(self) :: destroy => destroy_3d          !< Reset.
@@ -84,6 +86,8 @@ type :: curvilinear_block_t
       procedure, pass(self) :: build_search => build_search_3d !< Validity, orientation and the cell-box hierarchy.
       procedure, pass(self) :: locate_many => locate_many_3d  !< Robust location of points.
       procedure, pass(self) :: locate_many_device => locate_many_device_3d !< Robust location on the device.
+      procedure, pass(self) :: enter_device => enter_device_3d !< Map the search arrays to the device once.
+      procedure, pass(self) :: exit_device => exit_device_3d  !< Release them.
       procedure, pass(self) :: stencils => stencils_3d        !< Lagrange interpolation stencils.
       procedure, pass(self) :: quality => quality_3d          !< Cell quality metrics.
 endtype curvilinear_block_t
@@ -99,6 +103,8 @@ type :: curvilinear_block_2d_t
    integer(I4P),        allocatable :: cell_status(:)         !< Cell validity, linear cell index (build_search).
    real(R8P)                        :: orient = 1._R8P        !< Handedness (build_search).
    type(cell_bvh_t)                 :: search                 !< Cell-box hierarchy (build_search).
+   logical                          :: on_device = .false.    !< Arrays mapped by enter_device.
+   real(R8P),           allocatable :: flat_u(:), flat_v(:)   !< Flat vertex copies (device).
    contains
       procedure, pass(self) :: initialize => initialize_2d    !< Set the vertices.
       procedure, pass(self) :: destroy => destroy_2d          !< Reset.
@@ -111,6 +117,8 @@ type :: curvilinear_block_2d_t
       procedure, pass(self) :: build_search => build_search_2d !< Validity, orientation and the cell-box hierarchy.
       procedure, pass(self) :: locate_many => locate_many_2d  !< Robust location of points.
       procedure, pass(self) :: locate_many_device => locate_many_device_2d !< Robust location on the device.
+      procedure, pass(self) :: enter_device => enter_device_2d !< Map the search arrays to the device once.
+      procedure, pass(self) :: exit_device => exit_device_2d  !< Release them.
       procedure, pass(self) :: stencils => stencils_2d        !< Lagrange interpolation stencils.
       procedure, pass(self) :: quality => quality_2d          !< Cell quality metrics.
 endtype curvilinear_block_2d_t
@@ -604,35 +612,89 @@ contains
    if (present(fallbacks)) fallbacks = nf
    endsubroutine locate_many_2d
 
-   subroutine locate_many_device_3d(self, px, py, pz, cell, xi, status)
-   !< The robust location on the device (OpenACC; serial without it), bit-identical to `locate_many`: the block's
-   !< arrays are copied to plain local arrays and entered for the call (issue #20 rules: no derived-type members in the
-   !< compute region).
-   class(curvilinear_block_t), intent(in)  :: self          !< Block.
-   real(R8P),                  intent(in)  :: px(:), py(:), pz(:) !< Points.
-   integer(I4P), allocatable,  intent(out) :: cell(:,:)     !< Cells [3, n].
-   real(R8P),    allocatable,  intent(out) :: xi(:,:)       !< Local coordinates [3, n].
-   integer(I4P), allocatable,  intent(out) :: status(:)     !< LOC_* [n].
-   real(R8P),    allocatable               :: vx(:), vy(:), vz(:), nlo(:,:), nhi(:,:), clo(:,:), chi(:,:), xs(:,:) !< Copies.
-   real(R8P),    allocatable               :: qx(:), qy(:), qz(:) !< Points.
-   integer(I4P), allocatable               :: cst(:), lft(:), rgt(:), fst(:), lst(:), ord(:), lin(:), sts(:) !< Copies.
-   integer(I4P)                            :: n, m, ni, nj, nnode !< Counters.
-   real(R8P)                               :: p3(3)         !< Point.
+   subroutine enter_device_3d(self)
+   !< Map the location arrays to the device (after build_search) until exit_device: flat vertex copies, cell
+   !< validity and the hierarchy (member arrays, never self; issue #20).
+   class(curvilinear_block_t), intent(inout) :: self !< Block.
 
+   if (self%on_device) return
+   self%flat_x = reshape(self%x, [size(self%x)]) ; self%flat_y = reshape(self%y, [size(self%y)])
+   self%flat_z = reshape(self%z, [size(self%z)])
+   !$acc enter data copyin(self%flat_x, self%flat_y, self%flat_z, self%cell_status, self%search%node_lo, &
+   !$acc                   self%search%node_hi, self%search%left, self%search%right, self%search%first, &
+   !$acc                   self%search%last, self%search%order, self%search%cell_lo, self%search%cell_hi)
+   self%on_device = .true.
+   endsubroutine enter_device_3d
+
+   subroutine exit_device_3d(self)
+   !< Release the device copies of enter_device.
+   class(curvilinear_block_t), intent(inout) :: self !< Block.
+
+   if (.not. self%on_device) return
+   !$acc exit data delete(self%flat_x, self%flat_y, self%flat_z, self%cell_status, self%search%node_lo, &
+   !$acc                  self%search%node_hi, self%search%left, self%search%right, self%search%first, &
+   !$acc                  self%search%last, self%search%order, self%search%cell_lo, self%search%cell_hi)
+   deallocate(self%flat_x, self%flat_y, self%flat_z) ; self%on_device = .false.
+   endsubroutine exit_device_3d
+
+   subroutine enter_device_2d(self)
+   !< Map the location arrays to the device (after build_search) until exit_device.
+   class(curvilinear_block_2d_t), intent(inout) :: self !< Block.
+
+   if (self%on_device) return
+   self%flat_u = reshape(self%u, [size(self%u)]) ; self%flat_v = reshape(self%v, [size(self%v)])
+   !$acc enter data copyin(self%flat_u, self%flat_v, self%cell_status, self%search%node_lo, self%search%node_hi, &
+   !$acc                   self%search%left, self%search%right, self%search%first, self%search%last, &
+   !$acc                   self%search%order, self%search%cell_lo, self%search%cell_hi)
+   self%on_device = .true.
+   endsubroutine enter_device_2d
+
+   subroutine exit_device_2d(self)
+   !< Release the device copies of enter_device.
+   class(curvilinear_block_2d_t), intent(inout) :: self !< Block.
+
+   if (.not. self%on_device) return
+   !$acc exit data delete(self%flat_u, self%flat_v, self%cell_status, self%search%node_lo, self%search%node_hi, &
+   !$acc                  self%search%left, self%search%right, self%search%first, self%search%last, &
+   !$acc                  self%search%order, self%search%cell_lo, self%search%cell_hi)
+   deallocate(self%flat_u, self%flat_v) ; self%on_device = .false.
+   endsubroutine exit_device_2d
+
+   subroutine locate_many_device_3d(self, px, py, pz, cell, xi, status)
+   !< The robust location on the device (OpenACC; serial without it), bit-identical to `locate_many`. With
+   !< enter_device done the mapped arrays are used in place (top-level pointer aliases, issue #20); otherwise the
+   !< block is entered and left around the call.
+   class(curvilinear_block_t), intent(inout), target :: self    !< Block.
+   real(R8P),                  intent(in)            :: px(:), py(:), pz(:) !< Points.
+   integer(I4P), allocatable,  intent(out)           :: cell(:,:) !< Cells [3, n].
+   real(R8P),    allocatable,  intent(out)           :: xi(:,:)   !< Local coordinates [3, n].
+   integer(I4P), allocatable,  intent(out)           :: status(:) !< LOC_* [n].
+   real(R8P),    pointer     :: vx(:), vy(:), vz(:), nlo(:,:), nhi(:,:), clo(:,:), chi(:,:) !< Aliases.
+   integer(I4P), pointer     :: cst(:), lft(:), rgt(:), fst(:), lst(:), ord(:) !< Aliases.
+   real(R8P),    allocatable :: qx(:), qy(:), qz(:), xs(:,:) !< Points, results.
+   integer(I4P), allocatable :: lin(:), sts(:) !< Results.
+   integer(I4P)              :: n, m, ni, nj, nnode !< Counters.
+   real(R8P)                 :: p3(3)       !< Point.
+   logical                   :: entered     !< Entered here.
+
+   entered = .not. self%on_device
+   if (entered) call self%enter_device
    n = size(px, kind=I4P) ; ni = self%ni ; nj = self%nj ; nnode = self%search%nnode
-   vx = reshape(self%x, [size(self%x)]) ; vy = reshape(self%y, [size(self%y)]) ; vz = reshape(self%z, [size(self%z)])
-   cst = self%cell_status ; nlo = self%search%node_lo ; nhi = self%search%node_hi ; lft = self%search%left
-   rgt = self%search%right ; fst = self%search%first ; lst = self%search%last ; ord = self%search%order
-   clo = self%search%cell_lo ; chi = self%search%cell_hi ; qx = px ; qy = py ; qz = pz
+   vx => self%flat_x ; vy => self%flat_y ; vz => self%flat_z ; cst => self%cell_status
+   nlo => self%search%node_lo ; nhi => self%search%node_hi ; lft => self%search%left ; rgt => self%search%right
+   fst => self%search%first ; lst => self%search%last ; ord => self%search%order
+   clo => self%search%cell_lo ; chi => self%search%cell_hi
+   qx = px ; qy = py ; qz = pz
    allocate(lin(n), xs(3, n), sts(n))
-   !$acc data copyin(vx, vy, vz, cst, nlo, nhi, lft, rgt, fst, lst, ord, clo, chi, qx, qy, qz) copyout(lin, xs, sts)
-   !$acc parallel loop private(p3)
+   !$acc data copyin(qx, qy, qz) copyout(lin, xs, sts)
+   !$acc parallel loop private(p3) present(vx, vy, vz, cst, nlo, nhi, lft, rgt, fst, lst, ord, clo, chi)
    do m = 1, n
       p3(1) = qx(m) ; p3(2) = qy(m) ; p3(3) = qz(m)
       call locate_point_3d_oac(p3, ni, nj, vx, vy, vz, cst, nnode, nlo, nhi, lft, rgt, fst, lst, ord, clo, chi, &
                                lin(m), xs(:, m), sts(m))
    enddo
    !$acc end data
+   if (entered) call self%exit_device
    allocate(cell(3, n))
    do m = 1, n
       cell(:, m) = linear_to_ijk(lin(m), self%ni, self%nj)
@@ -642,31 +704,37 @@ contains
 
    subroutine locate_many_device_2d(self, pu, pv, cell, xi, status)
    !< The robust 2-D location on the device (OpenACC; serial without it), bit-identical to `locate_many`.
-   class(curvilinear_block_2d_t), intent(in)  :: self      !< Block.
-   real(R8P),                     intent(in)  :: pu(:), pv(:) !< Points.
-   integer(I4P), allocatable,     intent(out) :: cell(:,:) !< Cells [2, n].
-   real(R8P),    allocatable,     intent(out) :: xi(:,:)   !< Local coordinates [2, n].
-   integer(I4P), allocatable,     intent(out) :: status(:) !< LOC_* [n].
-   real(R8P),    allocatable                  :: vu(:), vv(:), nlo(:,:), nhi(:,:), clo(:,:), chi(:,:), xs(:,:) !< Copies.
-   real(R8P),    allocatable                  :: qu(:), qv(:) !< Points.
-   integer(I4P), allocatable                  :: cst(:), lft(:), rgt(:), fst(:), lst(:), ord(:), lin(:), sts(:) !< Copies.
-   integer(I4P)                               :: n, m, ni, nnode !< Counters.
-   real(R8P)                                  :: o, p2(2)  !< Orientation, point.
+   class(curvilinear_block_2d_t), intent(inout), target :: self    !< Block.
+   real(R8P),                     intent(in)            :: pu(:), pv(:) !< Points.
+   integer(I4P), allocatable,     intent(out)           :: cell(:,:) !< Cells [2, n].
+   real(R8P),    allocatable,     intent(out)           :: xi(:,:)   !< Local coordinates [2, n].
+   integer(I4P), allocatable,     intent(out)           :: status(:) !< LOC_* [n].
+   real(R8P),    pointer     :: vu(:), vv(:), nlo(:,:), nhi(:,:), clo(:,:), chi(:,:) !< Aliases.
+   integer(I4P), pointer     :: cst(:), lft(:), rgt(:), fst(:), lst(:), ord(:) !< Aliases.
+   real(R8P),    allocatable :: qu(:), qv(:), xs(:,:) !< Points, results.
+   integer(I4P), allocatable :: lin(:), sts(:) !< Results.
+   integer(I4P)              :: n, m, ni, nnode !< Counters.
+   real(R8P)                 :: o, p2(2)    !< Orientation, point.
+   logical                   :: entered     !< Entered here.
 
+   entered = .not. self%on_device
+   if (entered) call self%enter_device
    n = size(pu, kind=I4P) ; ni = self%ni ; nnode = self%search%nnode ; o = self%orient
-   vu = reshape(self%u, [size(self%u)]) ; vv = reshape(self%v, [size(self%v)])
-   cst = self%cell_status ; nlo = self%search%node_lo ; nhi = self%search%node_hi ; lft = self%search%left
-   rgt = self%search%right ; fst = self%search%first ; lst = self%search%last ; ord = self%search%order
-   clo = self%search%cell_lo ; chi = self%search%cell_hi ; qu = pu ; qv = pv
+   vu => self%flat_u ; vv => self%flat_v ; cst => self%cell_status
+   nlo => self%search%node_lo ; nhi => self%search%node_hi ; lft => self%search%left ; rgt => self%search%right
+   fst => self%search%first ; lst => self%search%last ; ord => self%search%order
+   clo => self%search%cell_lo ; chi => self%search%cell_hi
+   qu = pu ; qv = pv
    allocate(lin(n), xs(2, n), sts(n))
-   !$acc data copyin(vu, vv, cst, nlo, nhi, lft, rgt, fst, lst, ord, clo, chi, qu, qv) copyout(lin, xs, sts)
-   !$acc parallel loop private(p2)
+   !$acc data copyin(qu, qv) copyout(lin, xs, sts)
+   !$acc parallel loop private(p2) present(vu, vv, cst, nlo, nhi, lft, rgt, fst, lst, ord, clo, chi)
    do m = 1, n
       p2(1) = qu(m) ; p2(2) = qv(m)
       call locate_point_2d_oac(p2, ni, vu, vv, cst, o, nnode, nlo, nhi, lft, rgt, fst, lst, ord, clo, chi, &
                                lin(m), xs(:, m), sts(m))
    enddo
    !$acc end data
+   if (entered) call self%exit_device
    allocate(cell(2, n)) ; cell = 0_I4P
    do m = 1, n
       if (lin(m) > 0) cell(:, m) = [mod(lin(m) - 1_I4P, ni - 1_I4P) + 1_I4P, (lin(m) - 1_I4P) / (ni - 1_I4P) + 1_I4P]

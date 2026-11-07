@@ -22,7 +22,7 @@ use penf,   only : I4P, I8P, R8P
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d, device_line_mismatches_2d
 use fossil, only : rigid_pose_2d_t, pose_2d, to_world
 use fossil, only : curvilinear_block_2d_t, detect_topology_2d, topo_record_t, TOPO_BOUNDARY, wall_cutter_2d
-use fossil_overset, only : hole_flags_2d, block_logical_t
+use fossil_overset, only : hole_flags_2d, block_logical_t, donor_set_t, donor_candidates_2d
 
 implicit none
 
@@ -297,6 +297,7 @@ contains
    type(curve_object)                       :: cut       !< Cutter.
    type(topo_record_t)                      :: rec       !< Wall record.
    type(block_logical_t), allocatable       :: h1(:), h2(:) !< Flags.
+   type(donor_set_t),     allocatable       :: d1(:), d2(:) !< Donor candidates.
    real(R8P)                                :: bu(129, 129), bv(129, 129) !< Background.
    integer(I4P)                             :: i, j, bad !< Counters.
 
@@ -316,6 +317,22 @@ contains
    print '(A,I0,A,I0)', 'hole flags: holes ', count(h1(2)%v), ' of ', size(h1(2)%v)
    print '(A,I0)', 'hole flags device vs serial mismatches: ', bad
    ok = ok .and. bad == 0 .and. count(h1(2)%v) > 1000
+   call blk(1)%build_search ; call blk(2)%build_search
+   call donor_candidates_2d(blk, d1)
+   call blk(1)%enter_device ; call blk(2)%enter_device
+   call donor_candidates_2d(blk, d2, device=.true.)
+   call blk(1)%exit_device ; call blk(2)%exit_device
+   bad = 0
+   do i = 1, 2
+      if (any(d1(i)%start /= d2(i)%start)) then
+         bad = bad + 1 ; cycle
+      endif
+      bad = bad + count(any(d1(i)%cell /= d2(i)%cell, dim=1) .or. any(d1(i)%xi /= d2(i)%xi, dim=1) .or. &
+                        d1(i)%block /= d2(i)%block .or. d1(i)%status /= d2(i)%status)
+   enddo
+   print '(A,I0)', 'donor candidates: ', size(d1(1)%block) + size(d1(2)%block)
+   print '(A,I0)', 'donor candidates device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0 .and. size(d1(2)%block) > 1000
    endsubroutine hole_case
 
    subroutine box(cur, p, h, algo, nm)

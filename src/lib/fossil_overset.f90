@@ -30,6 +30,14 @@ module fossil_overset
 !< X-rays (`xray_flags`, Meakin): the exact crossings of the wall along the lines parallel to z through a raster of
 !< n(1) x n(2) points over the cutter's box; a vertex takes the side of its nearest ray at its own z (inside if the
 !< last crossing below it enters the solid): exact on the rays, wrong only near the wall between rays.
+!<
+!< Donor candidates (`donor_candidates`): every vertex of every block located (WP2's robust path; build_search
+!< first) in every other block the pair matrix allows; every candidate other than LOC_OUTSIDE is kept, with its
+!< quality (donor volume, receptor volume = mean volume of the cells around the vertex, their ratio, the certified min
+!< det J of the donor over its volume). device=.true. runs the location on the GPU (blocks entered once,
+!< enter_device), bit-identical. The pair matrix (`overlap_matrix`): PAIR_OVERLAP if a boundary vertex of one block
+!< lies in a cell of the other, or the middle vertex of one does (embedded); PAIR_SHARED where the cutter found a
+!< shared wall; PAIR_NONE otherwise.
 
 use penf,                      only : I4P, R8P
 use vecfor,                    only : vector_R8P
@@ -39,11 +47,19 @@ use fossil_curve_object,       only : curve_object
 use fossil_curvilinear_block,  only : curvilinear_block_t, curvilinear_block_2d_t, TOPO_BOUNDARY
 use fossil_predicates,         only : orient2d_xy
 use fossil_box_query,          only : BOX_CUT
+use fossil_block_locate,       only : LOC_INSIDE, LOC_OUTSIDE
+use fossil_block_geometry,     only : hex_volume, quad_area, hex_validity, quad_validity
 
 implicit none
 private
 public :: wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2d, block_logical_t, block_real_t
 public :: hole_map, hole_map_2d, xray_flags, xray_flags_2d
+public :: donor_set_t, overlap_matrix, overlap_matrix_2d, donor_candidates, donor_candidates_2d
+public :: PAIR_NONE, PAIR_OVERLAP, PAIR_SHARED
+
+integer(I4P), parameter :: PAIR_NONE    = 0_I4P !< The blocks do not overlap.
+integer(I4P), parameter :: PAIR_OVERLAP = 1_I4P !< They overlap (and may cut each other).
+integer(I4P), parameter :: PAIR_SHARED  = 2_I4P !< They share a wall: overlapping without mutual cutting.
 
 type :: block_logical_t
    !< Logical values per vertex of a block (linear vertex index, i fastest).
@@ -54,6 +70,20 @@ type :: block_real_t
    !< Real values per vertex of a block (linear vertex index, i fastest).
    real(R8P), allocatable :: v(:) !< Values.
 endtype block_real_t
+
+type :: donor_set_t
+   !< Donor candidates of the vertices of one receptor block, CSR by vertex (linear index, i fastest).
+   integer(I4P), allocatable :: start(:)           !< First candidate of each vertex [nv + 1].
+   integer(I4P), allocatable :: block(:)           !< Donor block [nc].
+   integer(I4P), allocatable :: cell(:,:)          !< Donor cell [d, nc].
+   real(R8P),    allocatable :: xi(:,:)            !< Local coordinates [d, nc].
+   integer(I4P), allocatable :: status(:)          !< LOC_* (never LOC_OUTSIDE) [nc].
+   real(R8P),    allocatable :: donor_volume(:)    !< |volume| of the donor cell [nc].
+   real(R8P),    allocatable :: ratio(:)           !< donor_volume / receptor_volume [nc].
+   real(R8P),    allocatable :: min_jacobian(:)    !< Certified min det J of the donor cell over its volume [nc].
+   real(R8P),    allocatable :: receptor_volume(:) !< Mean |volume| of the cells around the vertex [nv].
+   real(R8P),    allocatable :: wall_distance(:)   !< Distance to the wall [nv] (if a wall is given).
+endtype donor_set_t
 
 type :: ray_t
    !< Exact crossings of one X-ray.
@@ -857,6 +887,266 @@ contains
       enddo
    enddo
    endsubroutine xray_flags_2d
+
+   ! ------------------------------------------------------------------------------------------------ donor candidates
+   subroutine overlap_matrix(blocks, pair, shared)
+   !< The three-valued pair matrix of a set of 3-D blocks (build_search done) (module notes).
+   type(curvilinear_block_t), intent(in)           :: blocks(:)   !< Blocks.
+   integer(I4P), allocatable, intent(out)          :: pair(:,:)   !< PAIR_* [nb, nb].
+   logical,                   intent(in), optional :: shared(:,:) !< Shared walls (wall_cutter).
+   real(R8P),    allocatable :: px(:), py(:), pz(:), xi(:,:) !< Points, local coordinates.
+   integer(I4P), allocatable :: cell(:,:), st(:) !< Results.
+   integer(I4P)              :: a, b, nb         !< Counters.
+
+   nb = size(blocks, kind=I4P) ; allocate(pair(nb, nb)) ; pair = PAIR_NONE
+   do a = 1, nb
+      call boundary_points_3d(blocks(a), px, py, pz)
+      do b = 1, nb
+         if (a == b) cycle
+         call blocks(b)%locate_many(px, py, pz, cell, xi, st)
+         if (any(st == LOC_INSIDE)) then
+            pair(a, b) = PAIR_OVERLAP ; pair(b, a) = PAIR_OVERLAP
+         endif
+      enddo
+   enddo
+   if (present(shared)) then
+      where (shared) pair = PAIR_SHARED
+   endif
+   do a = 1, nb
+      pair(a, a) = PAIR_NONE
+   enddo
+   endsubroutine overlap_matrix
+
+   subroutine boundary_points_3d(blk, px, py, pz)
+   !< The boundary vertices of a block and its middle vertex.
+   type(curvilinear_block_t), intent(in)  :: blk !< Block.
+   real(R8P), allocatable,    intent(out) :: px(:), py(:), pz(:) !< Points.
+   integer(I4P)                           :: i, j, k, n !< Counters.
+
+   allocate(px(blk%ni * blk%nj * blk%nk), py(blk%ni * blk%nj * blk%nk), pz(blk%ni * blk%nj * blk%nk)) ; n = 0_I4P
+   do k = 1, blk%nk
+      do j = 1, blk%nj
+         do i = 1, blk%ni
+            if (.not. (i == 1 .or. j == 1 .or. k == 1 .or. i == blk%ni .or. j == blk%nj .or. k == blk%nk .or. &
+                (i == (blk%ni + 1) / 2 .and. j == (blk%nj + 1) / 2 .and. k == (blk%nk + 1) / 2))) cycle
+            n = n + 1_I4P ; px(n) = blk%x(i, j, k) ; py(n) = blk%y(i, j, k) ; pz(n) = blk%z(i, j, k)
+         enddo
+      enddo
+   enddo
+   px = px(1:n) ; py = py(1:n) ; pz = pz(1:n)
+   endsubroutine boundary_points_3d
+
+   subroutine donor_candidates(blocks, donors, pair, wall, device)
+   !< Donor candidates of every vertex of every 3-D block (build_search done) (module notes).
+   type(curvilinear_block_t), target,  intent(inout)        :: blocks(:) !< Blocks.
+   type(donor_set_t),    allocatable,  intent(out)          :: donors(:) !< Candidates per receptor block.
+   integer(I4P),                       intent(in), optional :: pair(:,:) !< PAIR_* (default: every pair).
+   type(surface_stl_object),           intent(in), optional :: wall      !< Wall (for the wall distances).
+   logical,                            intent(in), optional :: device    !< Location on the GPU.
+   real(R8P),    allocatable :: px(:), py(:), pz(:), xi(:,:), vol(:,:,:), cand_xi(:,:,:) !< Work.
+   integer(I4P), allocatable :: cell(:,:), st(:), cand_cell(:,:,:), cand_st(:,:), cnt(:) !< Work.
+   real(R8P),    allocatable :: dw(:) !< Wall distances.
+   integer(I4P), allocatable :: bw(:) !< Wall bodies.
+   type(vector_R8P), allocatable :: pv(:) !< Points.
+   logical                   :: dev  !< Device.
+   integer(I4P)              :: a, b, nb, nv, v, c, k, i, j, kk, nc, slot !< Counters.
+   real(R8P)                 :: jm, o !< Validity bound, orientation.
+   integer(I4P)              :: cs    !< Validity status.
+
+   dev = .false. ; if (present(device)) dev = device
+   nb = size(blocks, kind=I4P) ; allocate(donors(nb))
+   do a = 1, nb
+      nv = blocks(a)%ni * blocks(a)%nj * blocks(a)%nk
+      call vertex_points_3d(blocks(a), px, py, pz)
+      allocate(cand_cell(3, nb, nv), cand_xi(3, nb, nv), cand_st(nb, nv), cnt(nv)) ; cand_st = LOC_OUTSIDE
+      do b = 1, nb
+         if (b == a) cycle
+         if (present(pair)) then
+            if (pair(a, b) == PAIR_NONE) cycle
+         endif
+         if (dev) then
+            call blocks(b)%locate_many_device(px, py, pz, cell, xi, st)
+         else
+            call blocks(b)%locate_many(px, py, pz, cell, xi, st)
+         endif
+         cand_cell(:, b, :) = cell ; cand_xi(:, b, :) = xi ; cand_st(b, :) = st
+      enddo
+      cnt = count(cand_st /= LOC_OUTSIDE, dim=1) ; nc = sum(cnt)
+      allocate(donors(a)%start(nv + 1), donors(a)%block(nc), donors(a)%cell(3, nc), donors(a)%xi(3, nc), &
+               donors(a)%status(nc), donors(a)%donor_volume(nc), donors(a)%ratio(nc), donors(a)%min_jacobian(nc))
+      call blocks(a)%geometry(volume=vol)
+      donors(a)%receptor_volume = vertex_volumes_3d(abs(vol))
+      donors(a)%start(1) = 1_I4P ; slot = 0_I4P
+      do v = 1, nv
+         do b = 1, nb
+            if (cand_st(b, v) == LOC_OUTSIDE) cycle
+            slot = slot + 1_I4P ; c = slot
+            donors(a)%block(c) = b ; donors(a)%cell(:, c) = cand_cell(:, b, v) ; donors(a)%xi(:, c) = cand_xi(:, b, v)
+            donors(a)%status(c) = cand_st(b, v)
+            i = cand_cell(1, b, v) ; j = cand_cell(2, b, v) ; kk = cand_cell(3, b, v)
+            donors(a)%donor_volume(c) = abs(hex_volume(blocks(b)%corners(i, j, kk)))
+            donors(a)%ratio(c) = donors(a)%donor_volume(c) / max(donors(a)%receptor_volume(v), tiny(1._R8P))
+            o = blocks(b)%orient
+            call hex_validity(blocks(b)%corners(i, j, kk), o, cs, jm)
+            donors(a)%min_jacobian(c) = jm / max(donors(a)%donor_volume(c), tiny(1._R8P))
+         enddo
+         donors(a)%start(v + 1) = slot + 1_I4P
+      enddo
+      if (present(wall)) then
+         allocate(pv(nv), dw(nv), bw(nv))
+         do k = 1, nv
+            pv(k) = vector_R8P(px(k), py(k), pz(k))
+         enddo
+         call wall%wall_distance_many(points=pv, distances=dw, bodies=bw)
+         call move_alloc(dw, donors(a)%wall_distance) ; deallocate(pv, bw)
+      endif
+      deallocate(cand_cell, cand_xi, cand_st, cnt)
+   enddo
+   endsubroutine donor_candidates
+
+   subroutine vertex_points_3d(blk, px, py, pz)
+   !< Every vertex of a block, linear index (i fastest).
+   type(curvilinear_block_t), intent(in)  :: blk !< Block.
+   real(R8P), allocatable,    intent(out) :: px(:), py(:), pz(:) !< Points.
+
+   px = reshape(blk%x, [size(blk%x)]) ; py = reshape(blk%y, [size(blk%y)]) ; pz = reshape(blk%z, [size(blk%z)])
+   endsubroutine vertex_points_3d
+
+   pure function vertex_volumes_3d(vol) result(vv)
+   !< Mean of the cell volumes around each vertex.
+   real(R8P), intent(in)  :: vol(:,:,:) !< Cell volumes [ni-1, nj-1, nk-1].
+   real(R8P), allocatable :: vv(:)      !< Per vertex [ni nj nk].
+   real(R8P), allocatable :: acc(:,:,:), cnt(:,:,:) !< Work.
+   integer(I4P)           :: n(3), a, b, c !< Counters.
+
+   n = shape(vol) + 1
+   allocate(acc(n(1), n(2), n(3)), cnt(n(1), n(2), n(3))) ; acc = 0._R8P ; cnt = 0._R8P
+   do c = 0, 1
+      do b = 0, 1
+         do a = 0, 1
+            acc(1 + a:n(1) - 1 + a, 1 + b:n(2) - 1 + b, 1 + c:n(3) - 1 + c) = &
+               acc(1 + a:n(1) - 1 + a, 1 + b:n(2) - 1 + b, 1 + c:n(3) - 1 + c) + vol
+            cnt(1 + a:n(1) - 1 + a, 1 + b:n(2) - 1 + b, 1 + c:n(3) - 1 + c) = &
+               cnt(1 + a:n(1) - 1 + a, 1 + b:n(2) - 1 + b, 1 + c:n(3) - 1 + c) + 1._R8P
+         enddo
+      enddo
+   enddo
+   vv = reshape(acc / cnt, [product(n)])
+   endfunction vertex_volumes_3d
+
+   subroutine overlap_matrix_2d(blocks, pair, shared)
+   !< The pair matrix of a set of 2-D blocks (as overlap_matrix).
+   type(curvilinear_block_2d_t), intent(in)           :: blocks(:)   !< Blocks.
+   integer(I4P), allocatable,    intent(out)          :: pair(:,:)   !< PAIR_* [nb, nb].
+   logical,                      intent(in), optional :: shared(:,:) !< Shared walls.
+   real(R8P),    allocatable :: pu(:), pv(:), xi(:,:) !< Points, local coordinates.
+   integer(I4P), allocatable :: cell(:,:), st(:) !< Results.
+   integer(I4P)              :: a, b, nb, i, j, n !< Counters.
+
+   nb = size(blocks, kind=I4P) ; allocate(pair(nb, nb)) ; pair = PAIR_NONE
+   do a = 1, nb
+      allocate(pu(blocks(a)%ni * blocks(a)%nj), pv(blocks(a)%ni * blocks(a)%nj)) ; n = 0_I4P
+      do j = 1, blocks(a)%nj
+         do i = 1, blocks(a)%ni
+            if (.not. (i == 1 .or. j == 1 .or. i == blocks(a)%ni .or. j == blocks(a)%nj .or. &
+                (i == (blocks(a)%ni + 1) / 2 .and. j == (blocks(a)%nj + 1) / 2))) cycle
+            n = n + 1_I4P ; pu(n) = blocks(a)%u(i, j) ; pv(n) = blocks(a)%v(i, j)
+         enddo
+      enddo
+      do b = 1, nb
+         if (a == b) cycle
+         call blocks(b)%locate_many(pu(1:n), pv(1:n), cell, xi, st)
+         if (any(st == LOC_INSIDE)) then
+            pair(a, b) = PAIR_OVERLAP ; pair(b, a) = PAIR_OVERLAP
+         endif
+      enddo
+      deallocate(pu, pv)
+   enddo
+   if (present(shared)) then
+      where (shared) pair = PAIR_SHARED
+   endif
+   do a = 1, nb
+      pair(a, a) = PAIR_NONE
+   enddo
+   endsubroutine overlap_matrix_2d
+
+   subroutine donor_candidates_2d(blocks, donors, pair, wall, device)
+   !< Donor candidates of every vertex of every 2-D block (as donor_candidates).
+   type(curvilinear_block_2d_t), target, intent(inout)        :: blocks(:) !< Blocks.
+   type(donor_set_t),    allocatable,    intent(out)          :: donors(:) !< Candidates per receptor block.
+   integer(I4P),                         intent(in), optional :: pair(:,:) !< PAIR_* (default: every pair).
+   type(curve_object),                   intent(in), optional :: wall      !< Wall (for the wall distances).
+   logical,                              intent(in), optional :: device    !< Location on the GPU.
+   real(R8P),    allocatable :: pu(:), pv(:), xi(:,:), ar(:,:), cand_xi(:,:,:), pts(:,:), dw(:) !< Work.
+   integer(I4P), allocatable :: cell(:,:), st(:), cand_cell(:,:,:), cand_st(:,:), cnt(:), bw(:) !< Work.
+   logical                   :: dev  !< Device.
+   integer(I4P)              :: a, b, nb, nv, v, c, i, j, nc, slot, cs !< Counters.
+   real(R8P)                 :: jm   !< Validity bound.
+
+   dev = .false. ; if (present(device)) dev = device
+   nb = size(blocks, kind=I4P) ; allocate(donors(nb))
+   do a = 1, nb
+      nv = blocks(a)%ni * blocks(a)%nj
+      pu = reshape(blocks(a)%u, [nv]) ; pv = reshape(blocks(a)%v, [nv])
+      allocate(cand_cell(2, nb, nv), cand_xi(2, nb, nv), cand_st(nb, nv), cnt(nv)) ; cand_st = LOC_OUTSIDE
+      do b = 1, nb
+         if (b == a) cycle
+         if (present(pair)) then
+            if (pair(a, b) == PAIR_NONE) cycle
+         endif
+         if (dev) then
+            call blocks(b)%locate_many_device(pu, pv, cell, xi, st)
+         else
+            call blocks(b)%locate_many(pu, pv, cell, xi, st)
+         endif
+         cand_cell(:, b, :) = cell ; cand_xi(:, b, :) = xi ; cand_st(b, :) = st
+      enddo
+      cnt = count(cand_st /= LOC_OUTSIDE, dim=1) ; nc = sum(cnt)
+      allocate(donors(a)%start(nv + 1), donors(a)%block(nc), donors(a)%cell(2, nc), donors(a)%xi(2, nc), &
+               donors(a)%status(nc), donors(a)%donor_volume(nc), donors(a)%ratio(nc), donors(a)%min_jacobian(nc))
+      call blocks(a)%geometry(area=ar)
+      donors(a)%receptor_volume = vertex_volumes_2d(abs(ar))
+      donors(a)%start(1) = 1_I4P ; slot = 0_I4P
+      do v = 1, nv
+         do b = 1, nb
+            if (cand_st(b, v) == LOC_OUTSIDE) cycle
+            slot = slot + 1_I4P ; c = slot
+            donors(a)%block(c) = b ; donors(a)%cell(:, c) = cand_cell(:, b, v) ; donors(a)%xi(:, c) = cand_xi(:, b, v)
+            donors(a)%status(c) = cand_st(b, v)
+            i = cand_cell(1, b, v) ; j = cand_cell(2, b, v)
+            donors(a)%donor_volume(c) = abs(quad_area(blocks(b)%corners(i, j)))
+            donors(a)%ratio(c) = donors(a)%donor_volume(c) / max(donors(a)%receptor_volume(v), tiny(1._R8P))
+            call quad_validity(blocks(b)%corners(i, j), blocks(b)%orient, cs, jm)
+            donors(a)%min_jacobian(c) = jm / max(donors(a)%donor_volume(c), tiny(1._R8P))
+         enddo
+         donors(a)%start(v + 1) = slot + 1_I4P
+      enddo
+      if (present(wall)) then
+         allocate(pts(2, nv), dw(nv), bw(nv)) ; pts(1, :) = pu ; pts(2, :) = pv
+         call wall%wall_distance_many(points=pts, distances=dw, bodies=bw)
+         call move_alloc(dw, donors(a)%wall_distance) ; deallocate(pts, bw)
+      endif
+      deallocate(cand_cell, cand_xi, cand_st, cnt)
+   enddo
+   endsubroutine donor_candidates_2d
+
+   pure function vertex_volumes_2d(ar) result(vv)
+   !< Mean of the cell areas around each vertex.
+   real(R8P), intent(in)  :: ar(:,:) !< Cell areas [ni-1, nj-1].
+   real(R8P), allocatable :: vv(:)   !< Per vertex [ni nj].
+   real(R8P), allocatable :: acc(:,:), cnt(:,:) !< Work.
+   integer(I4P)           :: n(2), a, b !< Counters.
+
+   n = shape(ar) + 1
+   allocate(acc(n(1), n(2)), cnt(n(1), n(2))) ; acc = 0._R8P ; cnt = 0._R8P
+   do b = 0, 1
+      do a = 0, 1
+         acc(1 + a:n(1) - 1 + a, 1 + b:n(2) - 1 + b) = acc(1 + a:n(1) - 1 + a, 1 + b:n(2) - 1 + b) + ar
+         cnt(1 + a:n(1) - 1 + a, 1 + b:n(2) - 1 + b) = cnt(1 + a:n(1) - 1 + a, 1 + b:n(2) - 1 + b) + 1._R8P
+      enddo
+   enddo
+   vv = reshape(acc / cnt, [product(n)])
+   endfunction vertex_volumes_2d
 
    ! ------------------------------------------------------------------------------------------------------- utilities
    pure function pt3(blk, p) result(x)

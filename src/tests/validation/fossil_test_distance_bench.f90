@@ -45,7 +45,7 @@ use fossil_distance_field, only : distance_field_object
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_3d, device_line_mismatches_3d
 use fossil,              only : rigid_pose_t, pose_from_axis_angle, to_world
 use fossil,              only : curvilinear_block_t, detect_topology, topo_record_t, TOPO_BOUNDARY, wall_cutter
-use fossil_overset,      only : hole_flags, block_logical_t
+use fossil_overset,      only : hole_flags, block_logical_t, donor_set_t, donor_candidates
 
 implicit none
 
@@ -82,6 +82,7 @@ integer                       :: feature_mismatch          !< Feature-edge boxes
 integer                       :: thin_mismatch             !< Thin-facet boxes: device vs CPU mismatches (issue #62).
 integer                       :: block_mismatch            !< Block location: device vs CPU mismatches (issue #71).
 integer                       :: hole_mismatch             !< Hole flags: device vs CPU mismatches (issue #72).
+integer                       :: donor_mismatch            !< Donor candidates: device vs CPU mismatches (issue #72).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -247,8 +248,8 @@ call feature_case(mismatch=feature_mismatch)
 rich_ok = rich_ok .and. feature_mismatch == 0
 call thin_case(mismatch=thin_mismatch)
 rich_ok = rich_ok .and. thin_mismatch == 0
-call block_case(mismatch=block_mismatch, hole_mismatch=hole_mismatch)
-rich_ok = rich_ok .and. block_mismatch == 0 .and. hole_mismatch == 0
+call block_case(mismatch=block_mismatch, hole_mismatch=hole_mismatch, donor_mismatch=donor_mismatch)
+rich_ok = rich_ok .and. block_mismatch == 0 .and. hole_mismatch == 0 .and. donor_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -343,6 +344,7 @@ print '(A,I0)',      '   feature device vs serial mismatches: ', feature_mismatc
 print '(A,I0)',      '   thin device vs serial mismatches: ', thin_mismatch
 print '(A,I0)',      '   block location device vs serial mismatches: ', block_mismatch
 print '(A,I0)',      '   hole flags device vs serial mismatches: ', hole_mismatch
+print '(A,I0)',      '   donor candidates device vs serial mismatches: ', donor_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -500,11 +502,13 @@ contains
    print '(A,I0,A,I0)', '   thin cells touched: ', count(t1), ' of ', NC**3
    endsubroutine thin_case
 
-   subroutine block_case(mismatch, hole_mismatch)
+   subroutine block_case(mismatch, hole_mismatch, donor_mismatch)
    !< Point location in a curvilinear block on the device against the CPU (issue #71): a wavy 3-D O-grid of
    !< 65 x 17 x 17 vertices with its seam, 50000 points in its box; cells, xi (bit for bit) and statuses. Timed.
    integer, intent(out)      :: mismatch               !< Mismatches.
    integer, intent(out)      :: hole_mismatch          !< Hole flag mismatches (issue #72).
+   integer, intent(out)      :: donor_mismatch         !< Donor candidate mismatches (issue #72).
+   type(donor_set_t), allocatable :: d1(:), d2(:)      !< Donor candidates.
    type(curvilinear_block_t) :: blk(1)                 !< Block.
    type(curvilinear_block_t) :: hb(2)                  !< O-grid with its inner wall, background.
    type(surface_stl_object)  :: cut                    !< Cutter.
@@ -564,6 +568,21 @@ contains
    hole_mismatch = count(h1(2)%v .neqv. h2(2)%v) + count(h1(1)%v .neqv. h2(1)%v)
    print '(A,I0,A,I0)', 'hole flags: holes ', count(h1(2)%v), ' of ', size(h1(2)%v)
    if (count(h1(2)%v) < 1000) hole_mismatch = hole_mismatch + 1
+   call hb(1)%build_search ; call hb(2)%build_search
+   call donor_candidates(hb, d1)
+   call hb(1)%enter_device ; call hb(2)%enter_device
+   call donor_candidates(hb, d2, device=.true.)
+   call hb(1)%exit_device ; call hb(2)%exit_device
+   donor_mismatch = 0
+   do i = 1, 2
+      if (any(d1(i)%start /= d2(i)%start)) then
+         donor_mismatch = donor_mismatch + 1 ; cycle
+      endif
+      donor_mismatch = donor_mismatch + count(any(d1(i)%cell /= d2(i)%cell, dim=1) .or. any(d1(i)%xi /= d2(i)%xi, dim=1) &
+                                              .or. d1(i)%block /= d2(i)%block .or. d1(i)%status /= d2(i)%status)
+   enddo
+   print '(A,I0)', 'donor candidates: ', size(d1(1)%block) + size(d1(2)%block)
+   if (size(d1(2)%block) < 1000) donor_mismatch = donor_mismatch + 1
    endsubroutine block_case
 
    subroutine box_device_case(mismatch)
