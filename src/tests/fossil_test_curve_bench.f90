@@ -21,7 +21,8 @@ use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, T
 use penf,   only : I4P, I8P, R8P
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d, device_line_mismatches_2d
 use fossil, only : rigid_pose_2d_t, pose_2d, to_world
-use fossil, only : curvilinear_block_2d_t, detect_topology_2d
+use fossil, only : curvilinear_block_2d_t, detect_topology_2d, topo_record_t, TOPO_BOUNDARY, wall_cutter_2d
+use fossil_overset, only : hole_flags_2d, block_logical_t
 
 implicit none
 
@@ -286,7 +287,36 @@ contains
    print '(A,I0,A,I0)', 'block location: points inside ', count(s1 == 1), ' of ', size(s1)
    print '(A,I0)', 'block location device vs serial mismatches: ', bad
    ok = ok .and. bad == 0 .and. count(s1 == 1) > 10000
+   call hole_case(blk(1))
    endsubroutine block_case
+
+   subroutine hole_case(og)
+   !< Hole flags on the device against the CPU (issue #72): the wall of the O-grid cuts a 129^2 background block.
+   type(curvilinear_block_2d_t), intent(in) :: og        !< O-grid.
+   type(curvilinear_block_2d_t)             :: blk(2)    !< O-grid with its wall, background.
+   type(curve_object)                       :: cut       !< Cutter.
+   type(topo_record_t)                      :: rec       !< Wall record.
+   type(block_logical_t), allocatable       :: h1(:), h2(:) !< Flags.
+   real(R8P)                                :: bu(129, 129), bv(129, 129) !< Background.
+   integer(I4P)                             :: i, j, bad !< Counters.
+
+   blk(1) = og
+   rec%kind = TOPO_BOUNDARY ; rec%face = 3 ; rec%lo = [1, 1, 1] ; rec%hi = [og%ni, 1, 1] ; rec%name = 'wall'
+   call blk(1)%add_record(rec)
+   do j = 1, 129
+      do i = 1, 129
+         bu(i, j) = -3.1_R8P + 6.2_R8P * (i - 1) / 128 ; bv(i, j) = -3.1_R8P + 6.2_R8P * (j - 1) / 128
+      enddo
+   enddo
+   call blk(2)%initialize(bu, bv)
+   call wall_cutter_2d(blk(1:1), cut)
+   call hole_flags_2d(blk, cut, h1)
+   call hole_flags_2d(blk, cut, h2, device=.true.)
+   bad = count(h1(2)%v .neqv. h2(2)%v) + count(h1(1)%v .neqv. h2(1)%v)
+   print '(A,I0,A,I0)', 'hole flags: holes ', count(h1(2)%v), ' of ', size(h1(2)%v)
+   print '(A,I0)', 'hole flags device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0 .and. count(h1(2)%v) > 1000
+   endsubroutine hole_case
 
    subroutine box(cur, p, h, algo, nm)
    !< box_classify_many_device vs box_classify_many (issue #38): a box of half-size h around every

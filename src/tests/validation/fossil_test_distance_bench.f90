@@ -44,7 +44,8 @@ use vecfor,              only : vector_R8P
 use fossil_distance_field, only : distance_field_object
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_3d, device_line_mismatches_3d
 use fossil,              only : rigid_pose_t, pose_from_axis_angle, to_world
-use fossil,              only : curvilinear_block_t, detect_topology
+use fossil,              only : curvilinear_block_t, detect_topology, topo_record_t, TOPO_BOUNDARY, wall_cutter
+use fossil_overset,      only : hole_flags, block_logical_t
 
 implicit none
 
@@ -80,6 +81,7 @@ integer                       :: deviation_mismatch        !< Surface deviation:
 integer                       :: feature_mismatch          !< Feature-edge boxes: device vs CPU mismatches (issue #61).
 integer                       :: thin_mismatch             !< Thin-facet boxes: device vs CPU mismatches (issue #62).
 integer                       :: block_mismatch            !< Block location: device vs CPU mismatches (issue #71).
+integer                       :: hole_mismatch             !< Hole flags: device vs CPU mismatches (issue #72).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -245,8 +247,8 @@ call feature_case(mismatch=feature_mismatch)
 rich_ok = rich_ok .and. feature_mismatch == 0
 call thin_case(mismatch=thin_mismatch)
 rich_ok = rich_ok .and. thin_mismatch == 0
-call block_case(mismatch=block_mismatch)
-rich_ok = rich_ok .and. block_mismatch == 0
+call block_case(mismatch=block_mismatch, hole_mismatch=hole_mismatch)
+rich_ok = rich_ok .and. block_mismatch == 0 .and. hole_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -340,6 +342,7 @@ print '(A,I0)',      '   deviation device vs serial mismatches: ', deviation_mis
 print '(A,I0)',      '   feature device vs serial mismatches: ', feature_mismatch
 print '(A,I0)',      '   thin device vs serial mismatches: ', thin_mismatch
 print '(A,I0)',      '   block location device vs serial mismatches: ', block_mismatch
+print '(A,I0)',      '   hole flags device vs serial mismatches: ', hole_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -497,11 +500,17 @@ contains
    print '(A,I0,A,I0)', '   thin cells touched: ', count(t1), ' of ', NC**3
    endsubroutine thin_case
 
-   subroutine block_case(mismatch)
+   subroutine block_case(mismatch, hole_mismatch)
    !< Point location in a curvilinear block on the device against the CPU (issue #71): a wavy 3-D O-grid of
    !< 65 x 17 x 17 vertices with its seam, 50000 points in its box; cells, xi (bit for bit) and statuses. Timed.
    integer, intent(out)      :: mismatch               !< Mismatches.
+   integer, intent(out)      :: hole_mismatch          !< Hole flag mismatches (issue #72).
    type(curvilinear_block_t) :: blk(1)                 !< Block.
+   type(curvilinear_block_t) :: hb(2)                  !< O-grid with its inner wall, background.
+   type(surface_stl_object)  :: cut                    !< Cutter.
+   type(topo_record_t)       :: rec                    !< Wall record.
+   type(block_logical_t), allocatable :: h1(:), h2(:)  !< Hole flags.
+   real(R8P),    allocatable :: gx(:,:,:), gy(:,:,:), gz(:,:,:) !< Background.
    real(R8P),    allocatable :: bx(:,:,:), by(:,:,:), bz(:,:,:), pu(:), pv(:), pw(:), x1(:,:), x2(:,:) !< Data.
    integer(I4P), allocatable :: c1(:,:), c2(:,:), s1(:), s2(:) !< Results.
    integer(I4P)              :: i, j, k, n             !< Counters.
@@ -535,6 +544,26 @@ contains
    print '(A,I0,A,I0,A,F9.2,A,F9.2,A)', 'block location: inside ', count(s1 == 1), ' of ', size(s1), ', serial ', &
          1e3_R8P * (t1 - t0) / rate, ' ms, device ', 1e3_R8P * (t2 - t1) / rate, ' ms (with copies)'
    if (count(s1 == 1) < 10000) mismatch = mismatch + 1
+   ! hole flags (issue #72): the inner wavy wall of the O-grid (an open tube) cuts a 41^3 background block
+   hb(1) = blk(1)
+   rec%kind = TOPO_BOUNDARY ; rec%face = 3 ; rec%lo = [1, 1, 1] ; rec%hi = [65, 1, 17] ; rec%name = 'wall'
+   call hb(1)%add_record(rec)
+   allocate(gx(41, 41, 41), gy(41, 41, 41), gz(41, 41, 41))
+   do k = 1, 41
+      do j = 1, 41
+         do i = 1, 41
+            gx(i, j, k) = -3.2_R8P + 0.16_R8P * (i - 1) ; gy(i, j, k) = -3.2_R8P + 0.16_R8P * (j - 1)
+            gz(i, j, k) = 0.05_R8P * (k - 1)
+         enddo
+      enddo
+   enddo
+   call hb(2)%initialize(gx, gy, gz)
+   call wall_cutter(hb(1:1), cut)
+   call hole_flags(hb, cut, h1)
+   call hole_flags(hb, cut, h2, device=.true.)
+   hole_mismatch = count(h1(2)%v .neqv. h2(2)%v) + count(h1(1)%v .neqv. h2(1)%v)
+   print '(A,I0,A,I0)', 'hole flags: holes ', count(h1(2)%v), ' of ', size(h1(2)%v)
+   if (count(h1(2)%v) < 1000) hole_mismatch = hole_mismatch + 1
    endsubroutine block_case
 
    subroutine box_device_case(mismatch)

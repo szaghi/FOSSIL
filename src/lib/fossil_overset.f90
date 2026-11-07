@@ -13,17 +13,33 @@ module fossil_overset
 !< elements straddling the edge of the finer patch split between kept and dropped: a residual strip of over- and
 !< under-coverage about one coarse element wide, whose effects on the winding number partly cancel.
 !< Two blocks whose patches overlap share a wall (`shared`).
+!<
+!< Hole flags (`hole_flags`, `hole_flags_2d`): a vertex is a hole when the signed distance to the cutter, signed by the
+!< fast winding number (negative inside), is below `offset` (default 0: inside; a vertex on the wall is a field
+!< point). `cuts(b)` selects the blocks the cutter cuts (default all). device=.true. runs the same kernels on the GPU
+!< (the cutter is entered and left around the call if it is not on the device already), bit-identical.
+
 use penf,                      only : I4P, R8P
 use vecfor,                    only : vector_R8P
 use fossil_facet_object,       only : facet_object
-use fossil_surface_stl_object, only : surface_stl_object
+use fossil_surface_stl_object, only : surface_stl_object, SIGN_FWN => SIGN_FAST_WINDING_NUMBER
 use fossil_curve_object,       only : curve_object
 use fossil_curvilinear_block,  only : curvilinear_block_t, curvilinear_block_2d_t, TOPO_BOUNDARY
 use fossil_predicates,         only : orient2d_xy
 
 implicit none
 private
-public :: wall_cutter, wall_cutter_2d
+public :: wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2d, block_logical_t, block_real_t
+
+type :: block_logical_t
+   !< Logical values per vertex of a block (linear vertex index, i fastest).
+   logical, allocatable :: v(:) !< Values.
+endtype block_logical_t
+
+type :: block_real_t
+   !< Real values per vertex of a block (linear vertex index, i fastest).
+   real(R8P), allocatable :: v(:) !< Values.
+endtype block_real_t
 
 type :: tri_list_t
    !< Wall triangles of one block.
@@ -99,7 +115,7 @@ contains
    character(*),              intent(in)    :: wname !< Wall name.
    type(tri_list_t),          intent(inout) :: tl    !< Triangles.
    real(R8P),                 intent(inout) :: gmax  !< Gap.
-   real(R8P), allocatable                   :: v(:,:,:) !< Work.
+   real(R8P), allocatable                   :: v(:,:,:), w(:,:,:) !< Work.
    integer(I4P)                             :: r, nd, d1, d2, m1, m2, p(3), q(3), nv(3), s, cap !< Counters.
    real(R8P)                                :: c(3, 4), xin(3), tri(3, 3, 2), nrm(3), cen(3) !< Work.
    integer(I4P)                             :: k                 !< Triangle.
@@ -131,7 +147,9 @@ contains
                cen = sum(tri(:, :, k), dim=2) / 3._R8P
                if (dot_product(nrm, xin - cen) < 0._R8P) tri(:, :, k) = tri(:, [1, 3, 2], k)
                cap = cap + 1_I4P
-               if (cap > size(v, 3)) v = reshape(v, [3, 3, 2 * size(v, 3)], pad=v)
+               if (cap > size(v, 3)) then ! grow by copy (no self-referencing reshape)
+                  allocate(w(3, 3, 2 * size(v, 3))) ; w(:, :, 1:cap - 1) = v(:, :, 1:cap - 1) ; call move_alloc(w, v)
+               endif
                v(:, :, cap) = tri(:, :, k)
             enddo
          enddo
@@ -282,21 +300,26 @@ contains
    integer(I4P)                                :: r, nd, d1, s, m, n0, n, p(2), q(2), nv(2), nr !< Counters.
    real(R8P)                                   :: o   !< Orientation of the first segment.
 
-   nv = [blk%ni, blk%nj] ; allocate(a(2, 0), b(2, 0), line(0)) ; nr = 0_I4P
+   nv = [blk%ni, blk%nj] ; nr = 0_I4P ; n = 0_I4P
+   do r = 1, blk%nrec ! capacity: the wall edges
+      if (blk%rec(r)%kind /= TOPO_BOUNDARY .or. trim(blk%rec(r)%name) /= wname) cycle
+      nd = (blk%rec(r)%face + 1_I4P) / 2_I4P ; d1 = 3_I4P - nd
+      n = n + max(blk%rec(r)%hi(d1) - blk%rec(r)%lo(d1), 0_I4P)
+   enddo
+   allocate(a(2, n), b(2, n), line(n)) ; n = 0_I4P
    do r = 1, blk%nrec
       if (blk%rec(r)%kind /= TOPO_BOUNDARY .or. trim(blk%rec(r)%name) /= wname) cycle
       nr = nr + 1_I4P
       nd = (blk%rec(r)%face + 1_I4P) / 2_I4P ; d1 = 3_I4P - nd
       s = merge(1_I4P, -1_I4P, mod(blk%rec(r)%face, 2_I4P) == 1_I4P)
-      n0 = size(line, kind=I4P)
+      n0 = n
       do m = blk%rec(r)%lo(d1), blk%rec(r)%hi(d1) - 1_I4P
          p = blk%rec(r)%lo(1:2) ; p(d1) = m ; q = p ; q(d1) = m + 1_I4P
          if (blk%u(p(1), p(2)) == blk%u(q(1), q(2)) .and. blk%v(p(1), p(2)) == blk%v(q(1), q(2))) cycle
-         a = reshape([a, [blk%u(p(1), p(2)), blk%v(p(1), p(2))]], [2, size(line) + 1])
-         b = reshape([b, [blk%u(q(1), q(2)), blk%v(q(1), q(2))]], [2, size(line) + 1])
-         line = [line, nr]
+         n = n + 1_I4P
+         a(:, n) = [blk%u(p(1), p(2)), blk%v(p(1), p(2))] ; b(:, n) = [blk%u(q(1), q(2)), blk%v(q(1), q(2))]
+         line(n) = nr
       enddo
-      n = size(line, kind=I4P)
       if (n == n0) cycle
       ! orientation from the first segment and the interior vertex next to its start
       p = blk%rec(r)%lo(1:2) ; p(d1) = blk%rec(r)%lo(d1) ; q = p ; q(nd) = q(nd) + s
@@ -306,7 +329,7 @@ contains
          call swap_ends(a(:, n0 + 1:n), b(:, n0 + 1:n))
       endif
    enddo
-   sl%n = size(line, kind=I4P) ; sl%a = a ; sl%b = b ; sl%line = line ; allocate(sl%keep(sl%n)) ; sl%keep = .true.
+   sl%n = n ; sl%a = a(:, 1:n) ; sl%b = b(:, 1:n) ; sl%line = line(1:n) ; allocate(sl%keep(n)) ; sl%keep = .true.
    endsubroutine block_wall_segments
 
    pure subroutine swap_ends(a, b)
@@ -397,6 +420,106 @@ contains
       m = huge(1._R8P)
    endif
    endfunction mean_len
+
+   ! ------------------------------------------------------------------------------------------------------ hole flags
+   subroutine hole_flags(blocks, cutter, holes, offset, cuts, device, distances)
+   !< Hole flags of every vertex of the 3-D blocks against the cutter (module notes).
+   type(curvilinear_block_t),          intent(in)            :: blocks(:)    !< Blocks.
+   type(surface_stl_object),           intent(inout)         :: cutter       !< Cutter.
+   type(block_logical_t), allocatable, intent(out)           :: holes(:)     !< Holes per block.
+   real(R8P),                          intent(in),  optional :: offset       !< Blank below this signed distance.
+   logical,                            intent(in),  optional :: cuts(:)      !< Blocks cut (default all).
+   logical,                            intent(in),  optional :: device       !< On the GPU.
+   type(block_real_t),    allocatable, intent(out), optional :: distances(:) !< Signed distances per block.
+   type(vector_R8P), allocatable :: p(:)  !< Points.
+   real(R8P),        allocatable :: d(:)  !< Distances.
+   real(R8P)                     :: off   !< Offset.
+   logical                       :: dev, entered !< Device flags.
+   integer(I4P)                  :: b, n, i, j, k !< Counters.
+
+   off = 0._R8P ; if (present(offset)) off = offset
+   dev = .false. ; if (present(device)) dev = device
+   entered = .false.
+   if (dev .and. .not. cutter%is_on_device) then
+      call cutter%enter_device ; entered = .true.
+   endif
+   allocate(holes(size(blocks)))
+   if (present(distances)) allocate(distances(size(blocks)))
+   do b = 1, size(blocks, kind=I4P)
+      n = blocks(b)%ni * blocks(b)%nj * blocks(b)%nk
+      allocate(holes(b)%v(n)) ; holes(b)%v = .false.
+      if (present(cuts)) then
+         if (.not. cuts(b)) cycle
+      endif
+      allocate(p(n), d(n)) ; n = 0_I4P
+      do k = 1, blocks(b)%nk
+         do j = 1, blocks(b)%nj
+            do i = 1, blocks(b)%ni
+               n = n + 1_I4P ; p(n) = vector_R8P(blocks(b)%x(i, j, k), blocks(b)%y(i, j, k), blocks(b)%z(i, j, k))
+            enddo
+         enddo
+      enddo
+      if (dev) then
+         call cutter%distance_many_device(points=p, distances=d, is_signed=.true., sign_algorithm=SIGN_FWN, &
+                                          is_square_root=.true.)
+      else
+         call cutter%distance_many(points=p, distances=d, is_signed=.true., sign_algorithm=SIGN_FWN, &
+                                   is_square_root=.true.)
+      endif
+      holes(b)%v = d < off
+      if (present(distances)) call move_alloc(d, distances(b)%v)
+      if (allocated(d)) deallocate(d)
+      deallocate(p)
+   enddo
+   if (entered) call cutter%exit_device
+   endsubroutine hole_flags
+
+   subroutine hole_flags_2d(blocks, cutter, holes, offset, cuts, device, distances)
+   !< Hole flags of every vertex of the 2-D blocks against the cutter (module notes).
+   type(curvilinear_block_2d_t),       intent(in)            :: blocks(:)    !< Blocks.
+   type(curve_object),                 intent(inout)         :: cutter       !< Cutter.
+   type(block_logical_t), allocatable, intent(out)           :: holes(:)     !< Holes per block.
+   real(R8P),                          intent(in),  optional :: offset       !< Blank below this signed distance.
+   logical,                            intent(in),  optional :: cuts(:)      !< Blocks cut (default all).
+   logical,                            intent(in),  optional :: device       !< On the GPU.
+   type(block_real_t),    allocatable, intent(out), optional :: distances(:) !< Signed distances per block.
+   real(R8P),        allocatable :: p(:,:), d(:) !< Points, distances.
+   real(R8P)                     :: off   !< Offset.
+   logical                       :: dev, entered !< Device flags.
+   integer(I4P)                  :: b, n, i, j !< Counters.
+
+   off = 0._R8P ; if (present(offset)) off = offset
+   dev = .false. ; if (present(device)) dev = device
+   entered = .false.
+   if (dev .and. .not. cutter%get_is_on_device()) then
+      call cutter%enter_device ; entered = .true.
+   endif
+   allocate(holes(size(blocks)))
+   if (present(distances)) allocate(distances(size(blocks)))
+   do b = 1, size(blocks, kind=I4P)
+      n = blocks(b)%ni * blocks(b)%nj
+      allocate(holes(b)%v(n)) ; holes(b)%v = .false.
+      if (present(cuts)) then
+         if (.not. cuts(b)) cycle
+      endif
+      allocate(p(2, n), d(n)) ; n = 0_I4P
+      do j = 1, blocks(b)%nj
+         do i = 1, blocks(b)%ni
+            n = n + 1_I4P ; p(:, n) = [blocks(b)%u(i, j), blocks(b)%v(i, j)]
+         enddo
+      enddo
+      if (dev) then
+         call cutter%distance_many_device(points=p, distances=d, is_signed=.true., sign_algorithm=SIGN_FWN)
+      else
+         call cutter%distance_many(points=p, distances=d, is_signed=.true., sign_algorithm=SIGN_FWN)
+      endif
+      holes(b)%v = d < off
+      if (present(distances)) call move_alloc(d, distances(b)%v)
+      if (allocated(d)) deallocate(d)
+      deallocate(p)
+   enddo
+   if (entered) call cutter%exit_device
+   endsubroutine hole_flags_2d
 
    ! ------------------------------------------------------------------------------------------------------- utilities
    pure function pt3(blk, p) result(x)
