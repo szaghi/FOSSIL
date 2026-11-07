@@ -24,6 +24,7 @@ implicit none
 private
 public :: trilinear_point, trilinear_jacobian, det3, hex_volume, hex_centroid, bilinear_face_vector
 public :: bilinear_point, bilinear_jacobian, quad_area, quad_centroid, GAUSS2
+public :: hex_shape_metrics, quad_shape_metrics, HEX_FACES
 public :: hex_validity, quad_validity, CELL_VALID, CELL_SINGULAR, CELL_INVALID, CELL_UNDETERMINED, VALIDITY_DEPTH
 
 integer(I4P), parameter :: CELL_VALID        = 1_I4P !< det J has the block's sign everywhere.
@@ -32,6 +33,9 @@ integer(I4P), parameter :: CELL_INVALID      = 3_I4P !< det J has the opposite s
 integer(I4P), parameter :: CELL_UNDETERMINED = 4_I4P !< Not decided (3-D only).
 integer(I4P), parameter :: VALIDITY_DEPTH    = 5_I4P !< Subdivision levels.
 integer(I4P), parameter :: VALIDITY_BOXES    = 2048_I4P !< Boxes examined per cell at most.
+integer(I4P), parameter :: HEX_FACES(4, 6)   = reshape([1, 3, 7, 5, 2, 4, 8, 6, 1, 5, 6, 2, 3, 7, 8, 4, 1, 2, 4, 3, &
+                                                        5, 6, 8, 7], [4, 6]) !< Corners of the faces -i, +i, -j, +j, -k, +k.
+real(R8P),    parameter :: RAD2DEG = 180._R8P / acos(-1._R8P) !< Degrees per radian.
 
 real(R8P), parameter :: GAUSS2(2) = [0.5_R8P - 0.5_R8P / sqrt(3._R8P), 0.5_R8P + 0.5_R8P / sqrt(3._R8P)] !< 2-point Gauss.
 
@@ -304,6 +308,76 @@ contains
    enddo
    eb = 2._R8P * eb + 8._R8P * epsilon(1._R8P) * ab
    endsubroutine bernstein27
+
+   pure subroutine hex_shape_metrics(c, skewness, aspect, warp)
+   !< Shape metrics of a trilinear cell: equiangle skewness max |theta - 90| / 90 over the corners of its six faces;
+   !< aspect ratio = longest / shortest of the mean edge lengths per direction; warp = max over the faces of the
+   !< angle (degrees) between the normals of the two triangles a diagonal splits the face into (both diagonals).
+   real(R8P), intent(in)  :: c(3, 8)  !< Corners.
+   real(R8P), intent(out) :: skewness !< Equiangle skewness in [0, 1].
+   real(R8P), intent(out) :: aspect   !< Aspect ratio >= 1.
+   real(R8P), intent(out) :: warp     !< Warp angle (degrees).
+   integer(I4P), parameter :: EI(2, 12) = reshape([1, 2, 3, 4, 5, 6, 7, 8, 1, 3, 2, 4, 5, 7, 6, 8, 1, 5, 2, 6, 3, 7, &
+                                                   4, 8], [2, 12]) !< Edges, 4 per direction.
+   real(R8P)               :: p(3, 4), len(3), th !< Face corners, mean lengths, angle.
+   integer(I4P)            :: f, k, e             !< Counters.
+
+   skewness = 0._R8P ; warp = 0._R8P ; len = 0._R8P
+   do f = 1, 6
+      do k = 1, 4
+         p(:, k) = c(:, HEX_FACES(k, f))
+      enddo
+      do k = 1, 4
+         th = angle3(p(:, mod(k + 2, 4) + 1) - p(:, k), p(:, mod(k, 4) + 1) - p(:, k))
+         skewness = max(skewness, abs(th - 90._R8P) / 90._R8P)
+      enddo
+      warp = max(warp, angle3(cross3(p(:, 2) - p(:, 1), p(:, 3) - p(:, 1)), cross3(p(:, 3) - p(:, 1), p(:, 4) - p(:, 1))), &
+                 angle3(cross3(p(:, 3) - p(:, 2), p(:, 4) - p(:, 2)), cross3(p(:, 4) - p(:, 2), p(:, 1) - p(:, 2))))
+   enddo
+   do e = 1, 12
+      len((e + 3) / 4) = len((e + 3) / 4) + norm2(c(:, EI(2, e)) - c(:, EI(1, e))) / 4._R8P
+   enddo
+   aspect = huge(1._R8P)
+   if (minval(len) > 0._R8P) aspect = maxval(len) / minval(len)
+   endsubroutine hex_shape_metrics
+
+   pure subroutine quad_shape_metrics(c, skewness, aspect)
+   !< Shape metrics of a bilinear cell: equiangle skewness and aspect ratio (as hex_shape_metrics).
+   real(R8P), intent(in)  :: c(2, 4)  !< Corners.
+   real(R8P), intent(out) :: skewness !< Equiangle skewness in [0, 1].
+   real(R8P), intent(out) :: aspect   !< Aspect ratio >= 1.
+   integer(I4P), parameter :: CYC(4) = [1, 2, 4, 3] !< Corners in cyclic order.
+   real(R8P)               :: p(3, 4), len(2), th !< Corners (z = 0), mean lengths, angle.
+   integer(I4P)            :: k   !< Counter.
+
+   do k = 1, 4
+      p(:, k) = [c(1, CYC(k)), c(2, CYC(k)), 0._R8P]
+   enddo
+   skewness = 0._R8P
+   do k = 1, 4
+      th = angle3(p(:, mod(k + 2, 4) + 1) - p(:, k), p(:, mod(k, 4) + 1) - p(:, k))
+      skewness = max(skewness, abs(th - 90._R8P) / 90._R8P)
+   enddo
+   len(1) = 0.5_R8P * (norm2(c(:, 2) - c(:, 1)) + norm2(c(:, 4) - c(:, 3)))
+   len(2) = 0.5_R8P * (norm2(c(:, 3) - c(:, 1)) + norm2(c(:, 4) - c(:, 2)))
+   aspect = huge(1._R8P)
+   if (minval(len) > 0._R8P) aspect = maxval(len) / minval(len)
+   endsubroutine quad_shape_metrics
+
+   pure real(R8P) function angle3(a, b) result(th)
+   !< Angle between two vectors in degrees (0 if one is zero), by atan2(|a x b|, a . b).
+   real(R8P), intent(in) :: a(3), b(3) !< Vectors.
+
+   th = RAD2DEG * atan2(norm2(cross3(a, b)), dot_product(a, b))
+   endfunction angle3
+
+   pure function cross3(a, b) result(c)
+   !< Cross product.
+   real(R8P), intent(in) :: a(3), b(3) !< Vectors.
+   real(R8P)             :: c(3)       !< a x b.
+
+   c = [a(2) * b(3) - a(3) * b(2), a(3) * b(1) - a(1) * b(3), a(1) * b(2) - a(2) * b(1)]
+   endfunction cross3
 
    pure subroutine shape8(xi, w)
    !< Trilinear shape functions.

@@ -26,7 +26,7 @@ use fossil_block_geometry, only : CELL_VALID, CELL_SINGULAR
 use fossil_predicates,     only : orient2d_xy
 use fossil_block_stencil,  only : lagrange_weights, centred_start, STENCIL_CENTRED, STENCIL_SHIFTED, STENCIL_REDUCED, &
                                   STENCIL_FAILED, STENCIL_MAX
-use fossil_block_geometry, only : trilinear_point, bilinear_point
+use fossil_block_geometry, only : trilinear_point, bilinear_point, hex_shape_metrics, quad_shape_metrics, HEX_FACES
 
 implicit none
 private
@@ -85,6 +85,7 @@ type :: curvilinear_block_t
       procedure, pass(self) :: locate_many => locate_many_3d  !< Robust location of points.
       procedure, pass(self) :: locate_many_device => locate_many_device_3d !< Robust location on the device.
       procedure, pass(self) :: stencils => stencils_3d        !< Lagrange interpolation stencils.
+      procedure, pass(self) :: quality => quality_3d          !< Cell quality metrics.
 endtype curvilinear_block_t
 
 type :: curvilinear_block_2d_t
@@ -111,6 +112,7 @@ type :: curvilinear_block_2d_t
       procedure, pass(self) :: locate_many => locate_many_2d  !< Robust location of points.
       procedure, pass(self) :: locate_many_device => locate_many_device_2d !< Robust location on the device.
       procedure, pass(self) :: stencils => stencils_2d        !< Lagrange interpolation stencils.
+      procedure, pass(self) :: quality => quality_2d          !< Cell quality metrics.
 endtype curvilinear_block_2d_t
 
 type :: vx_t
@@ -1246,6 +1248,138 @@ contains
       enddo
    enddo
    endsubroutine map_tensor_2d
+
+   ! --------------------------------------------------------------------------------------------------------- quality
+   subroutine quality_3d(self, skewness, orthogonality, aspect, warp, min_jacobian)
+   !< Cell quality metrics [ni-1, nj-1, nk-1] (definitions in fossil_block_geometry): equiangle skewness; orthogonality =
+   !< min over the six faces of cos(outward area vector, d), d from the cell centroid to the neighbour's (to the face's
+   !< vertex mean on the block boundary); aspect ratio; warp (degrees); min_jacobian = certified lower bound of det J
+   !< (times the orientation) over the mean det J (the volume).
+   class(curvilinear_block_t), intent(in)            :: self               !< Block.
+   real(R8P), allocatable,     intent(out), optional :: skewness(:,:,:)    !< Equiangle skewness.
+   real(R8P), allocatable,     intent(out), optional :: orthogonality(:,:,:) !< Orthogonality.
+   real(R8P), allocatable,     intent(out), optional :: aspect(:,:,:)      !< Aspect ratio.
+   real(R8P), allocatable,     intent(out), optional :: warp(:,:,:)        !< Warp (degrees).
+   real(R8P), allocatable,     intent(out), optional :: min_jacobian(:,:,:) !< Scaled certified min det J.
+   real(R8P), allocatable                            :: vol(:,:,:), cen(:,:,:,:), fi(:,:,:,:), fj(:,:,:,:), fk(:,:,:,:)
+   real(R8P), allocatable                            :: jm(:,:,:)          !< Bounds.
+   integer(I4P), allocatable                         :: st(:,:,:)          !< Validity.
+   real(R8P)                                         :: c(3, 8), sk, asp, wp, o, area(3), d(3), cosmin !< Work.
+   integer(I4P)                                      :: i, j, k, f, a, nc(3), nb(3) !< Counters.
+
+   nc = [self%ni - 1_I4P, self%nj - 1_I4P, self%nk - 1_I4P] ; o = self%orientation()
+   if (present(skewness)) allocate(skewness(nc(1), nc(2), nc(3)))
+   if (present(aspect)) allocate(aspect(nc(1), nc(2), nc(3)))
+   if (present(warp)) allocate(warp(nc(1), nc(2), nc(3)))
+   if (present(skewness) .or. present(aspect) .or. present(warp)) then
+      do k = 1, nc(3)
+         do j = 1, nc(2)
+            do i = 1, nc(1)
+               call hex_shape_metrics(self%corners(i, j, k), sk, asp, wp)
+               if (present(skewness)) skewness(i, j, k) = sk
+               if (present(aspect)) aspect(i, j, k) = asp
+               if (present(warp)) warp(i, j, k) = wp
+            enddo
+         enddo
+      enddo
+   endif
+   if (present(min_jacobian)) then
+      call self%geometry(volume=vol) ; call self%validity(st, jm, orientation=o)
+      min_jacobian = jm / max(o * vol, tiny(1._R8P))
+   endif
+   if (present(orthogonality)) then
+      call self%geometry(centroid=cen, face_i=fi, face_j=fj, face_k=fk)
+      allocate(orthogonality(nc(1), nc(2), nc(3)))
+      do k = 1, nc(3)
+         do j = 1, nc(2)
+            do i = 1, nc(1)
+               c = self%corners(i, j, k) ; cosmin = 1._R8P
+               do f = 1, 6
+                  a = (f + 1_I4P) / 2_I4P
+                  select case(f)
+                  case(1) ; area = -fi(:, i, j, k)
+                  case(2) ; area = fi(:, i + 1, j, k)
+                  case(3) ; area = -fj(:, i, j, k)
+                  case(4) ; area = fj(:, i, j + 1, k)
+                  case(5) ; area = -fk(:, i, j, k)
+                  case(6) ; area = fk(:, i, j, k + 1)
+                  endselect
+                  area = o * area
+                  nb = [i, j, k] ; nb(a) = nb(a) + merge(-1_I4P, 1_I4P, mod(f, 2_I4P) == 1_I4P)
+                  if (nb(a) >= 1 .and. nb(a) <= nc(a)) then
+                     d = cen(:, nb(1), nb(2), nb(3)) - cen(:, i, j, k)
+                  else
+                     d = 0.25_R8P * (c(:, HEX_FACES(1, f)) + c(:, HEX_FACES(2, f)) + c(:, HEX_FACES(3, f)) + &
+                                     c(:, HEX_FACES(4, f))) - cen(:, i, j, k)
+                  endif
+                  if (norm2(area) > 0._R8P .and. norm2(d) > 0._R8P) &
+                     cosmin = min(cosmin, dot_product(area, d) / (norm2(area) * norm2(d)))
+               enddo
+               orthogonality(i, j, k) = cosmin
+            enddo
+         enddo
+      enddo
+   endif
+   endsubroutine quality_3d
+
+   subroutine quality_2d(self, skewness, orthogonality, aspect, min_jacobian)
+   !< Cell quality metrics [ni-1, nj-1] as quality_3d (edges for faces; min_jacobian = min corner det J / area).
+   class(curvilinear_block_2d_t), intent(in)            :: self               !< Block.
+   real(R8P), allocatable,        intent(out), optional :: skewness(:,:)      !< Equiangle skewness.
+   real(R8P), allocatable,        intent(out), optional :: orthogonality(:,:) !< Orthogonality.
+   real(R8P), allocatable,        intent(out), optional :: aspect(:,:)        !< Aspect ratio.
+   real(R8P), allocatable,        intent(out), optional :: min_jacobian(:,:)  !< Scaled min det J.
+   real(R8P), allocatable                               :: ar(:,:), cen(:,:,:), ei(:,:,:), ej(:,:,:), jm(:,:) !< Geometry.
+   integer(I4P), allocatable                            :: st(:,:)            !< Validity.
+   integer(I4P), parameter                              :: EDGE(2, 4) = reshape([1, 3, 2, 4, 1, 2, 3, 4], [2, 4]) !< -i, +i, -j, +j.
+   real(R8P)                                            :: c(2, 4), sk, asp, o, nrm(2), d(2), cosmin !< Work.
+   integer(I4P)                                         :: i, j, f, a, nc(2), nb(2) !< Counters.
+
+   nc = [self%ni - 1_I4P, self%nj - 1_I4P] ; o = self%orientation()
+   if (present(skewness)) allocate(skewness(nc(1), nc(2)))
+   if (present(aspect)) allocate(aspect(nc(1), nc(2)))
+   if (present(skewness) .or. present(aspect)) then
+      do j = 1, nc(2)
+         do i = 1, nc(1)
+            call quad_shape_metrics(self%corners(i, j), sk, asp)
+            if (present(skewness)) skewness(i, j) = sk
+            if (present(aspect)) aspect(i, j) = asp
+         enddo
+      enddo
+   endif
+   if (present(min_jacobian)) then
+      call self%geometry(area=ar) ; call self%validity(st, jm, orientation=o)
+      min_jacobian = jm / max(o * ar, tiny(1._R8P))
+   endif
+   if (present(orthogonality)) then
+      call self%geometry(centroid=cen, face_i=ei, face_j=ej)
+      allocate(orthogonality(nc(1), nc(2)))
+      do j = 1, nc(2)
+         do i = 1, nc(1)
+            c = self%corners(i, j) ; cosmin = 1._R8P
+            do f = 1, 4
+               a = (f + 1_I4P) / 2_I4P
+               select case(f)
+               case(1) ; nrm = -ei(:, i, j)
+               case(2) ; nrm = ei(:, i + 1, j)
+               case(3) ; nrm = -ej(:, i, j)
+               case(4) ; nrm = ej(:, i, j + 1)
+               endselect
+               nrm = o * nrm
+               nb = [i, j] ; nb(a) = nb(a) + merge(-1_I4P, 1_I4P, mod(f, 2_I4P) == 1_I4P)
+               if (nb(a) >= 1 .and. nb(a) <= nc(a)) then
+                  d = cen(:, nb(1), nb(2)) - cen(:, i, j)
+               else
+                  d = 0.5_R8P * (c(:, EDGE(1, f)) + c(:, EDGE(2, f))) - cen(:, i, j)
+               endif
+               if (norm2(nrm) > 0._R8P .and. norm2(d) > 0._R8P) &
+                  cosmin = min(cosmin, dot_product(nrm, d) / (norm2(nrm) * norm2(d)))
+            enddo
+            orthogonality(i, j) = cosmin
+         enddo
+      enddo
+   endif
+   endsubroutine quality_2d
 
    ! ------------------------------------------------------------------------------------------------------- detection
    subroutine detect_topology(blocks, tolerance, translations)
