@@ -94,6 +94,9 @@ type :: swept_cells_3d_t
    logical                   :: self_intersecting = .false. !< The surface crosses itself (only with `check_input`).
 endtype swept_cells_3d_t
 
+real(R8P), parameter :: FLOOR_H = 1e-6_R8P !< Pieces shorter than this converge to 64 eps of the measure times FLOOR_H
+                                         !< (issue #69: slices within 1e-10 of a face carry ~1e-7 relative noise).
+
 type :: slist_t
    !< A list of breakpoints.
    real(R8P), allocatable :: s(:) !< Breakpoints.
@@ -310,6 +313,7 @@ contains
       real(R8P), allocatable              :: tmp(:), z(:)
       real(R8P)                           :: co(6), w0(2), w1(2), d(2), xs(2), r(2), lam, node(2)
       integer(I4P)                        :: q, nz, kk, e
+      logical                             :: cert
 
       allocate(tmp(0)) ; m = 0_I4P
       ! wall vertices crossing the line: X_nax(s) = a, the other coordinate inside [lo, hi]
@@ -319,7 +323,8 @@ contains
          else
             co = [vv(q), 0._R8P, vu(q), 0._R8P, t0(2) - a, dt(2)]
          endif
-         call isolate_zeros(co, th0, dth, z, nz)
+         call isolate_zeros(co, th0, dth, abs(vu(q)) + abs(vv(q)) + norm2(t0) + abs(a) + norm2(dt), z, nz, cert)
+         if (.not. cert) exact = .false.
          do kk = 1_I4P, nz
             xs = rot2(th0 + z(kk) * dth, [vu(q), vv(q)]) + t0 + z(kk) * dt
             if (xs(3 - nax) >= lo .and. xs(3 - nax) <= hi) tmp = [tmp, z(kk)]
@@ -339,7 +344,8 @@ contains
             co = [d(1) * w0(2) - d(2) * w0(1), d(1) * w1(2) - d(2) * w1(1), &
                   -(d(1) * w0(1) + d(2) * w0(2)), -(d(1) * w1(1) + d(2) * w1(2)), &
                   -(d(1) * vv(q) - d(2) * vu(q)), 0._R8P]
-            call isolate_zeros(co, th0, dth, z, nz)
+            call isolate_zeros(co, th0, dth, norm2(d) * (norm2(w0) + norm2(w1) + abs(vu(q)) + abs(vv(q))), z, nz, cert)
+            if (.not. cert) exact = .false.
             do kk = 1_I4P, nz
                xs = rot2(th0 + z(kk) * dth, [vu(q), vv(q)]) + t0 + z(kk) * dt
                r = rot2(th0 + z(kk) * dth, d)
@@ -350,6 +356,7 @@ contains
       enddo
       m = size(tmp, kind=I4P)
       call sort_unique(tmp, m)
+      call merge_close(tmp, m)
       b = tmp(1:m)
       endsubroutine face_events
 
@@ -376,8 +383,8 @@ contains
          do
             ng = 2_I4P * ng
             call piece(nax, a, lo, hi, sa, sb, ng, l2, o2) ; ne = ne + ng
-            if (abs(l2 - l1) <= 64._R8P * epsilon(1._R8P) * scl * (sb - sa) .and. &
-                abs(o2 - o1) <= 64._R8P * epsilon(1._R8P) * sco * (sb - sa)) exit
+            if (abs(l2 - l1) <= 64._R8P * epsilon(1._R8P) * scl * max(sb - sa, FLOOR_H) .and. &
+                abs(o2 - o1) <= 64._R8P * epsilon(1._R8P) * sco * max(sb - sa, FLOOR_H)) exit
             if (ng >= 64_I4P) then
                conv = .false. ; exit
             endif
@@ -415,6 +422,21 @@ contains
       endsubroutine piece
    endsubroutine faces_rotation_2d
 
+   pure subroutine merge_close(a, m)
+   !< Drop sorted breakpoints within 1e-10 of the previous kept one, of 0 or of 1 (see `isolate_zeros`).
+   real(R8P),    intent(inout) :: a(:) !< Breakpoints, sorted, a(1:m) used.
+   integer(I4P), intent(inout) :: m    !< Their number.
+   real(R8P)                   :: last
+   integer(I4P)                :: i, k
+
+   k = 0_I4P ; last = 0._R8P
+   do i = 1_I4P, m
+      if (a(i) - last < 1e-10_R8P .or. a(i) > 1._R8P - 1e-10_R8P) cycle
+      k = k + 1_I4P ; a(k) = a(i) ; last = a(i)
+   enddo
+   m = k
+   endsubroutine merge_close
+
    pure function rot2(th, p) result(r)
    !< p rotated by th.
    real(R8P), intent(in) :: th, p(2)
@@ -423,26 +445,41 @@ contains
    r = [cos(th) * p(1) - sin(th) * p(2), sin(th) * p(1) + cos(th) * p(2)]
    endfunction rot2
 
-   subroutine isolate_zeros(co, phi0, dphi, z, nz)
+   subroutine isolate_zeros(co, phi0, dphi, scale, z, nz, certified)
    !< Zeros in (0, 1) of g(s) = (p0 + p1 s) cos phi + (q0 + q1 s) sin phi + k0 + k1 s, phi = phi0 + s dphi, with
    !< co = [p0, p1, q0, q1, k0, k1] (issue #69). |g''| <= M = 2 |dphi| |(p1, q1)| + dphi^2 max|(p, q)| (the norm of
    !< an affine function is largest at an end): on [sa, sb] (h = sb - sa) with end values of one sign, both larger
    !< than M h^2/8 plus the evaluation error, g has no zero; otherwise the interval is halved. A sign change is
-   !< refined by bisection to one ulp; an interval down to 1e-15 without a certificate gives a breakpoint at its
-   !< middle (a tangency, or g within round-off of zero: harmless extra breakpoints).
+   !< refined by bisection to one ulp. An interval narrower than GAP = 1e-10 without a certificate (a zero at an end of
+   !< the step, a tangency, g within round-off of zero) gives one breakpoint at its middle: a kink within GAP of a
+   !< breakpoint changes the Gauss value of its piece by ~slope GAP^2, far below round-off. Zeros within GAP of 0 or
+   !< 1, or of each other, are merged by the callers (`merge_close`). An interval on which |g| is at round-off
+   !< throughout (end values and the curvature bound below `err`: a zero zone, e.g. a mesh face starting on a grid
+   !< plane) gets breakpoints at its two ends only. A g with every coefficient at
+   !< round-off of `scale` (identically zero: the element never leaves the face's line or plane) has no event. At most 4096
+   !< intervals are examined: beyond, `certified` is false and the caller must not claim exactness.
    real(R8P),              intent(in)  :: co(6), phi0, dphi
+   real(R8P),              intent(in)  :: scale !< Magnitude of the terms that make up the coefficients.
    real(R8P), allocatable, intent(out) :: z(:)
    integer(I4P),           intent(out) :: nz
-   integer(I4P), parameter             :: NSTACK = 4096
+   logical,                intent(out) :: certified
+   integer(I4P), parameter             :: NSTACK = 4096, BUDGET = 4096
+   real(R8P),    parameter             :: GAP = 1e-10_R8P !< Uncertified intervals stop here (see above).
    real(R8P)                           :: big_m, err, st(2, NSTACK), sa, sb, ga, gb, sm, gm, lo, hi, glo
-   integer(I4P)                        :: top
+   integer(I4P)                        :: top, used
 
-   allocate(z(0)) ; nz = 0_I4P
+   allocate(z(0)) ; nz = 0_I4P ; certified = .true. ; used = 0_I4P
    big_m = 2._R8P * abs(dphi) * norm2(co([2, 4])) + &
            dphi**2 * max(norm2([co(1), co(3)]), norm2([co(1) + co(2), co(3) + co(4)]))
-   err = 16._R8P * epsilon(1._R8P) * (abs(co(1)) + abs(co(2)) + abs(co(3)) + abs(co(4)) + abs(co(5)) + abs(co(6)))
+   err = 32._R8P * epsilon(1._R8P) * max(scale, abs(co(1)) + abs(co(2)) + abs(co(3)) + abs(co(4)) + abs(co(5)) + &
+                                          abs(co(6)))
+   if (maxval(abs(co)) <= 64._R8P * epsilon(1._R8P) * scale) return ! identically zero (to round-off): no event
    top = 1_I4P ; st(:, 1) = [0._R8P, 1._R8P]
    do while (top > 0_I4P)
+      used = used + 1_I4P
+      if (used > BUDGET) then
+         certified = .false. ; exit
+      endif
       sa = st(1, top) ; sb = st(2, top) ; top = top - 1_I4P
       ga = g(sa) ; gb = g(sb)
       if (ga * gb < 0._R8P .and. abs(ga) > err .and. abs(gb) > err .and. big_m * (sb - sa)**2 / 8._R8P < err) then
@@ -465,7 +502,11 @@ contains
          cycle
       endif
       if (ga * gb > 0._R8P .and. min(abs(ga), abs(gb)) > big_m * (sb - sa)**2 / 8._R8P + err) cycle ! no zero
-      if (sb - sa < 1e-15_R8P) then
+      if (abs(ga) <= err .and. abs(gb) <= err .and. big_m * (sb - sa)**2 / 8._R8P <= err) then
+         ! a zero zone: |g| at round-off over the whole interval, the event undetermined in double precision
+         call add(sa) ; call add(sb) ; cycle
+      endif
+      if (sb - sa < GAP) then
          call add(0.5_R8P * (sa + sb)) ; cycle
       endif
       if (top + 2_I4P > NSTACK) then ! cannot happen for |g''| bounded; keep a breakpoint rather than drop one
@@ -487,7 +528,7 @@ contains
       subroutine add(s)
       real(R8P), intent(in) :: s
 
-      if (s > 0._R8P .and. s < 1._R8P) then
+      if (s > GAP .and. s < 1._R8P - GAP) then
          z = [z, s] ; nz = nz + 1_I4P
       endif
       endsubroutine add
@@ -752,8 +793,9 @@ contains
    subroutine swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, check_input)
    !< Swept geometry of `surface` between `pose0` and `pose1` on the block with cell edges x(nx+1),
    !< y(ny+1), z(nz+1) (issue #41 step 5): volumes from `cut_cells_3d` at the two poses; face apertures
-   !< exact for a pure translation (`exact`, default .true.; see the module notes), else by `nq`-point
-   !< Gauss-Legendre (default 4) on copies moved to the screw poses or to `poses(nq)`.
+   !< exact for a pure translation and, since issue #69, for the screw motion with a rotation (`exact`, default
+   !< .true.; see the module notes and the moving-bodies page), else by `nq`-point Gauss-Legendre (default 4) on
+   !< copies moved to the screw poses or to `poses(nq)`.
    !< `status = STATUS_INVALID_INPUT` on bad edges, nq < 1 or a poses size other than nq.
    type(surface_stl_object), intent(in)            :: surface  !< Surface (body frame).
    type(rigid_pose_t),       intent(in)            :: pose0    !< Pose at the start.
@@ -770,6 +812,7 @@ contains
    type(intersection_pair_t), allocatable :: pairs(:) !< Crossing facet pairs (check_input).
    real(R8P)                :: d(3)               !< Displacement.
    logical                  :: translation        !< Exact path.
+   logical                  :: rotation_exact     !< Exact rotation path (issue #69).
    type(cut_cells_3d_t)     :: k0, k1             !< Cut cells at the end poses.
    real(R8P), allocatable   :: fx2(:,:,:), fy2(:,:,:), fz2(:,:,:), flux(:,:,:), fl2(:,:,:) !< Work.
    integer(I4P)             :: nx, ny, nz, n, i, j, k, st !< Work.
@@ -816,8 +859,15 @@ contains
    sw%cleared = sw%alpha0 == 0._R8P .and. sw%alpha1 > 0._R8P
    sw%covered = sw%alpha0 > 0._R8P .and. sw%alpha1 == 0._R8P
    translation = all(pose1%r == pose0%r) .and. .not. present(poses)
-   if (present(exact)) translation = translation .and. exact
-   if (translation) then
+   rotation_exact = .not. present(poses) .and. .not. translation
+   if (present(exact)) then
+      translation = translation .and. exact ; rotation_exact = rotation_exact .and. exact
+   endif
+   if (rotation_exact) then
+      ! exact rotation (issue #69): certified breakpoints per grid plane, Gauss doubled to round-off on every piece
+      call faces_rotation_3d(surface, pose0, pose1, x, y, z, sw%face_x, sw%face_y, sw%face_z, flux, sw%evaluations, &
+                             sw%exact)
+   elseif (translation) then
       sw%exact = .true.
       d = pose1%t - pose0%t
       call faces_translation_3d(s0, d, x, y, z, sw%face_x, sw%face_y, sw%face_z, sw%evaluations)
@@ -834,7 +884,7 @@ contains
       call faces_gauss_3d(surface, pose0, pose1, x, y, z, n, sw%face_x, sw%face_y, sw%face_z, flux, poses)
       sw%evaluations = n
    endif
-   if (.not. present(poses) .and. .not. translation) then
+   if (.not. present(poses) .and. .not. translation .and. .not. rotation_exact) then
       allocate(fx2(nx + 1, ny, nz), fy2(nx, ny + 1, nz), fz2(nx, ny, nz + 1), fl2(nx, ny, nz))
       call faces_gauss_3d(surface, pose0, pose1, x, y, z, 2_I4P * n, fx2, fy2, fz2, fl2)
       sw%error_estimate = max(maxval(abs(fx2 - sw%face_x)), maxval(abs(fy2 - sw%face_y)), maxval(abs(fz2 - sw%face_z)))
@@ -850,6 +900,291 @@ contains
       enddo
    enddo
    endsubroutine swept_cells_3d
+
+   subroutine faces_rotation_3d(surface, pose0, pose1, x, y, z, fx, fy, fz, flux, nev, exact)
+   !< Exact time-averaged fluid face areas and rigid-field outflows under the screw motion with a rotation (issue #69;
+   !< moving-bodies page, "Exact rotation"), one grid plane at a time. The body point w = R0 q moves to
+   !< X(s) = Rot(s angle) w + t0 + s dt about the fixed unit axis k (Rodrigues: Rot(phi) w = A cos phi + B sin phi + C,
+   !< C = k (k . w), A = w - C, B = k x w). A plane's breakpoints are the zeros (`isolate_zeros`) of: a mesh vertex
+   !< on the plane, a mesh edge meeting one of its grid lines (det[D, e_l, N - t(s)] - det[d, Rot^T e_l, w]), one of
+   !< its grid nodes on a triangle ((Rot n0) . (N - t(s)) - n0 . w_a), each checked to lie on the plane's grid and
+   !< prefiltered by the box the element sweeps. A plane outside the box the body sweeps is fluid throughout (closed
+   !< form). On every piece, Gauss-Legendre doubled from 2 nodes until the plane's face areas and outflows change by
+   !< round-off (at most 64 nodes, else exact = .false.); one evaluation slices a moved copy (`slice_surface` with
+   !< `on_plane_low` and the 2-D cut cells, as `cut_cells_3d`).
+   type(surface_stl_object), intent(in)  :: surface        !< Surface (body frame).
+   type(rigid_pose_t),       intent(in)  :: pose0, pose1   !< End poses.
+   real(R8P),                intent(in)  :: x(:), y(:), z(:) !< Cell edges.
+   real(R8P),                intent(out) :: fx(:,:,:), fy(:,:,:), fz(:,:,:) !< Time-averaged fluid areas.
+   real(R8P),                intent(out) :: flux(:,:,:)    !< Time integral of the rigid-field outflow per cell.
+   integer(I4P),             intent(out) :: nev            !< Largest number of evaluations per plane.
+   logical,                  intent(out) :: exact          !< Every piece converged.
+   type(facet_object), pointer :: f
+   real(R8P), allocatable      :: w(:,:,:), vlo(:,:,:), vhi(:,:,:), ox(:,:,:), oy(:,:,:), oz(:,:,:), bp(:)
+   real(R8P), allocatable      :: area(:,:), outf(:,:)
+   real(R8P)                   :: kax(3), ang, t0(3), dt(3), om(3), blo(3), bhi(3), xs(3), mrg, g(3, 3)
+   integer(I4P)                :: nf, nx, ny, nz, i, j, k, q, c, ne, nb
+   logical                     :: ok
+
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   call pose_log_3d(pose0, pose1, kax, ang)
+   t0 = pose0%t ; dt = pose1%t - pose0%t ; om = ang * kax
+   nf = surface%get_facets_number()
+   allocate(w(3, 3, nf), vlo(3, 3, nf), vhi(3, 3, nf))
+   blo = huge(1._R8P) ; bhi = -huge(1._R8P)
+   do i = 1_I4P, nf
+      f => surface%facet_at(i)
+      do c = 1, 3
+         w(:, c, i) = matmul(pose0%r, [f%vertex(c)%x, f%vertex(c)%y, f%vertex(c)%z])
+         ! box of the vertex path: 17 samples, |X''| <= ang^2 |w|
+         vlo(:, c, i) = huge(1._R8P) ; vhi(:, c, i) = -huge(1._R8P)
+         do q = 0, 16
+            xs = at(w(:, c, i), real(q, R8P) / 16._R8P)
+            vlo(:, c, i) = min(vlo(:, c, i), xs) ; vhi(:, c, i) = max(vhi(:, c, i), xs)
+         enddo
+         mrg = ang**2 * norm2(w(:, c, i)) / (8._R8P * 16._R8P**2) + 1e-12_R8P * (norm2(w(:, c, i)) + norm2(t0) + &
+               norm2(dt) + 1._R8P)
+         vlo(:, c, i) = vlo(:, c, i) - mrg ; vhi(:, c, i) = vhi(:, c, i) + mrg
+         blo = min(blo, vlo(:, c, i)) ; bhi = max(bhi, vhi(:, c, i))
+      enddo
+   enddo
+   allocate(ox(nx + 1, ny, nz), oy(nx, ny + 1, nz), oz(nx, ny, nz + 1))
+   nev = 0_I4P ; exact = .true.
+   g(:, 1) = [minval(x), minval(y), minval(z)] ; g(:, 2) = [maxval(x), maxval(y), maxval(z)]
+   do i = 1_I4P, nx + 1_I4P ! planes x = x_i: (u, v) = (y, z)
+      call one_plane(1_I4P, x(i), y, z, area, outf)
+      fx(i, :, :) = area ; ox(i, :, :) = outf
+   enddo
+   do j = 1_I4P, ny + 1_I4P ! planes y = y_j: (u, v) = (z, x)
+      call one_plane(2_I4P, y(j), z, x, area, outf)
+      do k = 1_I4P, nz
+         do i = 1_I4P, nx
+            fy(i, j, k) = area(k, i) ; oy(i, j, k) = outf(k, i)
+         enddo
+      enddo
+   enddo
+   do k = 1_I4P, nz + 1_I4P ! planes z = z_k: (u, v) = (x, y)
+      call one_plane(3_I4P, z(k), x, y, area, outf)
+      fz(:, :, k) = area ; oz(:, :, k) = outf
+   enddo
+   do k = 1_I4P, nz
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx
+            flux(i, j, k) = ox(i + 1, j, k) - ox(i, j, k) + oy(i, j + 1, k) - oy(i, j, k) + oz(i, j, k + 1) - oz(i, j, k)
+         enddo
+      enddo
+   enddo
+   contains
+      pure function at(wv, sv) result(xv)
+      !< Position at s of the body point with R0 q = wv.
+      real(R8P), intent(in) :: wv(3), sv
+      real(R8P)             :: xv(3), cv(3)
+
+      cv = kax * dot_product(kax, wv)
+      xv = (wv - cv) * cos(sv * ang) + cross(kax, wv) * sin(sv * ang) + cv + t0 + sv * dt
+      endfunction at
+
+      pure subroutine rodrigues(wv, a3, b3, c3)
+      !< Rot(phi) wv = a3 cos phi + b3 sin phi + c3.
+      real(R8P), intent(in)  :: wv(3)
+      real(R8P), intent(out) :: a3(3), b3(3), c3(3)
+
+      c3 = kax * dot_product(kax, wv) ; a3 = wv - c3 ; b3 = cross(kax, wv)
+      endsubroutine rodrigues
+
+      subroutine one_plane(na, lev, gu, gv, ar, ou)
+      !< Time-averaged fluid areas ar(nu, nv) and outflows ou(nu, nv) of the faces of the plane normal to na at lev,
+      !< whose in-plane axes (cyclic) carry the cell edges gu, gv.
+      integer(I4P),           intent(in)  :: na
+      real(R8P),              intent(in)  :: lev, gu(:), gv(:)
+      real(R8P), allocatable, intent(out) :: ar(:,:), ou(:,:)
+      real(R8P), allocatable              :: a1(:,:), o1(:,:), a2(:,:), o2(:,:)
+      real(R8P)                           :: sa, sb, sca, sco
+      integer(I4P)                        :: iu, iv, nu, nv, ng, m
+
+      nu = size(gu, kind=I4P) - 1_I4P ; nv = size(gv, kind=I4P) - 1_I4P
+      allocate(ar(nu, nv), ou(nu, nv))
+      iu = mod(na, 3_I4P) + 1_I4P ; iv = mod(na + 1_I4P, 3_I4P) + 1_I4P
+      if (lev < blo(na) .or. lev > bhi(na) .or. gu(nu + 1) < blo(iu) .or. gu(1) > bhi(iu) .or. &
+          gv(nv + 1) < blo(iv) .or. gv(1) > bhi(iv)) then ! fluid throughout: closed form
+         do m = 1_I4P, nv
+            do ne = 1_I4P, nu
+               ar(ne, m) = (gu(ne + 1) - gu(ne)) * (gv(m + 1) - gv(m))
+               xs(na) = lev ; xs(iu) = 0.5_R8P * (gu(ne) + gu(ne + 1)) ; xs(iv) = 0.5_R8P * (gv(m) + gv(m + 1))
+               ou(ne, m) = ar(ne, m) * (cross_k(om, xs - (t0 + 0.5_R8P * dt), na) + dt(na))
+            enddo
+         enddo
+         return
+      endif
+      call plane_events(na, lev, gu, gv, iu, iv, bp, nb)
+      ar = 0._R8P ; ou = 0._R8P ; ne = 0_I4P
+      sca = maxval(gu(2:) - gu(:nu)) * maxval(gv(2:) - gv(:nv))
+      sco = sca * (norm2(om) * (maxval(abs([x, y, z])) + norm2(t0) + norm2(dt)) + norm2(dt))
+      do m = 0_I4P, nb
+         sa = 0._R8P ; if (m > 0_I4P) sa = bp(m)
+         sb = 1._R8P ; if (m < nb) sb = bp(m + 1)
+         if (sb <= sa) cycle
+         ng = 2_I4P
+         call plane_piece(na, lev, gu, gv, iu, iv, sa, sb, ng, a1, o1) ; ne = ne + ng
+         do
+            ng = 2_I4P * ng
+            call plane_piece(na, lev, gu, gv, iu, iv, sa, sb, ng, a2, o2) ; ne = ne + ng
+            if (maxval(abs(a2 - a1)) <= 64._R8P * epsilon(1._R8P) * sca * max(sb - sa, FLOOR_H) .and. &
+                maxval(abs(o2 - o1)) <= 64._R8P * epsilon(1._R8P) * sco * max(sb - sa, FLOOR_H)) exit
+            if (ng >= 64_I4P) then
+               exact = .false. ; exit
+            endif
+            a1 = a2 ; o1 = o2
+         enddo
+         ar = ar + a2 ; ou = ou + o2
+      enddo
+      nev = max(nev, ne)
+      endsubroutine one_plane
+
+      subroutine plane_piece(na, lev, gu, gv, iu, iv, sa, sb, ng, ar, ou)
+      !< ng-point Gauss-Legendre over [sa, sb] of the fluid areas and outflows of one plane (moved copies).
+      integer(I4P),           intent(in)  :: na, iu, iv, ng
+      real(R8P),              intent(in)  :: lev, gu(:), gv(:), sa, sb
+      real(R8P), allocatable, intent(out) :: ar(:,:), ou(:,:)
+      type(surface_stl_object)            :: sq_
+      type(curve_object)                  :: sec
+      type(cut_cells_2d_t)                :: c2
+      real(R8P), allocatable              :: sq(:), wq(:)
+      real(R8P)                           :: sn, tq(3), a, cw(3)
+      integer(I4P)                        :: q, ju, jv, st
+
+      allocate(ar(size(gu) - 1, size(gv) - 1), ou(size(gu) - 1, size(gv) - 1)) ; ar = 0._R8P ; ou = 0._R8P
+      call gauss_legendre_01(ng, sq, wq)
+      do q = 1_I4P, ng
+         sn = sa + (sb - sa) * sq(q)
+         sq_ = surface ; call sq_%move(pose_interpolate(pose0, pose1, sn))
+         tq = t0 + sn * dt
+         call slice_surface(surface=sq_, normal_axis=na, level=lev, curve=sec, on_plane_low=.true.)
+         call sec%cut_cells(x=gu, y=gv, cut=c2, status=st)
+         do jv = 1_I4P, size(gv, kind=I4P) - 1_I4P
+            do ju = 1_I4P, size(gu, kind=I4P) - 1_I4P
+               a = c2%alpha(ju, jv) * (gu(ju + 1) - gu(ju)) * (gv(jv + 1) - gv(jv))
+               cw(na) = lev ; cw(iu) = c2%centroid(1, ju, jv) ; cw(iv) = c2%centroid(2, ju, jv)
+               ar(ju, jv) = ar(ju, jv) + (sb - sa) * wq(q) * a
+               ou(ju, jv) = ou(ju, jv) + (sb - sa) * wq(q) * a * (cross_k(om, cw - tq, na) + dt(na))
+            enddo
+         enddo
+      enddo
+      endsubroutine plane_piece
+
+      subroutine plane_events(na, lev, gu, gv, iu, iv, b, m)
+      !< Breakpoints in (0, 1) of the plane normal to na at lev with grid gu x gv.
+      integer(I4P),           intent(in)  :: na, iu, iv
+      real(R8P),              intent(in)  :: lev, gu(:), gv(:)
+      real(R8P), allocatable, intent(out) :: b(:)
+      integer(I4P),           intent(out) :: m
+      real(R8P), allocatable              :: tmp(:), zz(:)
+      real(R8P)                           :: co(6), a3(3), b3(3), c3(3), ae(3), be(3), ce(3), d3(3), f0(3), f1(3)
+      real(R8P)                           :: nn(3), xq(3), dd(3), lam, pp(3), tol, el(3), ebox(3, 2), tb(3, 2), bary(3)
+      real(R8P)                           :: xa(3), xb(3), xc(3), wxd(3)
+      integer(I4P)                        :: ii, cc, nz, kk, li, ldir, lfix, mm, e1, e2
+      logical                             :: cert
+
+      allocate(tmp(0))
+      tol = 1e-12_R8P * (maxval(abs([x, y, z])) + 1._R8P)
+      do ii = 1_I4P, nf
+         tb(:, 1) = minval(vlo(:, :, ii), dim=2) ; tb(:, 2) = maxval(vhi(:, :, ii), dim=2)
+         if (lev < tb(na, 1) .or. lev > tb(na, 2)) cycle
+         ! (a) vertices on the plane
+         do cc = 1, 3
+            if (lev < vlo(na, cc, ii) .or. lev > vhi(na, cc, ii)) cycle
+            call rodrigues(w(:, cc, ii), a3, b3, c3)
+            co = [a3(na), 0._R8P, b3(na), 0._R8P, c3(na) + t0(na) - lev, dt(na)]
+            call isolate_zeros(co, 0._R8P, ang, norm2(w(:, cc, ii)) + norm2(t0) + abs(lev) + norm2(dt), zz, nz, cert)
+            if (.not. cert) exact = .false.
+            do kk = 1_I4P, nz
+               xq = at(w(:, cc, ii), zz(kk))
+               if (xq(iu) >= gu(1) - tol .and. xq(iu) <= gu(size(gu)) + tol .and. &
+                   xq(iv) >= gv(1) - tol .and. xq(iv) <= gv(size(gv)) + tol) tmp = [tmp, zz(kk)]
+            enddo
+         enddo
+         ! (b) edges meeting grid lines of the plane: lines along iv at u = gu(li), along iu at v = gv(li)
+         do cc = 1, 3
+            e1 = cc ; e2 = mod(cc, 3) + 1
+            ebox(:, 1) = min(vlo(:, e1, ii), vlo(:, e2, ii)) ; ebox(:, 2) = max(vhi(:, e1, ii), vhi(:, e2, ii))
+            if (lev < ebox(na, 1) .or. lev > ebox(na, 2)) cycle
+            d3 = w(:, e2, ii) - w(:, e1, ii) ; wxd = cross(w(:, e1, ii), d3)
+            call rodrigues(d3, a3, b3, c3)
+            do ldir = 1, 2
+               if (ldir == 1) then
+                  lfix = iu ; el = 0._R8P ; el(iv) = 1._R8P
+               else
+                  lfix = iv ; el = 0._R8P ; el(iu) = 1._R8P
+               endif
+               call rodrigues(el, ae, be, ce)
+               do li = 1, merge(size(gu), size(gv), ldir == 1)
+                  pp = 0._R8P ; pp(na) = lev ; pp(lfix) = merge(gu(li), gv(li), ldir == 1)
+                  if (pp(lfix) < ebox(lfix, 1) .or. pp(lfix) > ebox(lfix, 2)) cycle
+                  f0 = cross(el, pp - t0) ; f1 = cross(el, -dt)
+                  co = [dot_product(a3, f0) - dot_product(ae, wxd), dot_product(a3, f1), &
+                        dot_product(b3, f0) + dot_product(be, wxd), dot_product(b3, f1), &
+                        dot_product(c3, f0) - dot_product(ce, wxd), dot_product(c3, f1)]
+                  call isolate_zeros(co, 0._R8P, ang, norm2(d3) * (norm2(pp) + norm2(t0) + norm2(dt) + &
+                                     norm2(w(:, e1, ii))), zz, nz, cert)
+                  if (.not. cert) exact = .false.
+                  do kk = 1_I4P, nz
+                     xq = at(w(:, e1, ii), zz(kk)) ; dd = at(w(:, e2, ii), zz(kk)) - xq
+                     if (dd(na) == 0._R8P) cycle
+                     lam = (lev - xq(na)) / dd(na)
+                     if (lam < -1e-12_R8P .or. lam > 1._R8P + 1e-12_R8P) cycle
+                     pp = xq + lam * dd
+                     if (abs(pp(lfix) - merge(gu(li), gv(li), ldir == 1)) > tol * 1e3_R8P) cycle
+                     mm = merge(iv, iu, ldir == 1)
+                     if (ldir == 1) then
+                        if (pp(mm) < gv(1) - tol .or. pp(mm) > gv(size(gv)) + tol) cycle
+                     else
+                        if (pp(mm) < gu(1) - tol .or. pp(mm) > gu(size(gu)) + tol) cycle
+                     endif
+                     tmp = [tmp, zz(kk)]
+                  enddo
+               enddo
+            enddo
+         enddo
+         ! (c) grid nodes of the plane on the triangle
+         nn = cross(w(:, 2, ii) - w(:, 1, ii), w(:, 3, ii) - w(:, 1, ii))
+         call rodrigues(nn, a3, b3, c3)
+         do li = 1, size(gu)
+            if (gu(li) < tb(iu, 1) .or. gu(li) > tb(iu, 2)) cycle
+            do mm = 1, size(gv)
+               if (gv(mm) < tb(iv, 1) .or. gv(mm) > tb(iv, 2)) cycle
+               pp(na) = lev ; pp(iu) = gu(li) ; pp(iv) = gv(mm)
+               f0 = pp - t0 ; f1 = -dt
+               co = [dot_product(a3, f0), dot_product(a3, f1), dot_product(b3, f0), dot_product(b3, f1), &
+                     dot_product(c3, f0) - dot_product(nn, w(:, 1, ii)), dot_product(c3, f1)]
+               call isolate_zeros(co, 0._R8P, ang, norm2(nn) * (norm2(pp) + norm2(t0) + norm2(dt) + norm2(w(:, 1, ii))), &
+                                  zz, nz, cert)
+               if (.not. cert) exact = .false.
+               do kk = 1_I4P, nz
+                  xa = at(w(:, 1, ii), zz(kk)) ; xb = at(w(:, 2, ii), zz(kk)) ; xc = at(w(:, 3, ii), zz(kk))
+                  el = cross(xb - xa, xc - xa)
+                  if (dot_product(el, el) <= 0._R8P) cycle
+                  bary = [dot_product(cross(xc - xb, pp - xb), el), dot_product(cross(xa - xc, pp - xc), el), &
+                          dot_product(cross(xb - xa, pp - xa), el)] / dot_product(el, el)
+                  if (all(bary >= -1e-12_R8P)) tmp = [tmp, zz(kk)]
+               enddo
+            enddo
+         enddo
+      enddo
+      m = size(tmp, kind=I4P)
+      call sort_unique(tmp, m)
+      call merge_close(tmp, m)
+      b = tmp(1:m)
+      endsubroutine plane_events
+   endsubroutine faces_rotation_3d
+
+   pure function cross_k(a, b, k) result(c)
+   !< Component k of a x b.
+   real(R8P),    intent(in) :: a(3), b(3)
+   integer(I4P), intent(in) :: k
+   real(R8P)                :: c, v(3)
+
+   v = cross(a, b) ; c = v(k)
+   endfunction cross_k
 
    subroutine faces_translation_3d(s0, d, x, y, z, fx, fy, fz, nev)
    !< Exact time-averaged fluid areas of every face under the translation s d of the surface s0 (at

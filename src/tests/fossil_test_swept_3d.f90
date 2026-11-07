@@ -87,7 +87,7 @@ c = [0.5_R8P, 0.5_R8P, 0.5_R8P]
 p1 = pose_from_axis_angle([1._R8P, 1._R8P, 1._R8P], 0.3_R8P)
 p1%t = c - matmul(p1%r, c) + d
 do k = 1, 3
-   call swept_cells_3d(s, p0, p1, e, e, e, sw, nq=2_I4P**k, status=st)
+   call swept_cells_3d(s, p0, p1, e, e, e, sw, nq=2_I4P**k, exact=.false., status=st)
    res(k) = maxval(abs(sw%residual), mask=sw%alpha0 >= 0._R8P .and. sw%alpha1 >= 0._R8P)
 enddo
 ok(2) = st == STATUS_OK .and. res(2) < res(1) .and. res(3) < res(2)
@@ -99,7 +99,7 @@ allocate(pq(3))
 do i = 1, 3
    pq(i) = pose_interpolate(p0, p1, sq(i))
 enddo
-call swept_cells_3d(s, p0, p1, e, e, e, sw, nq=3_I4P, status=st)
+call swept_cells_3d(s, p0, p1, e, e, e, sw, nq=3_I4P, exact=.false., status=st)
 call swept_cells_3d(s, p0, p1, e, e, e, sw2, nq=3_I4P, poses=pq, status=st2)
 ok(3) = st == STATUS_OK .and. st2 == STATUS_OK .and. all(sw%face_x == sw2%face_x) .and. all(sw%face_y == sw2%face_y) .and. &
         all(sw%face_z == sw2%face_z) .and. all(sw2%residual == 0._R8P)

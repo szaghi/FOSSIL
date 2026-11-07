@@ -151,7 +151,11 @@ call swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status
   falls to round-off (1.7e-16 to 6.3e-16 on the cases below, where 4-node Gauss left 1.7e-4 to
   1.4e-2). `sw%evaluations` is the largest number of evaluations per face (92 for the square, 1838
   for the 200-vertex NACA 0012).
-- **Otherwise (3-D rotation, explicit node poses, or `exact=.false.`): Gauss–Legendre at `nq` nodes**
+- **3-D rotation: exact** (issue #69). The same scheme one grid plane at a time: a plane's breakpoints
+  are a mesh vertex on it, a mesh edge meeting one of its grid lines, one of its grid nodes on a
+  triangle; one evaluation slices a moved copy and gives every face of the plane. Residual 1.4e-16 to
+  1.8e-15 on the cases below, where 4-node Gauss left 1.0e-3 to 9.3e-3.
+- **Otherwise (explicit node poses, or `exact=.false.`): Gauss–Legendre at `nq` nodes**
   (default 4), on copies moved to the node poses. With the screw motion, `error_estimate` is the
   largest face change between `nq` and `2 nq` nodes.
 
@@ -180,11 +184,17 @@ removes them, as the translation path does, and is built as follows.
 - *Certified isolation.* |g''(s)| ≤ M = Δθ² max|(p, q)| + 2|Δθ| |(p₁, q₁)|, the maximum over [0, 1].
   On an interval of length h whose end values have the same sign and exceed M h²/8 in magnitude, g has
   no zero (g lies above its chord minus M h²/8). Otherwise the interval is halved; a sign change is
-  refined by bisection to one ulp of s. No pair of zeros is missed; a double zero (a tangency) ends as
-  an interval at round-off and becomes a breakpoint, which is harmless.
+  refined by bisection to one ulp of s. No pair of zeros is missed. An interval narrower than 1e-10
+  without a certificate (a tangency, a zero at an end of the step) gives one breakpoint; an interval on
+  which |g| stays at round-off throughout (a zero zone: a mesh face starting on a grid plane) gets
+  breakpoints at its two ends only; breakpoints within 1e-10 of each other merge. A kink that close to
+  a breakpoint changes its piece's Gauss value by ~slope × 1e-20. If the 4096-interval budget of one
+  event runs out, `sw%exact` is false.
 - *Integration.* On each piece between breakpoints the fluid measure is analytic, so Gauss–Legendre
   converges exponentially. The node count on a piece doubles from 2 until two successive values agree
-  to round-off of the face measure; `sw%evaluations` reports the largest count. A piece that has not
+  to round-off of the face measure (pieces shorter than 1e-6 to 64 ε of the measure times 1e-6: slices
+  within 1e-10 of a mesh face carry ~1e-7 relative noise); `sw%evaluations` reports the largest count
+  (per face in 2-D, per plane in 3-D). A piece that has not
   converged at 64 nodes marks the result `sw%exact = .false.`, never silently. Each evaluation moves a
   copy of the body to the node's pose and measures the face exactly as the cut cells do, so apertures
   and fractions share one convention.
@@ -217,6 +227,7 @@ fluid at the other.
 | swept, 2-D translation: square (every face vs analytic), non-convex heptagon, heptagon at a rotated pose | faces to 8.3e-17; uniform-flow residual ≤ 1.7e-16 in every cell; walls sum to ≤ 1.4e-16 |
 | swept, 2-D negative control: Gauss with 4 nodes, no breakpoints | residual 9.0e-3 |
 | swept, 2-D rotation, Gauss (`exact=.false.`): off-centre square, pitching NACA 0012; nq = 2, 4, 8, 16 | residual 5.6e-3 → 1.6e-4 (rate ≈ 2.3) and 1.5e-3 → 1.6e-6 (rate ≈ 3.4) |
+| swept, 3-D rotation, exact (issue #69): cube 0.3 rad about (1, 1, 1) + shift (faces starting on grid planes), L-prism 0.5 rad about a tilted axis + shift, 32-face cone pitching 0.4 rad | residual 1.4e-16, 1.8e-15, 5.0e-16 (6³ validation: 4.3e-17, 8.3e-16, 5.0e-16); walls sum ≤ 1.8e-15; Gauss nq = 8 ≥ 4× closer than nq = 2 |
 | swept, 2-D rotation, exact (issue #69): square 0.4 rad off-centre + shift, square 1.2 rad + shift, NACA 0012 pitching 0.15 rad | residual 1.7e-16, 1.8e-16, 6.3e-16; walls sum ≤ 1.9e-16; Gauss nq = 16 ≥ 4× closer to the exact faces than nq = 4 |
 | swept, 3-D translation: unit cube (every face vs analytic) | faces to 5.6e-17; uniform-flow residual 2.5e-17; walls sum to ≤ 8.3e-17 |
 | swept, 3-D translation: cube and L-prism at a pose rotated about (1, 1, 1), 32-face cone | uniform-flow residual 7.6e-17, 3.0e-16, 1.9e-16 |
