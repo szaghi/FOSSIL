@@ -76,6 +76,7 @@ const docs = [
       { text: 'Immersed-boundary queries', link: '/guide/advanced/ib-queries' },
       { text: 'AMR tagging', link: '/guide/advanced/amr-tagging' },
       { text: 'Cut-cell geometry', link: '/guide/advanced/cut-cells' },
+      { text: 'Cut cells: solver support', link: '/guide/advanced/cut-solver' },
       { text: 'Moving bodies', link: '/guide/advanced/moving-bodies' },
     ],
   },
