@@ -47,15 +47,18 @@ the input.
    #69 this was the floating Möller test, which never reported a coplanar
    overlap. One shared **vertex** (issue #46): the exact `pair_classify`
    (`orient3d`); a common segment of positive length is a crossing, the
-   vertex alone is a touch and is not reported. Coplanar pairs sharing a
-   vertex (normals parallel to 1e-12 rad) are skipped, as are pairs whose
-   other vertices lie strictly on one side of the other plane (they can
-   only touch).
+   vertex alone is a touch and is not reported. Pairs whose other
+   vertices lie strictly on one side of the other plane can only touch
+   and are skipped. Exactly coplanar pairs sharing a vertex (issue #69;
+   skipped to 1e-12 rad before, so crossings tilted by less went unseen)
+   are decided in the projection: overlapping interiors are reported
+   (`SELFINT_COPLANAR`), a common edge segment from the vertex is a touch
+   (`include_touching`).
 
-Not detected yet (issue #69, next steps): two sheets crossing along a
+Not detected yet (issue #69, next step): two sheets crossing along a
 **shared edge** (a non-manifold edge with four facets, e.g. two cubes
-merged so that their face edges coincide), and an overlap of coplanar
-facets around a shared vertex.
+merged so that their face edges coincide), and a coplanar pair folded
+over its shared edge.
 
 ## Pipeline (resolution)
 
