@@ -20,11 +20,15 @@ module fossil_curvilinear_block
 use penf, only : I4P, R8P
 use fossil_block_geometry, only : hex_volume, hex_centroid, bilinear_face_vector, quad_area, quad_centroid, hex_validity, &
                                   quad_validity
+use fossil_block_locate,   only : cell_bvh_t, build_cell_bvh, locate_point_3d_oac, locate_point_2d_oac, LOC_INSIDE, &
+                                  LOC_OUTSIDE, newton_3d_oac, inverse_2d_oac, XI_TOL
+use fossil_block_geometry, only : CELL_VALID, CELL_SINGULAR
+use fossil_predicates,     only : orient2d_xy
 
 implicit none
 private
 public :: curvilinear_block_t, curvilinear_block_2d_t, topo_record_t
-public :: detect_topology, detect_topology_2d, record_map
+public :: detect_topology, detect_topology_2d, record_map, locate_in_blocks, locate_in_blocks_2d
 public :: TOPO_BOUNDARY, TOPO_ABUT, TOPO_PERIODIC, TOPO_SINGULAR
 public :: BLOCK_STATUS_OK, BLOCK_STATUS_BAD_INPUT
 
@@ -57,10 +61,14 @@ endtype topo_record_t
 type :: curvilinear_block_t
    !< Curvilinear structured block in 3-D.
    integer(I4P)                     :: ni = 0_I4P, nj = 0_I4P, nk = 0_I4P !< Vertices per direction.
+   integer(I4P)                     :: id = 1_I4P             !< Index in its set (detect_topology).
    character(len=:),    allocatable :: name                   !< Block name.
    real(R8P),           allocatable :: x(:,:,:), y(:,:,:), z(:,:,:) !< Vertices.
    integer(I4P)                     :: nrec = 0_I4P           !< Number of records.
    type(topo_record_t), allocatable :: rec(:)                 !< Topology records [nrec].
+   integer(I4P),        allocatable :: cell_status(:)         !< Cell validity, linear cell index (build_search).
+   real(R8P)                        :: orient = 1._R8P        !< Handedness (build_search).
+   type(cell_bvh_t)                 :: search                 !< Cell-box hierarchy (build_search).
    contains
       procedure, pass(self) :: initialize => initialize_3d    !< Set the vertices.
       procedure, pass(self) :: destroy => destroy_3d          !< Reset.
@@ -70,15 +78,21 @@ type :: curvilinear_block_t
       procedure, pass(self) :: geometry => geometry_3d        !< Exact cell geometry.
       procedure, pass(self) :: orientation => orientation_3d  !< Handedness (sign of the block volume).
       procedure, pass(self) :: validity => validity_3d        !< Certified cell validity.
+      procedure, pass(self) :: build_search => build_search_3d !< Validity, orientation and the cell-box hierarchy.
+      procedure, pass(self) :: locate_many => locate_many_3d  !< Robust location of points.
 endtype curvilinear_block_t
 
 type :: curvilinear_block_2d_t
    !< Curvilinear structured block in 2-D.
    integer(I4P)                     :: ni = 0_I4P, nj = 0_I4P !< Vertices per direction.
+   integer(I4P)                     :: id = 1_I4P             !< Index in its set (detect_topology).
    character(len=:),    allocatable :: name                   !< Block name.
    real(R8P),           allocatable :: u(:,:), v(:,:)         !< Vertices.
    integer(I4P)                     :: nrec = 0_I4P           !< Number of records.
    type(topo_record_t), allocatable :: rec(:)                 !< Topology records [nrec].
+   integer(I4P),        allocatable :: cell_status(:)         !< Cell validity, linear cell index (build_search).
+   real(R8P)                        :: orient = 1._R8P        !< Handedness (build_search).
+   type(cell_bvh_t)                 :: search                 !< Cell-box hierarchy (build_search).
    contains
       procedure, pass(self) :: initialize => initialize_2d    !< Set the vertices.
       procedure, pass(self) :: destroy => destroy_2d          !< Reset.
@@ -88,6 +102,8 @@ type :: curvilinear_block_2d_t
       procedure, pass(self) :: geometry => geometry_2d        !< Exact cell geometry.
       procedure, pass(self) :: orientation => orientation_2d  !< Handedness (sign of the block area).
       procedure, pass(self) :: validity => validity_2d        !< Exact cell validity.
+      procedure, pass(self) :: build_search => build_search_2d !< Validity, orientation and the cell-box hierarchy.
+      procedure, pass(self) :: locate_many => locate_many_2d  !< Robust location of points.
 endtype curvilinear_block_2d_t
 
 type :: vx_t
@@ -445,6 +461,396 @@ contains
    enddo
    endsubroutine validity_2d
 
+   ! -------------------------------------------------------------------------------------------------------- location
+   subroutine build_search_3d(self)
+   !< Cell validity, block orientation and the hierarchy over the cell boxes (needed by the location).
+   class(curvilinear_block_t), intent(inout) :: self      !< Block.
+   integer(I4P),  allocatable                :: st(:,:,:) !< Validity.
+   real(R8P),     allocatable                :: lo(:,:), hi(:,:) !< Cell boxes.
+   real(R8P)                                 :: c(3, 8)   !< Corners.
+   integer(I4P)                              :: i, j, k, n !< Counters.
+
+   self%orient = self%orientation()
+   call self%validity(st, orientation=self%orient)
+   self%cell_status = reshape(st, [size(st)])
+   allocate(lo(3, size(st)), hi(3, size(st))) ; n = 0_I4P
+   do k = 1, self%nk - 1
+      do j = 1, self%nj - 1
+         do i = 1, self%ni - 1
+            n = n + 1_I4P ; c = self%corners(i, j, k)
+            lo(:, n) = minval(c, dim=2) ; hi(:, n) = maxval(c, dim=2)
+         enddo
+      enddo
+   enddo
+   call build_cell_bvh(lo, hi, self%search)
+   endsubroutine build_search_3d
+
+   subroutine build_search_2d(self)
+   !< Cell validity, block orientation and the hierarchy over the cell boxes (needed by the location).
+   class(curvilinear_block_2d_t), intent(inout) :: self    !< Block.
+   integer(I4P),  allocatable                   :: st(:,:) !< Validity.
+   real(R8P),     allocatable                   :: lo(:,:), hi(:,:) !< Cell boxes.
+   real(R8P)                                    :: c(2, 4) !< Corners.
+   integer(I4P)                                 :: i, j, n !< Counters.
+
+   self%orient = self%orientation()
+   call self%validity(st, orientation=self%orient)
+   self%cell_status = reshape(st, [size(st)])
+   allocate(lo(2, size(st)), hi(2, size(st))) ; n = 0_I4P
+   do j = 1, self%nj - 1
+      do i = 1, self%ni - 1
+         n = n + 1_I4P ; c = self%corners(i, j)
+         lo(:, n) = minval(c, dim=2) ; hi(:, n) = maxval(c, dim=2)
+      enddo
+   enddo
+   call build_cell_bvh(lo, hi, self%search)
+   endsubroutine build_search_2d
+
+   subroutine locate_many_3d(self, px, py, pz, cell, xi, status, walk, start, jumps, fallbacks)
+   !< Location of the points (build_search first): cell (i, j, k) (0 if outside), xi, LOC_* status. Robust path by
+   !< default; walk=.true. walks from `start` (cells [3, n]) or, without it, from the previous point's cell, and
+   !< returns what the robust path returns (it falls back to it whenever the walk cannot settle the answer).
+   class(curvilinear_block_t), intent(in)            :: self          !< Block.
+   real(R8P),                  intent(in)            :: px(:), py(:), pz(:) !< Points.
+   integer(I4P), allocatable,  intent(out)           :: cell(:,:)     !< Cells [3, n].
+   real(R8P),    allocatable,  intent(out)           :: xi(:,:)       !< Local coordinates [3, n].
+   integer(I4P), allocatable,  intent(out)           :: status(:)     !< LOC_* [n].
+   logical,                    intent(in),  optional :: walk          !< Walk from a start cell.
+   integer(I4P),               intent(in),  optional :: start(:,:)    !< Start cells [3, n].
+   integer(I4P),               intent(out), optional :: jumps         !< Cells crossed by the walks.
+   integer(I4P),               intent(out), optional :: fallbacks     !< Points handed to the robust path.
+   integer(I4P)                                      :: n, c, c0, nj, nf !< Counters.
+   logical                                           :: walking, done !< Flags.
+
+   walking = .false. ; if (present(walk)) walking = walk
+   nj = 0_I4P ; nf = 0_I4P ; c = 0_I4P
+   allocate(cell(3, size(px)), xi(3, size(px)), status(size(px)))
+   do n = 1, size(px, kind=I4P)
+      done = .false.
+      if (walking) then
+         c0 = c
+         if (present(start)) c0 = 0_I4P
+         if (present(start)) then
+            if (all(start(:, n) >= 1) .and. start(1, n) < self%ni .and. start(2, n) < self%nj .and. start(3, n) < self%nk) &
+               c0 = start(1, n) + (self%ni - 1_I4P) * (start(2, n) - 1_I4P + (self%nj - 1_I4P) * (start(3, n) - 1_I4P))
+         endif
+         if (c0 > 0) then
+            call walk_3d(self, [px(n), py(n), pz(n)], c0, c, xi(:, n), done, nj)
+            if (done) status(n) = LOC_INSIDE
+         endif
+         if (.not. done) nf = nf + 1_I4P
+      endif
+      if (.not. done) call locate_point_3d_oac([px(n), py(n), pz(n)], self%ni, self%nj, self%x, self%y, self%z, self%cell_status, &
+                               self%search%nnode, self%search%node_lo, self%search%node_hi, self%search%left, &
+                               self%search%right, self%search%first, self%search%last, self%search%order, &
+                               self%search%cell_lo, self%search%cell_hi, c, xi(:, n), status(n))
+      cell(:, n) = linear_to_ijk(c, self%ni, self%nj)
+      if (status(n) /= LOC_INSIDE) c = 0_I4P
+   enddo
+   if (present(jumps)) jumps = nj
+   if (present(fallbacks)) fallbacks = nf
+   endsubroutine locate_many_3d
+
+   subroutine locate_many_2d(self, pu, pv, cell, xi, status, walk, start, jumps, fallbacks)
+   !< Location of the points (build_search first): cell (i, j) (0 if outside), xi, LOC_* status; walk as in 3-D.
+   class(curvilinear_block_2d_t), intent(in)            :: self      !< Block.
+   real(R8P),                     intent(in)            :: pu(:), pv(:) !< Points.
+   integer(I4P), allocatable,     intent(out)           :: cell(:,:) !< Cells [2, n].
+   real(R8P),    allocatable,     intent(out)           :: xi(:,:)   !< Local coordinates [2, n].
+   integer(I4P), allocatable,     intent(out)           :: status(:) !< LOC_* [n].
+   logical,                       intent(in),  optional :: walk      !< Walk from a start cell.
+   integer(I4P),                  intent(in),  optional :: start(:,:) !< Start cells [2, n].
+   integer(I4P),                  intent(out), optional :: jumps     !< Cells crossed by the walks.
+   integer(I4P),                  intent(out), optional :: fallbacks !< Points handed to the robust path.
+   integer(I4P)                                         :: n, c, c0, nj, nf !< Counters.
+   logical                                              :: walking, done !< Flags.
+
+   walking = .false. ; if (present(walk)) walking = walk
+   nj = 0_I4P ; nf = 0_I4P ; c = 0_I4P
+   allocate(cell(2, size(pu)), xi(2, size(pu)), status(size(pu)))
+   do n = 1, size(pu, kind=I4P)
+      done = .false.
+      if (walking) then
+         c0 = c
+         if (present(start)) then
+            c0 = 0_I4P
+            if (all(start(:, n) >= 1) .and. start(1, n) < self%ni .and. start(2, n) < self%nj) &
+               c0 = start(1, n) + (self%ni - 1_I4P) * (start(2, n) - 1_I4P)
+         endif
+         if (c0 > 0) then
+            call walk_2d(self, [pu(n), pv(n)], c0, c, xi(:, n), done, nj)
+            if (done) status(n) = LOC_INSIDE
+         endif
+         if (.not. done) nf = nf + 1_I4P
+      endif
+      if (.not. done) call locate_point_2d_oac([pu(n), pv(n)], self%ni, self%u, self%v, self%cell_status, self%orient, &
+                               self%search%nnode, self%search%node_lo, self%search%node_hi, self%search%left, &
+                               self%search%right, self%search%first, self%search%last, self%search%order, &
+                               self%search%cell_lo, self%search%cell_hi, c, xi(:, n), status(n))
+      cell(:, n) = 0_I4P
+      if (c > 0) cell(:, n) = [mod(c - 1_I4P, self%ni - 1_I4P) + 1_I4P, (c - 1_I4P) / (self%ni - 1_I4P) + 1_I4P]
+      if (status(n) /= LOC_INSIDE) c = 0_I4P
+   enddo
+   if (present(jumps)) jumps = nj
+   if (present(fallbacks)) fallbacks = nf
+   endsubroutine locate_many_2d
+
+   subroutine walk_3d(self, p, c0, cell, xi, done, jumps)
+   !< Stencil jumping from cell c0: Newton in the current cell, then a jump towards the largest excursion of xi out of
+   !< [0, 1], across abutting records of this block. On a containing cell, the tie rule is settled among the cells
+   !< sharing a vertex with it. done = .false. (the robust path decides) on: a cell that is not valid, Newton not
+   !< converged in a containing cell, a cycle, the step limit, a block face without an abutting record to this block,
+   !< a containing cell whose xi touches the block boundary, or a neighbour that is not valid.
+   class(curvilinear_block_t), intent(in)    :: self    !< Block.
+   real(R8P),                  intent(in)    :: p(3)    !< Point.
+   integer(I4P),               intent(in)    :: c0      !< Start cell (linear).
+   integer(I4P),               intent(out)   :: cell    !< Cell (linear).
+   real(R8P),                  intent(out)   :: xi(3)   !< Local coordinates.
+   logical,                    intent(out)   :: done    !< The walk settled the answer.
+   integer(I4P),               intent(inout) :: jumps   !< Jump counter.
+   integer(I4P)                              :: ijk(3), nc(3), seen(16), step, a, d, c, best, w(3), cand(3) !< Work.
+   integer(I4P)                              :: m1, m2, m3      !< Neighbour offsets.
+   real(R8P)                                 :: q(3), qb(3), ex  !< Local coordinates, excursion.
+   logical                                   :: conv, inside, ok !< Flags.
+
+   done = .false. ; cell = 0_I4P ; xi = 0._R8P ; seen = 0_I4P
+   nc = [self%ni - 1_I4P, self%nj - 1_I4P, self%nk - 1_I4P]
+   c = c0
+   do step = 1, 2_I4P * sum(nc) + 8_I4P
+      if (any(seen == c)) return
+      seen(mod(step - 1_I4P, 16_I4P) + 1_I4P) = c
+      if (self%cell_status(c) /= CELL_VALID .and. self%cell_status(c) /= CELL_SINGULAR) return
+      ijk = linear_to_ijk(c, self%ni, self%nj)
+      call newton_3d_oac(self%corners(ijk(1), ijk(2), ijk(3)), p, q, conv)
+      inside = all(q >= -XI_TOL) .and. all(q <= 1._R8P + XI_TOL)
+      if (inside) then
+         if (.not. conv) return
+         ! the tie rule among the cells sharing a vertex
+         do a = 1, 3
+            if ((ijk(a) == 1 .and. q(a) <= XI_TOL) .or. (ijk(a) == nc(a) .and. q(a) >= 1._R8P - XI_TOL)) return
+         enddo
+         best = c ; xi = q
+         do m3 = -1, 1
+            do m2 = -1, 1
+               do m1 = -1, 1
+                  w = [m1, m2, m3] ; cand = ijk + w
+                  if (any(cand < 1) .or. any(cand > nc)) cycle
+                  d = cand(1) + nc(1) * (cand(2) - 1_I4P + nc(2) * (cand(3) - 1_I4P))
+                  if (d == c) cycle
+                  if (self%cell_status(d) /= CELL_VALID .and. self%cell_status(d) /= CELL_SINGULAR) return
+                  if (d > best) cycle
+                  call newton_3d_oac(self%corners(cand(1), cand(2), cand(3)), p, qb, ok)
+                  if (all(qb >= -XI_TOL) .and. all(qb <= 1._R8P + XI_TOL)) then
+                     if (.not. ok) return
+                     best = d ; xi = qb
+                  endif
+               enddo
+            enddo
+         enddo
+         cell = best ; done = .true. ; return
+      endif
+      ! jump
+      a = 1_I4P ; ex = -1._R8P
+      do d = 1, 3
+         if (max(-q(d), q(d) - 1._R8P) > ex) then
+            ex = max(-q(d), q(d) - 1._R8P) ; a = d
+         endif
+      enddo
+      w = 0_I4P ; w(a) = merge(-1_I4P, 1_I4P, q(a) < 0._R8P)
+      cand = ijk + w
+      if (cand(a) < 1 .or. cand(a) > nc(a)) then
+         if (.not. cross_record_3d(self, ijk, a, w(a), cand)) return
+      endif
+      c = cand(1) + nc(1) * (cand(2) - 1_I4P + nc(2) * (cand(3) - 1_I4P))
+      jumps = jumps + 1_I4P
+   enddo
+   endsubroutine walk_3d
+
+   logical function cross_record_3d(self, ijk, a, s, cand) result(ok)
+   !< The cell across the block face (direction a, side s) from cell ijk, through an abutting record to this block.
+   class(curvilinear_block_t), intent(in)  :: self    !< Block.
+   integer(I4P),               intent(in)  :: ijk(3), a, s !< Cell, direction, side.
+   integer(I4P),               intent(out) :: cand(3) !< Cell across.
+   integer(I4P)                            :: f, r, v0(3), v1(3), q0(3), q1(3) !< Work.
+
+   ok = .false. ; cand = 0_I4P
+   f = 2_I4P * a - merge(1_I4P, 0_I4P, s < 0)
+   v0 = ijk ; v1 = ijk + 1_I4P ; v0(a) = merge(ijk(a) - 1_I4P, ijk(a) + 1_I4P, s < 0) ; v1(a) = v0(a) + 1_I4P
+   do r = 1, self%nrec
+      if (self%rec(r)%kind /= TOPO_ABUT .or. self%rec(r)%face /= f .or. self%rec(r)%donor_block /= self%id) cycle
+      if (any((ijk < self%rec(r)%lo .or. ijk + 1_I4P > self%rec(r)%hi) .and. [1, 2, 3] /= a)) cycle
+      q0 = record_map(self%rec(r), v0) ; q1 = record_map(self%rec(r), v1)
+      cand = min(q0, q1)
+      ok = all(cand >= 1) .and. cand(1) < self%ni .and. cand(2) < self%nj .and. cand(3) < self%nk
+      if (ok) return
+   enddo
+   endfunction cross_record_3d
+
+   subroutine walk_2d(self, p, c0, cell, xi, done, jumps)
+   !< The 2-D walk (as walk_3d): exact containment by orient2d, xi of outside points from the bilinear inverse.
+   class(curvilinear_block_2d_t), intent(in)    :: self  !< Block.
+   real(R8P),                     intent(in)    :: p(2)  !< Point.
+   integer(I4P),                  intent(in)    :: c0    !< Start cell (linear).
+   integer(I4P),                  intent(out)   :: cell  !< Cell (linear).
+   real(R8P),                     intent(out)   :: xi(2) !< Local coordinates.
+   logical,                       intent(out)   :: done  !< The walk settled the answer.
+   integer(I4P),                  intent(inout) :: jumps !< Jump counter.
+   integer(I4P)                                 :: ij(2), nc(2), seen(16), step, a, d, c, w(2), cand(2), cq !< Work.
+   integer(I4P)                                 :: m1, m2 !< Neighbour offsets.
+   real(R8P)                                    :: q(2), ex !< Local coordinates, excursion.
+   integer(I4P)                                 :: st    !< Robust answer in a neighbourhood.
+   logical                                      :: found, on_edge(4) !< Flags.
+
+   done = .false. ; cell = 0_I4P ; xi = 0._R8P ; seen = 0_I4P
+   nc = [self%ni - 1_I4P, self%nj - 1_I4P]
+   c = c0
+   do step = 1, 2_I4P * sum(nc) + 8_I4P
+      if (any(seen == c)) return
+      seen(mod(step - 1_I4P, 16_I4P) + 1_I4P) = c
+      if (self%cell_status(c) /= CELL_VALID .and. self%cell_status(c) /= CELL_SINGULAR) return
+      ij = [mod(c - 1_I4P, nc(1)) + 1_I4P, (c - 1_I4P) / nc(1) + 1_I4P]
+      if (contains_2d(self, ij, p, on_edge)) then
+         if ((ij(1) == 1 .and. on_edge(4)) .or. (ij(1) == nc(1) .and. on_edge(2)) .or. &
+             (ij(2) == 1 .and. on_edge(1)) .or. (ij(2) == nc(2) .and. on_edge(3))) return
+         ! the tie rule among the cells sharing a vertex: the first one containing p
+         do m2 = -1, 1
+            do m1 = -1, 1
+               w = [m1, m2] ; cand = ij + w
+               if (any(cand < 1) .or. any(cand > nc)) cycle
+               d = cand(1) + nc(1) * (cand(2) - 1_I4P)
+               if (self%cell_status(d) /= CELL_VALID .and. self%cell_status(d) /= CELL_SINGULAR) return
+            enddo
+         enddo
+         do m2 = -1, 1
+            do m1 = -1, 1
+               w = [m1, m2] ; cand = ij + w
+               if (any(cand < 1) .or. any(cand > nc)) cycle
+               if (.not. contains_2d(self, cand, p, on_edge)) cycle
+               cq = cand(1) + nc(1) * (cand(2) - 1_I4P)
+               call locate_point_2d_oac(p, self%ni, self%u, self%v, self%cell_status, self%orient, &
+                                        1_I4P, self%search%cell_lo(:, cq), self%search%cell_hi(:, cq), [0_I4P], [0_I4P], &
+                                        [1_I4P], [1_I4P], [cq], self%search%cell_lo, self%search%cell_hi, d, xi, st)
+               cell = d ; done = st == LOC_INSIDE ; return
+            enddo
+         enddo
+         return
+      endif
+      call inverse_2d_oac(self%corners(ij(1), ij(2)), p, q, found)
+      a = 1_I4P ; ex = -1._R8P
+      do d = 1, 2
+         if (max(-q(d), q(d) - 1._R8P) > ex) then
+            ex = max(-q(d), q(d) - 1._R8P) ; a = d
+         endif
+      enddo
+      if (ex <= 0._R8P) return ! inverse inside but containment false: let the robust path decide
+      w = 0_I4P ; w(a) = merge(-1_I4P, 1_I4P, q(a) < 0._R8P)
+      cand = ij + w
+      if (cand(a) < 1 .or. cand(a) > nc(a)) then
+         if (.not. cross_record_2d(self, ij, a, w(a), cand)) return
+      endif
+      c = cand(1) + nc(1) * (cand(2) - 1_I4P)
+      jumps = jumps + 1_I4P
+   enddo
+   endsubroutine walk_2d
+
+   logical function contains_2d(self, ij, p, on_edge) result(yes)
+   !< Exact closed containment of p in the valid cell ij; on_edge: p on edge eta = 0, xi = 1, eta = 1, xi = 0.
+   class(curvilinear_block_2d_t), intent(in)  :: self       !< Block.
+   integer(I4P),                  intent(in)  :: ij(2)      !< Cell.
+   real(R8P),                     intent(in)  :: p(2)       !< Point.
+   logical,                       intent(out) :: on_edge(4) !< On an edge.
+   real(R8P)                                  :: cc(2, 4), o(4) !< Corners, orientations.
+
+   cc = self%corners(ij(1), ij(2))
+   o(1) = self%orient * orient2d_xy(cc(1, 1), cc(2, 1), cc(1, 2), cc(2, 2), p(1), p(2))
+   o(2) = self%orient * orient2d_xy(cc(1, 2), cc(2, 2), cc(1, 4), cc(2, 4), p(1), p(2))
+   o(3) = self%orient * orient2d_xy(cc(1, 4), cc(2, 4), cc(1, 3), cc(2, 3), p(1), p(2))
+   o(4) = self%orient * orient2d_xy(cc(1, 3), cc(2, 3), cc(1, 1), cc(2, 1), p(1), p(2))
+   yes = all(o >= 0._R8P) ; on_edge = o == 0._R8P
+   endfunction contains_2d
+
+   logical function cross_record_2d(self, ij, a, s, cand) result(ok)
+   !< The cell across the block edge (direction a, side s) from cell ij, through an abutting record to this block.
+   class(curvilinear_block_2d_t), intent(in)  :: self    !< Block.
+   integer(I4P),                  intent(in)  :: ij(2), a, s !< Cell, direction, side.
+   integer(I4P),                  intent(out) :: cand(2) !< Cell across.
+   integer(I4P)                               :: f, r, b, v0(3), v1(3), q0(3), q1(3) !< Work.
+
+   ok = .false. ; cand = 0_I4P
+   f = 2_I4P * a - merge(1_I4P, 0_I4P, s < 0) ; b = 3_I4P - a
+   v0 = [ij(1), ij(2), 1_I4P] ; v1 = [ij(1) + 1_I4P, ij(2) + 1_I4P, 1_I4P]
+   v0(a) = merge(ij(a) - 1_I4P, ij(a) + 1_I4P, s < 0) ; v1(a) = v0(a) + 1_I4P
+   do r = 1, self%nrec
+      if (self%rec(r)%kind /= TOPO_ABUT .or. self%rec(r)%face /= f .or. self%rec(r)%donor_block /= self%id) cycle
+      if (ij(b) < self%rec(r)%lo(b) .or. ij(b) + 1_I4P > self%rec(r)%hi(b)) cycle
+      q0 = record_map(self%rec(r), v0) ; q1 = record_map(self%rec(r), v1)
+      cand = min(q0(1:2), q1(1:2))
+      ok = all(cand >= 1) .and. cand(1) < self%ni .and. cand(2) < self%nj
+      if (ok) return
+   enddo
+   endfunction cross_record_2d
+
+   pure function linear_to_ijk(c, ni, nj) result(ijk)
+   !< Cell (i, j, k) of the linear index c (0 -> 0).
+   integer(I4P), intent(in) :: c, ni, nj !< Linear index, vertices in i, j.
+   integer(I4P)             :: ijk(3)    !< Cell.
+
+   ijk = 0_I4P
+   if (c < 1) return
+   ijk(1) = mod(c - 1_I4P, ni - 1_I4P) + 1_I4P
+   ijk(2) = mod((c - 1_I4P) / (ni - 1_I4P), nj - 1_I4P) + 1_I4P
+   ijk(3) = (c - 1_I4P) / ((ni - 1_I4P) * (nj - 1_I4P)) + 1_I4P
+   endfunction linear_to_ijk
+
+   subroutine locate_in_blocks(blocks, px, py, pz, block, cell, xi, status)
+   !< Location over a set of blocks (each with build_search done): the first block whose cell contains the point
+   !< (LOC_INSIDE) wins; else the first block with another status than LOC_OUTSIDE.
+   type(curvilinear_block_t),  intent(in)  :: blocks(:)     !< Blocks.
+   real(R8P),                  intent(in)  :: px(:), py(:), pz(:) !< Points.
+   integer(I4P), allocatable,  intent(out) :: block(:)      !< Block [n] (0 if outside every block).
+   integer(I4P), allocatable,  intent(out) :: cell(:,:)     !< Cells [3, n].
+   real(R8P),    allocatable,  intent(out) :: xi(:,:)       !< Local coordinates [3, n].
+   integer(I4P), allocatable,  intent(out) :: status(:)     !< LOC_* [n].
+   integer(I4P), allocatable               :: bc(:,:), bs(:) !< One block's results.
+   real(R8P),    allocatable               :: bx(:,:)       !< One block's xi.
+   integer(I4P)                            :: b, n          !< Counters.
+
+   allocate(block(size(px)), cell(3, size(px)), xi(3, size(px)), status(size(px)))
+   block = 0_I4P ; cell = 0_I4P ; xi = 0._R8P ; status = LOC_OUTSIDE
+   do b = 1, size(blocks, kind=I4P)
+      call blocks(b)%locate_many(px, py, pz, bc, bx, bs)
+      do n = 1, size(px, kind=I4P)
+         if (status(n) == LOC_INSIDE .or. bs(n) == LOC_OUTSIDE) cycle
+         if (status(n) /= LOC_OUTSIDE .and. bs(n) /= LOC_INSIDE) cycle
+         block(n) = b ; cell(:, n) = bc(:, n) ; xi(:, n) = bx(:, n) ; status(n) = bs(n)
+      enddo
+   enddo
+   endsubroutine locate_in_blocks
+
+   subroutine locate_in_blocks_2d(blocks, pu, pv, block, cell, xi, status)
+   !< Location over a set of 2-D blocks (each with build_search done), as `locate_in_blocks`.
+   type(curvilinear_block_2d_t), intent(in)  :: blocks(:)   !< Blocks.
+   real(R8P),                    intent(in)  :: pu(:), pv(:) !< Points.
+   integer(I4P), allocatable,    intent(out) :: block(:)    !< Block [n] (0 if outside every block).
+   integer(I4P), allocatable,    intent(out) :: cell(:,:)   !< Cells [2, n].
+   real(R8P),    allocatable,    intent(out) :: xi(:,:)     !< Local coordinates [2, n].
+   integer(I4P), allocatable,    intent(out) :: status(:)   !< LOC_* [n].
+   integer(I4P), allocatable                 :: bc(:,:), bs(:) !< One block's results.
+   real(R8P),    allocatable                 :: bx(:,:)     !< One block's xi.
+   integer(I4P)                              :: b, n        !< Counters.
+
+   allocate(block(size(pu)), cell(2, size(pu)), xi(2, size(pu)), status(size(pu)))
+   block = 0_I4P ; cell = 0_I4P ; xi = 0._R8P ; status = LOC_OUTSIDE
+   do b = 1, size(blocks, kind=I4P)
+      call blocks(b)%locate_many(pu, pv, bc, bx, bs)
+      do n = 1, size(pu, kind=I4P)
+         if (status(n) == LOC_INSIDE .or. bs(n) == LOC_OUTSIDE) cycle
+         if (status(n) /= LOC_OUTSIDE .and. bs(n) /= LOC_INSIDE) cycle
+         block(n) = b ; cell(:, n) = bc(:, n) ; xi(:, n) = bx(:, n) ; status(n) = bs(n)
+      enddo
+   enddo
+   endsubroutine locate_in_blocks_2d
+
    ! ------------------------------------------------------------------------------------------------------- detection
    subroutine detect_topology(blocks, tolerance, translations)
    !< Propose the topology records of a set of 3-D blocks (appended to each block's records).
@@ -458,6 +864,7 @@ contains
 
    allocate(vx(size(blocks)))
    do b = 1, size(blocks, kind=I4P)
+      blocks(b)%id = b
       vx(b)%n = [blocks(b)%ni, blocks(b)%nj, blocks(b)%nk]
       allocate(vx(b)%c(3, vx(b)%n(1), vx(b)%n(2), vx(b)%n(3)))
       vx(b)%c(1,:,:,:) = blocks(b)%x ; vx(b)%c(2,:,:,:) = blocks(b)%y ; vx(b)%c(3,:,:,:) = blocks(b)%z
@@ -481,6 +888,7 @@ contains
 
    allocate(vx(size(blocks)))
    do b = 1, size(blocks, kind=I4P)
+      blocks(b)%id = b
       vx(b)%n = [blocks(b)%ni, blocks(b)%nj, 1_I4P]
       allocate(vx(b)%c(3, vx(b)%n(1), vx(b)%n(2), 1))
       vx(b)%c(1,:,:,1) = blocks(b)%u ; vx(b)%c(2,:,:,1) = blocks(b)%v ; vx(b)%c(3,:,:,1) = 0._R8P

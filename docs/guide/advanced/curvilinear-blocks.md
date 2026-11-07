@@ -174,15 +174,23 @@ The first candidate that contains the point wins (the tie rule above); a
 warped, degenerate or unconverged candidate is reported only if no valid cell
 contains the point.
 
-**Fast path** (PEGASUS 5, Lee & Baeder in `methods/donor-search.md`).
-Stencil jumping from a start cell, such as the previous donor: the inverse map
-of the current cell gives ξ, and the walk moves to the neighbour in the
-direction of the largest excursion of ξ outside [0, 1], crossing the topology
-records. It stops on a containing cell, then settles the tie rule among the
-cells sharing a vertex with it, so it returns what the robust path returns. A
-cycle, a step limit, a cell that is not valid, a singular record, a physical
-boundary or a record to another block hands the point to the robust path. The
-counts of jumps and fallbacks are reported.
+**Fast path** (PEGASUS 5, Lee & Baeder in `methods/donor-search.md`),
+`locate_many(..., walk=.true., start=)`. Stencil jumping from a start cell
+(the given one, or the previous point's cell): the inverse map of the current
+cell gives ξ (in 3-D Newton kept in [−1, 2]³, so even an unconverged ξ points
+the way), and the walk moves one cell in the direction of the largest
+excursion of ξ outside [0, 1], across the abutting records of the same block.
+On a containing cell it settles the tie rule among the cells sharing a vertex
+with it, so it returns what the robust path returns, bit for bit. Anything
+else hands the point to the robust path: a cell that is not valid, a
+neighbour that is not valid, Newton not converged in a containing cell, a
+revisited cell, the step limit, a block face without an abutting record to
+the same block (a physical boundary, a periodic or singular record, another
+block), or a containing cell whose ξ touches the block boundary (a seam point
+may lie in a cell far away in index space). The identity holds on blocks that
+do not overlap themselves; the tests check it on an O-grid, a C-grid, a polar
+grid and a wavy 3-D O-grid. The counts of jumps and fallbacks are returned
+(`jumps=`, `fallbacks=`).
 
 **Device.** `locate_many_device` runs the robust path, written once as free
 `_oac` procedures on plain arrays (the cell boxes, the tree, the vertices and
