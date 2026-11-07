@@ -24,6 +24,9 @@ use fossil_block_locate,   only : cell_bvh_t, build_cell_bvh, locate_point_3d_oa
                                   LOC_OUTSIDE, newton_3d_oac, inverse_2d_oac, XI_TOL
 use fossil_block_geometry, only : CELL_VALID, CELL_SINGULAR
 use fossil_predicates,     only : orient2d_xy
+use fossil_block_stencil,  only : lagrange_weights, centred_start, STENCIL_CENTRED, STENCIL_SHIFTED, STENCIL_REDUCED, &
+                                  STENCIL_FAILED, STENCIL_MAX
+use fossil_block_geometry, only : trilinear_point, bilinear_point
 
 implicit none
 private
@@ -81,6 +84,7 @@ type :: curvilinear_block_t
       procedure, pass(self) :: build_search => build_search_3d !< Validity, orientation and the cell-box hierarchy.
       procedure, pass(self) :: locate_many => locate_many_3d  !< Robust location of points.
       procedure, pass(self) :: locate_many_device => locate_many_device_3d !< Robust location on the device.
+      procedure, pass(self) :: stencils => stencils_3d        !< Lagrange interpolation stencils.
 endtype curvilinear_block_t
 
 type :: curvilinear_block_2d_t
@@ -106,6 +110,7 @@ type :: curvilinear_block_2d_t
       procedure, pass(self) :: build_search => build_search_2d !< Validity, orientation and the cell-box hierarchy.
       procedure, pass(self) :: locate_many => locate_many_2d  !< Robust location of points.
       procedure, pass(self) :: locate_many_device => locate_many_device_2d !< Robust location on the device.
+      procedure, pass(self) :: stencils => stencils_2d        !< Lagrange interpolation stencils.
 endtype curvilinear_block_2d_t
 
 type :: vx_t
@@ -922,6 +927,325 @@ contains
       enddo
    enddo
    endsubroutine locate_in_blocks_2d
+
+   ! -------------------------------------------------------------------------------------------------------- stencils
+   subroutine stencils_3d(self, cell, xi, q, nodes, weights, status, order_matched, reduce, xi_matched)
+   !< Tensor-product Lagrange stencils of width q on the vertices, per located point (cell, xi): nodes [3, q^3, n]
+   !< (vertex indices of this block, beyond a face mapped through its abutting or periodic records to this block),
+   !< weights [q^3, n] (unused slots: weight 0), STENCIL_* status. Centred, shifted one-sided at a physical boundary
+   !< (reduce=.true.: narrowed first). order_matched (default .true.): for a width > 2, xi is recomputed by Newton on
+   !< the isoparametric map of the stencil's own vertices, from the trilinear xi.
+   class(curvilinear_block_t), intent(in)            :: self           !< Block.
+   integer(I4P),               intent(in)            :: cell(:,:)      !< Cells [3, n] (0: not located).
+   real(R8P),                  intent(in)            :: xi(:,:)        !< Local coordinates [3, n].
+   integer(I4P),               intent(in)            :: q              !< Width (2..STENCIL_MAX).
+   integer(I4P), allocatable,  intent(out)           :: nodes(:,:,:)   !< Nodes [3, q^3, n].
+   real(R8P),    allocatable,  intent(out)           :: weights(:,:)   !< Weights [q^3, n].
+   integer(I4P), allocatable,  intent(out)           :: status(:)      !< STENCIL_* [n].
+   logical,                    intent(in),  optional :: order_matched  !< Order-matched xi (default .true.).
+   logical,                    intent(in),  optional :: reduce         !< Narrow instead of shifting.
+   real(R8P),    allocatable,  intent(out), optional :: xi_matched(:,:) !< Index coordinates s = i + xi used [3, n].
+   integer(I4P)                                      :: n, qq(3), st0(3), a, m1, m2, m3, slot, it, nv(3) !< Work.
+   integer(I4P)                                      :: nd(3, STENCIL_MAX, STENCIL_MAX, STENCIL_MAX) !< Mapped nodes.
+   real(R8P)                                         :: sh(3, STENCIL_MAX, STENCIL_MAX, STENCIL_MAX) !< Their shifts.
+   real(R8P)                                         :: sc(3), w(STENCIL_MAX, 3), dw(STENCIL_MAX, 3), p(3), x(3), jac(3, 3) !< Work.
+   real(R8P)                                         :: r(3), d(3), det, wt !< Newton.
+   logical                                           :: om, red, ok, marked(3) !< Flags.
+
+   om = .true. ; if (present(order_matched)) om = order_matched
+   red = .false. ; if (present(reduce)) red = reduce
+   nv = [self%ni, self%nj, self%nk]
+   allocate(nodes(3, q ** 3, size(cell, 2)), weights(q ** 3, size(cell, 2)), status(size(cell, 2)))
+   nodes = 1_I4P ; weights = 0._R8P ; status = STENCIL_FAILED
+   if (present(xi_matched)) then
+      allocate(xi_matched(3, size(cell, 2))) ; xi_matched = 0._R8P
+   endif
+   if (q < 2 .or. q > STENCIL_MAX) return
+   do n = 1, size(cell, 2, I4P)
+      if (any(cell(:, n) < 1)) cycle
+      qq = q ; status(n) = STENCIL_CENTRED
+      do a = 1, 3
+         st0(a) = centred_start(cell(a, n), xi(a, n), qq(a))
+      enddo
+      do it = 1, 4
+         call map_tensor_3d(self, st0, qq, nd, sh, marked)
+         if (.not. any(marked)) exit
+         do a = 1, 3
+            if (.not. marked(a)) cycle
+            if (red) then
+               do while (qq(a) > 2 .and. (st0(a) < 1 .or. st0(a) + qq(a) - 1 > nv(a)))
+                  qq(a) = qq(a) - 1_I4P ; st0(a) = centred_start(cell(a, n), xi(a, n), qq(a))
+               enddo
+               if (qq(a) < q) status(n) = STENCIL_REDUCED
+            endif
+            qq(a) = min(qq(a), nv(a))
+            if (st0(a) < 1 .or. st0(a) + qq(a) - 1 > nv(a)) then
+               st0(a) = max(1_I4P, min(st0(a), nv(a) - qq(a) + 1_I4P))
+               if (status(n) == STENCIL_CENTRED) status(n) = STENCIL_SHIFTED
+            endif
+         enddo
+      enddo
+      if (any(marked)) then
+         status(n) = STENCIL_FAILED ; cycle
+      endif
+      sc = real(cell(:, n), R8P) + xi(:, n)
+      if (om .and. any(qq > 2)) then
+         p = trilinear_point(self%corners(cell(1, n), cell(2, n), cell(3, n)), xi(:, n))
+         do it = 1, 20
+            do a = 1, 3
+               call lagrange_weights(qq(a), st0(a), sc(a), w(:, a), dw(:, a))
+            enddo
+            x = 0._R8P ; jac = 0._R8P
+            do m3 = 1, qq(3)
+               do m2 = 1, qq(2)
+                  do m1 = 1, qq(1)
+                     r = [self%x(nd(1, m1, m2, m3), nd(2, m1, m2, m3), nd(3, m1, m2, m3)), &
+                          self%y(nd(1, m1, m2, m3), nd(2, m1, m2, m3), nd(3, m1, m2, m3)), &
+                          self%z(nd(1, m1, m2, m3), nd(2, m1, m2, m3), nd(3, m1, m2, m3))] - sh(:, m1, m2, m3)
+                     x = x + w(m1, 1) * w(m2, 2) * w(m3, 3) * r
+                     jac(:, 1) = jac(:, 1) + dw(m1, 1) * w(m2, 2) * w(m3, 3) * r
+                     jac(:, 2) = jac(:, 2) + w(m1, 1) * dw(m2, 2) * w(m3, 3) * r
+                     jac(:, 3) = jac(:, 3) + w(m1, 1) * w(m2, 2) * dw(m3, 3) * r
+                  enddo
+               enddo
+            enddo
+            r = x - p
+            det = jac(1, 1) * (jac(2, 2) * jac(3, 3) - jac(3, 2) * jac(2, 3)) &
+                + jac(2, 1) * (jac(3, 2) * jac(1, 3) - jac(1, 2) * jac(3, 3)) &
+                + jac(3, 1) * (jac(1, 2) * jac(2, 3) - jac(2, 2) * jac(1, 3))
+            if (det == 0._R8P) exit
+            d(1) = (r(1) * (jac(2, 2) * jac(3, 3) - jac(3, 2) * jac(2, 3)) + r(2) * (jac(3, 2) * jac(1, 3) - &
+                    jac(1, 2) * jac(3, 3)) + r(3) * (jac(1, 2) * jac(2, 3) - jac(2, 2) * jac(1, 3))) / det
+            d(2) = (jac(1, 1) * (r(2) * jac(3, 3) - r(3) * jac(2, 3)) + jac(2, 1) * (r(3) * jac(1, 3) - &
+                    r(1) * jac(3, 3)) + jac(3, 1) * (r(1) * jac(2, 3) - r(2) * jac(1, 3))) / det
+            d(3) = (jac(1, 1) * (jac(2, 2) * r(3) - jac(3, 2) * r(2)) + jac(2, 1) * (jac(3, 2) * r(1) - &
+                    jac(1, 2) * r(3)) + jac(3, 1) * (jac(1, 2) * r(2) - jac(2, 2) * r(1))) / det
+            sc = sc - d
+            if (maxval(abs(d)) <= 1e-14_R8P * maxval(abs(sc))) exit
+         enddo
+      endif
+      do a = 1, 3
+         call lagrange_weights(qq(a), st0(a), sc(a), w(:, a))
+      enddo
+      slot = 0_I4P
+      do m3 = 1, qq(3)
+         do m2 = 1, qq(2)
+            do m1 = 1, qq(1)
+               slot = slot + 1_I4P ; wt = w(m1, 1) * w(m2, 2) * w(m3, 3)
+               nodes(:, slot, n) = nd(:, m1, m2, m3) ; weights(slot, n) = wt
+            enddo
+         enddo
+      enddo
+      if (present(xi_matched)) xi_matched(:, n) = sc
+   enddo
+   endsubroutine stencils_3d
+
+   subroutine map_tensor_3d(self, st0, qq, nd, sh, marked)
+   !< Map every node of the tensor stencil into the block (through records to this block); marked(a): a node beyond
+   !< a face of direction a without a record.
+   class(curvilinear_block_t), intent(in)  :: self      !< Block.
+   integer(I4P),               intent(in)  :: st0(3), qq(3) !< Starts, widths.
+   integer(I4P),               intent(out) :: nd(:,:,:,:) !< Mapped nodes [3, q, q, q].
+   real(R8P),                  intent(out) :: sh(:,:,:,:) !< Coordinate shifts of the mapped nodes.
+   logical,                    intent(out) :: marked(3) !< Directions to shift.
+   integer(I4P)                            :: m1, m2, m3, a !< Counters.
+   logical                                 :: ok        !< Mapped.
+
+   marked = .false.
+   do m3 = 1, qq(3)
+      do m2 = 1, qq(2)
+         do m1 = 1, qq(1)
+            nd(:, m1, m2, m3) = st0 + [m1, m2, m3] - 1_I4P
+            call map_vertex_3d(self, nd(:, m1, m2, m3), sh(:, m1, m2, m3), ok, a)
+            if (.not. ok) marked(a) = .true.
+         enddo
+      enddo
+   enddo
+   endsubroutine map_tensor_3d
+
+   subroutine map_vertex_3d(self, m, shift, ok, bad)
+   !< Map the vertex index m into the block through the records to this block (up to three crossings); shift: the
+   !< donor coordinates minus the shift give the node's position (periodic translations); bad: the direction that
+   !< could not be crossed.
+   class(curvilinear_block_t), intent(in)    :: self   !< Block.
+   integer(I4P),               intent(inout) :: m(3)   !< Vertex index.
+   real(R8P),                  intent(out)   :: shift(3) !< Accumulated translation.
+   logical,                    intent(out)   :: ok     !< Mapped.
+   integer(I4P),               intent(out)   :: bad    !< Direction not crossed.
+   integer(I4P)                              :: nv(3), it, a, f, r, b !< Work.
+   logical                                   :: crossed !< A record applied.
+
+   nv = [self%ni, self%nj, self%nk] ; shift = 0._R8P ; ok = .true. ; bad = 0_I4P
+   do it = 1, 3
+      a = 0_I4P
+      do b = 1, 3
+         if (m(b) < 1 .or. m(b) > nv(b)) then
+            a = b ; exit
+         endif
+      enddo
+      if (a == 0) return
+      f = 2_I4P * a - merge(1_I4P, 0_I4P, m(a) < 1)
+      crossed = .false.
+      do r = 1, self%nrec
+         associate(rc => self%rec(r))
+            if ((rc%kind /= TOPO_ABUT .and. rc%kind /= TOPO_PERIODIC) .or. rc%face /= f .or. rc%donor_block /= self%id) &
+               cycle
+            if (any((m < rc%lo .or. m > rc%hi) .and. [1, 2, 3] /= a)) cycle
+            m = record_map(rc, m)
+            if (rc%kind == TOPO_PERIODIC) shift = shift + rc%translation
+            crossed = .true.
+         endassociate
+         exit
+      enddo
+      if (.not. crossed) then
+         ok = .false. ; bad = a ; return
+      endif
+   enddo
+   ok = all(m >= 1 .and. m <= nv)
+   if (.not. ok) bad = maxloc(merge(1, 0, m < 1 .or. m > nv), dim=1)
+   endsubroutine map_vertex_3d
+
+   subroutine stencils_2d(self, cell, xi, q, nodes, weights, status, order_matched, reduce, xi_matched)
+   !< The 2-D stencils (as stencils_3d): nodes [2, q^2, n], weights [q^2, n].
+   class(curvilinear_block_2d_t), intent(in)            :: self           !< Block.
+   integer(I4P),                  intent(in)            :: cell(:,:)      !< Cells [2, n] (0: not located).
+   real(R8P),                     intent(in)            :: xi(:,:)        !< Local coordinates [2, n].
+   integer(I4P),                  intent(in)            :: q              !< Width (2..STENCIL_MAX).
+   integer(I4P), allocatable,     intent(out)           :: nodes(:,:,:)   !< Nodes [2, q^2, n].
+   real(R8P),    allocatable,     intent(out)           :: weights(:,:)   !< Weights [q^2, n].
+   integer(I4P), allocatable,     intent(out)           :: status(:)      !< STENCIL_* [n].
+   logical,                       intent(in),  optional :: order_matched  !< Order-matched xi (default .true.).
+   logical,                       intent(in),  optional :: reduce         !< Narrow instead of shifting.
+   real(R8P),    allocatable,     intent(out), optional :: xi_matched(:,:) !< Index coordinates used [2, n].
+   integer(I4P)                                         :: n, qq(2), st0(2), a, m1, m2, slot, it, nv(2) !< Work.
+   integer(I4P)                                         :: nd(2, STENCIL_MAX, STENCIL_MAX) !< Mapped nodes.
+   real(R8P)                                            :: sh(2, STENCIL_MAX, STENCIL_MAX) !< Their shifts.
+   real(R8P)                                            :: sc(2), w(STENCIL_MAX, 2), dw(STENCIL_MAX, 2), p(2), x(2) !< Work.
+   real(R8P)                                            :: jac(2, 2), r(2), det !< Newton.
+   logical                                              :: om, red, marked(2) !< Flags.
+
+   om = .true. ; if (present(order_matched)) om = order_matched
+   red = .false. ; if (present(reduce)) red = reduce
+   nv = [self%ni, self%nj]
+   allocate(nodes(2, q ** 2, size(cell, 2)), weights(q ** 2, size(cell, 2)), status(size(cell, 2)))
+   nodes = 1_I4P ; weights = 0._R8P ; status = STENCIL_FAILED
+   if (present(xi_matched)) then
+      allocate(xi_matched(2, size(cell, 2))) ; xi_matched = 0._R8P
+   endif
+   if (q < 2 .or. q > STENCIL_MAX) return
+   do n = 1, size(cell, 2, I4P)
+      if (any(cell(:, n) < 1)) cycle
+      qq = q ; status(n) = STENCIL_CENTRED
+      do a = 1, 2
+         st0(a) = centred_start(cell(a, n), xi(a, n), qq(a))
+      enddo
+      do it = 1, 4
+         call map_tensor_2d(self, st0, qq, nd, sh, marked)
+         if (.not. any(marked)) exit
+         do a = 1, 2
+            if (.not. marked(a)) cycle
+            if (red) then
+               do while (qq(a) > 2 .and. (st0(a) < 1 .or. st0(a) + qq(a) - 1 > nv(a)))
+                  qq(a) = qq(a) - 1_I4P ; st0(a) = centred_start(cell(a, n), xi(a, n), qq(a))
+               enddo
+               if (qq(a) < q) status(n) = STENCIL_REDUCED
+            endif
+            qq(a) = min(qq(a), nv(a))
+            if (st0(a) < 1 .or. st0(a) + qq(a) - 1 > nv(a)) then
+               st0(a) = max(1_I4P, min(st0(a), nv(a) - qq(a) + 1_I4P))
+               if (status(n) == STENCIL_CENTRED) status(n) = STENCIL_SHIFTED
+            endif
+         enddo
+      enddo
+      if (any(marked)) then
+         status(n) = STENCIL_FAILED ; cycle
+      endif
+      sc = real(cell(:, n), R8P) + xi(:, n)
+      if (om .and. any(qq > 2)) then
+         p = bilinear_point(self%corners(cell(1, n), cell(2, n)), xi(:, n))
+         do it = 1, 20
+            do a = 1, 2
+               call lagrange_weights(qq(a), st0(a), sc(a), w(:, a), dw(:, a))
+            enddo
+            x = 0._R8P ; jac = 0._R8P
+            do m2 = 1, qq(2)
+               do m1 = 1, qq(1)
+                  r = [self%u(nd(1, m1, m2), nd(2, m1, m2)), self%v(nd(1, m1, m2), nd(2, m1, m2))] - sh(:, m1, m2)
+                  x = x + w(m1, 1) * w(m2, 2) * r
+                  jac(:, 1) = jac(:, 1) + dw(m1, 1) * w(m2, 2) * r
+                  jac(:, 2) = jac(:, 2) + w(m1, 1) * dw(m2, 2) * r
+               enddo
+            enddo
+            r = x - p
+            det = jac(1, 1) * jac(2, 2) - jac(1, 2) * jac(2, 1)
+            if (det == 0._R8P) exit
+            r = [(jac(2, 2) * r(1) - jac(1, 2) * r(2)) / det, (-jac(2, 1) * r(1) + jac(1, 1) * r(2)) / det]
+            sc = sc - r
+            if (maxval(abs(r)) <= 1e-14_R8P * maxval(abs(sc))) exit
+         enddo
+      endif
+      do a = 1, 2
+         call lagrange_weights(qq(a), st0(a), sc(a), w(:, a))
+      enddo
+      slot = 0_I4P
+      do m2 = 1, qq(2)
+         do m1 = 1, qq(1)
+            slot = slot + 1_I4P
+            nodes(:, slot, n) = nd(:, m1, m2) ; weights(slot, n) = w(m1, 1) * w(m2, 2)
+         enddo
+      enddo
+      if (present(xi_matched)) xi_matched(:, n) = sc
+   enddo
+   endsubroutine stencils_2d
+
+   subroutine map_tensor_2d(self, st0, qq, nd, sh, marked)
+   !< Map every node of the 2-D tensor stencil into the block (see map_tensor_3d).
+   class(curvilinear_block_2d_t), intent(in)  :: self      !< Block.
+   integer(I4P),                  intent(in)  :: st0(2), qq(2) !< Starts, widths.
+   integer(I4P),                  intent(out) :: nd(:,:,:) !< Mapped nodes [2, q, q].
+   real(R8P),                     intent(out) :: sh(:,:,:) !< Coordinate shifts.
+   logical,                       intent(out) :: marked(2) !< Directions to shift.
+   integer(I4P)                               :: m1, m2, a, m(3), nv(2), it, f, r, b !< Work.
+   real(R8P)                                  :: shift(2) !< Translation.
+   logical                                    :: crossed, ok !< Flags.
+
+   marked = .false. ; nv = [self%ni, self%nj]
+   do m2 = 1, qq(2)
+      do m1 = 1, qq(1)
+         m = [st0(1) + m1 - 1_I4P, st0(2) + m2 - 1_I4P, 1_I4P] ; shift = 0._R8P ; ok = .true.
+         do it = 1, 2
+            a = 0_I4P
+            do b = 1, 2
+               if (m(b) < 1 .or. m(b) > nv(b)) then
+                  a = b ; exit
+               endif
+            enddo
+            if (a == 0) exit
+            f = 2_I4P * a - merge(1_I4P, 0_I4P, m(a) < 1)
+            crossed = .false.
+            do r = 1, self%nrec
+               associate(rc => self%rec(r))
+                  if ((rc%kind /= TOPO_ABUT .and. rc%kind /= TOPO_PERIODIC) .or. rc%face /= f .or. &
+                      rc%donor_block /= self%id) cycle
+                  if (m(3 - a) < rc%lo(3 - a) .or. m(3 - a) > rc%hi(3 - a)) cycle
+                  m = record_map(rc, m)
+                  if (rc%kind == TOPO_PERIODIC) shift = shift + rc%translation(1:2)
+                  crossed = .true.
+               endassociate
+               exit
+            enddo
+            if (.not. crossed) then
+               ok = .false. ; marked(a) = .true. ; exit
+            endif
+         enddo
+         if (ok .and. any(m(1:2) < 1 .or. m(1:2) > nv)) then
+            ok = .false. ; marked(maxloc(merge(1, 0, m(1:2) < 1 .or. m(1:2) > nv), dim=1)) = .true.
+         endif
+         nd(:, m1, m2) = m(1:2) ; sh(:, m1, m2) = shift
+         if (.not. ok) nd(:, m1, m2) = 1_I4P
+      enddo
+   enddo
+   endsubroutine map_tensor_2d
 
    ! ------------------------------------------------------------------------------------------------------- detection
    subroutine detect_topology(blocks, tolerance, translations)
