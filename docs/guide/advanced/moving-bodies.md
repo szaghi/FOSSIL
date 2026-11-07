@@ -150,6 +150,45 @@ call swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status
   to the node poses. With the screw motion, `error_estimate` is the
   largest face change between `nq` and `2 nq` nodes.
 
+**Exact rotation (design, issue #69).** The Gauss path converges algebraically under rotation (rate 2–3,
+see the validation table), because a face's fluid measure has kinks inside the step. The exact path
+removes them, as the translation path does, and is built as follows.
+
+- *Motion.* The screw motion of `pose_interpolate` has the angle linear in s ∈ [0, 1] about a fixed
+  axis (the plane normal in 2-D) and the translation linear in s: a body point q is at
+  X(s) = R_k(sΔθ) R₀ q + t₀ + s Δt. It is not a rotation about a fixed pivot, so the events below are
+  transcendental in general.
+- *Events.* A face's fluid measure is smooth between the instants when
+  - a wall vertex crosses the face's line (2-D) or plane (3-D);
+  - an end node of the face crosses a wall segment (2-D), or a grid node of the plane crosses a
+    triangle (3-D);
+  - a mesh edge crosses one of the plane's grid lines (3-D).
+
+  Each is a zero of an orientation of moving and fixed points, and with X(s) as above every one has
+  the form
+
+  g(s) = (p₀ + p₁ s) cos φ + (q₀ + q₁ s) sin φ + k₀ + k₁ s,   φ = φ₀ + s Δθ,
+
+  with coefficients from the input points (the rotation acts on differences of body points, the
+  translation enters linearly), plus a check that the event lies on the face (the vertex inside the
+  span, the node's foot inside the segment or triangle).
+- *Certified isolation.* |g''(s)| ≤ M = Δθ² max|(p, q)| + 2|Δθ| |(p₁, q₁)|, the maximum over [0, 1].
+  On an interval of length h whose end values have the same sign and exceed M h²/8 in magnitude, g has
+  no zero (g lies above its chord minus M h²/8). Otherwise the interval is halved; a sign change is
+  refined by bisection to one ulp of s. No pair of zeros is missed; a double zero (a tangency) ends as
+  an interval at round-off and becomes a breakpoint, which is harmless.
+- *Integration.* On each piece between breakpoints the fluid measure is analytic, so Gauss–Legendre
+  converges exponentially. The node count on a piece doubles from 2 until two successive values agree
+  to round-off of the face measure; `sw%evaluations` reports the largest count. A piece that has not
+  converged at 64 nodes marks the result `sw%exact = .false.`, never silently. Each evaluation moves a
+  copy of the body to the node's pose and measures the face exactly as the cut cells do, so apertures
+  and fractions share one convention.
+- *What changes.* The swept volumes are exact already (cut-cell volumes at the two poses), and `wall`
+  closes the uniform flow by construction, so a conservative update is consistent either way
+  (Falcovitz's requirement). The exact path makes the time-averaged apertures exact under rotation too,
+  and with them the rigid-field `residual`, which falls to round-off. Explicit node poses (`poses=`)
+  keep the Gauss path; `exact=.false.` forces it.
+
 **Check.** `residual` is the volume balance of the body's rigid velocity
 field: swept volume plus the time integral of the field's outflow through
 the fluid part of every face. It vanishes when a uniform flow moving with
