@@ -69,6 +69,9 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 | 3-D cut cells: face fractions, volumes, fluid pieces with their own measures | `cut_cells_3d` (module `fossil_cut_cells_3d`) | [Cut-cell geometry](/guide/advanced/cut-cells) | [10](/manual/tutorial/10-cut-cells) |
 | Cut-cell solver support: piece links, state- and flux-redistribution neighbourhoods, merge targets | `cut_links_2d`, `cut_cells_3d(links=)`, `srd_neighbourhoods`, `frd_neighbourhoods`, `merge_targets` | [Cut cells: solver support](/guide/advanced/cut-solver) | |
 | Cut-cell moments up to order 4, quadrature rules, edge fractions, exact coarsening | `cut_cells_3d(moments_order=, quadrature=, edges=)`, `curve%cut_cells(moments_order=, quadrature=)`, `cut_coarsen_3d`, `cut_coarsen_2d` | [Cut cells: solver support](/guide/advanced/cut-solver) | |
+| Curvilinear structured blocks: topology records (seams, cuts, poles, periodic, interfaces) and their detection | `curvilinear_block_t`, `curvilinear_block_2d_t`, `detect_topology` | [Curvilinear blocks](/guide/advanced/curvilinear-blocks) | |
+| Exact cell geometry, certified cell validity, quality metrics | `geometry`, `validity`, `quality` | [Curvilinear blocks](/guide/advanced/curvilinear-blocks) | |
+| Point location in curvilinear blocks (robust, walking, GPU) and Lagrange stencils of width q | `locate_many`, `locate_many_device`, `locate_in_blocks`, `stencils` | [Curvilinear blocks](/guide/advanced/curvilinear-blocks) | |
 | Rigid poses, body-frame queries, O(N) tree refit | `rigid_pose_t`, `pose=`, `move` | [Moving bodies](/guide/advanced/moving-bodies) | [11](/manual/tutorial/11-moving-bodies) |
 | Swept geometry of a time step: exact swept volumes, time-averaged apertures | `swept_cells_2d`, `swept_cells_3d` | [Moving bodies](/guide/advanced/moving-bodies) | [11](/manual/tutorial/11-moving-bodies) |
 

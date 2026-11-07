@@ -235,19 +235,23 @@ The wiki defines none, so FOSSIL defines them *(gk)*, per cell:
 ## API
 
 ```fortran
-type(curvilinear_block_t) :: blk
-call blk%initialize(x, y, z, name='blade', status=st)        ! vertex arrays (ni, nj, nk)
-call detect_topology(blocks, tolerance=t, translations=tau) ! records on every block
-call blk%geometry(volume, centroid, face_i, face_j, face_k)  ! exact cell geometry
-call blk%validity(cell_status, min_jacobian)               ! certified signs
-call blk%build_search()                                    ! cell-box hierarchy
-call blk%locate_many(px, py, pz, cell, xi, status, start=, walk=)
-call blk%stencils(cell, xi, q, nodes, weights, stencil_status, order_matched=)
-call blk%quality(skewness, orthogonality, aspect, warp, min_jacobian)
+type(curvilinear_block_t) :: blocks(2)
+call blocks(1)%initialize(x, y, z, name='blade', status=st)   ! vertex arrays (ni, nj, nk)
+call detect_topology(blocks, tolerance=t, translations=tau)    ! records on every block (blocks(b)%rec)
+call blocks(1)%geometry(volume, centroid, face_i, face_j, face_k) ! exact cell geometry
+call blocks(1)%validity(status, min_jacobian)                 ! certified CELL_* per cell
+call blocks(1)%build_search()                                 ! validity, orientation, cell-box hierarchy
+call blocks(1)%locate_many(px, py, pz, cell, xi, status)      ! robust; walk=.true., start=, jumps=, fallbacks=
+call blocks(1)%locate_many_device(px, py, pz, cell, xi, status) ! the robust path on the GPU, bit-identical
+call locate_in_blocks(blocks, px, py, pz, block, cell, xi, status)
+call blocks(1)%stencils(cell, xi, q, nodes, weights, status)  ! order_matched=, reduce=, xi_matched=
+call blocks(1)%quality(skewness, orthogonality, aspect, warp, min_jacobian)
 ```
 
-The 2-D type has the same procedures with `u, v`. `locate_in_blocks` locates
-over a set of blocks (the first block containing the point wins).
+The 2-D type has the same procedures with `u, v` (no warp). `cell(:, n)` is the cell index (0 if the point is
+outside), `xi(:, n)` its local coordinates; `nodes(:, k, n)` are vertex indices of the block (beyond a face, mapped
+through its records to the same block; records to other blocks are left to WP3), `weights(k, n)` their weights
+(unused slots of a narrowed stencil have weight 0).
 
 ## Proved and measured
 
@@ -259,7 +263,22 @@ over a set of blocks (the first block containing the point wins).
 | 3-D containment | Newton with a residual test: measured against analytic inverses |
 | fast path equal to robust path | measured on random points (O-grid, C-grid, polar grid) |
 | device equal to CPU | measured, bit for bit |
-| stencil exactness and order q | exactness proved (Lagrange); order measured by refinement |
+| stencil exactness and order q | exactness proved (Lagrange); order measured by refinement: q = 2, 3, 4 at 1.98, 3.00, 3.97 on a C-grid, q = 4 at 4.04 on a spherical shell; q = 4 with the trilinear ξ stalls at 2.0 |
+
+## Measured
+
+`fossil_val_curvilinear_block` (validation suite, -O2, one core):
+
+- a spherical-shell O-grid of 128 × 64 × 32 cells with both poles collapsed: `detect_topology` finds the seam (two
+  records) and the two singular poles; 253 952 cells valid and the 8192 pole cells singular, certified in 0.2 s;
+  200 000 points located at about 0.8 million per second (robust) and equal, bit for bit, through the walk;
+- a parabolic C-grid of 800 × 200 cells: the wake cut found; 10⁶ points at about 5.8 million per second, the walk
+  equal bit for bit;
+- interpolation orders (slopes over the refinements): q = 2, 3, 4 at 1.98, 3.00, 3.97 on the C-grid, q = 4 at 4.04
+  on the shell.
+
+On the GPU (RTX 4070), 50 000 points in a wavy 3-D O-grid: 12 ms with the copies of the arrays, 16 ms serial on the
+CPU, the same answers bit for bit.
 
 ## Left out
 

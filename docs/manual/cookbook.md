@@ -214,6 +214,20 @@ inside the 3 × 3 tile. Its single merge target is the linked face neighbour tha
 weighted factor η^nb = 0.45 is the share it hands to its neighbour. The moments are those of the piece in its
 cell's scaled coordinates. See [Cut cells: solver support](/guide/advanced/cut-solver).
 
+### Locate a point in a curvilinear block
+
+<<< @/examples/snippets/ck_block_locate.f90
+
+<<< @/examples/output/ck_block_locate.ansi{ansi}
+
+![an O-grid of 32 x 8 cells around the unit cylinder, the cell holding a point next to the seam, and the 16 vertices of its width-4 stencil on both sides of the seam](../examples/images/ck-block-locate.svg){.fossil-figure}
+
+`detect_topology_2d` finds the seam the grid writes exactly (faces 1 and 2 abut each other); `validity` certifies
+every cell, exactly in 2-D. `locate_many` returns the cell and its local coordinates: the point lies in the first cell
+after the seam. The width-4 stencil reaches across the seam through the record (vertex columns 32, 1, 2, 3), and its
+weights use the order-matched ξ, so the interpolation is fourth order on the curved grid. 3-D blocks
+(`curvilinear_block_t`) work the same way. See [Curvilinear blocks](/guide/advanced/curvilinear-blocks).
+
 ## Curves
 
 ### Cut a 2-D section of an STL

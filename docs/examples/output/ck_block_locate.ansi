@@ -1,0 +1,6 @@
+$ ck_block_locate
+records 2, faces 1 2
+valid cells 256 of 256
+inside T, cell  1  5, xi  0.09475  0.15303
+stencil i  32  1  2  3 32  1  2  3 32  1  2  3 32  1  2  3
+interpolation error of exp(x) cos(y)   2.48E-03
