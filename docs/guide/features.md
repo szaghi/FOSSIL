@@ -67,6 +67,8 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 | Exact grid-line crossings and wall fractions | `line_crossings`, `cell_wall_fractions` | [Cut-cell geometry](/guide/advanced/cut-cells) | |
 | 2-D cut cells: fractions, apertures, centroids, wetted boundary, pieces | `curve%cut_cells` | [Cut-cell geometry](/guide/advanced/cut-cells) | [10](/manual/tutorial/10-cut-cells) |
 | 3-D cut cells: face fractions, volumes, fluid pieces with their own measures | `cut_cells_3d` (module `fossil_cut_cells_3d`) | [Cut-cell geometry](/guide/advanced/cut-cells) | [10](/manual/tutorial/10-cut-cells) |
+| Cut-cell solver support: piece links, state- and flux-redistribution neighbourhoods, merge targets | `cut_links_2d`, `cut_cells_3d(links=)`, `srd_neighbourhoods`, `frd_neighbourhoods`, `merge_targets` | [Cut cells: solver support](/guide/advanced/cut-solver) | |
+| Cut-cell moments up to order 4, quadrature rules, edge fractions, exact coarsening | `cut_cells_3d(moments_order=, quadrature=, edges=)`, `curve%cut_cells(moments_order=, quadrature=)`, `cut_coarsen_3d`, `cut_coarsen_2d` | [Cut cells: solver support](/guide/advanced/cut-solver) | |
 | Rigid poses, body-frame queries, O(N) tree refit | `rigid_pose_t`, `pose=`, `move` | [Moving bodies](/guide/advanced/moving-bodies) | [11](/manual/tutorial/11-moving-bodies) |
 | Swept geometry of a time step: exact swept volumes, time-averaged apertures | `swept_cells_2d`, `swept_cells_3d` | [Moving bodies](/guide/advanced/moving-bodies) | [11](/manual/tutorial/11-moving-bodies) |
 

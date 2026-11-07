@@ -199,6 +199,21 @@ A box is cut when it meets the surface, near when it is within `radius` of it, o
 sign at its centre (fast winding number by default). The 152 cut cells are the shell between the 6^3 and 4^3 blocks
 that contain the cube's faces. See [AMR tagging](/guide/advanced/amr-tagging).
 
+### Neighbourhoods for a small-cell cure
+
+<<< @/examples/snippets/ck_cut_solver.f90
+
+<<< @/examples/output/ck_cut_solver.ansi{ansi}
+
+![the disc on 16 x 16 cells, the cut cells coloured by their area fraction; the smallest piece, the cells of its state-redistribution neighbourhood outlined, its merge target marked](../examples/images/ck-cut-solver.svg){.fossil-figure}
+
+`cut_links_2d` (3-D: `cut_cells_3d(..., links=)`) links the pieces of neighbouring cells; the solver support builds
+on it. The smallest piece holds 4.5 % of its cell. Its state-redistribution neighbourhood grows along its wall
+normal (0.58, −0.81) until it holds half a cell: the diagonal piece (+1, −1) comes first, reached through the links
+inside the 3 × 3 tile. Its single merge target is the linked face neighbour that best faces the normal. The
+weighted factor η^nb = 0.45 is the share it hands to its neighbour. The moments are those of the piece in its
+cell's scaled coordinates. See [Cut cells: solver support](/guide/advanced/cut-solver).
+
 ## Curves
 
 ### Cut a 2-D section of an STL

@@ -8,12 +8,12 @@ first, coarse levels, and the fluid fractions of the cell edges. Issue #70
 (roadmap #68, WP1) adds them as pure geometry and graph work; the solver keeps
 the arithmetic on its states and fluxes.
 
-::: info Design note (issue #70, step 2)
-This page fixes the definitions, the tie rules and the API shapes before the
-code. Each section says what the literature prescribes, with the source, and
-what FOSSIL chooses where the literature leaves room. Statements from general
-knowledge rather than a cited source are marked *(gk)*. Later steps of #70
-replace the plans here with the measured results.
+::: info Design and reference (issue #70)
+Each section says what the literature prescribes, with the source, what FOSSIL
+chooses where the literature leaves room, the interface, and what the tests
+measured. Statements from general knowledge rather than a cited source are
+marked *(gk)*. A worked example is in the cookbook:
+[Neighbourhoods for a small-cell cure](/manual/cookbook#neighbourhoods-for-a-small-cell-cure).
 :::
 
 ## Principles

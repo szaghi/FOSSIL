@@ -1,0 +1,9 @@
+$ ck_cut_solver
+pieces 204, links 720, small pieces 24
+smallest piece 71 in cell 11  5, area fraction  0.0452
+  SRD member   71 in cell 11  5
+  SRD member   60 in cell 12  4
+  wall normal   0.5804 -0.8143
+  weighted volume / cell  0.5452, eta_nb  0.4548
+  merge target 59 in cell 11  4
+  moments 1, X, Y     0.04518  0.01715 -0.01882
