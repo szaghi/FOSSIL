@@ -220,9 +220,9 @@ The volume and the moments come from signed tetrahedra about a fixed point, so t
 results of contacts and of △ too.
 
 Self-intersections: the exact result keeps the slivers of near-degenerate inputs, and rounding it to doubles can fold
-a sliver by an ulp. A pair reported by `find_self_intersections` is first confirmed by the exact `pair_cut` on the
-result's doubles (the detector's floating-point test reports false crossings on slivers 1e-10 wide), then measured:
-its depth is the smaller of the intersection's length and of the two facets' penetrations through each other's plane.
+a sliver by an ulp. Each pair reported by `find_self_intersections` (exact since issue #69; its earlier floating-point
+test reported false crossings on slivers 1e-10 wide, so the harness re-checked every pair with `pair_cut`) is
+measured: its depth is the smaller of the intersection's length and of the two facets' penetrations through each other's plane.
 A fold is short or shallow; a real crossing is both long and deep, of the order of a facet. Validity allows folds up
 to 1e-12 of the joint diagonal; the deepest measured anywhere is about 1e-15. The pass criterion is #33's: a result with status OK satisfies every identity that
 applies; a non-OK status (`BOOL_STATUS_CDT_FAILED`) is allowed and counted.

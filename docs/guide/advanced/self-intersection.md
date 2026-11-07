@@ -70,6 +70,9 @@ the input.
    `p`–`q`. Fans with unequal numbers of forward and backward facets (an
    orientation or boundary defect, not a crossing) and fans with two
    facets in the same half-plane (folds, reported pairwise) are skipped.
+   The criterion assumes consistently oriented sheets: on a misoriented
+   input a reported pair can be an orientation defect rather than a
+   crossing (`sanitize` orients the normals first).
 
 Not reported: duplicate facets (three shared vertices), which
 `remove_duplicate_facets` handles.
@@ -129,7 +132,7 @@ along each axis if you suspect coplanar self-overlaps.
 ## Example: detection
 
 The dragon fixture in this repo is **known dirty** — it ships with
-~1167 real self-intersections (759 before issue #46 added the pairs sharing one vertex) and is the regression workhorse for §1.2:
+1191 self-intersection pairs: 1167 crossings (759 before issue #46 added the pairs sharing one vertex) and, since issue #69, 24 pairs of sheets crossing at its non-manifold edges. It is the regression workhorse for §1.2:
 
 ```fortran
 program ex_find_self_intersections
@@ -179,10 +182,10 @@ endprogram ex_resolve_self_intersections
 ## Visual reference
 
 The dragon fixture (6588 facets), drawn translucent, with the segment
-`p`–`q` of each of the 1167 crossing pairs `find_self_intersections`
+`p`–`q` of each of the 1191 pairs `find_self_intersections`
 reports:
 
-![the dragon drawn translucent, the 1167 self-intersection segments find_self_intersections reports in ember, most of them at the head and the feet](../../examples/images/ref-self-intersection-dragon.svg){.fossil-figure}
+![the dragon drawn translucent, the 1191 self-intersection segments find_self_intersections reports in ember, most of them at the head and the feet](../../examples/images/ref-self-intersection-dragon.svg){.fossil-figure}
 
 Drawn opaque, the dragon looks fine: the crossings are small folds
 the eye does not catch. That's the *whole point*

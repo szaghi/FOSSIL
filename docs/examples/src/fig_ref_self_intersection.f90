@@ -15,7 +15,7 @@ integer(I4P)                           :: u, status
 
 call dragon%load_from_file(file_name='dragon.stl', guess_format=.true.)
 call dragon%find_self_intersections(pairs=pairs, status=status)
-write(caption, '(A,I0,A,I0,A)') 'find_self_intersections: ', size(pairs), ' crossing pairs in ', &
+write(caption, '(A,I0,A,I0,A)') 'find_self_intersections: ', size(pairs), ' pairs in ', &
                                 dragon%get_facets_number(), ' facets'
 call fig_open(u, 'ref-self-intersection-dragon', trim(caption), -60._R8P, 22._R8P)
 call fig_surface(u, 'ghost', dragon)
