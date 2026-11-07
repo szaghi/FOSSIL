@@ -130,15 +130,20 @@ cell valid: a twisted cell can fold inside while every corner is positive
   coefficients on the cell, computed from its values at ξ, η, ζ ∈ {0, ½, 1}.
   Their minimum and maximum bound det J on the cell (the convex-hull property
   of the Bernstein form *(gk)*).
-- **Valid** when every coefficient has the block's sign by more than its
-  floating error bound; **invalid** when det J has the opposite sign at a
-  point (a value, not a coefficient); otherwise the cell is cut in eight and
-  each part is examined again, up to a depth limit. A cell where nothing
-  decides is **undetermined** (a flat cell, a corner value at zero).
+- **Valid** (`CELL_VALID`) when every coefficient has the block's sign by
+  more than its floating error bound; **invalid** (`CELL_INVALID`) when det J
+  has the opposite sign at a point (a value, not a coefficient) or vanishes on
+  a whole box (a flat cell); **singular** (`CELL_SINGULAR`) when the remaining
+  coefficients are exact zeros, which coincident vertices produce (a polar
+  axis, a collapsed edge: det J ≥ 0 is certified, zero on the collapse);
+  otherwise the cell is cut in eight and each part is examined again, down to
+  5 levels. A cell where nothing decides is **undetermined**
+  (`CELL_UNDETERMINED`). Location treats singular cells as valid.
 - **2-D is exact.** The bilinear det J has degree (1, 1), so its Bernstein
   coefficients are its four corner values, and each corner value is the
   orientation of the corner and its two neighbours: `orient2d` decides
-  valid, invalid or **degenerate** (a corner value exactly zero) exactly.
+  valid, invalid, or singular (a corner value exactly zero, the others
+  positive) exactly.
 - The certified lower bound of det J is kept for the quality metrics.
 
 ## Point location

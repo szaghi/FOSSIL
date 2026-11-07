@@ -18,7 +18,8 @@ module fossil_curvilinear_block
 !< vertex whose image is unique, with unique images of its face neighbours, seeds a transform that grows to the
 !< largest rectangle of the face on which every vertex maps onto a coincident vertex.
 use penf, only : I4P, R8P
-use fossil_block_geometry, only : hex_volume, hex_centroid, bilinear_face_vector, quad_area, quad_centroid
+use fossil_block_geometry, only : hex_volume, hex_centroid, bilinear_face_vector, quad_area, quad_centroid, hex_validity, &
+                                  quad_validity
 
 implicit none
 private
@@ -67,6 +68,8 @@ type :: curvilinear_block_t
       procedure, pass(self) :: cells_number => cells_number_3d !< Number of cells.
       procedure, pass(self) :: corners => corners_3d          !< Corners of a cell.
       procedure, pass(self) :: geometry => geometry_3d        !< Exact cell geometry.
+      procedure, pass(self) :: orientation => orientation_3d  !< Handedness (sign of the block volume).
+      procedure, pass(self) :: validity => validity_3d        !< Certified cell validity.
 endtype curvilinear_block_t
 
 type :: curvilinear_block_2d_t
@@ -83,6 +86,8 @@ type :: curvilinear_block_2d_t
       procedure, pass(self) :: cells_number => cells_number_2d !< Number of cells.
       procedure, pass(self) :: corners => corners_2d          !< Corners of a cell.
       procedure, pass(self) :: geometry => geometry_2d        !< Exact cell geometry.
+      procedure, pass(self) :: orientation => orientation_2d  !< Handedness (sign of the block area).
+      procedure, pass(self) :: validity => validity_2d        !< Exact cell validity.
 endtype curvilinear_block_2d_t
 
 type :: vx_t
@@ -363,6 +368,82 @@ contains
       enddo
    endif
    endsubroutine geometry_2d
+
+   real(R8P) function orientation_3d(self) result(o)
+   !< Handedness: +1 if the block volume (sum of the cell volumes) is >= 0, else -1.
+   class(curvilinear_block_t), intent(in) :: self    !< Block.
+   real(R8P)                              :: vol     !< Volume.
+   integer(I4P)                           :: i, j, k !< Counters.
+
+   vol = 0._R8P
+   do k = 1, self%nk - 1
+      do j = 1, self%nj - 1
+         do i = 1, self%ni - 1
+            vol = vol + hex_volume(self%corners(i, j, k))
+         enddo
+      enddo
+   enddo
+   o = merge(1._R8P, -1._R8P, vol >= 0._R8P)
+   endfunction orientation_3d
+
+   real(R8P) function orientation_2d(self) result(o)
+   !< Handedness: +1 if the block area (sum of the cell areas) is >= 0, else -1.
+   class(curvilinear_block_2d_t), intent(in) :: self !< Block.
+   real(R8P)                                 :: ar   !< Area.
+   integer(I4P)                              :: i, j !< Counters.
+
+   ar = 0._R8P
+   do j = 1, self%nj - 1
+      do i = 1, self%ni - 1
+         ar = ar + quad_area(self%corners(i, j))
+      enddo
+   enddo
+   o = merge(1._R8P, -1._R8P, ar >= 0._R8P)
+   endfunction orientation_2d
+
+   subroutine validity_3d(self, status, min_jacobian, orientation)
+   !< Certified validity of every cell (CELL_*) and the certified lower bound of det J times the block orientation.
+   class(curvilinear_block_t), intent(in)            :: self             !< Block.
+   integer(I4P), allocatable,  intent(out)           :: status(:,:,:)    !< CELL_* [ni-1, nj-1, nk-1].
+   real(R8P),    allocatable,  intent(out), optional :: min_jacobian(:,:,:) !< Lower bound of orient det J.
+   real(R8P),                  intent(in),  optional :: orientation      !< Orientation (default: the block's).
+   real(R8P)                                         :: o, jm            !< Orientation, bound.
+   integer(I4P)                                      :: i, j, k          !< Counters.
+
+   o = 0._R8P ; if (present(orientation)) o = sign(1._R8P, orientation)
+   if (o == 0._R8P) o = self%orientation()
+   allocate(status(self%ni - 1, self%nj - 1, self%nk - 1))
+   if (present(min_jacobian)) allocate(min_jacobian(self%ni - 1, self%nj - 1, self%nk - 1))
+   do k = 1, self%nk - 1
+      do j = 1, self%nj - 1
+         do i = 1, self%ni - 1
+            call hex_validity(self%corners(i, j, k), o, status(i, j, k), jm)
+            if (present(min_jacobian)) min_jacobian(i, j, k) = jm
+         enddo
+      enddo
+   enddo
+   endsubroutine validity_3d
+
+   subroutine validity_2d(self, status, min_jacobian, orientation)
+   !< Exact validity of every cell (CELL_*) and the minimum of det J times the block orientation (at a corner).
+   class(curvilinear_block_2d_t), intent(in)            :: self             !< Block.
+   integer(I4P), allocatable,     intent(out)           :: status(:,:)      !< CELL_* [ni-1, nj-1].
+   real(R8P),    allocatable,     intent(out), optional :: min_jacobian(:,:) !< min of orient det J.
+   real(R8P),                     intent(in),  optional :: orientation      !< Orientation (default: the block's).
+   real(R8P)                                            :: o, jm            !< Orientation, minimum.
+   integer(I4P)                                         :: i, j             !< Counters.
+
+   o = 0._R8P ; if (present(orientation)) o = sign(1._R8P, orientation)
+   if (o == 0._R8P) o = self%orientation()
+   allocate(status(self%ni - 1, self%nj - 1))
+   if (present(min_jacobian)) allocate(min_jacobian(self%ni - 1, self%nj - 1))
+   do j = 1, self%nj - 1
+      do i = 1, self%ni - 1
+         call quad_validity(self%corners(i, j), o, status(i, j), jm)
+         if (present(min_jacobian)) min_jacobian(i, j) = jm
+      enddo
+   enddo
+   endsubroutine validity_2d
 
    ! ------------------------------------------------------------------------------------------------------- detection
    subroutine detect_topology(blocks, tolerance, translations)
