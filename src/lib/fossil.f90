@@ -28,6 +28,8 @@ use fossil_surface_stl_object
 use fossil_distance_field, only : distance_field_object, FAR_VALUE
 use fossil_curve_slice, only : slice_surface
 use fossil_cut_cells_3d, only : cut_cells_3d_t, cut_cells_3d
+use fossil_cut_coarsen, only : cut_coarsen_3d, cut_coarsen_2d
+use fossil_cut_moments, only : MOMENTS_MAX, mono_count, mono_exponents
 use fossil_cut_graph, only : cut_links_t, cut_links_2d, srd_t, srd_neighbourhoods, SRD_REGULAR, SRD_COMPLETE, SRD_INCOMPLETE, &
                             SRD_NO_VOLUME, frd_t, frd_neighbourhoods, merge_t, merge_targets, MERGE_NONE, MERGE_OK, MERGE_CHAIN, &
                             MERGE_CYCLE, MERGE_ALONE
@@ -51,6 +53,7 @@ public :: surface_stl_object, proximity_pairs_of
 public :: distance_field_object, FAR_VALUE
 public :: slice_surface
 public :: cut_cells_3d_t, cut_cells_3d
+public :: cut_coarsen_3d, cut_coarsen_2d, MOMENTS_MAX, mono_count, mono_exponents
 public :: cut_links_t, cut_links_2d, srd_t, srd_neighbourhoods, SRD_REGULAR, SRD_COMPLETE, SRD_INCOMPLETE, SRD_NO_VOLUME
 public :: frd_t, frd_neighbourhoods, merge_t, merge_targets, MERGE_NONE, MERGE_OK, MERGE_CHAIN, MERGE_CYCLE, MERGE_ALONE
 public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose

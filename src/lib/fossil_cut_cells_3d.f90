@@ -63,6 +63,8 @@ module fossil_cut_cells_3d
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t
 use fossil_curve_slice,        only : slice_surface
 use fossil_cut_graph,          only : cut_links_t, build_csr
+use fossil_cut_moments,        only : MOMENTS_MAX, mono_count, mono_exponents, triangle_moments, segment_green_moments, &
+                                      cell_moments, tet_rule, triangle_rule, tensor_rule
 use fossil_facet_object,       only : facet_object
 use fossil_line_query,         only : line_crossing_before, tri_line_hit_oac
 use fossil_predicates,         only : orient2d_xy
@@ -109,6 +111,21 @@ type :: cut_cells_3d_t
    real(R8P),    allocatable :: edge_y(:,:,:)       !< Fluid fraction of the cell edges along y [nx+1, ny, nz+1].
    real(R8P),    allocatable :: edge_z(:,:,:)       !< Fluid fraction of the cell edges along z [nx+1, ny+1, nz].
    logical,      allocatable :: node_in(:,:,:)      !< Grid node inside the solid [nx+1, ny+1, nz+1] (perturbed, exact).
+   integer(I4P)              :: moments_order = 0_I4P !< Order of the moments computed (issue #70; 0: none).
+   real(R8P),    allocatable :: piece_moments(:,:)  !< int X^a Y^b Z^c dV of each piece [mono_count(3, p), np].
+   real(R8P),    allocatable :: piece_wall_moments(:,:) !< int X^a Y^b Z^c dA over the wall of each piece [mono_count(3, p), np].
+   real(R8P),    allocatable :: piece_face_moments(:,:,:) !< Fluid moments of the six faces per piece [mono_count(2, p), 6, np]
+                                                    !< (in-face coordinates in cyclic order: x faces (Y, Z), y (Z, X), z (X, Y)).
+   real(R8P),    allocatable :: face_x_moments(:,:,:,:) !< Fluid moments of the x faces [mono_count(2, p), nx+1, ny, nz].
+   real(R8P),    allocatable :: face_y_moments(:,:,:,:) !< Fluid moments of the y faces [mono_count(2, p), nx, ny+1, nz].
+   real(R8P),    allocatable :: face_z_moments(:,:,:,:) !< Fluid moments of the z faces [mono_count(2, p), nx, ny, nz+1].
+   integer(I4P), allocatable :: quad_start(:)       !< Volume rule of piece p: quad_start(p) .. quad_start(p + 1) - 1 (#70).
+   real(R8P),    allocatable :: quad_point(:,:)     !< Its points [3, nq].
+   real(R8P),    allocatable :: quad_weight(:)      !< Its weights (signed: cones over the boundary).
+   integer(I4P), allocatable :: quad_status(:)      !< 0: the weights add up to the piece volume (1e-12 of the cell), 1: not.
+   integer(I4P), allocatable :: wall_quad_start(:)  !< Wall rule of piece p (positive weights).
+   real(R8P),    allocatable :: wall_quad_point(:,:) !< Its points [3, nw].
+   real(R8P),    allocatable :: wall_quad_weight(:) !< Its weights.
 endtype cut_cells_3d_t
 
 type :: pierce_t
@@ -120,7 +137,7 @@ type :: pierce_t
 endtype pierce_t
 
 contains
-   subroutine cut_cells_3d(surface, x, y, z, cut, status, links, edges)
+   subroutine cut_cells_3d(surface, x, y, z, cut, status, links, edges, moments_order, quadrature)
    !< Cut cells of `surface` on the block with cell edges x(nx+1), y(ny+1), z(nz+1) (issue #40).
    !<
    !< Step 4: the face fluid fractions, centroids and pieces of every grid face (see the module
@@ -131,8 +148,12 @@ contains
    integer(I4P),             intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
    type(cut_links_t),        intent(out), optional :: links      !< Links between the pieces (issue #70).
    logical,                  intent(in),  optional :: edges      !< Also the fluid fractions of the cell edges (issue #70).
+   integer(I4P),             intent(in),  optional :: moments_order !< Moments of the pieces up to this order (0-4, #70).
+   logical,                  intent(in),  optional :: quadrature !< Quadrature rules on the pieces and their walls (#70).
    type(cut_cells_2d_t), allocatable :: px(:), py(:), pz(:) !< Plane sections kept for the links.
    logical              :: all_edges !< Edge fractions asked.
+   integer(I4P)         :: mo, nm2   !< Moment order, 2-D moments per face.
+   logical              :: qd        !< Quadrature asked.
    integer(I4P),         allocatable :: piv_piece(:), piv_edge(:) !< Fluid edge intervals of the pieces of multi-piece
    real(R8P),            allocatable :: piv_lo(:), piv_hi(:)      !< cells: piece, cell edge (1-12), range.
    integer(I4P)         :: nx, ny, nz, i, j, k, st, f !< Work.
@@ -159,43 +180,51 @@ contains
             cut%face_z_centroid(3, nx, ny, nz + 1))
    allocate(cut%face_x_pieces(nx + 1, ny, nz), cut%face_y_pieces(nx, ny + 1, nz), cut%face_z_pieces(nx, ny, nz + 1))
    allocate(cut%face_x_closed(nx + 1, ny, nz), cut%face_y_closed(nx, ny + 1, nz), cut%face_z_closed(nx, ny, nz + 1))
-   if (present(links)) allocate(px(nx + 1), py(ny + 1), pz(nz + 1))
+   mo = 0_I4P ; if (present(moments_order)) mo = max(0_I4P, min(MOMENTS_MAX, moments_order))
+   qd = .false. ; if (present(quadrature)) qd = quadrature
+   if (present(links) .or. qd) allocate(px(nx + 1), py(ny + 1), pz(nz + 1))
+   cut%moments_order = mo ; nm2 = 0_I4P ; if (mo > 0_I4P) nm2 = mono_count(2_I4P, mo)
+   allocate(cut%face_x_moments(nm2, nx + 1, ny, nz), cut%face_y_moments(nm2, nx, ny + 1, nz), &
+            cut%face_z_moments(nm2, nx, ny, nz + 1))
    ! planes x = x_i: (u, v) = (y, z)
    do i = 1, nx + 1
       call slice_surface(surface=surface, normal_axis=1_I4P, level=x(i), curve=sec, on_plane_low=.true.)
-      call sec%cut_cells(x=y, y=z, cut=c2, status=st, intervals=present(links))
-      if (present(links)) px(i) = c2
+      call sec%cut_cells(x=y, y=z, cut=c2, status=st, intervals=present(links), moments_order=mo, boundaries=qd)
+      if (present(links) .or. qd) px(i) = c2
       do k = 1, nz
          do j = 1, ny
             cut%face_x(i, j, k) = c2%alpha(j, k) ; cut%face_x_pieces(i, j, k) = c2%pieces(j, k)
             cut%face_x_closed(i, j, k) = c2%closed(j, k)
             cut%face_x_centroid(:, i, j, k) = [x(i), c2%centroid(1, j, k), c2%centroid(2, j, k)]
+            if (nm2 > 0_I4P) cut%face_x_moments(:, i, j, k) = section_moments(c2, j, k, nm2)
          enddo
       enddo
    enddo
    ! planes y = y_j: (u, v) = (z, x)
    do j = 1, ny + 1
       call slice_surface(surface=surface, normal_axis=2_I4P, level=y(j), curve=sec, on_plane_low=.true.)
-      call sec%cut_cells(x=z, y=x, cut=c2, status=st, intervals=present(links))
-      if (present(links)) py(j) = c2
+      call sec%cut_cells(x=z, y=x, cut=c2, status=st, intervals=present(links), moments_order=mo, boundaries=qd)
+      if (present(links) .or. qd) py(j) = c2
       do k = 1, nz
          do i = 1, nx
             cut%face_y(i, j, k) = c2%alpha(k, i) ; cut%face_y_pieces(i, j, k) = c2%pieces(k, i)
             cut%face_y_closed(i, j, k) = c2%closed(k, i)
             cut%face_y_centroid(:, i, j, k) = [c2%centroid(2, k, i), y(j), c2%centroid(1, k, i)]
+            if (nm2 > 0_I4P) cut%face_y_moments(:, i, j, k) = section_moments(c2, k, i, nm2)
          enddo
       enddo
    enddo
    ! planes z = z_k: (u, v) = (x, y)
    do k = 1, nz + 1
       call slice_surface(surface=surface, normal_axis=3_I4P, level=z(k), curve=sec, on_plane_low=.true.)
-      call sec%cut_cells(x=x, y=y, cut=c2, status=st, intervals=present(links))
-      if (present(links)) pz(k) = c2
+      call sec%cut_cells(x=x, y=y, cut=c2, status=st, intervals=present(links), moments_order=mo, boundaries=qd)
+      if (present(links) .or. qd) pz(k) = c2
       do j = 1, ny
          do i = 1, nx
             cut%face_z(i, j, k) = c2%alpha(i, j) ; cut%face_z_pieces(i, j, k) = c2%pieces(i, j)
             cut%face_z_closed(i, j, k) = c2%closed(i, j)
             cut%face_z_centroid(:, i, j, k) = [c2%centroid(1, i, j), c2%centroid(2, i, j), z(k)]
+            if (nm2 > 0_I4P) cut%face_z_moments(:, i, j, k) = section_moments(c2, i, j, nm2)
          enddo
       enddo
    enddo
@@ -259,24 +288,44 @@ contains
       enddo
    enddo
    if (present(links)) then
-      call cut_pieces_3d(surface, x, y, z, cut, piv_piece, piv_edge, piv_lo, piv_hi)
+      call cut_pieces_3d(surface, x, y, z, cut, mo, qd, piv_piece, piv_edge, piv_lo, piv_hi, px, py, pz)
       call links_3d(cut, x, y, z, px, py, pz, piv_piece, piv_edge, piv_lo, piv_hi, links)
    else
-      call cut_pieces_3d(surface, x, y, z, cut)
+      if (qd) then
+         call cut_pieces_3d(surface, x, y, z, cut, mo, qd, px=px, py=py, pz=pz)
+      else
+         call cut_pieces_3d(surface, x, y, z, cut, mo, qd)
+      endif
    endif
    endsubroutine cut_cells_3d
 
-   subroutine cut_pieces_3d(surface, x, y, z, cut, piv_piece, piv_edge, piv_lo, piv_hi)
+   subroutine cut_pieces_3d(surface, x, y, z, cut, mo, qd, piv_piece, piv_edge, piv_lo, piv_hi, px, py, pz)
    !< Fluid pieces of every cell (see the module notes); with piv_*, the fluid edge intervals of the pieces of every
    !< multi-piece cell (issue #70, for the links).
    type(surface_stl_object), intent(in)    :: surface    !< Surface.
    real(R8P),                intent(in)    :: x(:), y(:), z(:) !< Cell edges.
    type(cut_cells_3d_t),     intent(inout) :: cut        !< Cut cells (alpha, closed set).
+   integer(I4P),             intent(in)    :: mo         !< Moment order (0: none).
+   logical,                  intent(in)    :: qd         !< Quadrature rules.
+   real(R8P),    allocatable   :: qpt(:,:), qw(:), wpt(:,:), wwt(:) !< Rules of the pieces of one cell (see cell_pieces).
+   integer(I4P), allocatable   :: qst(:), wst(:), qwn(:)  !< Their starts, wall-cone points per piece.
+   real(R8P),    allocatable   :: spt(:,:), sw(:)         !< Cones over the section faces of a one-piece cell.
+   integer(I4P)                :: nsc                     !< Their count.
+   real(R8P),    allocatable   :: qbp(:,:), qbw(:), wbp(:,:), wbw(:) !< Rules of all pieces.
+   integer(I4P), allocatable   :: qcnt(:), wcnt(:)        !< Points per piece.
+   integer(I4P)                :: nqb, nwb, m3            !< Points so far, work.
+   real(R8P)                   :: tpt(3, 27), tw(27)      !< Tensor rule of a fluid cell.
    integer(I4P), allocatable, intent(out), optional :: piv_piece(:), piv_edge(:) !< Intervals: piece, cell edge.
    real(R8P),    allocatable, intent(out), optional :: piv_lo(:), piv_hi(:)      !< Intervals: range.
+   type(cut_cells_2d_t),     intent(in),  optional :: px(:), py(:), pz(:) !< Plane sections (with boundaries, for qd).
    integer(I4P), allocatable   :: cpp(:), cpe(:)          !< Intervals of one cell: local piece, edge.
    real(R8P),    allocatable   :: cpl(:), cph(:)          !< Intervals of one cell: range.
    integer(I4P)                :: nivb, m2                !< Intervals so far, work.
+   integer(I4P)                :: nm2, nm3                !< Moments per face, per piece.
+   integer(I4P), allocatable   :: e2(:,:), e3(:,:)        !< Their exponents.
+   real(R8P),    allocatable   :: pvw(:,:), pwm(:,:), pfm(:,:,:) !< Moments of the pieces of one cell (see cell_pieces).
+   real(R8P),    allocatable   :: mbuf(:,:), wbuf(:,:), fbuf(:,:,:) !< Moments of all pieces: volume, wall, faces.
+   real(R8P),    allocatable   :: cm(:,:), cw(:,:), cf(:,:,:) !< Moments of the pieces of the cell being added.
    type(facet_object), pointer :: fp                      !< Facet.
    real(R8P),    allocatable   :: tri(:,:,:), nrm(:,:)    !< Triangles [3, 3, nf], normals [3, nf].
    integer(I4P), allocatable   :: cnt(:), start(:), lst(:) !< Cell -> triangles (CSR).
@@ -296,6 +345,12 @@ contains
    nf = surface%get_facets_number()
    allocate(tri(3, 3, nf), nrm(3, nf), cnt(nx * ny * nz + 1), cut%pieces(nx, ny, nz), cut%first_piece(nx, ny, nz))
    allocate(pbuf(17, 64), pcel(3, 64)) ; npb = 0_I4P ; nivb = 0_I4P
+   nm2 = 0_I4P ; nm3 = 0_I4P
+   if (mo > 0_I4P) then
+      nm2 = mono_count(2_I4P, mo) ; nm3 = mono_count(3_I4P, mo) ; e2 = mono_exponents(2_I4P, mo) ; e3 = mono_exponents(3_I4P, mo)
+   endif
+   allocate(mbuf(nm3, 64), wbuf(nm3, 64), fbuf(nm2, 6, 64))
+   allocate(qbp(3, 64), qbw(64), wbp(3, 64), wbw(64), qcnt(64), wcnt(64)) ; nqb = 0_I4P ; nwb = 0_I4P
    if (present(piv_piece)) allocate(piv_piece(64), piv_edge(64), piv_lo(64), piv_hi(64))
    cnt = 0_I4P
    do f = 1, nf
@@ -376,7 +431,9 @@ contains
                   cs(q) = merge(0_I4P, 1_I4P, cut%node_in(i + mod(q - 1, 2), j + mod((q - 1) / 2, 2), k + (q - 1) / 4))
                enddo
                call cell_pieces(tri, nrm, lst(start(c):start(c + 1) - 1), &
-                                [x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], cs, np, pm, cpp, cpe, cpl, cph)
+                                [x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], cs, np, pm, present(piv_piece), &
+                                cpp, cpe, cpl, cph, &
+                                mo, pvw, pwm, pfm, qd, qpt, qw, qst, wpt, wwt, wst, qwn)
                if (np > 1_I4P) then ! (issue #70) trust the split only if it closes
                   h = [x(i + 1) - x(i), y(j + 1) - y(j), z(k + 1) - z(k)]
                   if (.not. split_closes(pm(:, 1:np), h, cut%alpha(i, j, k), [cut%face_x(i, j, k), cut%face_x(i + 1, j, k), &
@@ -397,6 +454,58 @@ contains
                endif
             endif
             if (cut%pieces(i, j, k) < 1_I4P) cycle
+            ! moments (issue #70): faces from the plane sections for a single piece, else per piece; volumes by the
+            ! divergence theorem along x from the wall terms and the two x faces
+            if (nm3 > 0_I4P) then
+               h = [x(i + 1) - x(i), y(j + 1) - y(j), z(k + 1) - z(k)]
+               if (allocated(cm)) deallocate(cm, cw, cf)
+               allocate(cm(nm3, cut%pieces(i, j, k)), cw(nm3, cut%pieces(i, j, k)), cf(nm2, 6, cut%pieces(i, j, k)))
+               if (cnt(c) == 0_I4P) then ! a fluid cell
+                  cm(:, 1) = cell_moments(e3, product(h)) ; cw(:, 1) = 0._R8P
+                  cf(:, 1, 1) = cell_moments(e2, h(2) * h(3)) ; cf(:, 2, 1) = cf(:, 1, 1)
+                  cf(:, 3, 1) = cell_moments(e2, h(3) * h(1)) ; cf(:, 4, 1) = cf(:, 3, 1)
+                  cf(:, 5, 1) = cell_moments(e2, h(1) * h(2)) ; cf(:, 6, 1) = cf(:, 5, 1)
+               else
+                  cw = pwm ; cf = pfm
+                  if (cut%pieces(i, j, k) == 1_I4P) then
+                     cf(:, 1, 1) = cut%face_x_moments(:, i, j, k) ; cf(:, 2, 1) = cut%face_x_moments(:, i + 1, j, k)
+                     cf(:, 3, 1) = cut%face_y_moments(:, i, j, k) ; cf(:, 4, 1) = cut%face_y_moments(:, i, j + 1, k)
+                     cf(:, 5, 1) = cut%face_z_moments(:, i, j, k) ; cf(:, 6, 1) = cut%face_z_moments(:, i, j, k + 1)
+                  endif
+                  do m2 = 1, cut%pieces(i, j, k)
+                     cm(:, m2) = volume_moments(pvw(:, m2), cf(:, 1, m2), cf(:, 2, m2), h(1), e2, e3)
+                  enddo
+               endif
+            endif
+            ! quadrature (issue #70): a fluid cell takes the tensor rule, a cut cell its cones
+            if (qd) then
+               if (cnt(c) == 0_I4P) then
+                  call tensor_rule([x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], tpt, tw)
+                  call push_rule(tpt, tw, .true.) ; call grow_counts ; qcnt(npb + 1) = 27_I4P ; wcnt(npb + 1) = 0_I4P
+               else
+                  call grow_counts
+                  if (cut%pieces(i, j, k) == 1_I4P) then ! the wall cones, then cones over the exact section faces
+                     nsc = 0_I4P ; if (.not. allocated(spt)) allocate(spt(3, 256), sw(256))
+                     do m3 = 1, 6
+                        select case ((m3 + 1) / 2)
+                        case (1) ; call face_cones(px(i + mod(m3 + 1, 2)), [i, j, k], m3, spt, sw, nsc)
+                        case (2) ; call face_cones(py(j + mod(m3 + 1, 2)), [i, j, k], m3, spt, sw, nsc)
+                        case default ; call face_cones(pz(k + mod(m3 + 1, 2)), [i, j, k], m3, spt, sw, nsc)
+                        endselect
+                     enddo
+                     call push_rule(qpt(:, qst(1):qst(1) + qwn(1) - 1), qw(qst(1):qst(1) + qwn(1) - 1), .true.)
+                     call push_rule(spt(:, 1:nsc), sw(1:nsc), .true.)
+                     call push_rule(wpt(:, wst(1):wst(2) - 1), wwt(wst(1):wst(2) - 1), .false.)
+                     qcnt(npb + 1) = qwn(1) + nsc ; wcnt(npb + 1) = wst(2) - wst(1)
+                  else
+                     do m3 = 1, cut%pieces(i, j, k)
+                        call push_rule(qpt(:, qst(m3):qst(m3 + 1) - 1), qw(qst(m3):qst(m3 + 1) - 1), .true.)
+                        call push_rule(wpt(:, wst(m3):wst(m3 + 1) - 1), wwt(wst(m3):wst(m3 + 1) - 1), .false.)
+                        qcnt(npb + m3) = qst(m3 + 1) - qst(m3) ; wcnt(npb + m3) = wst(m3 + 1) - wst(m3)
+                     enddo
+                  endif
+               endif
+            endif
             ! measures: the cell totals for a single piece (exact), else the per-piece ones
             if (cut%pieces(i, j, k) == 1_I4P) then
                h = [x(i + 1) - x(i), y(j + 1) - y(j), z(k + 1) - z(k)]
@@ -416,6 +525,24 @@ contains
    cut%piece_cell = pcel(:, 1:npb)
    cut%piece_volume = pbuf(1, 1:npb) ; cut%piece_centroid = pbuf(2:4, 1:npb) ; cut%piece_wet_area = pbuf(5, 1:npb)
    cut%piece_wet_centroid = pbuf(6:8, 1:npb) ; cut%piece_wet_normal = pbuf(9:11, 1:npb) ; cut%piece_face = pbuf(12:17, 1:npb)
+   if (nm3 > 0_I4P) then
+      cut%piece_moments = mbuf(:, 1:npb) ; cut%piece_wall_moments = wbuf(:, 1:npb) ; cut%piece_face_moments = fbuf(:, :, 1:npb)
+   endif
+   if (qd) then
+      allocate(cut%quad_start(npb + 1), cut%wall_quad_start(npb + 1), cut%quad_status(npb))
+      cut%quad_start(1) = 1_I4P ; cut%wall_quad_start(1) = 1_I4P
+      do m3 = 1, npb
+         cut%quad_start(m3 + 1) = cut%quad_start(m3) + qcnt(m3) ; cut%wall_quad_start(m3 + 1) = cut%wall_quad_start(m3) + wcnt(m3)
+      enddo
+      cut%quad_point = qbp(:, 1:nqb) ; cut%quad_weight = qbw(1:nqb)
+      cut%wall_quad_point = wbp(:, 1:nwb) ; cut%wall_quad_weight = wbw(1:nwb)
+      do m3 = 1, npb
+         h = [x(cut%piece_cell(1, m3) + 1) - x(cut%piece_cell(1, m3)), y(cut%piece_cell(2, m3) + 1) - y(cut%piece_cell(2, m3)), &
+              z(cut%piece_cell(3, m3) + 1) - z(cut%piece_cell(3, m3))]
+         cut%quad_status(m3) = merge(0_I4P, 1_I4P, abs(sum(cut%quad_weight(cut%quad_start(m3):cut%quad_start(m3 + 1) - 1)) - &
+                                                     cut%piece_volume(m3)) <= 1.e-12_R8P * product(h))
+      enddo
+   endif
    if (present(piv_piece)) then
       piv_piece = piv_piece(1:nivb) ; piv_edge = piv_edge(1:nivb) ; piv_lo = piv_lo(1:nivb) ; piv_hi = piv_hi(1:nivb)
    endif
@@ -435,11 +562,96 @@ contains
       endif
       pbuf(:, npb + 1:npb + n) = pp
       pcel(1, npb + 1:npb + n) = i ; pcel(2, npb + 1:npb + n) = j ; pcel(3, npb + 1:npb + n) = k
+      if (nm3 > 0_I4P) then
+         if (npb + n > size(mbuf, 2)) call grow_moments(max(2_I4P * size(mbuf, 2, kind=I4P), npb + n))
+         mbuf(:, npb + 1:npb + n) = cm ; wbuf(:, npb + 1:npb + n) = cw ; fbuf(:, :, npb + 1:npb + n) = cf
+      endif
       npb = npb + n
       endsubroutine add_pieces
+
+      subroutine face_cones(sec_, ic, f_, pts, ws, n_)
+      !< Cones from the centre of cell ic over the fluid region of its face f_, from the oriented boundary of the plane
+      !< section sec_ (exact, as the face fractions): triangles from the face centre (issue #70).
+      type(cut_cells_2d_t), intent(in)    :: sec_          !< Plane section.
+      integer(I4P),         intent(in)    :: ic(3), f_     !< Cell, face (1-6).
+      real(R8P), allocatable, intent(inout) :: pts(:,:), ws(:) !< Points, weights.
+      integer(I4P),         intent(inout) :: n_            !< Points so far.
+      real(R8P)    :: c0_(3), c1_(3), cc_(3), pf_(3), a3(3), b3(3), rp_(3, 36), rw_(36) !< Work.
+      real(R8P),    allocatable :: tp(:,:), tw(:)          !< Growth.
+      integer(I4P) :: ax_, sd_, ip, kk_, iu, iv, b1_, b2_  !< Work.
+
+      ax_ = (f_ + 1_I4P) / 2_I4P ; sd_ = mod(f_ + 1_I4P, 2_I4P)
+      b1_ = mod(ax_, 3_I4P) + 1_I4P ; b2_ = mod(ax_ + 1_I4P, 3_I4P) + 1_I4P ; iu = ic(b1_) ; iv = ic(b2_)
+      c0_ = [x(ic(1)), y(ic(2)), z(ic(3))] ; c1_ = [x(ic(1) + 1), y(ic(2) + 1), z(ic(3) + 1)] ; cc_ = 0.5_R8P * (c0_ + c1_)
+      pf_ = cc_ ; pf_(ax_) = merge(c1_(ax_), c0_(ax_), sd_ == 1_I4P)
+      if (sec_%pieces(iu, iv) < 1_I4P) return
+      do ip = sec_%first_piece(iu, iv), sec_%first_piece(iu, iv) + sec_%pieces(iu, iv) - 1_I4P
+         do kk_ = sec_%piece_seg_start(ip), sec_%piece_seg_start(ip + 1) - 1_I4P
+            a3(ax_) = pf_(ax_) ; a3(b1_) = sec_%piece_seg(1, kk_) ; a3(b2_) = sec_%piece_seg(2, kk_)
+            b3(ax_) = pf_(ax_) ; b3(b1_) = sec_%piece_seg(3, kk_) ; b3(b2_) = sec_%piece_seg(4, kk_)
+            if (sd_ == 1_I4P) then ! high face: outward +e_ax, counter-clockwise in (u, v)
+               call tet_rule(cc_, pf_, a3, b3, rp_, rw_)
+            else
+               call tet_rule(cc_, pf_, b3, a3, rp_, rw_)
+            endif
+            if (n_ + 36_I4P > size(ws)) then
+               allocate(tp(3, 2 * size(ws)), tw(2 * size(ws))) ; tp(:, 1:n_) = pts(:, 1:n_) ; tw(1:n_) = ws(1:n_)
+               call move_alloc(tp, pts) ; call move_alloc(tw, ws)
+            endif
+            pts(:, n_ + 1:n_ + 36) = rp_ ; ws(n_ + 1:n_ + 36) = rw_ ; n_ = n_ + 36_I4P
+         enddo
+      enddo
+      endsubroutine face_cones
+
+      subroutine push_rule(pp, ww, vol)
+      !< Append points and weights to the volume (vol) or wall rule buffers.
+      real(R8P), intent(in)     :: pp(:,:), ww(:) !< Points, weights.
+      logical,   intent(in)     :: vol            !< Volume rule.
+      real(R8P), allocatable    :: t2(:,:), t1(:) !< Growth.
+      integer(I4P)              :: nn, cap        !< Work.
+
+      nn = size(ww, kind=I4P)
+      if (vol) then
+         if (nqb + nn > size(qbw)) then
+            cap = max(2_I4P * size(qbw, kind=I4P), nqb + nn)
+            allocate(t2(3, cap), t1(cap)) ; t2(:, 1:nqb) = qbp(:, 1:nqb) ; t1(1:nqb) = qbw(1:nqb)
+            call move_alloc(t2, qbp) ; call move_alloc(t1, qbw)
+         endif
+         qbp(:, nqb + 1:nqb + nn) = pp ; qbw(nqb + 1:nqb + nn) = ww ; nqb = nqb + nn
+      else
+         if (nwb + nn > size(wbw)) then
+            cap = max(2_I4P * size(wbw, kind=I4P), nwb + nn)
+            allocate(t2(3, cap), t1(cap)) ; t2(:, 1:nwb) = wbp(:, 1:nwb) ; t1(1:nwb) = wbw(1:nwb)
+            call move_alloc(t2, wbp) ; call move_alloc(t1, wbw)
+         endif
+         wbp(:, nwb + 1:nwb + nn) = pp ; wbw(nwb + 1:nwb + nn) = ww ; nwb = nwb + nn
+      endif
+      endsubroutine push_rule
+
+      subroutine grow_counts
+      !< Room for the point counts of the pieces of the cell being added.
+      integer(I4P), allocatable :: t1(:) !< Growth.
+      integer(I4P)              :: cap   !< Capacity.
+
+      if (npb + cut%pieces(i, j, k) <= size(qcnt)) return
+      cap = max(2_I4P * size(qcnt, kind=I4P), npb + cut%pieces(i, j, k))
+      allocate(t1(cap)) ; t1(1:npb) = qcnt(1:npb) ; call move_alloc(t1, qcnt)
+      allocate(t1(cap)) ; t1(1:npb) = wcnt(1:npb) ; call move_alloc(t1, wcnt)
+      endsubroutine grow_counts
+
+      subroutine grow_moments(cap)
+      !< Grow the moment buffers to cap pieces.
+      integer(I4P), intent(in)  :: cap !< Capacity.
+      real(R8P),    allocatable :: t2(:,:), t3(:,:,:) !< Work.
+
+      allocate(t2(nm3, cap)) ; t2(:, 1:npb) = mbuf(:, 1:npb) ; call move_alloc(t2, mbuf)
+      allocate(t2(nm3, cap)) ; t2(:, 1:npb) = wbuf(:, 1:npb) ; call move_alloc(t2, wbuf)
+      allocate(t3(nm2, 6, cap)) ; t3(:, :, 1:npb) = fbuf(:, :, 1:npb) ; call move_alloc(t3, fbuf)
+      endsubroutine grow_moments
    endsubroutine cut_pieces_3d
 
-   subroutine cell_pieces(tri, nrm, lst, c0, c1, cs, npieces, pm, ivp_o, ive_o, ivl_o, ivh_o)
+   subroutine cell_pieces(tri, nrm, lst, c0, c1, cs, npieces, pm, want_iv, ivp_o, ive_o, ivl_o, ivh_o, mo, pvw, pwm, pfm, &
+                          qd, qpt, qw, qst, wpt, wwt, wst, qwn)
    !< Fluid pieces of the cell [c0, c1] cut by the triangles lst (see the module notes); -1 if the
    !< boundary states do not close. pm: the measures of the pieces (see `piece_measures`).
    !<
@@ -454,9 +666,20 @@ contains
    integer(I4P),             intent(in)  :: cs(8)     !< Corner states (0 solid, 1 fluid), exact.
    integer(I4P),             intent(out) :: npieces   !< Pieces.
    real(R8P), allocatable,   intent(out) :: pm(:,:)   !< Measures [17, npieces] (allocated if npieces >= 0).
+   logical,                  intent(in)  :: want_iv   !< Return the fluid edge intervals (for the links).
    integer(I4P), allocatable, intent(out) :: ivp_o(:)   !< Fluid edge intervals: local piece (0: none; issue #70).
    integer(I4P), allocatable, intent(out) :: ive_o(:)   !< Fluid edge intervals: cell edge (1-12).
    real(R8P),    allocatable, intent(out) :: ivl_o(:), ivh_o(:) !< Fluid edge intervals: range.
+   integer(I4P),             intent(in)  :: mo        !< Moment order (0: none; issue #70).
+   real(R8P), allocatable,   intent(out) :: pvw(:,:)  !< Wall divergence terms of the moments (solid normal) [nm3, npieces].
+   real(R8P), allocatable,   intent(out) :: pwm(:,:)  !< Wall moments [nm3, npieces].
+   real(R8P), allocatable,   intent(out) :: pfm(:,:,:) !< Face moments [nm2, 6, npieces].
+   logical,                  intent(in)  :: qd        !< Quadrature rules (issue #70).
+   real(R8P), allocatable,   intent(out) :: qpt(:,:), qw(:) !< Volume rules of the pieces (points, weights).
+   integer(I4P), allocatable, intent(out) :: qst(:)   !< Their starts [npieces + 1].
+   real(R8P), allocatable,   intent(out) :: wpt(:,:), wwt(:) !< Wall rules.
+   integer(I4P), allocatable, intent(out) :: wst(:)   !< Their starts [npieces + 1].
+   integer(I4P), allocatable, intent(out) :: qwn(:)   !< Wall-cone points of each piece (they come first in its rule).
    integer(I4P), parameter     :: NCORN = 8_I4P       !< Corner atoms follow the polygons.
    real(R8P),    allocatable   :: pv(:,:,:)           !< Polygons [3, 16, nt].
    integer(I4P), allocatable   :: pfl(:,:), pn(:)     !< Vertex flags, vertex counts.
@@ -469,6 +692,10 @@ contains
    integer(I4P)                :: cstate(8)           !< Corner states: -1 unknown, 0 solid, 1 fluid.
    integer(I4P)                :: nt, np, q, v, w, e, a, natom, niv, npc, nc, kk !< Work.
    logical                     :: ok                  !< Consistency.
+   real(R8P),    allocatable   :: fsg(:,:), wtp(:,:), wtw(:) !< Quadrature: oriented face segments [6, m]; wall points, weights.
+   integer(I4P), allocatable   :: fsf(:), fsr(:), wtr(:) !< Segment face and set; wall point set.
+   integer(I4P)                :: nfs, nwt            !< Counts.
+   real(R8P)                   :: rp(3, 36), rw(36), tp7(3, 7), tw7(7), pf(3), sa(3), sb(3) !< Rule work.
    real(R8P)                   :: tt, la, lb, tc      !< Crossing position, edge line, kernel parameter.
    logical                     :: hit, en             !< Crossing, entering.
 
@@ -801,6 +1028,11 @@ contains
       !< triangle), else the fluid region where the ray leaves the cell through the +x face (the ray of
       !< `faces_islands` on that face); -1 if neither is found.
       real(R8P),    allocatable :: wt(:,:), fa(:,:) !< Wall terms [11, natom], face fluid areas [6, natom].
+      real(R8P),    allocatable :: wvm(:,:), wwm(:,:), fmm(:,:,:) !< Moments: wall divergence, wall, faces (per root).
+      integer(I4P), allocatable :: me2(:,:), me3(:,:) !< Exponents.
+      real(R8P)                 :: cc(3), ts(3, 3), tp(3), mtmp(mono_count(2_I4P, max(1_I4P, mo))) !< Moment work.
+      integer(I4P)              :: nmo2, nmo3, gv  !< Moments per face, per piece; work.
+      integer(I4P)              :: rr, kq, m, ft, ax_, sd_ !< Rule work.
       integer(I4P), allocatable :: tgt(:), pid(:)   !< Inclusion target, piece of a root.
       real(R8P)                 :: h(3), pl(3), ql(3), sg, vp, mp(3), hf(3) !< Work.
       integer(I4P)              :: qq, vv, jj, r, ax, sd, bt, b1, b2, kk, ee, k1, k2, s1, s2, guard, npc_ !< Work.
@@ -809,6 +1041,17 @@ contains
       h = c1 - c0
       allocate(wt(11, natom), fa(6, natom), tgt(natom), pid(natom))
       wt = 0._R8P ; fa = 0._R8P ; tgt = 0_I4P ; pid = 0_I4P
+      nmo2 = 0_I4P ; nmo3 = 0_I4P
+      if (mo > 0_I4P) then
+         nmo2 = mono_count(2_I4P, mo) ; nmo3 = mono_count(3_I4P, mo)
+         me2 = mono_exponents(2_I4P, mo) ; me3 = mono_exponents(3_I4P, mo)
+      endif
+      if (mo > 0_I4P) then
+         allocate(wvm(nmo3, natom), wwm(nmo3, natom), fmm(nmo2, 6, natom)) ; wvm = 0._R8P ; wwm = 0._R8P ; fmm = 0._R8P
+      endif
+      cc = c0 + 0.5_R8P * h
+      nfs = 0_I4P ; nwt = 0_I4P
+      if (qd) allocate(fsg(6, 64), fsf(64), fsr(64), wtp(3, 64), wtw(64), wtr(64))
       do r = 1, nt
          if (find(r) /= r .or. touch(r) .or. pn(r) == 0_I4P .or. vol(r) < 0._R8P) cycle
          tgt(r) = inclusion_target(r)
@@ -837,6 +1080,17 @@ contains
          r = find(qq) ; if (tgt(r) /= 0_I4P) r = tgt(r)
          do vv = 2, pn(qq) - 1
             call tri_terms(pv(:, 1, qq) - c0, pv(:, vv, qq) - c0, pv(:, vv + 1, qq) - c0, wt(:, r))
+            if (qd) then ! wall rule on the fan triangle
+               call triangle_rule(pv(:, 1, qq), pv(:, vv, qq), pv(:, vv + 1, qq), tp7, tw7, .false.)
+               do gv = 1, 7
+                  call push_wall(tp7(:, gv), tw7(gv), r)
+               enddo
+            endif
+            if (nmo3 > 0_I4P) then
+               ts(:, 1) = (pv(:, 1, qq) - cc) / h ; ts(:, 2) = (pv(:, vv, qq) - cc) / h ; ts(:, 3) = (pv(:, vv + 1, qq) - cc) / h
+               tp = cross3(pv(:, vv, qq) - pv(:, 1, qq), pv(:, vv + 1, qq) - pv(:, 1, qq))
+               call triangle_moments(ts(:, 1), ts(:, 2), ts(:, 3), me3, product(h), 0.5_R8P * norm2(tp), wvm(:, r), wwm(:, r))
+            endif
          enddo
          do ax = 1, 3
             b1 = mod(ax, 3_I4P) + 1_I4P ; b2 = mod(ax + 1_I4P, 3_I4P) + 1_I4P
@@ -862,6 +1116,20 @@ contains
                   endif
                   pl = pv(:, vv, qq) - c0 ; ql = pv(:, jj, qq) - c0
                   fa(bt + 1, r) = fa(bt + 1, r) + sg * 0.5_R8P * (pl(b1) + ql(b1)) * (ql(b2) - pl(b2))
+                  if (qd) then ! the trace, counter-clockwise seen from +e_ax
+                     if (sg > 0._R8P) then
+                        call push_seg(pv(:, vv, qq), pv(:, jj, qq), bt + 1_I4P, r)
+                     else
+                        call push_seg(pv(:, jj, qq), pv(:, vv, qq), bt + 1_I4P, r)
+                     endif
+                  endif
+                  if (nmo2 > 0_I4P) then
+                     mtmp(1:nmo2) = 0._R8P
+                     call segment_green_moments([pl(b1) / h(b1) - 0.5_R8P, pl(b2) / h(b2) - 0.5_R8P], &
+                                                [ql(b1) / h(b1) - 0.5_R8P, ql(b2) / h(b2) - 0.5_R8P], me2, h(b1) * h(b2), &
+                                                mtmp(1:nmo2))
+                     fmm(:, bt + 1, r) = fmm(:, bt + 1, r) + sg * mtmp(1:nmo2)
+                  endif
                enddo
             enddo
          enddo
@@ -876,12 +1144,41 @@ contains
             r = find(iv_atom(jj))
             fa(2 * (k1 - 1) + s1 + 1, r) = fa(2 * (k1 - 1) + s1 + 1, r) + h(k2) * (iv_hi(jj) - iv_lo(jj))
          endif
+         if (nmo2 > 0_I4P) then ! moments: centred coordinates, so the edge at U = -1/2 counts too (going -V there)
+            r = find(iv_atom(jj)) ; mtmp(1:nmo2) = 0._R8P
+            if (s2 == 1_I4P) then
+               call segment_green_moments([0.5_R8P, (iv_lo(jj) - cc(kk)) / h(kk)], [0.5_R8P, (iv_hi(jj) - cc(kk)) / h(kk)], &
+                                          me2, h(k2) * h(kk), mtmp(1:nmo2))
+            else
+               call segment_green_moments([-0.5_R8P, (iv_hi(jj) - cc(kk)) / h(kk)], [-0.5_R8P, (iv_lo(jj) - cc(kk)) / h(kk)], &
+                                          me2, h(k2) * h(kk), mtmp(1:nmo2))
+            endif
+            fmm(:, 2 * (k1 - 1) + s1 + 1, r) = fmm(:, 2 * (k1 - 1) + s1 + 1, r) + mtmp(1:nmo2)
+         endif
+         if (qd) then ! the interval bounds two faces: (k1, s1) along V at U = s2, (k2, s2) along U at V = s1
+            r = find(iv_atom(jj))
+            sa = 0._R8P ; sa(kk) = iv_lo(jj) ; sa(k1) = merge(c1(k1), c0(k1), s1 == 1_I4P)
+            sa(k2) = merge(c1(k2), c0(k2), s2 == 1_I4P) ; sb = sa ; sb(kk) = iv_hi(jj)
+            if (s2 == 1_I4P) then
+               call push_seg(sa, sb, 2_I4P * (k1 - 1_I4P) + s1 + 1_I4P, r)
+            else
+               call push_seg(sb, sa, 2_I4P * (k1 - 1_I4P) + s1 + 1_I4P, r)
+            endif
+            if (s1 == 0_I4P) then
+               call push_seg(sa, sb, 2_I4P * (k2 - 1_I4P) + s2 + 1_I4P, r)
+            else
+               call push_seg(sb, sa, 2_I4P * (k2 - 1_I4P) + s2 + 1_I4P, r)
+            endif
+         endif
       enddo
       allocate(pm(17, npc_))
-      allocate(ivp_o(niv), ive_o(niv), ivl_o(niv), ivh_o(niv))
-      do jj = 1, niv
-         ivp_o(jj) = pid(find(iv_atom(jj))) ; ive_o(jj) = iv_edge(jj) ; ivl_o(jj) = iv_lo(jj) ; ivh_o(jj) = iv_hi(jj)
-      enddo
+      if (mo > 0_I4P) allocate(pvw(nmo3, npc_), pwm(nmo3, npc_), pfm(nmo2, 6, npc_))
+      if (want_iv) then
+         allocate(ivp_o(niv), ive_o(niv), ivl_o(niv), ivh_o(niv))
+         do jj = 1, niv
+            ivp_o(jj) = pid(find(iv_atom(jj))) ; ive_o(jj) = iv_edge(jj) ; ivl_o(jj) = iv_lo(jj) ; ivh_o(jj) = iv_hi(jj)
+         enddo
+      endif
       hf = [h(2) * h(3), h(3) * h(1), h(1) * h(2)]
       do r = 1, natom
          if (pid(r) == 0_I4P) cycle
@@ -896,8 +1193,94 @@ contains
          if (wt(5, r) > 0._R8P) pm(6:8, kk) = c0 + wt(6:8, r) / wt(5, r)
          pm(9:11, kk) = wt(9:11, r)
          pm(12:17, kk) = fa(:, r) / [hf(1), hf(1), hf(2), hf(2), hf(3), hf(3)]
+         if (mo > 0_I4P) then
+            pvw(:, kk) = wvm(:, r) ; pwm(:, kk) = wwm(:, r) ; pfm(:, :, kk) = fmm(:, :, r)
+         endif
       enddo
+      if (qd) then ! rules of the pieces: cones from the cell centre over the fluid boundary (the wall fans reversed:
+         ! their normal is the solid's; on every face the triangles from the face centre to the oriented segments),
+         ! 36 points per cone (`tet_rule`); wall rules from push_wall
+         allocate(qst(npc_ + 1), wst(npc_ + 1), qwn(npc_)) ; qst = 0_I4P ; wst = 0_I4P ; qwn = 0_I4P
+         ! count: cones per piece
+         do qq = 1, nt
+            if (pn(qq) == 0_I4P) cycle
+            rr = find(qq) ; if (tgt(rr) /= 0_I4P) rr = tgt(rr)
+            if (pid(rr) /= 0_I4P) then
+               qst(pid(rr) + 1) = qst(pid(rr) + 1) + 36_I4P * (pn(qq) - 2_I4P)
+               qwn(pid(rr)) = qwn(pid(rr)) + 36_I4P * (pn(qq) - 2_I4P)
+            endif
+         enddo
+         do m = 1, nfs
+            rr = find(fsr(m)) ; if (pid(rr) /= 0_I4P) qst(pid(rr) + 1) = qst(pid(rr) + 1) + 36_I4P
+         enddo
+         do m = 1, nwt
+            rr = find(wtr(m)) ; if (tgt(rr) /= 0_I4P) rr = tgt(rr)
+            if (pid(rr) /= 0_I4P) wst(pid(rr) + 1) = wst(pid(rr) + 1) + 1_I4P
+         enddo
+         qst(1) = 1_I4P ; wst(1) = 1_I4P
+         do kq = 1, npc_
+            qst(kq + 1) = qst(kq + 1) + qst(kq) ; wst(kq + 1) = wst(kq + 1) + wst(kq)
+         enddo
+         allocate(qpt(3, qst(npc_ + 1) - 1), qw(qst(npc_ + 1) - 1), wpt(3, wst(npc_ + 1) - 1), wwt(wst(npc_ + 1) - 1))
+         block
+            integer(I4P) :: fq(npc_), fw(npc_) !< Fill pointers.
+            fq = qst(1:npc_) ; fw = wst(1:npc_)
+            do qq = 1, nt
+               if (pn(qq) == 0_I4P) cycle
+               rr = find(qq) ; if (tgt(rr) /= 0_I4P) rr = tgt(rr)
+               if (pid(rr) == 0_I4P) cycle
+               kq = pid(rr)
+               do vv = 2, pn(qq) - 1 ! reversed: the fluid's outward normal
+                  call tet_rule(cc, pv(:, 1, qq), pv(:, vv + 1, qq), pv(:, vv, qq), rp, rw)
+                  qpt(:, fq(kq):fq(kq) + 35) = rp ; qw(fq(kq):fq(kq) + 35) = rw ; fq(kq) = fq(kq) + 36_I4P
+               enddo
+            enddo
+            do m = 1, nfs
+               rr = find(fsr(m)) ; if (pid(rr) == 0_I4P) cycle
+               kq = pid(rr) ; ft = fsf(m) ; ax_ = (ft + 1_I4P) / 2_I4P ; sd_ = mod(ft + 1_I4P, 2_I4P)
+               pf = cc ; pf(ax_) = merge(c1(ax_), c0(ax_), sd_ == 1_I4P)
+               if (sd_ == 1_I4P) then ! high face: outward +e_ax, as the segments turn
+                  call tet_rule(cc, pf, fsg(1:3, m), fsg(4:6, m), rp, rw)
+               else
+                  call tet_rule(cc, pf, fsg(4:6, m), fsg(1:3, m), rp, rw)
+               endif
+               qpt(:, fq(kq):fq(kq) + 35) = rp ; qw(fq(kq):fq(kq) + 35) = rw ; fq(kq) = fq(kq) + 36_I4P
+            enddo
+            do m = 1, nwt
+               rr = find(wtr(m)) ; if (tgt(rr) /= 0_I4P) rr = tgt(rr)
+               if (pid(rr) == 0_I4P) cycle
+               kq = pid(rr) ; wpt(:, fw(kq)) = wtp(:, m) ; wwt(fw(kq)) = wtw(m) ; fw(kq) = fw(kq) + 1_I4P
+            enddo
+         endblock
+      endif
       endsubroutine piece_measures
+
+      subroutine push_seg(pa_, pb_, fc_, r_)
+      !< Record the oriented face segment pa_ -> pb_ (counter-clockwise seen from +e_ax) of face fc_, set r_.
+      real(R8P),    intent(in) :: pa_(3), pb_(3) !< End points.
+      integer(I4P), intent(in) :: fc_, r_        !< Face, root.
+      real(R8P),    allocatable :: t2(:,:)       !< Growth.
+
+      if (nfs == size(fsf)) then
+         allocate(t2(6, 2 * nfs)) ; t2(:, 1:nfs) = fsg(:, 1:nfs) ; call move_alloc(t2, fsg)
+         fsf = [fsf, fsf] ; fsr = [fsr, fsr]
+      endif
+      nfs = nfs + 1_I4P ; fsg(1:3, nfs) = pa_ ; fsg(4:6, nfs) = pb_ ; fsf(nfs) = fc_ ; fsr(nfs) = r_
+      endsubroutine push_seg
+
+      subroutine push_wall(pt_, w_, r_)
+      !< Record a wall rule point of set r_.
+      real(R8P),    intent(in) :: pt_(3), w_ !< Point, weight.
+      integer(I4P), intent(in) :: r_         !< Root.
+      real(R8P),    allocatable :: t2(:,:)   !< Growth.
+
+      if (nwt == size(wtw)) then
+         allocate(t2(3, 2 * nwt)) ; t2(:, 1:nwt) = wtp(:, 1:nwt) ; call move_alloc(t2, wtp)
+         wtw = [wtw, wtw] ; wtr = [wtr, wtr]
+      endif
+      nwt = nwt + 1_I4P ; wtp(:, nwt) = pt_ ; wtw(nwt) = w_ ; wtr(nwt) = r_
+      endsubroutine push_wall
+
 
       logical function across_crosses(fi, ax, lev) result(yes)
       !< The facet of the cell across the edge of facet fi that lies on the plane x(ax) = lev has a vertex beyond the
@@ -1150,6 +1533,41 @@ contains
       nl = nl + 1_I4P ; lp(nl) = pb ; lq(nl) = pa ; lf(nl) = 2_I4P * a - 1_I4P ; la(nl) = ar_
       endsubroutine add_link
    endsubroutine links_3d
+
+   function section_moments(c2, iu, iv, nm2) result(m)
+   !< Fluid moments of the cell (iu, iv) of a plane section: the sum over its pieces (issue #70).
+   type(cut_cells_2d_t), intent(in) :: c2      !< Section.
+   integer(I4P),         intent(in) :: iu, iv  !< Cell.
+   integer(I4P),         intent(in) :: nm2     !< Moments.
+   real(R8P)                        :: m(nm2)  !< Moments.
+   integer(I4P)                     :: p       !< Work.
+
+   m = 0._R8P
+   if (c2%pieces(iu, iv) < 1_I4P) return
+   do p = c2%first_piece(iu, iv), c2%first_piece(iu, iv) + c2%pieces(iu, iv) - 1_I4P
+      m = m + c2%piece_moments(:, p)
+   enddo
+   endfunction section_moments
+
+   pure function volume_moments(wv, fm, fp, hx, e2, e3) result(m)
+   !< Volume moments of a piece (issue #70): int X^a Y^b Z^c dV = oint h_x X^(a+1) / (a+1) Y^b Z^c n_x dA over its
+   !< boundary: minus the wall terms wv (taken with the solid's normal) plus the faces x = -+ h_x / 2 (fluid moments fm,
+   !< fp in (Y, Z), the outward normal -+1).
+   real(R8P),    intent(in) :: wv(:)          !< Wall divergence terms (solid normal).
+   real(R8P),    intent(in) :: fm(:), fp(:)   !< Moments of the -x and +x faces.
+   real(R8P),    intent(in) :: hx             !< Cell width along x.
+   integer(I4P), intent(in) :: e2(:,:), e3(:,:) !< Exponents.
+   real(R8P)                :: m(size(wv))    !< Moments.
+   integer(I4P)             :: k, l           !< Work.
+
+   do k = 1, size(wv)
+      m(k) = -wv(k)
+      do l = 1, size(e2, 2)
+         if (e2(1, l) /= e3(2, k) .or. e2(2, l) /= e3(3, k)) cycle
+         m(k) = m(k) + hx / (e3(1, k) + 1) * (0.5_R8P ** (e3(1, k) + 1) * fp(l) - (-0.5_R8P) ** (e3(1, k) + 1) * fm(l))
+      enddo
+   enddo
+   endfunction volume_moments
 
    pure logical function split_closes(pm, h, alpha, faces) result(ok)
    !< The pieces pm [17, n] of a cell of size h split it consistently (issue #70): their face fractions add up to the

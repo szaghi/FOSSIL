@@ -238,27 +238,74 @@ Two families, both reported per piece:
   coordinates put the −x face at 0); face moments by Green's theorem over the
   same boundary arcs as the face fractions; 2-D by Green. First moments must
   equal the existing centroids.
-- **Wall quadrature:** fan triangles × a symmetric triangle rule, positive
-  weights, exact to degree p.
-- **Volume quadrature:** cones from the piece centroid over its boundary
-  polygons, split into tetrahedra (triangles in 2-D), × a simplex rule *(gk)*.
-  Exact to degree p; weights can be negative where the piece is not
-  star-shaped about its centroid, and the minimum weight is reported.
+- **Interface:** `cut_cells_3d(..., moments_order=p)` gives `piece_moments(:, np)`,
+  `piece_wall_moments(:, np)`, `piece_face_moments(:, 6, np)` and the face
+  totals `face_x/y/z_moments`, in the order of `mono_exponents` (`fossil_cut_moments`:
+  by degree, then decreasing exponent of X, then of Y); 2-D
+  `curve%cut_cells(..., moments_order=p)` gives `piece_moments` and
+  `piece_wall_moments`. The faces of a one-piece cell come from the plane
+  sections (the same numbers as the face fractions), those of a multi-piece
+  cell from the same boundary arcs as its face areas; a fluid cell is
+  analytic. Kernels: 3-point Gauss on segments and the symmetric 7-point
+  triangle rule in closed form, both exact to degree 5.
+- **Measured** (`fossil_test_cut_moments`, order 4): summed over the pieces
+  and re-centred to global monomials, the moments equal the block's minus the
+  body's (integrated independently over tetrahedra from the origin) to
+  9.9·10⁻¹⁴ relative on the tilted wedge, the aligned L-prism and the thin
+  plate, and to 3.6·10⁻¹⁵ in 2-D (a 64-gon); the zeroth and first moments
+  equal the piece volumes and centroids, the wall ones the wetted areas and
+  centroids (2.0·10⁻¹⁵ of the cell); the face moments of the pieces add up to
+  the plane sections' (5.7·10⁻¹⁵ of the face).
+- **Quadrature** (`cut_cells_3d(..., quadrature=.true.)`, 2-D
+  `curve%cut_cells(..., quadrature=.true.)`): per piece `quad_start`,
+  `quad_point`, `quad_weight`, and `wall_quad_start`, `wall_quad_point`,
+  `wall_quad_weight`; 3-D `quad_status` (0: the weights add up to the piece
+  volume).
+  - Wall rules: the symmetric 7-point rule on the wall fan triangles (3-D),
+    3-point Gauss on the wall segments (2-D); positive weights, exact to
+    degree 5.
+  - Volume rules: signed cones from the cell centre over the oriented fluid
+    boundary of the piece *(gk: the divergence-theorem cone construction)*:
+    the wall fans reversed and, on every face, the triangles from the face
+    centre to the face region's oriented boundary, from the plane section for
+    a one-piece cell (exact, as the face fractions) and from the face arcs of
+    the pieces otherwise; 36 points per cone (Duffy map, Gauss 4 × 3 × 3),
+    exact to degree 4; a fluid cell takes the 3ᵈ Gauss rule. Weights are
+    negative where a piece is not star-shaped about the cell centre: they are
+    counted, not hidden. 2-D: signed triangles from the cell centre over the
+    exported oriented boundary (`boundaries=.true.`: `piece_seg_start`,
+    `piece_seg`, `piece_seg_wall`).
+  - **Measured** (`fossil_test_cut_quadrature`; L-prism generic and
+    aligned, thin plate, 4 lattice tetrahedra, a 64-gon; 5028 pieces): the
+    rules integrate every monomial of degree ≤ 4 to the piece's moments to
+    4.8·10⁻¹⁵ of the cell, the wall rules to 1.4·10⁻¹⁵; 360 pieces have
+    negative volume weights; 1 piece has `quad_status` 1, a two-piece cell of
+    a lattice tetrahedron whose face arcs (the clipped traces, as its face
+    areas) do not close.
 
 ## Coarsening
 
 Coarse–fine cut cells are where re-redistribution fails at κ < 10⁻⁴ (llm-wiki
-`methods/high-order-amr.md`). The coarse geometry at ratio r (default 2,
-nested edges checked) is built from the fine one, never recomputed:
+`methods/high-order-amr.md`). The coarse geometry at ratio r (nested edges, the
+cell counts multiples of r) is built from the fine one, never recomputed:
+`cut_coarsen_3d(fine, links, x, y, z, ratio, coarse, coarse_links, fine_to_coarse, status)`
+(2-D `cut_coarsen_2d`, without z).
 
-- coarse pieces are the components of the fine pieces linked inside the coarse
-  cell, and the fine → coarse piece map is an output;
-- volumes, face fractions, wall measures, moments and links are sums of the
-  fine ones in a fixed order, so fine fractions add up to coarse ones by
-  construction.
-- **Gate:** against `cut_cells_3d` run directly on the coarse grid, the same
-  piece count in every cell and the same links, volumes and areas to 10⁻¹⁴ of
-  the cell.
+- Coarse pieces are the connected components of the fine pieces of a coarse
+  cell, joined by the fine links inside it; `fine_to_coarse` maps every fine
+  piece to its coarse one.
+- Volumes, centroids, wetted measures, the fluid areas of the coarse faces,
+  the moments (re-centred and rescaled to the coarse cell) and the links are
+  sums of the fine ones; node flags and edge fractions come from the fine
+  ones. A coarse cell with an untrusted fine cell is untrusted. Face piece
+  counts are not derived (−1); quadrature rules are not coarsened
+  (concatenating the fine rules is exact).
+- **Measured** (`fossil_test_cut_coarsen`; tilted wedge, L-prism, thin plate,
+  a 64-gon and a thin plate in 2-D; 2612 coarse cells at ratio 2): against
+  the cut cells computed directly on the coarse grid, the same pieces in every
+  cell, piece volumes to 2.5·10⁻¹⁴ of the cell, fractions and wetted areas to
+  2.5·10⁻¹⁴, node flags exactly, edge fractions to 1.1·10⁻¹⁶, moments to
+  1.2·10⁻¹⁵, link areas per coarse face to 7.8·10⁻¹⁵.
 
 ## Edge fractions
 

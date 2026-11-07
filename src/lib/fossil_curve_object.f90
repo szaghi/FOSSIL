@@ -30,6 +30,7 @@ use fossil_box_query,          only : curve_box_contact_oac, curve_box_thin_oac,
                                      BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
 use fossil_line_query,         only : curve_line_crossings_oac, line_crossing_before_2d
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
+use fossil_cut_moments,        only : MOMENTS_MAX
 use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate
 use fossil_predicates,         only : orient2d_xy
 use fossil_mass_properties,    only : moments_accumulator_t, accumulate_segment, moments_to_properties_2d, symmetric2_eigen
@@ -1269,7 +1270,7 @@ contains
       endsubroutine exact_parity
    endsubroutine cell_wall_fractions
 
-   subroutine cut_cells(self, x, y, cut, status, intervals)
+   subroutine cut_cells(self, x, y, cut, status, intervals, moments_order, boundaries, quadrature)
    !< Exact cut cells of the block with cell edges x(nx+1), y(ny+1) (u, v) (issue #40): fluid area
    !< fraction, edge apertures, fluid centroid, wetted length, centroid and normal integral, and the
    !< fluid pieces of every cell (`fossil_cut_cells_2d`; the fluid is outside the solid). Exact
@@ -1282,18 +1283,26 @@ contains
    type(cut_cells_2d_t), intent(out)           :: cut    !< Cut cells.
    integer(I4P),         intent(out), optional :: status !< STATUS_OK or STATUS_INVALID_INPUT.
    logical,              intent(in),  optional :: intervals !< Record the fluid edge intervals (default .true.).
+   integer(I4P),         intent(in),  optional :: moments_order !< Moments of the pieces up to this order (0-4, issue #70).
+   logical,              intent(in),  optional :: boundaries !< Oriented boundaries of the pieces (issue #70).
+   logical,              intent(in),  optional :: quadrature !< Quadrature rules of the pieces (issue #70).
    integer(I4P)                                :: st     !< Module status.
    logical                                     :: wi     !< With the intervals.
+   integer(I4P)                                :: mo     !< Moment order.
+   logical                                     :: wb, wq !< Boundaries, quadrature.
 
    if (present(status)) status = STATUS_OK
    wi = .true. ; if (present(intervals)) wi = intervals
+   mo = 0_I4P ; if (present(moments_order)) mo = max(0_I4P, min(MOMENTS_MAX, moments_order))
+   wb = .false. ; if (present(boundaries)) wb = boundaries
+   wq = .false. ; if (present(quadrature)) wq = quadrature
    if (self%nv > 0_I4P) then
-      call compute_cut_cells_2d(self%u, self%v, self%next, x, y, cut, st, wi)
+      call compute_cut_cells_2d(self%u, self%v, self%next, x, y, cut, st, wi, mo, wb, wq)
    else
       block
          real(R8P)    :: uu(0), vv(0)
          integer(I4P) :: nn(0)
-         call compute_cut_cells_2d(uu, vv, nn, x, y, cut, st, wi)
+         call compute_cut_cells_2d(uu, vv, nn, x, y, cut, st, wi, mo, wb, wq)
       end block
    endif
    if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
