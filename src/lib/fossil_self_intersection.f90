@@ -3,9 +3,9 @@
 module fossil_self_intersection
 !< FOSSIL, self-intersection detection on a triangulated surface.
 !<
-!< Detects pairs of facets in the same surface whose triangles cross
-!< transversally (Möller tri-tri intersection). Reports the facet ID pair plus
-!< the intersection segment endpoints. Facets sharing an edge meet only along
+!< Detects pairs of facets in the same surface whose triangles cross, or
+!< overlap in a common plane, decided exactly. Reports the facet ID pair, the
+!< kind (SELFINT_*) and the intersection segment endpoints. Facets sharing an edge meet only along
 !< it (unless coplanar and folded over each other) and are skipped. Facets
 !< sharing one vertex are not skipped (issue #46): they may still cross away
 !< from it, and are classified exactly; touching only at the shared vertex is
@@ -21,10 +21,17 @@ module fossil_self_intersection
 !<
 !<   2. Adjacency filter: count the shared vertices. Vertex identity is
 !<      determined by the pool's `vertex_id` (when the pool is in use) or by
-!<      coordinate equality within EPS otherwise. Two or three shared: skip.
+!<      exact coordinate equality otherwise. Two or three shared: skip.
 !<
-!<   3. Narrow phase. No shared vertex: `facet%intersect_facet` (Möller 1997),
-!<      the segment endpoints of a transverse intersection. One shared vertex:
+!<   3. Narrow phase. No shared vertex (issue #69): `pair_cut` (exact orient3d
+!<      signs, implicit section points; it replaced the floating Möller test,
+!<      which skipped every coplanar overlap, and vertices EPS apart no longer
+!<      count as one): a crossing (common segment of positive
+!<      length) is reported, a touch (one common point) only with
+!<      `include_touching`; an exactly coplanar pair is decided in the
+!<      projection (exact orient2d): overlapping interiors are reported
+!<      (SELFINT_COPLANAR), boundaries meeting only with `include_touching`.
+!<      One shared vertex:
 !<      an exact wedge test on orient3d signs of input vertices (issue #55; it
 !<      replaced pair_classify, whose on-plane snap reported crossings on
 !<      near-coplanar pairs touching at the vertex only); a crossing (a common
@@ -42,8 +49,9 @@ use fossil_aabb_node_object, only : aabb_node_object
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object,     only : facet_object
 use fossil_list_id_object,   only : list_id_object
-use fossil_predicates,       only : orient3d
-use fossil_utils,            only : EPS
+use fossil_implicit_points,  only : implicit_point_t, ip_approx
+use fossil_predicates,       only : orient2d_xy, orient3d
+use fossil_tritri_exact,     only : pair_cut, facet_drop, PAIR_CROSSING, PAIR_TOUCHING, PAIR_COPLANAR
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
 
@@ -53,6 +61,10 @@ public :: intersection_pair_t
 public :: find_self_intersections
 
 integer(I4P), parameter :: MAX_CHILDREN = 8_I4P  !< Buffer size for `enumerate_children` (octree fan-out).
+integer(I4P), parameter, public :: SELFINT_CROSSING = 1_I4P !< The facets share a segment of positive length.
+integer(I4P), parameter, public :: SELFINT_TOUCHING = 2_I4P !< They meet at one point, or along a coplanar boundary.
+integer(I4P), parameter, public :: SELFINT_COPLANAR = 3_I4P !< Coplanar, interiors overlapping (positive area).
+integer(I4P), parameter :: COPLANAR_APART = 0_I4P, COPLANAR_TOUCH = 1_I4P, COPLANAR_OVERLAP = 2_I4P
 real(R8P),    parameter :: COPLANAR_SIN2 = 1.e-24_R8P !< Facets sharing a vertex with sin^2(normal angle) below: coplanar.
 
 type :: intersection_pair_t
@@ -60,13 +72,14 @@ type :: intersection_pair_t
    !< plus the intersection segment endpoints in world coordinates.
    integer(I4P)     :: a = 0_I4P  !< First facet id (always the smaller of the two).
    integer(I4P)     :: b = 0_I4P  !< Second facet id.
+   integer(I4P)     :: kind = 1_I4P !< SELFINT_CROSSING, SELFINT_TOUCHING (include_touching), SELFINT_COPLANAR.
    type(vector_R8P) :: p          !< Segment start.
    type(vector_R8P) :: q          !< Segment end.
 endtype intersection_pair_t
 
 contains
 
-   subroutine find_self_intersections(facet, tree, pairs, status)
+   subroutine find_self_intersections(facet, tree, pairs, status, include_touching)
    !< Find all self-intersecting facet pairs in the surface.
    !<
    !< On return:
@@ -81,10 +94,14 @@ contains
    type(aabb_tree_object),                        intent(in), target       :: tree     !< AABB tree built over `facet`.
    type(intersection_pair_t), allocatable,        intent(out)              :: pairs(:) !< Output list of intersection records.
    integer(I4P),                                  intent(out), optional    :: status   !< 0 on success.
+   logical,                                       intent(in),  optional    :: include_touching !< Also report pairs
+                                                                                    !< meeting at one point (default no).
    type(intersection_pair_t), allocatable                                  :: buf(:)
    integer(I4P)                                                            :: nfound
+   logical                                                                 :: touching
 
    if (present(status)) status = 0_I4P
+   touching = .false. ; if (present(include_touching)) touching = include_touching
 
    ! Start with a small accumulator and double on demand. Nearly all clean
    ! meshes finish with zero pairs, so the initial size is intentionally small.
@@ -92,9 +109,9 @@ contains
    nfound = 0_I4P
 
    if (tree%get_nodes_number() <= 0) then
-      call brute_force_pairs(facet=facet, buf=buf, nfound=nfound)
+      call brute_force_pairs(facet=facet, touching=touching, buf=buf, nfound=nfound)
    else
-      call traverse_node_pair(facet=facet, tree=tree, na=0_I4P, nb=0_I4P, &
+      call traverse_node_pair(facet=facet, tree=tree, na=0_I4P, nb=0_I4P, touching=touching, &
                               buf=buf, nfound=nfound)
    endif
 
@@ -104,13 +121,14 @@ contains
    deallocate(buf)
    endsubroutine find_self_intersections
 
-   subroutine brute_force_pairs(facet, buf, nfound)
+   subroutine brute_force_pairs(facet, touching, buf, nfound)
    !< O(N^2) fallback used when no AABB tree is available. Same adjacency
    !< filter and narrow-phase as the BVH path.
    type(facet_object),                     intent(in)     :: facet(:)
+   logical,                                intent(in)     :: touching
    type(intersection_pair_t), allocatable, intent(inout)  :: buf(:)
    integer(I4P),                           intent(inout)  :: nfound
-   integer(I4P)                                           :: i, j, n
+   integer(I4P)                                           :: i, j, n, kind
    type(vector_R8P)                                       :: p, q
    logical                                                :: hit
 
@@ -118,13 +136,13 @@ contains
    do i = 1, n - 1
       do j = i + 1, n
          if (.not. bboxes_overlap(facet(i), facet(j))) cycle
-         call test_pair(fa=facet(i), fb=facet(j), hit=hit, p=p, q=q)
-         if (hit) call push_pair(buf=buf, nfound=nfound, a=i, b=j, p=p, q=q)
+         call test_pair(fa=facet(i), fb=facet(j), touching=touching, hit=hit, kind=kind, p=p, q=q)
+         if (hit) call push_pair(buf=buf, nfound=nfound, a=i, b=j, kind=kind, p=p, q=q)
       enddo
    enddo
    endsubroutine brute_force_pairs
 
-   recursive subroutine traverse_node_pair(facet, tree, na, nb, buf, nfound)
+   recursive subroutine traverse_node_pair(facet, tree, na, nb, touching, buf, nfound)
    !< Tree-vs-tree traversal. Visits node-pairs `(na, nb)` with `na <= nb` to
    !< avoid double-counting. Prunes when the two AABBs don't overlap; recurses
    !< by descending the *larger* of the two nodes (volume-based heuristic).
@@ -134,6 +152,7 @@ contains
    type(facet_object),                     intent(in)    :: facet(:)
    type(aabb_tree_object),                 intent(in)    :: tree
    integer(I4P),                           intent(in)    :: na, nb
+   logical,                                intent(in)    :: touching
    type(intersection_pair_t), allocatable, intent(inout) :: buf(:)
    integer(I4P),                           intent(inout) :: nfound
    type(aabb_node_object), pointer                       :: node_a, node_b
@@ -159,7 +178,7 @@ contains
 
    if (nca == 0 .and. ncb == 0) then
       ! Leaf-leaf: enumerate candidate facet pairs.
-      call enumerate_leaf_pair(facet=facet, tree=tree, na=na, nb=nb, &
+      call enumerate_leaf_pair(facet=facet, tree=tree, na=na, nb=nb, touching=touching, &
                                buf=buf, nfound=nfound)
       return
    endif
@@ -169,14 +188,14 @@ contains
       ! a is leaf; recurse into b's children paired with a.
       do j = 1, ncb
          call traverse_node_pair(facet=facet, tree=tree, na=na, nb=cb(j), &
-                                 buf=buf, nfound=nfound)
+                                 touching=touching, buf=buf, nfound=nfound)
       enddo
       return
    endif
    if (ncb == 0) then
       do i = 1, nca
          call traverse_node_pair(facet=facet, tree=tree, na=ca(i), nb=nb, &
-                                 buf=buf, nfound=nfound)
+                                 touching=touching, buf=buf, nfound=nfound)
       enddo
       return
    endif
@@ -188,17 +207,17 @@ contains
    if (va >= vb) then
       do i = 1, nca
          call traverse_node_pair(facet=facet, tree=tree, na=ca(i), nb=nb, &
-                                 buf=buf, nfound=nfound)
+                                 touching=touching, buf=buf, nfound=nfound)
       enddo
    else
       do j = 1, ncb
          call traverse_node_pair(facet=facet, tree=tree, na=na, nb=cb(j), &
-                                 buf=buf, nfound=nfound)
+                                 touching=touching, buf=buf, nfound=nfound)
       enddo
    endif
    endsubroutine traverse_node_pair
 
-   subroutine enumerate_leaf_pair(facet, tree, na, nb, buf, nfound)
+   subroutine enumerate_leaf_pair(facet, tree, na, nb, touching, buf, nfound)
    !< Enumerate candidate facet pairs at the leaf-pair (na, nb).
    !<
    !< When `na == nb` (the same leaf), enumerate i < j over its facet ids.
@@ -210,11 +229,12 @@ contains
    type(facet_object),                     intent(in)    :: facet(:)
    type(aabb_tree_object),                 intent(in)    :: tree
    integer(I4P),                           intent(in)    :: na, nb
+   logical,                                intent(in)    :: touching
    type(intersection_pair_t), allocatable, intent(inout) :: buf(:)
    integer(I4P),                           intent(inout) :: nfound
    type(aabb_node_object), pointer                       :: node_a, node_b
    type(list_id_object)                                  :: ids_a, ids_b
-   integer(I4P)                                          :: i, j, fi, fj, lo, hi
+   integer(I4P)                                          :: i, j, fi, fj, lo, hi, kind
    type(vector_R8P)                                      :: p, q
    logical                                               :: hit
 
@@ -238,8 +258,8 @@ contains
          if (na == nb .and. fi >= fj) cycle  ! intra-leaf: i < j only
          if (na /= nb .and. fi /= lo) cycle  ! inter-leaf: only the (lo, hi) direction
          if (.not. bboxes_overlap(facet(lo), facet(hi))) cycle
-         call test_pair(fa=facet(lo), fb=facet(hi), hit=hit, p=p, q=q)
-         if (hit) call push_pair(buf=buf, nfound=nfound, a=lo, b=hi, p=p, q=q)
+         call test_pair(fa=facet(lo), fb=facet(hi), touching=touching, hit=hit, kind=kind, p=p, q=q)
+         if (hit) call push_pair(buf=buf, nfound=nfound, a=lo, b=hi, kind=kind, p=p, q=q)
       enddo
    enddo
    endsubroutine enumerate_leaf_pair
@@ -255,16 +275,19 @@ contains
                 fa%bb(2)%z < fb%bb(1)%z .or. fb%bb(2)%z < fa%bb(1)%z)
    endfunction bboxes_overlap
 
-   subroutine test_pair(fa, fb, hit, p, q)
+   subroutine test_pair(fa, fb, touching, hit, kind, p, q)
    !< Narrow phase of one candidate pair (see the module header, steps 2 and 3).
-   type(facet_object), intent(in)  :: fa, fb !< The pair.
-   logical,            intent(out) :: hit    !< True if the facets cross.
-   type(vector_R8P),   intent(out) :: p, q   !< Intersection segment, if hit.
+   type(facet_object), intent(in)  :: fa, fb   !< The pair.
+   logical,            intent(in)  :: touching !< Report pairs meeting at one point.
+   logical,            intent(out) :: hit      !< True if the pair is reported.
+   integer(I4P),       intent(out) :: kind     !< SELFINT_* code, if hit.
+   type(vector_R8P),   intent(out) :: p, q     !< Intersection segment (see intersection_pair_t), if hit.
 
-   hit = .false.
+   hit = .false. ; kind = SELFINT_CROSSING
+   p = fa%vertex(1) ; q = p
    select case (shared_vertices_number(fa, fb))
    case (0_I4P)
-      call fa%intersect_facet(other=fb, p=p, q=q, intersects=hit)
+      call disjoint_pair(ta=fa%vertex, tb=fb%vertex, touching=touching, hit=hit, kind=kind, p=p, q=q)
    case (1_I4P)
       ! the shared vertex lies on both planes: if the other two vertices of either facet are strictly on one side
       ! of the other's plane, the facets meet at that vertex alone. This exact filter skips orient3d on the shared
@@ -281,6 +304,120 @@ contains
       p = fa%vertex(1) ; q = p ! sharing an edge (or a duplicate): they meet along it
    endselect
    endsubroutine test_pair
+
+   subroutine disjoint_pair(ta, tb, touching, hit, kind, p, q)
+   !< Exact narrow phase of two triangles with no vertex in common (issue #69): `pair_cut` (exact orient3d signs,
+   !< implicit section points) for the general position, and for an exactly coplanar pair the relation of the two
+   !< triangles in the projection that drops `facet_drop` (exact orient2d): interiors overlapping is a defect
+   !< (SELFINT_COPLANAR), boundaries meeting without area is a touch. p, q: the rounded common segment (crossing), the
+   !< rounded common point twice (touching), the two centroids (coplanar overlap).
+   type(vector_R8P), intent(in)  :: ta(3), tb(3) !< The triangles.
+   logical,          intent(in)  :: touching     !< Report pairs meeting at one point (or along a boundary, coplanar).
+   logical,          intent(out) :: hit          !< True if reported.
+   integer(I4P),     intent(out) :: kind         !< SELFINT_* code, if hit.
+   type(vector_R8P), intent(out) :: p, q         !< See above.
+   type(implicit_point_t)        :: ip, iq
+   integer(I4P)                  :: pk, rel
+
+   hit = .false. ; kind = SELFINT_CROSSING
+   p = ta(1) ; q = p
+   call pair_cut(ta, tb, pk, ip, iq)
+   select case (pk)
+   case (PAIR_CROSSING)
+      hit = .true.
+      p = to_vector(ip_approx(ip)) ; q = to_vector(ip_approx(iq))
+   case (PAIR_TOUCHING)
+      if (.not. touching) return
+      hit = .true. ; kind = SELFINT_TOUCHING
+      p = to_vector(ip_approx(ip)) ; q = p
+   case (PAIR_COPLANAR)
+      rel = coplanar_relation(ta, tb)
+      if (rel == COPLANAR_OVERLAP) then
+         hit = .true. ; kind = SELFINT_COPLANAR
+      elseif (rel == COPLANAR_TOUCH .and. touching) then
+         hit = .true. ; kind = SELFINT_TOUCHING
+      endif
+      p = (ta(1) + ta(2) + ta(3)) / 3._R8P ; q = (tb(1) + tb(2) + tb(3)) / 3._R8P
+   endselect
+   endsubroutine disjoint_pair
+
+   function coplanar_relation(ta, tb) result(rel)
+   !< Relation of two exactly coplanar triangles (exact orient2d in the projection dropping `facet_drop(ta)`; the
+   !< projection keeps incidences of coplanar points). Separating-axis test with the six edge lines: the interiors are
+   !< disjoint iff one triangle lies in the closed outer half-plane of an edge of the other (COPLANAR_OVERLAP
+   !< otherwise); the closed triangles are disjoint iff it lies in the open outer half-plane (COPLANAR_TOUCH if only
+   !< the closed test separates them, COPLANAR_APART if the open one does). A degenerate triangle (zero area) is apart.
+   type(vector_R8P), intent(in) :: ta(3), tb(3) !< The triangles.
+   integer(I4P)                 :: rel          !< COPLANAR_APART, COPLANAR_TOUCH, COPLANAR_OVERLAP.
+   real(R8P)                    :: a(2, 3), b(2, 3)
+   integer(I4P)                 :: drop, sa, sb
+   logical                      :: closed_sep, open_sep
+
+   rel = COPLANAR_APART
+   drop = facet_drop(ta)
+   if (drop == 0_I4P) return
+   call project(ta, a) ; call project(tb, b)
+   sa = o2(a(:, 1), a(:, 2), a(:, 3)) ; sb = o2(b(:, 1), b(:, 2), b(:, 3))
+   if (sa == 0_I4P .or. sb == 0_I4P) return
+   closed_sep = .false. ; open_sep = .false.
+   call separate(a, sa, b)
+   call separate(b, sb, a)
+   if (open_sep) then
+      rel = COPLANAR_APART
+   elseif (closed_sep) then
+      rel = COPLANAR_TOUCH
+   else
+      rel = COPLANAR_OVERLAP
+   endif
+   contains
+      subroutine project(t, x)
+      !< Kept coordinates (drop + 1, drop + 2) mod 3 of t.
+      type(vector_R8P), intent(in)  :: t(3)
+      real(R8P),        intent(out) :: x(2, 3)
+      real(R8P)                     :: c(3)
+      integer(I4P)                  :: i
+
+      do i = 1, 3
+         c = [t(i)%x, t(i)%y, t(i)%z]
+         x(1, i) = c(mod(drop, 3_I4P) + 1_I4P) ; x(2, i) = c(mod(drop + 1_I4P, 3_I4P) + 1_I4P)
+      enddo
+      endsubroutine project
+
+      subroutine separate(t, st, o)
+      !< Does an edge line of t (orientation st) separate o (closed and open sense)?
+      real(R8P),    intent(in) :: t(2, 3), o(2, 3)
+      integer(I4P), intent(in) :: st
+      integer(I4P)             :: e, k, sg(3)
+
+      do e = 1, 3
+         do k = 1, 3
+            sg(k) = st * o2(t(:, e), t(:, mod(e, 3_I4P) + 1_I4P), o(:, k)) ! > 0: inner side of the edge
+         enddo
+         if (all(sg <= 0_I4P)) closed_sep = .true.
+         if (all(sg < 0_I4P)) open_sep = .true.
+      enddo
+      endsubroutine separate
+   endfunction coplanar_relation
+
+   function o2(a, b, c) result(sg)
+   !< Exact sign (-1, 0, 1) of the 2-D orientation of a, b, c.
+   real(R8P), intent(in) :: a(2), b(2), c(2)
+   integer(I4P)          :: sg
+   real(R8P)             :: d
+
+   d = orient2d_xy(a(1), a(2), b(1), b(2), c(1), c(2))
+   sg = 0_I4P
+   if (d > 0._R8P) sg = 1_I4P
+   if (d < 0._R8P) sg = -1_I4P
+   endfunction o2
+
+   pure function to_vector(x) result(v)
+   !< A vector_R8P from three reals.
+   real(R8P), intent(in) :: x(3)
+   type(vector_R8P)      :: v
+
+   v%x = x(1) ; v%y = x(2) ; v%z = x(3)
+   endfunction to_vector
 
    subroutine shared_vertex_crossing(ta, tb, hit, p, q)
    !< Exact crossing test of two triangles sharing one vertex s, neither with its two free vertices strictly on one
@@ -381,7 +518,7 @@ contains
    !< Fast path: when the vertex pool is in use, both facets carry non-zero
    !< `vertex_id` triples — equality of any pair of ids is exact and cheap.
    !< Slow path: when the pool is not in use (or any id is unset), fall back
-   !< to coordinate comparison within EPS.
+   !< to exact coordinate equality.
    type(facet_object), intent(in) :: fa, fb
    integer(I4P)                   :: n
    integer(I4P)                   :: i, j
@@ -404,20 +541,19 @@ contains
    endfunction shared_vertices_number
 
    pure function vertex_coincident(va, vb) result(yes)
-   !< Coordinate-equality test for two vertices, within EPS.
+   !< Exact coordinate equality of two vertices (issue #69: within EPS before, so vertices 1e-8 apart counted as one
+   !< and their facets were skipped).
    type(vector_R8P), intent(in) :: va, vb
    logical                      :: yes
 
-   yes = abs(va%x - vb%x) <= EPS .and. &
-         abs(va%y - vb%y) <= EPS .and. &
-         abs(va%z - vb%z) <= EPS
+   yes = va%x == vb%x .and. va%y == vb%y .and. va%z == vb%z
    endfunction vertex_coincident
 
-   subroutine push_pair(buf, nfound, a, b, p, q)
+   subroutine push_pair(buf, nfound, a, b, kind, p, q)
    !< Append a record to `buf`, doubling its capacity when full.
    type(intersection_pair_t), allocatable, intent(inout) :: buf(:)
    integer(I4P),                           intent(inout) :: nfound
-   integer(I4P),                           intent(in)    :: a, b
+   integer(I4P),                           intent(in)    :: a, b, kind
    type(vector_R8P),                       intent(in)    :: p, q
    type(intersection_pair_t), allocatable                :: tmp(:)
    integer(I4P)                                          :: cap
@@ -431,6 +567,7 @@ contains
    nfound       = nfound + 1
    buf(nfound)%a = a
    buf(nfound)%b = b
+   buf(nfound)%kind = kind
    buf(nfound)%p = p
    buf(nfound)%q = q
    endsubroutine push_pair

@@ -20,7 +20,7 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 | Repair: slivers, duplicates, gaps, orientation, one warning per defect class | `surface%sanitize` | [I/O, analysis, manipulation](/guide/usage) | [2](/manual/tutorial/02-repair) |
 | Hole filling (Liepa minimum-weight patches, refinement, thin-plate fairing) | `surface%fill_holes` | [Hole filling](/guide/advanced/hole-filling) | [2](/manual/tutorial/02-repair) |
 | Translate, rotate, mirror, resize, clip, merge | `translate`, `rotate`, `mirror`, `resize`, `clip`, `merge_solids` | [I/O, analysis, manipulation](/guide/usage) | [3](/manual/tutorial/03-manipulation) |
-| Self-intersection detection and resolution (Möller tri-tri, exact predicates) | `find_self_intersections`, `resolve_self_intersections` | [Self-intersection](/guide/advanced/self-intersection) | |
+| Self-intersection detection and resolution (exact `pair_cut`, exact predicates) | `find_self_intersections`, `resolve_self_intersections` | [Self-intersection](/guide/advanced/self-intersection) | |
 | Booleans: union, intersection, difference, symmetric difference (Zhou et al. 2016) | `surface%boolean` | [Boolean operations](/guide/advanced/booleans) | |
 | Quadric decimation (Garland and Heckbert 1997) | `surface%decimate` | [Mesh decimation](/guide/advanced/decimate) | |
 | Isotropic remeshing, optional feature preservation (Botsch and Kobbelt 2004) | `surface%isotropic_remesh` | [Isotropic remeshing](/guide/advanced/isotropic-remesh) | |

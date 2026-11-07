@@ -1857,13 +1857,14 @@ endprogram ex_boolean_api
 ### `find_self_intersections`
 
 ```fortran
-call surface%find_self_intersections(pairs=pairs, status=status)
+call surface%find_self_intersections(pairs=pairs, status=status, include_touching=touching)
 ```
 
 **Purpose.** Locate every facet pair whose triangles geometrically
-cross (Möller tri-tri intersection in the narrow phase, AABB tree-vs-
-tree broad phase). Adjacent facets sharing a vertex or edge are
-filtered out — only **real geometric crossings** remain. Conceptual
+cross or overlap in a common plane (AABB tree-vs-tree broad phase,
+every narrow-phase decision exact since issue #69). Adjacent facets
+meeting only at the shared vertex or edge are filtered out — only
+**real geometric defects** remain. Conceptual
 overview on the [§1.2 feature page](/guide/advanced/self-intersection).
 
 **Arguments.**
@@ -1872,9 +1873,12 @@ overview on the [§1.2 feature page](/guide/advanced/self-intersection).
 | -------- | ------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------- |
 | `pairs`  | `out`        | `type(intersection_pair_t), allocatable` | (required) Returned list of intersection records. Always allocated (zero-length if none).   |
 | `status` | `out`, opt.  | `integer(I4P)`                           | `STATUS_OK` on success.                                                                     |
+| `include_touching` | `in`, opt. | `logical`                     | Also report pairs meeting at one point (default `.false.`).                                 |
 
 Each `pairs(i)` record has fields `%a` and `%b` (facet IDs with
-`a < b`), and `%p` and `%q` (segment endpoints in world coordinates).
+`a < b`), `%kind` (`SELFINT_CROSSING`, `SELFINT_COPLANAR`,
+`SELFINT_TOUCHING`) and `%p` and `%q` (segment endpoints in world
+coordinates).
 
 **Example.**
 

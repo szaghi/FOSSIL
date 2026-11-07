@@ -22,7 +22,7 @@ use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil_winding_number, only : compute_winding_number => winding_number, WN_FOUR_PI => FOUR_PI, WN_DEFAULT_BETA => DEFAULT_BETA
 use fossil_hole_filling,   only : boundary_loop_t, extract_boundary_loops, triangulate_loop, refine_patch, fair_patch
-use fossil_self_intersection, only : intersection_pair_t, &
+use fossil_self_intersection, only : intersection_pair_t, SELFINT_CROSSING, SELFINT_TOUCHING, SELFINT_COPLANAR, &
                                      compute_self_intersections => find_self_intersections
 use fossil_marching_cubes, only : compute_isosurface => extract_isosurface, MC_STATUS_OK
 use fossil_decimate, only : compute_decimate => decimate, &
@@ -71,7 +71,7 @@ implicit none
 private
 public :: surface_stl_object
 public :: proximity_pairs_of
-public :: intersection_pair_t
+public :: intersection_pair_t, SELFINT_CROSSING, SELFINT_TOUCHING, SELFINT_COPLANAR
 public :: SIGN_RAY_INTERSECTIONS, SIGN_SOLID_ANGLE, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER
 public :: FEATURE_FACE, FEATURE_EDGE, FEATURE_VERTEX
 public :: sign_algorithm_from_string
@@ -3660,16 +3660,19 @@ contains
    endif
    endfunction winding_number
 
-   subroutine find_self_intersections(self, pairs, status)
+   subroutine find_self_intersections(self, pairs, status, include_touching)
    !< Find all self-intersecting facet pairs in the surface (issue #18 §1.2).
    !<
    !< On return:
    !<   - `pairs` is allocated with exactly the number of intersections found
    !<     (zero-length allocation if none, never unallocated).
-   !<   - Each record carries the pair of facet ids (`a < b`) and the 3D
-   !<     intersection segment endpoints `p`, `q`.
-   !<   - Adjacent facets (sharing a vertex or edge) are filtered — they
-   !<     "intersect" only at the shared feature, which is not a defect.
+   !<   - Each record carries the pair of facet ids (`a < b`), the kind
+   !<     (`SELFINT_CROSSING`, `SELFINT_COPLANAR`, `SELFINT_TOUCHING`) and the
+   !<     3D intersection segment endpoints `p`, `q` (rounded; the two
+   !<     centroids for a coplanar overlap).
+   !<   - Every decision is exact (issue #69). Adjacent facets meeting only at
+   !<     the shared feature are not reported; touching pairs only with
+   !<     `include_touching`.
    !<
    !< Performance:
    !<   - Broad phase via tree-vs-tree traversal on the existing AABB tree
@@ -3678,13 +3681,16 @@ contains
    class(surface_stl_object),                     intent(in)            :: self     !< Surface.
    type(intersection_pair_t), allocatable,        intent(out)           :: pairs(:) !< Output: list of intersection records.
    integer(I4P),                                  intent(out), optional :: status   !< 0 on success.
+   logical,                                       intent(in),  optional :: include_touching !< Also pairs meeting at
+                                                                                   !< one point (default .false.).
 
    if (self%facets_number <= 0) then
       allocate(pairs(0))
       if (present(status)) status = 0_I4P
       return
    endif
-   call compute_self_intersections(facet=self%facet, tree=self%aabb, pairs=pairs, status=status)
+   call compute_self_intersections(facet=self%facet, tree=self%aabb, pairs=pairs, status=status, &
+                                   include_touching=include_touching)
    endsubroutine find_self_intersections
 
    subroutine boolean(self, other, op, status, weld)

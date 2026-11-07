@@ -8,9 +8,10 @@ title: Self-intersection
 
 Two TBPs that bracket the self-intersection problem:
 
-- **`surface%find_self_intersections(pairs, status)`** — *detection*.
-  Returns the list of every facet pair `(a, b)` whose triangles cross,
-  with the 3D segment endpoints of the intersection.
+- **`surface%find_self_intersections(pairs, status, include_touching)`** —
+  *detection*. Returns the list of every facet pair `(a, b)` whose
+  triangles cross or overlap in a common plane, decided exactly, with the
+  kind of contact and the 3D segment endpoints of the intersection.
 - **`surface%resolve_self_intersections(status)`** — *resolution*.
   Cleans the surface up by collapsing every self-crossing through a
   self-boolean union (`boolean(self, self, BOOL_UNION)`).
@@ -30,20 +31,31 @@ the input.
    `enumerate_children` dispatcher so SAH BVH and octree both share
    the traversal code.
 2. **Pool-aware adjacency filter.** The shared vertices of the pair are
-   counted by vertex-pool ID (coordinates when the pool is not in use).
-   Two facets sharing an **edge** meet along it, as expected: skipped.
-3. **Narrow phase.** No shared vertex: the Möller tri-tri test
-   (`facet%intersect_facet`), with the segment endpoints of a transverse
-   crossing. One shared **vertex** (issue #46): the exact `pair_classify`
+   counted by vertex-pool ID (exact coordinate equality when the pool is
+   not in use). Two facets sharing an **edge** meet along it, as expected:
+   skipped.
+3. **Narrow phase.** No shared vertex (issue #69): the exact `pair_cut`
+   of the boolean (`fossil_tritri_exact`, exact `orient3d` signs and
+   implicit section points). A common segment of positive length is a
+   crossing (`SELFINT_CROSSING`), reported with its endpoints rounded to
+   doubles. A single common point is a touch (`SELFINT_TOUCHING`),
+   reported only with `include_touching=.true.`. Two exactly coplanar
+   triangles are compared in the projection that keeps them non-degenerate
+   (exact `orient2d`, separating-axis test on the six edge lines):
+   overlapping interiors are a defect (`SELFINT_COPLANAR`, `p` and `q`
+   the two centroids), boundaries meeting without area a touch. Before
+   #69 this was the floating Möller test, which never reported a coplanar
+   overlap. One shared **vertex** (issue #46): the exact `pair_classify`
    (`orient3d`); a common segment of positive length is a crossing, the
    vertex alone is a touch and is not reported. Coplanar pairs sharing a
    vertex (normals parallel to 1e-12 rad) are skipped, as are pairs whose
    other vertices lie strictly on one side of the other plane (they can
    only touch).
 
-Not detected: two sheets crossing along a **shared edge** (a non-manifold
-edge with four facets, e.g. two cubes merged so that their face edges
-coincide), and an overlap of coplanar facets around a shared vertex.
+Not detected yet (issue #69, next steps): two sheets crossing along a
+**shared edge** (a non-manifold edge with four facets, e.g. two cubes
+merged so that their face edges coincide), and an overlap of coplanar
+facets around a shared vertex.
 
 ## Pipeline (resolution)
 
@@ -65,16 +77,23 @@ keeps only the outer-manifold sub-triangles. Inherits §1.1's
 ### Detection
 
 ```fortran
-call surface%find_self_intersections(pairs=pairs, status=status)
+call surface%find_self_intersections(pairs=pairs, status=status, include_touching=touching)
    type(intersection_pair_t), allocatable, intent(out) :: pairs(:)
    integer(I4P),                           intent(out), optional :: status
+   logical,                                intent(in),  optional :: include_touching ! default .false.
 ```
 
 `pairs` is always allocated (zero-length if no intersections found).
 Each record carries:
 
 - `pairs(i)%a`, `pairs(i)%b` — facet IDs with `a < b`.
-- `pairs(i)%p`, `pairs(i)%q` — segment endpoints in world coordinates.
+- `pairs(i)%kind` — `SELFINT_CROSSING` (a common segment of positive
+  length), `SELFINT_COPLANAR` (coplanar, overlapping interiors) or, with
+  `include_touching`, `SELFINT_TOUCHING` (one common point, or coplanar
+  boundaries meeting without area).
+- `pairs(i)%p`, `pairs(i)%q` — segment endpoints in world coordinates
+  (the common point twice for a touch, the two centroids for a coplanar
+  overlap).
 
 ### Resolution
 
@@ -187,7 +206,8 @@ inspection and that `is_watertight()` doesn't catch.
 ## References
 
 - Möller, *A Fast Triangle-Triangle Intersection Test*, Journal of
-  Graphics Tools 2(2), 1997. The narrow-phase test.
+  Graphics Tools 2(2), 1997. The narrow-phase test until issue #69,
+  replaced by the exact `pair_cut` (see [booleans](/guide/advanced/booleans)).
 - Zhou, Grinspun, Zorin & Jacobson, *Mesh Arrangements for Solid
   Geometry*, SIGGRAPH 2016. The reference algorithm for the §1.1
   boolean that `resolve_self_intersections` reuses.
