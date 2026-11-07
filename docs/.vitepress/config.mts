@@ -78,6 +78,7 @@ const docs = [
       { text: 'Cut-cell geometry', link: '/guide/advanced/cut-cells' },
       { text: 'Cut cells: solver support', link: '/guide/advanced/cut-solver' },
       { text: 'Curvilinear blocks', link: '/guide/advanced/curvilinear-blocks' },
+      { text: 'Overset assembly', link: '/guide/advanced/overset' },
       { text: 'Moving bodies', link: '/guide/advanced/moving-bodies' },
     ],
   },
