@@ -38,6 +38,19 @@ module fossil_overset
 !< enter_device), bit-identical. The pair matrix (`overlap_matrix`): PAIR_OVERLAP if a boundary vertex of one block
 !< lies in a cell of the other, or the middle vertex of one does (embedded); PAIR_SHARED where the cutter found a
 !< shared wall; PAIR_NONE otherwise.
+!<
+!< Classification (`classify`, `classify_2d`; Chesshire & Henshaw, Lee & Baeder). Holes (from the cutters) are 0.
+!< A vertex wants a donor if it lies on an overlap boundary (faces covered by TOPO_BOUNDARY records named `overlap`;
+!< mandatory), or by the rule: SELECT_EXPLICIT, within `layers` index rings of a hole (the fringe); SELECT_IMPLICIT,
+!< when a candidate's donor cell is smaller than its own cells (ratio < 1). Vertices within `immune` index layers of a
+!< wall face never receive. A candidate is valid when every node of its width-q donor stencil (WP2 stencils, nonzero
+!< weights) is no hole, and, with explicit interpolation (default), no receptor either; candidates are tried by
+!< increasing donor volume. Validity depends on the neighbours' classes, so the classification is iterated
+!< (Jacobi: every block from the previous state, hence independent of the block order) to a fixed point. A mandatory
+!< vertex is a receptor point whether or not it finds a donor (CMPGRD): it never serves as an explicit stencil node,
+!< which also keeps the iteration from oscillating; without a valid donor it is an orphan. A desired one without a
+!< valid donor stays a field point. With implicit interpolation,
+!< receptors in each other's stencils (circular interpolation, Sherer & Scott) are counted.
 
 use penf,                      only : I4P, R8P
 use vecfor,                    only : vector_R8P
@@ -49,6 +62,7 @@ use fossil_predicates,         only : orient2d_xy
 use fossil_box_query,          only : BOX_CUT
 use fossil_block_locate,       only : LOC_INSIDE, LOC_OUTSIDE
 use fossil_block_geometry,     only : hex_volume, quad_area, hex_validity, quad_validity
+use fossil_block_stencil,      only : STENCIL_FAILED
 
 implicit none
 private
@@ -56,6 +70,10 @@ public :: wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2d, block_logical_
 public :: hole_map, hole_map_2d, xray_flags, xray_flags_2d
 public :: donor_set_t, overlap_matrix, overlap_matrix_2d, donor_candidates, donor_candidates_2d
 public :: PAIR_NONE, PAIR_OVERLAP, PAIR_SHARED
+public :: overset_mask_t, classify, classify_2d, SELECT_EXPLICIT, SELECT_IMPLICIT
+
+integer(I4P), parameter :: SELECT_EXPLICIT = 1_I4P !< Holes from cutters; the hole fringe and overlap boundaries receive.
+integer(I4P), parameter :: SELECT_IMPLICIT = 2_I4P !< Lee & Baeder: a point receives when a smaller donor cell exists.
 
 integer(I4P), parameter :: PAIR_NONE    = 0_I4P !< The blocks do not overlap.
 integer(I4P), parameter :: PAIR_OVERLAP = 1_I4P !< They overlap (and may cut each other).
@@ -84,6 +102,25 @@ type :: donor_set_t
    real(R8P),    allocatable :: receptor_volume(:) !< Mean |volume| of the cells around the vertex [nv].
    real(R8P),    allocatable :: wall_distance(:)   !< Distance to the wall [nv] (if a wall is given).
 endtype donor_set_t
+
+type :: overset_mask_t
+   !< Classification of the vertices of one block (linear vertex index, i fastest).
+   integer(I4P), allocatable :: iota(:)   !< 1 field, 0 hole, -k receptor from block k.
+   integer(I4P), allocatable :: donor(:)  !< Chosen candidate (index into the block's donor_set_t), 0 if none.
+   integer(I4P), allocatable :: orphan(:) !< Orphan cause (0: none; ORPHAN_* from step 7, 1 = no valid donor).
+   integer(I4P), allocatable :: fringe(:) !< Fringe level (0: none).
+endtype overset_mask_t
+
+type :: cls_t
+   !< Work descriptor of one block for the classification.
+   integer(I4P)              :: n(3) = 1_I4P     !< Vertices per direction.
+   logical,      allocatable :: hole(:)          !< Holes [nv].
+   logical,      allocatable :: mandatory(:)     !< Overlap-boundary vertices [nv].
+   logical,      allocatable :: immune(:)        !< Never receptors [nv].
+   logical,      allocatable :: desired(:)       !< Want a donor by the selection rule [nv].
+   integer(I4P), allocatable :: order(:)         !< Candidates of each vertex in preference order [nc].
+   integer(I4P), allocatable :: nodes(:,:)       !< Donor stencil nodes (linear, 0 unused) [q^d, nc].
+endtype cls_t
 
 type :: ray_t
    !< Exact crossings of one X-ray.
@@ -1147,6 +1184,318 @@ contains
    enddo
    vv = reshape(acc / cnt, [product(n)])
    endfunction vertex_volumes_2d
+
+   ! -------------------------------------------------------------------------------------------------- classification
+   subroutine classify(blocks, donors, masks, rule, q, holes, explicit_interpolation, layers, immune, overlap_name, &
+                       wall_name, iterations, circular)
+   !< Classify the vertices of a set of 3-D blocks (module notes).
+   type(curvilinear_block_t),          intent(in)            :: blocks(:)   !< Blocks.
+   type(donor_set_t),                  intent(in)            :: donors(:)   !< Candidates (donor_candidates).
+   type(overset_mask_t), allocatable,  intent(out)           :: masks(:)    !< Classification per block.
+   integer(I4P),                       intent(in)            :: rule        !< SELECT_*.
+   integer(I4P),                       intent(in)            :: q           !< Donor stencil width.
+   type(block_logical_t),              intent(in),  optional :: holes(:)    !< Holes per block (default none).
+   logical,                            intent(in),  optional :: explicit_interpolation !< Default .true.
+   integer(I4P),                       intent(in),  optional :: layers      !< Fringe rings (explicit rule, default 1).
+   integer(I4P),                       intent(in),  optional :: immune      !< Wall-normal immune layers (default 0).
+   character(*),                       intent(in),  optional :: overlap_name !< Overlap boundary name ('overlap').
+   character(*),                       intent(in),  optional :: wall_name   !< Wall name ('wall').
+   integer(I4P),                       intent(out), optional :: iterations  !< Fixed-point iterations.
+   integer(I4P),                       intent(out), optional :: circular    !< Circular receptor pairs.
+   type(cls_t), allocatable :: cl(:) !< Descriptors.
+   integer(I4P), allocatable :: nodes(:,:,:), sst(:), cell(:,:) !< Stencils.
+   real(R8P),    allocatable :: w(:,:), xi(:,:) !< Weights.
+   integer(I4P)              :: a, b, c, nb, nc, k, m !< Counters.
+
+   nb = size(blocks, kind=I4P) ; allocate(cl(nb))
+   do a = 1, nb ! every block's sizes first: the stencil nodes of block b are linearised with cl(b)%n
+      cl(a)%n = [blocks(a)%ni, blocks(a)%nj, blocks(a)%nk]
+   enddo
+   do a = 1, nb
+      call face_flags_3d(blocks(a), cl(a), overlap_name, wall_name, immune)
+      if (present(holes)) then
+         cl(a)%hole = holes(a)%v
+      else
+         allocate(cl(a)%hole(product(cl(a)%n))) ; cl(a)%hole = .false.
+      endif
+      nc = size(donors(a)%block, kind=I4P)
+      allocate(cl(a)%nodes(q ** 3, nc)) ; cl(a)%nodes = 0_I4P
+      do b = 1, nb ! stencils of the candidates in block b
+         m = count(donors(a)%block == b)
+         if (m == 0) cycle
+         cell = donors(a)%cell(:, pack([(c, c = 1, nc)], donors(a)%block == b))
+         xi = donors(a)%xi(:, pack([(c, c = 1, nc)], donors(a)%block == b))
+         call blocks(b)%stencils(cell, xi, q, nodes, w, sst)
+         k = 0_I4P
+         do c = 1, nc
+            if (donors(a)%block(c) /= b) cycle
+            k = k + 1_I4P
+            if (sst(k) == STENCIL_FAILED) then
+               cl(a)%nodes(:, c) = -1_I4P
+            else
+               where (w(:, k) /= 0._R8P) cl(a)%nodes(:, c) = nodes(1, :, k) + cl(b)%n(1) * &
+                  (nodes(2, :, k) - 1_I4P + cl(b)%n(2) * (nodes(3, :, k) - 1_I4P))
+            endif
+         enddo
+      enddo
+   enddo
+   call classify_core(cl, donors, masks, rule, explicit_interpolation, layers, iterations, circular)
+   endsubroutine classify
+
+   subroutine classify_2d(blocks, donors, masks, rule, q, holes, explicit_interpolation, layers, immune, overlap_name, &
+                          wall_name, iterations, circular)
+   !< Classify the vertices of a set of 2-D blocks (as classify).
+   type(curvilinear_block_2d_t),       intent(in)            :: blocks(:)   !< Blocks.
+   type(donor_set_t),                  intent(in)            :: donors(:)   !< Candidates (donor_candidates_2d).
+   type(overset_mask_t), allocatable,  intent(out)           :: masks(:)    !< Classification per block.
+   integer(I4P),                       intent(in)            :: rule        !< SELECT_*.
+   integer(I4P),                       intent(in)            :: q           !< Donor stencil width.
+   type(block_logical_t),              intent(in),  optional :: holes(:)    !< Holes per block (default none).
+   logical,                            intent(in),  optional :: explicit_interpolation !< Default .true.
+   integer(I4P),                       intent(in),  optional :: layers      !< Fringe rings (explicit rule, default 1).
+   integer(I4P),                       intent(in),  optional :: immune      !< Wall-normal immune layers (default 0).
+   character(*),                       intent(in),  optional :: overlap_name !< Overlap boundary name ('overlap').
+   character(*),                       intent(in),  optional :: wall_name   !< Wall name ('wall').
+   integer(I4P),                       intent(out), optional :: iterations  !< Fixed-point iterations.
+   integer(I4P),                       intent(out), optional :: circular    !< Circular receptor pairs.
+   type(cls_t), allocatable :: cl(:) !< Descriptors.
+   integer(I4P), allocatable :: nodes(:,:,:), sst(:), cell(:,:) !< Stencils.
+   real(R8P),    allocatable :: w(:,:), xi(:,:) !< Weights.
+   integer(I4P)              :: a, b, c, nb, nc, k, m !< Counters.
+
+   nb = size(blocks, kind=I4P) ; allocate(cl(nb))
+   do a = 1, nb
+      cl(a)%n = [blocks(a)%ni, blocks(a)%nj, 1_I4P]
+   enddo
+   do a = 1, nb
+      call face_flags_2d(blocks(a), cl(a), overlap_name, wall_name, immune)
+      if (present(holes)) then
+         cl(a)%hole = holes(a)%v
+      else
+         allocate(cl(a)%hole(product(cl(a)%n))) ; cl(a)%hole = .false.
+      endif
+      nc = size(donors(a)%block, kind=I4P)
+      allocate(cl(a)%nodes(q ** 2, nc)) ; cl(a)%nodes = 0_I4P
+      do b = 1, nb
+         m = count(donors(a)%block == b)
+         if (m == 0) cycle
+         cell = donors(a)%cell(:, pack([(c, c = 1, nc)], donors(a)%block == b))
+         xi = donors(a)%xi(:, pack([(c, c = 1, nc)], donors(a)%block == b))
+         call blocks(b)%stencils(cell, xi, q, nodes, w, sst)
+         k = 0_I4P
+         do c = 1, nc
+            if (donors(a)%block(c) /= b) cycle
+            k = k + 1_I4P
+            if (sst(k) == STENCIL_FAILED) then
+               cl(a)%nodes(:, c) = -1_I4P
+            else
+               where (w(:, k) /= 0._R8P) cl(a)%nodes(:, c) = nodes(1, :, k) + cl(b)%n(1) * (nodes(2, :, k) - 1_I4P)
+            endif
+         enddo
+      enddo
+   enddo
+   call classify_core(cl, donors, masks, rule, explicit_interpolation, layers, iterations, circular)
+   endsubroutine classify_2d
+
+   subroutine face_flags_3d(blk, cl, overlap_name, wall_name, immune)
+   !< Mandatory (overlap boundary) and immune (near-wall) vertices of a 3-D block.
+   type(curvilinear_block_t), intent(in)           :: blk          !< Block.
+   type(cls_t),               intent(inout)        :: cl           !< Descriptor.
+   character(*),              intent(in), optional :: overlap_name !< Overlap name.
+   character(*),              intent(in), optional :: wall_name    !< Wall name.
+   integer(I4P),              intent(in), optional :: immune       !< Immune layers.
+   integer(I4P)                                    :: r, nimm      !< Counters.
+
+   nimm = 0_I4P ; if (present(immune)) nimm = immune
+   allocate(cl%mandatory(product(cl%n)), cl%immune(product(cl%n))) ; cl%mandatory = .false. ; cl%immune = .false.
+   do r = 1, blk%nrec
+      if (blk%rec(r)%kind /= TOPO_BOUNDARY) cycle
+      if (trim(blk%rec(r)%name) == name_or(overlap_name, 'overlap')) &
+         call mark_range(cl%n, blk%rec(r)%face, blk%rec(r)%lo, blk%rec(r)%hi, 1_I4P, cl%mandatory)
+      if (trim(blk%rec(r)%name) == name_or(wall_name, 'wall') .and. nimm > 0) &
+         call mark_range(cl%n, blk%rec(r)%face, blk%rec(r)%lo, blk%rec(r)%hi, nimm, cl%immune)
+   enddo
+   endsubroutine face_flags_3d
+
+   subroutine face_flags_2d(blk, cl, overlap_name, wall_name, immune)
+   !< Mandatory (overlap boundary) and immune (near-wall) vertices of a 2-D block.
+   type(curvilinear_block_2d_t), intent(in)           :: blk          !< Block.
+   type(cls_t),                  intent(inout)        :: cl           !< Descriptor.
+   character(*),                 intent(in), optional :: overlap_name !< Overlap name.
+   character(*),                 intent(in), optional :: wall_name    !< Wall name.
+   integer(I4P),                 intent(in), optional :: immune       !< Immune layers.
+   integer(I4P)                                       :: r, nimm      !< Counters.
+
+   nimm = 0_I4P ; if (present(immune)) nimm = immune
+   allocate(cl%mandatory(product(cl%n)), cl%immune(product(cl%n))) ; cl%mandatory = .false. ; cl%immune = .false.
+   do r = 1, blk%nrec
+      if (blk%rec(r)%kind /= TOPO_BOUNDARY) cycle
+      if (trim(blk%rec(r)%name) == name_or(overlap_name, 'overlap')) &
+         call mark_range(cl%n, blk%rec(r)%face, blk%rec(r)%lo, blk%rec(r)%hi, 1_I4P, cl%mandatory)
+      if (trim(blk%rec(r)%name) == name_or(wall_name, 'wall') .and. nimm > 0) &
+         call mark_range(cl%n, blk%rec(r)%face, blk%rec(r)%lo, blk%rec(r)%hi, nimm, cl%immune)
+   enddo
+   endsubroutine face_flags_2d
+
+   pure function name_or(name, default) result(n)
+   !< The name if present, else the default.
+   character(*), intent(in), optional :: name    !< Name.
+   character(*), intent(in)           :: default !< Default.
+   character(len=:), allocatable      :: n       !< Result.
+
+   n = default ; if (present(name)) n = trim(name)
+   endfunction name_or
+
+   pure subroutine mark_range(n, face, lo, hi, depth, flag)
+   !< Mark the vertices of a face range and of the next depth - 1 layers into the block.
+   integer(I4P), intent(in)    :: n(3), face, lo(3), hi(3), depth !< Sizes, face, range, layers.
+   logical,      intent(inout) :: flag(:)                         !< Flags [nv].
+   integer(I4P)                :: l(3), h(3), nd, i, j, k         !< Work.
+
+   nd = (face + 1_I4P) / 2_I4P ; l = lo ; h = hi
+   if (mod(face, 2_I4P) == 1_I4P) then
+      h(nd) = min(lo(nd) + depth - 1_I4P, n(nd))
+   else
+      l(nd) = max(hi(nd) - depth + 1_I4P, 1_I4P)
+   endif
+   do k = l(3), h(3)
+      do j = l(2), h(2)
+         do i = l(1), h(1)
+            flag(i + n(1) * (j - 1_I4P + n(2) * (k - 1_I4P))) = .true.
+         enddo
+      enddo
+   enddo
+   endsubroutine mark_range
+
+   subroutine classify_core(cl, donors, masks, rule, explicit_interpolation, layers, iterations, circular)
+   !< The fixed point of the classification on the descriptors (module notes).
+   type(cls_t),                       intent(inout)         :: cl(:)      !< Descriptors.
+   type(donor_set_t),                 intent(in)            :: donors(:)  !< Candidates.
+   type(overset_mask_t), allocatable, intent(out)           :: masks(:)   !< Classification.
+   integer(I4P),                      intent(in)            :: rule       !< SELECT_*.
+   logical,                           intent(in),  optional :: explicit_interpolation !< Default .true.
+   integer(I4P),                      intent(in),  optional :: layers     !< Fringe rings.
+   integer(I4P),                      intent(out), optional :: iterations !< Iterations.
+   integer(I4P),                      intent(out), optional :: circular   !< Circular pairs.
+   type(overset_mask_t), allocatable :: old(:) !< Previous state.
+   integer(I4P), allocatable         :: key(:) !< Sort keys.
+   logical                           :: expl, changed, valid !< Flags.
+   integer(I4P)                      :: nb, a, v, c, j, it, nl, b, u, nv, ncirc, cu !< Counters.
+   integer(I4P), parameter           :: MAX_IT = 50_I4P !< Iteration cap.
+
+   expl = .true. ; if (present(explicit_interpolation)) expl = explicit_interpolation
+   nl = 1_I4P ; if (present(layers)) nl = layers
+   nb = size(cl, kind=I4P) ; allocate(masks(nb))
+   do a = 1, nb
+      nv = product(cl(a)%n)
+      allocate(masks(a)%iota(nv), masks(a)%donor(nv), masks(a)%orphan(nv), masks(a)%fringe(nv))
+      masks(a)%iota = merge(0_I4P, 1_I4P, cl(a)%hole) ; masks(a)%donor = 0_I4P ; masks(a)%orphan = 0_I4P
+      masks(a)%fringe = 0_I4P
+      allocate(cl(a)%desired(nv)) ; cl(a)%desired = .false.
+      if (rule == SELECT_EXPLICIT) then
+         call hole_rings(cl(a)%n, cl(a)%hole, nl, cl(a)%desired)
+      else
+         do v = 1, nv
+            cl(a)%desired(v) = any(donors(a)%ratio(donors(a)%start(v):donors(a)%start(v + 1) - 1) < 1._R8P)
+         enddo
+      endif
+      ! candidates in preference order: increasing donor volume (stable)
+      allocate(cl(a)%order(size(donors(a)%block)))
+      do v = 1, nv
+         key = [(c, c = donors(a)%start(v), donors(a)%start(v + 1) - 1)]
+         call sort_by_volume(key, donors(a)%donor_volume)
+         cl(a)%order(donors(a)%start(v):donors(a)%start(v + 1) - 1) = key
+      enddo
+   enddo
+   do it = 1, MAX_IT
+      old = masks ; changed = .false.
+      do a = 1, nb
+         do v = 1, product(cl(a)%n)
+            if (cl(a)%hole(v)) cycle
+            masks(a)%iota(v) = 1_I4P ; masks(a)%donor(v) = 0_I4P ; masks(a)%orphan(v) = 0_I4P
+            if (cl(a)%immune(v) .or. .not. (cl(a)%mandatory(v) .or. cl(a)%desired(v))) cycle
+            do j = donors(a)%start(v), donors(a)%start(v + 1) - 1
+               c = cl(a)%order(j) ; b = donors(a)%block(c)
+               if (donors(a)%status(c) /= LOC_INSIDE .or. cl(a)%nodes(1, c) < 0) cycle
+               valid = .true.
+               do u = 1, size(cl(a)%nodes, 1, I4P)
+                  if (cl(a)%nodes(u, c) == 0) cycle
+                  if (old(b)%iota(cl(a)%nodes(u, c)) == 0 .or. (expl .and. (old(b)%iota(cl(a)%nodes(u, c)) < 0 .or. &
+                      cl(b)%mandatory(cl(a)%nodes(u, c))))) then
+                     valid = .false. ; exit
+                  endif
+               enddo
+               if (valid) then
+                  masks(a)%iota(v) = -b ; masks(a)%donor(v) = c ; exit
+               endif
+            enddo
+            if (masks(a)%iota(v) == 1 .and. cl(a)%mandatory(v)) masks(a)%orphan(v) = 1_I4P
+         enddo
+         changed = changed .or. any(masks(a)%iota /= old(a)%iota)
+      enddo
+      if (.not. changed) exit
+   enddo
+   if (present(iterations)) iterations = it
+   if (present(circular)) then ! receptors whose stencils hold each other
+      ncirc = 0_I4P
+      do a = 1, nb
+         do v = 1, product(cl(a)%n)
+            if (masks(a)%iota(v) >= 0) cycle
+            c = masks(a)%donor(v) ; b = -masks(a)%iota(v)
+            do u = 1, size(cl(a)%nodes, 1, I4P)
+               if (cl(a)%nodes(u, c) <= 0) cycle
+               if (masks(b)%iota(cl(a)%nodes(u, c)) /= -a) cycle
+               cu = masks(b)%donor(cl(a)%nodes(u, c))
+               if (any(cl(b)%nodes(:, cu) == v)) ncirc = ncirc + 1_I4P
+            enddo
+         enddo
+      enddo
+      circular = ncirc / 2_I4P
+   endif
+   endsubroutine classify_core
+
+   pure subroutine hole_rings(n, hole, nl, ring)
+   !< Vertices within nl index rings (Chebyshev) of a hole, holes excluded.
+   integer(I4P), intent(in)  :: n(3), nl  !< Sizes, rings.
+   logical,      intent(in)  :: hole(:)   !< Holes.
+   logical,      intent(out) :: ring(:)   !< Ring vertices.
+   integer(I4P)              :: i, j, k, di, dj, dk, ii, jj, kk, dz !< Counters.
+
+   ring = .false. ; dz = merge(0_I4P, nl, n(3) == 1)
+   do k = 1, n(3)
+      do j = 1, n(2)
+         do i = 1, n(1)
+            if (.not. hole(i + n(1) * (j - 1_I4P + n(2) * (k - 1_I4P)))) cycle
+            do dk = -dz, dz
+               do dj = -nl, nl
+                  do di = -nl, nl
+                     ii = i + di ; jj = j + dj ; kk = k + dk
+                     if (ii < 1 .or. jj < 1 .or. kk < 1 .or. ii > n(1) .or. jj > n(2) .or. kk > n(3)) cycle
+                     ring(ii + n(1) * (jj - 1_I4P + n(2) * (kk - 1_I4P))) = .true.
+                  enddo
+               enddo
+            enddo
+         enddo
+      enddo
+   enddo
+   ring = ring .and. .not. hole
+   endsubroutine hole_rings
+
+   pure subroutine sort_by_volume(key, vol)
+   !< Stable insertion sort of candidate indices by increasing donor volume.
+   integer(I4P), intent(inout) :: key(:) !< Candidates.
+   real(R8P),    intent(in)    :: vol(:) !< Donor volumes.
+   integer(I4P)                :: i, j, t !< Work.
+
+   do i = 2, size(key)
+      t = key(i) ; j = i - 1
+      do while (j >= 1)
+         if (vol(key(j)) <= vol(t)) exit
+         key(j + 1) = key(j) ; j = j - 1
+      enddo
+      key(j + 1) = t
+   enddo
+   endsubroutine sort_by_volume
 
    ! ------------------------------------------------------------------------------------------------------- utilities
    pure function pt3(blk, p) result(x)
