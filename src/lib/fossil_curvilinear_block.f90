@@ -18,6 +18,7 @@ module fossil_curvilinear_block
 !< vertex whose image is unique, with unique images of its face neighbours, seeds a transform that grows to the
 !< largest rectangle of the face on which every vertex maps onto a coincident vertex.
 use penf, only : I4P, R8P
+use fossil_block_geometry, only : hex_volume, hex_centroid, bilinear_face_vector, quad_area, quad_centroid
 
 implicit none
 private
@@ -64,6 +65,8 @@ type :: curvilinear_block_t
       procedure, pass(self) :: destroy => destroy_3d          !< Reset.
       procedure, pass(self) :: add_record => add_record_3d    !< Append a record.
       procedure, pass(self) :: cells_number => cells_number_3d !< Number of cells.
+      procedure, pass(self) :: corners => corners_3d          !< Corners of a cell.
+      procedure, pass(self) :: geometry => geometry_3d        !< Exact cell geometry.
 endtype curvilinear_block_t
 
 type :: curvilinear_block_2d_t
@@ -78,6 +81,8 @@ type :: curvilinear_block_2d_t
       procedure, pass(self) :: destroy => destroy_2d          !< Reset.
       procedure, pass(self) :: add_record => add_record_2d    !< Append a record.
       procedure, pass(self) :: cells_number => cells_number_2d !< Number of cells.
+      procedure, pass(self) :: corners => corners_2d          !< Corners of a cell.
+      procedure, pass(self) :: geometry => geometry_2d        !< Exact cell geometry.
 endtype curvilinear_block_2d_t
 
 type :: vx_t
@@ -209,6 +214,155 @@ contains
       q(abs(rec%transform(d))) = q(abs(rec%transform(d))) + sign(1_I4P, rec%transform(d)) * (p(d) - rec%begin(d))
    enddo
    endfunction record_map
+
+   ! -------------------------------------------------------------------------------------------------------- geometry
+   pure function corners_3d(self, i, j, k) result(c)
+   !< Corners of cell (i, j, k): corner (a, b, e) at 1 + a + 2 b + 4 e.
+   class(curvilinear_block_t), intent(in) :: self    !< Block.
+   integer(I4P),               intent(in) :: i, j, k !< Cell.
+   real(R8P)                              :: c(3, 8) !< Corners.
+   integer(I4P)                           :: a, b, e !< Corner bits.
+
+   do e = 0, 1
+      do b = 0, 1
+         do a = 0, 1
+            c(:, 1 + a + 2 * b + 4 * e) = [self%x(i + a, j + b, k + e), self%y(i + a, j + b, k + e), &
+                                           self%z(i + a, j + b, k + e)]
+         enddo
+      enddo
+   enddo
+   endfunction corners_3d
+
+   pure function corners_2d(self, i, j) result(c)
+   !< Corners of cell (i, j): corner (a, b) at 1 + a + 2 b.
+   class(curvilinear_block_2d_t), intent(in) :: self    !< Block.
+   integer(I4P),                  intent(in) :: i, j    !< Cell.
+   real(R8P)                                 :: c(2, 4) !< Corners.
+
+   c(:, 1) = [self%u(i, j), self%v(i, j)] ; c(:, 2) = [self%u(i + 1, j), self%v(i + 1, j)]
+   c(:, 3) = [self%u(i, j + 1), self%v(i, j + 1)] ; c(:, 4) = [self%u(i + 1, j + 1), self%v(i + 1, j + 1)]
+   endfunction corners_2d
+
+   pure function vtx(self, i, j, k) result(p)
+   !< Vertex (i, j, k).
+   class(curvilinear_block_t), intent(in) :: self    !< Block.
+   integer(I4P),               intent(in) :: i, j, k !< Vertex.
+   real(R8P)                              :: p(3)    !< Coordinates.
+
+   p = [self%x(i, j, k), self%y(i, j, k), self%z(i, j, k)]
+   endfunction vtx
+
+   subroutine geometry_3d(self, volume, centroid, face_i, face_j, face_k)
+   !< Exact cell geometry: volumes, centroids, and the area vectors of the i, j, k faces, oriented towards +i, +j, +k
+   !< (outward on the high faces of a right-handed cell). Cell (i, j, k) is bounded by face_i(:, i..i+1, j, k), etc.
+   class(curvilinear_block_t), intent(in)                         :: self            !< Block.
+   real(R8P), allocatable,     intent(out), optional              :: volume(:,:,:)   !< Volumes [ni-1, nj-1, nk-1].
+   real(R8P), allocatable,     intent(out), optional              :: centroid(:,:,:,:) !< Centroids [3, cells].
+   real(R8P), allocatable,     intent(out), optional              :: face_i(:,:,:,:) !< i faces [3, ni, nj-1, nk-1].
+   real(R8P), allocatable,     intent(out), optional              :: face_j(:,:,:,:) !< j faces [3, ni-1, nj, nk-1].
+   real(R8P), allocatable,     intent(out), optional              :: face_k(:,:,:,:) !< k faces [3, ni-1, nj-1, nk].
+   integer(I4P)                                                   :: i, j, k, ni, nj, nk !< Counters.
+
+   ni = self%ni ; nj = self%nj ; nk = self%nk
+   if (present(volume)) then
+      allocate(volume(ni - 1, nj - 1, nk - 1))
+      do k = 1, nk - 1
+         do j = 1, nj - 1
+            do i = 1, ni - 1
+               volume(i, j, k) = hex_volume(self%corners(i, j, k))
+            enddo
+         enddo
+      enddo
+   endif
+   if (present(centroid)) then
+      allocate(centroid(3, ni - 1, nj - 1, nk - 1))
+      do k = 1, nk - 1
+         do j = 1, nj - 1
+            do i = 1, ni - 1
+               centroid(:, i, j, k) = hex_centroid(self%corners(i, j, k))
+            enddo
+         enddo
+      enddo
+   endif
+   if (present(face_i)) then
+      allocate(face_i(3, ni, nj - 1, nk - 1))
+      do k = 1, nk - 1
+         do j = 1, nj - 1
+            do i = 1, ni
+               face_i(:, i, j, k) = bilinear_face_vector(vtx(self, i, j, k), vtx(self, i, j + 1, k), &
+                                                         vtx(self, i, j + 1, k + 1), vtx(self, i, j, k + 1))
+            enddo
+         enddo
+      enddo
+   endif
+   if (present(face_j)) then
+      allocate(face_j(3, ni - 1, nj, nk - 1))
+      do k = 1, nk - 1
+         do j = 1, nj
+            do i = 1, ni - 1
+               face_j(:, i, j, k) = bilinear_face_vector(vtx(self, i, j, k), vtx(self, i, j, k + 1), &
+                                                         vtx(self, i + 1, j, k + 1), vtx(self, i + 1, j, k))
+            enddo
+         enddo
+      enddo
+   endif
+   if (present(face_k)) then
+      allocate(face_k(3, ni - 1, nj - 1, nk))
+      do k = 1, nk
+         do j = 1, nj - 1
+            do i = 1, ni - 1
+               face_k(:, i, j, k) = bilinear_face_vector(vtx(self, i, j, k), vtx(self, i + 1, j, k), &
+                                                         vtx(self, i + 1, j + 1, k), vtx(self, i, j + 1, k))
+            enddo
+         enddo
+      enddo
+   endif
+   endsubroutine geometry_3d
+
+   subroutine geometry_2d(self, area, centroid, face_i, face_j)
+   !< Exact cell geometry: areas, centroids, and the normals (length = edge length) of the i and j edges, oriented
+   !< towards +i, +j.
+   class(curvilinear_block_2d_t), intent(in)            :: self            !< Block.
+   real(R8P), allocatable,        intent(out), optional :: area(:,:)       !< Areas [ni-1, nj-1].
+   real(R8P), allocatable,        intent(out), optional :: centroid(:,:,:) !< Centroids [2, cells].
+   real(R8P), allocatable,        intent(out), optional :: face_i(:,:,:)   !< i edges [2, ni, nj-1].
+   real(R8P), allocatable,        intent(out), optional :: face_j(:,:,:)   !< j edges [2, ni-1, nj].
+   integer(I4P)                                         :: i, j, ni, nj    !< Counters.
+
+   ni = self%ni ; nj = self%nj
+   if (present(area)) then
+      allocate(area(ni - 1, nj - 1))
+      do j = 1, nj - 1
+         do i = 1, ni - 1
+            area(i, j) = quad_area(self%corners(i, j))
+         enddo
+      enddo
+   endif
+   if (present(centroid)) then
+      allocate(centroid(2, ni - 1, nj - 1))
+      do j = 1, nj - 1
+         do i = 1, ni - 1
+            centroid(:, i, j) = quad_centroid(self%corners(i, j))
+         enddo
+      enddo
+   endif
+   if (present(face_i)) then
+      allocate(face_i(2, ni, nj - 1))
+      do j = 1, nj - 1
+         do i = 1, ni
+            face_i(:, i, j) = [self%v(i, j + 1) - self%v(i, j), -(self%u(i, j + 1) - self%u(i, j))]
+         enddo
+      enddo
+   endif
+   if (present(face_j)) then
+      allocate(face_j(2, ni - 1, nj))
+      do j = 1, nj
+         do i = 1, ni - 1
+            face_j(:, i, j) = [-(self%v(i + 1, j) - self%v(i, j)), self%u(i + 1, j) - self%u(i, j)]
+         enddo
+      enddo
+   endif
+   endsubroutine geometry_2d
 
    ! ------------------------------------------------------------------------------------------------------- detection
    subroutine detect_topology(blocks, tolerance, translations)
