@@ -28,6 +28,7 @@ use fossil_surface_stl_object
 use fossil_distance_field, only : distance_field_object, FAR_VALUE
 use fossil_curve_slice, only : slice_surface
 use fossil_cut_cells_3d, only : cut_cells_3d_t, cut_cells_3d
+use fossil_cut_graph, only : cut_links_t, cut_links_2d
 use fossil_rigid_pose, only : rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, &
                              pose_2d, pose_compose, pose_inverse, to_body, to_world, rotate, pose_interpolate
 use fossil_swept_cells, only : swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
@@ -48,6 +49,7 @@ public :: surface_stl_object, proximity_pairs_of
 public :: distance_field_object, FAR_VALUE
 public :: slice_surface
 public :: cut_cells_3d_t, cut_cells_3d
+public :: cut_links_t, cut_links_2d
 public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose
 public :: pose_inverse, to_body, to_world, rotate, pose_interpolate
 public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01

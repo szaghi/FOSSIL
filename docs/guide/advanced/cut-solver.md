@@ -45,24 +45,63 @@ replace the plans here with the measured results.
 
 A **link** (p, q, f, A) says that piece p of cell c and piece q of the cell
 across face f of c share a fluid region of that face, of area A. It is stored
-from p's side in CSR form: `link_start(np + 1)`, `link_piece(:)`,
-`link_face(:)` (1 to 6: −x, +x, −y, +y, −z, +z; 1 to 4 in 2-D) and
-`link_area(:)`. Both directions are stored, with the same area.
+from p's side in CSR form (`cut_links_t`): `start(np + 1)`, `piece(:)`,
+`face(:)` (1 to 6: −x, +x, −y, +y, −z, +z; 1 to 4 in 2-D) and `area(:)`,
+sorted by face, then by the piece across. Both directions are stored, with the
+same area.
 
-- **Which pieces meet.** A connected fluid region of a face lies next to one
-  piece on each side: the fluid next to a connected region is connected.
-  A face region is matched to its pieces through the fluid intervals of the
-  face's four edges, which both cells compute exactly and identically (the
-  edge crossings under the global perturbation of issue #69).
-- **Areas.** When the pieces of one side that touch the face are a single
-  piece, every link of the face takes the face area of the piece on the other
-  side (exact: the same numbers as `piece_face`). When both sides have several
-  pieces on the face, the area of each region comes from the plane section's
-  2-D pieces; a region with no fluid edge interval (a fluid island inside a
-  solid trace) is matched by its area, and an ambiguous match is reported.
-- **Invariants (the gate):** the links of a face sum to the face fraction ×
-  face area, symmetry (p → q ⇔ q → p, same area), and per piece the outward
-  face areas minus the wall normal integral vanish per axis.
+```fortran
+program piece_links
+use fossil, only : surface_stl_object, curve_object, cut_cells_2d_t, cut_cells_3d_t, cut_cells_3d, &
+                   cut_links_t, cut_links_2d
+use penf,   only : I4P, R8P
+implicit none
+type(surface_stl_object) :: surface
+type(curve_object)       :: curve
+type(cut_cells_2d_t)     :: cut2
+type(cut_cells_3d_t)     :: cut3
+type(cut_links_t)        :: links2, links3
+real(R8P)                :: x(9)
+integer(I4P)             :: i, k, p
+
+x = [(-0.5_R8P + 0.25_R8P * i, i = 0, 8)]
+call surface%load_from_file(file_name='cube.stl', guess_format=.true.)
+call cut_cells_3d(surface, x, x, x, cut3, links=links3) ! 3-D: computed with the cut cells
+call curve%adopt_loops(u=[0._R8P, 1._R8P, 0._R8P], v=[0._R8P, 0._R8P, 1._R8P], loop_sizes=[3_I4P])
+call curve%cut_cells(x=x, y=x, cut=cut2)                 ! 2-D: from the cut cells
+call cut_links_2d(cut2, links2)
+p = 1
+do k = links3%start(p), links3%start(p + 1) - 1 ! piece p meets piece(k) over its face face(k), area area(k)
+   print '(3I6,ES12.4)', p, links3%piece(k), links3%face(k), links3%area(k)
+enddo
+endprogram piece_links
+```
+
+- **2-D.** The fluid intervals of a cell edge are bounded by the crossings of
+  the walk and the cell corners, the same points in the two cells that share
+  the edge, so the intervals of two pieces across an edge are equal or
+  disjoint: one link per pair of equal intervals, of their length. The cut
+  cells now also give each piece's apertures (`piece_aperture(4, np)`) and
+  its fluid intervals (`piece_iv_start`, `piece_iv_edge`, `piece_iv_lo`,
+  `piece_iv_hi`).
+- **3-D.** A connected fluid region of a face lies next to one piece on each
+  side. The regions are the pieces of the plane section's 2-D cut cell (their
+  areas are the same numbers as the face fractions), matched to the 3-D pieces
+  on both sides through the fluid edge intervals they share, the edges of the
+  face being cell edges. A one-piece side takes every region; two one-piece
+  cells get one link of the face's fluid area. A region with no fluid
+  interval (a fluid island inside a solid trace on the face) goes to the only
+  piece of its side whose face area it leaves unexplained, else it is counted
+  in `links%unmatched` and gets no link.
+- **Untrusted cells** (`pieces = -1`) have no pieces and no links: their
+  neighbours see a wall there.
+
+Measured (`fossil_test_cut_links`, `fossil_test_cut_links_3d`):
+
+| Case | Result |
+|---|---|
+| 2-D: circle on a generic and an aligned grid, thin plate | link sums = piece aperture × edge length to 1·10⁻¹⁶, exact symmetry, per-piece apertures add up to the cell's exactly; plate pieces never link across the plate |
+| 3-D: tilted wedge, cone, L-prism (generic, aligned), thin plate, square tube (hole as a face island), 8 lattice tetrahedra; 113 298 links, 193 multi-piece cells | link sums = piece face fraction × face area to 1.2·10⁻¹⁴, exact symmetry, 0 unmatched regions; plate pieces never link across the plate |
 
 ## Neighbourhoods for state redistribution
 

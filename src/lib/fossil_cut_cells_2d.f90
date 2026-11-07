@@ -53,6 +53,12 @@ type :: cut_cells_2d_t
    real(R8P),    allocatable :: piece_centroid(:,:) !< Fluid centroid of each piece [2, np].
    real(R8P),    allocatable :: piece_wet_length(:) !< Wetted length of each piece [np].
    real(R8P),    allocatable :: piece_wet_normal(:,:) !< Outward-normal integral of each piece [2, np].
+   real(R8P),    allocatable :: piece_aperture(:,:) !< Fluid fraction of the cell edges per piece [4 (-u, +u, -v, +v), np].
+   integer(I4P), allocatable :: piece_iv_start(:)   !< Fluid edge intervals of piece p: piece_iv_start(p) .. (p+1) - 1.
+   integer(I4P), allocatable :: piece_iv_edge(:)    !< Edge of an interval: vertical edges (i, j) = i + (j - 1) (nx + 1),
+                                                    !< then horizontal ones (i, j) = (nx + 1) ny + i + (j - 1) nx.
+   real(R8P),    allocatable :: piece_iv_lo(:)      !< Interval start along its edge (v on a vertical edge, u on a horizontal).
+   real(R8P),    allocatable :: piece_iv_hi(:)      !< Interval end.
 endtype cut_cells_2d_t
 
 type :: xing_t
@@ -82,6 +88,10 @@ type :: ctx_t
    integer(I4P)               :: npb = 0_I4P      !< Pieces in the buffers.
    real(R8P),     allocatable :: pa(:), pcx(:), pcy(:), pwl(:), pwx(:), pwy(:) !< Piece buffers.
    integer(I4P),  allocatable :: pci(:), pcj(:)   !< Piece cells.
+   real(R8P),     allocatable :: pap(:,:)         !< Piece apertures [4, capacity].
+   integer(I4P)               :: niv = 0_I4P      !< Piece intervals in the buffers.
+   integer(I4P),  allocatable :: ivp(:), ive(:)   !< Interval piece, edge.
+   real(R8P),     allocatable :: ivl(:), ivh(:)   !< Interval range.
 endtype ctx_t
 
 contains
@@ -115,8 +125,9 @@ contains
    ne = (nx + 1_I4P) * ny + nx * (ny + 1_I4P) ; ncell = nx * ny
    call index_crossings(cx%xs, nxs, ne, cx%xstart, cx%xord)
    call index_pieces(cx%ps, nps, ncell, cx%pstart, cx%pord)
-   allocate(cx%pa(16), cx%pcx(16), cx%pcy(16), cx%pwl(16), cx%pwx(16), cx%pwy(16), cx%pci(16), cx%pcj(16))
-   cx%npb = 0_I4P
+   allocate(cx%pa(16), cx%pcx(16), cx%pcy(16), cx%pwl(16), cx%pwx(16), cx%pwy(16), cx%pci(16), cx%pcj(16), cx%pap(4, 16))
+   allocate(cx%ivp(16), cx%ive(16), cx%ivl(16), cx%ivh(16))
+   cx%npb = 0_I4P ; cx%niv = 0_I4P
    do c = 1_I4P, ncell
       call one_cell(c, cx, cc)
    enddo
@@ -128,6 +139,17 @@ contains
    cc%piece_centroid(1, :) = cx%pcx(1:npb) ; cc%piece_centroid(2, :) = cx%pcy(1:npb)
    cc%piece_wet_length = cx%pwl(1:npb)
    cc%piece_wet_normal(1, :) = cx%pwx(1:npb) ; cc%piece_wet_normal(2, :) = cx%pwy(1:npb)
+   cc%piece_aperture = cx%pap(:, 1:npb)
+   ! intervals per piece (CSR; appended piece by piece, so already grouped)
+   allocate(cc%piece_iv_start(npb + 1)) ; cc%piece_iv_start = 0_I4P
+   do c = 1_I4P, cx%niv
+      cc%piece_iv_start(cx%ivp(c) + 1) = cc%piece_iv_start(cx%ivp(c) + 1) + 1_I4P
+   enddo
+   cc%piece_iv_start(1) = 1_I4P
+   do c = 1_I4P, npb
+      cc%piece_iv_start(c + 1) = cc%piece_iv_start(c + 1) + cc%piece_iv_start(c)
+   enddo
+   cc%piece_iv_edge = cx%ive(1:cx%niv) ; cc%piece_iv_lo = cx%ivl(1:cx%niv) ; cc%piece_iv_hi = cx%ivh(1:cx%niv)
    endsubroutine compute_cut_cells_2d
 
    subroutine one_cell(cid, cx, cc)
@@ -136,10 +158,12 @@ contains
    type(ctx_t),          intent(inout) :: cx  !< Working data.
    type(cut_cells_2d_t), intent(inout) :: cc  !< Cut cells.
    integer(I4P), parameter :: MAXS = 512 !< Sub-intervals per cell.
+   integer(I4P), parameter :: ORDER(4) = [4_I4P, 2_I4P, 1_I4P, 3_I4P] !< Edges (counter-clockwise ids) as (-u, +u, -v, +v).
    integer(I4P) :: i, j, e, k, m, ns, q, r, nb, h, s0 !< Work.
    real(R8P)    :: sa(2, MAXS), sb(2, MAXS) !< Sub-interval end points (counter-clockwise).
    logical      :: sfl(MAXS)                !< Sub-interval is fluid.
    integer(I4P) :: sx(MAXS)                 !< Crossing at the end of sub-interval k (0: corner).
+   integer(I4P) :: sed(MAXS)                !< Edge (1 bottom, 2 right, 3 top, 4 left) of sub-interval k.
    integer(I4P) :: par(MAXS)                !< Union-find parents.
    integer(I4P) :: xsub(2, MAXS)            !< For each crossing slot: (crossing id, sub-interval before it).
    real(R8P)    :: x0, x1, y0, y1, area_c, len(4), flen(4), gs(3) !< Work.
@@ -187,6 +211,9 @@ contains
          cc%alpha(i, j) = 1._R8P ; cc%aperture(:, i, j) = 1._R8P
          cc%centroid(:, i, j) = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
          call add_piece(cx, i, j, area_c, 0.5_R8P * (x0 + x1) * area_c, 0.5_R8P * (y0 + y1) * area_c, 0._R8P, [0._R8P, 0._R8P])
+         cx%pap(:, cx%npb) = 1._R8P
+         call add_iv(cx, cx%npb, eid(4), y0, y1) ; call add_iv(cx, cx%npb, eid(2), y0, y1)
+         call add_iv(cx, cx%npb, eid(1), x0, x1) ; call add_iv(cx, cx%npb, eid(3), x0, x1)
          cc%pieces(i, j) = 1_I4P
       endif
       return
@@ -264,6 +291,20 @@ contains
       endif
       if (find(k) /= k) cycle
       call add_piece(cx, i, j, acc(1, k), acc(2, k), acc(3, k), acc(4, k), wn(:, k))
+      ! its fluid edge intervals (issue #70), in the order (-u, +u, -v, +v) = edges (4, 2, 1, 3)
+      cx%pap(:, cx%npb) = 0._R8P
+      do e = 1, 4
+         m = ORDER(e)
+         do q = 1, nsb
+            if (.not. sfl(q) .or. sed(q) /= m .or. find(q) /= k) cycle
+            cx%pap(e, cx%npb) = cx%pap(e, cx%npb) + norm2(sb(:, q) - sa(:, q)) / len(e)
+            if (m == 2 .or. m == 4) then
+               call add_iv(cx, cx%npb, eid(m), min(sa(2, q), sb(2, q)), max(sa(2, q), sb(2, q)))
+            else
+               call add_iv(cx, cx%npb, eid(m), min(sa(1, q), sb(1, q)), max(sa(1, q), sb(1, q)))
+            endif
+         enddo
+      enddo
       cc%pieces(i, j) = cc%pieces(i, j) + 1_I4P
       cc%alpha(i, j) = cc%alpha(i, j) + acc(1, k)
       cc%centroid(:, i, j) = cc%centroid(:, i, j) + acc(2:3, k)
@@ -331,7 +372,7 @@ contains
       if (ns >= MAXS - 4) then
          ok = .false. ; return
       endif
-      ns = ns + 1 ; sa(:, ns) = aa ; sb(:, ns) = bb ; sfl(ns) = fluid ; sx(ns) = xid
+      ns = ns + 1 ; sa(:, ns) = aa ; sb(:, ns) = bb ; sfl(ns) = fluid ; sx(ns) = xid ; sed(ns) = ed
       if (fluid) flen(ed) = flen(ed) + norm2(bb - aa)
       if (xid > 0) then
          nxc = nxc + 1 ; xsub(:, nxc) = [xid, ns]
@@ -580,6 +621,19 @@ contains
    endsubroutine one_cell
 
 
+   subroutine add_iv(cx, ip, ed, lo, hi)
+   !< Append the fluid interval [lo, hi] of edge ed to piece ip.
+   type(ctx_t),  intent(inout) :: cx     !< Working data.
+   integer(I4P), intent(in)    :: ip, ed !< Piece, edge id.
+   real(R8P),    intent(in)    :: lo, hi !< Range.
+
+   if (cx%niv == size(cx%ivp)) then
+      cx%ivp = [cx%ivp, cx%ivp] ; cx%ive = [cx%ive, cx%ive] ; cx%ivl = [cx%ivl, cx%ivl] ; cx%ivh = [cx%ivh, cx%ivh]
+   endif
+   cx%niv = cx%niv + 1_I4P
+   cx%ivp(cx%niv) = ip ; cx%ive(cx%niv) = ed ; cx%ivl(cx%niv) = lo ; cx%ivh(cx%niv) = hi
+   endsubroutine add_iv
+
    subroutine add_piece(cx, ii, jj, ar, mx, my, wl, wnn)
    !< Append a piece (area, first moments, wetted length, normal).
    type(ctx_t),  intent(inout) :: cx      !< Working data.
@@ -589,7 +643,9 @@ contains
    if (cx%npb == size(cx%pa)) then
       cx%pa = [cx%pa, cx%pa] ; cx%pcx = [cx%pcx, cx%pcx] ; cx%pcy = [cx%pcy, cx%pcy] ; cx%pwl = [cx%pwl, cx%pwl]
       cx%pwx = [cx%pwx, cx%pwx] ; cx%pwy = [cx%pwy, cx%pwy] ; cx%pci = [cx%pci, cx%pci] ; cx%pcj = [cx%pcj, cx%pcj]
+      cx%pap = reshape([cx%pap, cx%pap], [4, 2 * size(cx%pap, 2)])
    endif
+   cx%pap(:, cx%npb + 1) = 0._R8P
    cx%npb = cx%npb + 1_I4P
    cx%pa(cx%npb) = ar ; cx%pwl(cx%npb) = wl ; cx%pwx(cx%npb) = wnn(1) ; cx%pwy(cx%npb) = wnn(2)
    cx%pci(cx%npb) = ii ; cx%pcj(cx%npb) = jj
