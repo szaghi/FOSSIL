@@ -175,6 +175,7 @@ endprogram cut_geometry
 | 3-D piece measures: thin plate; hollow box; inclusion in the void, above a plate, beside a wall | exact volumes (0.5 and 0.499 of the cell; 98 and 1; 0.992; 0.782; 0.792) |
 | `orient3d`: near-coplanar grid (6144 points), coplanar dyadic points | exact signs and zeros (the naive determinant is wrong on 2022) |
 | line crossings, device path vs CPU | 0 mismatches (device path run on the host) |
+| node parities along x, y, z on a grid-aligned cube, an octahedron, 20 lattice tetrahedra (2-D: square, diamond, 20 triangles) | 0 of 108 086 and 0 of 6358 disagree (108 and 45 before issue #69) |
 | centre inside flags within 3 ulp of a tilted face: tetrahedron (3-D), triangle (2-D), quadruple-precision reference | 0 of 3168 and 0 of 3200 wrong (249 and 295 before issue #69) |
 
 ## Limitations
@@ -196,12 +197,24 @@ endprogram cut_geometry
     x + ε). Before #69 the rounded crossing position decided it, and on a
     tilted tetrahedron 249 of 3168 centres within 3 ulp of a face landed on
     the wrong side (295 of 3200 in 2-D).
-  - The tie-break of the line crossings orders the two transverse
-    perturbations cyclically per axis. That is exact for the crossing counts
-    of each line, but not one global perturbation.
-  - Exact agreement across axes for points on the surface would need one
-    global symbolic perturbation decided with `orient3d`. `orient3d` is now
-    exact; the perturbation is not implemented.
+  - **One global perturbation** (issue #69). Every grid point is taken at
+    P + (ε₁, ε₂, ε₃), ε₁ ≫ ε₂ ≫ ε₃: the line kernels break ties on a
+    projected edge or vertex in that order (on y lines x before z; before
+    #69 each axis ordered its own pair cyclically, with no global order),
+    and a point on a facet's plane takes the sign of the perturbed
+    `orient3d`, minus the first nonzero component of the normal. The
+    parities of a grid node along x, y and z are then the point-in-solid
+    test of one perturbed point and agree everywhere: 0 disagreements over
+    108 086 nodes of a grid-aligned cube, an octahedron and 20 lattice
+    tetrahedra (108 before), 0 over 6358 nodes in 2-D (45 before). The 2-D
+    sections of the 3-D cut cells keep their own (u, v) order.
+  - **Pieces on bodies through grid nodes.** On tetrahedra with vertices
+    on the grid nodes (and so edges on grid lines and faces through them),
+    every face and cell closes and the solid volume is right to 1e-15, but
+    the piece classification flags 0 to 38 cells per body as untrusted
+    (`pieces = -1`), and up to 2 cells per body get a volume fraction
+    outside [0, 1]. Unchanged by issue #69 (identical before it): a
+    follow-up.
 - **Constructed points.** The 3-D sections and the clipping decide on the
   rounded crossing points, consistently across kernels. A body passing
   exactly through grid lines at non-representable points can then give a

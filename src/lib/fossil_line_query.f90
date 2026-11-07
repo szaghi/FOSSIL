@@ -6,9 +6,13 @@ module fossil_line_query
 !< k = 1 the line is y = a, z = b; for k = 2, z = a, x = b; for k = 3, x = a, y = b. It crosses a
 !< triangle exactly when the point (a, b) lies in the triangle projected on the plane of those two
 !< coordinates. That is decided with the exact `orient2d_xy`, and a point on a projected edge or
-!< vertex is resolved by the symbolic perturbation (a, b) + (eps, eps^2): the sign of orient2d(A, B,
-!< P + delta) is the sign of orient2d(A, B, P) if it is not zero, else the sign of A_b - B_b, else
-!< the sign of B_a - A_a (comparisons, so exact). The three perturbed signs agree exactly when the
+!< vertex is resolved by one global symbolic perturbation of the grid (issue #69), x + eps1,
+!< y + eps2, z + eps3 with eps1 >> eps2 >> eps3: (a, b) + (eps, eps^2) on x and z lines, (a, b) +
+!< (eps^2, eps) on y lines ((a, b) = (z, x)). The sign of orient2d(A, B, P + delta) is the sign of
+!< orient2d(A, B, P) if it is not zero, else of its derivative along the first perturbed coordinate
+!< (A_b - B_b for a, B_a - A_a for b), else along the second (comparisons, so exact). Before #69
+!< each axis perturbed its own pair cyclically (y >> z, z >> x, x >> y: no global order), so a
+!< point on the surface could be inside along one axis and outside along another. The three perturbed signs agree exactly when the
 !< line crosses the triangle, so on a watertight surface every crossing is counted once (Woop et al.
 !< 2013, made exact); a triangle whose projection is degenerate (parallel to the line) is never
 !< crossed. The common sign is the sign of the triangle normal along the axis: positive, the line
@@ -44,14 +48,15 @@ contains
    !< The crossing of triangle tri with the line along `axis` at (a, b) lies before the point of the line at coordinate
    !< c, exactly (issue #69): host only. With n = (B - A) x (C - A) and P the point, orient3d(A, B, C, P) =
    !< -n_axis (c - t), t the exact crossing parameter, and the crossing enters (n_axis < 0) or leaves (n_axis > 0):
-   !< the sign of c - t is one exact orient3d. A point on the triangle's plane (P on the wall) counts as past the
-   !< crossing: P is taken at c + eps along the line.
+   !< the sign of c - t is one exact orient3d. A point on the triangle's plane takes the global perturbation P +
+   !< (eps1, eps2, eps3) (issue #69, as the line kernel): orient3d(A, B, C, P + delta) = -n . delta, the sign of
+   !< minus the first nonzero component of n in the order x, y, z.
    real(R8P),    intent(in) :: tri(3, 3) !< Triangle vertices (columns), as the crossing kernel saw them.
    integer(I4P), intent(in) :: axis     !< Line axis.
    real(R8P),    intent(in) :: a, b     !< Line position (cyclic order, see the module header).
    real(R8P),    intent(in) :: c        !< Point coordinate along the axis.
    logical,      intent(in) :: entering !< The crossing enters the solid.
-   logical                  :: before   !< Crossing at t <= c (t = c counts as before).
+   logical                  :: before   !< Crossing before the (perturbed) point.
    real(R8P)                :: p(3), o
 
    select case (axis)
@@ -60,8 +65,9 @@ contains
    case default ; p = [a, b, c]
    endselect
    o = orient3d_xyz(tri(:, 1), tri(:, 2), tri(:, 3), p)
+   if (o == 0._R8P) o = -first_normal_sign(tri)
    if (o == 0._R8P) then
-      before = .true.
+      before = .true. ! degenerate triangle: never crossed by the kernel
    elseif (entering) then
       before = o > 0._R8P
    else
@@ -69,18 +75,36 @@ contains
    endif
    endfunction line_crossing_before
 
+   function first_normal_sign(tri) result(sg)
+   !< Sign (-1, 0, +1) of the first nonzero component of n = (B - A) x (C - A) in the order x, y, z, exactly (the
+   !< components are the orientations of the projections on (y, z), (z, x), (x, y)).
+   real(R8P), intent(in) :: tri(3, 3) !< Triangle vertices (columns).
+   real(R8P)             :: sg
+   integer(I4P)          :: k, i1, i2
+
+   sg = 0._R8P
+   do k = 1, 3
+      i1 = mod(k, 3) + 1 ; i2 = mod(k + 1, 3) + 1
+      sg = orient2d_xy(tri(i1, 1), tri(i2, 1), tri(i1, 2), tri(i2, 2), tri(i1, 3), tri(i2, 3))
+      if (sg /= 0._R8P) then
+         sg = sign(1._R8P, sg) ; return
+      endif
+   enddo
+   endfunction first_normal_sign
+
    function line_crossing_before_2d(pu, pv, qu, qv, axis, a, c, entering) result(before)
    !< 2-D twin of `line_crossing_before`: the crossing of the segment p -> q with the line along `axis` (1: v = a, 2:
    !< u = a) lies before the point of the line at coordinate c, exactly. For P on the line, orient2d(p, q, P) =
    !< -(q_v - p_v) (c - t) along u and (q_u - p_u) (c - t) along v, and with the module's entering convention (the
-   !< solid on the left) both give: entering, before iff orient2d > 0; leaving, iff < 0. A point on the segment counts
-   !< as past the crossing (c + eps).
+   !< solid on the left) both give: entering, before iff orient2d > 0; leaving, iff < 0. A point on the segment takes
+   !< the global perturbation P + (eps1, eps2) (u first, as the 2-D node test): orient2d(p, q, P + delta) has the sign
+   !< of -(q_v - p_v), else of q_u - p_u.
    real(R8P),    intent(in) :: pu, pv, qu, qv !< Segment.
    integer(I4P), intent(in) :: axis           !< Line axis.
    real(R8P),    intent(in) :: a              !< Line position.
    real(R8P),    intent(in) :: c              !< Point coordinate along the axis.
    logical,      intent(in) :: entering       !< The crossing enters the solid.
-   logical                  :: before         !< Crossing at t <= c.
+   logical                  :: before         !< Crossing before the (perturbed) point.
    real(R8P)                :: o
 
    if (axis == 1_I4P) then
@@ -89,7 +113,10 @@ contains
       o = orient2d_xy(pu, pv, qu, qv, a, c)
    endif
    if (o == 0._R8P) then
-      before = .true.
+      o = -(qv - pv) ; if (o == 0._R8P) o = qu - pu
+   endif
+   if (o == 0._R8P) then
+      before = .true. ! degenerate segment
    elseif (entering) then
       before = o > 0._R8P
    else
@@ -108,12 +135,14 @@ contains
    logical,      intent(out) :: enter  !< The line (in +axis) enters the solid there.
    integer(I4P)              :: i1, i2 !< Projected coordinate indices.
    real(R8P)                 :: wa, wb, wc, sa, sb, sc !< Weights and perturbed signs.
+   logical                   :: bfirst !< Perturb b before a.
 
    i1 = mod(axis, 3_I4P) + 1_I4P ; i2 = mod(axis + 1_I4P, 3_I4P) + 1_I4P
    hit = .false. ; t = 0._R8P ; enter = .false.
-   call psign(tv(3 + i1), tv(3 + i2), tv(6 + i1), tv(6 + i2), a, b, wa, sa) ! edge B -> C: weight of A
-   call psign(tv(6 + i1), tv(6 + i2), tv(i1), tv(i2), a, b, wb, sb)         ! edge C -> A: weight of B
-   call psign(tv(i1), tv(i2), tv(3 + i1), tv(3 + i2), a, b, wc, sc)         ! edge A -> B: weight of C
+   bfirst = axis == 2_I4P ! global perturbation x + eps1, y + eps2, z + eps3: on a y line (a, b) = (z, x), x first
+   call psign(tv(3 + i1), tv(3 + i2), tv(6 + i1), tv(6 + i2), a, b, bfirst, wa, sa) ! edge B -> C: weight of A
+   call psign(tv(6 + i1), tv(6 + i2), tv(i1), tv(i2), a, b, bfirst, wb, sb)         ! edge C -> A: weight of B
+   call psign(tv(i1), tv(i2), tv(3 + i1), tv(3 + i2), a, b, bfirst, wc, sc)         ! edge A -> B: weight of C
    if (sa == 0._R8P .or. sa /= sb .or. sa /= sc) return
    hit = .true.
    enter = sa < 0._R8P
@@ -124,28 +153,30 @@ contains
    endif
    endsubroutine tri_line_hit_oac
 
-   pure subroutine psign(p1, p2, q1, q2, a, b, w, s)
-   !< Weight orient2d(p, q, (a, b)) (approximate magnitude, exact sign) and its perturbed sign.
+   pure subroutine psign(p1, p2, q1, q2, a, b, bfirst, w, s)
+   !< Weight orient2d(p, q, (a, b)) (approximate magnitude, exact sign) and its perturbed sign: (a, b) + (eps, eps^2),
+   !< or (a, b) + (eps^2, eps) with `bfirst` (issue #69: the two orders make one global perturbation of the grid).
    !$acc routine seq
    real(R8P), intent(in)  :: p1, p2, q1, q2 !< Edge end points (projected).
    real(R8P), intent(in)  :: a, b           !< Line position.
+   logical,   intent(in)  :: bfirst         !< Perturb b first.
    real(R8P), intent(out) :: w, s           !< Weight, perturbed sign (-1, 0, +1).
+   real(R8P)              :: da, db         !< d/da = p2 - q2, d/db = q1 - p1 of orient2d(p, q, P).
 
    w = orient2d_xy(p1, p2, q1, q2, a, b)
+   da = 0._R8P ; db = 0._R8P
+   if (p2 > q2) da = 1._R8P
+   if (p2 < q2) da = -1._R8P
+   if (q1 > p1) db = 1._R8P
+   if (q1 < p1) db = -1._R8P
    if (w > 0._R8P) then
       s = 1._R8P
    elseif (w < 0._R8P) then
       s = -1._R8P
-   elseif (p2 > q2) then ! d/da orient2d(p, q, P) = p2 - q2
-      s = 1._R8P
-   elseif (p2 < q2) then
-      s = -1._R8P
-   elseif (q1 > p1) then ! d/db orient2d(p, q, P) = q1 - p1
-      s = 1._R8P
-   elseif (q1 < p1) then
-      s = -1._R8P
+   elseif (bfirst) then
+      s = db ; if (s == 0._R8P) s = da
    else
-      s = 0._R8P
+      s = da ; if (s == 0._R8P) s = db
    endif
    endsubroutine psign
 
