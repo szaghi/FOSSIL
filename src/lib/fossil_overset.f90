@@ -51,6 +51,14 @@ module fossil_overset
 !< which also keeps the iteration from oscillating; without a valid donor it is an orphan. A desired one without a
 !< valid donor stays a field point. With implicit interpolation,
 !< receptors in each other's stencils (circular interpolation, Sherer & Scott) are counted.
+!<
+!< Wall projection (`wall_projection`, PEGASUS 5 / PROGRD): for a receptor block a and a donor block b sharing a curved
+!< wall discretized twice, every wall vertex of a moves onto the closest point of b's wall (its cutter) when that is
+!< within `max_distance`; the shift is carried up the wall-normal grid line, scaled by 1 - s / max_distance (s: the
+!< distance from the wall vertex along the line) down to zero. The projected point is moved 1e-9 max_distance along
+!< the wall normal into the fluid, so the rounding of the foot point never leaves it outside the donor block's exact
+!< containment test. The shifted points serve the donor search only
+!< (`donor_candidates(..., shifts=)`); the grid never moves.
 
 use penf,                      only : I4P, R8P
 use vecfor,                    only : vector_R8P
@@ -74,6 +82,7 @@ public :: overset_mask_t, classify, classify_2d, SELECT_EXPLICIT, SELECT_IMPLICI
 public :: fringe_levels, fringe_levels_2d, overlap_width, overlap_width_2d
 public :: ORPHAN_NONE, ORPHAN_NO_CANDIDATE, ORPHAN_STENCIL_HOLE, ORPHAN_RECEPTOR_DONOR, ORPHAN_BOUNDARY, ORPHAN_WALL
 public :: FRINGE_INNER_1, FRINGE_INNER_2, FRINGE_OUTER_1, FRINGE_OUTER_2
+public :: wall_projection, wall_projection_2d
 
 integer(I4P), parameter :: ORPHAN_NONE           = 0_I4P !< Not an orphan.
 integer(I4P), parameter :: ORPHAN_NO_CANDIDATE   = 1_I4P !< No donor cell anywhere: insufficient overlap.
@@ -988,14 +997,16 @@ contains
    px = px(1:n) ; py = py(1:n) ; pz = pz(1:n)
    endsubroutine boundary_points_3d
 
-   subroutine donor_candidates(blocks, donors, pair, wall, device)
+   subroutine donor_candidates(blocks, donors, pair, wall, device, shifts)
    !< Donor candidates of every vertex of every 3-D block (build_search done) (module notes).
    type(curvilinear_block_t), target,  intent(inout)        :: blocks(:) !< Blocks.
    type(donor_set_t),    allocatable,  intent(out)          :: donors(:) !< Candidates per receptor block.
    integer(I4P),                       intent(in), optional :: pair(:,:) !< PAIR_* (default: every pair).
    type(surface_stl_object),           intent(in), optional :: wall      !< Wall (for the wall distances).
    logical,                            intent(in), optional :: device    !< Location on the GPU.
-   real(R8P),    allocatable :: px(:), py(:), pz(:), xi(:,:), vol(:,:,:), cand_xi(:,:,:) !< Work.
+   type(block_real_t),                 intent(in), optional :: shifts(:,:) !< Search shifts [nb, nb] (wall_projection):
+                                                                       !< shifts(a, b)%v(3 nv) for receptors of a in b.
+   real(R8P),    allocatable :: px(:), py(:), pz(:), xi(:,:), vol(:,:,:), cand_xi(:,:,:), qx(:), qy(:), qz(:) !< Work.
    integer(I4P), allocatable :: cell(:,:), st(:), cand_cell(:,:,:), cand_st(:,:), cnt(:) !< Work.
    real(R8P),    allocatable :: dw(:) !< Wall distances.
    integer(I4P), allocatable :: bw(:) !< Wall bodies.
@@ -1016,10 +1027,17 @@ contains
          if (present(pair)) then
             if (pair(a, b) == PAIR_NONE) cycle
          endif
+         qx = px ; qy = py ; qz = pz
+         if (present(shifts)) then
+            if (allocated(shifts(a, b)%v)) then
+               qx = px + shifts(a, b)%v(1:3 * nv:3) ; qy = py + shifts(a, b)%v(2:3 * nv:3)
+               qz = pz + shifts(a, b)%v(3:3 * nv:3)
+            endif
+         endif
          if (dev) then
-            call blocks(b)%locate_many_device(px, py, pz, cell, xi, st)
+            call blocks(b)%locate_many_device(qx, qy, qz, cell, xi, st)
          else
-            call blocks(b)%locate_many(px, py, pz, cell, xi, st)
+            call blocks(b)%locate_many(qx, qy, qz, cell, xi, st)
          endif
          cand_cell(:, b, :) = cell ; cand_xi(:, b, :) = xi ; cand_st(b, :) = st
       enddo
@@ -1122,14 +1140,15 @@ contains
    enddo
    endsubroutine overlap_matrix_2d
 
-   subroutine donor_candidates_2d(blocks, donors, pair, wall, device)
+   subroutine donor_candidates_2d(blocks, donors, pair, wall, device, shifts)
    !< Donor candidates of every vertex of every 2-D block (as donor_candidates).
    type(curvilinear_block_2d_t), target, intent(inout)        :: blocks(:) !< Blocks.
    type(donor_set_t),    allocatable,    intent(out)          :: donors(:) !< Candidates per receptor block.
    integer(I4P),                         intent(in), optional :: pair(:,:) !< PAIR_* (default: every pair).
    type(curve_object),                   intent(in), optional :: wall      !< Wall (for the wall distances).
    logical,                              intent(in), optional :: device    !< Location on the GPU.
-   real(R8P),    allocatable :: pu(:), pv(:), xi(:,:), ar(:,:), cand_xi(:,:,:), pts(:,:), dw(:) !< Work.
+   type(block_real_t),                   intent(in), optional :: shifts(:,:) !< Search shifts [nb, nb]: (2 nv).
+   real(R8P),    allocatable :: pu(:), pv(:), xi(:,:), ar(:,:), cand_xi(:,:,:), pts(:,:), dw(:), qu(:), qv(:) !< Work.
    integer(I4P), allocatable :: cell(:,:), st(:), cand_cell(:,:,:), cand_st(:,:), cnt(:), bw(:) !< Work.
    logical                   :: dev  !< Device.
    integer(I4P)              :: a, b, nb, nv, v, c, i, j, nc, slot, cs !< Counters.
@@ -1146,10 +1165,16 @@ contains
          if (present(pair)) then
             if (pair(a, b) == PAIR_NONE) cycle
          endif
+         qu = pu ; qv = pv
+         if (present(shifts)) then
+            if (allocated(shifts(a, b)%v)) then
+               qu = pu + shifts(a, b)%v(1:2 * nv:2) ; qv = pv + shifts(a, b)%v(2:2 * nv:2)
+            endif
+         endif
          if (dev) then
-            call blocks(b)%locate_many_device(pu, pv, cell, xi, st)
+            call blocks(b)%locate_many_device(qu, qv, cell, xi, st)
          else
-            call blocks(b)%locate_many(pu, pv, cell, xi, st)
+            call blocks(b)%locate_many(qu, qv, cell, xi, st)
          endif
          cand_cell(:, b, :) = cell ; cand_xi(:, b, :) = xi ; cand_st(b, :) = st
       enddo
@@ -1694,6 +1719,104 @@ contains
       key(j + 1) = t
    enddo
    endsubroutine sort_by_volume
+
+   ! ------------------------------------------------------------------------------------------------- wall projection
+   subroutine wall_projection(blocks, a, b, shift, max_distance, wall_name)
+   !< Search shifts of the vertices of block a for donors in block b (module notes); shift(3 nv) (zero off the walls).
+   type(curvilinear_block_t), intent(in)           :: blocks(:)    !< Blocks.
+   integer(I4P),              intent(in)           :: a, b         !< Receptor and donor blocks.
+   real(R8P), allocatable,    intent(out)          :: shift(:)     !< Shifts [3 nv].
+   real(R8P),                 intent(in)           :: max_distance !< Projection and decay distance.
+   character(*),              intent(in), optional :: wall_name    !< Wall name ('wall').
+   type(surface_stl_object)      :: wb      !< Wall of b.
+   type(vector_R8P), allocatable :: p(:)    !< Wall vertices of a.
+   real(R8P),        allocatable :: d(:), cp(:,:), nr(:,:) !< Distances, closest points, normals.
+   integer(I4P),     allocatable :: idx(:,:) !< Wall vertex index and face.
+   integer(I4P)                  :: r, nd, s, i, j, k, m, n, st, w(3), q(3), nv(3), lin !< Counters.
+   real(R8P)                     :: sh(3), x0(3), x(3), dist, f !< Work.
+
+   nv = [blocks(a)%ni, blocks(a)%nj, blocks(a)%nk]
+   allocate(shift(3 * product(nv))) ; shift = 0._R8P
+   call wall_cutter(blocks(b:b), wb, wall_name=wall_name, status=st)
+   if (st /= 0) return
+   n = 0_I4P ; allocate(p(product(nv)), idx(4, product(nv)))
+   do r = 1, blocks(a)%nrec
+      if (blocks(a)%rec(r)%kind /= TOPO_BOUNDARY .or. trim(blocks(a)%rec(r)%name) /= name_or(wall_name, 'wall')) cycle
+      do k = blocks(a)%rec(r)%lo(3), blocks(a)%rec(r)%hi(3)
+         do j = blocks(a)%rec(r)%lo(2), blocks(a)%rec(r)%hi(2)
+            do i = blocks(a)%rec(r)%lo(1), blocks(a)%rec(r)%hi(1)
+               n = n + 1_I4P ; p(n) = vector_R8P(blocks(a)%x(i, j, k), blocks(a)%y(i, j, k), blocks(a)%z(i, j, k))
+               idx(:, n) = [i, j, k, blocks(a)%rec(r)%face]
+            enddo
+         enddo
+      enddo
+   enddo
+   if (n == 0) return
+   allocate(d(n), cp(3, n), nr(3, n))
+   call wb%query_many(points=p(1:n), distances=d, closest_points=cp, normals=nr, is_signed=.false.)
+   do m = 1, n
+      if (abs(d(m)) > max_distance) cycle
+      w = idx(1:3, m) ; nd = (idx(4, m) + 1_I4P) / 2_I4P ; s = merge(1_I4P, -1_I4P, mod(idx(4, m), 2_I4P) == 1)
+      x0 = [p(m)%x, p(m)%y, p(m)%z]
+      sh = cp(:, m) + 1e-9_R8P * max_distance * nr(:, m) / max(norm2(nr(:, m)), tiny(1._R8P)) - x0
+      q = w
+      do
+         x = [blocks(a)%x(q(1), q(2), q(3)), blocks(a)%y(q(1), q(2), q(3)), blocks(a)%z(q(1), q(2), q(3))]
+         dist = norm2(x - x0) ; f = 1._R8P - dist / max_distance
+         if (f <= 0._R8P) exit
+         lin = q(1) + nv(1) * (q(2) - 1_I4P + nv(2) * (q(3) - 1_I4P))
+         shift(3 * lin - 2:3 * lin) = f * sh
+         q(nd) = q(nd) + s
+         if (q(nd) < 1 .or. q(nd) > nv(nd)) exit
+      enddo
+   enddo
+   endsubroutine wall_projection
+
+   subroutine wall_projection_2d(blocks, a, b, shift, max_distance, wall_name)
+   !< Search shifts of the vertices of the 2-D block a for donors in block b (as wall_projection); shift(2 nv).
+   type(curvilinear_block_2d_t), intent(in)           :: blocks(:)    !< Blocks.
+   integer(I4P),                 intent(in)           :: a, b         !< Receptor and donor blocks.
+   real(R8P), allocatable,       intent(out)          :: shift(:)     !< Shifts [2 nv].
+   real(R8P),                    intent(in)           :: max_distance !< Projection and decay distance.
+   character(*),                 intent(in), optional :: wall_name    !< Wall name ('wall').
+   type(curve_object)        :: wb      !< Wall of b.
+   real(R8P),    allocatable :: p(:,:), d(:), cp(:,:), nr(:,:) !< Wall vertices, distances, closest points, normals.
+   integer(I4P), allocatable :: idx(:,:) !< Wall vertex index and face.
+   integer(I4P)              :: r, nd, s, i, j, m, n, st, q(2), nv(2), lin !< Counters.
+   real(R8P)                 :: sh(2), x0(2), x(2), dist, f !< Work.
+
+   nv = [blocks(a)%ni, blocks(a)%nj]
+   allocate(shift(2 * product(nv))) ; shift = 0._R8P
+   call wall_cutter_2d(blocks(b:b), wb, wall_name=wall_name, status=st)
+   if (st /= 0) return
+   n = 0_I4P ; allocate(p(2, product(nv)), idx(3, product(nv)))
+   do r = 1, blocks(a)%nrec
+      if (blocks(a)%rec(r)%kind /= TOPO_BOUNDARY .or. trim(blocks(a)%rec(r)%name) /= name_or(wall_name, 'wall')) cycle
+      do j = blocks(a)%rec(r)%lo(2), blocks(a)%rec(r)%hi(2)
+         do i = blocks(a)%rec(r)%lo(1), blocks(a)%rec(r)%hi(1)
+            n = n + 1_I4P ; p(:, n) = [blocks(a)%u(i, j), blocks(a)%v(i, j)] ; idx(:, n) = [i, j, blocks(a)%rec(r)%face]
+         enddo
+      enddo
+   enddo
+   if (n == 0) return
+   allocate(d(n), cp(2, n), nr(2, n))
+   call wb%query_many(points=p(:, 1:n), distances=d, closest_points=cp, normals=nr, is_signed=.false.)
+   do m = 1, n
+      if (abs(d(m)) > max_distance) cycle
+      nd = (idx(3, m) + 1_I4P) / 2_I4P ; s = merge(1_I4P, -1_I4P, mod(idx(3, m), 2_I4P) == 1)
+      x0 = p(:, m) ; q = idx(1:2, m)
+      sh = cp(:, m) + 1e-9_R8P * max_distance * nr(:, m) / max(norm2(nr(:, m)), tiny(1._R8P)) - x0
+      do
+         x = [blocks(a)%u(q(1), q(2)), blocks(a)%v(q(1), q(2))]
+         dist = norm2(x - x0) ; f = 1._R8P - dist / max_distance
+         if (f <= 0._R8P) exit
+         lin = q(1) + nv(1) * (q(2) - 1_I4P)
+         shift(2 * lin - 1:2 * lin) = f * sh
+         q(nd) = q(nd) + s
+         if (q(nd) < 1 .or. q(nd) > nv(nd)) exit
+      enddo
+   enddo
+   endsubroutine wall_projection_2d
 
    ! ------------------------------------------------------------------------------------------------------- utilities
    pure function pt3(blk, p) result(x)
