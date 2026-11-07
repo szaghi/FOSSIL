@@ -48,6 +48,7 @@ use fossil_overset, only : wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2
                            FRINGE_INNER_2, FRINGE_OUTER_1, FRINGE_OUTER_2, wall_projection, wall_projection_2d, &
                            exposed_points, connectivity_t, build_connectivity, save_connectivity, &
                            cell_centre_block, cell_centre_block_2d
+use fossil_ccd, only : motion_bound_3d, motion_bound_2d
 use fossil_rigid_pose, only : rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, &
                              pose_2d, pose_compose, pose_inverse, to_body, to_world, rotate, pose_interpolate
 use fossil_swept_cells, only : swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
@@ -86,6 +87,7 @@ public :: wall_projection, wall_projection_2d, exposed_points, connectivity_t, b
 public :: cell_centre_block, cell_centre_block_2d
 public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose
 public :: pose_inverse, to_body, to_world, rotate, pose_interpolate
+public :: motion_bound_3d, motion_bound_2d
 public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
 public :: inertia_to_world, principal_frame
 public :: FEATURE_EDGE_SHARP, FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, FEATURE_EDGE_DEFAULT_ANGLE
