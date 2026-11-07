@@ -23,12 +23,14 @@ module fossil_cut_cells_3d
 !< normal integral follow. A cell with a face not closed is flagged and gets no measures.
 !<
 !< Pieces (issue #40). The connected fluid pieces of every cell, by a union-find over the parts of
-!< the boundary of the fluid: the clipped wall polygons (clipped again with on-plane flags: a vertex
-!< made by the clip of a cell plane lies on that face, two flags of two axes put it on a cell edge)
-!< and the fluid intervals of the 12 cell edges. The edge intervals come from the polygon vertices on
-!< each edge (piercings, entering or leaving by the sign of the triangle normal along the edge, the
-!< states alternating) and the corner states; corners of edges without piercings take the state of
-!< their neighbours, or the exact parity of the line query when no edge of the cell is pierced.
+!< the boundary of the fluid: the clipped wall polygons (with on-plane flags from the coordinates: a
+!< vertex on a cell plane lies on that face, two flags of two axes put it on a cell edge) and the fluid
+!< intervals of the 12 cell edges. Since issue #70 the corner states are the exact parities of the
+!< perturbed nodes (`column_parity`) and the piercings of an edge its exact crossings under the global
+!< perturbation (`tri_line_hit_oac`, kept when `line_crossing_before` puts them between the perturbed
+!< corners), so the states alternate from one corner to the other; crossings at one rounded position are
+!< reordered by that alternation. Before #70 the piercings were the polygon vertices on the edge, one per
+!< incident facet at a mesh edge or vertex on it, and lattice bodies flagged up to 38 cells each.
 !< Joins: polygons sharing a vertex (the clipped points of a shared mesh edge are bit-identical),
 !< a piercing with the fluid interval next to it, the fluid intervals at a fluid corner, and a solid
 !< island traced on a face (a loop of wall polygon edges on the face that touches no cell edge, the
@@ -51,10 +53,17 @@ module fossil_cut_cells_3d
 !< on a low face). Volume and moments follow from the high faces and the walls. An inclusion (a closed
 !< wall set of positive solid volume) goes to the set around it, found by a +x ray. A single-piece
 !< cell takes the cell totals; zero-volume pieces are kept, with their volume (0), for a solver to drop.
+!< Traces are read on the perturbed face plane (issue #70): a polygon lying in the face plane bounds the
+!< fluid only if its solid lies beyond the face, and then not along the cell edges (the edge intervals
+!< carry the boundary there); a facet ending on the face plane counts there only if the facet across its
+!< edge on the plane crosses it. A multi-piece cell is trusted only if its split closes (`split_closes`:
+!< face sums equal the plane sections, volumes add up, every piece closes per axis), else -1: on 1.57
+!< million cells of lattice bodies 19 remain (947 before #70), where a facet touches the cell along a
+!< segment of a cell edge only, so its trace on the face is missing.
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t
 use fossil_curve_slice,        only : slice_surface
 use fossil_facet_object,       only : facet_object
-use fossil_line_query,         only : line_crossing_before
+use fossil_line_query,         only : line_crossing_before, tri_line_hit_oac
 use fossil_predicates,         only : orient2d_xy
 use fossil_surface_stl_object, only : surface_stl_object, STATUS_OK, STATUS_INVALID_INPUT
 use penf,                      only : I4P, R8P
@@ -251,6 +260,9 @@ contains
    integer(I4P), allocatable   :: pcel(:,:)               !< Cells of all pieces [3, capacity].
    integer(I4P)                :: npb                     !< Pieces so far.
    real(R8P)                   :: tot(17), h(3)           !< Cell totals, cell size.
+   logical,      allocatable   :: node_in(:,:,:)          !< Exact inside flags of the (perturbed) grid nodes.
+   logical,      allocatable   :: need(:,:)               !< Node columns that a cut cell needs.
+   integer(I4P)                :: cs(8), q                !< Corner states, corner.
 
    nx = cut%nx ; ny = cut%ny ; nz = cut%nz
    nf = surface%get_facets_number()
@@ -317,6 +329,20 @@ contains
       endif
       m = f + 1
    enddo
+   ! corner states: the exact inside flags of the perturbed nodes (issue #70), one z line per needed column
+   allocate(need(nx + 1, ny + 1), node_in(nx + 1, ny + 1, nz + 1)) ; need = .false. ; node_in = .false.
+   do k = 1, nz
+      do j = 1, ny
+         do i = 1, nx
+            if (cnt(i + nx * ((j - 1) + ny * (k - 1))) > 0_I4P) need(i:i + 1, j:j + 1) = .true.
+         enddo
+      enddo
+   enddo
+   do j = 1, ny + 1
+      do i = 1, nx + 1
+         if (need(i, j)) call column_parity(surface, x(i), y(j), z, node_in(i, j, :))
+      enddo
+   enddo
    do k = 1, nz
       do j = 1, ny
          do i = 1, nx
@@ -330,8 +356,16 @@ contains
             elseif (cnt(c) == 0_I4P) then
                cut%pieces(i, j, k) = merge(1_I4P, 0_I4P, cut%alpha(i, j, k) > 0.5_R8P)
             else
-               call cell_pieces(surface, tri, nrm, lst(start(c):start(c + 1) - 1), &
-                                [x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], np, pm)
+               do q = 1, 8
+                  cs(q) = merge(0_I4P, 1_I4P, node_in(i + mod(q - 1, 2), j + mod((q - 1) / 2, 2), k + (q - 1) / 4))
+               enddo
+               call cell_pieces(tri, nrm, lst(start(c):start(c + 1) - 1), &
+                                [x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], cs, np, pm)
+               if (np > 1_I4P) then ! (issue #70) trust the split only if it closes
+                  h = [x(i + 1) - x(i), y(j + 1) - y(j), z(k + 1) - z(k)]
+                  if (.not. split_closes(pm(:, 1:np), h, cut%alpha(i, j, k), [cut%face_x(i, j, k), cut%face_x(i + 1, j, k), &
+                      cut%face_y(i, j, k), cut%face_y(i, j + 1, k), cut%face_z(i, j, k), cut%face_z(i, j, k + 1)])) np = -1_I4P
+               endif
                cut%pieces(i, j, k) = np
             endif
             if (cut%pieces(i, j, k) < 1_I4P) cycle
@@ -374,13 +408,19 @@ contains
       endsubroutine add_pieces
    endsubroutine cut_pieces_3d
 
-   subroutine cell_pieces(surface, tri, nrm, lst, c0, c1, npieces, pm)
+   subroutine cell_pieces(tri, nrm, lst, c0, c1, cs, npieces, pm)
    !< Fluid pieces of the cell [c0, c1] cut by the triangles lst (see the module notes); -1 if the
    !< boundary states do not close. pm: the measures of the pieces (see `piece_measures`).
-   type(surface_stl_object), intent(in)  :: surface   !< Surface (line-query fallback).
+   !<
+   !< The corner states cs and the crossings of the 12 cell edges are exact under the global perturbation
+   !< (issue #70): a crossing belongs to the edge when it lies after the perturbed low corner and before the
+   !< perturbed high one (`line_crossing_before`), so the corner states and the crossings of every edge agree.
+   !< Before #70 the piercings were the clipped polygon vertices on two planes, and a mesh edge or vertex on a
+   !< cell edge (lattice bodies) gave one piercing per incident facet: the states did not alternate.
    real(R8P),                intent(in)  :: tri(:,:,:), nrm(:,:) !< Triangles, normals.
    integer(I4P),             intent(in)  :: lst(:)    !< Triangles of the cell.
    real(R8P),                intent(in)  :: c0(3), c1(3) !< Cell corners.
+   integer(I4P),             intent(in)  :: cs(8)     !< Corner states (0 solid, 1 fluid), exact.
    integer(I4P),             intent(out) :: npieces   !< Pieces.
    real(R8P), allocatable,   intent(out) :: pm(:,:)   !< Measures [17, npieces] (allocated if npieces >= 0).
    integer(I4P), parameter     :: NCORN = 8_I4P       !< Corner atoms follow the polygons.
@@ -395,7 +435,8 @@ contains
    integer(I4P)                :: cstate(8)           !< Corner states: -1 unknown, 0 solid, 1 fluid.
    integer(I4P)                :: nt, np, q, v, w, e, a, natom, niv, npc, nc, kk !< Work.
    logical                     :: ok, changed         !< Consistency, propagation.
-   real(R8P)                   :: p0(3)               !< Work.
+   real(R8P)                   :: tt, la, lb, tc      !< Crossing position, edge line, kernel parameter.
+   logical                     :: hit, en             !< Crossing, entering.
 
    nt = size(lst, kind=I4P)
    allocate(pv(3, 16, nt), pfl(16, nt), pn(nt))
@@ -406,45 +447,43 @@ contains
          call clip_flags(pv(:, :, q), pfl(:, q), np, a, c1(a), .false., 2_I4P * (a - 1_I4P) + 1_I4P)
       enddo
       pn(q) = np ; if (np < 3_I4P) pn(q) = 0_I4P
-   enddo
-   ! piercings: polygon vertices on two planes of different axes
-   allocate(pc(16 * nt)) ; npc = 0_I4P
-   do q = 1, nt
+      ! on-plane flags from the coordinates (issue #70): a vertex made by one clip can lie exactly on a plane
+      ! clipped before or after it (lattice bodies), and the traces and edge piercings need that flag too
       do v = 1, pn(q)
-         e = edge_of(pfl(v, q))
-         if (e == 0_I4P) cycle
-         a = (e - 1_I4P) / 4_I4P + 1_I4P ! edge axis
-         if (nrm(a, lst(q)) == 0._R8P) cycle
-         if (any(pc(1:npc)%edge == e .and. pc(1:npc)%poly == q)) cycle
+         pfl(v, q) = 0_I4P
+         do a = 1, 3
+            if (pv(a, v, q) == c0(a)) pfl(v, q) = ibset(pfl(v, q), 2_I4P * (a - 1_I4P))
+            if (pv(a, v, q) == c1(a)) pfl(v, q) = ibset(pfl(v, q), 2_I4P * (a - 1_I4P) + 1_I4P)
+         enddo
+      enddo
+   enddo
+   ! piercings: the exact crossings of the cell edges (issue #70)
+   allocate(pc(12 * nt)) ; npc = 0_I4P
+   do e = 1, 12
+      a = (e - 1_I4P) / 4_I4P + 1_I4P ; kk = mod(e - 1_I4P, 4_I4P) ! edge axis, sides
+      la = merge(c1(mod(a, 3_I4P) + 1_I4P), c0(mod(a, 3_I4P) + 1_I4P), mod(kk, 2_I4P) == 1_I4P)
+      lb = merge(c1(mod(a + 1_I4P, 3_I4P) + 1_I4P), c0(mod(a + 1_I4P, 3_I4P) + 1_I4P), kk / 2_I4P == 1_I4P)
+      do q = 1, nt
+         call tri_line_hit_oac(reshape(tri(:, :, lst(q)), [9]), a, la, lb, hit, tc, en)
+         if (.not. hit) cycle
+         if (line_crossing_before(tri(:, :, lst(q)), a, la, lb, c0(a), en)) cycle
+         if (.not. line_crossing_before(tri(:, :, lst(q)), a, la, lb, c1(a), en)) cycle
+         tt = min(max(tc, c0(a)), c1(a)) ! the clipped polygon's vertex on the edge if it has one (same rounding)
+         do v = 1, pn(q)
+            if (edge_of(pfl(v, q)) == e) then
+               tt = pv(a, v, q) ; exit
+            endif
+         enddo
          npc = npc + 1_I4P
-         pc(npc) = pierce_t(e, pv(a, v, q), nrm(a, lst(q)) < 0._R8P, q)
+         pc(npc) = pierce_t(e, tt, en, merge(q, 0_I4P, pn(q) > 0_I4P))
       enddo
    enddo
    call sort_pierce(pc, npc)
    ! corner states from the pierced edges, then propagation along the others
-   ok = .true. ; cstate = -1_I4P
-   do e = 1, 12
-      if (.not. any(pc(1:npc)%edge == e)) cycle
+   ok = .true. ; cstate = cs
+   do e = 1, 12 ! check: the crossings alternate from the low corner's state to the high one's
       call walk_edge(e, .false.)
    enddo
-   changed = .true.
-   do while (changed)
-      changed = .false.
-      do e = 1, 12
-         if (any(pc(1:npc)%edge == e)) cycle
-         call propagate(corner_of(e, 0_I4P), corner_of(e, 1_I4P))
-      enddo
-   enddo
-   if (all(cstate == -1_I4P)) then
-      cstate(1) = merge(0_I4P, 1_I4P, inside_parity(surface, c0))
-      changed = .true.
-      do while (changed)
-         changed = .false.
-         do e = 1, 12
-            call propagate(corner_of(e, 0_I4P), corner_of(e, 1_I4P))
-         enddo
-      enddo
-   endif
    if (any(cstate == -1_I4P)) ok = .false.
    if (.not. ok) then
       npieces = -1_I4P ; return
@@ -542,12 +581,13 @@ contains
       endsubroutine set_corner
 
       subroutine walk_edge(ed, build)
-      !< Walk the piercings of edge ed from its low corner. Without `build`: corner states (the
-      !< state before the first piercing from its type), with alternation repair of equal positions.
-      !< With `build`: the fluid interval atoms and their joins.
+      !< Walk the piercings of edge ed from its low corner's exact state. Without `build`: check that they
+      !< alternate and end at the high corner's state, reordering crossings at one rounded position (a mesh
+      !< edge or vertex on the cell edge: their exact order is the alternation). With `build`: the fluid
+      !< interval atoms and their joins.
       integer(I4P), intent(in) :: ed    !< Edge.
       logical,      intent(in) :: build !< Build the intervals.
-      integer(I4P)             :: st, ii, i1, i2, prev, ax !< State, piercings, previous endpoint atom.
+      integer(I4P)             :: st, ii, i1, i2, prev, ax, jt, kt !< State, piercings, previous endpoint atom.
       real(R8P)                :: tprev, lo, hi !< Previous position, edge range.
       type(pierce_t)           :: tmp   !< Swap.
 
@@ -566,29 +606,34 @@ contains
          endif
          return
       endif
-      st = merge(1_I4P, 0_I4P, pc(i1)%enter)
-      if (.not. build) call set_corner(corner_of(ed, 0_I4P), st)
-      if (build) st = cstate(corner_of(ed, 0_I4P))
+      st = cstate(corner_of(ed, 0_I4P)) ! exact (issue #70); crossings at one rounded position are reordered below
       prev = nt + corner_of(ed, 0_I4P) ; tprev = lo
       do ii = i1, i2
          if (pc(ii)%enter .neqv. (st == 1_I4P)) then ! alternation broken: repair a tie, else not closed
-            if (ii < i2 .and. (pc(ii + 1)%enter .eqv. (st == 1_I4P)) .and. &
-                abs(pc(ii + 1)%t - pc(ii)%t) <= 64._R8P * spacing(max(abs(lo), abs(hi)))) then
-               tmp = pc(ii) ; pc(ii) = pc(ii + 1) ; pc(ii + 1) = tmp
-            else
+            jt = 0_I4P
+            do kt = ii + 1_I4P, i2
+               if (abs(pc(kt)%t - pc(ii)%t) > 64._R8P * spacing(max(abs(lo), abs(hi)))) exit
+               if (pc(kt)%enter .eqv. (st == 1_I4P)) then
+                  jt = kt ; exit
+               endif
+            enddo
+            if (jt == 0_I4P) then
                ok = .false. ; return
             endif
+            tmp = pc(ii) ; pc(ii) = pc(jt) ; pc(jt) = tmp
          endif
          if (build .and. st == 1_I4P) then
             call new_interval(ed, tprev, pc(ii)%t)
-            call unite(natom, prev) ; call unite(natom, pc(ii)%poly)
+            if (prev > 0_I4P) call unite(natom, prev) ! 0: a crossing without a polygon in the cell
+            if (pc(ii)%poly > 0_I4P) call unite(natom, pc(ii)%poly)
          endif
          st = 1_I4P - st ; prev = pc(ii)%poly ; tprev = pc(ii)%t
       enddo
       if (.not. build) call set_corner(corner_of(ed, 1_I4P), st)
       if (build .and. st == 1_I4P) then
          call new_interval(ed, tprev, hi)
-         call unite(natom, prev) ; call unite(natom, nt + corner_of(ed, 1_I4P))
+         if (prev > 0_I4P) call unite(natom, prev)
+         call unite(natom, nt + corner_of(ed, 1_I4P))
       endif
       endsubroutine walk_edge
 
@@ -737,6 +782,7 @@ contains
       integer(I4P), allocatable :: tgt(:), pid(:)   !< Inclusion target, piece of a root.
       real(R8P)                 :: h(3), pl(3), ql(3), sg, vp, mp(3), hf(3) !< Work.
       integer(I4P)              :: qq, vv, jj, r, ax, sd, bt, b1, b2, kk, ee, k1, k2, s1, s2, guard, npc_ !< Work.
+      logical                   :: inplane, outside !< Polygon in the face plane, its outward normal leaves the cell.
 
       h = c1 - c0
       allocate(wt(11, natom), fa(6, natom), tgt(natom), pid(natom))
@@ -774,9 +820,24 @@ contains
             b1 = mod(ax, 3_I4P) + 1_I4P ; b2 = mod(ax + 1_I4P, 3_I4P) + 1_I4P
             do sd = 0, 1
                bt = 2_I4P * (ax - 1_I4P) + sd ; sg = merge(1._R8P, -1._R8P, sd == 1_I4P)
+               inplane = all(btest(pfl(1:pn(qq), qq), bt))
+               outside = (sd == 1_I4P .and. nrm(ax, lst(qq)) > 0._R8P) .or. (sd == 0_I4P .and. nrm(ax, lst(qq)) < 0._R8P)
                do vv = 1, pn(qq)
                   jj = mod(vv, pn(qq)) + 1_I4P
                   if (.not. (btest(pfl(vv, qq), bt) .and. btest(pfl(jj, qq), bt))) cycle
+                  ! traces on the perturbed face (issue #70): the face plane is taken at c + eps (#69)
+                  if (inplane) then ! the polygon lies in the face plane, just below the perturbed one
+                     if (outside) exit ! solid on the cell side: the perturbed face is fluid there, no boundary
+                     ! solid beyond the face: its outline bounds the fluid (it stands for the facets around it,
+                     ! which cross the perturbed plane), except along the cell edges, where the fluid edge
+                     ! intervals carry the boundary
+                     if (iand(iand(pfl(vv, qq), pfl(jj, qq)), not(ibset(0_I4P, bt))) /= 0_I4P) cycle
+                  elseif (maxval(tri(ax, :, lst(qq))) <= merge(c1(ax), c0(ax), sd == 1_I4P)) then
+                     ! the facet ends on the face plane, which the perturbed plane does not cut: its edge on the plane
+                     ! bounds the fluid only if the facet across that edge crosses the plane (that facet's polygon in
+                     ! the cell is the edge alone, so this one stands for it)
+                     if (.not. across_crosses(lst(qq), ax, merge(c1(ax), c0(ax), sd == 1_I4P))) cycle
+                  endif
                   pl = pv(:, vv, qq) - c0 ; ql = pv(:, jj, qq) - c0
                   fa(bt + 1, r) = fa(bt + 1, r) + sg * 0.5_R8P * (pl(b1) + ql(b1)) * (ql(b2) - pl(b2))
                enddo
@@ -811,6 +872,32 @@ contains
          pm(12:17, kk) = fa(:, r) / [hf(1), hf(1), hf(2), hf(2), hf(3), hf(3)]
       enddo
       endsubroutine piece_measures
+
+      logical function across_crosses(fi, ax, lev) result(yes)
+      !< The facet of the cell across the edge of facet fi that lies on the plane x(ax) = lev has a vertex beyond the
+      !< plane (x(ax) > lev); .false. if fi has no edge on the plane or no facet of the cell shares it.
+      integer(I4P), intent(in) :: fi  !< Facet.
+      integer(I4P), intent(in) :: ax  !< Plane axis.
+      real(R8P),    intent(in) :: lev !< Plane level.
+      integer(I4P)             :: m1, m2, g, mm, nshare !< Work.
+
+      yes = .false.
+      do m1 = 1, 3
+         m2 = mod(m1, 3_I4P) + 1_I4P
+         if (tri(ax, m1, fi) /= lev .or. tri(ax, m2, fi) /= lev) cycle
+         do g = 1, nt
+            if (lst(g) == fi) cycle
+            nshare = 0_I4P
+            do mm = 1, 3
+               if (all(tri(:, mm, lst(g)) == tri(:, m1, fi)) .or. all(tri(:, mm, lst(g)) == tri(:, m2, fi))) &
+                  nshare = nshare + 1_I4P
+            enddo
+            if (nshare == 2_I4P .and. maxval(tri(ax, :, lst(g))) > lev) then
+               yes = .true. ; return
+            endif
+         enddo
+      enddo
+      endfunction across_crosses
 
       integer(I4P) function inclusion_target(ri) result(tr)
       !< Root of the set around the inclusion ri (see `piece_measures`); 0 if not found.
@@ -867,25 +954,56 @@ contains
       endfunction inclusion_target
    endsubroutine cell_pieces
 
-   logical function inside_parity(surface, p)
-   !< The point p inside the solid: odd number of exact crossings of the line along z below it. Which crossings lie
-   !< below p is decided exactly (issue #69, `line_crossing_before`; the rounded parameter decided it before), a point
-   !< on the wall counting as above it.
-   type(surface_stl_object), intent(in) :: surface !< Surface.
-   real(R8P),                intent(in) :: p(3)    !< Point.
+   pure logical function split_closes(pm, h, alpha, faces) result(ok)
+   !< The pieces pm [17, n] of a cell of size h split it consistently (issue #70): their face fractions add up to the
+   !< exact face totals (the plane sections), their volumes to alpha |cell|, and every piece closes, (f+ - f-) A_a = the
+   !< a component of its wall normal integral, per axis. Tolerance 1e-12 of the face area or cell volume, as the other
+   !< trust tests. A face split by the traces of the clipped polygons can miss a boundary on the perturbed face plane
+   !< (a facet lying in it or ending on it next to one crossing it): such a cell is not trusted.
+   real(R8P), intent(in) :: pm(:,:)   !< Piece measures (see `piece_measures`).
+   real(R8P), intent(in) :: h(3)      !< Cell size.
+   real(R8P), intent(in) :: alpha     !< Cell volume fraction.
+   real(R8P), intent(in) :: faces(6)  !< Face fractions (-x, +x, -y, +y, -z, +z).
+   real(R8P)             :: af(3), vc  !< Face areas, cell volume.
+   integer(I4P)          :: a, p      !< Work.
+   real(R8P), parameter  :: TOL = 1.e-12_R8P !< Relative tolerance.
+
+   af = [h(2) * h(3), h(3) * h(1), h(1) * h(2)] ; vc = product(h)
+   ok = abs(sum(pm(1, :)) - alpha * vc) <= TOL * vc
+   do a = 1, 6
+      ok = ok .and. abs(sum(pm(11 + a, :)) - faces(a)) <= TOL
+   enddo
+   do p = 1, size(pm, 2)
+      do a = 1, 3
+         ok = ok .and. abs((pm(13 + 2 * (a - 1), p) - pm(12 + 2 * (a - 1), p)) * af(a) - pm(8 + a, p)) <= TOL * af(a)
+      enddo
+   enddo
+   endfunction split_closes
+
+   subroutine column_parity(surface, xa, yb, z, inside)
+   !< Exact inside flags of the nodes (xa, yb, z(k)) of a grid column (issue #70): the parity of the crossings of
+   !< the z line before each node, decided by `line_crossing_before` under the global perturbation, a node on the
+   !< wall taken at P + (eps1, eps2, eps3). The same test as the node parities of #69, so the corner states of
+   !< every cell agree with the crossings of its edges.
+   type(surface_stl_object), intent(in)  :: surface   !< Surface.
+   real(R8P),                intent(in)  :: xa, yb    !< Column.
+   real(R8P),                intent(in)  :: z(:)      !< Nodes.
+   logical,                  intent(out) :: inside(:) !< Inside flags.
    real(R8P),    allocatable :: t(:)     !< Crossings.
    integer(I4P), allocatable :: fc(:)    !< Facets.
    logical,      allocatable :: en(:)    !< Entering flags.
-   integer(I4P)              :: n, k, m  !< Number of crossings, work.
+   integer(I4P)              :: n, k, m, kk !< Work.
 
-   call surface%line_crossings(3_I4P, p(1), p(2), -huge(1._R8P), huge(1._R8P), t, fc, en, n)
-   m = 0_I4P
-   do k = 1_I4P, n
-      if (line_crossing_before(reshape(surface%tri_vertices(:, fc(k)), [3, 3]), 3_I4P, p(1), p(2), p(3), en(k))) &
-         m = m + 1_I4P
+   call surface%line_crossings(3_I4P, xa, yb, -huge(1._R8P), huge(1._R8P), t, fc, en, n)
+   do k = 1, size(z)
+      m = 0_I4P
+      do kk = 1_I4P, n
+         if (line_crossing_before(reshape(surface%tri_vertices(:, fc(kk)), [3, 3]), 3_I4P, xa, yb, z(k), en(kk))) &
+            m = m + 1_I4P
+      enddo
+      inside(k) = mod(m, 2_I4P) == 1_I4P
    enddo
-   inside_parity = mod(m, 2_I4P) == 1_I4P
-   endfunction inside_parity
+   endsubroutine column_parity
 
    pure integer(I4P) function edge_index(k, sides)
    !< Cell edge (1-12) along axis k at the sides (0 low, 1 high) of the two other axes.

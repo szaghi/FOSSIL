@@ -110,9 +110,13 @@ endprogram cut_geometry
     fluid:
     - the parts are the wall polygons (each triangle clipped to the cell) and
       the fluid intervals of the 12 cell edges;
-    - the clip flags every vertex it makes with its cell plane, so the
-      vertices on a cell edge (two planes) are the edge's piercings, entering
-      or leaving the solid by the sign of the normal along the edge;
+    - the corner states are the exact inside flags of the perturbed nodes,
+      and the piercings of an edge are its exact crossings under the global
+      perturbation (between the perturbed corners), entering or leaving the
+      solid by the sign of the normal along the edge, so the states
+      alternate from corner to corner (issue #70; before, the piercings were
+      the clipped polygon vertices on the edge, one per incident facet when a
+      mesh edge or vertex lay on it);
     - the parts are joined where polygons share a vertex (the clipped points
       of a shared mesh edge are bit-identical), at a piercing, at a fluid
       corner, and where a solid island traced on a face is surrounded by
@@ -175,6 +179,7 @@ endprogram cut_geometry
 | 3-D piece measures: thin plate; hollow box; inclusion in the void, above a plate, beside a wall | exact volumes (0.5 and 0.499 of the cell; 98 and 1; 0.992; 0.782; 0.792) |
 | `orient3d`: near-coplanar grid (6144 points), coplanar dyadic points | exact signs and zeros (the naive determinant is wrong on 2022) |
 | line crossings, device path vs CPU | 0 mismatches (device path run on the host) |
+| 3-D pieces: cube-01, an octahedron and 40 lattice tetrahedra on grids of step 1/8, 1/4, 1/16 (1.57 million cells) | 19 cells untrusted (947 before issue #70), none outside [0, 1]; per-piece closure 3.5·10⁻¹⁴, piece sums 1.4·10⁻¹⁴, block volume 1.6·10⁻¹⁵ |
 | node parities along x, y, z on a grid-aligned cube, an octahedron, 20 lattice tetrahedra (2-D: square, diamond, 20 triangles) | 0 of 108 086 and 0 of 6358 disagree (108 and 45 before issue #69) |
 | centre inside flags within 3 ulp of a tilted face: tetrahedron (3-D), triangle (2-D), quadruple-precision reference | 0 of 3168 and 0 of 3200 wrong (249 and 295 before issue #69) |
 
@@ -186,8 +191,11 @@ endprogram cut_geometry
   cell centre); a solver can drop pieces with no volume.
 - **Flagged cells (`pieces = -1`).** Cells a boundary edge of the mesh
   overlaps, cells whose fraction is outside [0, 1] (an open surface corrupts
-  the face parities beyond the cells it flags), and cells whose edge states
-  do not close.
+  the face parities beyond the cells it flags), cells whose edge states
+  do not close, and (issue #70) multi-piece cells whose split does not
+  close: the face fractions of the pieces must add up to the plane
+  sections, their volumes to the cell's, and every piece must close per
+  axis.
 - **Points exactly on the surface.**
   - The inside flag of a cell centre is the parity of the crossings along
     its x line before it. Since issue #69 "before" is exact: with
@@ -208,13 +216,20 @@ endprogram cut_geometry
     108 086 nodes of a grid-aligned cube, an octahedron and 20 lattice
     tetrahedra (108 before), 0 over 6358 nodes in 2-D (45 before). The 2-D
     sections of the 3-D cut cells keep their own (u, v) order.
-  - **Pieces on bodies through grid nodes.** On tetrahedra with vertices
-    on the grid nodes (and so edges on grid lines and faces through them),
-    every face and cell closes and the solid volume is right to 1e-15, but
-    the piece classification flags 0 to 38 cells per body as untrusted
-    (`pieces = -1`), and up to 2 cells per body get a volume fraction
-    outside [0, 1]. Unchanged by issue #69 (identical before it): a
-    follow-up.
+  - **Pieces on bodies through grid nodes** (issue #70). Before #70, on
+    tetrahedra with vertices on the grid nodes, the piece classification
+    flagged up to 38 cells per body (947 of 1.57 million cells over 42
+    bodies and three grids): a mesh edge or vertex on a cell edge gave one
+    piercing per incident facet. The edges now take their exact crossings,
+    and the face traces are read on the perturbed plane: a polygon lying
+    in the face plane bounds the fluid only if its solid lies beyond the
+    face, and then not along the cell edges; a facet ending on the plane
+    counts there only if the facet across its edge crosses the plane. 19
+    cells remain flagged, where a facet touches the cell only along a
+    segment of a cell edge (its clipped polygon is empty, so its trace on
+    the face is missing); the closure test flags them, none is wrong. The
+    "fractions outside [0, 1]" seen before were 1 + 4·10⁻¹⁶, round-off of
+    the face sums, inside the 10⁻¹² tolerance.
 - **Constructed points.** The 3-D sections and the clipping decide on the
   rounded crossing points, consistently across kernels. A body passing
   exactly through grid lines at non-representable points can then give a
