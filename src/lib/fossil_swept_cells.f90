@@ -96,6 +96,13 @@ endtype swept_cells_3d_t
 
 real(R8P), parameter :: FLOOR_H = 1e-6_R8P !< Pieces shorter than this converge to 64 eps of the measure times FLOOR_H
                                          !< (issue #69: slices within 1e-10 of a face carry ~1e-7 relative noise).
+! A piece whose Gauss values miss that target at 64 nodes is still converged if the last change is within 64 eps of
+! the round-off of ONE evaluation (issues #84, #86): 2-D, the coordinate magnitude xm = max |grid| + |t0| + |dt| (a
+! crossing's round-off); 3-D, xm times the face side. Near an instant when a wall side lies along the face's line
+! (2-D) or a body face on the grid plane (3-D) (a side or face starting on it, a corner leaving it tangentially),
+! the crossings of a moved copy carry round-off amplified by 1 / angle, and the values stop agreeing at a floor
+! that does not shrink with the piece. Anything a piece hides below that bound (noise, or an event within the
+! round-off of a zero zone) moves the face's average by at most 64 eps xm (times the side in 3-D).
 
 type :: slist_t
    !< A list of breakpoints.
@@ -109,7 +116,7 @@ contains
    !< rotating case; `poses(nq)` the poses at the nodes (`gauss_legendre_01`) instead of the screw
    !< motion; `exact` (default .true.) uses the exact integration for a pure translation and, since issue #69,
    !< for the screw motion with a rotation (certified breakpoints, Gauss doubled to round-off on every piece;
-   !< `sw%exact` false if a piece did not converge at 64 nodes).
+   !< `sw%exact` false if a piece did not converge at 64 nodes, to the round-off of one evaluation: see FLOOR_H).
    !< `status = STATUS_INVALID_INPUT` on bad edges, nq < 1 or a poses size other than nq.
    !< `check_input` (default .false., issue #44): look for self-intersections of the curve first
    !< (`self_intersections`, one BVH pass); if any, `sw%self_intersecting` and a warning on stderr: the
@@ -222,7 +229,8 @@ contains
    !< breakpoints, the zeros of g(s) = (p0 + p1 s) cos phi + (q0 + q1 s) sin phi + k0 + k1 s isolated with the bound
    !< on |g''| (`isolate_zeros`): a wall vertex crossing the face's line inside its span, an end node crossing a wall
    !< segment inside it. On every piece between breakpoints the fluid length and the outflow are analytic: Gauss-
-   !< Legendre doubled from 2 nodes until two values agree to round-off (at most 64; else exact = .false.).
+   !< Legendre doubled from 2 nodes until two values agree to round-off (at 64, to that of one evaluation: FLOOR_H;
+   !< else exact = .false.).
    type(curve_object),    intent(in)  :: curve        !< Curve (body frame).
    type(rigid_pose_2d_t), intent(in)  :: pose0, pose1 !< End poses.
    real(R8P),             intent(in)  :: x(:), y(:)   !< Cell edges.
@@ -369,11 +377,13 @@ contains
       real(R8P),    intent(out) :: avg, out
       integer(I4P), intent(out) :: ne
       logical,      intent(out) :: conv
-      real(R8P)                 :: sa, sb, l1, o1, l2, o2, scl, sco
+      real(R8P)                 :: sa, sb, l1, o1, l2, o2, scl, sco, xm, sno
       integer(I4P)              :: q, ng
 
       avg = 0._R8P ; out = 0._R8P ; ne = 0_I4P ; conv = .true.
-      scl = hi - lo ; sco = scl * (abs(dth) * (maxval(abs([x, y])) + norm2(t0) + norm2(dt)) + norm2(dt))
+      xm = maxval(abs([x, y])) + norm2(t0) + norm2(dt) ! coordinate magnitude: the round-off scale of a crossing
+      scl = hi - lo ; sco = scl * (abs(dth) * xm + norm2(dt))
+      sno = xm * (abs(dth) * xm + norm2(dt))
       do q = 0_I4P, m
          sa = 0._R8P ; if (q > 0_I4P) sa = b(q)
          sb = 1._R8P ; if (q < m) sb = b(q + 1)
@@ -385,8 +395,9 @@ contains
             call piece(nax, a, lo, hi, sa, sb, ng, l2, o2) ; ne = ne + ng
             if (abs(l2 - l1) <= 64._R8P * epsilon(1._R8P) * scl * max(sb - sa, FLOOR_H) .and. &
                 abs(o2 - o1) <= 64._R8P * epsilon(1._R8P) * sco * max(sb - sa, FLOOR_H)) exit
+            ! at 64 nodes: the change against the round-off of one evaluation (length: xm; issue #86, see FLOOR_H)
             if (ng >= 64_I4P) then
-               conv = .false. ; exit
+               conv = max(abs(l2 - l1) / xm, abs(o2 - o1) / sno) <= 64._R8P * epsilon(1._R8P) ; exit
             endif
             l1 = l2 ; o1 = o2
          enddo
@@ -910,8 +921,8 @@ contains
    !< its grid nodes on a triangle ((Rot n0) . (N - t(s)) - n0 . w_a), each checked to lie on the plane's grid and
    !< prefiltered by the box the element sweeps. A plane outside the box the body sweeps is fluid throughout (closed
    !< form). On every piece, Gauss-Legendre doubled from 2 nodes until the plane's face areas and outflows change by
-   !< round-off (at most 64 nodes, else exact = .false.); one evaluation slices a moved copy (`slice_surface` with
-   !< `on_plane_low` and the 2-D cut cells, as `cut_cells_3d`).
+   !< round-off (at 64 nodes, to that of one evaluation: FLOOR_H; else exact = .false.); one evaluation slices a
+   !< moved copy (`slice_surface` with `on_plane_low` and the 2-D cut cells, as `cut_cells_3d`).
    type(surface_stl_object), intent(in)  :: surface        !< Surface (body frame).
    type(rigid_pose_t),       intent(in)  :: pose0, pose1   !< End poses.
    real(R8P),                intent(in)  :: x(:), y(:), z(:) !< Cell edges.
@@ -999,7 +1010,7 @@ contains
       real(R8P),              intent(in)  :: lev, gu(:), gv(:)
       real(R8P), allocatable, intent(out) :: ar(:,:), ou(:,:)
       real(R8P), allocatable              :: a1(:,:), o1(:,:), a2(:,:), o2(:,:)
-      real(R8P)                           :: sa, sb, sca, sco
+      real(R8P)                           :: sa, sb, sca, sco, xm, sna, sno
       integer(I4P)                        :: iu, iv, nu, nv, ng, m
 
       nu = size(gu, kind=I4P) - 1_I4P ; nv = size(gv, kind=I4P) - 1_I4P
@@ -1019,7 +1030,10 @@ contains
       call plane_events(na, lev, gu, gv, iu, iv, bp, nb)
       ar = 0._R8P ; ou = 0._R8P ; ne = 0_I4P
       sca = maxval(gu(2:) - gu(:nu)) * maxval(gv(2:) - gv(:nv))
-      sco = sca * (norm2(om) * (maxval(abs([x, y, z])) + norm2(t0) + norm2(dt)) + norm2(dt))
+      xm = maxval(abs([x, y, z])) + norm2(t0) + norm2(dt) ! coordinate magnitude: the round-off scale of a crossing
+      sco = sca * (norm2(om) * xm + norm2(dt))
+      sna = xm * max(maxval(gu(2:) - gu(:nu)), maxval(gv(2:) - gv(:nv))) ! round-off of one face area
+      sno = sna * (norm2(om) * xm + norm2(dt))
       do m = 0_I4P, nb
          sa = 0._R8P ; if (m > 0_I4P) sa = bp(m)
          sb = 1._R8P ; if (m < nb) sb = bp(m + 1)
@@ -1031,8 +1045,11 @@ contains
             call plane_piece(na, lev, gu, gv, iu, iv, sa, sb, ng, a2, o2) ; ne = ne + ng
             if (maxval(abs(a2 - a1)) <= 64._R8P * epsilon(1._R8P) * sca * max(sb - sa, FLOOR_H) .and. &
                 maxval(abs(o2 - o1)) <= 64._R8P * epsilon(1._R8P) * sco * max(sb - sa, FLOOR_H)) exit
+            ! at 64 nodes: the change against the round-off of one evaluation (area: sna; issue #84, see FLOOR_H)
             if (ng >= 64_I4P) then
-               exact = .false. ; exit
+               if (max(maxval(abs(a2 - a1)) / sna, maxval(abs(o2 - o1)) / sno) > 64._R8P * epsilon(1._R8P)) &
+                  exact = .false.
+               exit
             endif
             a1 = a2 ; o1 = o2
          enddo
@@ -1081,7 +1098,7 @@ contains
       real(R8P), allocatable              :: tmp(:), zz(:)
       real(R8P)                           :: co(6), a3(3), b3(3), c3(3), ae(3), be(3), ce(3), d3(3), f0(3), f1(3)
       real(R8P)                           :: nn(3), xq(3), dd(3), lam, pp(3), tol, el(3), ebox(3, 2), tb(3, 2), bary(3)
-      real(R8P)                           :: xa(3), xb(3), xc(3), wxd(3)
+      real(R8P)                           :: xa(3), xb(3), xc(3), wxd(3), lval
       integer(I4P)                        :: ii, cc, nz, kk, li, ldir, lfix, mm, e1, e2
       logical                             :: cert
 
@@ -1118,7 +1135,13 @@ contains
                endif
                call rodrigues(el, ae, be, ce)
                do li = 1, merge(size(gu), size(gv), ldir == 1)
-                  pp = 0._R8P ; pp(na) = lev ; pp(lfix) = merge(gu(li), gv(li), ldir == 1)
+                  ! not merge(gu(li), gv(li), ...): merge evaluates both, out of bounds when the sizes differ
+                  if (ldir == 1) then
+                     lval = gu(li)
+                  else
+                     lval = gv(li)
+                  endif
+                  pp = 0._R8P ; pp(na) = lev ; pp(lfix) = lval
                   if (pp(lfix) < ebox(lfix, 1) .or. pp(lfix) > ebox(lfix, 2)) cycle
                   f0 = cross(el, pp - t0) ; f1 = cross(el, -dt)
                   co = [dot_product(a3, f0) - dot_product(ae, wxd), dot_product(a3, f1), &
@@ -1133,7 +1156,7 @@ contains
                      lam = (lev - xq(na)) / dd(na)
                      if (lam < -1e-12_R8P .or. lam > 1._R8P + 1e-12_R8P) cycle
                      pp = xq + lam * dd
-                     if (abs(pp(lfix) - merge(gu(li), gv(li), ldir == 1)) > tol * 1e3_R8P) cycle
+                     if (abs(pp(lfix) - lval) > tol * 1e3_R8P) cycle
                      mm = merge(iv, iu, ldir == 1)
                      if (ldir == 1) then
                         if (pp(mm) < gv(1) - tol .or. pp(mm) > gv(size(gv)) + tol) cycle

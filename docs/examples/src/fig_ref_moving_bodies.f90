@@ -60,17 +60,18 @@ call fig_close(u)
 ! ---- swept geometry of one step of a screw motion
 p0 = pose_identity()
 p1 = pose_from_axis_angle(axis=[0.3_R8P, 0.2_R8P, 1._R8P], angle=0.35_R8P, translation=[0.15_R8P, 0.05_R8P, 0._R8P])
-x = [(-1.01_R8P + i / 6._R8P, i = 0, 12)]                                ! 12 x 12 x 3 cells
-z = [-0.76_R8P, -0.26_R8P, 0.24_R8P, 0.74_R8P]
+x = [(-1._R8P + i / 6._R8P, i = 0, 12)]                ! 12 x 12 x 3 cells; the faces x, y = +-0.5 start on grid planes
+z = [-0.75_R8P, -0.25_R8P, 0.25_R8P, 0.75_R8P]
 call swept_cells_3d(cube, p0, p1, x, x, z, sw, status=status)
+if (.not. sw%exact) error stop 'swept_cells_3d: off the exact path (issue #84)'
 print '(A,L1,A,ES9.2,A,ES9.2)', 'swept: exact ', sw%exact, ', sum of swept ', sum(sw%swept), &
                                  ', largest residual ', maxval(abs(sw%residual))
 call fig_open(u, 'ref-moving-bodies-swept', &
               'swept volume / cell volume (ember gained, teal lost); start dark, end yellow', &
               -90._R8P, 90._R8P)
 do j = 1, 12 ; do i = 1, 12
-   call fig_quad(u, 'field', vec(x(i), x(j), -0.01_R8P), vec(x(i + 1), x(j), -0.01_R8P), vec(x(i + 1), x(j + 1), -0.01_R8P), &
-                 vec(x(i), x(j + 1), -0.01_R8P), value=sw%swept(i, j, 2) / ((x(i + 1) - x(i)) * (x(j + 1) - x(j)) * 0.5_R8P))
+   call fig_quad(u, 'field', vec(x(i), x(j), 0._R8P), vec(x(i + 1), x(j), 0._R8P), vec(x(i + 1), x(j + 1), 0._R8P), &
+                 vec(x(i), x(j + 1), 0._R8P), value=sw%swept(i, j, 2) / ((x(i + 1) - x(i)) * (x(j + 1) - x(j)) * 0.5_R8P))
 enddo ; enddo
 moved = cube
 call outline(moved, 'cell')
@@ -87,21 +88,21 @@ contains
    endfunction vec
 
    subroutine outline(s, style)
-   !< The section of s by the plane z = -0.01 (the middle of the layer), drawn just above the cells.
+   !< The section of s by the plane z = 0 (the middle of the layer), drawn just above the cells.
    type(surface_stl_object), intent(in) :: s
    character(*),             intent(in) :: style
    type(vector_R8P), allocatable        :: a(:), b(:)
    real(R8P)                            :: uv(2)
    integer(I4P)                         :: i, n, nv
 
-   call slice_surface(s, 3_I4P, -0.01_R8P, section)
+   call slice_surface(s, 3_I4P, 0._R8P, section)
    nv = section%get_vertices_number()
    allocate(a(nv), b(nv)) ; n = 0
    do i = 1, nv
       if (section%get_next(i) == 0_I4P) cycle
       n = n + 1
-      uv = section%get_vertex(i) ; a(n) = vec(uv(1), uv(2), LIFT - 0.01_R8P)
-      uv = section%get_vertex(section%get_next(i)) ; b(n) = vec(uv(1), uv(2), LIFT - 0.01_R8P)
+      uv = section%get_vertex(i) ; a(n) = vec(uv(1), uv(2), LIFT)
+      uv = section%get_vertex(section%get_next(i)) ; b(n) = vec(uv(1), uv(2), LIFT)
    enddo
    call fig_segments(u, style, a(1:n), b(1:n))
    endsubroutine outline

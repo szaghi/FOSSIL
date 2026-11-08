@@ -155,8 +155,8 @@ follow from the fixed grid (issue #41):
 
 ![a 12 x 12 grid seen from above, the middle layer of a 12 x 12 x 3 block, each cell shaded by the volume the unit cube sweeps through it over one step of a screw motion (0.35 rad about a tilted axis plus a shift), divided by the cell volume: ember where the cell gains fluid on the trailing side, teal where it loses fluid on the leading side, cream elsewhere; the section of the cube at mid-layer at the start in dark brown and at the end in yellow](../../examples/images/ref-moving-bodies-swept.svg){.fossil-figure}
 
-In the figure the step takes the exact rotation path: the residual is at most 5.33·10⁻¹⁷ in every cell, and the
-swept volumes add up to -1.99·10⁻¹⁷.
+In the figure the step takes the exact rotation path, with the cube's faces x, y = ±0.5 starting on grid planes
+(issue #84): the residual is at most 9.69·10⁻¹⁷ in every cell, and the swept volumes add up to -3.84·10⁻¹⁷.
 
 ```fortran
 call swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input)
@@ -232,8 +232,15 @@ removes them, as the translation path does, and is built as follows.
   converges exponentially. The node count on a piece doubles from 2 until two successive values agree
   to round-off of the face measure (pieces shorter than 1e-6 to 64 ε of the measure times 1e-6: slices
   within 1e-10 of a mesh face carry ~1e-7 relative noise); `sw%evaluations` reports the largest count
-  (per face in 2-D, per plane in 3-D). A piece that has not
-  converged at 64 nodes marks the result `sw%exact = .false.`, never silently. Each evaluation moves a
+  (per face in 2-D, per plane in 3-D). At 64 nodes the target becomes the round-off of one evaluation:
+  64 ε of the coordinate magnitude (2-D) or of that times the face side (3-D), no longer times the
+  piece length (issues #84, #86). Near an instant when a wall side lies along a face's line, or a body
+  face on a grid plane (a side or face starting there, a corner leaving a line tangentially), the
+  crossings of a moved copy carry round-off amplified by 1/angle, and successive Gauss values stop
+  agreeing at a floor that does not shrink with the piece. A piece that misses this target too marks
+  the result `sw%exact = .false.`, never silently. The flag still catches missing breakpoints: with
+  every breakpoint dropped, the dragon sections and the cube of issue #84 all come out not exact
+  (residuals 1e-6 to 2e-4). Each evaluation moves a
   copy of the body to the node's pose and measures the face exactly as the cut cells do, so apertures
   and fractions share one convention.
 - *What changes.* The swept volumes are exact already (cut-cell volumes at the two poses), and `wall`
@@ -267,6 +274,8 @@ fluid at the other.
 | swept, 2-D rotation, Gauss (`exact=.false.`): off-centre square, pitching NACA 0012; nq = 2, 4, 8, 16 | residual 5.6e-3 → 1.6e-4 (rate ≈ 2.3) and 1.5e-3 → 1.6e-6 (rate ≈ 3.4) |
 | swept, 3-D rotation, exact (issue #69): cube 0.3 rad about (1, 1, 1) + shift (faces starting on grid planes), L-prism 0.5 rad about a tilted axis + shift, 32-face cone pitching 0.4 rad | residual 1.4e-16, 1.8e-15, 5.0e-16 (6³ validation: 4.3e-17, 8.3e-16, 5.0e-16); walls sum ≤ 1.8e-15; Gauss nq = 8 ≥ 4× closer than nq = 2 |
 | swept, 2-D rotation, exact (issue #69): square 0.4 rad off-centre + shift, square 1.2 rad + shift, NACA 0012 pitching 0.15 rad | residual 1.7e-16, 1.8e-16, 6.3e-16; walls sum ≤ 1.9e-16; Gauss nq = 16 ≥ 4× closer to the exact faces than nq = 4 |
+| swept, rotation with the wall starting on grid lines / planes (issues #84, #86; `fossil_test_swept_rotation_onplane`): square [−0.5, 0.5]² on a 0.5 grid, 0.1 rad + shift; centred unit cube 0.35 rad about (0.3, 0.2, 1) + shift, faces y = ±0.5 on grid planes | `exact` (both were not before); residual 1.3e-16, 4.4e-16; walls sum ≤ 5.6e-17 |
+| swept, 2-D rotation of dragon sections, z = −0.35, −0.20, −0.10, −0.05, π/18 on a 0.025 grid (`fossil_val_swept_rotation_2d`) | all `exact` (before: one or two of the four not, which ones depending on the round-off of the placed mesh; turned in 10-degree steps, most steps not); residual ≤ 1.2e-17 |
 | swept, 3-D translation: unit cube (every face vs analytic) | faces to 5.6e-17; uniform-flow residual 2.5e-17; walls sum to ≤ 8.3e-17 |
 | swept, 3-D translation: cube and L-prism at a pose rotated about (1, 1, 1), 32-face cone | uniform-flow residual 7.6e-17, 3.0e-16, 1.9e-16 |
 | swept, 3-D translation without one breakpoint class (vertex / edge-line / node-triangle) | residual up to 5.7e-4 / 1.4e-3 / 1.3e-5: each class is needed |

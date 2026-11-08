@@ -3,7 +3,8 @@
 !< Tutorial 11, step 4: the swept geometry of a rotation. A section of the placed dragon (chapters 2-3) that does not
 !< cross itself, turned by 10 degrees about the origin (the exact rotation path of swept_cells_2d), then the unit cube
 !< turned by 15 degrees about its vertical axis on 10^3 cells (swept_cells_3d). The figure: an animation of the section
-!< turning in six steps of 10 degrees, each frame the cells shaded by that step's swept area.
+!< turning in nine steps of 10 degrees, each frame the cells shaded by that step's swept area; every step must take
+!< the exact path (issue #86: before its fix, most steps of these sections did not).
 program tut11_4_rotation
 !region rotation
 use fossil,     only : surface_stl_object, curve_object, rigid_pose_t, rigid_pose_2d_t, pose_identity, &
@@ -23,9 +24,9 @@ integer(I4P)             :: i, n, status
 integer(I4P), allocatable :: pairs(:,:)
 
 call surface%load_from_file(file_name='dragon-placed.stl', guess_format=.true.)
-call slice_surface(surface, 3_I4P, -0.05_R8P, section, merge_collinear=.true., status=status)   ! z = -0.05
+call slice_surface(surface, 3_I4P, -0.2_R8P, section, merge_collinear=.true., status=status)   ! z = -0.2
 call section%self_intersections(pairs, n)
-print '(A,I0,A,I0)', 'section z = -0.05: ', section%get_vertices_number(), ' segments, crossing pairs ', n
+print '(A,I0,A,I0)', 'section z = -0.2: ', section%get_vertices_number(), ' segments, crossing pairs ', n
 x = [(-0.6_R8P + 0.025_R8P * i, i = 0, 48)]
 call swept_cells_2d(section, pose_2d(angle=0._R8P), pose_2d(angle=pi / 18._R8P), x, x, sw)   ! 10 degrees
 print '(A,L1,A,I0,A,I0)', 'rotation: exact ', sw%exact, ', cells swept ', count(sw%swept /= 0._R8P), &
@@ -57,8 +58,8 @@ contains
    endsubroutine solid
 
    subroutine figure
-   !< The section turning in six steps of 10 degrees.
-   integer(I4P), parameter       :: NS = 6
+   !< The section turning in nine steps of 10 degrees, each one exact.
+   integer(I4P), parameter       :: NS = 9
    real(R8P),    parameter       :: LIFT = 1.e-3_R8P
    type(curve_object)            :: moved
    type(rigid_pose_2d_t)         :: pa, pb
@@ -79,6 +80,8 @@ contains
       else
          call swept_cells_2d(section, pa, pb, x, x, sk)
       endif
+      if (.not. sk%exact) error stop 'swept_cells_2d: a step off the exact path'
+      print '(A,I0,A,L1,A,ES9.2)', 'step ', s, ': exact ', sk%exact, ', largest |residual| ', maxval(abs(sk%residual))
       write(caption, '(A,I0,A,I0,A,I0,A,I0,A)') 'step ', s, ': ', 10 * (s - 1), ' to ', 10 * s, ' degrees, ', &
                                                 count(sk%swept /= 0._R8P), ' cells swept'
       call fig_frame(u, trim(caption))

@@ -101,7 +101,7 @@ cell.
 ## Swept geometry of a rotation
 
 A rotation is the general case: a wall vertex moves along a circular arc, and a face's fluid length is no longer
-piecewise linear in time. The test case is a section of the placed dragon that does not cross itself (z = −0.05),
+piecewise linear in time. The test case is a section of the placed dragon that does not cross itself (z = −0.2),
 turned by 10 degrees about the origin. Then comes a 3-D body, the unit cube turned by 15 degrees about its vertical
 axis.
 
@@ -112,19 +112,22 @@ axis.
 - A rotation takes the exact path too (`exact=.true.` is the default). For each face, the routine finds the instants
   when the combinatorics change (a vertex on the face's line, a node on a segment) as certified zeros of a function
   of time. Between them it applies Gauss-Legendre, doubling the nodes until the result stops changing at round-off.
-  `sw%evaluations` is the largest number of evaluations one face needed.
+  `sw%evaluations` is the largest number of evaluations one face needed. When a wall side lies almost along a face
+  for a while, the evaluations themselves carry amplified round-off; at 64 nodes the routine then asks only for the
+  round-off of one evaluation (issue #86).
 - `swept_cells_3d` does the same per grid plane: a mesh vertex on the moving plane, a mesh edge on a grid line, a grid
   node on a triangle.
 - `exact=.false.` falls back to `nq` fixed Gauss nodes (default 4), and `sw%error_estimate` compares them with 2 nq.
 
 <<< @/examples/output/tut11-rotation.ansi{ansi}
 
-The section has 135 segments and no crossing pair, so both paths are exact. Turning it by 10 degrees sweeps 164 cells,
-and one face needed at most 106 evaluations. The swept areas sum to 1.0e-18 and the largest residual is 1.2e-17. The
+The section has 229 segments and no crossing pair, so both paths are exact. Turning it by 10 degrees sweeps 225 cells,
+and one face needed at most 190 evaluations. The swept areas sum to 5.3e-17 and the largest residual is 7.0e-18. The
+animation turns it through nine steps of 10 degrees, every one exact, with residuals of at most 2.4e-17. The
 cube turned by 15 degrees sweeps 327 cells and clears 27, with the swept volumes summing to 1.4e-16 and the largest
 residual 4.7e-17.
 
-![the section of the dragon at z = -0.05 turning about the origin in six steps of 10 degrees: each frame shows the section before the step in grey and after it in yellow, and the cells shaded by that step's swept area, ember where fluid is gained and teal where it is lost](../../examples/images/tut11-rotation.svg){.fossil-figure}
+![the section of the dragon at z = -0.2 turning about the origin in nine steps of 10 degrees: each frame shows the section before the step in grey and after it in yellow, and the cells shaded by that step's swept area, ember where fluid is gained and teal where it is lost](../../examples/images/tut11-rotation.svg){.fossil-figure}
 
 ## Mass and inertia
 
