@@ -58,21 +58,26 @@ blocks (`wall_cutter`): the faces covered by `TOPO_BOUNDARY` records with the gi
   the cutter, as the winding number needs.
 - **Overlapping wall patches** of different blocks (collar grids, the two caps of a Yin–Yang sphere) cover the same
   wall twice; a plain union counts the overlap twice in the winding number *(gk/inference)*. They are trimmed: an
-  element of the coarser patch (larger mean element size over the overlap) whose centroid (in 2-D, midpoint) lies
-  within the tolerance of the finer patch is dropped (the finer patch wins); the tolerance defaults to 0.1 of the
-  element size. The elements straddling the edge of the finer patch split between kept and dropped: the cutter keeps
-  a residual strip, about one coarse element wide at most, double-covered where a straddling element stays and
-  uncovered where it goes.
+  element of the coarser patch (larger mean element size over the overlap) is dropped only if the finer patch covers
+  it, that is its vertices and its centroid (in 2-D, its ends and midpoint) all lie within the tolerance of the finer
+  patch; the tolerance defaults to 0.1 of the element size. The elements straddling the edge of the finer patch stay,
+  so no gap opens: the cutter keeps a double-covered strip at most one coarse element wide, which raises the winding
+  number inside by the doubly covered solid angle over 4π (issue #91; no gap is the safe side for hole cutting).
+  `strict=.false.` restores the centroid-only rule, which also drops a straddling element whose centroid lies on the
+  finer patch and leaves a gap there.
 - **Shared walls**: two blocks whose wall patches overlap share a wall. In Lee & Baeder's pair matrix they overlap
   *without mutual cutting*: they interpolate from each other but never cut each other's points
   (`methods/implicit-hole-cutting.md`).
 
-![two partial annuli around the unit cylinder: a fine one of 24 cells from 0 to 200 degrees on top, its wall in gold, and a coarse one of 11 cells from 153 to 373 degrees below, its kept wall segments in ember drawn just outside the circle; the three coarse segments dropped by the trimming are drawn in grey just inside it; on the left the kept coarse segment overlaps the fine wall from 193 to 200 degrees, on the right the coarse wall stops at 353 degrees and the fine one starts at 0, a gap; teal ticks on every kept segment point to the fluid](../../examples/images/ref-overset-cutter.svg){.fossil-figure}
+![two partial annuli around the unit cylinder: a fine one of 24 cells from 0 to 200 degrees on top, its wall in gold, and a coarse one of 11 cells from 153 to 373 degrees below, its kept wall segments in ember drawn just outside the circle; the two coarse segments dropped by the trimming are drawn in grey just inside it; on the left the kept coarse segment overlaps the fine wall from 193 to 200 degrees, on the right the kept coarse segment from 353 to 373 degrees overlaps it from 0 to 13, no gap; teal ticks on every kept segment point to the fluid](../../examples/images/ref-overset-cutter.svg){.fossil-figure}
 
-Two blocks share the cylinder's wall (`shared(1, 2)` is true). `wall_cutter_2d` keeps the fine patch whole and 8 of
-the 11 coarse segments: the segment from 193 to 213 degrees has its midpoint 0.054 off the fine patch, above the tolerance 0.035, and stays (the
-wall from 193 to 200 is covered twice), the one from 353 to 373 has its midpoint on it and goes (the wall from 353 to
-360 is not covered) (`fig_ref_overset_cutter.f90`). Both strips are within one coarse segment of the patch edge.
+Two blocks share the cylinder's wall (`shared(1, 2)` is true). `wall_cutter_2d` keeps the fine patch whole and 9 of
+the 11 coarse segments: the two from 153 to 193 degrees lie on the fine patch and go; the segment from 193 to 213 has
+its end at 213 off the fine patch and stays (the wall from 193 to 200 is covered twice), and so does the one from 353
+to 373, whose end at 353 is off it (0 to 13 covered twice). The double cover is 20 degrees, the gap 0
+(`fig_ref_overset_cutter.f90`; `fossil_test_overset_cutters` checks every angle of the coarse range exactly). The
+centroid rule (`strict=.false.`) dropped the segment from 353 to 373, whose midpoint lies on the fine patch, and left
+the wall from 353 to 360 uncovered. Both strips are within one coarse segment of the patch edge.
 
 ## Hole cutting
 

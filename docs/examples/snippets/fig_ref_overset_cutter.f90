@@ -1,9 +1,9 @@
 !< Figure of the reference page "Overset assembly kernels", section "Cutters": two partial annuli around the unit
 !< cylinder, a fine one (24 cells over 0 to 200 degrees) and a coarse one (11 cells over 153 to 373 degrees), whose
-!< wall patches overlap at both ends. wall_cutter_2d keeps the fine patch, drops the coarse segments lying within the
-!< tolerance of it (ghost) and keeps the coarse segments whose midpoints lie off it: a double-covered strip at
-!< 193 to 200 degrees and a gap at 353 to 360 (the trimming tests the midpoint); every kept segment carries a tick
-!< towards the fluid (solid on the left of a -> b).
+!< wall patches overlap at both ends. wall_cutter_2d keeps the fine patch, drops the coarse segments it covers (both
+!< ends and the midpoint within the tolerance: ghost) and keeps the others: double-covered strips at 193 to 200 and
+!< 0 to 13 degrees, no gap (issue #91; the centroid rule, strict=.false., dropped the segment from 353 to 373 and left
+!< 353 to 360 uncovered); every kept segment carries a tick towards the fluid (solid on the left of a -> b).
 program fig_ref_overset_cutter
 use fossil,     only : curvilinear_block_2d_t, topo_record_t, TOPO_BOUNDARY, curve_object, wall_cutter_2d
 use fossil_fig, only : fig_open, fig_segments, fig_label, fig_close
@@ -17,7 +17,7 @@ type(curve_object)             :: cutter
 logical,          allocatable  :: shared(:,:), kept(:)
 integer(I4P),     allocatable  :: owner(:)
 type(vector_R8P), allocatable  :: a(:), b(:), ta(:), tb(:)
-real(R8P)                      :: p(2), q(2), mid(2), nrm(2)
+real(R8P)                      :: p(2), q(2), mid(2), nrm(2), dbl, gap, lo
 integer(I4P)                   :: u, i, j, l, first, last, nk, ns
 character(120)                 :: caption
 
@@ -43,6 +43,17 @@ do i = 1, 11
 enddo
 print '(A,11L2)', 'coarse wall segments kept: ', kept
 nk = count(kept)
+! the coarse range 153-373 deg against the fine 0-200 (360-560): covered twice where a kept coarse segment lies over
+! the fine patch, not at all where a dropped one lies off it
+dbl = 0._R8P ; gap = 0._R8P
+do i = 1, 11
+   lo = 153._R8P + 20 * (i - 1)
+   if (kept(i)) dbl = dbl + max(0._R8P, min(lo + 20, 200._R8P) - max(lo, 0._R8P)) &
+                          + max(0._R8P, min(lo + 20, 560._R8P) - max(lo, 360._R8P))
+   if (.not. kept(i)) gap = gap + 20 - max(0._R8P, min(lo + 20, 200._R8P) - max(lo, 0._R8P)) &
+                                     - max(0._R8P, min(lo + 20, 560._R8P) - max(lo, 360._R8P))
+enddo
+print '(A,F4.1,A,F3.1,A)', 'double-covered: ', dbl, ' deg, uncovered: ', gap, ' deg'
 
 write(caption, '(A,I0,A,I0,A)') 'fine patch kept (gold), coarse patch (ember): ', 11 - nk, &
                                 ' dropped (grey, drawn inside), ', nk, ' kept (drawn outside)'
@@ -80,7 +91,7 @@ call fig_label(u, 'accent', pt([0.2_R8P, 1.62_R8P], 5 * LIFT), 'fine, 0-200 deg'
 call fig_label(u, 'patch', pt([-0.3_R8P, -1.9_R8P], 5 * LIFT), 'coarse, 153-373 deg')
 call fig_label(u, 'ghost', pt(0.72_R8P * [cos(172 * D2R), sin(172 * D2R)], 5 * LIFT), 'dropped')
 call fig_label(u, 'hole', pt(0.8_R8P * [cos(197 * D2R), sin(197 * D2R)], 5 * LIFT), 'double, 193-200')
-call fig_label(u, 'hole', pt(1.1_R8P * [cos(352 * D2R), sin(352 * D2R)], 5 * LIFT), 'gap, 353-360')
+call fig_label(u, 'hole', pt(1.12_R8P * [cos(6 * D2R), sin(6 * D2R)], 5 * LIFT), 'double, 0-13')
 call fig_close(u)
 contains
    subroutine annulus(blk, t0, t1, nc, rmax)

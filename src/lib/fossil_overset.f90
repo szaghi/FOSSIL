@@ -8,10 +8,12 @@ module fossil_overset
 !< Cutters (`wall_cutter`, `wall_cutter_2d`): the wall faces of the blocks (faces covered by TOPO_BOUNDARY records with
 !< the given name) as a surface (curve) oriented with the block interior, the fluid, on the outer side. A bilinear
 !< face is split along its shorter diagonal; `gap` reports the largest distance between a face's bilinear centre and
-!< its two triangles. Overlapping wall patches of two blocks are trimmed: the elements of the coarser patch (larger
-!< mean element size over the overlap) whose centroid lies within the tolerance of the finer patch are dropped, so the
-!< elements straddling the edge of the finer patch split between kept and dropped: a residual strip of over- and
-!< under-coverage about one coarse element wide, whose effects on the winding number partly cancel.
+!< its two triangles. Overlapping wall patches of two blocks are trimmed: an element of the coarser patch (larger
+!< mean element size over the overlap, the elements whose centroid lies within the tolerance of the other patch) is
+!< dropped only if the finer patch covers it: its vertices and its centroid (2-D: midpoint) all lie within the tolerance
+!< of the finer patch (issue #91). The elements straddling the edge of the finer patch stay, so no gap opens: a
+!< residual double-covered strip at most one coarse element wide remains. strict=.false. restores the centroid-only
+!< rule (#72), which also drops a straddling element whose centroid lies on the finer patch and opens a gap there.
 !< Two blocks whose patches overlap share a wall (`shared`).
 !<
 !< Hole flags (`hole_flags`, `hole_flags_2d`): a vertex is a hole when the signed distance to the cutter, signed by the
@@ -202,13 +204,14 @@ endtype seg_list_t
 
 contains
    ! ---------------------------------------------------------------------------------------------------------- cutters
-   subroutine wall_cutter(blocks, cutter, wall_name, tolerance, gap, shared, owner, status)
+   subroutine wall_cutter(blocks, cutter, wall_name, tolerance, gap, shared, owner, status, strict)
    !< The wall cutter of a set of 3-D blocks (module notes). owner(f): the block of facet f; shared(a, b): blocks a
    !< and b share a wall. tolerance: trimming distance (default 0.1 of the square root of the element area).
    type(curvilinear_block_t), intent(in)            :: blocks(:)   !< Blocks.
    type(surface_stl_object),  intent(inout)         :: cutter      !< Cutter.
    character(*),              intent(in),  optional :: wall_name   !< Record name of the walls (default 'wall').
    real(R8P),                 intent(in),  optional :: tolerance   !< Trimming distance.
+   logical,                   intent(in),  optional :: strict      !< Drop covered elements only (default .true.).
    real(R8P),                 intent(out), optional :: gap         !< Largest bilinear-to-triangle distance.
    logical,      allocatable, intent(out), optional :: shared(:,:) !< Shared walls [nb, nb].
    integer(I4P), allocatable, intent(out), optional :: owner(:)    !< Block of each facet.
@@ -226,7 +229,7 @@ contains
    do b = 1, size(blocks, kind=I4P)
       call block_wall_triangles(blocks(b), wname, tl(b), gmax)
    enddo
-   call trim_triangles(tl, tolerance, sh)
+   call trim_triangles(tl, tolerance, sh, strict)
    n = 0_I4P
    do b = 1, size(tl, kind=I4P)
       n = n + count(tl(b)%keep)
@@ -302,18 +305,22 @@ contains
    tl%n = cap ; tl%v = v(:, :, 1:cap) ; allocate(tl%keep(cap)) ; tl%keep = .true.
    endsubroutine block_wall_triangles
 
-   subroutine trim_triangles(tl, tolerance, sh)
+   subroutine trim_triangles(tl, tolerance, sh, strict)
    !< Trim overlapping patches of block pairs (module notes); sh(a, b): the patches of a and b overlap.
    type(tri_list_t),     intent(inout)        :: tl(:)     !< Triangles per block.
    real(R8P),            intent(in), optional :: tolerance !< Trimming distance.
    logical, allocatable, intent(out)          :: sh(:,:)   !< Shared walls.
+   logical,              intent(in), optional :: strict    !< Drop covered elements only (default .true.).
    type(surface_stl_object), allocatable      :: sb(:)     !< Surface per block.
    type(facet_object),       allocatable      :: f(:)      !< Facets.
-   logical,                  allocatable      :: near(:)   !< Triangles of a near b.
+   logical,                  allocatable      :: near(:)   !< Triangles of a near b (centroid).
+   logical,                  allocatable      :: cova(:), covb(:) !< Triangles of a covered by b, of b by a.
    integer(I4P)                               :: a, b, t, k, nb !< Counters.
    real(R8P)                                  :: mean_a, mean_b !< Mean sizes over the overlap.
    logical,                  allocatable      :: nearb(:)  !< Triangles of b near a.
+   logical                                    :: strict_   !< Strict rule.
 
+   strict_ = .true. ; if (present(strict)) strict_ = strict
    nb = size(tl, kind=I4P)
    allocate(sh(nb, nb), sb(nb)) ; sh = .false.
    do b = 1, nb
@@ -329,39 +336,48 @@ contains
    do a = 1, nb
       do b = a + 1, nb
          if (tl(a)%n == 0 .or. tl(b)%n == 0) cycle
-         call near_set(tl(a), sb(b), tolerance, near) ; call near_set(tl(b), sb(a), tolerance, nearb)
+         call near_set(tl(a), sb(b), tolerance, near, cova) ; call near_set(tl(b), sb(a), tolerance, nearb, covb)
          if (.not. (any(near) .or. any(nearb))) cycle
          sh(a, b) = .true. ; sh(b, a) = .true.
          mean_a = mean_size(tl(a), near) ; mean_b = mean_size(tl(b), nearb)
+         if (.not. strict_) then
+            cova = near ; covb = nearb
+         endif
          if (mean_a >= mean_b) then ! a coarser (ties: the higher index wins)
-            tl(a)%keep = tl(a)%keep .and. .not. near
+            tl(a)%keep = tl(a)%keep .and. .not. cova
          else
-            tl(b)%keep = tl(b)%keep .and. .not. nearb
+            tl(b)%keep = tl(b)%keep .and. .not. covb
          endif
       enddo
    enddo
    endsubroutine trim_triangles
 
-   subroutine near_set(ta, sbs, tolerance, near)
-   !< near(t): the centroid of triangle t lies within the tolerance of the surface sbs.
+   subroutine near_set(ta, sbs, tolerance, near, cover)
+   !< near(t): the centroid of triangle t lies within the tolerance of the surface sbs; cover(t): its three vertices
+   !< too (sbs covers it).
    type(tri_list_t),         intent(in)           :: ta        !< Triangles.
    type(surface_stl_object), intent(in)           :: sbs       !< Other surface.
    real(R8P),                intent(in), optional :: tolerance !< Distance.
    logical, allocatable,     intent(out)          :: near(:)   !< Flags [n].
-   type(vector_R8P), allocatable                  :: pts(:)    !< Vertices.
+   logical, allocatable,     intent(out)          :: cover(:)  !< Flags [n].
+   type(vector_R8P), allocatable                  :: pts(:)    !< Centroids, then vertices.
    real(R8P),        allocatable                  :: d(:)      !< Distances.
-   integer(I4P)                                   :: t         !< Counter.
+   integer(I4P)                                   :: t, k      !< Counters.
    real(R8P)                                      :: tol       !< Tolerance.
 
-   allocate(pts(ta%n), d(ta%n), near(ta%n))
+   allocate(pts(4 * ta%n), d(4 * ta%n), near(ta%n), cover(ta%n))
    do t = 1, ta%n
       pts(t) = vector_R8P(sum(ta%v(1, :, t)) / 3._R8P, sum(ta%v(2, :, t)) / 3._R8P, sum(ta%v(3, :, t)) / 3._R8P)
+      do k = 1, 3
+         pts(ta%n + 3 * (t - 1) + k) = vector_R8P(ta%v(1, k, t), ta%v(2, k, t), ta%v(3, k, t))
+      enddo
    enddo
    call sbs%distance_many(points=pts, distances=d, is_signed=.false., is_square_root=.true.)
    do t = 1, ta%n
       tol = 0.1_R8P * sqrt(0.5_R8P * norm2(cross(ta%v(:, 2, t) - ta%v(:, 1, t), ta%v(:, 3, t) - ta%v(:, 1, t))))
       if (present(tolerance)) tol = tolerance
       near(t) = d(t) <= tol
+      cover(t) = near(t) .and. all(d(ta%n + 3 * (t - 1) + 1:ta%n + 3 * t) <= tol)
    enddo
    endsubroutine near_set
 
@@ -382,7 +398,7 @@ contains
    endif
    endfunction mean_size
 
-   subroutine wall_cutter_2d(blocks, cutter, wall_name, tolerance, shared, owner, status)
+   subroutine wall_cutter_2d(blocks, cutter, wall_name, tolerance, shared, owner, status, strict)
    !< The wall cutter of a set of 2-D blocks: polylines along the wall edges, solid on the left (module notes).
    !< A polyline whose ends coincide is a closed loop; trimming splits polylines into open pieces.
    type(curvilinear_block_2d_t), intent(in)            :: blocks(:)   !< Blocks.
@@ -392,6 +408,7 @@ contains
    logical,      allocatable,    intent(out), optional :: shared(:,:) !< Shared walls [nb, nb].
    integer(I4P), allocatable,    intent(out), optional :: owner(:)    !< Block of each loop.
    integer(I4P),                 intent(out), optional :: status      !< 0, or 1 if no wall edge was found.
+   logical,                      intent(in),  optional :: strict      !< Drop covered segments only (default .true.).
    type(seg_list_t), allocatable :: sl(:)          !< Segments per block.
    logical,          allocatable :: sh(:,:)        !< Shared walls.
    real(R8P),        allocatable :: u(:), v(:)     !< Loop vertices.
@@ -405,7 +422,7 @@ contains
    do b = 1, size(blocks, kind=I4P)
       call block_wall_segments(blocks(b), wname, sl(b))
    enddo
-   call trim_segments(sl, tolerance, sh)
+   call trim_segments(sl, tolerance, sh, strict)
    allocate(u(0), v(0), sizes(0), own(0), closed(0))
    do b = 1, size(sl, kind=I4P)
       s = 1_I4P
@@ -484,16 +501,20 @@ contains
    t = a ; a = b ; b = t
    endsubroutine swap_ends
 
-   subroutine trim_segments(sl, tolerance, sh)
+   subroutine trim_segments(sl, tolerance, sh, strict)
    !< Trim overlapping polylines of block pairs (as trim_triangles).
    type(seg_list_t),     intent(inout)        :: sl(:)     !< Segments per block.
    real(R8P),            intent(in), optional :: tolerance !< Trimming distance.
    logical, allocatable, intent(out)          :: sh(:,:)   !< Shared walls.
+   logical,              intent(in), optional :: strict    !< Drop covered segments only (default .true.).
    type(curve_object), allocatable            :: cb(:)     !< Curve per block.
-   logical,            allocatable            :: na(:), nbb(:) !< Near flags.
+   logical,            allocatable            :: na(:), nbb(:) !< Near flags (midpoint).
+   logical,            allocatable            :: ca(:), cbb(:) !< Covered flags.
    integer(I4P)                               :: a, b, nb  !< Counters.
    real(R8P)                                  :: ma, mb    !< Mean lengths.
+   logical                                    :: strict_   !< Strict rule.
 
+   strict_ = .true. ; if (present(strict)) strict_ = strict
    nb = size(sl, kind=I4P)
    allocate(sh(nb, nb), cb(nb)) ; sh = .false.
    do b = 1, nb
@@ -503,14 +524,17 @@ contains
    do a = 1, nb
       do b = a + 1, nb
          if (sl(a)%n == 0 .or. sl(b)%n == 0) cycle
-         call near_segs(sl(a), cb(b), tolerance, na) ; call near_segs(sl(b), cb(a), tolerance, nbb)
+         call near_segs(sl(a), cb(b), tolerance, na, ca) ; call near_segs(sl(b), cb(a), tolerance, nbb, cbb)
          if (.not. (any(na) .or. any(nbb))) cycle
          sh(a, b) = .true. ; sh(b, a) = .true.
          ma = mean_len(sl(a), na) ; mb = mean_len(sl(b), nbb)
+         if (.not. strict_) then
+            ca = na ; cbb = nbb
+         endif
          if (ma >= mb) then
-            sl(a)%keep = sl(a)%keep .and. .not. na
+            sl(a)%keep = sl(a)%keep .and. .not. ca
          else
-            sl(b)%keep = sl(b)%keep .and. .not. nbb
+            sl(b)%keep = sl(b)%keep .and. .not. cbb
          endif
       enddo
    enddo
@@ -529,22 +553,26 @@ contains
    call c%adopt_loops(u=u, v=v, loop_sizes=[(2_I4P, s = 1, sl%n)], closed=[(.false., s = 1, sl%n)])
    endsubroutine segment_curve
 
-   subroutine near_segs(sa, cb, tolerance, near)
-   !< near(s): the midpoint of segment s lies within the tolerance of the curve cb.
+   subroutine near_segs(sa, cb, tolerance, near, cover)
+   !< near(s): the midpoint of segment s lies within the tolerance of the curve cb; cover(s): both ends too (cb covers
+   !< it).
    type(seg_list_t),     intent(in)           :: sa        !< Segments.
    type(curve_object),   intent(in)           :: cb        !< Other curve.
    real(R8P),            intent(in), optional :: tolerance !< Distance.
    logical, allocatable, intent(out)          :: near(:)   !< Flags.
-   real(R8P), allocatable                     :: p(:,:), d(:) !< Ends, distances.
-   integer(I4P)                               :: s         !< Counter.
+   logical, allocatable, intent(out)          :: cover(:)  !< Flags.
+   real(R8P), allocatable                     :: p(:,:), d(:) !< Midpoints, starts, ends; distances.
+   integer(I4P)                               :: s, n      !< Counters.
    real(R8P)                                  :: tol       !< Tolerance.
 
-   allocate(p(2, sa%n), d(sa%n), near(sa%n))
-   p = 0.5_R8P * (sa%a + sa%b)
+   n = sa%n
+   allocate(p(2, 3 * n), d(3 * n), near(n), cover(n))
+   p(:, 1:n) = 0.5_R8P * (sa%a + sa%b) ; p(:, n + 1:2 * n) = sa%a ; p(:, 2 * n + 1:3 * n) = sa%b
    call cb%distance_many(points=p, distances=d, is_signed=.false.)
-   do s = 1, sa%n
+   do s = 1, n
       tol = 0.1_R8P * norm2(sa%b(:, s) - sa%a(:, s)) ; if (present(tolerance)) tol = tolerance
       near(s) = abs(d(s)) <= tol
+      cover(s) = near(s) .and. abs(d(n + s)) <= tol .and. abs(d(2 * n + s)) <= tol
    enddo
    endsubroutine near_segs
 

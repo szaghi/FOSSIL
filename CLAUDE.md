@@ -295,8 +295,9 @@ fobis fetch            # --update to re-fetch
 - `fossil_overset.f90` — overset assembly kernels (issue #72, roadmap #68 WP3; design in `docs/guide/advanced/overset.md`),
   on sets of `curvilinear_block_t` / `_2d_t` (points = vertices; cell-centred data: the cell-centre blocks with a ghost
   or extrapolated layer). `wall_cutter(_2d)`: wall faces (TOPO_BOUNDARY named `wall`) -> surface/curve, shorter
-  diagonal, solid inside, overlapping patches trimmed (coarser patch's elements whose centroid lies within the
-  tolerance of the finer patch dropped; `shared` walls). `hole_flags(_2d)`: FWN signed distance < offset (on the wall:
+  diagonal, solid inside, overlapping patches trimmed (a coarser patch's element dropped only if its vertices and
+  centroid lie within the tolerance of the finer patch: no gap, a double-covered strip; `strict=.false.` = the
+  centroid rule of #72, issue #91; `shared` walls). `hole_flags(_2d)`: FWN signed distance < offset (on the wall:
   field), CPU/device bit-exact, `cuts=` (exclude the posed owner blocks), `poses=`/`cutter_pose=`. `hole_map(_2d)`:
   Cartesian map, exact BOX_CUT, paint from corners, line of sight along a grid axis with exact crossing parity (exact;
   `pegasus=.true.` shows PEGASUS 5's thin-body failure); `xray_flags(_2d)`. `donor_candidates(_2d)`: all candidates per

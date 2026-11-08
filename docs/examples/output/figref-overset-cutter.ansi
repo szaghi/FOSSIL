@@ -1,5 +1,6 @@
 $ fig_ref_overset_cutter
 cutter loops: 2, shared wall: T
 loop 1 from block 1, vertices 25
-loop 2 from block 2, vertices 9
-coarse wall segments kept:  F F T T T T T T T T F
+loop 2 from block 2, vertices 10
+coarse wall segments kept:  F F T T T T T T T T T
+double-covered: 20.0 deg, uncovered: 0.0 deg
