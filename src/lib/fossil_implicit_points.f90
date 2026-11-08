@@ -10,41 +10,52 @@ module fossil_implicit_points
 !< - IPK_SSI: segment (a, b) meets segment (c, d), both in one plane, solved in the coordinate plane that drops axis
 !<   `drop`: the point of the line (a, b) whose projection lies on the projected line (c, d);
 !< - IPK_EEI: the lines (a, b) and (c, d), exactly coplanar (orient3d(a, b, c, d) = 0) and not parallel, meet: the
-!<   identity depends on the two edges only, not on a projection or on the facets they bound.
+!<   identity depends on the two edges only, not on a projection or on the facets they bound;
+!< - IPK_TPI: three planes, each through three input points, meet (issue #91): the point where three facets of a
+!<   self-intersecting surface cross inside each of them.
 !< Each point has homogeneous coordinates (X, W), polynomials in the input coordinates:
 !< - explicit: X = x, W = 1;
 !< - LPI: n = (s - r) x (t - r), W = n . (q - p), X = W p + (n . (r - p)) (q - p);
 !< - SSI: with u = b - a, v = d - c, w = c - a in the kept axes (i, j): W = u_i v_j - u_j v_i,
 !<   X = W a + (w_i v_j - w_j v_i) u;
-!< - EEI: with m = u x v, W = m . m, X = W a + ((w x v) . m) u.
+!< - EEI: with m = u x v, W = m . m, X = W a + ((w x v) . m) u;
+!< - TPI (Cramer): plane k through (a_k, b_k, c_k) has n_k = (b_k - a_k) x (c_k - a_k) and, about o = a_1,
+!<   d_k = n_k . (a_k - o) (d_1 = 0); W = n_1 . (n_2 x n_3) (degree 6), X = W o + d_2 (n_3 x n_1) + d_3 (n_1 x n_2)
+!<   (degree 7). W = 0 (planes not independent) is not a point: the caller constructs a TPI only for three planes
+!<   that meet in one point.
 !< The defining inputs are put in a canonical order first (endpoints and segments lexicographically, the plane's
-!< three points lexicographically), so one geometric construction is one point, and `ip_approx` rounds it by one
-!< formula: equal identities give equal bits.
+!< three points lexicographically, the three planes of a TPI lexicographically by their nine coordinates), so one
+!< geometric construction is one point, and `ip_approx` rounds it by one formula: equal identities give equal bits.
 !<
 !< Predicates (`ip_orient3d`, `ip_orient2d`, `ip_compare`) return the exact sign of a polynomial in the input
 !< coordinates. Stage 1 evaluates it in doubles with a running bound of the rounding error of every operation (a
 !< dynamic filter, conservative); when the bound does not settle the sign, stage 2 evaluates the same polynomial in
 !< expansion arithmetic (nonoverlapping sums of doubles, Shewchuk 1997), exactly. Products are made exact by
 !< splitting each factor by bit masks into three 18-bit pieces, so FMA contraction cannot change a result (as in
-!< `fossil_predicates`). The sign is exact barring overflow and underflow of the intermediate products.
+!< `fossil_predicates`). The sign is exact barring overflow and underflow of the intermediate products. The stage-2
+!< intermediates are compressed (Shewchuk's Compress), which keeps the expansions of the degree-21 orient3d of a TPI
+!< short; a compressed expansion has the same value, so signs do not depend on it (and the rounding of the older kinds
+!< by `ip_approx` does not use it, their bits are those of issue #65).
 use fossil_predicates, only : orient2d_xy, orient3d_xyz
 use penf, only : I4P, I8P, R8P
 
 implicit none
 private
-public :: implicit_point_t, IPK_EXPLICIT, IPK_LPI, IPK_SSI, IPK_EEI
-public :: ip_explicit, ip_lpi, ip_ssi, ip_eei, ip_same, ip_approx
+public :: implicit_point_t, IPK_EXPLICIT, IPK_LPI, IPK_SSI, IPK_EEI, IPK_TPI
+public :: ip_explicit, ip_lpi, ip_ssi, ip_eei, ip_tpi, ip_same, ip_approx
 public :: ip_orient3d, ip_orient2d, ip_compare, ip_lex_compare, ip_identity_compare, ip_rank
 
 integer(I4P), parameter :: IPK_EXPLICIT = 1_I4P !< Input vertex.
 integer(I4P), parameter :: IPK_LPI      = 2_I4P !< Line-plane intersection.
 integer(I4P), parameter :: IPK_SSI      = 3_I4P !< Coplanar segment-segment intersection.
 integer(I4P), parameter :: IPK_EEI      = 4_I4P !< Intersection of two exactly coplanar lines (edge-edge).
+integer(I4P), parameter :: IPK_TPI      = 5_I4P !< Intersection of three planes (issue #91).
 
 type :: implicit_point_t
    !< An implicit point: its kind, its defining input points (canonical order) and, for IPK_SSI, the dropped axis.
    integer(I4P) :: kind = 0_I4P            !< IP_*.
-   real(R8P)    :: v(3, 5) = 0._R8P        !< Defining points (columns): x; p, q, r, s, t; a, b, c, d.
+   real(R8P)    :: v(3, 9) = 0._R8P        !< Defining points (columns): x; p, q, r, s, t; a, b, c, d; a_1, b_1,
+                                           !< c_1, a_2, b_2, c_2, a_3, b_3, c_3 (TPI).
    integer(I4P) :: drop = 0_I4P            !< Dropped axis of an IPK_SSI.
 endtype implicit_point_t
 
@@ -125,6 +136,29 @@ contains
    p%kind = IPK_EEI ; p%drop = 0_I4P
    endfunction ip_eei
 
+   pure function ip_tpi(pl1, pl2, pl3) result(p)
+   !< The planes through the columns of pl1, pl2, pl3 meet (canonical order: points within a plane, then the planes).
+   real(R8P), intent(in)  :: pl1(3, 3), pl2(3, 3), pl3(3, 3) !< Planes, three points each.
+   type(implicit_point_t) :: p                                !< Point.
+   real(R8P)              :: w(3, 3, 3), t(3, 3)
+   integer(I4P)           :: i, j
+
+   p%kind = IPK_TPI
+   w(:, :, 1) = pl1 ; w(:, :, 2) = pl2 ; w(:, :, 3) = pl3
+   do i = 1, 3
+      call sort3(w(:, :, i))
+   enddo
+   do i = 2, 3 ! insertion sort of the planes by their nine coordinates
+      j = i
+      do while (j > 1)
+         if (.not. plane_less(w(:, :, j), w(:, :, j - 1))) exit
+         t = w(:, :, j) ; w(:, :, j) = w(:, :, j - 1) ; w(:, :, j - 1) = t
+         j = j - 1
+      enddo
+   enddo
+   p%v(:, 1:3) = w(:, :, 1) ; p%v(:, 4:6) = w(:, :, 2) ; p%v(:, 7:9) = w(:, :, 3)
+   endfunction ip_tpi
+
    pure function ip_same(a, b) result(same)
    !< The same construction (identity): same kind, defining points and axis, bit for bit.
    type(implicit_point_t), intent(in) :: a, b !< Points.
@@ -167,6 +201,12 @@ contains
          sg = 0_I4P ; return
       endif
    endif
+   if (p%kind == IPK_TPI) then ! on its three planes by construction
+      if (same_plane(p%v(:, 1:3), a, b, c) .or. same_plane(p%v(:, 4:6), a, b, c) .or. &
+          same_plane(p%v(:, 7:9), a, b, c)) then
+         sg = 0_I4P ; return
+      endif
+   endif
    ! det[a - P; b - P; c - P] W^3 = det[W a - X; W b - X; W c - X]; sign(W^3) = sign(W)
    call homog_r(p, rx, rw)
    rd = det3_r(rw, rx, a, b, c)
@@ -202,7 +242,8 @@ contains
       sg = s1 * s2 * s3 * s4 ; return
    endif
    call homog_x(p, ex, ew) ; call homog_x(q, fx, fw) ; call homog_x(r, gx, gw)
-   e = ex(i) * (fx(j) * gw - gx(j) * fw) - fx(i) * (ex(j) * gw - gx(j) * ew) + gx(i) * (ex(j) * fw - fx(j) * ew)
+   e = xc(ex(i) * xc(fx(j) * gw - gx(j) * fw)) - xc(fx(i) * xc(ex(j) * gw - gx(j) * ew)) + &
+       xc(gx(i) * xc(ex(j) * fw - fx(j) * ew))
    sg = x_sign(e) * x_sign(ew) * x_sign(fw) * x_sign(gw)
    endfunction ip_orient2d
 
@@ -267,7 +308,7 @@ contains
    if (p%drop /= q%drop) then
       sg = merge(-1_I4P, 1_I4P, p%drop < q%drop) ; return
    endif
-   do c = 1, 5
+   do c = 1, 9
       do k = 1, 3
          if (p%v(k, c) /= q%v(k, c)) then
             sg = merge(-1_I4P, 1_I4P, p%v(k, c) < q%v(k, c)) ; return
@@ -278,14 +319,16 @@ contains
 
    elemental function ip_rank(p) result(r)
    !< Preference among constructions of the same point: an input vertex, then an edge-edge point, a segment-segment
-   !< point, a line-plane point (the most specific construction is the one every facet pair agrees on).
+   !< point, a line-plane point, a three-plane point (the most specific construction is the one every facet pair agrees
+   !< on).
    type(implicit_point_t), intent(in) :: p !< Point.
-   integer(I4P)                       :: r !< 1 (preferred) .. 4.
+   integer(I4P)                       :: r !< 1 (preferred) .. 5.
 
    select case (p%kind)
    case (IPK_EXPLICIT) ; r = 1_I4P
    case (IPK_EEI)      ; r = 2_I4P
    case (IPK_SSI)      ; r = 3_I4P
+   case (IPK_TPI)      ; r = 5_I4P
    case default        ; r = 4_I4P
    endselect
    endfunction ip_rank
@@ -340,8 +383,43 @@ contains
       do k = 1, 3
          x(k) = w * r_of(p%v(k, 1)) + t * (r_of(p%v(k, 2)) - r_of(p%v(k, 1)))
       enddo
+   case (IPK_TPI)
+      call homog_tpi_r(p, x, w)
    endselect
    endsubroutine homog_r
+
+   pure subroutine homog_tpi_r(p, x, w)
+   !< (X, W) of a three-plane point with error bounds (Cramer about o = a_1, see the module header).
+   type(implicit_point_t), intent(in)  :: p    !< Point.
+   type(rerr_t),           intent(out) :: x(3) !< X.
+   type(rerr_t),           intent(out) :: w    !< W.
+   type(rerr_t)                        :: n(3, 3), c(3, 3), d(3), u(3), v(3)
+   integer(I4P)                        :: k, l, o
+
+   do l = 1, 3
+      o = 3_I4P * (l - 1_I4P)
+      do k = 1, 3
+         u(k) = r_of(p%v(k, o + 2)) - r_of(p%v(k, o + 1)) ; v(k) = r_of(p%v(k, o + 3)) - r_of(p%v(k, o + 1))
+      enddo
+      n(:, l) = r_cross(u, v)
+      do k = 1, 3
+         u(k) = r_of(p%v(k, o + 1)) - r_of(p%v(k, 1))
+      enddo
+      d(l) = n(1, l) * u(1) + n(2, l) * u(2) + n(3, l) * u(3)
+   enddo
+   c(:, 1) = r_cross(n(:, 2), n(:, 3)) ; c(:, 2) = r_cross(n(:, 3), n(:, 1)) ; c(:, 3) = r_cross(n(:, 1), n(:, 2))
+   w = n(1, 1) * c(1, 1) + n(2, 1) * c(2, 1) + n(3, 1) * c(3, 1)
+   do k = 1, 3 ! d(1) = 0 exactly (o is a point of plane 1)
+      x(k) = w * r_of(p%v(k, 1)) + (d(2) * c(k, 2) + d(3) * c(k, 3))
+   enddo
+   endsubroutine homog_tpi_r
+
+   pure function r_cross(a, b) result(c)
+   type(rerr_t), intent(in) :: a(3), b(3)
+   type(rerr_t)             :: c(3)
+
+   c(1) = a(2) * b(3) - a(3) * b(2) ; c(2) = a(3) * b(1) - a(1) * b(3) ; c(3) = a(1) * b(2) - a(2) * b(1)
+   endfunction r_cross
 
    pure subroutine homog_x(p, x, w)
    !< (X, W) of p, exactly.
@@ -391,8 +469,44 @@ contains
       do k = 1, 3
          x(k) = w * x_of(p%v(k, 1)) + t * (x_of(p%v(k, 2)) - x_of(p%v(k, 1)))
       enddo
+   case (IPK_TPI)
+      call homog_tpi_x(p, x, w)
    endselect
    endsubroutine homog_x
+
+   pure subroutine homog_tpi_x(p, x, w)
+   !< (X, W) of a three-plane point, exactly (compressed expansions).
+   type(implicit_point_t), intent(in)  :: p    !< Point.
+   type(expn_t),           intent(out) :: x(3) !< X.
+   type(expn_t),           intent(out) :: w    !< W.
+   type(expn_t)                        :: n(3, 3), c(3, 3), d(3), u(3), v(3)
+   integer(I4P)                        :: k, l, o
+
+   do l = 1, 3
+      o = 3_I4P * (l - 1_I4P)
+      do k = 1, 3
+         u(k) = x_of(p%v(k, o + 2)) - x_of(p%v(k, o + 1)) ; v(k) = x_of(p%v(k, o + 3)) - x_of(p%v(k, o + 1))
+      enddo
+      n(:, l) = x_cross(u, v)
+      do k = 1, 3
+         u(k) = x_of(p%v(k, o + 1)) - x_of(p%v(k, 1))
+      enddo
+      d(l) = xc(xc(n(1, l) * u(1)) + xc(n(2, l) * u(2)) + xc(n(3, l) * u(3)))
+   enddo
+   c(:, 1) = x_cross(n(:, 2), n(:, 3)) ; c(:, 2) = x_cross(n(:, 3), n(:, 1)) ; c(:, 3) = x_cross(n(:, 1), n(:, 2))
+   w = xc(xc(n(1, 1) * c(1, 1)) + xc(n(2, 1) * c(2, 1)) + xc(n(3, 1) * c(3, 1)))
+   do k = 1, 3
+      x(k) = xc(xc(w * x_of(p%v(k, 1))) + xc(xc(d(2) * c(k, 2)) + xc(d(3) * c(k, 3))))
+   enddo
+   endsubroutine homog_tpi_x
+
+   pure function x_cross(a, b) result(c)
+   !< Exact cross product, compressed.
+   type(expn_t), intent(in) :: a(3), b(3)
+   type(expn_t)             :: c(3)
+
+   c(1) = xc(a(2) * b(3) - a(3) * b(2)) ; c(2) = xc(a(3) * b(1) - a(1) * b(3)) ; c(3) = xc(a(1) * b(2) - a(2) * b(1))
+   endfunction x_cross
 
    pure function det3_r(w, x, a, b, c) result(d)
    !< det[W a - X; W b - X; W c - X], with error bound.
@@ -418,10 +532,10 @@ contains
    integer(I4P)             :: k
 
    do k = 1, 3
-      ra(k) = w * x_of(a(k)) - x(k) ; rb(k) = w * x_of(b(k)) - x(k) ; rc(k) = w * x_of(c(k)) - x(k)
+      ra(k) = xc(w * x_of(a(k)) - x(k)) ; rb(k) = xc(w * x_of(b(k)) - x(k)) ; rc(k) = xc(w * x_of(c(k)) - x(k))
    enddo
-   d = ra(1) * (rb(2) * rc(3) - rb(3) * rc(2)) - ra(2) * (rb(1) * rc(3) - rb(3) * rc(1)) + &
-       ra(3) * (rb(1) * rc(2) - rb(2) * rc(1))
+   d = xc(ra(1) * xc(rb(2) * rc(3) - rb(3) * rc(2))) - xc(ra(2) * xc(rb(1) * rc(3) - rb(3) * rc(1))) + &
+       xc(ra(3) * xc(rb(1) * rc(2) - rb(2) * rc(1)))
    endfunction det3_x
 
    ! stage 1: doubles with error bounds ---------------------------------------------------------------------------------
@@ -529,6 +643,37 @@ contains
       enddo
    enddo
    endfunction x_mul
+
+   pure function xc(a) result(h)
+   !< The expansion compressed (Shewchuk's Compress): same value, nonoverlapping, few components.
+   type(expn_t), intent(in) :: a
+   type(expn_t)             :: h
+   real(R8P)                :: q, qn, sm, bv
+   integer(I4P)             :: k, bottom, top
+
+   allocate(h%c(max(1_I4P, a%n))) ; h%n = 0_I4P
+   if (a%n == 0_I4P) return
+   bottom = a%n ; q = a%c(a%n)
+   do k = a%n - 1, 1, -1 ! fast two-sum from the top: |q| >= |a%c(k)|
+      qn = q + a%c(k) ; bv = qn - q ; sm = a%c(k) - bv
+      if (sm /= 0._R8P) then
+         h%c(bottom) = qn ; bottom = bottom - 1_I4P ; q = sm
+      else
+         q = qn
+      endif
+   enddo
+   top = 0_I4P
+   do k = bottom + 1, a%n
+      qn = h%c(k) + q ; bv = qn - h%c(k) ; sm = q - bv
+      if (sm /= 0._R8P) then
+         top = top + 1_I4P ; h%c(top) = sm
+      endif
+      q = qn
+   enddo
+   top = top + 1_I4P ; h%c(top) = q
+   h%n = top
+   if (top == 1_I4P .and. q == 0._R8P) h%n = 0_I4P
+   endfunction xc
 
    pure function x_sign(a) result(s)
    !< Exact sign: the largest (last) nonzero component.
@@ -661,6 +806,8 @@ contains
          on = all(x%v(:, 1:2) == l)
       case (IPK_EEI)
          on = all(x%v(:, 1:2) == l) .or. all(x%v(:, 3:4) == l)
+      case (IPK_TPI) ! carries no input line
+         on = .false.
       case default ! an SSI point lies on its first segment in 3D only
          on = all(x%v(:, 1:2) == l)
       endselect
@@ -689,6 +836,20 @@ contains
       less = a(3) < b(3)
    endif
    endfunction lex_less
+
+   pure function plane_less(a, b) result(less)
+   !< Lexicographic order of two planes (three sorted points each) by their nine coordinates.
+   real(R8P), intent(in) :: a(3, 3), b(3, 3)
+   logical               :: less
+   integer(I4P)          :: k
+
+   less = .false.
+   do k = 1, 3
+      if (any(a(:, k) /= b(:, k))) then
+         less = lex_less(a(:, k), b(:, k)) ; return
+      endif
+   enddo
+   endfunction plane_less
 
    pure subroutine sort3(w)
    real(R8P), intent(inout) :: w(3, 3)

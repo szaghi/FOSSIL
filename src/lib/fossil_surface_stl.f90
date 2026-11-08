@@ -4003,8 +4003,9 @@ contains
    !<
    !< Status (BOOL_STATUS_*), `self` unchanged unless OK:
    !<   - OK: no self-intersection (nothing to do), or the self-union is closed (no boundary edge);
-   !<   - CDT_FAILED: a facet's cuts cross each other (three facets meeting at a point inside a facet: the
-   !<     arrangement has no triple-point construction), see the Known limitations of the reference page;
+   !<   - CDT_FAILED: a facet's triangulation failed (a cut along a coplanar facet's edge crossing another cut inside
+   !<     it); cuts of three facets meeting at a point inside a facet are split at their three-plane point (IPK_TPI,
+   !<     issue #91). See the Known limitations of the reference page;
    !<   - NOT_CLOSED: the selection is not closed (an input that is not closed has no well-defined winding number);
    !<   - EMPTY_INPUT: no facets.
    class(surface_stl_object),     intent(inout)        :: self   !< Surface; replaced by its self-union on success.

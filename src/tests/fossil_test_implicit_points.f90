@@ -13,45 +13,77 @@
 !<    coordinates, so the plane holds exactly): the point lies on both lines in every projection and on the plane; the
 !<    identity does not depend on the order of the edges or of their endpoints; `ip_lex_compare` is 0 on the same
 !<    point from two constructions only when they coincide.
+!< 5. Three-plane points (issue #91, IPK_TPI). Golden signs (the T3, T2, TC lines of the golden file, same exact
+!<    rational reference): orient3d against a plane nearly through the point (a vertex moved by 0..50 ulps), against a
+!<    plane coincident with one of its planes but given by other points, and against a plane through a point m that
+!<    all three planes contain (exact zeros); orient2d of two such points on nearly one line (planes 1, 2 through a
+!<    line, one moved by 0..20 ulps) with a point of that line; coordinate comparison with the rounded point moved by
+!<    0..3 ulps and with m. Exact zeros on random inputs: the point lies on its three planes (orient3d with the
+!<    planes' points in any order), a point of three planes through an input vertex m equals m (`ip_lex_compare` 0;
+!<    `ip_approx` rounds X and W, then divides: measured 2 ulps from m, bound 4), two points sharing two planes are
+!<    collinear with a third such point in every projection; reordering the planes and the points of each plane gives
+!<    the same identity and the same rounded bits; a TPI equal to an LPI (the line of two of its planes' points)
+!<    compares equal, keeps a distinct identity and ranks after it.
 program fossil_test_implicit_points
 
-use fossil_implicit_points, only : implicit_point_t, ip_explicit, ip_lpi, ip_ssi, ip_eei, ip_same, ip_approx, &
-                                   ip_orient3d, ip_orient2d, ip_compare, ip_lex_compare
+use fossil_implicit_points, only : implicit_point_t, ip_explicit, ip_lpi, ip_ssi, ip_eei, ip_tpi, ip_same, &
+                                   ip_approx, ip_orient3d, ip_orient2d, ip_compare, ip_lex_compare, &
+                                   ip_identity_compare, ip_rank
 use fossil_predicates,      only : orient3d_xyz, orient2d_xy
 use penf,                   only : I4P, I8P, R8P
 
 implicit none
 
-type(implicit_point_t) :: x1, x2, e
+type(implicit_point_t) :: x1, x2, x3, e
 character(2)           :: tag
-real(R8P)              :: v(30), p(3), q(3), r(3), s(3), t(3), a(3), b(3), c(3), d(3)
+real(R8P)              :: v(57), p(3), q(3), r(3), s(3), t(3), a(3), b(3), c(3), d(3), m(3), pl(3, 3, 3)
 integer(I4P)           :: u, ios, ex, nv, drop, ngold, bad_gold, naive_off, nzero_bad, nagree_bad, k, i, neei_bad
+integer(I4P)           :: ntgold, bad_tgold, tnaive_off, ntpi_bad
+real(R8P)              :: ulps
 integer(I8P)           :: seed
 logical                :: ok
 
-ngold = 0 ; bad_gold = 0 ; naive_off = 0
+ngold = 0 ; bad_gold = 0 ; naive_off = 0 ; ntgold = 0 ; bad_tgold = 0 ; tnaive_off = 0
 open(newunit=u, file='src/tests/implicit_points_golden.txt', status='old', action='read')
 read(u, *) ! header
 do
    read(u, '(A2)', advance='no', iostat=ios) tag
    if (ios /= 0) exit
-   if (tag == 'O3') then
+   select case (tag)
+   case ('O3')
       read(u, *) ex, nv, v(1:24)
       x1 = ip_lpi(v(1:3), v(4:6), v(7:9), v(10:12), v(13:15))
       k = ip_orient3d(x1, v(16:18), v(19:21), v(22:24))
-   else
+   case ('O2')
       read(u, *) ex, drop, nv, v(1:30)
       x1 = ip_lpi(v(1:3), v(4:6), v(7:9), v(10:12), v(13:15))
       x2 = ip_lpi(v(16:18), v(19:21), v(22:24), v(25:27), v(28:30))
       k = ip_orient2d(x1, x2, ip_explicit(v(1:3)), drop)
+   case ('T3')
+      read(u, *) ex, nv, v(1:36)
+      k = ip_orient3d(tpi_of(v(1:27)), v(28:30), v(31:33), v(34:36))
+   case ('T2')
+      read(u, *) ex, drop, nv, v(1:57)
+      k = ip_orient2d(tpi_of(v(1:27)), tpi_of(v(28:54)), ip_explicit(v(55:57)), drop) ! drop as in O2
+   case ('TC')
+      read(u, *) ex, drop, nv, v(1:30)
+      k = ip_compare(tpi_of(v(1:27)), ip_explicit(v(28:30)), int(drop + 1, I4P))
+   endselect
+   if (tag(1:1) == 'T') then
+      ntgold = ntgold + 1
+      if (k /= ex) bad_tgold = bad_tgold + 1
+      if (nv /= ex) tnaive_off = tnaive_off + 1
+   else
+      ngold = ngold + 1
+      if (k /= ex) bad_gold = bad_gold + 1
+      if (nv /= ex) naive_off = naive_off + 1
    endif
-   ngold = ngold + 1
-   if (k /= ex) bad_gold = bad_gold + 1
-   if (nv /= ex) naive_off = naive_off + 1
 enddo
 close(u)
 print '(A,I0,A,I0,A,I0)', 'golden cases ', ngold, ', exact disagreements ', bad_gold, &
                           ', disagreements of the rounded evaluation (negative control) ', naive_off
+print '(A,I0,A,I0,A,I0)', 'three-plane golden cases ', ntgold, ', exact disagreements ', bad_tgold, &
+                          ', disagreements of the rounded evaluation (negative control) ', tnaive_off
 
 nzero_bad = 0 ; seed = 20261106_I8P
 do i = 1, 500
@@ -111,10 +143,57 @@ do i = 1, 500
 enddo
 print '(A,I0)', 'edge-edge point checks failing: ', neei_bad
 
+ntpi_bad = 0 ; ulps = 0._R8P
+do i = 1, 300
+   do k = 1, 3
+      pl(:, 1, k) = rv() ; pl(:, 2, k) = rv() ; pl(:, 3, k) = rv()
+   enddo
+   x1 = ip_tpi(pl(:, :, 1), pl(:, :, 2), pl(:, :, 3))
+   do k = 1, 3 ! on its three planes, the points in any order
+      if (ip_orient3d(x1, pl(:, 1, k), pl(:, 2, k), pl(:, 3, k)) /= 0) ntpi_bad = ntpi_bad + 1
+      if (ip_orient3d(x1, pl(:, 3, k), pl(:, 1, k), pl(:, 2, k)) /= 0) ntpi_bad = ntpi_bad + 1
+   enddo
+   ! same identity and bits whatever the order of the planes and of their points
+   x2 = ip_tpi(pl(:, [3, 1, 2], 3), pl(:, [2, 1, 3], 1), pl(:, :, 2))
+   if (.not. ip_same(x1, x2) .or. any(ip_approx(x1) /= ip_approx(x2)) .or. ip_identity_compare(x1, x2) /= 0) &
+      ntpi_bad = ntpi_bad + 1
+   if (ip_lex_compare(x1, x2) /= 0) ntpi_bad = ntpi_bad + 1
+   ! two points sharing planes 1 and 2 and a third: collinear in every projection (the line of planes 1, 2)
+   x2 = ip_tpi(pl(:, :, 1), pl(:, :, 2), reshape([rv(), rv(), rv()], [3, 3]))
+   x3 = ip_tpi(pl(:, :, 2), reshape([rv(), rv(), rv()], [3, 3]), pl(:, :, 1))
+   do drop = 1, 3
+      if (ip_orient2d(x1, x2, x3, drop) /= 0) ntpi_bad = ntpi_bad + 1
+   enddo
+   ! three planes through an input vertex m: the point is m
+   m = rv()
+   x2 = ip_tpi(reshape([m, rv(), rv()], [3, 3]), reshape([rv(), m, rv()], [3, 3]), reshape([rv(), rv(), m], [3, 3]))
+   if (ip_lex_compare(x2, ip_explicit(m)) /= 0) ntpi_bad = ntpi_bad + 1
+   r = ip_approx(x2) ! X and W rounded, then divided: a few ulps (the registry keeps m itself, the explicit point)
+   ulps = max(ulps, maxval(abs(r - m) / spacing(m)))
+   if (ip_orient3d(x2, m, rv(), rv()) /= 0) ntpi_bad = ntpi_bad + 1
+   ! the same point as a line-plane point: the line through two points of planes 1 and 2 (p, q on both), plane 3
+   p = rv() ; q = rv()
+   x2 = ip_tpi(reshape([p, q, rv()], [3, 3]), reshape([q, rv(), p], [3, 3]), pl(:, :, 3))
+   x3 = ip_lpi(p, q, pl(:, 1, 3), pl(:, 2, 3), pl(:, 3, 3))
+   if (ip_lex_compare(x2, x3) /= 0 .or. ip_same(x2, x3) .or. ip_rank(x3) >= ip_rank(x2)) ntpi_bad = ntpi_bad + 1
+   if (ip_lex_compare(x1, x2) == 0) ntpi_bad = ntpi_bad + 1
+enddo
+print '(A,I0,A,F4.1)', 'three-plane point checks failing: ', ntpi_bad, ', rounding of a point equal to an input vertex, ulps ', &
+   ulps
+
 ok = ngold > 0 .and. bad_gold == 0 .and. naive_off > 0 .and. nzero_bad == 0 .and. nagree_bad == 0 .and. neei_bad == 0
+ok = ok .and. ntgold > 0 .and. bad_tgold == 0 .and. tnaive_off > 0 .and. ntpi_bad == 0 .and. ulps <= 4._R8P
 print '(A,L1)', 'Are all tests passed? ', ok
 
 contains
+   pure function tpi_of(w) result(x)
+   !< The three-plane point of the planes w(1:9), w(10:18), w(19:27) (three points each).
+   real(R8P), intent(in)  :: w(27)
+   type(implicit_point_t) :: x
+
+   x = ip_tpi(reshape(w(1:9), [3, 3]), reshape(w(10:18), [3, 3]), reshape(w(19:27), [3, 3]))
+   endfunction tpi_of
+
    function rnd() result(r)
    integer(I8P) :: r
 

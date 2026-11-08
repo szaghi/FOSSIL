@@ -62,3 +62,89 @@ with open('implicit_points_golden.txt','w') as f:
         else:
             f.write('O2 %d %d %d %s\n'%(e[0],e[1],naive,' '.join(repr(v) for v in vals)))
 print(len(out), sum(1 for o in out if (o[2] if o[0]=='O3' else o[2][0])!=o[3]), 'naive disagreements', sum(1 for o in out if (o[2] if o[0]=='O3' else o[2][0])==0),'zeros')
+# Three-plane points (issue #91 step 1, IPK_TPI), appended with their own random stream (the lines above unchanged).
+# T3 e naive  P1 P2 P3 a b c       orient3d(a, b, c, TPI), each plane P = three points (9 values)
+# T2 e drop naive  P1 P2 P3 Q1 Q2 Q3 x   orient2d(TPI(P), TPI(Q), x) in the projection dropping axis drop
+# TC e axis naive  P1 P2 P3 x      sign(TPI_axis - x_axis)
+rg=random.Random(20261108)
+def RR(): return rg.uniform(-1,1)
+def DY(): return rg.randrange(-1024,1025)/1024.  # short dyadic: products and sums of a few stay exact in doubles
+def tpi(P):
+    P=[[[F(x) for x in v] for v in pl] for pl in P]
+    n=[cross(sub(b,a),sub(c,a)) for a,b,c in P]; d=[dot(n[k],P[k][0]) for k in range(3)]
+    w=dot(n[0],cross(n[1],n[2]))
+    if w==0: return None
+    c12=cross(n[1],n[2]); c20=cross(n[2],n[0]); c01=cross(n[0],n[1])
+    return [(d[0]*c12[i]+d[1]*c20[i]+d[2]*c01[i])/w for i in range(3)]
+def flat(P): return [x for pl in P for v in pl for x in v]
+def plane_through(m, rnd):  # a plane through the point m (doubles), its other two points random
+    return [list(m), [rnd() for _ in range(3)], [rnd() for _ in range(3)]]
+tout=[]
+# T3: random planes, (a, b, c) nearly through the point (c nudged by 0..50 ulps)
+for n in range(40):
+    P=[[[RR() for _ in range(3)] for _ in range(3)] for _ in range(3)]
+    X=tpi(P)
+    if X is None or any(abs(x)>2 for x in X): continue
+    Xa=[float(x) for x in X]
+    a=[RR() for _ in range(3)]; b=[RR() for _ in range(3)]
+    c=[float(F(Xa[i])+(F(Xa[i])-F(a[i]))*F(7,10)) for i in range(3)]
+    idx=rg.randrange(3); c[idx]=nudge(c[idx],rg.choice([0,1,2,5,50])*rg.choice([-1,1]))
+    tout.append(('T3',flat(P)+a+b+c,sg(o3d(a,b,c,X)),sg(o3d(a,b,c,Xa))))
+# T3 degenerate: the point lies on (a, b, c) exactly. (i) A plane coincident with one of its planes, given by other
+# points: all on z = (1 - x - y) with short dyadic x, y (exact). (ii) Three planes through one point m and (a, b, c)
+# through m too.
+for n in range(12):
+    def pv(): x=DY()/2; y=DY()/2; return [x,y,1.-x-y]
+    P=[[pv() for _ in range(3)]]+[[[RR() for _ in range(3)] for _ in range(3)] for _ in range(2)]
+    X=tpi(P)
+    if X is None: continue
+    a,b,c=pv(),pv(),pv()
+    if o3d(a,b,c,[F(0),F(0),F(5)])==0: continue
+    tout.append(('T3',flat(P)+a+b+c,sg(o3d(a,b,c,X)),sg(o3d(a,b,c,[float(x) for x in X]))))
+for n in range(12):
+    m=[RR() for _ in range(3)]
+    P=[plane_through(m,RR) for _ in range(3)]
+    if tpi(P) is None: continue
+    a=list(m); b=[RR() for _ in range(3)]; c=[RR() for _ in range(3)]
+    X=tpi(P); assert X==[F(x) for x in m]
+    tout.append(('T3',flat(P)+a+b+c,sg(o3d(a,b,c,X)),sg(o3d(a,b,c,[float(x) for x in X]))))
+# T2: two three-plane points on (nearly) one line: planes 1, 2 of both contain the line (p, q), q moved by 0..20 ulps
+# in the second point's plane 2; x = p
+for n in range(40):
+    p=[RR() for _ in range(3)]; q=[RR() for _ in range(3)]
+    q2=list(q); idx=rg.randrange(3); q2[idx]=nudge(q2[idx],rg.choice([0,1,3,20]))
+    r1=[RR() for _ in range(3)]; r2=[RR() for _ in range(3)]
+    P=[[p,q,r1],[p,q,r2],[[RR() for _ in range(3)] for _ in range(3)]]
+    Q=[[p,q,r1],[p,q2,r2],[[RR() for _ in range(3)] for _ in range(3)]]
+    X1=tpi(P); X2=tpi(Q)
+    if X1 is None or X2 is None or any(abs(x)>3 for x in X1+X2): continue
+    drop=rg.randrange(3)
+    e=sg(o2d(X1,X2,[F(x) for x in p],drop))
+    naive=sg(o2d([F(float(x)) for x in X1],[F(float(x)) for x in X2],[F(x) for x in p],drop))
+    tout.append(('T2',flat(P)+flat(Q)+p,(e,drop),naive))
+# TC: coordinate comparison with an explicit point: the rounded point moved by 0..3 ulps on one axis, and the exact
+# case of three planes through one point m (equal on every axis)
+for n in range(40):
+    if n%4==3:
+        m=[RR() for _ in range(3)]; P=[plane_through(m,RR) for _ in range(3)]
+        X=tpi(P)
+        if X is None: continue
+        x=list(m)
+    else:
+        P=[[[RR() for _ in range(3)] for _ in range(3)] for _ in range(3)]
+        X=tpi(P)
+        if X is None or any(abs(v)>2 for v in X): continue
+        x=[float(v) for v in X]
+        idx=rg.randrange(3); x[idx]=nudge(x[idx],rg.choice([0,1,3])*rg.choice([-1,1]))
+    axis=rg.randrange(3)
+    e=sg(X[axis]-F(x[axis])); naive=sg(F(float(X[axis]))-F(x[axis]))
+    tout.append(('TC',flat(P)+x,(e,axis),naive))
+with open('implicit_points_golden.txt','a') as f:
+    for kind,vals,e,naive in tout:
+        if kind=='T3':
+            f.write('T3 %d %d %s\n'%(e,naive,' '.join(repr(v) for v in vals)))
+        else:
+            f.write('%s %d %d %d %s\n'%(kind,e[0],e[1],naive,' '.join(repr(v) for v in vals)))
+ex=lambda o: o[2] if o[0]=='T3' else o[2][0]
+print(len(tout), 'three-plane cases,', sum(1 for o in tout if ex(o)!=o[3]), 'naive disagreements,',
+      sum(1 for o in tout if ex(o)==0), 'zeros')

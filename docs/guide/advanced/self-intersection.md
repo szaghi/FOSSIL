@@ -170,8 +170,9 @@ and leaves it unchanged otherwise:
 
 - `BOOL_STATUS_OK` — no self-intersection (nothing to do), or the
   self-union is closed;
-- `BOOL_STATUS_CDT_FAILED` — the cuts of a facet cross each other (see
-  [Known limitations](#known-limitations));
+- `BOOL_STATUS_CDT_FAILED` — the exact triangulation of a facet failed:
+  a cut along the edge of a coplanar facet crosses another cut inside it
+  (see [Known limitations](#known-limitations));
 - `BOOL_STATUS_NOT_CLOSED` — the selection has boundary edges: the
   input is not closed, so its winding number is not an integer;
 - `BOOL_STATUS_EMPTY_INPUT` — no facets.
@@ -226,23 +227,27 @@ inspection and that `is_watertight()` doesn't catch.
 
 ## Known limitations
 
-- **Three facets crossing at one point.** In a facet crossed by two
-  facets that also cross each other, the two cuts cross inside the
-  facet, at the point common to the three planes. The arrangement has no
-  construction for that point (its implicit points are line-plane and
-  segment-segment intersections), so the exact triangulation reports
-  crossing constraints and `resolve_self_intersections` returns
-  `BOOL_STATUS_CDT_FAILED` with the surface unchanged. Two bodies in a
-  boolean never meet this (each surface is clean); a self-intersecting
-  surface does whenever three of its sheets cross. `dragon.stl` does: 138
-  of its facets have crossing cuts (facet 36 is cut by facets 283, 6090,
-  6515 and 6582, which cross each other in pairs), raw or after
-  `sanitize`. It is also not closed (61 non-manifold edges raw;
+- **Three facets crossing at one point** are handled since issue #91. In
+  a facet crossed by two facets that also cross each other, the two cuts
+  cross inside the facet, at the point common to the three planes. The
+  arrangement constructs that point exactly (an implicit three-plane point,
+  `IPK_TPI`: Cramer's rule on the three planes, each through three input
+  vertices, with exact predicates), adds it to the three facets and splits
+  both cuts there. Three unit cubes crossing pairwise, merged into one
+  surface, resolve to their union (`fossil_test_resolve_self`, case 6).
+  `dragon.stl` has such points (facet 36 is cut by facets 283, 6090, 6515
+  and 6582, which cross each other in pairs; before issue #91, 138 facets
+  failed the triangulation), and now resolves to
+  `BOOL_STATUS_NOT_CLOSED`: it is not closed (61 non-manifold edges raw;
   boundary edges after `sanitize` removes 62 duplicates), so its winding
-  number is not an integer and the self-union is not defined.
-  `fossil_test_resolve_self` checks the status. The fix is a
-  three-plane intersection point with its exact predicates; until then
-  wrap such inputs with [`alpha_wrap`](/guide/advanced/alpha-wrap).
+  number is not an integer and the self-union is not defined. Wrap such
+  inputs with [`alpha_wrap`](/guide/advanced/alpha-wrap).
+- **A coplanar cut crossing another cut.** A facet exactly coplanar with
+  another is cut along the portions of the other's edges inside it; if
+  such a cut crosses a cut by a transversal facet (or another coplanar
+  cut) inside the facet, the crossing point (a line-plane or edge-edge
+  point) is not constructed there, and the call returns
+  `BOOL_STATUS_CDT_FAILED` with the surface unchanged.
 - **Closed inputs only.** The selection reads the winding number,
   defined for a closed surface. On an open one the selection keeps its
   boundary edges and the call returns `BOOL_STATUS_NOT_CLOSED`.

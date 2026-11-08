@@ -12,21 +12,26 @@
 !< 3. A clean cube is returned unchanged (same facets, bit for bit).
 !< 4. The crossing cubes of 1 with a facet of the first cube's face x = 0 removed (outside the second cube): not
 !<    closed, so BOOL_STATUS_NOT_CLOSED and the surface unchanged.
-!< 5. dragon.stl (1191 pairs): BOOL_STATUS_CDT_FAILED, the surface unchanged. The cuts of facet 36 cross each other
-!<    (CDTI_CROSSING): three facets meet at a point inside it, and the arrangement has no triple-point construction
-!<    (a documented limit, see docs/guide/advanced/self-intersection.md).
+!< 5. dragon.stl (1191 pairs): it is open, so BOOL_STATUS_NOT_CLOSED and the surface unchanged. Before issue #91 it
+!<    returned BOOL_STATUS_CDT_FAILED: the cuts of facet 36 cross each other (three facets meet at a point inside it)
+!<    and the arrangement had no triple-point construction.
+!< 6. Three unit cubes crossing pairwise (issue #91), translated by (0.3, 0.3, 0.3) and (0.6, -0.15, 0.45), merged into
+!<    one surface: the faces x = 1 of the first, y = 0.3 of the second and z = 0.45 of the third meet at
+!<    (1, 0.3, 0.45), strictly inside a facet of each (a three-plane point, IPK_TPI). The result equals the boolean
+!<    chain (A u B) u C: same volume and area to 1e-12, watertight, manifold, one shell, no self-intersection left.
+!<    Base 204cd62: BOOL_STATUS_CDT_FAILED.
 !< Negative control (base 9335a01): case 1 returns status 0, 224 facets, volume 2 (the arrangement unselected), not
 !< watertight; case 2 returns 88 facets, not watertight, 20 crossing pairs.
 program fossil_test_resolve_self
 
 use fossil, only : surface_stl_object, facet_object, intersection_pair_t, BOOL_UNION, BOOL_STATUS_OK, &
-                   BOOL_STATUS_NOT_CLOSED, BOOL_STATUS_CDT_FAILED
+                   BOOL_STATUS_NOT_CLOSED
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
 
 implicit none
 
-type(surface_stl_object)               :: a, b, soup, resolved, cube, holed, dragon
+type(surface_stl_object)               :: a, b, c, soup, resolved, cube, holed, dragon
 type(facet_object), allocatable        :: facets(:)
 type(facet_object), pointer            :: f, g
 type(intersection_pair_t), allocatable :: pairs(:)
@@ -34,7 +39,7 @@ type(vector_R8P), parameter            :: CORNER = vector_R8P(1._R8P, 1._R8P, 1.
 type(vector_R8P), parameter            :: APEX = vector_R8P(0.3_R8P, 0.35_R8P, -0.3_R8P)
 real(R8P)                              :: v_in, pocket, zmin
 integer(I4P)                           :: status, i, j, n, cut
-logical                                :: ok(5)
+logical                                :: ok(6)
 
 ! 1. two crossing cubes in one surface
 call a%load_from_file(file_name='src/tests/cube-01.stl', guess_format=.true.)
@@ -122,13 +127,34 @@ print '(A,I0,A,I0,A,I0)', '4. removed facet ', cut, ', status ', status, ', face
 ok(4) = status == BOOL_STATUS_NOT_CLOSED .and. holed%get_facets_number() == n .and. holed%get_volume() == v_in
 print '(A,L1)', '4. not closed: NOT_CLOSED, unchanged: ', ok(4)
 
-! 5. the dragon: a facet's cuts cross (triple point), CDT_FAILED, unchanged
+! 5. the dragon: its cuts cross at triple points (issue #91), it is open: NOT_CLOSED, unchanged
 call dragon%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
 n = dragon%get_facets_number() ; v_in = dragon%get_volume()
 call dragon%resolve_self_intersections(status=status)
 print '(A,I0,A,I0)', '5. dragon: status ', status, ', facets ', dragon%get_facets_number()
-ok(5) = status == BOOL_STATUS_CDT_FAILED .and. dragon%get_facets_number() == n .and. dragon%get_volume() == v_in
-print '(A,L1)', '5. dragon: CDT_FAILED, unchanged: ', ok(5)
+ok(5) = status == BOOL_STATUS_NOT_CLOSED .and. dragon%get_facets_number() == n .and. dragon%get_volume() == v_in
+print '(A,L1)', '5. dragon: NOT_CLOSED, unchanged: ', ok(5)
+
+! 6. three cubes crossing pairwise, a triple point inside a facet of each (issue #91)
+call a%load_from_file(file_name='src/tests/cube-01.stl', guess_format=.true.)
+b = a ; c = a
+call b%translate(delta=vector_R8P(0.3_R8P, 0.3_R8P, 0.3_R8P)) ; call b%analyze
+call c%translate(delta=vector_R8P(0.6_R8P, -0.15_R8P, 0.45_R8P)) ; call c%analyze
+soup = a
+call soup%merge_solids(other=b) ; call soup%merge_solids(other=c) ; call soup%analyze
+resolved = soup
+call resolved%resolve_self_intersections(status=status)
+call resolved%find_self_intersections(pairs=pairs)
+call a%boolean(other=b, op=BOOL_UNION) ; call a%boolean(other=c, op=BOOL_UNION)
+print '(A,I0,A,I0,A,F19.16,A,L1,L1,A,I0,A,I0)', '6. status ', status, ', facets ', resolved%get_facets_number(), &
+   ', volume ', resolved%get_volume(), ', watertight, manifold ', resolved%is_watertight(), resolved%is_manifold(), &
+   ', shells ', resolved%get_shells_number(), ', pairs ', size(pairs)
+print '(A,I0,A,F19.16,A,ES10.3,A,ES10.3)', '   boolean chain: facets ', a%get_facets_number(), ', volume ', &
+   a%get_volume(), ', |dV| ', abs(resolved%get_volume() - a%get_volume()), ', |dA| ', abs(area(resolved) - area(a))
+ok(6) = status == BOOL_STATUS_OK .and. resolved%is_watertight() .and. resolved%is_manifold() .and. &
+        resolved%get_shells_number() == 1 .and. size(pairs) == 0 .and. &
+        abs(resolved%get_volume() - a%get_volume()) < 1.e-12_R8P .and. abs(area(resolved) - area(a)) < 1.e-12_R8P
+print '(A,L1)', '6. three crossing cubes = the boolean chain: ', ok(6)
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 
 contains

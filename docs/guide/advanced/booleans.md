@@ -34,7 +34,9 @@ a tolerance:
    every facet pair whose boxes overlap is classified from exact `orient3d` signs: separated, crossing, touching or
    coplanar. A crossing gives a common segment whose endpoints are **implicit points** (`fossil_implicit_points`): an
    input vertex, the point where an edge meets a plane, or the point where two exactly coplanar edges meet. A point
-   is kept as its construction, never rounded while the arrangement is built.
+   is kept as its construction, never rounded while the arrangement is built. A fifth construction, the point where
+   three planes meet (issue #91), serves self-intersecting surfaces: when two cuts of one facet cross inside it (the
+   facet and the two that cut it meet at one point), that point joins the three facets and splits both cuts.
 2. **Point registry** (`fossil_arrangement`). One index per geometric point, exactly: points of one construction
    merge, then points of different constructions with the same exact coordinates. Each is rounded once, by one
    formula, so every facet that shares it gets the same bits; two distinct points never share rounded coordinates.
@@ -436,9 +438,12 @@ gates its case, the sphere translated by 1e-6.
   first if you suspect this is your case.
 
 - **CDT failures** (`BOOL_STATUS_CDT_FAILED`): the exact triangulation of
-  a facet cannot fail on cuts that meet only at their ends; it fails on
-  cuts crossing inside a facet (a self-intersecting input) or on a
-  degenerate facet with cuts. None in the validation.
+  a facet cannot fail on cuts that meet only at their ends. Two cuts by
+  transversal facets that cross inside a facet (a self-intersecting input)
+  meet at a three-plane point, inserted since issue #91. It still fails on
+  a degenerate facet with cuts, or on a cut along the edge of a coplanar
+  facet crossed by another cut inside the facet (the arrangement constructs
+  no point there). None in the validation.
 
 ## See also
 

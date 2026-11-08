@@ -203,8 +203,8 @@ One shell can pass through itself: here the unit cube with its corner (1, 1, 1) 
 its own bottom face. It is watertight and one shell, so only `find_self_intersections` sees the defect, and there are
 no separate bodies to unite. `resolve_self_intersections` keeps the faces with winding number 0 in front and 1 behind:
 the pocket below the bottom face, wound −1, goes, and the dent opens through the bottom face. Check the status: on
-`BOOL_STATUS_CDT_FAILED` (the cuts of a facet cross each other, as on `dragon.stl`) or `BOOL_STATUS_NOT_CLOSED` (an
-input that is not closed) the surface is left unchanged; [`alpha_wrap`](/guide/advanced/alpha-wrap) is the fallback.
+`BOOL_STATUS_NOT_CLOSED` (an input that is not closed, as `dragon.stl`) or `BOOL_STATUS_CDT_FAILED` (a cut along a
+coplanar facet's edge crosses another cut) the surface is left unchanged; [`alpha_wrap`](/guide/advanced/alpha-wrap) is the fallback.
 See [self-intersection](/guide/advanced/self-intersection#known-limitations).
 
 ### Wrap a triangle soup into a closed surface

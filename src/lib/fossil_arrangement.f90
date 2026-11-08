@@ -13,8 +13,10 @@ module fossil_arrangement
 !<    points (`fossil_implicit_points`) to both facets; an exactly coplanar pair records the partner and cuts each
 !<    facet along the portions of the other's edges inside it. The registry then merges the points: one index per
 !<    geometric point, exactly (identity, then exact coordinates), the most specific construction kept, rounded once;
-!<    distinct points get distinct rounded coordinates (`separate_rounded`). Points inside a facet edge go to the
-!<    facet across it (T-junctions, exact collinearity).
+!<    distinct points get distinct rounded coordinates (`separate_rounded`). Two cuts of one facet made by two
+!<    transversal facets that cross inside it (exactly, `ip_orient2d`) meet at the point of the three planes
+!<    (IPK_TPI, issue #91): it joins the three facets as an isolated point, and the triangulator splits both cuts there.
+!<    Points inside a facet edge go to the facet across it (T-junctions, exact collinearity).
 !< 3. `arrangement_retriangulate`: each cut facet is triangulated by `cdt_facet` (exact orient2d on implicit points),
 !<    with its cuts as constraints; sub-triangles keep the parent's orientation and carry their registry vertices and
 !<    which of their edges lie on a cut (for the selection by patches in `fossil_boolean`).
@@ -26,7 +28,7 @@ use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_cdt_implicit,     only : cdt_facet, CDTI_OK
 use fossil_facet_object,     only : facet_object
 use fossil_implicit_points,  only : implicit_point_t, ip_explicit, ip_approx, ip_orient2d, ip_lex_compare, &
-                                    ip_identity_compare, ip_rank, ip_compare
+                                    ip_identity_compare, ip_rank, ip_compare, ip_tpi
 use fossil_list_id_object,   only : list_id_object
 use fossil_tritri_exact,     only : pair_cut, coplanar_cut, facet_drop, PAIR_CROSSING, PAIR_COPLANAR
 use fossil_utils,            only : EPS
@@ -159,12 +161,14 @@ contains
       ! Brute-force fallback when either tree is empty.
       call collect_brute_force(arr=arr)
       call merge_points(arr=arr)
+      call add_triple_points(arr=arr)
       call propagate_edge_points(arr=arr)
       return
    endif
 
    call traverse_cross_pair(arr=arr, na=0_I4P, nb=0_I4P)
    call merge_points(arr=arr)
+   call add_triple_points(arr=arr)
    call propagate_edge_points(arr=arr)
    endsubroutine arrangement_collect_intersections
 
@@ -183,6 +187,7 @@ contains
       call collect_pair(arr=arr, gi=pa(k), gj=pb(k))
    enddo
    call merge_points(arr=arr)
+   call add_triple_points(arr=arr)
    call propagate_edge_points(arr=arr)
    endsubroutine arrangement_collect_pairs
 
@@ -314,9 +319,7 @@ contains
    !< point keeps its most specific construction (`ip_rank`: an input vertex first), the same for every facet, and
    !< its coordinates are rounded once (`ip_approx`).
    type(arrangement_t), intent(inout)  :: arr
-   integer(I4P), allocatable           :: idx(:), grp(:), ulist(:), gidx(:), fid(:), best(:), map(:)
-   type(implicit_point_t), allocatable :: merged(:)
-   integer(I4P)                        :: n_total, gi, k, n, u, nf, j
+   integer(I4P)                        :: n_total, gi, k
 
    n_total = arr%n_a + arr%n_b
    allocate(arr%corner(3, n_total)) ; arr%corner = 0_I4P
@@ -325,7 +328,20 @@ contains
          call register_point(arr, ip_explicit(xyz_of(arr%facet(gi)%vertex(k))), arr%corner(k, gi))
       enddo
    enddo
+   call merge_registry(arr)
+   endsubroutine merge_points
+
+   subroutine merge_registry(arr)
+   !< The merge of `merge_points` on the registry as it is (raw points appended after an earlier merge included): one
+   !< index per geometric point, the segments, corners and isolated points remapped, coordinates rounded once.
+   type(arrangement_t), intent(inout)  :: arr
+   integer(I4P), allocatable           :: idx(:), grp(:), ulist(:), gidx(:), fid(:), best(:), map(:)
+   type(implicit_point_t), allocatable :: merged(:)
+   integer(I4P)                        :: n_total, gi, k, n, u, nf, j
+
+   n_total = arr%n_a + arr%n_b
    n = arr%n_pts
+   if (allocated(arr%xyz)) deallocate(arr%xyz)
    allocate(arr%xyz(3, 0))
    if (n == 0_I4P) return
    allocate(idx(n), grp(n), ulist(n), map(n))
@@ -375,8 +391,75 @@ contains
       do k = 1, 3
          if (arr%corner(k, gi) > 0_I4P) arr%corner(k, gi) = map(arr%corner(k, gi))
       enddo
+      do j = 1, arr%cut(gi)%n_steiner
+         arr%cut(gi)%steiner(j) = map(arr%cut(gi)%steiner(j))
+      enddo
    enddo
-   endsubroutine merge_points
+   endsubroutine merge_registry
+
+   subroutine add_triple_points(arr)
+   !< Cuts of one facet that cross (issue #91). A facet gi cut by two facets g, h transversal to it (not coplanar
+   !< partners) has two cuts on the lines gi ^ g and gi ^ h; when they cross at a point inside both (exact: the ends of
+   !< each strictly on either side of the other in gi's projection, `ip_orient2d`) that point is the meeting point of
+   !< the three planes, which no pair of facets constructs: an IPK_TPI. It joins gi, g and h as an isolated point
+   !< (the triangulator splits every cut through it) and the registry is merged again, so the three facets share it,
+   !< and a TPI equal to a point of the registry (an LPI where the crossing is on a facet edge) takes that point. No
+   !< crossing: nothing changes.
+   type(arrangement_t), intent(inout) :: arr
+   integer(I4P)                       :: gi, k, l, drop, a, b, c, d, g, h, id, n_added
+
+   n_added = 0_I4P
+   do gi = 1, arr%n_a + arr%n_b
+      if (arr%cut(gi)%n_segments < 2_I4P) cycle
+      drop = facet_drop(arr%facet(gi)%vertex)
+      if (drop == 0_I4P) cycle
+      do k = 1, arr%cut(gi)%n_segments - 1
+         g = arr%cut(gi)%src(k)
+         if (is_partner(arr, gi, g)) cycle
+         a = arr%cut(gi)%seg(1, k) ; b = arr%cut(gi)%seg(2, k)
+         if (a == b) cycle
+         do l = k + 1, arr%cut(gi)%n_segments
+            h = arr%cut(gi)%src(l)
+            if (h == g) cycle
+            if (is_partner(arr, gi, h)) cycle
+            c = arr%cut(gi)%seg(1, l) ; d = arr%cut(gi)%seg(2, l)
+            if (c == d .or. c == a .or. c == b .or. d == a .or. d == b) cycle
+            if (ip_orient2d(arr%pts(a), arr%pts(b), arr%pts(c), drop) * &
+                ip_orient2d(arr%pts(a), arr%pts(b), arr%pts(d), drop) >= 0_I4P) cycle
+            if (ip_orient2d(arr%pts(c), arr%pts(d), arr%pts(a), drop) * &
+                ip_orient2d(arr%pts(c), arr%pts(d), arr%pts(b), drop) >= 0_I4P) cycle
+            call register_point(arr, ip_tpi(plane_of(arr, gi), plane_of(arr, g), plane_of(arr, h)), id)
+            call append_steiner(cut=arr%cut(gi), id=id)
+            call append_steiner(cut=arr%cut(g), id=id)
+            call append_steiner(cut=arr%cut(h), id=id)
+            n_added = n_added + 1_I4P
+         enddo
+      enddo
+   enddo
+   if (n_added > 0_I4P) call merge_registry(arr)
+   endsubroutine add_triple_points
+
+   pure function is_partner(arr, f, o) result(yes)
+   !< Facet o is a coplanar partner of facet f (its cuts in f lie on o's edges, not on a plane through f).
+   type(arrangement_t), intent(in) :: arr  !< Arrangement.
+   integer(I4P),        intent(in) :: f, o !< Facets.
+   logical                         :: yes  !< Partner.
+
+   yes = .false.
+   if (arr%cut(f)%n_coplanar > 0_I4P) yes = any(arr%cut(f)%coplanar(1:arr%cut(f)%n_coplanar) == o)
+   endfunction is_partner
+
+   pure function plane_of(arr, f) result(w)
+   !< The three vertices of facet f (columns).
+   type(arrangement_t), intent(in) :: arr     !< Arrangement.
+   integer(I4P),        intent(in) :: f       !< Facet.
+   real(R8P)                       :: w(3, 3) !< Vertices.
+   integer(I4P)                    :: v
+
+   do v = 1, 3
+      w(:, v) = xyz_of(arr%facet(f)%vertex(v))
+   enddo
+   endfunction plane_of
 
    subroutine separate_rounded(arr)
    !< Distinct registry points get distinct rounded coordinates (issue #65). Two exact points closer than an ulp can

@@ -1958,9 +1958,11 @@ endprogram ex_resolve_self_intersections_api
 
 **Notes.**
 
-- `BOOL_STATUS_CDT_FAILED`: the cuts of a facet cross each other, at a
-  point where three facets of the surface meet (the arrangement has no
-  triple-point construction). `dragon.stl` returns it.
+- `BOOL_STATUS_CDT_FAILED`: the triangulation of a facet failed: a cut
+  along the edge of a coplanar facet crosses another cut inside it. Cuts
+  of three facets meeting at one point inside a facet are split at their
+  three-plane point (issue #91); `dragon.stl`, which has them, returns
+  `BOOL_STATUS_NOT_CLOSED` (it is open).
 - `BOOL_STATUS_NOT_CLOSED`: the selection has boundary edges, because
   the input is not closed (its winding number is not an integer).
 - Interior cavities formed by self-intersections are **dropped**, not
