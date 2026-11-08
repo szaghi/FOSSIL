@@ -131,12 +131,12 @@ moved sources in `exe/`: delete them by hand, or `run_tests.sh` runs them.
 fobis rule --ex makedoc   # Requires 'formal' and npm/VitePress
 fobis rule --ex deldoc    # Delete doc build artifacts
 bash scripts/docs_examples.sh   # rebuild static-gnu, compile and run docs/examples/src/*.f90, regenerate
-                                # docs/examples/{snippets,output,images} (~1 min); never edit those by hand
+                                # docs/examples/{snippets,output,images} (~4 min); never edit those by hand
 cd docs && npm run docs:build   # API pages (formal) + VitePress site
 ```
 
 The site follows the FLAP/VecFor/StringiFor/FoXy skeleton (issue #43): Start here (`docs/guide/index.md`,
-`installation.md`) → Tutorial (`docs/manual/tutorial/NN-*.md`, 12 chapters) → Cookbook (`docs/manual/cookbook.md`) →
+`installation.md`) → Tutorial (`docs/manual/tutorial/NN-*.md`, 16 chapters, the GPU last) → Cookbook (`docs/manual/cookbook.md`) →
 Reference (`docs/guide/features.md` is the feature map, then `usage.md`, `advanced/*.md`, `api/*.md`) → Project. One
 sidebar in reading order in `docs/.vitepress/config.mts`. Every tutorial/cookbook snippet and output comes from a
 program in `docs/examples/src/` (markers `!run`, `!region`, `!cast`, `!anim`; see the script header); explicit output
@@ -146,7 +146,10 @@ casts, `scripts/mesh2svg.py` the figures (`!fig NAME`: the program writes NAME.f
 `scripts/gallery.py` (regions `<!-- gallery:start/end -->`; never edit them by hand; `--check` runs in
 `check_doc_snippets.sh`). Brand: `docs/brand/marks.py` generates `docs/public/{logo,logo-dark,favicon}.svg` (the carved ammonite);
 palette in `docs/.vitepress/theme/custom.css`. `scripts/check_doc_snippets.sh` still compiles the fortran blocks of
-the hand-written reference pages.
+the hand-written reference pages, and runs `scripts/check_doc_coverage.py --strict` (issue #77): every reference page
+and tutorial chapter shows a generated figure and a run example (`ref_<page>.f90`, `fig_ref_<page>_*.f90`), every
+feature-map row links a tutorial chapter or a recipe (Tutorial and Cookbook columns), the landing cards equal the
+gallery tiles, every example program is shown somewhere, every included file exists. A new feature needs all of them.
 
 ### Alternative build (fpm)
 
