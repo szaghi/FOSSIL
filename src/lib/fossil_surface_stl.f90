@@ -6748,7 +6748,7 @@ contains
    integer(I4P),              intent(out), optional :: facet_self, facet_other     !< Closest facets at toi.
    integer(I4P),              intent(out), optional :: iterations     !< Advancement steps.
    integer(I4P),              intent(in),  optional :: max_iterations !< Cap (default CCD_MAX_ITERATIONS).
-   logical,                   intent(in),  optional :: directional    !< Directional step too (default .false.).
+   logical,                   intent(in),  optional :: directional    !< Directional step (absent: adaptive, #75).
    integer(I4P),              intent(out), optional :: pairs          !< Exact pair evaluations of the directional steps.
    type(surface_ccd_evaluator_t)                    :: ev             !< Distance at s.
    real(R8P)                                        :: mu, tol, d     !< Bound, tolerance, distance.

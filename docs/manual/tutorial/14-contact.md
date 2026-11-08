@@ -8,7 +8,7 @@ throws a small cube, the pebble, at the dragon. Four runs build the answer step 
 2. advance the pebble by conservative steps, each certified by the gap it starts from, to the time of first contact;
 3. find the earliest contact among several bodies at once;
 4. do the same in 2-D around the NACA 0012 section, then slide a particle along a wall, where the plain bound
-   creeps and the directional bound does not.
+   creeps, the directional bound does not, and the default switches from one to the other.
 
 <<< @/examples/snippets/tut14a_sampling-setup.f90
 
@@ -83,7 +83,11 @@ repeats until the gap falls below a tolerance.
 - `directional=.true.` adds the directional bound of C2A: per pair of triangles, the closing speed projected on the
   pair's separating direction. The bound holds for each pair of triangles, which is convex, and its minimum over the
   pairs holds for the whole body. The loop takes the larger of the two certified steps. On this head-on throw it saves
-  one step of five and costs 789114 exact pair evaluations (`pairs`). It stays off by default.
+  one step of five and costs 789114 exact pair evaluations (`pairs`).
+- Without `directional` the loop is adaptive (issue #75): plain steps, and the directional bound only after eight
+  steps in a row that stall (each advancing s by less than 1 % of what is left and closing less than 1 % of the
+  margin d − tol/2). This throw never stalls, so the default is the plain run above, bit for bit.
+  `directional=.false.` forces the plain bound only.
 
 ![the placed dragon and the pebble's straight path through its body along x: the pebble at the five sampled instants s = 0, 0.25, 0.5, 0.75, 1 (grey, the one at s = 0.5 hidden inside the dragon), none touching it, and the pebble at the first contact s = 0.3552 that time_of_impact returns (ember), where it first touches the dragon](../../examples/images/tut14-throw.svg){.fossil-figure}
 
@@ -151,19 +155,22 @@ along z through the dragon, pebble 4 flying along x across pebble 3's path, abov
 
 - The plain bound cannot tell motion along a wall from motion towards it: a particle moving at speed μ is assumed to
   close the gap at μ. At a gap of 0.02 it advances by about the gap per step and needs 41 steps to cross a step in
-  which it never comes closer (last four lines of the run above).
-- At a gap of 4e-6, four tolerances, each step is about 3.5e-6 long: the loop hits the cap of 1000 steps at
+  which it never comes closer (last six lines of the run above, `directional=.false.` for the plain bound alone).
+- At a gap of 4e-6, four tolerances, each step is about 3.5e-6 long: the plain loop hits the cap of 1000 steps at
   s = 0.004375 and returns `CCD_NOT_CONVERGED` with that certified lower bound.
 - The directional bound sees that the particle does not approach the wall and crosses the whole step in one, at
-  either gap. Pass `directional=.true.` for bodies that slide or roll along each other: resting contact, particles in
-  a channel, a valve against its seat.
+  either gap (`directional=.true.`).
+- The default arguments switch between the two (issue #75). At a gap of 0.02 each plain step covers a few per cent
+  of what is left, so the loop never stalls: the same 41 steps as the plain bound. At 4e-6 the plain steps stall,
+  and after eight of them the directional step crosses the rest: `CCD_SEPARATE` in 9 steps. Resting contact,
+  particles in a channel, a valve against its seat converge with the default arguments.
 
 ![a particle of radius 0.03 sliding 0.8 along a flat wall at a gap of 0.02 over one step: top, the plain bound's 41 iterates, each disc outline about one gap ahead of the previous one, the last in yellow; bottom, the directional bound's single step from s = 0 (grey) to s = 1 (yellow)](../../examples/images/tut14-sliding.svg){.fossil-figure}
 
 ::: tip What you learned
 A gap sampled in time can miss a contact. `motion_bound_3d` bounds the speed of a body over a step, and
-`time_of_impact` advances by the steps that bound certifies, to the first contact. Add `directional=.true.` for
-bodies sliding along each other. `first_impact` and `first_impact_2d` give the earliest contact among several bodies,
+`time_of_impact` advances by the steps that bound certifies, to the first contact, and switches to the directional
+bound by itself when bodies slide along each other. `first_impact` and `first_impact_2d` give the earliest contact among several bodies,
 equal to the loop over all pairs, and `proximity_pairs_of` the pairs close at one instant. Reference:
 [Continuous collision detection](/guide/advanced/collision), [Body–body distance](/guide/advanced/body-distance).
 :::

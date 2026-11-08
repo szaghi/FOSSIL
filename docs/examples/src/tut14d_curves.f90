@@ -1,6 +1,6 @@
 !run tut14d tut14d_curves
 !< Tutorial 14, run 4: the 2-D twins around the NACA 0012 section (distance_to, time_of_impact, first_impact_2d), then a
-!< particle sliding along a wall: the plain bound creeps, the directional bound crosses the step.
+!< particle sliding along a wall: the plain bound creeps, the directional bound and the default (adaptive) cross the step.
 program tut14d_curves
 !region curves
 use fossil, only : surface_stl_object, curve_object, rigid_pose_2d_t, pose_2d, first_impact_2d, slice_surface, &
@@ -41,8 +41,12 @@ do k = 1, 2                                                                     
    q0 = pose_2d(angle=0._R8P, translation=[0.1_R8P, 0.03_R8P + gap])
    q1 = pose_2d(angle=0._R8P, translation=[0.9_R8P, 0.03_R8P + gap])
    call wall%time_of_impact(disc, pose_2d(angle=0._R8P), pose_2d(angle=0._R8P), q0, q1, toi, status, &
-                            tolerance=1.e-6_R8P, iterations=steps)
+                            tolerance=1.e-6_R8P, iterations=steps, directional=.false.)
    print '(A,ES8.1,A,A,A,F9.6,A,I0,A)', 'gap ', gap, ', plain:       ', status_name(status), ' at s = ', toi, &
+                                      ' (', steps, ' steps)'
+   call wall%time_of_impact(disc, pose_2d(angle=0._R8P), pose_2d(angle=0._R8P), q0, q1, toi, status, &
+                            tolerance=1.e-6_R8P, iterations=steps)
+   print '(A,ES8.1,A,A,A,F9.6,A,I0,A)', 'gap ', gap, ', default:     ', status_name(status), ' at s = ', toi, &
                                       ' (', steps, ' steps)'
    call wall%time_of_impact(disc, pose_2d(angle=0._R8P), pose_2d(angle=0._R8P), q0, q1, toi, status, &
                             tolerance=1.e-6_R8P, iterations=steps, directional=.true.)

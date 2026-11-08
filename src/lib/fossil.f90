@@ -49,7 +49,8 @@ use fossil_overset, only : wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2
                            exposed_points, connectivity_t, build_connectivity, save_connectivity, &
                            cell_centre_block, cell_centre_block_2d
 use fossil_ccd, only : motion_bound_3d, motion_bound_2d, ccd_evaluator_t, ccd_advance, CCD_CONTACT, CCD_SEPARATE, &
-                       CCD_INITIAL_CONTACT, CCD_NOT_CONVERGED, CCD_INVALID_INPUT, CCD_MAX_ITERATIONS
+                       CCD_INITIAL_CONTACT, CCD_NOT_CONVERGED, CCD_INVALID_INPUT, CCD_MAX_ITERATIONS, CCD_STALL_STEPS, &
+                       CCD_STALL_FRACTION
 use fossil_projection, only : projection_target_t, PROJ_FREE, PROJ_PATCH, PROJ_CURVE, PROJ_CORNER, project_points, &
                               project_points_2d, classify_points, classify_points_2d, PROJ_STATUS_OK, PROJ_STATUS_BAD_INPUT, &
                               project_block_face, project_block_side
@@ -95,7 +96,7 @@ public :: cell_centre_block, cell_centre_block_2d
 public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose
 public :: pose_inverse, to_body, to_world, rotate, pose_interpolate
 public :: motion_bound_3d, motion_bound_2d, ccd_evaluator_t, ccd_advance, CCD_CONTACT, CCD_SEPARATE, CCD_INITIAL_CONTACT
-public :: CCD_NOT_CONVERGED, CCD_INVALID_INPUT, CCD_MAX_ITERATIONS
+public :: CCD_NOT_CONVERGED, CCD_INVALID_INPUT, CCD_MAX_ITERATIONS, CCD_STALL_STEPS, CCD_STALL_FRACTION
 public :: projection_target_t, PROJ_FREE, PROJ_PATCH, PROJ_CURVE, PROJ_CORNER, project_points, project_points_2d
 public :: classify_points, classify_points_2d, PROJ_STATUS_OK, PROJ_STATUS_BAD_INPUT, project_block_face, project_block_side
 public :: block_report_t, block_report, block_report_2d, save_block_report, utau_flat_plate

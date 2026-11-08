@@ -1,13 +1,17 @@
 !< FOSSIL validation: time of first contact at size (issue #73, step 7).
 !<
 !< 1. The bunny (decimated to 5 000 facets) against the dragon (2 000), both scaled to a unit diagonal, over 8 fixed-seed
-!<    steps that turn and translate the dragon across the bunny: time_of_impact with the plain and the directional
-!<    bound against a brute force (200 samples of d, then the first time d <= tol / 2 bisected): no sample of [0, toi) is
-!<    below tol / 2, d(toi) <= tol, toi <= the bisected time; iterations, pair evaluations and times reported.
+!<    steps that turn and translate the dragon across the bunny: time_of_impact with the plain (`directional=.false.`)
+!<    and the directional bound against a brute force (200 samples of d, then the first time d <= tol / 2 bisected): no
+!<    sample of [0, toi) is below tol / 2, d(toi) <= tol, toi <= the bisected time; iterations, pair evaluations and
+!<    times reported. The default (adaptive, issue #75) never stalls here: the plain toi, status and steps bit for bit
+!<    (asserted), at the plain cost (reported).
 !< 2. Sliding passes: a cube sliding past another, face parallel to face, at a gap tol 2^k, k = -2..8: contact at and
 !<    below tol; above it the plain bound advances by about (gap - tol / 2) / mu per step and hits the cap
 !<    (CCD_NOT_CONVERGED, a certified lower bound), the directional bound (n . dt = 0 for the parallel faces) separates
-!<    in a few steps (both reported, the statuses asserted).
+!<    in a few steps, and so does the default (issue #75: it switches after 8 stalled plain steps); all reported, the
+!<    statuses asserted. The same sliding pair plus a far cube through first_impact: plain CCD_NOT_CONVERGED, the default
+!<    CCD_SEPARATE.
 !< 3. Several bodies: 6 spheres (10^3 marching cubes) with fixed-seed velocities over 10 sub-steps (passing through
 !<    each other); per sub-step first_impact equals the loop over all pairs, bit for bit (toi, pair, status); pruning reported.
 !< Exit status 0 if every check holds.
@@ -22,10 +26,10 @@ use vecfor,                only : vector_R8P
 implicit none
 
 real(R8P), parameter     :: TOL = 1e-6_R8P
-type(surface_stl_object) :: a, b, s(6)
-type(rigid_pose_t)       :: a0, a1, b0, p0(6), p1(6)
-real(R8P)                :: t0, t1, tp, td, tbrute, toi, tb, d, v(3, 6)
-integer(I4P)             :: k, i, st, sb, ip, id, np, pair(2), pb(2), nbad, ntest, nall
+type(surface_stl_object) :: a, b, s(6), sl(3)
+type(rigid_pose_t)       :: a0, a1, b0, p0(6), p1(6), l0(3), l1(3)
+real(R8P)                :: t0, t1, tp, td, ta, tbrute, toi, tb, ts, d, da, v(3, 6)
+integer(I4P)             :: k, i, st, sb, ss, ip, id, ia, np, na, pair(2), pb(2), nbad, ntest, nall
 integer(I8P)             :: seed
 logical                  :: all_ok
 
@@ -36,7 +40,7 @@ b0 = pose_identity()
 call a%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.) ; call a%decimate(target_facets=5000_I4P)
 call b%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.) ; call b%decimate(target_facets=2000_I4P)
 call scale_to_unit(a) ; call scale_to_unit(b)
-seed = 20261107_I8P ; tp = 0._R8P ; td = 0._R8P ; tbrute = 0._R8P
+seed = 20261107_I8P ; tp = 0._R8P ; td = 0._R8P ; ta = 0._R8P ; tbrute = 0._R8P
 print '(A)', 'step  status  toi           plain steps  directional steps  pairs   bisected - toi'
 do k = 1, 8
    a0 = pose_from_axis_angle([rnd() - 0.5_R8P, rnd() - 0.5_R8P, rnd() - 0.5_R8P], 6.28_R8P * rnd(), &
@@ -44,30 +48,53 @@ do k = 1, 8
    a1 = pose_from_axis_angle([rnd() - 0.5_R8P, rnd() - 0.5_R8P, rnd() - 0.5_R8P], 6.28_R8P * rnd(), &
                              [1.2_R8P, 0.4_R8P * (rnd() - 0.5_R8P), 0.4_R8P * (rnd() - 0.5_R8P)])
    call cpu_time(t0)
-   call b%time_of_impact(a, a0, a1, b0, b0, toi, st, tolerance=TOL, distance=d, iterations=ip)
+   call b%time_of_impact(a, a0, a1, b0, b0, toi, st, tolerance=TOL, distance=d, iterations=ip, directional=.false.)
    call cpu_time(t1) ; tp = tp + (t1 - t0)
    call b%time_of_impact(a, a0, a1, b0, b0, tb, sb, tolerance=TOL, iterations=id, directional=.true., pairs=np)
    call cpu_time(t0) ; td = td + (t0 - t1)
+   call b%time_of_impact(a, a0, a1, b0, b0, ts, ss, tolerance=TOL, distance=da, iterations=ia, pairs=na)
+   call cpu_time(t1) ; ta = ta + (t1 - t0)
    call brute(toi, st, d, ip, id, np, k)
-   call cpu_time(t1) ; tbrute = tbrute + (t1 - t0)
-   if (sb /= st .or. id > ip) then
-      all_ok = .false. ; print '(A)', '   directional status differs or more steps'
+   if (na == 0) then ! never stalled: the plain loop
+      if (ts /= toi .or. ss /= st .or. ia /= ip) then
+         all_ok = .false. ; print '(A)', '   default differs from plain without a switch'
+      endif
+   else ! a switch: certified, but not wanted where the plain bound converges (issue #75 acceptance)
+      call brute(ts, ss, da, ia, ia, na, k)
+      all_ok = .false. ; print '(A)', '   the default switched to the directional step'
+   endif
+   print '(A,I3,A,I7,A,ES10.2)', '   default: steps ', ia, ', pairs ', na, ', toi - plain toi ', ts - toi
+   call cpu_time(t0) ; tbrute = tbrute + (t0 - t1)
+   if (sb /= st .or. id > ip .or. ss /= st) then
+      all_ok = .false. ; print '(A)', '   directional or default status differs, or more steps'
    endif
 enddo
-print '(A,3F9.3)', 'times: plain, directional, brute force [s] ', tp, td, tbrute
+print '(A,4F9.3)', 'times: plain, directional, default, brute force [s] ', tp, td, ta, tbrute
 
 ! 2. grazing passes
 call cube(a, [0._R8P, 0._R8P, 0._R8P])
-print '(A)', 'gap / tol   plain status  steps   directional status  steps'
+print '(A)', 'gap / tol   plain status  steps   directional status  steps   default status  steps'
 do k = -2, 8
    call cube(b, [2._R8P, 1._R8P + TOL * 2._R8P ** k, 0._R8P])
    a0 = pose_identity() ; a1 = a0 ; a1%t = [4._R8P, 0._R8P, 0._R8P]
-   call a%time_of_impact(b, a0, a1, b0, b0, toi, st, tolerance=TOL, iterations=ip)
+   call a%time_of_impact(b, a0, a1, b0, b0, toi, st, tolerance=TOL, iterations=ip, directional=.false.)
    call a%time_of_impact(b, a0, a1, b0, b0, tb, sb, tolerance=TOL, iterations=id, directional=.true.)
-   print '(F9.2,I15,I7,I21,I7)', 2._R8P ** k, st, ip, sb, id
-   if (k <= 0 .and. (st /= CCD_CONTACT .or. sb /= CCD_CONTACT)) all_ok = .false.
-   if (k > 0 .and. (st /= CCD_NOT_CONVERGED .or. sb /= CCD_SEPARATE)) all_ok = .false.
+   call a%time_of_impact(b, a0, a1, b0, b0, ts, ss, tolerance=TOL, iterations=ia)
+   print '(F9.2,I15,I7,I21,I7,I17,I7)', 2._R8P ** k, st, ip, sb, id, ss, ia
+   if (k <= 0 .and. (st /= CCD_CONTACT .or. sb /= CCD_CONTACT .or. ss /= CCD_CONTACT)) all_ok = .false.
+   if (k > 0 .and. (st /= CCD_NOT_CONVERGED .or. sb /= CCD_SEPARATE .or. ss /= CCD_SEPARATE)) all_ok = .false.
 enddo
+! the sliding pair plus a far cube through first_impact (issue #75): plain caps, the default separates
+call cube(sl(1), [0._R8P, 0._R8P, 0._R8P]) ; call cube(sl(2), [2._R8P, 1._R8P + 16._R8P * TOL, 0._R8P])
+call cube(sl(3), [50._R8P, 50._R8P, 50._R8P])
+do i = 1, 3
+   l0(i) = pose_identity() ; l1(i) = l0(i)
+enddo
+l1(1)%t = [4._R8P, 0._R8P, 0._R8P]
+call first_impact(sl, l0, l1, toi, pair, st, tolerance=TOL, directional=.false.)
+call first_impact(sl, l0, l1, ts, pb, ss, tolerance=TOL)
+print '(A,I2,A,I2,A,F9.6)', 'first_impact, sliding pair: plain status ', st, ', default status ', ss, ', toi ', ts
+if (st /= CCD_NOT_CONVERGED .or. ss /= CCD_SEPARATE .or. ts /= 1._R8P) all_ok = .false.
 
 ! 3. several bodies
 do i = 1, 6

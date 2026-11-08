@@ -18,9 +18,16 @@ module fossil_ccd
 !< comes from an extension of `ccd_evaluator_t` (no body type here; an internal procedure as actual argument made
 !< gfortran put trampolines on an executable stack, issue #60).
 !<
-!< `directional=.true.`: the evaluator's `safe_step` (C2A's per-pair directional bound, e.g. `body_safe_step`) gives a
-!< second certified step from s_k; the loop takes the larger of the two, so it never takes more steps than the plain
-!< bound. The default `safe_step` gives none.
+!< The directional step: the evaluator's `safe_step` (C2A's per-pair directional bound, e.g. `body_safe_step`) gives a
+!< second certified step from s_k; with it the loop takes the larger of the two. The default `safe_step` gives none.
+!< `directional` absent (issue #75, the default) is adaptive: plain steps until CCD_STALL_STEPS consecutive steps
+!< stall, then the larger of the two steps for the rest of the loop. A step stalls if it advances s by less than
+!< CCD_STALL_FRACTION of the remaining interval 1 - s_k and closes less than CCD_STALL_FRACTION of the margin
+!< d_k - tol / 2: the plain bound creeping along a sliding contact. The second condition keeps an approach plain: there
+!< the steps also become short near contact, but each one closes the margin by the ratio closing speed / mu.
+!< `directional=.true.` takes the larger from the first step (never more steps than the plain bound), `.false.` the
+!< plain step only. Both steps are certified, so every mode keeps the guarantees; a loop that never stalls is the plain
+!< loop bit for bit.
 use penf,              only : I4P, R8P
 use fossil_rigid_pose, only : rigid_pose_t, rigid_pose_2d_t, pose_log_3d, pose_angle_2d
 
@@ -29,6 +36,7 @@ private
 public :: motion_bound_3d, motion_bound_2d
 public :: ccd_evaluator_t, ccd_advance
 public :: CCD_CONTACT, CCD_SEPARATE, CCD_INITIAL_CONTACT, CCD_NOT_CONVERGED, CCD_INVALID_INPUT, CCD_MAX_ITERATIONS
+public :: CCD_STALL_STEPS, CCD_STALL_FRACTION
 
 integer(I4P), parameter :: CCD_CONTACT         = 1_I4P    !< The bodies come within the tolerance.
 integer(I4P), parameter :: CCD_SEPARATE        = 2_I4P    !< No contact over [0, 1].
@@ -36,6 +44,8 @@ integer(I4P), parameter :: CCD_INITIAL_CONTACT = 3_I4P    !< Within the toleranc
 integer(I4P), parameter :: CCD_NOT_CONVERGED   = 4_I4P    !< Iteration cap hit: toi is a certified lower bound.
 integer(I4P), parameter :: CCD_INVALID_INPUT   = 5_I4P    !< tolerance <= 0, mu < 0 or max_iterations < 1.
 integer(I4P), parameter :: CCD_MAX_ITERATIONS  = 1000_I4P !< Default iteration cap.
+integer(I4P), parameter :: CCD_STALL_STEPS     = 8_I4P    !< Adaptive: stalled steps in a row before the switch.
+real(R8P),    parameter :: CCD_STALL_FRACTION  = 0.01_R8P !< Adaptive: stall below this fraction of 1 - s and margin.
 
 type, abstract :: ccd_evaluator_t
    !< Distance between two moving bodies at the step parameter s (extended by the caller).
@@ -66,14 +76,16 @@ contains
    real(R8P),              intent(out), optional :: distance       !< d(toi).
    integer(I4P),           intent(out), optional :: iterations     !< Advancement steps (evaluations after s = 0).
    integer(I4P),           intent(in),  optional :: max_iterations !< Cap (default CCD_MAX_ITERATIONS).
-   logical,                intent(in),  optional :: directional    !< Also the evaluator's directional step.
+   logical,                intent(in),  optional :: directional    !< Directional step: .true. always, .false. never,
+                                                                    !< absent adaptive (after a stall).
    real(R8P)                                     :: s, d, s_next, d_next, dt, dt_dir !< Iterates, steps.
-   logical                                       :: dir            !< Directional.
-   integer(I4P)                                  :: it, cap        !< Counters.
+   logical                                       :: dir, adaptive  !< Directional now, may switch to it.
+   integer(I4P)                                  :: it, cap, stall !< Counters, stalled steps in a row.
 
-   toi = 0._R8P ; d = huge(1._R8P) ; it = 0_I4P
+   toi = 0._R8P ; d = huge(1._R8P) ; it = 0_I4P ; stall = 0_I4P
    cap = CCD_MAX_ITERATIONS ; if (present(max_iterations)) cap = max_iterations
-   dir = .false. ; if (present(directional)) dir = directional
+   dir = .false. ; adaptive = .not. present(directional)
+   if (present(directional)) dir = directional
    s = 0._R8P
    if (.not. (tolerance > 0._R8P) .or. .not. (mu >= 0._R8P) .or. cap < 1_I4P) then
       status = CCD_INVALID_INPUT
@@ -95,6 +107,15 @@ contains
             if (.not. (s_next > s)) exit ! the step is below the resolution of s: not converged
             it = it + 1_I4P
             call evaluator%distance(s_next, d_next)
+            if (adaptive) then ! a stalled step: short, and the margin d - tol / 2 hardly closes
+               stall = stall + 1_I4P
+               if (s_next - s >= CCD_STALL_FRACTION * (1._R8P - s) .or. &
+                   d_next - 0.5_R8P * tolerance <= (1._R8P - CCD_STALL_FRACTION) * (d - 0.5_R8P * tolerance)) &
+                  stall = 0_I4P
+               if (stall >= CCD_STALL_STEPS) then ! the plain bound creeps: directional from the next step on
+                  dir = .true. ; adaptive = .false.
+               endif
+            endif
             s = s_next ; d = d_next
             if (d <= tolerance) then
                status = CCD_CONTACT

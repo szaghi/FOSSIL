@@ -3,13 +3,13 @@ module fossil_ccd_test_distances
 !< FOSSIL test-side module: analytic distance functions for the conservative advancement tests (issue #73).
 !<
 !< d(s) = max(0, |a (s - c)| + b (s - c)^2 + e) with the Lipschitz bound of each case given by the test; every call is
-!< counted.
+!< counted. `stepping_distance_t` (issue #75) adds a directional step: `safe_step` returns min(cap, dir_step), counted.
 use fossil, only : ccd_evaluator_t
 use penf,   only : I4P, R8P
 
 implicit none
 private
-public :: analytic_distance_t
+public :: analytic_distance_t, stepping_distance_t
 
 type, extends(ccd_evaluator_t) :: analytic_distance_t
    !< d(s) = max(0, a |s - c| + b (s - c)^2 + e).
@@ -22,6 +22,14 @@ type, extends(ccd_evaluator_t) :: analytic_distance_t
       procedure, pass(self) :: distance !< d(s).
       procedure, pass(self) :: exact    !< d(s), not counted.
 endtype analytic_distance_t
+
+type, extends(analytic_distance_t) :: stepping_distance_t
+   !< An analytic distance with a fixed directional step (certified only where the test says so).
+   real(R8P)    :: dir_step = 0._R8P   !< Directional step.
+   integer(I4P) :: safe_calls = 0_I4P  !< Calls of safe_step.
+   contains
+      procedure, pass(self) :: safe_step !< min(cap, dir_step).
+endtype stepping_distance_t
 
 contains
    subroutine distance(self, s, d)
@@ -42,4 +50,16 @@ contains
 
    d = max(0._R8P, self%a * abs(s - self%c) + self%b * (s - self%c)**2 + self%e)
    endfunction exact
+
+   subroutine safe_step(self, s, tolerance, cap, step)
+   !< min(cap, dir_step), counted.
+   class(stepping_distance_t), intent(inout) :: self      !< Function.
+   real(R8P),                  intent(in)    :: s         !< Parameter.
+   real(R8P),                  intent(in)    :: tolerance !< Tolerance.
+   real(R8P),                  intent(in)    :: cap       !< Largest step wanted.
+   real(R8P),                  intent(out)   :: step      !< Step.
+
+   self%safe_calls = self%safe_calls + 1_I4P
+   step = min(cap, self%dir_step)
+   endsubroutine safe_step
 endmodule fossil_ccd_test_distances

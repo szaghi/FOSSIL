@@ -119,11 +119,29 @@ in 2-D), each of them convex, inside the descent of the two trees, as C2A does w
 - its safe step is (d_ij − η tol) / c_ij (unbounded if c_ij ≤ 0), and the step is the minimum over all pairs;
 - a node pair whose plain-bound step (box distance over the node μ) is already above the best is pruned.
 
-`directional=.true.` selects it: the loop takes the larger of the plain and the directional step, both certified, so
-it never takes more steps than the plain bound. It is off by default: on large bodies a directional step evaluates
-tens of thousands of facet pairs exactly (see Measured). Turn it on when bodies slide along each other: the plain
-bound cannot tell tangential motion from approach, and at a gap just above the tolerance it advances by about
+With it the loop takes the larger of the plain and the directional step, both certified. A directional step costs
+far more than a plain one: on large bodies it evaluates tens of thousands of facet pairs exactly (see Measured). And
+the plain bound cannot tell tangential motion from approach: at a gap just above the tolerance it advances by about
 (gap − tol/2)/μ per step until the cap.
+
+### The default: adaptive (issue #75)
+
+`directional` chooses between the two:
+
+| `directional` | Steps |
+|---|---|
+| absent (default) | plain, until the plain loop stalls; then the larger of the two for the rest of the loop |
+| `.true.` | the larger of the two from the first step: never more steps than the plain bound |
+| `.false.` | plain only |
+
+A step **stalls** when it advances s by less than 1 % of the remaining interval 1 − s_k *and* closes less than 1 %
+of the margin d_k − tol/2. Eight stalled steps in a row switch the loop to the directional step
+(`CCD_STALL_STEPS` = 8, `CCD_STALL_FRACTION` = 0.01, exported by `fossil`). The second condition is what keeps an
+approach plain: near contact its steps become short as well, but each closes the margin by the ratio of the closing
+speed to μ, while a body sliding along another keeps its margin. Both steps are certified, so the switch keeps every
+guarantee (d ≥ tol/2 on [0, toi], d(toi) ≤ tol, no tunnelling), and a loop that never stalls is the plain loop bit
+for bit, at the plain cost. `curve%time_of_impact`, `first_impact` and `first_impact_2d` pass `directional` through
+and default to the same rule.
 
 ## Several bodies
 
@@ -160,7 +178,8 @@ cannot finish, and several bodies.
   (4 − 1/2) tol / μ = 8.75e-7, and the loop stops at the cap, 1000 steps, with `CCD_NOT_CONVERGED` and s = 0.250874,
   a certified lower bound on any contact. With `directional=.true.` the
   separating planes of the facet pairs see that the gap does not close: 11 steps and 2662 exact pair evaluations
-  reach s = 1, `CCD_SEPARATE`.
+  reach s = 1, `CCD_SEPARATE`. The default gets there too: its plain steps stall from s = 0.25 on, it switches after
+  eight of them and reaches s = 1 in 18 steps and 2430 pair evaluations.
 - **Several bodies.** Four unit cubes 3 apart, their frames at their centres: 1 and 2 close in at 1.5 and 1.4 per
   step, 3 turns in place, 4 moves away. `first_impact` finds cubes 1 and 2 at s = 0.689655 = 2/2.9 (the gap 2 over
   the closing speed 2.9) and runs `time_of_impact` on 3 of the 6 pairs.
@@ -170,7 +189,7 @@ cannot finish, and several bodies.
 | Routine | Arguments |
 |---|---|
 | `motion_bound_3d(p0, p1, x, y, z)` / `motion_bound_2d(p0, p1, u, v)` | μ of a vertex set |
-| `ccd_advance(evaluator, mu, tolerance, toi, status, distance, iterations, max_iterations, directional)` | the loop over an abstract distance evaluator (`ccd_evaluator_t`) |
+| `ccd_advance(evaluator, mu, tolerance, toi, status, distance, iterations, max_iterations, directional)` | the loop over an abstract distance evaluator (`ccd_evaluator_t`); `directional` absent: adaptive |
 | `surface%time_of_impact(other, pose_self0, pose_self1, pose_other0, pose_other1, toi, status, ...)` | optional: `tolerance`, `distance`, `point_self`, `point_other`, `facet_self`, `facet_other`, `iterations`, `max_iterations`, `directional`, `pairs` (exact pair evaluations of the directional steps) |
 | `curve%time_of_impact(...)` | the 2-D twin (`segment_self`, `segment_other`) |
 | `first_impact(surfaces, poses0, poses1, toi, pair, status, tolerance, directional, tested)` / `first_impact_2d` | several bodies (`tested`: pairs that ran `time_of_impact`) |
@@ -188,8 +207,8 @@ the distance query); the directional step per convex pair.
 | oblique, 45° to a face | 12 | 1 | |
 | quarter turn onto a post | 25 | 25 | toi 1.1e-6 below the analytic angle |
 | cube vs cube, turning and translating | 11 | 9-10 | within 1e-7 of the bisected brute force |
-| bunny (5 000 facets) vs dragon (2 000), 8 steps | 7-35 | about half | plain 0.51 s, directional 7.5 s in all; 5e4-2e5 exact pairs per query |
-| sliding past a face at a gap of 2-256 tol | 1000 (cap) | 7 | plain: `CCD_NOT_CONVERGED`, a certified lower bound |
+| bunny (5 000 facets) vs dragon (2 000), 8 steps | 9-35 | about half | plain 0.57 s, directional 7.8 s in all; 5e4-2e5 exact pairs per query; the default never stalls: plain toi, status and steps bit for bit, 0.56 s |
+| sliding past a face at a gap of 2-256 tol | 1000 (cap) | 7 | plain: `CCD_NOT_CONVERGED`, a certified lower bound; the default: 14-15 steps, `CCD_SEPARATE` |
 | a plate 1e-3 thick crossed within one step | 1 | 1 | apart at both end poses |
 
 Every result keeps d ≥ tol/2 at the samples of [0, toi] and d(toi) ≤ tol. Six spheres over 10 sub-steps:

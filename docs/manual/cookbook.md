@@ -1131,8 +1131,10 @@ moving it or rebuilding its tree, here the corner of the turned cube at x = 2 âˆ
 `time_of_impact` moves each body from its pose at s = 0 to its pose at s = 1 (the motion of `pose_interpolate`: the
 rotation about the body's own origin, angle and translation linear in s) and returns the first s at which they come
 within the tolerance (default 1e-6 of the larger box diagonal), never later than the true contact: a plate 1e-3 thick
-crossed within one step, apart at both ends, is still caught. `first_impact` gives the earliest contact among several
-bodies. See [continuous collision detection](/guide/advanced/collision).
+crossed within one step, apart at both ends, is still caught. Bodies sliding along each other just above the
+tolerance converge with the default arguments too: the loop switches to the directional bound when its plain steps
+stall (`directional=.false.` / `.true.` force either bound). `first_impact` gives the earliest contact among several
+bodies. See [continuous collision detection](/guide/advanced/collision#the-default-adaptive-issue-75).
 
 ### Which of my moving bodies touch first?
 

@@ -4,8 +4,12 @@ do k = 1, 2                                                                     
    q0 = pose_2d(angle=0._R8P, translation=[0.1_R8P, 0.03_R8P + gap])
    q1 = pose_2d(angle=0._R8P, translation=[0.9_R8P, 0.03_R8P + gap])
    call wall%time_of_impact(disc, pose_2d(angle=0._R8P), pose_2d(angle=0._R8P), q0, q1, toi, status, &
-                            tolerance=1.e-6_R8P, iterations=steps)
+                            tolerance=1.e-6_R8P, iterations=steps, directional=.false.)
    print '(A,ES8.1,A,A,A,F9.6,A,I0,A)', 'gap ', gap, ', plain:       ', status_name(status), ' at s = ', toi, &
+                                      ' (', steps, ' steps)'
+   call wall%time_of_impact(disc, pose_2d(angle=0._R8P), pose_2d(angle=0._R8P), q0, q1, toi, status, &
+                            tolerance=1.e-6_R8P, iterations=steps)
+   print '(A,ES8.1,A,A,A,F9.6,A,I0,A)', 'gap ', gap, ', default:     ', status_name(status), ' at s = ', toi, &
                                       ' (', steps, ' steps)'
    call wall%time_of_impact(disc, pose_2d(angle=0._R8P), pose_2d(angle=0._R8P), q0, q1, toi, status, &
                             tolerance=1.e-6_R8P, iterations=steps, directional=.true.)

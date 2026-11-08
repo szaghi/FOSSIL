@@ -344,8 +344,9 @@ fobis fetch            # --update to re-fetch
   INITIAL_CONTACT / NOT_CONVERGED (cap 1000, toi a certified lower bound) / INVALID_INPUT). `surface%time_of_impact`,
   `curve%time_of_impact` (over `distance_to` with poses; default tol 1e-6 of the larger bbox diagonal);
   `directional=.true.` adds C2A's per-pair separating-plane step (`body_safe_step` in `fossil_body_distance`; valid per
-  convex triangle / segment pair only, never for a whole non-convex body) and takes the larger certified step (default
-  off). `first_impact` / `first_impact_2d`: swept-box broad phase, candidates by lower bound, equal to the loop over all
+  convex triangle / segment pair only, never for a whole non-convex body) and takes the larger certified step;
+  `.false.` plain only; absent = adaptive (issue #75): plain until 8 consecutive steps stall (< 1 % of 1 - s AND < 1 %
+  of the margin d - tol/2 closed), then the larger step; never-stalling loops are the plain loop bit for bit. `first_impact` / `first_impact_2d`: swept-box broad phase, candidates by lower bound, equal to the loop over all
   pairs. CPU only. Validation `fossil_val_ccd`.
 - `fossil_projection.f90`, `fossil_block_report.f90`, `fossil_hyperbolic.f90` — body-fitted grid support (issue #74,
   roadmap #68 WP5; design in `docs/guide/advanced/body-fitted.md`): `projection_target_t` (`surface%projection_target`,
