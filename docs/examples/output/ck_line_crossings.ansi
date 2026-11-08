@@ -1,0 +1,14 @@
+$ ck_line_crossings
+v =  0.00: 2 crossings
+   u =  0.5000, segment 1, entering F
+   u =  0.5000, segment 4, entering T
+v =  0.25: 2 crossings
+   u =  0.2500, segment 4, entering T
+   u =  0.7500, segment 1, entering F
+v =  0.50: 2 crossings
+   u =  0.0000, segment 3, entering T
+   u =  1.0000, segment 2, entering F
+v =  0.75: 2 crossings
+   u =  0.2500, segment 3, entering T
+   u =  0.7500, segment 2, entering F
+v =  1.00: 0 crossings

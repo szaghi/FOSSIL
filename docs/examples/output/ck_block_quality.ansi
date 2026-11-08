@@ -1,0 +1,6 @@
+$ ck_block_quality
+valid 126, singular 0, invalid 2
+skewness max  0.930, orthogonality min -0.978, aspect max   3.19
+scaled min J min  -9.930
+not valid: cell  5  4, min J  -9.930, skewness  0.799
+not valid: cell  5  5, min J  -0.981, skewness  0.930

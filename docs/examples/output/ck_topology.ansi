@@ -1,0 +1,9 @@
+$ ck_topology
+block 1 face 1: periodic block 2 face 4, transform  2 -1
+block 1 face 2: abut     block 2 face 3, transform  2 -1
+block 1 face 3: periodic block 1 face 4, transform  1  2
+block 1 face 4: periodic block 1 face 3, transform  1  2
+block 2 face 1: periodic block 2 face 2, transform  1  2
+block 2 face 2: periodic block 2 face 1, transform  1  2
+block 2 face 3: abut     block 1 face 2, transform -2  1
+block 2 face 4: periodic block 1 face 1, transform -2  1

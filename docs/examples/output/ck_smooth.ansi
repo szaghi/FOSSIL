@@ -1,0 +1,4 @@
+$ ck_smooth
+noisy:    rms |r - 1|  0.02077, area 14.42808, volume  4.16238
+smoothed: rms |r - 1|  0.00796, area 12.61290, volume  4.17461
+unit sphere:                   area 12.56637, volume  4.18879

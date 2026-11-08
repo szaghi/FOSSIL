@@ -1,0 +1,9 @@
+$ ck_save_report
+# FOSSIL block report (issue #74)
+# wall points 130, cell centred F, u_tau given T, u_tau estimated (flat plate) F
+# y1+ min max mean p95   1.000000E+00  1.478052E+00  1.009473E+00  1.007625E+00  target   1.0000E+00  fraction above   1.0000
+# growth ratio max   1.202872E+00
+# cells 5160  skewness max p95   9.1129E-01  8.6628E-02  orthogonality min   1.6313E-01  aspect max   6.5055E+02  warp max   0.0000E+00  scaled min J min   3.1658E-01  not certified valid 0
+# i j k face y1_line y1_wall y1+ growth
+      1      1      1  3  5.54269590E-05  5.54269590E-05  1.47805224E+00  1.19624335E+00
+      2      1      1  3  3.75000002E-05  3.75000002E-05  1.00000001E+00  1.20287168E+00

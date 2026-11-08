@@ -1,0 +1,6 @@
+$ ck_save_connectivity
+# FOSSIL overset connectivity (issue #72)
+# block 1 field 396 holes 0 receptors 33 orphans 0
+# block 2 field 1488 holes 137 receptors 56 orphans 0
+# receptors 89
+1 397 2 34 20 1   3.3333333333333337E-01   1.0000000000000000E+00   0.0000000000000000E+00 3 3 1 F   7.0671030218573849E-01

@@ -1,0 +1,4 @@
+$ ck_laplacian
+status 0, vertices 26, nonzeros of L 170
+max |L 1|   0.00E+00
+sum of the vertex masses   6.000000, surface area   6.000000

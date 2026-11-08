@@ -1,0 +1,4 @@
+$ ck_cut_moments
+pieces 204, max |sum of weights - area|  3.69E-17
+int x^2 over the fluid: quadrature  0.2565237066412, exact 1/3 - disc  0.2565237066412
+cell (4, 8): alpha  0.24207, moment X^2  1.3940368640499E-04, by quadrature  1.3940368640499E-04

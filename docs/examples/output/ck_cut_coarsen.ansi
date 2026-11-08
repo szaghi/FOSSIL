@@ -1,0 +1,5 @@
+$ ck_cut_coarsen
+fine pieces 768 -> coarse 204, direct 204
+max |alpha coarse - alpha direct|  1.42E-14
+max |aperture difference|          0.00E+00
+links: coarsened 720, direct 720

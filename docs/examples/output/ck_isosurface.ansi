@@ -1,0 +1,3 @@
+$ ck_isosurface
+facets 4232, watertight T
+volume  3.11864, exact 2 pi^2 R r^2  3.15827

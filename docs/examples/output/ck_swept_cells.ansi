@@ -1,0 +1,5 @@
+$ ck_swept_cells
+exact T, sum of the swept areas -2.33E-17
+fluid gained  0.01827, lost  0.01827
+cells cleared 10, covered 2
+max |volume balance residual|  3.28E-17
