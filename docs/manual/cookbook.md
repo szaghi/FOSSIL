@@ -243,6 +243,32 @@ no hole and no receptor. No vertex is left an orphan; `build_connectivity` lists
 cells and local coordinates, as a flow solver reads them. FOSSIL does not choose the assembly policy: the rule, the
 stencil width and the fringe depth are the caller's. See [Overset assembly](/guide/advanced/overset).
 
+
+### Put a block face on a body with sharp edges
+
+<<< @/examples/snippets/ck_project_face.f90
+
+<<< @/examples/output/ck_project_face.ansi{ansi}
+
+![the unit cube and a 9 x 9 face grid near its face x = 1: before the projection, off the face and wider than it (faint lines); after it, its corners on the cube's corners, its edge lines on the cube's edges and its interior on the face](../examples/images/ck-project-face.svg){.fossil-figure}
+
+`projection_target` collects the body's patches, its feature edges and patch boundaries (as curves between corners)
+and its corners, once. `project_block_face` tags each vertex of the face by its distance to them (`tolerance`): the
+face's corners go to the cube's corners, its edge lines to the cube's edges, its interior to the face. A plain closest
+point would pull grid lines across the edges. See [body-fitted grid support](/guide/advanced/body-fitted).
+
+### Extrude an O-grid and check its wall spacing
+
+<<< @/examples/snippets/ck_wall_spacing.f90
+
+<<< @/examples/output/ck_wall_spacing.ansi{ansi}
+
+![an O-grid marched from a NACA0012 section, every second grid line, zoomed on the nose: the lines leave the wall at right angles and spread away from it](../examples/images/ck-wall-spacing.svg){.fossil-figure}
+
+`hyperbolic_grid_2d` marches layers normal to the section, with heights from `geometric_spacing`. The first one is set
+for y₁⁺ = 1 with the given u_τ. `block_report_2d` measures what the grid gives: y₁⁺ at every wall vertex, from the
+true distance to the wall, the growth ratio along the grid lines, and WP2's quality. See
+[body-fitted grid support](/guide/advanced/body-fitted).
 ## Curves
 
 ### Cut a 2-D section of an STL

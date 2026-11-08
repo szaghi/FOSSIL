@@ -77,8 +77,9 @@ y⁺ ≈ 30-100 (`turbulence-modelling/wiki/methods/rans-wall-function.md`), and
 faces covered by `TOPO_BOUNDARY` records named `wall`):
 
 - **y₁ along the grid line:** |x₂ − x₁|, the first off-wall vertex along the wall-normal index. With
-  `cell_centred=.true.` it is the first cell centre, the mean of the first layer's vertices around the wall vertex.
-- **y₁ to the wall:** the distance of that point to the wall cutter (`wall_cutter`, WP3): the true height, which
+  `cell_centred=.true.` the report is per wall cell instead: the distance from the centre of the cell's wall face
+  (mean of its 4 vertices, 2-D 2) to the centre of the first cell (mean of its 8 vertices, 2-D 4).
+- **y₁ to the wall:** the distance of the off-wall point (vertex or cell centre) to the wall cutter (`wall_cutter`, WP3): the true height, which
   differs from the grid-line one when the grid line leaves the wall at an angle.
 - **y₁⁺ = y₁ u_τ / ν**, with u_τ given by the caller (a scalar, or one value per wall vertex). Otherwise it is
   estimated from a flat-plate correlation (`utau_flat_plate`: C_f = 0.0576 Re_x^(−1/5), u_τ = U sqrt(C_f/2)
@@ -99,15 +100,25 @@ Hyperbolic grids are "one to two orders of magnitude faster" to generate than el
 boundary and cannot place the outer one, which suits overset grids (Chan 2009). Overture re-marches its body-fitted
 grids this way for moving bodies (`overset-grid-methods/wiki/software/overture.md`).
 
-`hyperbolic_grid_2d(u, v, spacing, block)` marches layers outward from a closed curve (an O-grid) or an open one *(gk:
-Steger & Chaussee 1980)*. The two conditions of the hyperbolic system are orthogonality, r_ξ · r_η = 0, and the cell
-size, |r_ξ × r_η| = ΔA. At each point they give the step r_η = h n, normal to the current layer, with h the spacing
-of the layer. The step directions are then smoothed by an implicit dissipation, (I − ε δ_ξξ) Δr = h n: a periodic or
-plain tridiagonal solve per layer. This keeps concave corners from folding, and ε grows with the layer.
+`hyperbolic_grid_2d(u, v, spacing, block)` marches layers outward from a closed curve (an O-grid) or an open one,
+to the right of the curve's direction (outward for a counter-clockwise closed curve) *(gk: Steger & Chaussee 1980)*.
 
-- The spacing comes as a list of layer heights, or as a first height, a growth ratio and a layer count. The first
-  height can be set from a y₁⁺ target with the report's definitions.
-- Every generated cell is checked by WP2's certified validity, and the status reports folds.
+- **The step.** The two conditions of the hyperbolic system are orthogonality, r_ξ · r_η = 0, and the cell size,
+  |r_ξ × r_η| = ΔA. They give at each point a step normal to the current layer (central differences).
+- **The mitre length.** Its length is h / cos(β/2), with h the layer's height and β the layer's turning angle at the
+  point (capped at 4h). This is the exact offset of a polygon: a layer stays at height h from both sides of a corner.
+  A plain h along the bisector makes concave corners lag and their cells fold. From a regular polygon the layers are
+  its exact offsets.
+- **Smoothing.** The step directions are smoothed by an implicit dissipation, (I − ε_k δ_ξξ) D = n: a periodic or
+  plain tridiagonal solve per layer, with ε_k growing linearly to `epsilon` (default 0.5) at the last layer.
+- **Validity.** Every generated cell is checked by WP2's quality (scaled certified min J). `invalid` counts the cells
+  not certified valid, and status 2 reports them.
+- **Measured limit.** The smoothing cures a V-shaped concave corner (a notch 0.15 deep in a unit square folds without
+  it, not with it). It does not cure a right-angled concave notch once the marched height passes the point spacing at
+  its corners: a structured layer cannot drop the points that the offset of a concave corner swallows. The status
+  reports the folds, and the caller limits the height or refines the boundary there.
+- **Spacing.** `geometric_spacing(h1, ratio, layers)` gives the layer heights. The first height can be set from a y₁⁺
+  target with the report's definitions (y₁ = y₁⁺ ν / u_τ).
 
 ## API
 
@@ -116,19 +127,30 @@ plain tridiagonal solve per layer. This keeps concave corners from folding, and 
 | `surface%projection_target(target, angle, corner_angle)` / `curve%projection_target(target, corner_angle)` | build |
 | `project_points(target, x, y, z, kinds, ids, fx, fy, fz, distances)` / `project_points_2d` | constrained feet |
 | `classify_points(target, x, y, z, tolerance, kinds, ids)` / `classify_points_2d` | automatic constraints |
-| `project_block_face(block, face, target, tolerance, moved)` / `project_block_side` | a block face onto the body |
-| `block_report(block, cutter, nu, report, ...)` / `block_report_2d`, `save_block_report`, `utau_flat_plate` | wall spacing and quality |
-| `hyperbolic_grid_2d(u, v, spacing, block, ...)` | 2-D extrusion |
+| `project_block_face(block, face, target, tolerance, moved, kinds, status)` / `project_block_side` | a block face onto the body, in place |
+| `block_report(block, cutter, nu, report, u_tau, u_tau_wall, u_inf, x_le, target_y1p, cell_centred, wall_name, status)` / `block_report_2d` | wall spacing and quality (`fossil_block_report`) |
+| `save_block_report(report, file_name)`, `utau_flat_plate(u_inf, nu, x)` | the text file, the flat-plate estimate |
+| `hyperbolic_grid_2d(u, v, spacing, block, closed, epsilon, invalid, status)`, `geometric_spacing(h1, ratio, layers)` | 2-D extrusion (`fossil_hyperbolic`) |
 
 ## Proved and measured
 
 - **Exact by construction:** corners are returned bit for bit; feet on a given constraint are its closest points
   (ties by index); the classification is deterministic.
-- **Measured (steps 3-7):**
-  - idempotence of the projection;
-  - feet on curved constraints against analytic ones;
-  - the report against analytic O-grids;
-  - the extrusion against the polar grid, and its validity on airfoils.
+- **Measured** (`fossil_test_projection*`, `fossil_test_block_report`, `fossil_test_hyperbolic_2d`,
+  `fossil_val_body_fitted`):
+
+| Case | Result |
+|---|---|
+| a point near a cube edge | free projection lands on the wrong face; `PROJ_PATCH` and `PROJ_CURVE` do not |
+| projection idempotence | 3.4 ulps on a sphere; 3.5e-13 on the NACA0012 wing (feet on edges of long spanwise triangles) |
+| a cylinder rim | feet equal the closest chord point, bit for bit |
+| a squircle face under a cylinder cap | boundary on the rim, interior on the cap; unconstrained, the boundary falls on the side |
+| NACA0012 wing, a 41 × 21 grid | trailing-edge row on its line, root and tip rows on z = 0 and 1, corners on corners |
+| geometric O-grids (2-D, 3-D) | y₁ = h₁ along the line and to the wall to 2e-16, growth ratio q to 1e-12 |
+| NACA0012 O-grid, y₁⁺ = 1 by design | every cell valid; y₁⁺ 1.000-1.009 away from the trailing edge, 1.48 at its corner |
+| extrusion from a regular 64-gon | its exact offsets, to 7e-16 |
+| a V notch 0.15 deep / a right-angled notch | folds without smoothing, none with it / folds reported (26 cells) |
+| the bunny (69 451 facets) | target built in 0.06 s; a 101 × 101 grid projected in 0.73 s |
 
 ## Left out
 

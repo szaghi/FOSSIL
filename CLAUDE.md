@@ -341,6 +341,17 @@ fobis fetch            # --update to re-fetch
   convex triangle / segment pair only, never for a whole non-convex body) and takes the larger certified step (default
   off). `first_impact` / `first_impact_2d`: swept-box broad phase, candidates by lower bound, equal to the loop over all
   pairs. CPU only. Validation `fossil_val_ccd`.
+- `fossil_projection.f90`, `fossil_block_report.f90`, `fossil_hyperbolic.f90` — body-fitted grid support (issue #74,
+  roadmap #68 WP5; design in `docs/guide/advanced/body-fitted.md`): `projection_target_t` (`surface%projection_target`,
+  `curve%projection_target`: elements by patch with one tree per patch; constraint curves = feature edges of #61 +
+  patch boundaries, chained between corners; corners); `project_points(_2d)` with PROJ_FREE / PATCH / CURVE / CORNER
+  (ties to the lowest index; corners bit for bit), `classify_points(_2d)` (corner, else curve, else the patch of the
+  closest facet, within a tolerance), `project_block_face` / `project_block_side` (in place). `block_report(_2d)`
+  (own module: fossil_projection cannot use the surface type): y1 along the grid line and to the wall cutter,
+  y1+ (u_tau given, or `utau_flat_plate` flagged as an estimate), growth ratio, WP2 quality, `cell_centred` (wall
+  cells), `save_block_report` (text). `hyperbolic_grid_2d`: normal steps of mitre length h/cos(beta/2) (exact polygon
+  offsets), implicit smoothing of the directions; folds at right-angled concave notches are reported (status 2), not
+  prevented; `geometric_spacing`. CPU only. Validation `fossil_val_body_fitted`.
 - `fossil_box_predicates.f90`, `fossil_box_query.f90` — AMR tagging (issue #38): box-triangle separating-axis test (conservative: run on the box inflated by `box_tolerance`, 1e-12 of the problem size, never misses a contact), exact 2-D box-segment test; `bvh_box_contact_oac` / `curve_box_contact_oac` (shared CPU/device traversals), `cell_bands` / `cell_components` (tag-band BFS, 26-connected components). The device box path follows the #20 rules and needs no new device arrays.
 
 ## Coding conventions

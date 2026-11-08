@@ -1,0 +1,5 @@
+$ ck_project_face
+corners 4, on edges 28, on the face 49
+face corner (1, 1) now at   1.0000  0.0000  0.0000
+edge vertex (5, 1) now at   1.0000  0.5000  0.0000
+largest move   0.0268
