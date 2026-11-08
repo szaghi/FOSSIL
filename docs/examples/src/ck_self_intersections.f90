@@ -1,6 +1,6 @@
 !run ck_self_intersections ck_self_intersections
 program ck_self_intersections
-use fossil, only : surface_stl_object, intersection_pair_t, BOOL_UNION, BOOL_STATUS_OK
+use fossil, only : surface_stl_object, intersection_pair_t, BOOL_STATUS_OK
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
 implicit none
@@ -18,9 +18,9 @@ print '(A,I0,A,I0,A,F7.4)', 'merged: ', soup%get_facets_number(), ' facets, ', s
                             ' crossing pairs, volume ', soup%get_volume()
 print '(A,2(3F7.3,2X))', 'first crossing segment ', pairs(1)%p%x, pairs(1)%p%y, pairs(1)%p%z, &
                          pairs(1)%q%x, pairs(1)%q%y, pairs(1)%q%z
-call a%boolean(other=b, op=BOOL_UNION, status=status)         ! resolve: keep only the outer surface
-if (status /= BOOL_STATUS_OK) error stop 'boolean failed'
-call a%find_self_intersections(pairs=pairs)
-print '(A,I0,A,I0,A,F7.4,A,L1)', 'union:  ', a%get_facets_number(), ' facets, ', size(pairs), &
-                                 ' crossing pairs, volume ', a%get_volume(), ', watertight ', a%is_watertight()
+call soup%resolve_self_intersections(status=status)          ! remove them: keep only the outer surface
+if (status /= BOOL_STATUS_OK) error stop 'resolve_self_intersections failed'
+call soup%find_self_intersections(pairs=pairs)
+print '(A,I0,A,I0,A,F7.4,A,L1)', 'resolved: ', soup%get_facets_number(), ' facets, ', size(pairs), &
+                                 ' crossing pairs, volume ', soup%get_volume(), ', watertight ', soup%is_watertight()
 endprogram ck_self_intersections

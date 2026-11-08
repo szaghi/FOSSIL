@@ -1916,19 +1916,22 @@ endprogram ex_find_self_intersections_api
 call surface%resolve_self_intersections(status=status)
 ```
 
-**Purpose.** Clean up every self-intersection in-place by running
-`boolean(self, self, BOOL_UNION)`. The §1.1 arrangement engine
-collects every self-crossing, retriangulates the affected facets, and
-the union selection rule keeps only the outer manifold. Result is a
-self-intersection-free version of the input.
+**Purpose.** Replace a closed surface by its self-union: the boundary
+of the region it winds around at least once (issue #78). The pairs of
+`find_self_intersections` are cut into the exact arrangement of the
+surface with itself (the boolean engine's implicit points and
+`cdt_facet`), and each patch of sub-triangles between cuts is kept iff
+the surface's winding number is 0 in front of it. The result is
+self-intersection free and keeps the input's patches.
 
 **Arguments.**
 
 | Argument | Intent       | Type           | Notes                                                              |
 | -------- | ------------ | -------------- | ------------------------------------------------------------------ |
-| `status` | `out`, opt.  | `integer(I4P)` | `BOOL_STATUS_*` (inherits status codes from the boolean engine).   |
+| `status` | `out`, opt.  | `integer(I4P)` | `BOOL_STATUS_OK`, `BOOL_STATUS_CDT_FAILED`, `BOOL_STATUS_NOT_CLOSED` or `BOOL_STATUS_EMPTY_INPUT`. |
 
-Mutates `self` in place.
+Mutates `self` in place on `BOOL_STATUS_OK` only; a surface with no
+self-intersection is returned unchanged.
 
 **Example.**
 
@@ -1948,13 +1951,14 @@ endprogram ex_resolve_self_intersections_api
 
 **Notes.**
 
-- **Inherits the §1.1 coplanar limitation.** Self-intersections that
-  involve coplanar facet pairs may produce a result with silently
-  wrong volume; perturb by `~1e-6 * bbox_diag` if you suspect
-  coplanar self-overlaps.
+- `BOOL_STATUS_CDT_FAILED`: the cuts of a facet cross each other, at a
+  point where three facets of the surface meet (the arrangement has no
+  triple-point construction). `dragon.stl` returns it.
+- `BOOL_STATUS_NOT_CLOSED`: the selection has boundary edges, because
+  the input is not closed (its winding number is not an integer).
 - Interior cavities formed by self-intersections are **dropped**, not
-  re-meshed. If the input had meaningful interior structure, it's
-  gone after resolve.
+  re-meshed, and so are inverted pockets (winding number −1). If the
+  input had meaningful interior structure, it's gone after resolve.
 - For inputs too dirty for resolve to handle (large holes, missing
   facets), reach for [`alpha_wrap`](#alpha_wrap) instead.
 

@@ -40,12 +40,13 @@ module fossil_boolean
 use fossil_arrangement,    only : arrangement_t, arrangement_initialize, &
                                   arrangement_collect_intersections, &
                                   arrangement_retriangulate, coplanar_partner, cut_sources, &
+                                  arrangement_collect_pairs, coplanar_cover, &
                                   ARR_STATUS_OK, ARR_STATUS_CDT_FAILED
 use fossil_aabb_tree_object, only : aabb_tree_object, wn_node_t
 use fossil_facet_object,   only : facet_object
 use fossil_implicit_points, only : ip_orient3d
 use fossil_predicates,     only : orient3d
-use fossil_winding_number, only : winding_number
+use fossil_winding_number, only : winding_number, FOUR_PI
 use penf,                  only : I4P, R8P
 use vecfor,                only : vector_R8P
 
@@ -53,7 +54,9 @@ implicit none
 private
 public :: BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF
 public :: BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, BOOL_STATUS_EMPTY_INPUT
+public :: BOOL_STATUS_NOT_CLOSED
 public :: boolean_compute
+public :: self_union_compute
 public :: weld_vertices
 
 ! Op codes — the API surface for `surface%boolean(other, op, status)`.
@@ -67,6 +70,7 @@ integer(I4P), parameter :: BOOL_STATUS_OK              = 0_I4P
 integer(I4P), parameter :: BOOL_STATUS_CDT_FAILED      = 1_I4P  !< Retriangulation could not recover a cut segment.
 integer(I4P), parameter :: BOOL_STATUS_NOT_IMPLEMENTED = 2_I4P  !< Op code is none of BOOL_UNION/INTERSECT/DIFFERENCE/SYMDIFF.
 integer(I4P), parameter :: BOOL_STATUS_EMPTY_INPUT     = 3_I4P  !< One of the input surfaces has zero facets.
+integer(I4P), parameter :: BOOL_STATUS_NOT_CLOSED      = 4_I4P  !< The self-union is not closed (issue #78).
 
 ! Three-state classification thresholds for the WN test:
 !   wn > 0.5 + WN_BOUNDARY_TOL  → strictly inside
@@ -263,6 +267,139 @@ contains
    kept_facet(1:used) = buf(1:used)
    endsubroutine tag_and_select
 
+   subroutine self_union_compute(facet, tree, pa, pb, kept_facet, status)
+   !< The self-union of one closed surface (issue #78): the boundary of the region its winding number covers at least
+   !< once (Zhou, Grinspun, Zorin, Jacobson 2016, the selection of the boolean of a surface with itself).
+   !<
+   !< 1. The exact arrangement of the surface with itself (`arrangement_collect_pairs` over the pairs `pa`, `pb` of
+   !<    `find_self_intersections`), retriangulated by `cdt_facet` as for two bodies.
+   !< 2. Patches: sub-triangles connected across edges on no cut and shared by exactly two of them (a non-manifold
+   !<    edge separates sheets). The winding number of the surface is constant on each side of a patch: w on the
+   !<    side its normal points to (the front), w + 1 behind it.
+   !< 3. w per patch at the centroid c of a large sub-triangle: the exact solid-angle sum over every facet but the
+   !<    parent is w + 1/2 there (the parent's own term jumps by 1 across it, the others are continuous), rounded to
+   !<    the nearest integer; of the `N_PROBES` largest sub-triangles the one nearest to an integer + 1/2 decides.
+   !< 4. A patch is kept iff w = 0 (outside in front, inside behind). A sub-triangle covered by coplanar facets of the
+   !<    surface (`coplanar_cover`, exact) is decided alone: with C its parent and the facets covering it and c the sum
+   !<    of their orientations relative to the parent, the sum over the other facets is w_front + c/2 = w_back - c/2;
+   !<    one copy (the lowest facet of C) is kept iff one side has w <= 0 and the other w >= 1, oriented outward.
+   !< The result is not checked here: the caller checks that it is closed.
+   type(facet_object),              intent(in)            :: facet(:)   !< Facets of the surface.
+   type(aabb_tree_object),          intent(in), target    :: tree       !< Its AABB tree.
+   integer(I4P),                    intent(in)            :: pa(:)      !< First facet of each self-intersecting pair.
+   integer(I4P),                    intent(in)            :: pb(:)      !< Second facet of each pair.
+   type(facet_object), allocatable, intent(out)           :: kept_facet(:) !< The self-union.
+   integer(I4P),                    intent(out), optional :: status     !< BOOL_STATUS_OK or BOOL_STATUS_CDT_FAILED.
+   integer(I4P), parameter                                :: N_PROBES = 3_I4P
+   type(arrangement_t)                                    :: arr
+   type(facet_object), allocatable                        :: sub_facet(:), buf(:)
+   integer(I4P),       allocatable                        :: sub_owner(:), sub_source(:), sub_pid(:, :)
+   integer(I4P),       allocatable                        :: patch(:), probe(:, :), cover(:), wfront(:)
+   logical,            allocatable                        :: sub_cut(:, :), shared(:), decided(:)
+   real(R8P),          allocatable                        :: probe_area(:, :), best(:)
+   integer(I4P)                                           :: arr_status, n_sub, np, k, p, j, nc, used, c, wf, wb
+   real(R8P)                                              :: ar, w, dev
+
+   if (present(status)) status = BOOL_STATUS_OK
+   if (size(facet, dim=1) == 0) then
+      if (present(status)) status = BOOL_STATUS_EMPTY_INPUT
+      allocate(kept_facet(0))
+      return
+   endif
+   call arrangement_initialize(arr=arr, facet_a=facet, tree_a=tree, facet_b=facet(1:0), tree_b=tree)
+   call arrangement_collect_pairs(arr=arr, pa=pa, pb=pb)
+   call arrangement_retriangulate(arr=arr, sub_facet=sub_facet, sub_owner=sub_owner, sub_source=sub_source, &
+                                  status=arr_status, sub_pid=sub_pid, sub_cut=sub_cut)
+   if (arr_status /= ARR_STATUS_OK) then
+      if (present(status)) status = BOOL_STATUS_CDT_FAILED
+      allocate(kept_facet(0))
+      return
+   endif
+   n_sub = size(sub_facet, dim=1)
+   allocate(shared(n_sub))
+   do k = 1, n_sub
+      shared(k) = coplanar_partner(arr=arr, gi=sub_source(k), pid=sub_pid(:, k)) > 0_I4P
+   enddo
+   call build_patches(sub_owner, sub_pid, sub_cut, patch, np, manifold=.true.)
+   ! probes: the N_PROBES largest non-shared sub-triangles of each patch
+   allocate(probe(N_PROBES, np), probe_area(N_PROBES, np))
+   probe = 0_I4P ; probe_area = -1._R8P
+   do k = 1, n_sub
+      if (shared(k)) cycle
+      p = patch(k) ; ar = sub_facet(k)%area()
+      do j = 1, N_PROBES
+         if (ar > probe_area(j, p)) then
+            probe(j + 1:N_PROBES, p) = probe(j:N_PROBES - 1, p)
+            probe_area(j + 1:N_PROBES, p) = probe_area(j:N_PROBES - 1, p)
+            probe(j, p) = k ; probe_area(j, p) = ar
+            exit
+         endif
+      enddo
+   enddo
+   allocate(wfront(np), decided(np), best(np))
+   wfront = 0_I4P ; decided = .false. ; best = huge(1._R8P)
+   do p = 1, np
+      do j = 1, N_PROBES
+         k = probe(j, p)
+         if (k == 0_I4P) exit
+         w = solid_angle_except(arr%facet(1:arr%n_a), [sub_source(k)], sub_facet(k)%centroid) / FOUR_PI - 0.5_R8P
+         dev = abs(w - anint(w))
+         if (dev < best(p)) then
+            best(p) = dev ; wfront(p) = nint(w, kind=I4P) ; decided(p) = .true.
+         endif
+         if (best(p) < WN_BOUNDARY_TOL) exit ! decisive: no need for the next probe
+      enddo
+   enddo
+   allocate(buf(max(1_I4P, n_sub)))
+   used = 0_I4P
+   do k = 1, n_sub
+      if (.not. shared(k)) then
+         if (.not. decided(patch(k))) cycle
+         if (wfront(patch(k)) /= 0_I4P) cycle
+         used = used + 1_I4P ; buf(used) = sub_facet(k)
+         cycle
+      endif
+      call coplanar_cover(arr=arr, gi=sub_source(k), pid=sub_pid(:, k), g=cover, ng=nc)
+      if (any(cover(1:nc) < sub_source(k))) cycle ! one copy: the lowest facet of the cover decides
+      c = 1_I4P
+      do j = 1, nc
+         if (arr%facet(cover(j))%normal%dotproduct(rhs=arr%facet(sub_source(k))%normal) > 0._R8P) then
+            c = c + 1_I4P
+         else
+            c = c - 1_I4P
+         endif
+      enddo
+      w = solid_angle_except(arr%facet(1:arr%n_a), [sub_source(k), cover(1:nc)], sub_facet(k)%centroid) / FOUR_PI
+      wf = nint(w - 0.5_R8P * c, kind=I4P) ; wb = nint(w + 0.5_R8P * c, kind=I4P)
+      if (wf <= 0_I4P .and. wb >= 1_I4P) then
+         used = used + 1_I4P ; buf(used) = sub_facet(k)
+      elseif (wb <= 0_I4P .and. wf >= 1_I4P) then
+         used = used + 1_I4P ; buf(used) = sub_facet(k)
+         call buf(used)%reverse_normal
+         call buf(used)%compute_metrix
+      endif
+   enddo
+   allocate(kept_facet(used))
+   do k = 1, used
+      kept_facet(k) = buf(k)
+   enddo
+   endsubroutine self_union_compute
+
+   pure function solid_angle_except(facet, skip, point) result(omega)
+   !< Sum of the signed solid angles of the facets at `point`, except the facets `skip` (issue #78).
+   type(facet_object), intent(in) :: facet(:) !< Facets.
+   integer(I4P),       intent(in) :: skip(:)  !< Facets left out.
+   type(vector_R8P),   intent(in) :: point    !< Point.
+   real(R8P)                      :: omega    !< Sum.
+   integer(I4P)                   :: f
+
+   omega = 0._R8P
+   do f = 1, size(facet, dim=1)
+      if (any(skip == f)) cycle
+      omega = omega + facet(f)%solid_angle(point=point)
+   enddo
+   endfunction solid_angle_except
+
    subroutine local_inside(arr, gi, pid, e, inside, ok)
    !< Exact side of the sub-triangle (registry vertices `pid`) of facet gi beside its cut edge e (opposite vertex e)
    !< with respect to the other surface (issue #65). The edge lies on the other surface: inside one facet g of it, or
@@ -325,13 +462,15 @@ contains
       endfunction vertex_side
    endsubroutine local_inside
 
-   subroutine build_patches(owner, pid, cut, patch, np)
+   subroutine build_patches(owner, pid, cut, patch, np, manifold)
    !< Patches: union-find of the sub-triangles of each surface over the edges (registry index pairs) that no
-   !< triangulation marked as a cut; patch(k) in 1..np.
+   !< triangulation marked as a cut; patch(k) in 1..np. With `manifold`, only over edges shared by exactly two
+   !< sub-triangles (issue #78: the sheets through a non-manifold edge are different patches).
    integer(I4P),              intent(in)  :: owner(:), pid(:, :)
    logical,                   intent(in)  :: cut(:, :)
    integer(I4P), allocatable, intent(out) :: patch(:)
    integer(I4P),              intent(out) :: np
+   logical,                   intent(in), optional :: manifold
    integer(I4P), allocatable              :: key(:, :), ord(:), parent(:), root_id(:)
    integer(I4P)                           :: n, k, e, h, i, j, a, b
    logical,      allocatable              :: hcut(:)
@@ -357,6 +496,9 @@ contains
          j = j + 1_I4P
       enddo
       any_cut = any(hcut(ord(i:j)))
+      if (present(manifold)) then
+         if (manifold .and. j - i /= 1_I4P) any_cut = .true.
+      endif
       if (.not. any_cut) then
          do k = i + 1, j
             call unite((ord(i) - 1_I4P) / 3_I4P + 1_I4P, (ord(k) - 1_I4P) / 3_I4P + 1_I4P)

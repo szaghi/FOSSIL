@@ -1,8 +1,8 @@
-!< Figures of the cookbook recipe "Find and resolve self-intersections": the two crossing cubes merged into one
+!< Figures of the cookbook recipe "Find self-intersections and remove them": the two crossing cubes merged into one
 !< surface (ghost) with the segments along which find_self_intersections reports the facet pairs crossing, then the
-!< union of the two cubes, its walls inside the other cube gone.
+!< surface after resolve_self_intersections, its walls inside the other cube gone.
 program fig_ck_self_intersections
-use fossil,     only : surface_stl_object, intersection_pair_t, BOOL_UNION
+use fossil,     only : surface_stl_object, intersection_pair_t
 use fossil_fig, only : fig_open, fig_surface, fig_segments, fig_close
 use penf,       only : I4P, R8P
 use vecfor,     only : vector_R8P
@@ -23,9 +23,10 @@ call fig_open(u, 'ck-self-intersections-before', trim(caption), -55._R8P, 25._R8
 call fig_surface(u, 'ghost', soup)
 call fig_segments(u, 'hole', pairs%p, pairs%q)
 call fig_close(u)
-call a%boolean(other=b, op=BOOL_UNION)
-write(caption, '(A,I0,A,F6.4)') 'union: ', a%get_facets_number(), ' facets, no crossing, volume ', a%get_volume()
+call soup%resolve_self_intersections
+write(caption, '(A,I0,A,F6.4)') 'resolved: ', soup%get_facets_number(), ' facets, no crossing, volume ', &
+                                soup%get_volume()
 call fig_open(u, 'ck-self-intersections-after', trim(caption), -55._R8P, 25._R8P)
-call fig_surface(u, 'body', a)
+call fig_surface(u, 'body', soup)
 call fig_close(u)
 endprogram fig_ck_self_intersections

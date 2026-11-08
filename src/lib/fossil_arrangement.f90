@@ -39,8 +39,10 @@ public :: cut_list_t
 public :: arrangement_t
 public :: arrangement_initialize
 public :: arrangement_collect_intersections
+public :: arrangement_collect_pairs
 public :: arrangement_retriangulate
 public :: coplanar_partner
+public :: coplanar_cover
 public :: cut_sources
 public :: project_to_plane
 public :: lift_from_plane
@@ -165,6 +167,24 @@ contains
    call merge_points(arr=arr)
    call propagate_edge_points(arr=arr)
    endsubroutine arrangement_collect_intersections
+
+   subroutine arrangement_collect_pairs(arr, pa, pb)
+   !< The arrangement of one surface with itself (issue #78): `arr` holds the surface as A (B empty) and the pairs
+   !< (pa(k), pb(k)) are its facet pairs that cross or overlap in a common plane (`find_self_intersections`). Each
+   !< pair is cut exactly as a pair of A and B (`collect_pair`), then the registry is merged and the T-junctions closed
+   !< as in `arrangement_collect_intersections`. Facets meeting only along a shared edge or at a shared vertex add no
+   !< cut.
+   type(arrangement_t), intent(inout) :: arr    !< Arrangement (A = the surface, no B).
+   integer(I4P),        intent(in)    :: pa(:)  !< First facet of each pair.
+   integer(I4P),        intent(in)    :: pb(:)  !< Second facet of each pair.
+   integer(I4P)                       :: k
+
+   do k = 1, size(pa)
+      call collect_pair(arr=arr, gi=pa(k), gj=pb(k))
+   enddo
+   call merge_points(arr=arr)
+   call propagate_edge_points(arr=arr)
+   endsubroutine arrangement_collect_pairs
 
    subroutine collect_brute_force(arr)
    !< O(nA * nB) fallback used only when trees are not initialized.
@@ -610,26 +630,43 @@ contains
 
    function coplanar_partner(arr, gi, pid) result(partner)
    !< The coplanar partner of facet gi (a facet of the other surface exactly coplanar with it) containing the
-   !< sub-triangle of gi with registry vertices `pid`, or 0 (issues #63, #65). The arrangement cut gi along the
-   !< portions of its partners' edges inside it, so a sub-triangle lies inside a partner or outside it: inside iff its
-   !< three vertices are in the closed partner (a convex set), by exact `ip_orient2d` in the projection of gi.
+   !< sub-triangle of gi with registry vertices `pid`, or 0 (issues #63, #65): the first of `coplanar_cover`.
    type(arrangement_t), intent(in) :: arr     !< Arrangement.
    integer(I4P),        intent(in) :: gi      !< Parent facet of the sub-triangle.
    integer(I4P),        intent(in) :: pid(3)  !< Registry indices of the sub-triangle's vertices.
    integer(I4P)                    :: partner !< Partner index, 0 if none.
-   integer(I4P)                    :: k, g, drop, og, j, e
-   type(implicit_point_t)          :: gv(3)
-   logical                         :: inside
+   integer(I4P), allocatable       :: g(:)
+   integer(I4P)                    :: ng
 
+   call coplanar_cover(arr, gi, pid, g, ng, first=.true.)
    partner = 0_I4P
+   if (ng > 0_I4P) partner = g(1)
+   endfunction coplanar_partner
+
+   subroutine coplanar_cover(arr, gi, pid, g, ng, first)
+   !< The coplanar partners of facet gi (facets exactly coplanar with it, recorded by `collect_pair`) containing the
+   !< sub-triangle of gi with registry vertices `pid`, in the order they were recorded (issues #63, #65, #78). The
+   !< arrangement cut gi along the portions of its partners' edges inside it, so a sub-triangle lies inside a partner
+   !< or outside it: inside iff its three vertices are in the closed partner (a convex set), by exact `ip_orient2d` in
+   !< the projection of gi.
+   type(arrangement_t),       intent(in)           :: arr    !< Arrangement.
+   integer(I4P),              intent(in)           :: gi     !< Parent facet of the sub-triangle.
+   integer(I4P),              intent(in)           :: pid(3) !< Registry indices of the sub-triangle's vertices.
+   integer(I4P), allocatable, intent(out)          :: g(:)   !< Partners containing it.
+   integer(I4P),              intent(out)          :: ng     !< Their number.
+   logical,                   intent(in), optional :: first  !< Stop at the first one (default .false.).
+   integer(I4P)                                    :: k, drop, og, j, e
+   type(implicit_point_t)                          :: gv(3)
+   logical                                         :: inside
+
+   allocate(g(max(1_I4P, arr%cut(gi)%n_coplanar))) ; ng = 0_I4P
    if (arr%cut(gi)%n_coplanar == 0_I4P) return
    if (any(pid <= 0_I4P)) return
    drop = facet_drop(arr%facet(gi)%vertex)
    if (drop == 0_I4P) return
    do k = 1, arr%cut(gi)%n_coplanar
-      g = arr%cut(gi)%coplanar(k)
       do j = 1, 3
-         gv(j) = ip_explicit(xyz_of(arr%facet(g)%vertex(j)))
+         gv(j) = ip_explicit(xyz_of(arr%facet(arr%cut(gi)%coplanar(k))%vertex(j)))
       enddo
       og = ip_orient2d(gv(1), gv(2), gv(3), drop)
       if (og == 0_I4P) cycle
@@ -643,10 +680,13 @@ contains
          if (.not. inside) exit
       enddo
       if (inside) then
-         partner = g ; return
+         ng = ng + 1_I4P ; g(ng) = arr%cut(gi)%coplanar(k)
+         if (present(first)) then
+            if (first) return
+         endif
       endif
    enddo
-   endfunction coplanar_partner
+   endsubroutine coplanar_cover
 
    subroutine cut_sources(arr, gi, ip, iq, g, ng)
    !< Facets of the other surface whose cut segments in facet gi contain the edge (ip, iq) (registry indices): the

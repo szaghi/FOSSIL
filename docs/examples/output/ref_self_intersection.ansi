@@ -1,4 +1,4 @@
 $ ref_self_intersection
-merged:   96 facets, watertight T, shells 2, volume 2.0000, self-intersecting pairs 32
-pairs:    32, crossing 32, sheets 0
-union:   136 facets, watertight T, shells 1, volume 1.7690, self-intersecting pairs 0
+merged:    96 facets, watertight T, shells 2, volume 2.0000, self-intersecting pairs 32
+pairs:     32, crossing 32, sheets 0
+resolved: 136 facets, watertight T, shells 1, volume 1.7690, self-intersecting pairs 0

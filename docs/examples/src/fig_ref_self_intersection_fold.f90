@@ -4,8 +4,8 @@
 !< Figures of the reference page "Self-intersection" on one closed shell that passes through itself: the unit cube with
 !< its corner (1, 1, 1) pushed to (0.3, 0.35, -0.3), through its own bottom face. "What it does": the surface drawn
 !< translucent, the facets of the reported pairs in ember, the crossing segments in red; it is watertight and one
-!< shell. "Pipeline (resolution)": the same surface after resolve_self_intersections, with the pairs
-!< find_self_intersections still reports on it (issue #78: the self-union does not remove the crossings).
+!< shell. "Pipeline (resolution)": the same surface after resolve_self_intersections (issue #78), with the pairs
+!< find_self_intersections still reports on it: none.
 program fig_ref_self_intersection_fold
 use fossil,     only : surface_stl_object, facet_object, intersection_pair_t, BOOL_STATUS_OK
 use fossil_fig, only : fig_open, fig_surface, fig_triangle, fig_segment, fig_close
@@ -40,8 +40,8 @@ call scene('ref-self-intersection-fold')
 call cube%resolve_self_intersections(status=status)
 print '(A,L1)', 'resolve_self_intersections: BOOL_STATUS_OK ', status == BOOL_STATUS_OK
 call cube%find_self_intersections(pairs=pairs)
-write(caption, '(A,I0,A,L1,A,I0,A)') 'resolve_self_intersections: ', cube%get_facets_number(), &
-      ' facets, watertight ', cube%is_watertight(), ', ', size(pairs), ' crossing pairs left'
+write(caption, '(A,I0,A,L1,A,I0,A,F6.4)') 'resolved: ', cube%get_facets_number(), ' facets, watertight ', &
+      cube%is_watertight(), ', ', size(pairs), ' crossing pairs, volume ', cube%get_volume()
 print '(A)', trim(caption)
 call scene('ref-self-intersection-resolve')
 contains

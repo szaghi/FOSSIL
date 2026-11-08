@@ -1,4 +1,4 @@
 $ ck_self_intersections
 merged: 96 facets, 32 crossing pairs, volume  2.0000
 first crossing segment   1.000  0.900  0.400    1.000  1.000  0.400
-union:  136 facets, 0 crossing pairs, volume  1.7270, watertight T
+resolved: 136 facets, 0 crossing pairs, volume  1.7270, watertight T

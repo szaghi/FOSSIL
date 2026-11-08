@@ -175,14 +175,15 @@ manifold, not watertight. See
 
 ![two unit cubes merged into one surface, as a translucent ghost, and in ember the closed curve along which their facets cross](../examples/images/ck-self-intersections-before.svg)
 
-![the union of the two cubes: 136 facets, the walls inside the other cube removed](../examples/images/ck-self-intersections-after.svg)
+![after resolve_self_intersections: 136 facets, the walls inside the other cube removed](../examples/images/ck-self-intersections-after.svg)
 
 </div>
 
 `find_self_intersections` lists every pair of facets that cross, with the segment they share: here 32 pairs along one
-closed curve where the walls of the two cubes meet. To remove them, unite the crossing bodies with
-`boolean(BOOL_UNION)`: the result keeps only the outer surface, watertight, no crossing pair left, volume
-1.7270 = 2 − 0.7 × 0.65 × 0.6. See [self-intersection](/guide/advanced/self-intersection).
+closed curve where the walls of the two cubes meet. `resolve_self_intersections` removes them: it keeps the boundary
+of the region the surface winds around at least once, watertight, no crossing pair left, volume
+1.7270 = 2 − 0.7 × 0.65 × 0.6, the same as the `boolean(BOOL_UNION)` of the two cubes as separate surfaces. See
+[self-intersection](/guide/advanced/self-intersection).
 
 ### Resolve the self-intersections of one surface
 
@@ -192,18 +193,19 @@ closed curve where the walls of the two cubes meet. To remove them, unite the cr
 
 <div class="fossil-pair">
 
-![what resolve_self_intersections returns for the two crossing cubes: the arrangement, volume 2.0000, translucent, its open edges in ember](../examples/images/ck-resolve-self-arrangement.svg)
+![the unit cube with its corner pushed through its own bottom face, translucent, the crossing segments in ember](../examples/images/ck-resolve-self-folded.svg)
 
-![the union of the two shells the recipe falls back to: 132 facets, volume 1.6570, watertight](../examples/images/ck-resolve-self-union.svg)
+![what resolve_self_intersections returns: the dent cut at the bottom face, the pocket below it gone, watertight](../examples/images/ck-resolve-self-resolved.svg)
 
 </div>
 
-`resolve_self_intersections` is meant to return the outer surface of a self-crossing surface. It does not yet
-([issue #78](https://github.com/szaghi/FOSSIL/issues/78)): on the two crossing cubes it returns status 0 with the
-volume counted twice (2.0000), a surface that is not watertight and still has 52 crossing pairs. Check its result
-before using it. The recipe does, and falls back to the shells: it splits the surface by `facet_shell` and unites
-them with `boolean`, which gives 132 facets, the volume 1.6570 (2 − 0.7³), watertight and with no crossing. See
-[self-intersection](/guide/advanced/self-intersection#known-limitations).
+One shell can pass through itself: here the unit cube with its corner (1, 1, 1) pushed to (0.3, 0.35, −0.3), through
+its own bottom face. It is watertight and one shell, so only `find_self_intersections` sees the defect, and there are
+no separate bodies to unite. `resolve_self_intersections` keeps the faces with winding number 0 in front and 1 behind:
+the pocket below the bottom face, wound −1, goes, and the dent opens through the bottom face. Check the status: on
+`BOOL_STATUS_CDT_FAILED` (the cuts of a facet cross each other, as on `dragon.stl`) or `BOOL_STATUS_NOT_CLOSED` (an
+input that is not closed) the surface is left unchanged; [`alpha_wrap`](/guide/advanced/alpha-wrap) is the fallback.
+See [self-intersection](/guide/advanced/self-intersection#known-limitations).
 
 ### Wrap a triangle soup into a closed surface
 

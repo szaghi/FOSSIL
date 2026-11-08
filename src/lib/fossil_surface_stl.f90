@@ -62,10 +62,10 @@ use fossil_smoothing, only : do_smooth_mesh => smooth_mesh, &
                              SMOOTH_DEFAULT_ITERATIONS
 use fossil_remesh, only : compute_remesh => isotropic_remesh, &
                           REM_STATUS_OK, REM_STATUS_BAD_INPUT
-use fossil_boolean, only : compute_boolean => boolean_compute, &
+use fossil_boolean, only : compute_boolean => boolean_compute, compute_self_union => self_union_compute, &
                            BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF, &
                            BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, &
-                           BOOL_STATUS_EMPTY_INPUT, weld_vertices
+                           BOOL_STATUS_EMPTY_INPUT, BOOL_STATUS_NOT_CLOSED, weld_vertices
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 use penf, only : I4P, I8P, R8P, MaxR8P, str
@@ -83,6 +83,7 @@ public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_F
 public :: STATUS_INVALID_INPUT
 public :: BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF
 public :: BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, BOOL_STATUS_EMPTY_INPUT
+public :: BOOL_STATUS_NOT_CLOSED
 
 ! Point-in-polyhedron algorithm selector for `is_point_inside`, `compute_distance`,
 ! and `distance` (when `is_signed=.true.`):
@@ -3988,20 +3989,58 @@ contains
    endsubroutine weld_onto
 
    subroutine resolve_self_intersections(self, status)
-   !< Self-boolean union — closes §1.2's deferred resolution path.
+   !< Remove the self-intersections of a closed surface: replace it by the boundary of the region it winds around at
+   !< least once (issue #78; the self-union of Zhou, Grinspun, Zorin, Jacobson 2016).
    !<
-   !< Runs `boolean(self, self, BOOL_UNION)`: the arrangement collects every
-   !< self-crossing as if A and B were the same surface; the union selection
-   !< rule keeps only the outer manifold, dropping interior cavities formed
-   !< by the self-intersections. Result is a self-intersection-free version
-   !< of the input.
+   !< The pairs of `find_self_intersections` (crossings, coplanar overlaps, folds) are cut exactly into the
+   !< arrangement of the surface with itself (implicit points, `cdt_facet`: the exact machinery of `boolean`, issue
+   !< #65); each patch of sub-triangles between cuts is kept iff the winding number of the surface is 0 in front of
+   !< it (and so 1 behind it), see `self_union_compute`. Interior walls, doubly wound regions and inverted pockets
+   !< (winding -1) go; the result is self-intersection free with the input's patches.
    !<
-   !< Inherits the coplanar handling of `boolean` (issue #33); see its
-   !< docstring for the exactness statement and what has been validated.
-   class(surface_stl_object),     intent(inout)        :: self
-   integer(I4P),                  intent(out), optional :: status
+   !< Status (BOOL_STATUS_*), `self` unchanged unless OK:
+   !<   - OK: no self-intersection (nothing to do), or the self-union is closed (no boundary edge);
+   !<   - CDT_FAILED: a facet's cuts cross each other (three facets meeting at a point inside a facet: the
+   !<     arrangement has no triple-point construction), see the Known limitations of the reference page;
+   !<   - NOT_CLOSED: the selection is not closed (an input that is not closed has no well-defined winding number);
+   !<   - EMPTY_INPUT: no facets.
+   class(surface_stl_object),     intent(inout)        :: self   !< Surface; replaced by its self-union on success.
+   integer(I4P),                  intent(out), optional :: status !< BOOL_STATUS_*.
+   type(intersection_pair_t), allocatable              :: pairs(:)
+   type(facet_object),        allocatable              :: kept(:), copy(:)
+   integer(I4P),              allocatable              :: pa(:), pb(:)
+   type(surface_stl_object)                            :: result
+   integer(I4P)                                        :: k, n, st
 
-   call self%boolean(other=self, op=BOOL_UNION, status=status)
+   if (present(status)) status = BOOL_STATUS_OK
+   if (self%facets_number <= 0) then
+      if (present(status)) status = BOOL_STATUS_EMPTY_INPUT
+      return
+   endif
+   call self%find_self_intersections(pairs=pairs)
+   n = count(pairs(:)%kind /= SELFINT_SHEETS) ! sheets crossing along an edge need no cut: the patches split there
+   if (size(pairs) == 0) return
+   allocate(pa(n), pb(n))
+   n = 0_I4P
+   do k = 1, size(pairs)
+      if (pairs(k)%kind == SELFINT_SHEETS) cycle
+      n = n + 1_I4P ; pa(n) = pairs(k)%a ; pb(n) = pairs(k)%b
+   enddo
+   call sync_patch_names(self)
+   call compute_self_union(facet=self%facet(1:self%facets_number), tree=self%aabb, pa=pa, pb=pb, kept_facet=kept, &
+                           status=st)
+   if (st /= BOOL_STATUS_OK) then
+      if (present(status)) status = st
+      return
+   endif
+   allocate(copy, source=kept)
+   call result%adopt_facets(facets=copy) ! closure check on a copy: self stays unchanged unless OK
+   if (result%facet_1_de%ids_number + result%facet_2_de%ids_number + result%facet_3_de%ids_number > 0 .or. &
+       result%facets_number == 0) then
+      if (present(status)) status = BOOL_STATUS_NOT_CLOSED
+      return
+   endif
+   call self%adopt_facets(facets=kept)
    endsubroutine resolve_self_intersections
 
    subroutine resample_via_distance_field(self, resolution, surface_out, status)
