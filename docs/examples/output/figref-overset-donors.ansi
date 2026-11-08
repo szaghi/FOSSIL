@@ -1,0 +1,8 @@
+$ fig_ref_overset_donors
+O-grid vertices with 1, 2, 3 candidates:   411   18    0
+O-grid vertex 428: block 2 cell 34 18 xi  0.077  0.399 ratio  0.7067
+O-grid vertex 428: block 3 cell  5  3 xi  0.154  0.798 ratio  0.1767
+O-grid vertex 397: block 2 cell 34 20 xi  0.333  1.000 ratio  0.7067
+O-grid vertex 397: block 3 cell  5  8 xi  0.667  1.000 ratio  0.1767
+O-grid vertex 398: block 2 cell 34 23 xi  0.077  0.601 ratio  0.7067
+O-grid vertex 398: block 3 cell  5 14 xi  0.154  0.202 ratio  0.1767

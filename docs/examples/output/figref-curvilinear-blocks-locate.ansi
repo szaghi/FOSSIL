@@ -1,0 +1,4 @@
+$ fig_ref_curvilinear_blocks_locate
+cells 126, not valid 2
+points 1147: inside 1025, outside 117, warped 5
+point  10.00  4.40: candidate boxes 2, cell  10  5, status 3

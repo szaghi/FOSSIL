@@ -1,0 +1,10 @@
+$ anim_ref_distance_field_sweeps
+grid 39 x 39 nodes, band nodes 311, band width  0.250
+signs: nodes signed by their own point query 0
+compute_band: 311 exact nodes, the rest unknown (blank)
+compute_signs: flood fill, 38 unknown nodes inside (dots)
+sweep 1 (x up, y up): 530 nodes still unknown
+sweep 2 (x down, y up): 273 nodes still unknown
+sweep 3 (x up, y down): all known, off the converged field by 1.06E+00
+sweep 4 (x down, y down): all known, off the converged field by 2.71E-05
+converged after 12 sweeps: no change above tol in a cycle of 4

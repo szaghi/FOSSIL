@@ -1,0 +1,4 @@
+$ fig_ref_body_fitted_zigzag
+cube   0.000  0.000  0.000 to   1.000  1.000  1.000, constraint curves 12, corners 8
+free feet on the front face 6, on the top face 7, moved  0.0300, off the edge by  0.0800
+curve feet on the edge T, moved at most  0.0854

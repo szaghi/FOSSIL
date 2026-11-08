@@ -1,0 +1,4 @@
+$ fig_ref_cut_solver_coarsen
+fine: pieces 106, cells with two pieces 10, links 356, status 0
+coarse (ratio 2): pieces 28, cells with two pieces 4, links 80
+coarse fluid area - fine fluid area  6.66E-16

@@ -28,6 +28,13 @@ the background: 9 in the first frame, 3 while it grazes the top, 10 in the last 
    `curvilinear_block_2d_t`), and the cells of those blocks are the donors. Cell-centred data (Xall, ADAM) use the
    blocks of their cell centres: the caller passes the centres with one ghost layer, or `cell_centre_block` builds
    the outer layer by linear extrapolation from the boundary face centres.
+
+![a close-up of the cylinder assembly where the O-grid (tan curved lines) crosses the Cartesian background (grey lines): each background vertex carries its iota, 0 (red) inside the cylinder, -1 (teal) on the ring around the holes that receives from the O-grid, 1 (grey) elsewhere; the O-grid's outer vertices that receive from the background carry -2 (gold); one O-grid cell donating to a background vertex is filled teal, one background cell donating to an O-grid vertex gold](../../examples/images/ref-overset-mask.svg){.fossil-figure}
+
+The mask of the cylinder assembly of the Example (explicit rule, holes without offset, 3-point stencils): 137
+background holes, 56 background receptors from the O-grid and 33 O-grid receptors from the background. Background
+vertex (27, 24) receives from O-grid cell (3, 1); O-grid vertex (4, 13) from background cell (32, 28)
+(`fig_ref_overset_mask.f90`).
 2. **Exact where it decides.** Hole flags come from the fast winding number on the real walls (exact on closed walls,
    robust on open or dirty ones); the hole map's cut elements are exact (`BOX_CUT`), its lines of sight and the
    X-rays use exact crossings. Everything approximate is measured against the exact flags.
@@ -51,12 +58,21 @@ blocks (`wall_cutter`): the faces covered by `TOPO_BOUNDARY` records with the gi
   the cutter, as the winding number needs.
 - **Overlapping wall patches** of different blocks (collar grids, the two caps of a Yin–Yang sphere) cover the same
   wall twice; a plain union counts the overlap twice in the winding number *(gk/inference)*. They are trimmed: an
-  element of the coarser patch whose vertices all lie within the tolerance of the finer patch is dropped (the finer
-  patch wins). Elements straddling the edge of the other patch stay: the cutter may keep a thin double-covered strip,
-  never a gap.
+  element of the coarser patch (larger mean element size over the overlap) whose centroid (in 2-D, midpoint) lies
+  within the tolerance of the finer patch is dropped (the finer patch wins); the tolerance defaults to 0.1 of the
+  element size. The elements straddling the edge of the finer patch split between kept and dropped: the cutter keeps
+  a residual strip, about one coarse element wide at most, double-covered where a straddling element stays and
+  uncovered where it goes.
 - **Shared walls**: two blocks whose wall patches overlap share a wall. In Lee & Baeder's pair matrix they overlap
   *without mutual cutting*: they interpolate from each other but never cut each other's points
   (`methods/implicit-hole-cutting.md`).
+
+![two partial annuli around the unit cylinder: a fine one of 24 cells from 0 to 200 degrees on top, its wall in gold, and a coarse one of 11 cells from 153 to 373 degrees below, its kept wall segments in ember drawn just outside the circle; the three coarse segments dropped by the trimming are drawn in grey just inside it; on the left the kept coarse segment overlaps the fine wall from 193 to 200 degrees, on the right the coarse wall stops at 353 degrees and the fine one starts at 0, a gap; teal ticks on every kept segment point to the fluid](../../examples/images/ref-overset-cutter.svg){.fossil-figure}
+
+Two blocks share the cylinder's wall (`shared(1, 2)` is true). `wall_cutter_2d` keeps the fine patch whole and 8 of
+the 11 coarse segments: the segment from 193 to 213 degrees has its midpoint 0.054 off the fine patch, above the tolerance 0.035, and stays (the
+wall from 193 to 200 is covered twice), the one from 353 to 373 has its midpoint on it and goes (the wall from 353 to
+360 is not covered) (`fig_ref_overset_cutter.f90`). Both strips are within one coarse segment of the patch edge.
 
 ## Hole cutting
 
@@ -95,6 +111,13 @@ wall-distance criterion. The pair matrix is three-valued: two blocks **overlap**
 donor in the other, or one sits inside the other; blocks with a shared wall **overlap without cutting**. On the
 device the blocks are entered once (`enter_device`) and every block pair runs the same `_oac` kernels as the CPU.
 
+![the outer ring of the cylinder's O-grid (tan) at angles -11.25, 0 and 11.25 degrees over the background of spacing 0.15 (grey) and a refined patch of spacing 0.075 (teal); each of the three outer vertices (red dots) has two candidates, a background cell filled brown and a patch cell filled gold, labelled with the donor / receptor volume ratios 0.71 and 0.18](../../examples/images/ref-overset-donors.svg){.fossil-figure}
+
+With a third block, a patch of spacing 0.075 over [1.65, 2.4] × [-0.6, 0.6], `donor_candidates_2d` returns 411 O-grid
+vertices with one candidate and 18 with two. For the outer-ring vertices the background cell is 0.7067 times the
+receptor's cells, the patch cell 0.1767 times; the vertex at angle 0 lies on a background cell edge (ξ = 1) and the
+lower cell is taken (`fig_ref_overset_donors.f90`). Which candidate wins is the classification's choice, below.
+
 ## Selection, validity and the fixed point
 
 `classify` turns holes and candidates into the mask (`definitions/point-classification.md`):
@@ -113,6 +136,12 @@ interpolation, no receptor either (Chesshire & Henshaw); an invalid candidate gi
 depends on the neighbours, so the classification is iterated to a fixed point (CMPGRD), preferring the fewest
 receptors. **Circular interpolation** (receptors in each other's stencils) is detected and reported (Sherer & Scott).
 
+![the cylinder assembly twice, from the same candidates: left the explicit rule with the holes cut at offset 0.3 (red), the ring of background receptors around them (teal) and the O-grid's outer ring receiving (gold); right the implicit rule without holes, a wider band of background receptors (teal) inside the O-grid and the O-grid's outer five or so rings receiving (gold) where the background cells are smaller](../../examples/images/ref-overset-selection.svg){.fossil-figure}
+
+The explicit rule gives 33 O-grid and 72 background receptors and settles in 2 iterations; the implicit rule, from the
+same candidates, 191 and 132 after 6: each vertex receives from whichever block has the smaller cell there, so the
+O-grid hands over to the background well inside its outer boundary (`fig_ref_overset_mask.f90`).
+
 ## Fringes, orphans, overlap width
 
 - **Fringe layers** (`definitions/fringe-point.md`) n_f deep, by SUGGAR's rules: node-centred (a cell with a hole
@@ -122,6 +151,13 @@ receptors. **Circular interpolation** (receptors in each other's stencils) is de
   a hole, the donor rejected near a boundary, or a low-quality donor whose own vertices receive (Roget & Sitaraman).
 - **Overlap width** as Chesshire's d: the distance between the innermost receptors of two blocks; d = 0 makes the
   interpolation system singular, and a stencil one point short loses one order of accuracy.
+
+![the cylinder assembly over a background cut short at x = -1.8, so the O-grid's outer boundary leaves it on the left: holes (brown) inside the cylinder, the background levels INNER 1 (teal) and INNER 2 (gold) around them, the O-grid levels OUTER 1 (teal) on its outer boundary and OUTER 2 (gold) one ring in, five ember orphans on the left where the outer boundary has no background cell, and a red segment marking the overlap width d between the nearest receptors of the two blocks](../../examples/images/ref-overset-fringes.svg){.fossil-figure}
+
+With the background starting at x = −1.8, `fringe_levels_2d(levels=2)` gives 56 INNER 1 and 64 INNER 2 background
+vertices and 33 OUTER 1 and 33 OUTER 2 O-grid vertices; 5 OUTER 1 vertices on the left are orphans with
+`ORPHAN_NO_CANDIDATE`. `overlap_width_2d` gives d = 0.8400, equal to the brute-force minimum over the receptor pairs
+(`fig_ref_overset_mask.f90`).
 
 ## Wall projection for viscous walls
 
@@ -151,11 +187,23 @@ projection, 12 fine wall vertices inside the coarse block's range have no donor;
 - the check D^{n+1} ∩ H^n = ∅ (Meakin & Suhs: no hole becomes a field point without first being a receptor) is
   reported, which bounds how far a hole moves per step.
 
+![the cylinder moving over the background of spacing h = 0.15 in one step, its wall before (grey circle, n) and after (red circle, n + 1): left a step of 0.6 h, right of 3.6 h. Background vertices after the step: holes brown, receptors teal; exposed points, receptors before and field points after, gold on the trailing side; on the right, holes that became field points without being receptors, ember](../../examples/images/ref-overset-exposed.svg){.fossil-figure}
+
+The O-grid moves with a pose (`poses=` and `cutter_pose=`, searches built once, `previous=` walks from the last
+donors). A step of 0.6 h exposes 8 background vertices, all receptors before: no violation. A step of 3.6 h exposes 53,
+26 of which were holes: the step is too long for the fringe (`fig_ref_overset_exposed.f90`).
+
 ## Connectivity output
 
 `connectivity_t` holds the mask, the fringe levels and orphan causes per block, and the receptor list (receptor block
 and vertex, donor block, stencil corner, ξ, width per direction, low-order flag, quality); `save_connectivity` writes
 it as plain text, one receptor per line, in the form the founding codes share (`definitions/domain-connectivity.md`).
+
+![three receptors on the O-grid's outer ring (gold dots) over the background grid, each joined by teal lines to the nine vertices of its 3 by 3 background stencil, its corner cell filled brown, and labelled with its record: receptor block 1, vertices 398, 399, 400, donor block 2, corner cells (34, 23), (33, 26), (32, 28), xi and width 3 3](../../examples/images/ref-overset-connectivity.svg){.fossil-figure}
+
+The records of three O-grid receptors, as `build_connectivity` stores them: receptor block and vertex (linear index, i
+fastest), donor block, corner cell, ξ in it, width 3 × 3. Vertex 400 reads `1 400 2 32 28 0.086 0.408 3 3`: its stencil
+is shifted towards the low side of the corner cell, where ξ lies (`fig_ref_overset_mask.f90`).
 
 ## Example
 

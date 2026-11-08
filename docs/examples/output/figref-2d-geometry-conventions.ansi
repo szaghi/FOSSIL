@@ -1,0 +1,7 @@
+$ fig_ref_2d_geometry_conventions
+normal axis 3, first defect open loop T at loop 4
+loop 1 (outer): nesting depth 0, signed area  12.0000, closed T
+loop 2 (hole): nesting depth 1, signed area  -6.0000, closed T
+loop 3 (island): nesting depth 2, signed area   0.5000, closed T
+loop 4 (open): nesting depth 0, signed area   0.0000, closed F
+cells inside (fast winding number) 945

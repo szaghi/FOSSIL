@@ -43,6 +43,12 @@ face is nearer, and a grid line that should run along the edge zig-zags across i
 | `PROJ_CURVE` | one constraint curve, or any | grid lines along an edge or a patch boundary |
 | `PROJ_CORNER` | one corner, fixed | grid corners on body corners |
 
+![the top front edge of a cube, close up: 13 grid points (teal) just outside it, alternately above the top face and in front of the front face; their closest-point feet (ember) alternate between the two faces, 0.08 off the edge, and the line through them zig-zags across the edge; the feet constrained to the edge curve (gold) lie on it in a straight line](../../examples/images/ref-body-fitted-zigzag.svg){.fossil-figure}
+
+On `cube-01.stl` (12 constraint curves, 8 corners), 7 of the 13 free feet land on the top face and 6 on the front
+face, each 0.08 off the edge; with `PROJ_CURVE` and id 0 (any curve) all 13 lie on the edge
+(`fig_ref_body_fitted_zigzag.f90`).
+
 ## The projection target
 
 A `projection_target_t` is built once from a surface (2-D: a curve) and every query reads it. It holds:
@@ -113,6 +119,13 @@ The report also summarises WP2's metrics over the whole block:
 
 It gives the fraction of wall vertices above `target_y1p`. `save_block_report` writes the totals and one line per
 wall vertex as plain text.
+
+![the top of an O-grid around the unit circle, close up: the first layer of cells coloured by y1+ from teal (below 1) through cream to ember (above 1); at each wall vertex the first grid-line step in gold, leaning at an angle where the grid is sheared, and the distance of the same off-wall point to the wall in teal, radial and shorter](../../examples/images/ref-body-fitted-report.svg){.fossil-figure}
+
+An O-grid of 64 × 12 cells around the unit circle, first height 0.04 (1 + 0.5 cos θ), its first layers sheared on
+the upper half; `block_report_2d` with u_τ = 1 and ν = 0.04. y₁⁺ runs from 0.5 to 1.5 (mean 1.017), and 52.3 % of the
+wall vertices are above the target 1. At wall vertex 17, the top, the step along the sheared grid line is 0.07309
+and the height to the wall 0.04114, which gives y₁⁺ = 1.0286 (`fig_ref_body_fitted_report.f90`).
 
 ## Hyperbolic extrusion (2-D)
 

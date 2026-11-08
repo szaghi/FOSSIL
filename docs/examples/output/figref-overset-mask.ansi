@@ -1,0 +1,11 @@
+$ fig_ref_overset_mask
+mask: holes 137, receptors 33 + 56
+explicit (offset 0.3): holes 241, receptors 33 + 72, iterations 2
+implicit: receptors 191 + 132, iterations 6
+background vertex 27 24: iota -1, donor O-grid cell  3  1
+O-grid vertex  4 13: iota -2, donor background cell 32 28
+fringes INNER 1, INNER 2, OUTER 1, OUTER 2:    56   64   33   33
+orphans (no candidate) 5, overlap width  0.8400, brute force  0.8400
+record: 1 398 2 34 23  0.077  0.601 3 3
+record: 1 399 2 33 26  0.318  0.102 3 3
+record: 1 400 2 32 28  0.086  0.408 3 3

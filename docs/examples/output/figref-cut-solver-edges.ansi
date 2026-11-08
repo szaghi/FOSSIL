@@ -1,0 +1,4 @@
+$ fig_ref_cut_solver_edges
+z edges 100: fluid 71, cut 18, solid 11
+nodes inside the solid 20 of 125
+cut edges split at their fraction: largest distance of the split point to the surface  2.63E-16

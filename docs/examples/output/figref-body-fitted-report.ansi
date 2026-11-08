@@ -1,0 +1,5 @@
+$ fig_ref_body_fitted_report
+wall vertices 65, y1+ min mean max  0.5000 1.0170 1.5000, fraction above 1  0.523
+largest ratio at wall vertex 17: y1 along the line  0.07309, to the wall  0.04114, y1+  1.0286
+unsheared wall vertex 1:  y1 along the line  0.06000, to the wall  0.06000, y1+  1.5000
+growth max  1.190, orthogonality min  0.5440, cells not valid 0

@@ -97,6 +97,13 @@ body size, far below the default tolerance.
 The tolerance is optional and defaults to 1e-6 of the larger bounding-box diagonal of the two bodies (the convention
 of `deviation`). Grazing approaches, where the bodies close slowly, converge slowly: that is what the cap is for.
 
+![top: the distance d(s) between a square and a wall over one step (gold), falling from 1.7 to 0 near s = 0.88; from each iterate (ember dots) a teal line of slope -mu runs down under the curve to the axis, where the next iterate starts, the steps shrinking as d does; bottom: the square, side 0.4, sliding up and right while turning a quarter, drawn at s0 to s3 (grey) and at contact against the wall (ember)](../../examples/images/ref-collision-advance.svg){.fossil-figure}
+
+A square of side 0.4 moves by (1.9, 2) and turns a quarter towards a wall, μ = 3.203 for a closing speed of about 2:
+`curve%time_of_impact` takes s = 0.5308, 0.7209, 0.8034, ... and stops at contact after 21 steps at s = 0.8764. Each
+Lipschitz line stays under d(s). Each step multiplies the distance by about 1 − c/μ, c the closing speed: here
+1.7, 0.609, 0.264, 0.122, a little under one half per step (`fig_ref_collision_advance.f90`).
+
 ### The directional bound (C2A)
 
 The plain bound assumes the worst direction of motion. Along the unit witness direction n of a convex pair, the

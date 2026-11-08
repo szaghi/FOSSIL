@@ -1,0 +1,4 @@
+$ fig_ref_ib_queries_feature
+cylinder: 192 facets, feature edges 96, volume  0.78316
+plane y = 0: min |phi| 0.0208, min feature distance 0.0294
+at the side (x = 0.479, z = 0.479): |phi| 0.0208, feature distance 0.4796

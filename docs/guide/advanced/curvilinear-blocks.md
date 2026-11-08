@@ -51,6 +51,12 @@ together, across the seam too, and 0 fallbacks to the robust path
 5. **Deterministic.** Every choice follows a fixed order; the same input gives
    the same output on the CPU and, bit for bit, on the device.
 
+![a sheared 2-D block of 5 by 3 cells, every cell labelled (i,j); teal dots on the midpoints of the interior edges and on the interior vertices, each joined by a gold segment to the centre of the cell that owns it: always the cell to the left, below, or below-left](../../examples/images/ref-curvilinear-blocks-tie.svg){.fossil-figure}
+
+The 30 points sit exactly on shared edges and vertices of a sheared block (dyadic coordinates, straight edges).
+`locate_many` returns all 30 as `LOC_INSIDE`, each in the cell of lower index, with ξ = 1 along every direction it
+shares (`fig_ref_curvilinear_blocks_tie.f90`).
+
 ## Data model
 
 A block of `ni × nj × nk` vertices has `(ni − 1) × (nj − 1) × (nk − 1)` cells;
@@ -63,6 +69,12 @@ with bilinear faces. The 2-D cell is the bilinear map of the unit square, with
 straight edges. Faces of the block are numbered 1 to 6 (−i, +i, −j, +j, −k,
 +k; 1 to 4 in 2-D), and a block's **handedness** is the sign of its total
 volume: validity means the Jacobian has that sign everywhere.
+
+![a block of 6 by 4 by 3 vertices, a box bent by a sine along i, drawn as its grid lines: the three index directions in teal from vertex (1,1,1), the six faces labelled face 1 (-i) to face 6 (+k) beside them, and cell (4,1,2) filled in ember with its eight vertices marked](../../examples/images/ref-curvilinear-blocks-numbering.svg){.fossil-figure}
+
+The block has 6 × 4 × 3 vertices and 30 cells; cell (4, 1, 2) is spanned by the vertices 4..5, 1..2, 2..3. With i,
+j, k along x, y, z it is right-handed: its cell volumes are positive (0.448 for this one), the block's 13.44
+(`fig_ref_curvilinear_blocks_numbering.f90`).
 
 ## Topology records
 
@@ -137,6 +149,12 @@ Geometric layer (`definitions/jacobian.md`,
 - A left-handed block gives negative volumes and inward face vectors,
   consistently; that is a property of the input, not a defect.
 
+![one trilinear cell, a unit cube whose top face is turned by about 30 degrees and lifted at one corner, drawn translucent with its curved faces sampled; the eight 2-point Gauss points inside it in gold, and from each face centre its outward area vector in teal, numbered 1 to 6](../../examples/images/ref-curvilinear-blocks-cell.svg){.fossil-figure}
+
+`geometry` on this single cell gives the volume 1.21875 and the six outward face vectors, the top one
+(−0.125, −0.375, 1.25): their sum is exactly zero here (`fig_ref_curvilinear_blocks_cell.f90`). The eight Gauss
+points are where the volume and centroid rules evaluate det J.
+
 ## Cell validity
 
 Map layer. Positive Jacobians at the eight corners do not make a trilinear
@@ -195,6 +213,12 @@ Roget & Sitaraman). Each candidate in index order is tested:
 The first candidate that contains the point wins (the tie rule above); a
 warped, degenerate or unconverged candidate is reported only if no valid cell
 contains the point.
+
+![a wavy 2-D block, zoomed on a vertex pushed across its neighbour so that two cells fold (outlined in ember); a lattice of located points over it, teal inside, ember outside beyond the block's right side, gold in the folded region; for one point in the fold the two cell boxes that contain it are drawn in gold and its cell filled](../../examples/images/ref-curvilinear-blocks-locate.svg){.fossil-figure}
+
+Of 1147 points, 1025 are `LOC_INSIDE`, 117 `LOC_OUTSIDE` and 5 `LOC_WARPED`: no valid cell contains them, only a
+folded one. The point (10, 4.4) has 2 candidate boxes; the cell that contains it, (10, 5), is folded, so its status is
+`LOC_WARPED` (`fig_ref_curvilinear_blocks_locate.f90`).
 
 **Fast path** (PEGASUS 5, Lee & Baeder in `methods/donor-search.md`),
 `locate_many(..., walk=.true., start=)`. Stencil jumping from a start cell
@@ -260,6 +284,13 @@ The wiki defines none, so FOSSIL defines them *(gk)*, per cell:
 | aspect ratio | the longest over the shortest of the mean edge lengths in the three index directions |
 | warp | max over faces of the angle between the normals of the two triangles each diagonal splits the face into |
 | min J | the certified lower bound of det J over the cell, over the mean det J |
+
+![the same 2-D wall block of 24 by 8 cells over a Gaussian bump drawn three times, coloured from cream (0) to sepia (maximum): by skewness, largest on the bump's flanks next to the wall; by 1 minus orthogonality, the same flanks; by log10 of the aspect ratio, largest in the flat first layer next to the wall](../../examples/images/ref-curvilinear-blocks-quality.svg){.fossil-figure}
+
+Vertical grid lines over a bump and a wall-normal spacing growing by 1.5 per layer: the skewness peaks at 0.357 in
+wall cell (10, 1) on the bump's flank, the orthogonality falls to 0.852 at (15, 1), the aspect ratio reaches 12.48
+in the first layer at (11, 1); min J / mean J is at least 0.938
+(`fig_ref_curvilinear_blocks_quality.f90`).
 
 ## Example
 

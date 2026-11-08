@@ -25,6 +25,11 @@ where nothing needs the last digit. The field is built in three stages:
 Every cell ends up holding a distance, including the far field of a
 stretched grid. `fossil_ib_generator` is built on it.
 
+![a torus (tube radius 0.35, centre radius 1) cut away on the side of the viewer, over the plane z = 0 of a 37 cubed grid, uniform near the torus and stretched by 1.25 per node outward: each node a cell coloured by phi, teal inside the tube, cream at the surface, ember outside up to 3.22 at the far corners; the band of exact values, 412 nodes on this plane, outlined in gold on both sides of the tube's section](../../examples/images/ref-distance-field-torus.svg){.fossil-figure}
+
+On the torus the band holds 12804 of the 50653 nodes; the flood fill signs the rest with no point query, and 24
+directional sweeps fill the magnitudes out to the stretched far field.
+
 In 2-D, `initialize(x, y)` without `z` makes a field for a
 [`curve_object`](/guide/advanced/2d-geometry): `compute(curve=...)` runs the
 same three stages (4-connected flood fill, 4 sweep directions). A quadtree
@@ -74,7 +79,26 @@ field keeps `closest`, `closest_id` and `closest_normal` on band cells: a
    when a full cycle of 8 changes no magnitude by more than `tol` times the
    domain diagonal.
 
-`compute` runs the three stages.
+`compute` runs the three stages. Called one by one on a 2-D field (an L and a disc, 39 × 39 nodes, uniform spacing
+0.125 then stretched by 1.3), each stage kept in a copy:
+
+<<< @/examples/snippets/anim_ref_distance_field_sweeps-stages.f90
+
+`sweep(max_sweeps=k)` stops after k directional sweeps, so a copy of the signed field swept with k = 1, 2, 3, 4
+shows what each direction adds:
+
+<<< @/examples/snippets/anim_ref_distance_field_sweeps-partial.f90
+
+![a 2-D field of an L-shaped body and a disc on a stretched 39 by 39 grid, one frame per stage: compute_band gives 311 exact nodes along the two outlines and leaves the rest blank; compute_signs marks the 38 unknown nodes inside the L by dots; sweep 1 (x and y increasing) fills the nodes up and to the right of the band, 530 still unknown; sweep 2 (x decreasing) the left, 273 unknown; sweep 3 (y decreasing) the rest, the field then 1.06 off its converged values; sweep 4 brings it to 2.7e-5; converged after 12 sweeps](../../examples/images/anim-ref-distance-field-sweeps.svg){.fossil-figure}
+
+<<< @/examples/output/anim-ref-distance-field-sweeps.ansi{ansi}
+
+- Each directional sweep carries the information one way: a node is updated only from neighbours already known, so
+  sweep 1 fills what lies up and to the right of the band, and the first three directions together reach every node.
+- The values are not final when every node is known: after sweep 3 the field is still 1.06 off, where the first
+  sweeps reached nodes along monotone paths longer than the straight line. The fourth direction brings it to 2.7e-5;
+  the sweeps then stop at the end of the third cycle of 4, when no node changed by more than `tol` times the domain
+  diagonal.
 
 ## API
 

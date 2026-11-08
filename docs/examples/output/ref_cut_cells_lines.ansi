@@ -1,0 +1,5 @@
+$ ref_cut_cells_lines
+lines 576, crossing the dragon 337, crossings 1460, overflowed 0
+dragon watertight F
+lines with unequal entering/leaving counts 0, lines differing from line_crossings 0
+most crossed line: 14 crossings, sorted from x =  -7.845 to   8.207, 7 entering

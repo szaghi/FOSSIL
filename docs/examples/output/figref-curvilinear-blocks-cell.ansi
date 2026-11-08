@@ -1,0 +1,9 @@
+$ fig_ref_curvilinear_blocks_cell
+volume  1.218750000, centroid   0.50712  0.52422  0.58903
+face 1 outward area vector  -1.00000 -0.25000 -0.06250
+face 2 outward area vector   1.18750  0.31250 -0.06250
+face 3 outward area vector   0.25000 -1.00000 -0.06250
+face 4 outward area vector  -0.31250  1.31250 -0.06250
+face 5 outward area vector   0.00000  0.00000 -1.00000
+face 6 outward area vector  -0.12500 -0.37500  1.25000
+largest component of the sum of the six  0.00E+00

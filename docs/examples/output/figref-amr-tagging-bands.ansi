@@ -1,0 +1,13 @@
+$ fig_ref_amr_tagging_bands
+tag -3: cells   0
+tag -2: cells  20
+tag -1: cells  96
+tag  0: cells 104
+tag  1: cells 100
+tag  2: cells  76
+tag  3: cells  36
+component 1:  180 cells, first cell (  1,  1), outside
+component 2:  112 cells, first cell (  5,  4), inside
+component 3:   32 cells, first cell (  9,  7), outside
+component 4:    4 cells, first cell ( 12,  9), inside
+uncut cells in 4 components, one point query each

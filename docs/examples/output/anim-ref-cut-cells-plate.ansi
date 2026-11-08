@@ -1,0 +1,25 @@
+$ anim_ref_cut_cells_plate
+frame  0: cut cells 15, two pieces  5, small  3, covering sum  6.94E-18
+frame  1: cut cells 15, two pieces  5, small  4, covering sum -2.43E-17
+frame  2: cut cells 18, two pieces  4, small  2, covering sum  3.47E-18
+frame  3: cut cells 15, two pieces  7, small  5, covering sum  1.21E-17
+frame  4: cut cells 16, two pieces  8, small  6, covering sum  1.04E-17
+frame  5: cut cells 18, two pieces  6, small  3, covering sum -3.30E-17
+frame  6: cut cells 16, two pieces  6, small  3, covering sum  0.00E+00
+frame  7: cut cells 16, two pieces  8, small  7, covering sum -1.04E-17
+frame  8: cut cells 17, two pieces  5, small  3, covering sum  1.73E-17
+frame  9: cut cells 18, two pieces  8, small  5, covering sum  4.51E-17
+frame 10: cut cells 17, two pieces  7, small  5, covering sum -5.20E-17
+frame 11: cut cells 17, two pieces  7, small  5, covering sum -7.29E-17
+frame 12: cut cells 16, two pieces  6, small  7, covering sum -5.20E-17
+frame 13: cut cells 16, two pieces  6, small  5, covering sum -4.16E-17
+frame 14: cut cells 16, two pieces  6, small  4, covering sum -1.73E-17
+frame 15: cut cells 13, two pieces  7, small  3, covering sum  6.94E-18
+frame 16: cut cells 14, two pieces  4, small  1, covering sum -7.63E-17
+frame 17: cut cells  9, two pieces  7, small  0, covering sum -2.08E-17
+frame 18: cut cells 15, two pieces  3, small  2, covering sum -4.51E-17
+frame 19: cut cells 14, two pieces  4, small  2, covering sum  3.12E-17
+frame 20: cut cells 14, two pieces  4, small  3, covering sum -6.94E-18
+frame 21: cut cells 14, two pieces  6, small  4, covering sum -4.86E-17
+frame 22: cut cells 14, two pieces  6, small  5, covering sum  7.98E-17
+frame 23: cut cells 15, two pieces  7, small  4, covering sum -3.47E-18

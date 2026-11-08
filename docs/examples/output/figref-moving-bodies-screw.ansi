@@ -1,0 +1,3 @@
+$ fig_ref_moving_bodies_screw
+compose(half, half): rotation off p1 by  1.11E-16, translation off p1 by  0.9487
+pose_interpolate at s = 1 is p1 bit for bit: T

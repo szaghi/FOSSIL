@@ -1,0 +1,10 @@
+$ anim_ref_amr_tagging_levels
+section: 2 loops, 152 vertices
+level 0: 1 boxes, cut 1, near 0, inside 0; leaves so far 0
+level 1: 4 boxes, cut 4, near 0, inside 0; leaves so far 0
+level 2: 16 boxes, cut 8, near 4, inside 0; leaves so far 4
+level 3: 48 boxes, cut 16, near 9, inside 0; leaves so far 27
+level 4: 100 boxes, cut 34, near 24, inside 0; leaves so far 69
+level 5: 232 boxes, cut 73, near 63, inside 14; leaves so far 165
+level 6: 544 boxes, cut 144, near 158, inside 80; all leaves 709
+leaves 709, uniform grid of the finest size 4096

@@ -1,0 +1,4 @@
+$ fig_ref_amr_tagging_codes
+boxes 1600: cut 179, near 222, inside 46, outside 1153
+box 588 alone: box_intersects_surface = T
+box 508 alone: box_intersects_surface = F

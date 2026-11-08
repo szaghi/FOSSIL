@@ -1,0 +1,12 @@
+$ anim_ref_moving_bodies_swept
+step 1: sum of swept  4.65E-17, max residual  1.84E-17, cleared 10, covered 10
+step 2: sum of swept -2.42E-17, max residual  2.26E-17, cleared 7, covered 6
+step 3: sum of swept  6.60E-18, max residual  5.12E-17, cleared 6, covered 6
+step 4: sum of swept -5.16E-17, max residual  5.42E-17, cleared 7, covered 5
+step 5: sum of swept  8.57E-17, max residual  5.02E-17, cleared 6, covered 7
+step 6: sum of swept  9.80E-17, max residual  3.81E-17, cleared 7, covered 6
+step 7: sum of swept -3.56E-16, max residual  5.38E-17, cleared 6, covered 6
+step 8: sum of swept  2.11E-16, max residual  7.55E-17, cleared 6, covered 6
+step 9: sum of swept  1.08E-16, max residual  5.91E-17, cleared 5, covered 7
+step 10: sum of swept -1.20E-16, max residual  1.04E-16, cleared 8, covered 9
+largest residual over the 10 steps  1.04E-16

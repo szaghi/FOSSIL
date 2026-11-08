@@ -31,6 +31,12 @@ What it covers:
   [`distance_field_object`](/guide/advanced/distance-field), one quadtree block
   at a time.
 
+![an ellipse with a square hole and a triangle beside it, the curve in gold over a grid of 5000 cells coloured by signed distance, teal inside the solid and ember outside; six query points, white, each joined to its closest point on the curve, one in the hole, two in the solid, three outside](../../examples/images/ref-2d-geometry-queries.svg){.fossil-figure}
+
+Two bodies, three loops, area 4.27099: `distance_many` gives the 5000 cell-centre distances, from −0.575 to 1.330, 1712
+of them inside; `compute_distance` the six feet, e.g. the point (0.10, 0.05) in the hole at d = 0.25 from the hole's
+top side (`fig_ref_2d_geometry_queries.f90`).
+
 ## Conventions
 
 - **Plane.** A curve lives in the plane normal to `normal_axis` (1, 2 or 3;
@@ -56,6 +62,13 @@ What it covers:
   exact `orient2d`: nesting depth, self-intersections, slicing, repair. The
   point queries are plain floating point, as in 3-D, so they run unchanged
   on the device.
+
+![four loops in the plane of normal_axis 3, with u = x and v = y drawn as axes: an outer square counter-clockwise, a square hole clockwise, a triangle island in the hole counter-clockwise, and an open C-shaped loop beside them; chevrons show the direction of every segment and the solid, to their left, is filled teal; the open loop is filled up to the straight chord between its two ends](../../examples/images/ref-2d-geometry-conventions.svg){.fossil-figure}
+
+The nesting depths are 0, 1, 2 and the signed areas 12, −6 and 0.5: the hole's is negative because it runs
+clockwise. `check_validity` returns `CURVE_OPEN_LOOP` at loop 4, whose area is 0. The cells are filled by
+`is_point_inside(sign_algorithm=SIGN_FAST_WINDING_NUMBER)`, which closes the open loop by the chord between its ends
+(`fig_ref_2d_geometry_conventions.f90`).
 
 ## Example
 

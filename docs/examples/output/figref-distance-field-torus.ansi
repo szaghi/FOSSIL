@@ -1,0 +1,6 @@
+$ fig_ref_distance_field_torus
+torus: R 1, r 0.35, 1920 facets
+grid 37 x 37 x 37 nodes, 50653 in all
+band nodes 12804, band width  2.430E-01
+sweeps 24, nodes signed by their own query 0
+plane z =   0.0000: phi from  -0.3175 to   3.2193

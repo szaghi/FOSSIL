@@ -1,0 +1,4 @@
+$ fig_ref_ib_queries_rich
+bodies 2, points within 0.3: 388, body 1: 236, body 2: 152
+feet inside a segment 316, at a vertex 72, of them at the square corners 32
+feet inside a segment: max |p - foot - d n|  2.26E-16

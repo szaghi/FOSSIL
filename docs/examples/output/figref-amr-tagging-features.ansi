@@ -1,0 +1,4 @@
+$ fig_ref_amr_tagging_features
+cells 4096: cut 680, touching a feature edge 88
+cells one cell from a feature edge 704
+box_feature_many on the same cells: 88 touched, same cells as the tags T

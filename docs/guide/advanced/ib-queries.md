@@ -31,6 +31,17 @@ batches, on the CPU or the device, for surfaces (3-D) and
 | Bodies | `get_bodies_number`, `facet_body`, `get_shells_number`, `facet_shell` | `get_bodies_number`, `loop_body` |
 | Vector level set | `distance_field_object%compute(..., store_closest=.true.)` | same, 2-D field |
 
+![a unit square and a 24-gon of radius 0.4 seen from above, every grid point within 0.3 of either wall joined by a grey segment to its foot point: 316 teal points whose foot lies inside a segment, joined along the segment normal, and 72 ember points whose foot is a vertex, fanning out around each corner of the square and around the vertices of the 24-gon](../../examples/images/ref-ib-queries-rich.svg){.fossil-figure}
+
+<<< @/examples/snippets/fig_ref_ib_queries_rich-query.f90
+
+<<< @/examples/output/figref-ib-queries-rich.ansi{ansi}
+
+One `query_many` batch on a curve of two bodies returns, per point, the distance, the foot, the closest vertex (0 inside
+a segment), the normal and the body. Of the 388 points within 0.3 of a wall, 316 have their foot inside a segment,
+where x − foot = φ n to 2.26·10⁻¹⁶. The other 72 have their foot on a vertex, 32 of them at the square's corners: there
+the points fan out around one foot and the normal is the vertex bisector, not x − foot.
+
 ## Example
 
 Two unit cubes 0.2 apart, loaded as one surface: the smallest case where a stencil can reach through another wall.
@@ -72,6 +83,15 @@ bodies, a stencil that reaches through the other wall, and a point with two foot
   nearest-neighbour spacings in [0.8, 1.2] Δx.
 - The vector level set, `distance_field_object%compute(store_closest=.true.)`, stores the same closest point and
   normal on the band cells of a [distance field](/guide/advanced/distance-field).
+
+The same calls on a moving body, in 2-D: a NACA 0012 section pitches by up to 15 degrees while it plunges across a
+fixed grid of spacing 0.05. At each step `move` places the curve (its segment tree refitted, not rebuilt),
+`query_many` classifies the grid nodes, and `image_points` mirrors the ghost nodes (inside, with a fluid neighbour)
+through the wall.
+
+![a NACA 0012 section crossing a fixed grid of spacing 0.05 in 12 steps, pitching between 15 degrees nose up and 15 degrees nose down while it plunges: in each frame the ghost nodes inside the section (teal) are each joined to their image point (yellow) outside it; 28 to 31 ghost nodes per step, all images visible](../../examples/images/anim-ref-ib-queries-ghosts.svg){.fossil-figure}
+
+<<< @/examples/output/anim-ref-ib-queries-ghosts.ansi{ansi}
 
 ## Definitions
 
@@ -133,6 +153,19 @@ each cube.
   - `flagged` counts the nodes above the threshold (default 0.05, Matsushita
     & Aoki).
   - q is large by nature on the medial axis.
+
+![two panels over the same grid of spacing 1/16 around a unit square and a 24-gon. Left: the wall distance capped at 0.4, cream on the walls to sepia at the cutoff, with the 576 cells beyond the cutoff left empty (the square's centre among them) and a teal staircase midway between the bodies where the nearest body changes. Right: the signed field, teal inside and cream outside, with the 233 nodes where the gradient diagnostic exceeds 0.05 in ember: the square's diagonals, the 24-gon's centre, the line midway between the bodies and four patches off the square's corners](../../examples/images/ref-ib-queries-wall.svg){.fossil-figure}
+
+<<< @/examples/snippets/fig_ref_ib_queries_wall-calls.f90
+
+<<< @/examples/output/figref-ib-queries-wall.ansi{ansi}
+
+On the left the bodies come from the same batch as the distances: 777 points are nearest to the square, 467 to the
+24-gon, 576 lie beyond the cutoff. On the right the diagnostic flags 233 of 1820 nodes. 28 of them lie in the band of
+exact distances: at the square's corners, where the diagonals start, and at a few 24-gon vertices. The other 205 lie
+in the far field the sweep filled: the medial axis inside the bodies, the line midway between them, and four patches
+just outside the band off the square's corners, where the circular fronts around a convex corner are filled by the
+first-order sweep, not by exact distances.
 
 ## Curvature at the foot point
 
@@ -239,4 +272,14 @@ All of them are lengths for `probe_many`:
 boundary or non-manifold edge, after `surface%build_features` (issue #61). Image-point and ghost-cell closures degrade
 at corners; this distance tells a solver where to switch. See
 [feature edges](/guide/advanced/feature-edges#distance-to-the-nearest-feature).
+
+![the plane y = 0 through a closed cylinder of radius 0.5 and height 1 seen side on, its section outlined in yellow: the left half shaded by the wall distance, cream along the whole side and both caps; the right half shaded by the distance to the 96 rim edges, cream only around the two points where the plane crosses the rims (ember dots), 0.48 at the side wall halfway up](../../examples/images/ref-ib-queries-feature.svg){.fossil-figure}
+
+<<< @/examples/snippets/fig_ref_ib_queries_feature-features.f90
+
+<<< @/examples/output/figref-ib-queries-feature.ansi{ansi}
+
+The cylinder's only feature edges at the default 30 degrees are its 96 rim edges: the side turns by 7.5 degrees per
+seam. Halfway up the side wall, a point 0.0208 from the wall is 0.4796 from the nearest feature: there the wall is
+smooth, and a solver can keep its regular closure.
 

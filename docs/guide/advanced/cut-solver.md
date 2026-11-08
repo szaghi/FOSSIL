@@ -50,6 +50,13 @@ its cell (`anim_cut_solver.f90`).
    moments need the transient wall polygons of `cut_cells_3d`, so it takes
    optional arguments that compute them only when asked.
 
+![10 by 6 cells of 0.1 seen from above: a square with its right and top sides on grid lines, a thin tilted plate and an open polyline; a teal dot at the centroid of every piece of a cell with one piece, ember dots for the 5 cells the plate splits into two pieces, gold strokes on the open high edges of the 3 zero-area pieces along the square's right and top sides, and the 4 cells the open polyline crosses outlined in ember: they have no pieces](../../examples/images/ref-cut-solver-pieces.svg){.fossil-figure}
+
+The 60 cells hold 60 pieces: 37 regular cells, 5 cells with two pieces, 3 pieces of zero area where the square's
+sides lie on the high edges of their cells (their only fluid is the open edge), and 4 cells the open curve leaves
+unclosed, with no pieces at all; in 2-D an unclosed cell has `closed` false, in 3-D `pieces = -1`
+(`fig_ref_cut_solver_pieces.f90`).
+
 ## The piece graph
 
 A **link** (p, q, f, A) says that piece p of cell c and piece q of the cell
@@ -123,6 +130,12 @@ open; FOSSIL's is:
 
 <<< @/examples/snippets/ref_cut_solver-srd.f90
 
+![a wavy wall, the solid below y = 0.24 + 0.08 sin(3 pi x), on 12 by 6 cells of 1/12, the cells shaded by fluid fraction: each of the 12 small pieces is a teal dot with a short ember stroke along its wall normal and a gold line to the other member of its neighbourhood, which lies in the direction of that normal: straight up at the troughs, diagonally on the flanks](../../examples/images/ref-cut-solver-srd.svg){.fossil-figure}
+
+On the wavy wall 12 of the 46 pieces are small; every neighbourhood is complete with one neighbour (2 members), the
+neighbour chosen along the wall normal. Σ V̂ equals the fluid area to 0.00e+00 and η^nb ranges from 0.022 to 0.651
+(`fig_ref_cut_solver_srd.f90`).
+
 Measured (`fossil_test_cut_srd`; 2-D circle, thin plate and half-plane, 3-D tilted
 wedge, cone and thin plate, τ = ½, 327 small pieces): every piece with volume is
 in exactly N^ov_j neighbourhoods and the column sums are 1 exactly; Σ V̂ is the
@@ -149,6 +162,12 @@ by Barrio Sanchez et al. as a monotone index path through valid cells.
   `frd_t` (`start`, `member` with the piece first, `weight`).
 
 <<< @/examples/snippets/ref_cut_solver-frd.f90
+
+![a thin plate, 0.02 thick and tilted by 0.3 rad, across 10 by 8 cells of 0.1, with the 3 by 3 block around one split cell outlined in gold: the piece above the plate joins in teal 6 pieces above it, the piece below joins in ember 4 pieces below it; no line crosses the plate](../../examples/images/ref-cut-solver-frd.svg){.fossil-figure}
+
+The split cell (6, 5) holds a piece above the plate, fraction 0.741, and one below, fraction 0.068. Their sets have 7
+and 5 members, own weights 0.142 and 0.021: both lie in the same 3 × 3 block, but no monotone path of links crosses
+the plate (`fig_ref_cut_solver_frd.f90`).
 
 - **Measured** (`fossil_test_cut_frd`; 2-D circle and thin plate, 3-D tilted
   wedge and thin plate, 654 cut pieces): every set equals a brute-force
@@ -190,6 +209,12 @@ Two families, both reported per piece:
   `mix_piece`, `mix_weight`).
 
 <<< @/examples/snippets/ref_cut_solver-merge.f90
+
+![a solid disc of radius 0.27 on 10 by 10 cells of 0.1, the cells shaded by fluid fraction: each small piece around the disc, teal, has a gold line to its merge target, the neighbouring piece outward along the wall normal; the small piece at the upper right, in ember, has three normal-directed targets, up, right and diagonal, labelled with weights 0.436, 0.240 and 0.324](../../examples/images/ref-cut-solver-merge.svg){.fossil-figure}
+
+Around the disc 10 of the 88 pieces are small and all 10 merge directly (`MERGE_OK`, no chain). The piece of cell
+(7, 7), fraction 0.052, has a wall normal near the diagonal: its three normal-directed targets carry 0.240, 0.436 and
+0.324 (`fig_ref_cut_solver_merge.f90`).
 
 - **Measured** (`fossil_test_cut_merge`; 2-D half-plane, circle and a
   translating circle, 3-D tilted wedge, 250 served pieces): on the
@@ -284,6 +309,11 @@ cell counts multiples of r) is built from the fine one, never recomputed:
 
 <<< @/examples/snippets/ref_cut_solver-coarsen.f90
 
+![a thin plate, 0.02 thick and tilted by 0.45 rad, across 12 by 8 fine cells of 1/12 with the 6 by 4 coarse cells drawn in gold: the fine pieces are teal dots joined by teal lines where a fine link lies inside one coarse cell, and each coarse piece is an ember dot; the coarse cells away from the plate show four fine pieces joined into one, those the plate crosses two separate groups and two ember dots](../../examples/images/ref-cut-solver-coarsen.svg){.fossil-figure}
+
+At ratio 2 the 106 fine pieces (10 cells with two) become 28 coarse ones (4 cells with two), and the 356 fine links
+80 coarse ones; the coarse fluid area equals the fine one to 6.66e-16 (`fig_ref_cut_solver_coarsen.f90`).
+
 - **Measured** (`fossil_test_cut_coarsen`; tilted wedge, L-prism, thin plate,
   a 64-gon and a thin plate in 2-D; 2612 coarse cells at ratio 2): against
   the cut cells computed directly on the coarse grid, the same pieces in every
@@ -316,6 +346,12 @@ every grid node, `node_in(nx + 1, ny + 1, nz + 1)` (the z lines); the 2-D cut ce
   crossing points ([limitations](./cut-cells#limitations)); the 3-D flags are
   exact predicates on the input triangles.
 
+![cube-01 turned by 0.3 rad about (1, 1, 1), translucent, on a 4 by 4 by 4 block of cells of 0.4: the vertical grid edges drawn teal where they hold fluid and ember where they run through the cube, each cut edge split at its fluid fraction, and the 20 grid nodes inside the cube as gold dots on the ember parts](../../examples/images/ref-cut-solver-edges.svg){.fossil-figure}
+
+Of the 100 z edges, 71 are all fluid, 11 all solid and 18 cut; 20 of the 125 nodes are inside. Each cut edge has one
+crossing here, so its split point, placed at its fraction from its fluid node, lies on the cube to 2.63e-16
+(`fig_ref_cut_solver_edges.f90`).
+
 ## Example
 
 The regions shown above, as one program: the cube-01 body on a 3-D block of 8³ cells of 0.25, then the half-plane
@@ -338,6 +374,22 @@ x < 0.58 on 10 × 10 cells of 0.1 (the solid on the left, the fluid fraction of 
   ∫X = 0.08, ∫X² = 0.03267, ∫Y² = 0.01667 (per cell area), in the order of `mono_exponents`: 1, X, Y, X², XY, Y².
 - **Coarsening.** At ratio 2 the 50 fine pieces become 15 coarse ones, the cut column's fraction 0.10, and the fine
   piece maps to the coarse piece 7, in coarse column 3.
+
+The 3-D calls, on cube-01 turned by 0.3 rad about (1, 1, 1) on 8³ cells of 0.2: one `cut_cells_3d` call with links,
+edge fractions, moments to order 2 and quadrature rules, the neighbourhoods and targets with `z=`, and
+`cut_coarsen_3d` against the cut cells computed directly on the coarse grid.
+
+<<< @/examples/snippets/ref_cut_solver_3d.f90
+
+<<< @/examples/output/ref_cut_solver_3d.ansi{ansi}
+
+- **One call.** 466 pieces, 5 multi-piece cells, 2286 links, no unmatched region; 191 cut edges and 126 nodes inside.
+  The 10 moments per piece (order 2 in 3-D) start with the volume, to 2.60e-17; every quadrature rule adds up
+  (`quad_status` 0).
+- **Graph.** 74 small pieces, all with a complete neighbourhood (Σ V̂ is the fluid volume to 0.00e+00) and a direct
+  merge target.
+- **Coarsening.** At ratio 2 the coarse cells have 64 pieces, as the direct computation; the fractions agree to
+  6.66e-16 and the piece counts cell by cell.
 
 ## Left out
 

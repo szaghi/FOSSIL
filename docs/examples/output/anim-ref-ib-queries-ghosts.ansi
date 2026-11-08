@@ -1,0 +1,14 @@
+$ anim_ref_ib_queries_ghosts
+step 1: nose up   0.0 deg, 28 ghost nodes, 0 images not visible
+step 2: nose up   7.5 deg, 30 ghost nodes, 0 images not visible
+step 3: nose up  13.0 deg, 31 ghost nodes, 0 images not visible
+step 4: nose up  15.0 deg, 29 ghost nodes, 0 images not visible
+step 5: nose up  13.0 deg, 31 ghost nodes, 0 images not visible
+step 6: nose up   7.5 deg, 29 ghost nodes, 0 images not visible
+step 7: nose up   0.0 deg, 28 ghost nodes, 0 images not visible
+step 8: nose up  -7.5 deg, 30 ghost nodes, 0 images not visible
+step 9: nose up -13.0 deg, 31 ghost nodes, 0 images not visible
+step 10: nose up -15.0 deg, 29 ghost nodes, 0 images not visible
+step 11: nose up -13.0 deg, 31 ghost nodes, 0 images not visible
+step 12: nose up  -7.5 deg, 29 ghost nodes, 0 images not visible
+images not visible over the 12 steps: 0

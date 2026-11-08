@@ -22,6 +22,14 @@ the tagging questions from the BVH alone, before any field exists:
 | Does one box meet the geometry? | `box_intersects_surface` | `box_intersects_curve` |
 | Signed tag bands on a block of cells | `tag_block(x, y, z, band, tags)` | `tag_block(x, y, band, tags)` |
 
+![a layer of 40 by 40 boxes through the middle of the dragon, the part of the dragon above the layer cut away: the 179 boxes the surface crosses in cream, the 222 boxes within half a box side of it in ember around them, the 46 boxes inside the body in teal; the 1153 outside boxes are left blank within the layer's outline](../../examples/images/ref-amr-tagging-codes.svg){.fossil-figure}
+
+One `box_classify_many` batch over the layer gives every code at once, with no field computed. The near ring is
+`radius` = half a box side wide; the inside boxes are the ones whose centre the fast winding number puts in the body.
+`box_intersects_surface` asks the same cut question for a single box:
+
+<<< @/examples/output/figref-amr-tagging-codes.ansi{ansi}
+
 ## Example
 
 The NACA 0012 section (the wing cut at z = 0.5, chord from −0.25 to 0.75) in 2-D: a quadtree built level by level
@@ -117,6 +125,14 @@ classification drives a whole hierarchy, and the block is stretched. The 3-D cal
     shared point stays inside the two cells, which the surface does not
     meet.
 
+![a 24 by 18 block around a square ring with a square island in its hole, every cell labelled with its tag: 0 (cream, unlabelled) on the cells the loops cross, then 1, 2 and the cap 3 outward in ember and -1, -2 inward in teal; the uncut cells form 4 components (outside the ring, the ring's solid, the hole, the island's solid) and the first cell of each, in column-major order, is outlined in gold: the one cell whose centre gets a point query](../../examples/images/ref-amr-tagging-bands.svg){.fossil-figure}
+
+On this block the breadth-first search gives every count, and four point queries give every sign: the 180 cells
+outside the ring, the 112 of its solid, the 32 of the hole and the 4 of the island's solid are one component each.
+The distances are capped at band + 1 = 3, which only the outer columns reach.
+
+<<< @/examples/output/figref-amr-tagging-bands.ansi{ansi}
+
 ## Refinement criteria from the literature
 
 | Criterion | With FOSSIL |
@@ -130,6 +146,12 @@ classification drives a whole hierarchy, and the block is stretched. The 3-D cal
 
 The quadtree of the [example](#example) uses the second criterion: every box is refined while it is cut or near
 within its children's diagonal, so the finest level wraps the airfoil in a ring of near cells.
+
+![the section of the dragon through the middle of its box (two loops, gold) under a quadtree built one level per frame: each frame classifies the boxes of one level in one batch, cut boxes in cream and near boxes in ember are split into the next level, inside boxes (teal) and outside boxes (outlined) stay as leaves; level 6 ends with 544 boxes, 144 cut, 158 near and 80 inside, and 709 leaves in all](../../examples/images/anim-ref-amr-tagging-levels.svg){.fossil-figure}
+
+The same criterion level by level on the section of the dragon: no box is inside before level 5, when the boxes
+become smaller than the body's cross-section; the 6 levels end with 709 leaves where the uniform grid of the finest
+size has 4096 cells.
 
 ## Results
 
@@ -151,6 +173,14 @@ Sharp edges and corners need more resolution than the smooth wall. `surface%buil
 touched by a feature edge (issue #61). `box_feature_many(_device)` answers the same question for any list of boxes. See
 [feature edges](/guide/advanced/feature-edges#refinement-along-the-features).
 
+![a cylinder of 48 sides in a block of 16 cubed cells: the 88 cells touched by its two rims drawn as ember cubes, rings at the top and the bottom; the side, whose facets turn by 7.5 degrees, below the 30-degree threshold, carries no feature edge and no tag](../../examples/images/ref-amr-tagging-features.svg){.fossil-figure}
+
+680 cells meet the cylinder, but only the 88 along the two rims meet a feature edge: the smooth side is resolved by
+the surface tags alone, and the rims get the extra refinement. `box_feature_many` on the same 4096 cells marks the
+same 88:
+
+<<< @/examples/output/figref-amr-tagging-features.ansi{ansi}
+
 ## Refining thin walls and gaps
 
 A wall or a gap thinner than the cell breaks an immersed boundary even where the surface is tagged. After
@@ -159,6 +189,14 @@ cell distance to the nearest cell that meets a facet whose local size (min of th
 `thin_factor` times the cell's largest side (issue #62). Each block compares with its own cell size, so refinement
 stops where the cells are fine enough. `box_thin_many(_device)` answers the same question for any list of boxes. See
 [thickness and gaps](/guide/advanced/thickness#amr-criterion).
+
+![a box 1 by 1 by 0.6 and, 0.06 off its +x face, a plate 0.04 thick (ember), seen from the front: the cells of side 0.1 that meet the plate or the box face across the gap outlined in gold, two columns of cells over the whole height and depth of the gap](../../examples/images/ref-amr-tagging-thin.svg){.fossil-figure}
+
+The local size of a facet is the smaller of its thickness and its gap: 0.043 on the plate (the ray cone's bias over
+0.04) and 0.064 on the box face across the gap. With `thin_factor=1` the cells of side 0.1 that meet those facets are
+tagged, 154 of them; on a block of side 0.03 none is, because every local size is above the cell:
+
+<<< @/examples/output/figref-amr-tagging-thin.ansi{ansi}
 
 ## Limitations
 

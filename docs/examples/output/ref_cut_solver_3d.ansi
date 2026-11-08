@@ -1,0 +1,8 @@
+$ ref_cut_solver_3d
+status 0, pieces 466, multi-piece cells 5, links 2286, unmatched 0
+cut edges (x, y, z) 191, nodes inside 126
+moments per piece 10, |m0 - volume|  2.60E-17, pieces with quad_status 1 0
+SRD: small 74, incomplete 0, sum vhat - fluid volume  0.00E+00
+merge: served 74, direct 74
+coarse: status 0, pieces 64, direct 64
+  largest |alpha coarsened - alpha direct|  6.66E-16, same piece counts T

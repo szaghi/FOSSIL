@@ -1,0 +1,4 @@
+$ fig_ref_cut_cells_outputs
+cells 48: cut 16, grid-line crossings 16
+solid area  0.22610, polygon area  0.22610
+wetted length  1.79520, largest divergence residual  0.00E+00

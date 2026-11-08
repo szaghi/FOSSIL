@@ -1,0 +1,3 @@
+$ fig_ref_cut_cells_checks
+covering sum - body volume  5.55E-16, largest divergence residual  3.22E-16
+small cells (alpha < 1e-2) 5, smallest in cell 5 4 3, alpha  1.576E-05

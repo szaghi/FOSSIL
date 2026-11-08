@@ -37,6 +37,12 @@ closures and sub-cell masks.
 | Wall fractions along the grid lines of a block | `surface%cell_wall_fractions` | `curve%cell_wall_fractions` |
 | Cut cells of a block | `cut_cells_3d(surface, x, y, z, cut)` | `curve%cut_cells(x, y, cut)` |
 
+![a solid ellipse, turned by 0.4 rad, on 8 by 6 cells of 0.125 seen from above: the cells shaded by fluid fraction, cream in the solid to sepia in the fluid; the 16 crossings of the grid lines with the ellipse as gold dots; on every edge the ellipse crosses, the fluid part of the edge in red, ending at the crossing; and from the wetted centroid of every cut cell a teal stroke along its wetted normal integral, pointing out of the ellipse](../../examples/images/ref-cut-cells-outputs.svg){.fossil-figure}
+
+The 2-D outputs on one picture: 16 of the 48 cells are cut and the grid lines cross the ellipse 16 times. The solid
+area of the cells is 0.22610, the polygon's area; the wetted lengths add up to 1.79520, and the aperture differences
+equal the wetted normal integral in every cell, residual 0.00e+00 (`fig_ref_cut_cells_outputs.f90`).
+
 ## Example
 
 The basic calls, on the dragon section and the dragon, are in
@@ -63,6 +69,19 @@ neighbourhoods) in the [cookbook](/manual/cookbook#neighbourhoods-for-a-small-ce
 - **Wall fractions.** `cell_wall_fractions` works on the cell centres, not the edges. Centre (2, 3, 3) is inside,
   and its -x line meets the wall at 0.270 of the spacing to the neighbouring centre; -1 marks the directions with no
   wall before the next centre.
+
+The batched line query, on the dragon: 24 × 24 lines along x through its bounding box, into buffers of 16 crossings
+per line, each line checked against the single-line call.
+
+<<< @/examples/snippets/ref_cut_cells_lines.f90
+
+<<< @/examples/output/ref_cut_cells_lines.ansi{ansi}
+
+- **Buffers.** 337 of the 576 lines cross the dragon, 1460 crossings in all, the most crossed line 14 times: a buffer
+  of 16 does not overflow (with 8, 10 lines overflowed). `overflow(i)` flags a line whose buffer was too small; its
+  kept crossings are then not the first ones, so re-run it with a larger buffer.
+- **Agreement.** Every line gives the same parameters and facets as `line_crossings`, and enters as often as it
+  leaves: the dragon is not watertight (`is_watertight` is false), but none of these lines passes through an opening.
 
 ## The exactness model
 
@@ -160,6 +179,18 @@ opposite sides of the plate.
   example `cut%alpha < 1.e-4`, the instability threshold the literature
   records for coarse cut cells. The small-cell treatment itself belongs to
   the solver.
+
+![the turned unit cube of the example, opaque, zoomed on three of the cells whose fluid fraction is below 1e-2, outlined in red: each cell lies almost entirely inside the cube and only one corner of it pokes out through a face; the smallest is labelled alpha 1.58E-05](../../examples/images/ref-cut-cells-checks.svg){.fossil-figure}
+
+On the turned cube of the example (6³ cells of 0.25) the covering sum is 5.55·10⁻¹⁶ and the largest divergence
+residual 3.22·10⁻¹⁶. The 5 small cells are cells the cube almost fills: only a corner sticks out through a face, the
+smallest, cell (5, 4, 3), with a fluid fraction of 1.576·10⁻⁵ (`fig_ref_cut_cells_checks.f90`).
+
+![a plate 0.5 long and 0.03 thick, half a cell, translating and turning through 16 by 10 cells of 1/16 over 24 frames: the cut cells shaded by fluid fraction, two gold dots at the piece centroids of every cell the plate splits in two, and the cells holding a piece below 0.1 of the cell outlined in red; the caption counts them and gives the covering sum of the frame](../../examples/images/anim-ref-cut-cells-plate.svg){.fossil-figure}
+
+The checks on a moving body, frame by frame (`anim_ref_cut_cells_plate.f90`): the plate cuts 9 to 18 cells, splits 3
+to 8 of them into two pieces and leaves up to 7 cells with a piece below 0.1 of the cell; the covering sum stays
+within 7.98·10⁻¹⁷ of the plate's area in every frame.
 
 ## Results
 

@@ -1,0 +1,3 @@
+$ fig_ref_cut_solver_pieces
+cells 60, pieces 60, regular (whole) cells 37
+cells with two pieces 5, zero-area pieces 3, unclosed cells (no pieces) 4

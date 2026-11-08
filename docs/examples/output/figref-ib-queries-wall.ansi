@@ -1,0 +1,4 @@
+$ fig_ref_ib_queries_wall
+wall distance, cutoff 0.4: 1820 points, body 1 777, body 2 467, beyond the cutoff 576
+gradient diagnostic: 233 of 1820 nodes above 0.05, max q  0.948
+  flagged in the band 28, in the swept far field 205

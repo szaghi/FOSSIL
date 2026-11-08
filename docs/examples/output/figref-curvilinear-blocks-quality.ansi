@@ -1,0 +1,5 @@
+$ fig_ref_curvilinear_blocks_quality
+skewness, max 0.357 at cell (10,1)
+1 - orthogonality, max 0.148 at cell (15,1)
+log10 aspect ratio; aspect max 12.48 at cell (11,1)
+min J / mean J, lowest  0.938

@@ -1,0 +1,5 @@
+$ fig_ref_amr_tagging_thin
+local size min(thickness, gap): plate  0.043, box face across the gap  0.064
+cells of side 0.10: 1638, cut 519, thin 154
+box_thin_many on the same cells: 154 touched, same cells as the tags T
+cells of side 0.03: 60630, cut 10058, thin 0

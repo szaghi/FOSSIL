@@ -18,6 +18,15 @@ the kind of query decides which one to use:
 `state_changes` flags the points (cell centres) that change state between
 two poses: fresh (solid → fluid) and dead (fluid → solid).
 
+![a NACA 0012 section seen from above at the start of a step (dark brown) and at its end (yellow), pitched 3 degrees nose up and moved 0.02 forward and 0.01 up, inside the outline of a grid of cell centres of spacing 0.02: only the 292 centres near the wall that the band filter sends to a second query are drawn, grey; among them 59 fresh centres (teal) along the lower aft surface the section leaves and 54 dead centres (ember) along the upper surface it covers](../../examples/images/ref-moving-bodies-states.svg){.fossil-figure}
+
+<<< @/examples/snippets/fig_ref_moving_bodies_states-states.f90
+
+<<< @/examples/output/figref-moving-bodies-states.ansi{ansi}
+
+Of the 1452 centres, 1160 are decided by one query: their distance at the old pose exceeds how far they move in
+the body frame. The other 292 are queried again.
+
 `swept_cells_2d` / `swept_cells_3d` give the swept geometry a conservative
 moving cut-cell update needs over a step (see [Swept geometry](#swept-geometry)).
 
@@ -49,6 +58,18 @@ the three ways to query a moved body, and runs the swept geometry of one step of
   busiest plane, residual 4.34·10⁻¹⁷. 12 cells are cleared (no fluid at the start, fluid at the end) and 9 covered.
   Summed over the block, which holds the body at both poses, the projected walls cancel to 8.327·10⁻¹⁷.
 
+The 2-D swept geometry over several steps: a square of side 0.5 rolls along a grid of spacing 0.1, turning 0.15 rad
+and advancing 0.14 per step while it bobs up and down, one `swept_cells_2d` call per step between consecutive poses.
+
+<<< @/examples/snippets/anim_ref_moving_bodies_swept-step.f90
+
+![a square of side 0.5 rolling to the right over a 24 by 12 grid of spacing 0.1 in 10 steps, each frame one step: the cells shaded by their swept area over the cell area, ember behind the square where fluid is gained, teal ahead of it where fluid is lost, the square at the start of the step in dark brown and at its end in yellow; every step takes the exact rotation path, with a largest residual of 1.04e-16](../../examples/images/anim-ref-moving-bodies-swept.svg){.fossil-figure}
+
+<<< @/examples/output/anim-ref-moving-bodies-swept.ansi{ansi}
+
+Every step takes the exact rotation path (`sw%exact`); the swept areas of a step add up to at most 3.56·10⁻¹⁶ and the
+largest uniform-flow residual over the 10 steps is 1.04·10⁻¹⁶.
+
 ## Poses
 
 - **`rigid_pose_t`** holds `r(3, 3)` and `t(3)`, with x_world = R x_body + t.
@@ -68,6 +89,14 @@ The pose argument is on:
 - for surfaces and curves alike.
 
 Closest points, second foot points and normals come back in the world frame.
+
+![the unit cube drawn by its edges at six poses of the screw motion from the identity to a turn of 120 degrees about z with translation (1.8, 0.6, 1.2), at s = 0, 1/5, ..., 1, grey up to the yellow end pose; the body-frame origin moves on a straight teal line, one corner on an ember arc; a teal cube drawn at pose_compose(half, half), with the end rotation but displaced from the end cube by 0.949](../../examples/images/ref-moving-bodies-screw.svg){.fossil-figure}
+
+<<< @/examples/output/figref-moving-bodies-screw.ansi{ansi}
+
+The body-frame origin moves on the straight line s t₁ while the body turns about it at a constant rate. Composing the
+half-way pose with itself gives the end rotation to 1.11·10⁻¹⁶ but misses the end position by 0.949: applying the
+half pose twice turns the first half-step's translation too, which the screw motion does not.
 
 ## How it works
 

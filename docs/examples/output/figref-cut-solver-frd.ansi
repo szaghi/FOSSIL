@@ -1,0 +1,4 @@
+$ fig_ref_cut_solver_frd
+cell  6  5: pieces 2, cells with two pieces 8
+  piece above: fraction  0.741, FRD members 7, own weight  0.142, weights sum - 1  0.00E+00
+  piece below: fraction  0.068, FRD members 5, own weight  0.021, weights sum - 1 -1.11E-16
