@@ -28,6 +28,12 @@ This is the *highest-leverage* of FOSSIL's advanced primitives. It directly fixe
 known correctness gap in FOSSIL's existing signed-distance API on the
 dirty STLs that motivate `sanitize` in the first place.
 
+![the dragon as it is, translucent, the rims of its holes in red, and the plane through the middle of its box normal to y coloured by the winding number: ember, about 1, inside the body, cream, about 0, outside](../../examples/images/ref-winding-dragon.svg){.fossil-figure}
+
+On the dragon as it is, holes included: on a plane through the body w ranges from -0.001 to 1.001, and none of the
+1536 cells lies between 0.1 and 0.9: holes this small do not blur the inside. The figures are drawn by
+`docs/examples/src/fig_ref_winding_number_field.f90`.
+
 ## Pipeline
 
 The exact formulation is
@@ -71,6 +77,11 @@ On bunny (69451 facets) a query takes about 13 µs.
 | dragon-fine | 9.8e-4 | 7.2e-5 |
 
 *Measured max |w_fast − w_exact| on 12³ grids.*
+
+![the same plane coloured by the difference between the fast and the exact winding number on a log scale from 1e-6 (cream) to 1e-3 (sepia): a speckle over the whole plane, inside and outside alike](../../examples/images/ref-winding-error.svg){.fossil-figure}
+
+The error of the default β = 2 against the exact sum (`beta=-1`) on that plane: at most 5.6e-4, spread over the whole
+plane rather than gathered at the surface.
 
 ::: warning Fixed in issue #29
 Before issue #29 the fast path rebuilt its cache on every call: about 1.1 ms

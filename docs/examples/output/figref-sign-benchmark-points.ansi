@@ -1,0 +1,5 @@
+$ fig_ref_sign_benchmark_points
+L-prism: 38 feature points x 8 directions = 304 points, 88 inside by construction
+wrong: pseudo-normal, ray, solid angle, winding number, naive     0    0    0    0    0
+reentrant edge: 70 points, 49 inside, pseudo-normal wrong 0
+holed prism, winding number: device vs host mismatches 0 of 304, wrong side 44

@@ -115,7 +115,8 @@ contains
    do i = 1, s%get_facets_number()
       fp => s%facet_at(i)
       if (v(i) < huge(1._R8P)) then
-         call fig_triangle(u, 'field', fp%vertex(1), fp%vertex(2), fp%vertex(3), value=2._R8P * min(1._R8P, v(i) / 0.5_R8P) - 1._R8P)
+         call fig_triangle(u, 'field', fp%vertex(1), fp%vertex(2), fp%vertex(3), &
+                           value=2._R8P * min(1._R8P, v(i) / 0.5_R8P) - 1._R8P)
       else
          call fig_triangle(u, 'body', fp%vertex(1), fp%vertex(2), fp%vertex(3))
       endif

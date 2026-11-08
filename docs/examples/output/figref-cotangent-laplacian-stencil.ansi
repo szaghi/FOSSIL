@@ -1,0 +1,6 @@
+$ fig_ref_cotangent_laplacian_stencil
+row of the centre, L(c, j):   0.390  1.085  0.123  0.981  0.219  0.827
+L(c, c) =  -3.624, -sum L(c, j) =  -3.624, M(c, c) =  0.8129
+alpha   63.43 deg, cot  0.5000
+beta   129.24 deg, cot -0.8167
+L(i, j) = -0.1583, (cot alpha + cot beta) / 2 = -0.1583

@@ -38,6 +38,12 @@ conjugate gradient for symmetric positive-definite CSR systems now exists
 (`fossil_linear_solver%cg_solve`, used by the hole fairing); the heat
 method and implicit smoothing have not been built on it yet.
 
+![an irregular one-ring seen from above: a centre vertex c lifted above six neighbours at uneven radii, each spoke labelled with its entry L(c, j), from 0.123 to 1.085, and the centre's barycentric area, a third of every incident triangle, shaded ember](../../examples/images/ref-laplacian-onering.svg){.fossil-figure}
+
+The row of one vertex: six spokes with weights from 0.123 to 1.085, the diagonal L(c, c) = -3.624, their negated sum,
+and M(c, c) = 0.8129, the shaded third of the six triangles. The figure is drawn by
+`docs/examples/src/fig_ref_cotangent_laplacian_stencil.f90`.
+
 ## Pipeline
 
 For each triangle `T` with vertices `(i, j, k)` and the opposite-vertex
@@ -66,9 +72,17 @@ angles `(α_i, α_j, α_k)`:
    per row.
 
 The result is a CSR-stored `L` (symmetric, sparse, negative-semidefinite
-when triangles are non-obtuse) and a diagonal `M`. Both are returned to
+on any mesh, since $-u^T L u$ is the Dirichlet energy of the piecewise-linear
+interpolant of `u`; its off-diagonal entries are non-negative only where no
+two opposite angles sum above π) and a diagonal `M`. Both are returned to
 the caller via `csr_matrix_t` containers; the diagonal `M` is just a
 length-N CSR with one entry per row.
+
+![two flat triangles sharing the edge (i, j): the angle opposite the edge in the upper triangle, alpha = 63.4 degrees at k with cot 0.500, and in the lower one, beta = 129.2 degrees at l with cot -0.817, marked by arcs; the shared edge labelled L(i, j) = -0.1583](../../examples/images/ref-laplacian-cotangents.svg){.fossil-figure}
+
+Step 2 on one edge: the acute angle at k gives cot α = 0.500, the obtuse angle at l gives cot β = -0.817, and
+`L%get_value(i, j)` returns their half-sum, -0.1583. An obtuse opposite angle can make a weight negative: `L` is then
+not an M-matrix, and the discrete maximum principle that non-negative weights give does not hold.
 
 ## API
 

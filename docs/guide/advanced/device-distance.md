@@ -41,6 +41,13 @@ in and the distances out.
 The results are **bit-exact** against the serial CPU path on every case
 validated so far (nvfortran 26.9, RTX 4070, see [Performance](#performance)).
 
+![the open dragon, translucent, with the centres of the 1820 cut cells of a 20-cubed block around it, teal where the winding number puts them inside, ember outside: a layer of points hugging the surface](../../examples/images/ref-device-distance-batch.svg){.fossil-figure}
+
+One call signs the 8000 cell centres of a 20³ block around the open dragon. The 1820 within half a cell diagonal of
+the surface are the cut cells (603 of them inside); 0 distances differ from those of `distance_many`. Built with
+gfortran, as here, the device loop runs on the host (see the [Example](#example)). The figure is drawn by
+`docs/examples/src/fig_ref_device_distance_batch.f90`.
+
 ## Pipeline
 
 1. **Residency** (`enter_device`, once per surface). `!$acc enter data
@@ -77,6 +84,13 @@ validated so far (nvfortran 26.9, RTX 4070, see [Performance](#performance)).
      routine the CPU path calls, with the same constants (β = 2).
 5. **Release** (`exit_device`, once). `!$acc exit data delete` of the four
    arrays.
+
+![an 8 by 8 plane of points above a corner of the unit cube, each joined to its closest point: teal segments straight down onto the top face, gold ones onto an edge, ember ones onto the corner vertex; red segments show the pseudo-normals of the edge and vertex regions](../../examples/images/ref-device-distance-regions.svg){.fossil-figure}
+
+Step 4 on 64 points above a corner of the unit cube, through `query_many_device`, which runs the same loop body and
+also returns the region: 16 closest points lie in the top face, 32 on an edge, 16 at the vertex. Each region has its
+own pseudo-normal (red for the edges and the vertex; a face's is its normal), and the sign is that of its dot
+product with `point - closest`.
 
 ## API
 

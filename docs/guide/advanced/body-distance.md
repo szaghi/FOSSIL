@@ -11,6 +11,12 @@ facets, with the two facets that realize it and the witness points on each, and 
 (issue #67). With several moving bodies the solver needs it for contact detection, lubrication corrections when two
 walls come within a few cells, and collision response.
 
+![the dragon and, beside its snout, a translucent cube; a gold segment joins the two witness points, and the dragon facet and the cube facet that realize the distance are drawn in ember](../../examples/images/ref-body-distance-witness.svg){.fossil-figure}
+
+A cube beside the dragon's snout: `distance_to` returns the distance, 1.2285, the two witness points (gold) and the
+facets that realize it, 583 on the dragon and 45 on the cube (ember). The figure is drawn by
+`docs/examples/src/fig_ref_body_distance_method.f90`.
+
 ## Method
 
 - **Pair distance** (`fossil_body_distance%tri_tri_distance`): 0 when the exact classification of `fossil_tritri_exact`
@@ -33,6 +39,12 @@ walls come within a few cells, and collision response.
   segment pairs are evaluated in order behind a box test, with the same tie rule; poses (`rigid_pose_2d_t`) move the
   endpoints as `move` does, so the result equals the one after `move`, bit for bit.
 - CPU only: one query per pair of bodies, not a batch over points.
+
+![two disjoint triangles, one sepia and one teal, joined by the 15 candidate segments of the pair distance drawn faint, 6 from a vertex to the other triangle and 9 between edges; the least, 0.35, in gold, from a vertex of the teal triangle down onto the sepia one](../../examples/images/ref-body-distance-candidates.svg){.fossil-figure}
+
+The 15 candidates of one triangle pair, computed with the public kernels `closest_on_triangle` and
+`closest_segment_segment` of `fossil_body_distance`: the least, 0.35, from a vertex of one triangle to the face of the
+other, is the value `tri_tri_distance` returns.
 
 ## Example
 
@@ -101,6 +113,12 @@ The pair distance rests on two closest-point kernels, both checked against quadr
   64 ε L.
 
 Both paths of `body_distance` (the descent and `body_distance_brute`) call the same kernels, so they stay bit-identical.
+
+![the error of the segment-segment distance against a quadruple-precision reference, in units of eps L on a log scale, against the angle between the segments from 1e-2 to 1e-15: closest_segment_segment in teal, between 0.18 and 0.68 at every angle; the textbook solve in ember, above the 16 eps L bound from 1e-3 to 1e-8, up to 1.3e7 at 1e-8, and lower again at most of the smaller angles](../../examples/images/ref-body-distance-accuracy.svg){.fossil-figure}
+
+The largest error over 40 fixed-seed pairs per decade of angle, drawn from the generator of the test: the kernel stays
+within 0.68 ε L at every angle; the textbook solve (written in the figure program) exceeds the 16 ε L bound from 1e-3
+to 1e-8, peaks at 1.3e7 ε L at 1e-8, and falls back below it at most of the smaller angles (1.5e3 ε L at 1e-10).
 
 ## Validation
 

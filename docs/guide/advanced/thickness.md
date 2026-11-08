@@ -53,6 +53,12 @@ for segmentation.
 - **Parallel.** OpenMP over the facets. Each facet is computed on its own, so the result does not depend on the
   thread count.
 
+![a plate 0.2 thick seen from the side, translucent, the 31 rays of one top facet fanning down in the 60-degree cone to the bottom face, their first hits in gold, the ray of the lower median in ember](../../examples/images/ref-thickness-cone.svg){.fossil-figure}
+
+The 31 rays of a facet of a plate 0.2 thick: all leave through the bottom face and count, with lengths from 0.200 (the
+axis) to 0.231 (the rim, 0.2 / cos 30°). Their lower median, 0.2144 = 1.072 t, is the facet's `thickness`: the bias
+of the table below. The figure is drawn by `docs/examples/src/fig_ref_thickness_cone.f90`.
+
 ### Bias of the cone
 
 A cone measures oblique lengths, and the median keeps that bias. On a plate and a sphere it is known in closed form:
@@ -160,6 +166,11 @@ call surface%box_thin_many(lo, hi, factor, touched)                    ! any box
 - **Tags.** `tag_block(thin_factor=, thin_band=, thin_tags=)` gives the Chebyshev cell distance to the nearest
   thin-touched cell, capped at `thin_band + 1`, through `cell_bands`, as the [feature tags](/guide/advanced/feature-edges)
   do.
+
+![the plate tapering from 0.05 to 0.45 along x, coloured by its ray thickness from teal to ember, with 66 gold wireframe cells of side 0.25 over its thin half](../../examples/images/ref-thickness-amr.svg){.fossil-figure}
+
+The tapered plate under a block of 128 cells of side h = 0.25: after `build_thin`, `box_thin_many(factor=1)` marks
+the 66 cells that meet a facet thinner than h, all at x ≤ 2.25; the plate is 0.25 thick at x = 2.
 
 ## 2-D curves
 

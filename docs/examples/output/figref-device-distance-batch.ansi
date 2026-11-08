@@ -1,0 +1,3 @@
+$ fig_ref_device_distance_batch
+one call: 8000 points, cut 1820 (inside 603), differing from distance_many 0
+query_many_device: 64 points, closest in a face 16, an edge 32, the vertex 16

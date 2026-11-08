@@ -34,6 +34,12 @@ The mean variant in particular is a one-liner on top of `(L, M)`:
 `L V` is the per-vertex mean-curvature normal scaled by `2 M_ii`;
 inverting the diagonal mass and halving gives `H n`.
 
+![a torus, R = 1 and r = 0.45, coloured by gaussian_curvature: ember on the outer side, where K > 0, up to 1.54; cream on the top and bottom circles, where K = 0; teal on the inner side, where K < 0, down to -4.00](../../examples/images/ref-curvature-torus.svg){.fossil-figure}
+
+A torus shows the three signs: `gaussian_curvature` gives K from -4.003 on the inner equator (exact -4.040) to 1.538 on
+the outer one (exact 1.533), and $\sum_i K_i A_i = 0$ to round-off, the Euler characteristic of a torus. The torus is
+parametric, 48 × 24 vertices; the figure is drawn by `docs/examples/src/fig_ref_curvature_torus.f90`.
+
 ### A correction worth surfacing
 
 The `feat(curvature,surface): per-vertex Gaussian curvature` commit
@@ -87,6 +93,12 @@ Both computations reuse the §2.1 per-triangle cotangent and area
 assembly. They run in a single pass over the facet array with O(N)
 storage; no sparse matrix is materialised by either TBP — the assembly
 is "on the fly" into the output vector.
+
+![the apex of an open six-sided cone, height 0.6 over a unit hexagon: the six angles at the apex marked by gold arcs, the apex's barycentric area shaded ember, and its mean-curvature normal H n drawn along the axis, labelled |H| = 0.811](../../examples/images/ref-curvature-defect.svg){.fossil-figure}
+
+Both formulae at the apex of a six-sided cone: the angles sum to 5.317, so the defect is 2π − 5.317 = 0.966; divided by
+the barycentric area A_i = 1.054 (shaded) it gives K = 0.917, the value `gaussian_curvature` returns.
+`mean_curvature` gives H = 0.811, along the pseudo-normal, +z.
 
 ## API
 

@@ -1,0 +1,5 @@
+$ fig_ref_thickness_cone
+facet 97: 31 rays counted, lengths  0.2000 to  0.2309, lower median  0.2144
+thickness(facet)  0.2144, equal to the median: T
+cells 128, thin-touched 66 (h =  0.2500, factor 1)
+largest x of a touched cell  2.2500

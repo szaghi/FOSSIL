@@ -61,6 +61,13 @@ symmetric 3×3 matrix.
   convention is fixed: in axes 1 and 2 the largest-magnitude component is positive, and axis 3 = axis 1 × axis 2.
   With repeated moments (a sphere, a cube) the axes are not unique, and any orthonormal set returned is valid.
 
+![the lower half of a torus, R = 1 and r = 0.4, open towards the viewer: its facets ember where D > 0, on the outer side, and teal where D < 0, on the inner side facing o; the reference point o, the bounding-box centre, lies in the hole; the tetrahedra of one outer and one inner facet drawn as gold wireframes](../../examples/images/ref-mass-properties-tetrahedra.svg){.fossil-figure}
+
+The reference point need not be inside the body. For a torus, the box centre o lies in the hole, and the facets of
+the inner side, which face it, give D < 0. The positive tetrahedra sum to 3.568, the negative ones to -0.510, and the
+total, 3.058, is the volume `mass_properties` returns (the smooth torus has 2π²Rr² = 3.158). The figure is drawn by
+`docs/examples/src/fig_ref_mass_properties_method.f90`.
+
 ## API
 
 ```fortran

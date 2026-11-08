@@ -1,0 +1,17 @@
+$ fig_ref_body_distance_method
+distance_to:   1.2285, facet_self 583, facet_other 45, intersecting F
+least of the 15 candidates  0.35000, tri_tri_distance  0.35000, candidate 1
+angle 1e- 2: closest_segment_segment     0.18 eps L, textbook  1.86E-01
+angle 1e- 3: closest_segment_segment     0.58 eps L, textbook  3.45E+01
+angle 1e- 4: closest_segment_segment     0.25 eps L, textbook  5.13E+01
+angle 1e- 5: closest_segment_segment     0.36 eps L, textbook  4.51E+01
+angle 1e- 6: closest_segment_segment     0.68 eps L, textbook  1.30E+06
+angle 1e- 7: closest_segment_segment     0.25 eps L, textbook  8.52E+06
+angle 1e- 8: closest_segment_segment     0.32 eps L, textbook  1.33E+07
+angle 1e- 9: closest_segment_segment     0.31 eps L, textbook  3.46E-01
+angle 1e-10: closest_segment_segment     0.22 eps L, textbook  1.53E+03
+angle 1e-11: closest_segment_segment     0.23 eps L, textbook  7.42E+00
+angle 1e-12: closest_segment_segment     0.18 eps L, textbook  1.44E+01
+angle 1e-13: closest_segment_segment     0.22 eps L, textbook  3.35E-01
+angle 1e-14: closest_segment_segment     0.35 eps L, textbook  5.20E-01
+angle 1e-15: closest_segment_segment     0.21 eps L, textbook  3.69E-01

@@ -1,0 +1,4 @@
+$ fig_ref_winding_number_field
+dragon: watertight F, facets 6588
+w from  -0.001 to   1.001; cells with 0.1 < w < 0.9: 0 of 1536
+max |w_fast - w_exact|  5.60E-04, 0 cells above 1e-3

@@ -1,0 +1,7 @@
+$ fig_ref_surface_deviation_method
+h(A, B) in   0.2500  0.2512;  h(B, A) in   0.9394  0.9394
+WARNING: sanitize: 18 hole(s) filled
+WARNING: sanitize: 60 degenerate facet(s) (zero-area / sliver) removed
+octahedron: 158 samples, largest distance  0.42020, deviation lower  0.42020
+turned dragon: host   0.35869  0.38539, device   0.35869  0.38539
+bounds bit-identical T, per-vertex mismatches 0

@@ -18,6 +18,13 @@ the large body's far corners are far from the small one.
 Remeshing, decimation, smoothing, hole filling, alpha wrapping and booleans all move a surface. The deviation measures
 by how much, so a test or a user can bound it instead of trusting it.
 
+![a small cube A of side 0.2 near a face of a unit cube B, both translucent: a gold segment h(A, B) from a vertex of A to the nearest face of B, and a long teal segment h(B, A) from a far corner of B to A](../../examples/images/ref-deviation-one-sided.svg){.fossil-figure}
+
+A cube A of side 0.2 near a face of a unit cube B: `deviation` brackets h(A, B) in [0.2500, 0.2512], the gap, and
+h(B, A) at 0.9394, from B's far corner. Each segment starts at the vertex with the largest `per_vertex` and ends at
+its closest point. The figures of this page that are not in the example are drawn by
+`docs/examples/src/fig_ref_surface_deviation_method.f90`.
+
 ## Method
 
 $d(x, B)$ comes from B's bounding-volume hierarchy (`distance_many`): exact closest-point distances, bit-identical
@@ -36,6 +43,12 @@ The largest sampled distance is a **lower bound** of $h(A, B)$: the true maximum
 **Mean and rms.** The sub-triangle centroids, each weighted by $\text{area}_f / n_f^2$, are a quadrature over A: the
 centroid rule on each sub-triangle, exact for a function linear over it. The mean and rms of $d$ are therefore
 **estimates**, exact when $d$ is constant (two parallel planes) and converging as the density grows.
+
+![an octahedron inscribed in a unit sphere, with its 158 samples: the 6 vertices, the 3 edge midpoints and the 16 sub-triangle centroids of each facet, teal where the distance to the sphere is below half the largest and ember above; the largest, 0.4202, at a facet centre in gold](../../examples/images/ref-deviation-samples.svg){.fossil-figure}
+
+The samples on an octahedron A inscribed in a unit sphere B, with `samples_per_area` = 16 / facet area, so
+$n_f = 4$: the 6 vertices, then for each facet its 3 edge midpoints and 16 sub-triangle centroids, 158 points. The
+largest sampled distance, 0.4202, near a facet centre, is the `lower` that `deviation` returns.
 
 ## Certified upper bound
 
@@ -127,6 +140,12 @@ call original%enter_device
 call coarse%deviation(original, lower=lower, upper=upper, device=.true., status=status)
 call original%exit_device
 ```
+
+![the dragon turned by 2 degrees about the vertical axis through its centre, each facet coloured by the distance of its vertices to the dragon, from teal at 0 through cream to ember at 0.1 and above](../../examples/images/ref-deviation-device.svg){.fossil-figure}
+
+The same check, on the host: the dragon turned by 2° against the dragon, with `device=.true.` and without. Both runs
+give 0.3587 ≤ h ≤ 0.3854, bit for bit, and none of the per-vertex distances differ. Built with gfortran, the device
+batches run on the host.
 
 The GPU check (`fossil_test_distance_bench`) compares a copy of the bench surface, rotated by 2 degrees about its centre,
 against the surface on the device and on the CPU, and prints `deviation device vs serial mismatches`, which must be 0.

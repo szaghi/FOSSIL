@@ -22,6 +22,12 @@ All three share the same Möller-Trumbore facet-test
 `enumerate_children` dispatcher used by §1.4 and §1.2). Both SAH BVH
 and octree tree kinds are supported transparently.
 
+![the dragon, with 35 rays from an eye point below and in front of it, aimed at a grid over its box: 23 rays drawn in gold up to their first hit, the facets they picked in ember, the 12 that miss drawn faint past the dragon](../../examples/images/ref-ray-queries-picking.svg){.fossil-figure}
+
+Picking: from an eye point in front of the dragon, 35 rays aimed at a grid over its box. 23 hit, and
+`intersect_ray_first` returns the first hit of each (gold) and the facet it picked (ember); the other 12 miss. The
+figure is drawn by `docs/examples/src/fig_ref_ray_queries_picking.f90`.
+
 ## Pipeline
 
 For each query:
@@ -43,6 +49,12 @@ For each query:
 A flat-O(N) fallback exists for surfaces without a built AABB tree;
 it operates on `facet(:)` directly. Standard surfaces from
 `load_from_file` always have a tree, so the fallback rarely fires.
+
+![one picked facet of the dragon, zoomed, split at the hit point into three sub-triangles, each shaded by the barycentric weight of the vertex opposite it; the vertices labelled 1 - u - v = 0.340, u = 0.432, v = 0.228; the ray arriving at the hit point](../../examples/images/ref-ray-queries-facet.svg){.fossil-figure}
+
+Step 2 on one of those hits: `facet%intersect_ray` returns t = 0.8543 and (u, v), the weights (0.340, 0.432, 0.228) of
+vertices 1, 2 and 3. Each weight is the area fraction of the sub-triangle opposite its vertex (shaded). The point at t
+along the ray and the barycentric point agree with `hit%point` within 1e-12.
 
 ## API
 

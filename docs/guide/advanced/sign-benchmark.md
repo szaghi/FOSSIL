@@ -28,6 +28,14 @@ every 2-D algorithm, and that naive closest-element sign.
 | 2-D | `fossil_test_sign_bench_2d` | 12 curves, 15258 points; 3 dirty variants of each |
 | Device | `fossil_test_sign_bench_device` | device signs = CPU signs on the benchmark points |
 
+![an L-shaped prism, translucent, with clusters of 8 points at each of its 12 vertices, 18 edge midpoints and 8 face centres, 0.04 away along the diagonal directions, teal inside and ember outside by construction](../../examples/images/ref-sign-benchmark-points.svg){.fossil-figure}
+
+The measurement on one body: points around every feature, each on a side known by construction, and for each
+algorithm the count of points it puts on the wrong side. On this L-prism, 304 points at δ = 0.04 along the 8 diagonal
+directions: all four algorithms and the naive sign get every point right. The errors of the [results](#results-3-d)
+come from sharper features, smaller δ and the dirty variants. The figures of this page that are not in the example are
+drawn by `docs/examples/src/fig_ref_sign_benchmark_points.f90` and `fig_ref_sign_benchmark.f90`.
+
 ## Method
 
 - **Bodies (3-D):**
@@ -65,6 +73,12 @@ every 2-D algorithm, and that naive closest-element sign.
   - 2-D: a gap (open loop), a duplicated vertex, a segment of 10⁻⁹.
   - The ground truth stays the clean geometry, and 3-D errors are split by
     distance to the defect (near: under 0.1 L).
+
+![the section z = 0.5 of the L-prism around its reentrant edge, seen from above: the two faces meeting at 270 degrees, faint rays bounding the excluded wedges, and 10 directions with 7 points each at delta halving from 0.2 to 0.003, teal in the inside sector and ember in the outside one, as the pseudo-normal signs them](../../examples/images/ref-sign-benchmark-construction.svg){.fossil-figure}
+
+The construction at the L-prism's reentrant edge: 3 directions in the 90° outside sector (15° to 75°) and 7 in the
+270° inside sector (135° to 315°), each at least a sixth of its sector away from both faces, with δ halving from 0.2
+to 0.003 along each. Of the 70 points, 49 are inside; the pseudo-normal puts none on the wrong side.
 
 ## Results, 3-D
 
@@ -210,6 +224,12 @@ pseudo-normal and fast winding number) give the same signed distances as
 the CPU on all benchmark points: 0 mismatches, run on the host. The GPU
 benches print `sign bench device vs serial mismatches` for the manual gate,
 which has not run yet.
+
+![the L-prism with one wall facet removed, the hole's rim in red, and the 304 points of the first figure coloured by the winding-number sign that query_many_device gives, teal inside, ember outside](../../examples/images/ref-sign-benchmark-device.svg){.fossil-figure}
+
+The 304 points of the first figure on the prism with one wall facet removed: the winding-number signed distances of
+`query_many_device` equal those of `query_many` bit for bit (0 of 304 differ, the device loop run on the host). 44
+points near the hole are on the wrong side for both: the cost of the hole, not of the device.
 
 ## Recommendation
 

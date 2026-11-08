@@ -1,0 +1,4 @@
+$ fig_ref_ray_queries_picking
+intersect_ray_first: 35 rays, 23 hits
+facet 4364: t  0.8543, weights 0.3396 0.4320 0.2284
+eye + t dir = hit%point = barycentric point, to 1e-12: T

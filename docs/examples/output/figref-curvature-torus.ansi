@@ -1,0 +1,6 @@
+$ fig_ref_curvature_torus
+torus: 1152 vertices, K from  -4.003 to   1.538
+exact: inner equator  -4.040, outer equator   1.533
+|sum K_i A_i| / (2 pi) = |Euler characteristic|:  0.000000
+apex: angle sum  5.3173, defect 2 pi - sum  0.9659, A_i  1.0536
+apex: K = defect / A_i =  0.9168, gaussian_curvature  0.9168, mean_curvature H  0.8108
