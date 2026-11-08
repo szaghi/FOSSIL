@@ -12,20 +12,40 @@ module fossil_projection
 !< Trees: median split on the element centroids along the longest box axis (deterministic: ties by element index),
 !< leaves of at most LEAF elements; node(:) = [left, right, first, count] over a permutation of the elements.
 !< This module knows no surface or curve type: the surface and the curve build their target through it.
+!<
+!< Projection (`project_points`, `project_points_2d`): each point goes to the closest point of its target: the whole
+!< body (PROJ_FREE), one patch (PROJ_PATCH, id), one constraint curve or any (PROJ_CURVE, id or 0), one corner or the
+!< nearest (PROJ_CORNER, id or 0). Feet on triangles by `closest_on_triangle` (#69), on segments by the clamped
+!< projection; ties in the distance go to the lowest facet / segment index (deterministic, independent of the tree).
+!< Corners are returned bit for bit. `classify_points`: a corner within the tolerance, else a constraint curve within
+!< it, else the patch of the closest facet.
+!<
+!< Block faces (`project_block_face`, 3-D faces 1-6 = -i, +i, -j, +j, -k, +k; `project_block_side`, 2-D sides 1-4): every
+!< vertex of the face is classified with the tolerance (so face corners near body corners go to them, edge vertices
+!< near constraint curves to the curves, the others to the patch of their closest facet) and moved to its foot, in
+!< place; `moved` gives the distance each vertex moved.
 use penf,                 only : I4P, I8P, R8P
 use fossil_feature_edges, only : find_feature_edges
+use fossil_body_distance, only : closest_on_triangle
+use fossil_curvilinear_block, only : curvilinear_block_t, curvilinear_block_2d_t
 
 implicit none
 private
 public :: projection_target_t, build_target_3d, build_target_2d
 public :: PROJ_FREE, PROJ_PATCH, PROJ_CURVE, PROJ_CORNER
 public :: bvh_build
+public :: project_points, project_points_2d, classify_points, classify_points_2d
+public :: PROJ_STATUS_OK, PROJ_STATUS_BAD_INPUT
+public :: project_block_face, project_block_side
 
 integer(I4P), parameter :: PROJ_FREE   = 0_I4P !< The whole body.
 integer(I4P), parameter :: PROJ_PATCH  = 1_I4P !< One patch (id).
 integer(I4P), parameter :: PROJ_CURVE  = 2_I4P !< One constraint curve (id > 0), or any (id 0); 3-D only.
 integer(I4P), parameter :: PROJ_CORNER = 3_I4P !< One corner (id > 0), or the nearest (id 0); fixed.
 integer(I4P), parameter :: LEAF        = 4_I4P !< Elements per leaf.
+integer(I4P), parameter :: PROJ_STATUS_OK        = 0_I4P !< Every point projected.
+integer(I4P), parameter :: PROJ_STATUS_BAD_INPUT = 1_I4P !< A kind or id out of range, or a target not built: those
+                                                         !< points keep their position, distance -1.
 
 type :: projection_target_t
    !< What the constrained projection reads.
@@ -467,4 +487,367 @@ contains
       w = 2 * w
    enddo
    endsubroutine sort_keys
+
+   subroutine project_points(target, x, y, z, kinds, ids, fx, fy, fz, distances, status)
+   !< Feet of the points on their targets (3-D; see the module notes).
+   type(projection_target_t), intent(in)            :: target           !< Target (dims 3).
+   real(R8P),                 intent(in)            :: x(:), y(:), z(:) !< Points [n].
+   integer(I4P),              intent(in)            :: kinds(:), ids(:) !< PROJ_* and ids [n].
+   real(R8P),                 intent(out)           :: fx(:), fy(:), fz(:) !< Feet [n].
+   real(R8P),                 intent(out), optional :: distances(:)     !< Distances [n] (-1: not projected).
+   integer(I4P),              intent(out), optional :: status           !< PROJ_STATUS_*.
+   real(R8P)                                        :: p(3), f(3), d2
+   integer(I4P)                                     :: i, el, st
+   logical                                          :: ok
+
+   st = PROJ_STATUS_OK
+   do i = 1, size(x, kind=I4P)
+      p = [x(i), y(i), z(i)]
+      call project_one(target, p, kinds(i), ids(i), f, d2, el, ok)
+      if (.not. ok) then
+         st = PROJ_STATUS_BAD_INPUT ; f = p ; d2 = -1._R8P
+      endif
+      fx(i) = f(1) ; fy(i) = f(2) ; fz(i) = f(3)
+      if (present(distances)) distances(i) = merge(sqrt(max(0._R8P, d2)), -1._R8P, d2 >= 0._R8P)
+   enddo
+   if (present(status)) status = st
+   endsubroutine project_points
+
+   subroutine project_points_2d(target, u, v, kinds, ids, fu, fv, distances, status)
+   !< Feet of the points on their targets (2-D: PROJ_FREE, PROJ_PATCH, PROJ_CORNER).
+   type(projection_target_t), intent(in)            :: target           !< Target (dims 2).
+   real(R8P),                 intent(in)            :: u(:), v(:)       !< Points [n].
+   integer(I4P),              intent(in)            :: kinds(:), ids(:) !< PROJ_* and ids [n].
+   real(R8P),                 intent(out)           :: fu(:), fv(:)     !< Feet [n].
+   real(R8P),                 intent(out), optional :: distances(:)     !< Distances [n] (-1: not projected).
+   integer(I4P),              intent(out), optional :: status           !< PROJ_STATUS_*.
+   real(R8P)                                        :: p(3), f(3), d2
+   integer(I4P)                                     :: i, el, st
+   logical                                          :: ok
+
+   st = PROJ_STATUS_OK
+   do i = 1, size(u, kind=I4P)
+      p = [u(i), v(i), 0._R8P]
+      ok = kinds(i) /= PROJ_CURVE
+      if (ok) call project_one(target, p, kinds(i), ids(i), f, d2, el, ok)
+      if (.not. ok) then
+         st = PROJ_STATUS_BAD_INPUT ; f = p ; d2 = -1._R8P
+      endif
+      fu(i) = f(1) ; fv(i) = f(2)
+      if (present(distances)) distances(i) = merge(sqrt(max(0._R8P, d2)), -1._R8P, d2 >= 0._R8P)
+   enddo
+   if (present(status)) status = st
+   endsubroutine project_points_2d
+
+   subroutine classify_points(target, x, y, z, tolerance, kinds, ids)
+   !< Constraints of the points: PROJ_CORNER (a corner within tolerance), else PROJ_CURVE (a constraint curve within
+   !< it), else PROJ_PATCH with the patch of the closest facet.
+   type(projection_target_t), intent(in)  :: target           !< Target (dims 3).
+   real(R8P),                 intent(in)  :: x(:), y(:), z(:) !< Points [n].
+   real(R8P),                 intent(in)  :: tolerance        !< Tolerance.
+   integer(I4P),              intent(out) :: kinds(:), ids(:) !< PROJ_* and ids [n].
+   integer(I4P)                           :: i
+
+   do i = 1, size(x, kind=I4P)
+      call classify_one(target, [x(i), y(i), z(i)], tolerance, kinds(i), ids(i))
+   enddo
+   endsubroutine classify_points
+
+   subroutine classify_points_2d(target, u, v, tolerance, kinds, ids)
+   !< 2-D twin of classify_points: PROJ_CORNER or PROJ_PATCH.
+   type(projection_target_t), intent(in)  :: target           !< Target (dims 2).
+   real(R8P),                 intent(in)  :: u(:), v(:)       !< Points [n].
+   real(R8P),                 intent(in)  :: tolerance        !< Tolerance.
+   integer(I4P),              intent(out) :: kinds(:), ids(:) !< PROJ_* and ids [n].
+   integer(I4P)                           :: i
+
+   do i = 1, size(u, kind=I4P)
+      call classify_one(target, [u(i), v(i), 0._R8P], tolerance, kinds(i), ids(i))
+   enddo
+   endsubroutine classify_points_2d
+
+   subroutine project_block_face(block, face, target, tolerance, moved, kinds, status)
+   !< Classify and project the vertices of one face of a 3-D block onto the body, in place (see the module notes).
+   class(curvilinear_block_t), intent(inout)         :: block      !< Block.
+   integer(I4P),               intent(in)            :: face       !< Face 1-6 (-i, +i, -j, +j, -k, +k).
+   type(projection_target_t),  intent(in)            :: target     !< Target (dims 3).
+   real(R8P),                  intent(in)            :: tolerance  !< Classification tolerance.
+   real(R8P), allocatable,     intent(out), optional :: moved(:,:) !< Distance moved per face vertex.
+   integer(I4P), allocatable,  intent(out), optional :: kinds(:,:) !< Constraint per face vertex (PROJ_*).
+   integer(I4P),               intent(out), optional :: status     !< PROJ_STATUS_*.
+   integer(I4P)                                      :: lo(3), hi(3), a, n1, n2, i, j, kk, ii, st
+   integer(I4P)                                      :: idx(3)
+   real(R8P)                                         :: p(3), f(3), d2
+   integer(I4P)                                      :: el
+   logical                                           :: ok
+
+   st = PROJ_STATUS_OK
+   if (face < 1 .or. face > 6 .or. target%dims /= 3 .or. .not. allocated(block%x)) then
+      if (present(status)) status = PROJ_STATUS_BAD_INPUT
+      return
+   endif
+   lo = 1 ; hi = [block%ni, block%nj, block%nk]
+   a = (face + 1) / 2 ! the fixed direction
+   if (mod(face, 2) == 1) then
+      hi(a) = 1
+   else
+      lo(a) = hi(a)
+   endif
+   select case (a)
+   case (1) ; n1 = block%nj ; n2 = block%nk
+   case (2) ; n1 = block%ni ; n2 = block%nk
+   case default ; n1 = block%ni ; n2 = block%nj
+   endselect
+   if (present(moved)) allocate(moved(n1, n2))
+   if (present(kinds)) allocate(kinds(n1, n2))
+   do j = 1, n2
+      do i = 1, n1
+         select case (a)
+         case (1) ; idx = [lo(1), i, j]
+         case (2) ; idx = [i, lo(2), j]
+         case default ; idx = [i, j, lo(3)]
+         endselect
+         p = [block%x(idx(1), idx(2), idx(3)), block%y(idx(1), idx(2), idx(3)), block%z(idx(1), idx(2), idx(3))]
+         call classify_one(target, p, tolerance, kk, ii)
+         call project_one(target, p, kk, ii, f, d2, el, ok)
+         if (.not. ok) then
+            st = PROJ_STATUS_BAD_INPUT ; f = p
+         endif
+         block%x(idx(1), idx(2), idx(3)) = f(1) ; block%y(idx(1), idx(2), idx(3)) = f(2)
+         block%z(idx(1), idx(2), idx(3)) = f(3)
+         if (present(moved)) moved(i, j) = norm2(f - p)
+         if (present(kinds)) kinds(i, j) = kk
+      enddo
+   enddo
+   if (present(status)) status = st
+   endsubroutine project_block_face
+
+   subroutine project_block_side(block, side, target, tolerance, moved, kinds, status)
+   !< Classify and project the vertices of one side of a 2-D block onto the curve, in place (sides 1-4 = -i, +i, -j, +j).
+   class(curvilinear_block_2d_t), intent(inout)         :: block     !< Block.
+   integer(I4P),                  intent(in)            :: side      !< Side 1-4.
+   type(projection_target_t),     intent(in)            :: target    !< Target (dims 2).
+   real(R8P),                     intent(in)            :: tolerance !< Classification tolerance.
+   real(R8P), allocatable,        intent(out), optional :: moved(:)  !< Distance moved per side vertex.
+   integer(I4P), allocatable,     intent(out), optional :: kinds(:)  !< Constraint per side vertex (PROJ_*).
+   integer(I4P),                  intent(out), optional :: status    !< PROJ_STATUS_*.
+   integer(I4P)                                         :: n, i, iu, iv, kk, ii, el, st
+   real(R8P)                                            :: p(3), f(3), d2
+   logical                                              :: ok
+
+   st = PROJ_STATUS_OK
+   if (side < 1 .or. side > 4 .or. target%dims /= 2 .or. .not. allocated(block%u)) then
+      if (present(status)) status = PROJ_STATUS_BAD_INPUT
+      return
+   endif
+   n = merge(block%nj, block%ni, side <= 2)
+   if (present(moved)) allocate(moved(n))
+   if (present(kinds)) allocate(kinds(n))
+   do i = 1, n
+      select case (side)
+      case (1) ; iu = 1 ; iv = i
+      case (2) ; iu = block%ni ; iv = i
+      case (3) ; iu = i ; iv = 1
+      case default ; iu = i ; iv = block%nj
+      endselect
+      p = [block%u(iu, iv), block%v(iu, iv), 0._R8P]
+      call classify_one(target, p, tolerance, kk, ii)
+      call project_one(target, p, kk, ii, f, d2, el, ok)
+      if (.not. ok) then
+         st = PROJ_STATUS_BAD_INPUT ; f = p
+      endif
+      block%u(iu, iv) = f(1) ; block%v(iu, iv) = f(2)
+      if (present(moved)) moved(i) = norm2(f - p)
+      if (present(kinds)) kinds(i) = kk
+   enddo
+   if (present(status)) status = st
+   endsubroutine project_block_side
+
+   subroutine classify_one(target, p, tolerance, kind, id)
+   !< Constraint of one point.
+   type(projection_target_t), intent(in)  :: target    !< Target.
+   real(R8P),                 intent(in)  :: p(3)      !< Point.
+   real(R8P),                 intent(in)  :: tolerance !< Tolerance.
+   integer(I4P),              intent(out) :: kind, id  !< Constraint.
+   real(R8P)                              :: f(3), d2, t2
+   integer(I4P)                           :: el, k
+   logical                                :: ok
+
+   t2 = tolerance * tolerance
+   call nearest_corner(target, p, k, d2)
+   if (k > 0 .and. d2 <= t2) then
+      kind = PROJ_CORNER ; id = k ; return
+   endif
+   if (target%dims == 3 .and. target%seg_root > 0) then
+      call closest_on_curves(target, p, 0_I4P, f, d2, el)
+      if (el > 0 .and. d2 <= t2) then
+         kind = PROJ_CURVE ; id = target%seg_curve(el) ; return
+      endif
+   endif
+   call project_one(target, p, PROJ_FREE, 0_I4P, f, d2, el, ok)
+   kind = PROJ_PATCH ; id = 0
+   if (ok .and. el > 0) id = target%el_patch(el)
+   endsubroutine classify_one
+
+   subroutine project_one(target, p, kind, id, f, d2, el, ok)
+   !< Foot of one point; el = the element (or segment, or corner) reached.
+   type(projection_target_t), intent(in)  :: target !< Target.
+   real(R8P),                 intent(in)  :: p(3)   !< Point.
+   integer(I4P),              intent(in)  :: kind, id !< Constraint.
+   real(R8P),                 intent(out) :: f(3)   !< Foot.
+   real(R8P),                 intent(out) :: d2     !< Squared distance.
+   integer(I4P),              intent(out) :: el     !< Element / segment / corner.
+   logical,                   intent(out) :: ok     !< Projected.
+   integer(I4P)                           :: q
+
+   f = p ; d2 = huge(1._R8P) ; el = 0 ; ok = target%dims > 0
+   if (.not. ok) return
+   select case (kind)
+   case (PROJ_FREE)
+      do q = 1, target%np
+         if (target%patch_root(q) > 0) call closest_in_tree(target, target%patch_root(q), p, f, d2, el)
+      enddo
+   case (PROJ_PATCH)
+      ok = id >= 1 .and. id <= target%np
+      if (ok) ok = target%patch_root(id) > 0
+      if (ok) call closest_in_tree(target, target%patch_root(id), p, f, d2, el)
+   case (PROJ_CURVE)
+      ok = target%dims == 3 .and. id >= 0 .and. id <= target%nc .and. target%nc > 0
+      if (ok) call closest_on_curves(target, p, id, f, d2, el)
+   case (PROJ_CORNER)
+      ok = id >= 0 .and. id <= target%nk .and. target%nk > 0
+      if (ok) then
+         if (id > 0) then
+            el = id ; d2 = sum((target%corner(:, id) - p)**2)
+         else
+            call nearest_corner(target, p, el, d2)
+         endif
+         f = target%corner(:, el)
+      endif
+   case default
+      ok = .false.
+   endselect
+   if (ok) ok = el > 0
+   endsubroutine project_one
+
+   subroutine closest_in_tree(target, root, p, f, d2, el)
+   !< Closest element of the tree under root (depth first, box pruning; ties to the lowest original index).
+   type(projection_target_t), intent(in)    :: target !< Target.
+   integer(I4P),              intent(in)    :: root   !< Root node.
+   real(R8P),                 intent(in)    :: p(3)   !< Point.
+   real(R8P),                 intent(inout) :: f(3)   !< Best foot.
+   real(R8P),                 intent(inout) :: d2     !< Best squared distance.
+   integer(I4P),              intent(inout) :: el     !< Best element.
+   integer(I4P)                             :: stk(128), ns, nd, k, e
+   real(R8P)                                :: c(3), dd
+
+   ns = 1 ; stk(1) = root
+   do while (ns > 0)
+      nd = stk(ns) ; ns = ns - 1
+      if (box_d2(target%node_box(:, nd), p) > d2) cycle
+      if (target%node(1, nd) == 0) then
+         do k = target%node(3, nd), target%node(3, nd) + target%node(4, nd) - 1
+            e = target%perm(k)
+            if (target%dims == 3) then
+               c = closest_on_triangle(p, reshape(target%el(:, e), [3, 3]))
+            else
+               c = closest_on_segment(p, [target%el(1:2, e), 0._R8P], [target%el(3:4, e), 0._R8P])
+            endif
+            dd = sum((c - p)**2)
+            if (el == 0) then
+               f = c ; d2 = dd ; el = e
+            elseif (dd < d2 .or. (dd == d2 .and. target%el_id(e) < target%el_id(el))) then
+               f = c ; d2 = dd ; el = e
+            endif
+         enddo
+      else
+         stk(ns + 1) = target%node(2, nd) ; stk(ns + 2) = target%node(1, nd) ; ns = ns + 2
+      endif
+   enddo
+   endsubroutine closest_in_tree
+
+   subroutine closest_on_curves(target, p, id, f, d2, sg)
+   !< Closest constraint segment: of curve id (all its segments), or of any curve (id 0, the segment tree); ties to the
+   !< lowest segment index.
+   type(projection_target_t), intent(in)  :: target !< Target.
+   real(R8P),                 intent(in)  :: p(3)   !< Point.
+   integer(I4P),              intent(in)  :: id     !< Curve (0: any).
+   real(R8P),                 intent(out) :: f(3)   !< Foot.
+   real(R8P),                 intent(out) :: d2     !< Squared distance.
+   integer(I4P),              intent(out) :: sg     !< Segment.
+   integer(I4P)                           :: stk(128), ns, nd, k, e
+   real(R8P)                              :: c(3), dd
+
+   f = p ; d2 = huge(1._R8P) ; sg = 0
+   if (id > 0) then
+      do e = target%curve_first(id), target%curve_first(id + 1) - 1
+         c = closest_on_segment(p, target%seg(1:3, e), target%seg(4:6, e)) ; dd = sum((c - p)**2)
+         if (sg == 0 .or. dd < d2) then
+            f = c ; d2 = dd ; sg = e
+         endif
+      enddo
+      return
+   endif
+   if (target%seg_root == 0) return
+   ns = 1 ; stk(1) = target%seg_root
+   do while (ns > 0)
+      nd = stk(ns) ; ns = ns - 1
+      if (box_d2(target%seg_box(:, nd), p) > d2) cycle
+      if (target%seg_node(1, nd) == 0) then
+         do k = target%seg_node(3, nd), target%seg_node(3, nd) + target%seg_node(4, nd) - 1
+            e = target%seg_perm(k)
+            c = closest_on_segment(p, target%seg(1:3, e), target%seg(4:6, e)) ; dd = sum((c - p)**2)
+            if (sg == 0) then
+               f = c ; d2 = dd ; sg = e
+            elseif (dd < d2 .or. (dd == d2 .and. e < sg)) then
+               f = c ; d2 = dd ; sg = e
+            endif
+         enddo
+      else
+         stk(ns + 1) = target%seg_node(2, nd) ; stk(ns + 2) = target%seg_node(1, nd) ; ns = ns + 2
+      endif
+   enddo
+   endsubroutine closest_on_curves
+
+   subroutine nearest_corner(target, p, k, d2)
+   !< Nearest corner (ties to the lowest index; 0 if none).
+   type(projection_target_t), intent(in)  :: target !< Target.
+   real(R8P),                 intent(in)  :: p(3)   !< Point.
+   integer(I4P),              intent(out) :: k      !< Corner.
+   real(R8P),                 intent(out) :: d2     !< Squared distance.
+   integer(I4P)                           :: i
+   real(R8P)                              :: dd
+
+   k = 0 ; d2 = huge(1._R8P)
+   do i = 1, target%nk
+      dd = sum((target%corner(:, i) - p)**2)
+      if (dd < d2) then
+         k = i ; d2 = dd
+      endif
+   enddo
+   endsubroutine nearest_corner
+
+   pure function closest_on_segment(p, a, b) result(c)
+   !< Closest point of the segment [a, b] to p (clamped projection).
+   real(R8P), intent(in) :: p(3), a(3), b(3) !< Point, ends.
+   real(R8P)             :: c(3)             !< Foot.
+   real(R8P)             :: e(3), l2, t
+
+   e = b - a ; l2 = dot_product(e, e)
+   if (l2 > 0._R8P) then
+      t = max(0._R8P, min(1._R8P, dot_product(p - a, e) / l2))
+   else
+      t = 0._R8P
+   endif
+   c = a + t * e
+   if (t == 1._R8P) c = b
+   endfunction closest_on_segment
+
+   pure function box_d2(box, p) result(d2)
+   !< Squared distance from p to a box [6].
+   real(R8P), intent(in) :: box(6), p(3) !< Box, point.
+   real(R8P)             :: d2           !< Squared distance.
+
+   d2 = sum(max(0._R8P, box(1:3) - p, p - box(4:6))**2)
+   endfunction box_d2
 endmodule fossil_projection

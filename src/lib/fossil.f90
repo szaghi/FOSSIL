@@ -50,7 +50,9 @@ use fossil_overset, only : wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2
                            cell_centre_block, cell_centre_block_2d
 use fossil_ccd, only : motion_bound_3d, motion_bound_2d, ccd_evaluator_t, ccd_advance, CCD_CONTACT, CCD_SEPARATE, &
                        CCD_INITIAL_CONTACT, CCD_NOT_CONVERGED, CCD_INVALID_INPUT, CCD_MAX_ITERATIONS
-use fossil_projection, only : projection_target_t, PROJ_FREE, PROJ_PATCH, PROJ_CURVE, PROJ_CORNER
+use fossil_projection, only : projection_target_t, PROJ_FREE, PROJ_PATCH, PROJ_CURVE, PROJ_CORNER, project_points, &
+                              project_points_2d, classify_points, classify_points_2d, PROJ_STATUS_OK, PROJ_STATUS_BAD_INPUT, &
+                              project_block_face, project_block_side
 use fossil_rigid_pose, only : rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, &
                              pose_2d, pose_compose, pose_inverse, to_body, to_world, rotate, pose_interpolate
 use fossil_swept_cells, only : swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
@@ -92,7 +94,8 @@ public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, po
 public :: pose_inverse, to_body, to_world, rotate, pose_interpolate
 public :: motion_bound_3d, motion_bound_2d, ccd_evaluator_t, ccd_advance, CCD_CONTACT, CCD_SEPARATE, CCD_INITIAL_CONTACT
 public :: CCD_NOT_CONVERGED, CCD_INVALID_INPUT, CCD_MAX_ITERATIONS
-public :: projection_target_t, PROJ_FREE, PROJ_PATCH, PROJ_CURVE, PROJ_CORNER
+public :: projection_target_t, PROJ_FREE, PROJ_PATCH, PROJ_CURVE, PROJ_CORNER, project_points, project_points_2d
+public :: classify_points, classify_points_2d, PROJ_STATUS_OK, PROJ_STATUS_BAD_INPUT, project_block_face, project_block_side
 public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
 public :: inertia_to_world, principal_frame
 public :: FEATURE_EDGE_SHARP, FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, FEATURE_EDGE_DEFAULT_ANGLE
