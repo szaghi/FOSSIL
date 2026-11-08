@@ -1,0 +1,17 @@
+$ anim_block_walk
+frame  1: jumps   5, fallbacks 0, inside 3, cells  32   3  12   9   3   9
+frame  2: jumps   6, fallbacks 0, inside 3, cells  34   3  14   9   4   8
+frame  3: jumps   5, fallbacks 0, inside 3, cells  35   3  15   8   4   6
+frame  4: jumps   5, fallbacks 0, inside 3, cells  37   3  16   8   5   5
+frame  5: jumps   6, fallbacks 0, inside 3, cells  39   3  18   7   5   4
+frame  6: jumps   3, fallbacks 0, inside 3, cells  40   3  19   7   6   4
+frame  7: jumps   7, fallbacks 0, inside 3, cells   2   3  21   6   7   3
+frame  8: jumps   5, fallbacks 0, inside 3, cells   4   3  22   6   9   3
+frame  9: jumps   6, fallbacks 0, inside 3, cells   5   3  24   5  10   2
+frame 10: jumps   6, fallbacks 0, inside 3, cells   7   3  25   4  11   3
+frame 11: jumps   4, fallbacks 0, inside 3, cells   9   3  26   4  12   3
+frame 12: jumps   6, fallbacks 0, inside 3, cells  10   3  28   3  13   4
+frame 13: jumps   5, fallbacks 0, inside 3, cells  12   3  29   3  14   5
+frame 14: jumps   7, fallbacks 0, inside 3, cells  14   3  31   2  15   6
+frame 15: jumps   4, fallbacks 0, inside 3, cells  15   3  32   2  16   7
+frame 16: jumps   6, fallbacks 0, inside 3, cells  17   3  34   1  16   8

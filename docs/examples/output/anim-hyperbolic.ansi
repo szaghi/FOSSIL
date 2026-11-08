@@ -1,0 +1,10 @@
+$ anim_hyperbolic
+block 49 x 25, invalid cells 0, status 0
+layer  3: height 0.0053, marched 0.0139, invalid cells 0
+layer  6: height 0.0080, marched 0.0350, invalid cells 0
+layer  9: height 0.0122, marched 0.0671, invalid cells 0
+layer 12: height 0.0186, marched 0.1160, invalid cells 0
+layer 15: height 0.0283, marched 0.1903, invalid cells 0
+layer 18: height 0.0430, marched 0.3033, invalid cells 0
+layer 21: height 0.0655, marched 0.4752, invalid cells 0
+layer 24: height 0.0996, marched 0.7367, invalid cells 0
