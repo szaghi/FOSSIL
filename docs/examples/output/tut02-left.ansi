@@ -1,0 +1,5 @@
+$ tut02_b_left
+boundary edges 0, non-manifold edges 54
+facet edges without a single neighbour 216
+shells 76, bodies 37
+largest shell: 6292 facets; 75 small shells: 294 facets (ember)

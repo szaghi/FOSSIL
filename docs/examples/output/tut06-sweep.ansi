@@ -1,0 +1,7 @@
+$ tut06_c_sweep
+compute_band:  3667 band cells
+compute_signs: 849 nodes inside
+sweep:         32 directional sweeps to converge
+stopped after  1 sweeps: 44910 nodes unknown, error  7.1E-01
+stopped after  4 sweeps: 12943 nodes unknown, error  1.8E-01
+stopped after  8 sweeps: 0 nodes unknown, error  4.7E-04

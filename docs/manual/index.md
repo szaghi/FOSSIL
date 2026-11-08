@@ -23,22 +23,22 @@ Chapter 16 moves the batch to the GPU.
 
 | Chapter | You learn |
 |---|---|
-| [1. A first surface](./tutorial/01-first-surface) | `load_from_file`, what `analyze` computes, accessors, `is_watertight`, `is_manifold`, `save_into_file` |
-| [2. Repairing the surface](./tutorial/02-repair) | `sanitize`, `fill_holes=`, the stderr report, `is_volume` |
-| [3. Placing the body](./tutorial/03-manipulation) | `translate`, `rotate`, `resize`, `analyze` after a transformation, `clip`, `mirror`, `merge_solids` |
-| [4. Signed distance](./tutorial/04-distance) | `distance`, `is_point_inside`, `compute_distance`; the sign algorithms |
-| [5. Batched queries](./tutorial/05-batched) | `distance_many`, SAH BVH and octree, pseudo-normal and fast winding number on an open surface |
-| [6. A distance field](./tutorial/06-distance-field) | `distance_field_object` on a stretched grid: band, signs, fast sweeping |
-| [7. Curves in 2-D](./tutorial/07-curves) | `slice_surface`, `curve_object`, 2-D distance and 2-D field |
-| [8. Immersed-boundary queries](./tutorial/08-ib-queries) | `query_many`: wall point, feature, normal, body; `image_points`, `probe_many` |
-| [9. AMR tagging](./tutorial/09-amr-tagging) | `box_classify_many` (cut, near, inside, outside), `tag_block` |
-| [10. Cut cells](./tutorial/10-cut-cells) | `curve%cut_cells` and `cut_cells_3d`: fractions, apertures, fluid pieces, flagged cells |
-| [11. Moving bodies](./tutorial/11-moving-bodies) | poses, `pose=` queries, `move`, `state_changes`, `swept_cells_2d` |
-| [12. Geometry processing and analysis](./tutorial/12-geometry) | `boolean`, `set_patch`, `isotropic_remesh`, `deviation`, `feature_edges`, `thickness`, `thin_regions`, `mass_properties` |
-| [13. Structured blocks and overset grids](./tutorial/13-blocks-overset) | `curvilinear_block_2d_t`, `detect_topology_2d`, `validity`, `quality`, `locate_many`, `stencils`; `wall_cutter_2d`, `hole_flags_2d`, `donor_candidates_2d`, `classify_2d`, orphans, `save_connectivity` |
-| [14. Contact: distance and collision](./tutorial/14-contact) | `distance_to` with poses, `time_of_impact` (plain and `directional=`), `first_impact`; `curve%time_of_impact`, `first_impact_2d` |
-| [15. Body-fitted grids](./tutorial/15-body-fitted) | `projection_target`, `classify_points`, `project_points`, `project_block_face`, `geometric_spacing`, `hyperbolic_grid_2d`, `block_report_2d`, `save_block_report` |
-| [16. On the GPU](./tutorial/16-gpu) | `enter_device`, `distance_many_device`, `exit_device`; the nvfortran build |
+| [1. A first surface](./tutorial/01-first-surface) | `load_from_file`, what `analyze` computes, accessors, `facet_at` and `fcon_edge`, `is_watertight`, `is_manifold`, `feature_edges` (boundary, non-manifold), shells and bodies, `save_into_file`, `set_patch` and multi-solid ASCII files |
+| [2. Repairing the surface](./tutorial/02-repair) | `sanitize` and its passes one by one, `fill_holes` (`max_hole_size`, refine, fair), the stderr report, `is_volume`, what is left, `deviation` |
+| [3. Placing the body](./tutorial/03-manipulation) | `translate`, `rotate`, `resize` about the world origin, `analyze` after a transformation, `clip` with a remainder, `mirror`, `merge_solids` |
+| [4. Signed distance](./tutorial/04-distance) | `distance`, `is_point_inside`, the four sign algorithms and where the pseudo-normal fails, `compute_distance` (closest facet, feature, point, normal) |
+| [5. Batched queries](./tutorial/05-batched) | `distance_many`, SAH BVH and octree (what each splits), pseudo-normal and fast winding number on a grid |
+| [6. A distance field](./tutorial/06-distance-field) | `distance_field_object` on a stretched grid: `compute`, and `compute_band`, `compute_signs`, `sweep` one by one; checking the field |
+| [7. Curves in 2-D](./tutorial/07-curves) | `slice_surface` at many levels, `curve_object`, `self_intersections`, 2-D distance and batch, 2-D field |
+| [8. Immersed-boundary queries](./tutorial/08-ib-queries) | ghost points, `query_many`: wall point, feature, normal, body, ambiguity; `image_points`, `probe_many`; `thickness`, `thin_regions` |
+| [9. AMR tagging](./tutorial/09-amr-tagging) | `box_classify_many` (cut, near, inside, outside) and an octree refined level by level, `tag_block` on a block and on a section, feature-edge and thin-wall refinement (`build_features`, `build_thin`) |
+| [10. Cut cells](./tutorial/10-cut-cells) | exact `line_crossings`, `curve%cut_cells` and `cut_cells_3d` (fractions, apertures, fluid pieces), then the solver support: piece links, SRD neighbourhoods, merge targets, moments, quadrature, coarsening |
+| [11. Moving bodies](./tutorial/11-moving-bodies) | poses, `pose=` queries and `move`, `state_changes`, `swept_cells_2d` / `swept_cells_3d` for a translation and a rotation, the inertia of a closed surrogate, the gap between two bodies |
+| [12. Geometry processing and analysis](./tutorial/12-geometry) | `boolean`, `set_patch`, `isotropic_remesh`, `deviation`, `feature_edges`, `thickness`, `thin_regions`, `mass_properties`, on a bracket built step by step |
+| [13. Structured blocks and overset grids](./tutorial/13-blocks-overset) | an O-grid's topology (`detect_topology_2d`), `validity`, `quality`, `locate_many`, `stencils`; its overset assembly (`wall_cutter_2d`, `hole_flags_2d`, `donor_candidates_2d`, `classify_2d`, fringes, orphans, `save_connectivity`) and a moving near-body grid |
+| [14. Contact: distance and collision](./tutorial/14-contact) | why sampling misses contacts; `distance_to` with poses, `time_of_impact` (plain and `directional=`), `first_impact`, `proximity_pairs_of`; the 2-D twins |
+| [15. Body-fitted grids](./tutorial/15-body-fitted) | `projection_target`, free versus constrained projection (`classify_points`, `project_points`), `project_block_face` without collapsing cells, `geometric_spacing` from a y₁⁺ target, `hyperbolic_grid_2d`, `block_report_2d`, `save_block_report` |
+| [16. On the GPU](./tutorial/16-gpu) | `enter_device` and the `*_device` batches (distances, full and wall queries, box classification, curves), equal to the host bit for bit; one batch versus one slice per call; what is refused; `exit_device`; the nvfortran build |
 
 The chapters pass files to each other, so run them in order:
 

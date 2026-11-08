@@ -1,0 +1,6 @@
+$ tut11_3_swept
+translation: exact T, cells swept 131, cleared 16, covered 16
+  sum of the swept areas -9.65E-18
+  cells with residual > 1e-14: 2, largest  5.30E-06 in cell 23 22
+WARNING: swept_cells_2d: the curve crosses itself (1 segment pairs): residuals around the knots are not round-off
+  check_input: self-intersecting T

@@ -1,0 +1,11 @@
+$ tut10_a_crossings
+grid line 24 (x = -0.0250): 8 crossings
+  y =  -0.30294  segment  111  enters
+  y =  -0.12994  segment  134  leaves
+  y =  -0.04604  segment   18  enters
+  y =   0.12736  segment   27  leaves
+  y =   0.18151  segment   33  enters
+  y =   0.32503  segment   44  leaves
+  y =   0.35471  segment   51  enters
+  y =   0.40365  segment   57  leaves
+solid length of the line:  0.538856

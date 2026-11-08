@@ -1,0 +1,5 @@
+$ tut13_d_orphans
+O-grid of  9 layers: receptors  0, orphans 49 (stencil on a hole 16, receptor in the stencil 33)
+O-grid of 11 layers: receptors 18, orphans 31 (stencil on a hole  4, receptor in the stencil 27)
+O-grid of 13 layers: receptors 41, orphans  8 (stencil on a hole  0, receptor in the stencil  8)
+O-grid of 15 layers: receptors 49, orphans  0 (stencil on a hole  0, receptor in the stencil  0)

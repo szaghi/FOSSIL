@@ -1,0 +1,10 @@
+$ tut10_d_solver
+pieces 2234, links (both directions) 8658
+  piece 915 -> 913 in cell 21 20 over face 1, length / h  0.4351
+  piece 915 -> 963 in cell 22 21 over face 4, length / h  0.0785
+SRD: regular 2187, small 47, incomplete 0
+  smallest piece 1277 in cell 24 28, area / h^2  4.07E-04, neighbourhood of 2 pieces
+  neighbourhood area / h^2  0.8991 >= tau =  0.5000
+merge: served 47, direct 47, through a chain 0
+  smallest piece -> cell 25 28, normal-directed targets 2
+3-D: pieces 13797, links 78614, unmatched regions 0

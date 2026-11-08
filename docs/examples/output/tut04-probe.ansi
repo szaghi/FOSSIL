@@ -1,0 +1,25 @@
+$ tut04_d_probe
+probe (0,  0.420  0.000): d =   0.0274 outside
+probe (0,  0.406  0.065): d =   0.0090 outside
+probe (0,  0.364  0.125): d =   0.0255 outside
+probe (0,  0.297  0.177): d =   0.0709 outside
+probe (0,  0.210  0.217): d =   0.0770 outside
+probe (0,  0.109  0.241): d =   0.0953 outside
+probe (0,  0.000  0.250): d =   0.0300 outside
+probe (0, -0.109  0.241): d =  -0.0038 inside
+probe (0, -0.210  0.217): d =  -0.0420 inside
+probe (0, -0.297  0.177): d =   0.0069 outside
+probe (0, -0.364  0.125): d =   0.0086 outside
+probe (0, -0.406  0.065): d =   0.0079 outside
+probe (0, -0.420  0.000): d =   0.0668 outside
+probe (0, -0.406 -0.065): d =   0.0391 outside
+probe (0, -0.364 -0.125): d =  -0.0205 inside
+probe (0, -0.297 -0.177): d =  -0.0930 inside
+probe (0, -0.210 -0.217): d =  -0.0760 inside
+probe (0, -0.109 -0.241): d =  -0.0760 inside
+probe (0,  0.000 -0.250): d =  -0.0080 inside
+probe (0,  0.109 -0.241): d =  -0.0014 inside
+probe (0,  0.210 -0.217): d =  -0.0151 inside
+probe (0,  0.297 -0.177): d =   0.0299 outside
+probe (0,  0.364 -0.125): d =  -0.0023 inside
+probe (0,  0.406 -0.065): d =  -0.0139 inside

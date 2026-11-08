@@ -1,0 +1,14 @@
+$ tut10_b_cells2d
+cells: fluid 2141, solid 72, cut 91
+solid area from alpha  0.0726092, area of the curve  0.0726092
+solid length of the line x = -0.025 from the apertures:  0.538856
+cell (23,41): alpha  0.3303, apertures -x +x -y +y 0.6170 0.8541 0.0000 0.4930
+  wall length / h  2.0921, normal integral / h   0.2371  0.4930
+  aperture differences (+x - -x, +y - -y)      0.2371  0.4930
+pieces in the block 2234, cells with two or more 2
+  cell (22,20) alpha  0.2061
+    piece 914: area / h^2  0.1891, apertures 0.0000 0.5595 0.0000 0.6813
+    piece 915: area / h^2  0.0171, apertures 0.4351 0.0000 0.0000 0.0785
+  cell (23,41) alpha  0.3303
+    piece 1872: area / h^2  0.2108, apertures 0.0000 0.8541 0.0000 0.1734
+    piece 1873: area / h^2  0.1196, apertures 0.6170 0.0000 0.0000 0.3196

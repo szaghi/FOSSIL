@@ -1,0 +1,9 @@
+$ tut14a_sampling
+s =  0.00: gap  0.41853, touching F
+s =  0.25: gap  0.12466, touching F
+s =  0.50: gap  0.05901, touching F
+s =  0.75: gap  0.07438, touching F
+s =  1.00: gap  0.35909, touching F
+  touching from s =  0.3568 to s =  0.4171
+  touching from s =  0.5578 to s =  0.6080
+200 samples: touching at 24 of them

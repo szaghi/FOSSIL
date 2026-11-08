@@ -1,0 +1,8 @@
+$ tut15_3_ogrid
+section: 60 vertices, 120 wall points
+u_tau  4.569E-02, h1  2.189E-05, last layer  2.681E-02, outer height  0.1607
+O-grid 121 x 41, status 0, cells not certified valid 0
+layer 10: height  1.129E-04, from the wall  5.682E-04
+layer 20: height  6.993E-04, from the wall  4.086E-03
+layer 30: height  4.330E-03, from the wall  2.587E-02
+layer 40: height  2.681E-02, from the wall  1.607E-01

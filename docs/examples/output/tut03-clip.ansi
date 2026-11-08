@@ -1,0 +1,5 @@
+$ tut03_b_clip
+clip y<=0 3738 facets, remainder 2848, sum 6586
+merged    7476 facets (half + mirrored half)
+box min     -0.1886  -0.5000  -0.3530
+box max      0.2232   0.5000   0.3531

@@ -1,6 +1,0 @@
-$ tut10_cut_cells
-2-D: cut cells 91, cells with 2+ pieces 2
-     solid area   0.072609  curve area   0.072609
-     cell (23,41) alpha  0.33034  apertures  0.61695 0.85409 0.00000 0.49297
-3-D: cut cells 895, flagged 17, cells with 2+ pieces 75
-     cell (13,7,6) alpha  0.06856  pieces  0.06533 0.00323

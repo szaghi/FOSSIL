@@ -1,0 +1,5 @@
+$ tut09_a_blocks
+radius 0:    cut 87, inside 0, outside 425
+radius 0.05: cut 87, near 62, inside 0, outside 363
+block 75 meets the dragon: T
+its lower half meets it:  F

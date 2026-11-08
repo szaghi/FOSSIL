@@ -1,0 +1,10 @@
+$ tut01_open_edges
+facet 1 vertex 1      6.9477   1.0539  13.9143
+facet 1 vertex 2      6.8777   1.4739  13.9180
+facet 1 vertex 3      6.8427   1.0817  13.7563
+facet 1 normal       -0.8356  -0.1440   0.5301
+facet 1 neighbours   4901  2872    45
+boundary edges     0
+non-manifold edges 61
+facets on them     221
+shells             83, bodies 40

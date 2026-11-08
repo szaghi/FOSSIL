@@ -1,0 +1,7 @@
+$ tut11_5_inertia
+the placed dragon is a closed body: F
+alpha wrap: 2128 facets, watertight T
+volume  6.8960E-02, mass  6.8960E+01
+centre of mass    -0.0192 -0.0337 -0.0958
+principal moments 2.3413E+00 4.1358E+00 5.7928E+00
+moved wrap against inertia_to_world, relative  3.08E-16

@@ -1,0 +1,7 @@
+$ tut13_b_locate
+located 165, outside 35 of 200
+point 100: cell 24 14, xi 0.2754 0.1635
+walk equal to the robust path: T, cells crossed 314, fallbacks 38
+q = 2: centred stencils 165, max error of sin(2x) cos(y)  9.78E-03
+q = 3: centred stencils 149, max error of sin(2x) cos(y)  1.75E-03
+q = 4: centred stencils 133, max error of sin(2x) cos(y)  8.53E-04

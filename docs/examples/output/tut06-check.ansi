@@ -1,0 +1,4 @@
+$ tut06_d_check
+max error in the band  0.000E+00
+max error elsewhere    7.609E-02
+error on the plane x = 0: 0 in the band, up to 0.0479 (largest anywhere 0.0761)

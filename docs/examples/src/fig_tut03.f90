@@ -1,10 +1,9 @@
 !run fig03 fig_tut03
-!fig tut03-before
 !fig tut03-placed
 !fig tut03-clip
 !fig tut03-merge
-!< Figures of tutorial 3: the dragon repaired as in chapter 2, then the operations of chapter 3: the body centred (CAD
-!< units) and then turned a quarter about z and resized into the domain cube (x and y edges of the boxes marked), the
+!< Figures of tutorial 3: the dragon repaired as in chapter 2, then the operations of chapter 3: the body centred,
+!< turned a quarter about z and resized into the domain cube (x and y edges of the box marked), the
 !< clip and its remainder (ghost), the half and its mirror image. It saves fig-dragon-placed.stl, the placed body of the figures of
 !< chapters 5 and 6 (they run before the tutorial programs, which write dragon-placed.stl).
 program fig_tut03
@@ -26,13 +25,6 @@ call surface%save_into_file(file_name='fig-dragon-clean.stl')
 call surface%load_from_file(file_name='fig-dragon-clean.stl', guess_format=.true.) ! chapter 3, place
 bmin = surface%get_bmin() ; bmax = surface%get_bmax()
 call surface%translate(delta=-0.5_R8P * (bmin + bmax))
-call surface%analyze                                                               ! for the box of the figure
-bmin = surface%get_bmin() ; bmax = surface%get_bmax()
-call fig_open(u, 'tut03-before', 'translate: box centre to the origin, in CAD units', -60._R8P, 50._R8P)
-call fig_surface(u, 'body', surface)
-call fig_box(u, 'box', bmin, bmax)
-call fig_axes(u, bmin, bmax)
-call fig_close(u)
 call surface%rotate(axis=ez_R8P, angle=pi / 2._R8P)
 call surface%analyze
 bmin = surface%get_bmin() ; bmax = surface%get_bmax()

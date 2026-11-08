@@ -1,5 +1,5 @@
 !run tut01 tut01_first_surface
-!cast tour tut01 tut04 tut09
+!cast tour tut01 tut04 tut09a
 !< Tutorial 1: load an STL surface, read what analyze computed, save it.
 program tut01_first_surface
 !region load

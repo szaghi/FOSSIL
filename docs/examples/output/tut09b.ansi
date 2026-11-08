@@ -1,0 +1,9 @@
+$ tut09_b_octree
+level   side     boxes    cut   near inside outside
+    0  1.2000         1      1      0      0      0
+    1  0.6000         8      8      0      0      0
+    2  0.3000        64     26     37      0      1
+    3  0.1500       504     87    195      0    222
+    4  0.0750      2256    374    571      0   1311
+    5  0.0375      7560   1689   2230     13   3628
+leaves 9094 (inside 13, outside 5162); uniform grid of the finest side: 32768

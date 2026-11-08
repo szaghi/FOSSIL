@@ -1,0 +1,7 @@
+$ tut09_d_features
+facets 6586, thinner than a cell side (0.0375): 2465
+cells      at 0      1      2  beyond
+cut        1689   2569   2609  25901
+feature     867   2888   2778  26235
+thin        707   2512   2910  26639
+cut cells: on a feature edge 867, on a thin wall only 56, neither 766

@@ -1,0 +1,4 @@
+$ tut11_6_gap
+gap to the cube  0.50539 (facets 1077, 48), touching F
+closest pair  0.1946 -0.2762 -0.2950  -  0.7000 -0.2762 -0.2950
+pose_self = moved copy, bit for bit: T

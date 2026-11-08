@@ -1,0 +1,6 @@
+$ tut11_1_posed
+pose1: R row 1  0.9848  0.0000  0.1736
+       t        0.0200  0.0000  0.0000
+distances:      posed - moved, max  2.22E-16
+closest points: posed - moved, max  2.83E-15
+centres inside at pose1: 441 of 13824

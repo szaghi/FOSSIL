@@ -1,0 +1,12 @@
+$ tut14b_toi
+pebble speed bound mu =  1.2444 (translation 1.2, spin  0.0444), tolerance  1.303E-06
+step 0: s =  0.000000, gap  4.185E-01, next step (d - tol/2) / mu =  3.363E-01
+step 1: s =  0.336323, gap  2.208E-02, next step (d - tol/2) / mu =  1.774E-02
+step 2: s =  0.354068, gap  1.362E-03, next step (d - tol/2) / mu =  1.094E-03
+step 3: s =  0.355161, gap  8.522E-05, next step (d - tol/2) / mu =  6.796E-05
+step 4: s =  0.355229, gap  5.909E-06, next step (d - tol/2) / mu =  4.225E-06
+step 5: s =  0.355234, gap  9.784E-07 <= tolerance: contact
+contact T at s =  0.355234 (5 steps)
+  gap there  9.784E-07, dragon facet 1085, pebble facet 4
+  on the dragon -0.1462 -0.2800 -0.1936, on the pebble -0.1462 -0.2800 -0.1936
+directional: s =  0.355234 (4 steps, 789114 exact pair evaluations), same contact to 1e-6: T

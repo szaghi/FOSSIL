@@ -1,0 +1,10 @@
+$ tut13_a_block
+record 1: abut T, face 1, transform  1  2
+record 2: abut T, face 2, transform  1  2
+records after add_record: 4 (2 abut, wall, overlap)
+O-grid area  -5.992437, annulus between the ellipses   6.009585
+valid cells 768 of 768
+max skewness  0.103, min orthogonality  0.986, aspect from   8.06 at the wall to  1.23
+folded copy: 2 invalid cells
+  invalid cell 12  5
+  invalid cell 13  5

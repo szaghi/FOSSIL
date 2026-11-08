@@ -1,7 +1,4 @@
-$ tut05_batched
-points                4096
-max ||bvh| - |oct||   0.000E+00
-bvh, oct signs differ 1
-pseudo-normal:  inside   152  min d  -0.647299
-winding number: inside   108  min d  -0.069887
-signs differ at 50 points, max ||d_pn| - |d_wn||  0.000E+00
+$ tut05_a_grid
+points  4096
+inside  108
+min, max d  -0.069887  0.776508

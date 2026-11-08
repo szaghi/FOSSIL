@@ -1,0 +1,7 @@
+$ tut10_e_moments
+moments / h^2 (1, X, Y, X^2, XY, Y^2):  0.21077  0.07225  0.02296  0.02704  0.00883  0.01018
+  centroid from the moments  -0.02893  0.41522, piece_centroid  -0.02893  0.41522
+area rule: 42 points (21 negative), wall rule: 12 points
+  sum of weights - area  3.25E-19, rule on X^2 - moment  4.74E-20
+coarse (ratio 2): status 0, pieces 570, direct 570, fine piece 1872 -> coarse piece 486
+  largest |alpha coarsened - alpha direct|  1.78E-15

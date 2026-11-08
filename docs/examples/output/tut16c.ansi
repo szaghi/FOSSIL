@@ -1,0 +1,5 @@
+$ tut16_c_boxes
+surface boxes: device vs host mismatches 0 of 4096
+  cut 374, near 426, inside 0, outside 3296
+curve boxes: device vs host mismatches 0 of 1024
+curve distances: device vs host mismatches 0 of 4096, inside 205

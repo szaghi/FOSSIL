@@ -1,0 +1,6 @@
+$ anim_tut02_stages
+as loaded: 6588 facets, 61 non-manifold edges, the facets on them
+remove_duplicate_facets: 62 removed, 128 boundary edges open
+sanitize_normals: 91 facets flipped to a consistent outward winding
+fill_holes: 54 holes closed by 60 facets, 0 boundary edges left
+left: 54 non-manifold edges, sanitize cannot remove them

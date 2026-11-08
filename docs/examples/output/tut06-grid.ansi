@@ -1,0 +1,4 @@
+$ tut06_a_grid
+grid 43 x 43 x 43
+x from, to         -1.0766   1.0766
+spacing core, end    0.0400   0.1194

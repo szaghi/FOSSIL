@@ -1,0 +1,8 @@
+$ tut15_1_target
+wing: 188 facets; target: patches 1, constraint curves 12 (97 segments), corners 7
+point 1 ( 0.735, 0.0075): PROJ_PATCH    1  free ( 0.7344, 0.00331)  constrained ( 0.7344, 0.00331)
+point 2 ( 0.750, 0.0063): PROJ_CURVE    6  free ( 0.7493, 0.00135)  constrained ( 0.7500, 0.00126)
+point 3 ( 0.757, 0.0002): PROJ_CURVE    6  free ( 0.7500, 0.00020)  constrained ( 0.7500, 0.00126)
+point 4 ( 0.758, 0.0040): PROJ_CURVE    6  free ( 0.7500, 0.00126)  constrained ( 0.7500, 0.00126)
+point 5 ( 0.762,-0.0005): PROJ_PATCH    1  free ( 0.7500,-0.00050)  constrained ( 0.7500,-0.00050)
+point 6 ( 0.756,-0.0050): PROJ_CURVE    3  free ( 0.7500,-0.00126)  constrained ( 0.7500,-0.00126)

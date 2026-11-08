@@ -1,0 +1,8 @@
+$ tut15_2_face
+last two chordwise steps at the trailing edge:  0.00461 0.00154
+face  0.0050 off the wing, tolerance  0.0100: status 0
+  on corners 7, on curves 132, on the patch 722, largest move  0.0085
+  trailing-edge row on x = 0.75: T, root and tip rows on z = 0, 1: T, face edges of zero length: 42
+face  0.0005 off the wing, tolerance  0.0014: status 0
+  on corners 2, on curves 99, on the patch 760, largest move  0.0012
+  trailing-edge row on x = 0.75: T, root and tip rows on z = 0, 1: T, face edges of zero length: 0

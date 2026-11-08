@@ -1,0 +1,6 @@
+$ tut09_c_tags
+tag        -5     -4     -3     -2     -1      0      1      2      3      4      5
+3-D         0      0      0      7    352   1689   2217   2602   3009   3361  19531
+2-D         0      0      0      0     22     58     66     68     74     82    654
+layer 16: cut cells in 3-D 80, on its mid-plane section 58
+cells cut in 2-D but not in the layer: 0

@@ -1,0 +1,6 @@
+$ tut04_b_signs
+        point          pseudo-n.  winding n.  rays  solid angle
+  0.000  0.000  0.000         T         T         T         T
+  0.000  0.600  0.000         F         F         F         F
+  0.360 -0.200  0.200         T         F         F         F
+point 3: pseudo-normal d  -0.2833, vertex pseudo-normal  -0.6886 -0.0309  0.7245

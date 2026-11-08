@@ -1,0 +1,7 @@
+$ tut16_b_queries
+query_many_device vs query_many, 1728 probes, mismatches:
+  distances 0, closest points 0, facets 0
+  features 0, normals 0, bodies 0
+feet on a face 128, on an edge 477, on a vertex 1123
+wall distance, cutoff 0.05: mismatches 0, probes nearer than the cutoff 153 of 1728
+posed query: distance mismatches 0, facet mismatches 0

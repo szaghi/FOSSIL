@@ -1,0 +1,13 @@
+$ anim_tut01_turn
+turn   0: box 20.47 x  9.14 x 14.46, volume  465.93
+turn  30: box 17.37 x 12.88 x 14.46, volume  465.93
+turn  60: box 13.32 x 18.83 x 14.46, volume  465.93
+turn  90: box  9.14 x 20.47 x 14.46, volume  465.93
+turn 120: box 12.88 x 17.37 x 14.46, volume  465.93
+turn 150: box 18.83 x 13.32 x 14.46, volume  465.93
+turn 180: box 20.47 x  9.14 x 14.46, volume  465.93
+turn 210: box 17.37 x 12.88 x 14.46, volume  465.93
+turn 240: box 13.32 x 18.83 x 14.46, volume  465.93
+turn 270: box  9.14 x 20.47 x 14.46, volume  465.93
+turn 300: box 12.88 x 17.37 x 14.46, volume  465.93
+turn 330: box 18.83 x 13.32 x 14.46, volume  465.93

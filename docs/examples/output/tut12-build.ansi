@@ -1,0 +1,8 @@
+$ tut12_a_build
+base               :   48 facets, volume  1.00000, watertight T, patches base
+boss               :  124 facets, volume  0.24855, watertight T, patches boss
+bore               :  124 facets, volume  0.20998, watertight T, patches bore
+base + boss        :  248 facets, volume  1.15295, watertight T, patches base boss
+  volume - exact polygonal volume: -8.88E-16
+base + boss - bore :  524 facets, volume  1.00297, watertight T, patches base boss bore
+  volume - exact polygonal volume: -1.55E-15

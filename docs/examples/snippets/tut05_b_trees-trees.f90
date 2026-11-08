@@ -1,0 +1,26 @@
+use fossil,                  only : surface_stl_object, AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
+use penf,                    only : I4P, R8P
+use vecfor,                  only : vector_R8P, ex_R8P, ey_R8P, ez_R8P
+
+implicit none
+integer(I4P), parameter       :: n = 16                      ! points per direction
+type(surface_stl_object)      :: bvh, octree
+type(vector_R8P), allocatable :: points(:)
+real(R8P),        allocatable :: d_bvh(:), d_oct(:)
+real(R8P)                     :: h
+integer(I4P)                  :: i, j, k, p
+
+allocate(points(n**3), d_bvh(n**3), d_oct(n**3))
+h = 1.2_R8P / (n - 1)                                        ! the cube [-0.6, 0.6]^3
+p = 0
+do k = 1, n ; do j = 1, n ; do i = 1, n
+   p = p + 1
+   points(p) = (-0.6_R8P + (i - 1) * h) * ex_R8P + (-0.6_R8P + (j - 1) * h) * ey_R8P + (-0.6_R8P + (k - 1) * h) * ez_R8P
+enddo ; enddo ; enddo
+call bvh%load_from_file(file_name='dragon-placed.stl', guess_format=.true.)       ! default AABB_TREE_SAH_BVH
+call octree%load_from_file(file_name='dragon-placed.stl', guess_format=.true., aabb_tree_kind=AABB_TREE_OCTREE)
+call bvh%distance_many(points=points, distances=d_bvh, is_signed=.true., is_square_root=.true.)
+call octree%distance_many(points=points, distances=d_oct, is_signed=.true., is_square_root=.true.)
+print '(A,I0)',     'points                ', size(points)
+print '(A,ES10.3)', 'max ||bvh| - |oct||  ', maxval(abs(abs(d_bvh) - abs(d_oct)))
+print '(A,I0)',     'bvh, oct signs differ ', count(d_bvh * d_oct < 0._R8P)

@@ -1,0 +1,4 @@
+$ tut02_c_deviation
+repaired -> original  9.439E-02 <= h <=  1.190E-01
+original -> repaired  3.009E-03 <= h <=  2.968E-02
+facet centroids farther than 1e-3 from the original: 9, the farthest  7.200E-02

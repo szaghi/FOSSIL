@@ -1,0 +1,6 @@
+$ tut05_b_trees
+points                4096
+max ||bvh| - |oct||   0.000E+00
+bvh, oct signs differ 1
+SAH BVH: 16 boxes 4 levels below the root, 313 nodes in all
+octree: 50 boxes 2 levels below the root, 73 nodes in all

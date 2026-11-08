@@ -1,7 +1,5 @@
-$ tut06_distance_field
+$ tut06_b_field
 grid         43 x 43 x 43
 band           0.0800 half-width, 3667 cells
 sweeps       32, point-query signs 0
 inside cells 849
-max error in the band  0.000E+00
-max error elsewhere    7.609E-02

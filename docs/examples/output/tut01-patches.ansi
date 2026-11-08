@@ -1,0 +1,5 @@
+$ tut01_patches
+patches read back 3
+patch 1    middle  3036 facets
+patch 2     front  2238 facets
+patch 3      rear  1314 facets

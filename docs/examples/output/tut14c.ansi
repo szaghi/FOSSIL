@@ -1,0 +1,11 @@
+$ tut14c_several
+first contact T at s =  0.087759, bodies 3 4 (2 of 6 pairs tested)
+  pair 1-2: contact at s =  0.355234
+  pair 1-3: contact at s =  0.406194
+  pair 1-4: separate
+  pair 2-3: separate
+  pair 2-4: separate
+  pair 3-4: contact at s =  0.087759
+equal to the loop over all pairs, bit for bit: T
+within 0.3 at s = toi: bodies 1 and 4, gap  2.580E-01
+within 0.3 at s = toi: bodies 3 and 4, gap  6.599E-07

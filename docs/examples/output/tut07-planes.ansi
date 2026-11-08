@@ -1,0 +1,14 @@
+$ tut07_b_planes
+z = -0.30: loops 8, area  0.1675, 0 open
+z = -0.25: loops 6, area  0.1553, 0 open
+z = -0.20: loops 4, area  0.1262, 0 open
+z = -0.15: loops 4, area  0.0976, 0 open
+z = -0.10: loops 5, area  0.0775, 0 open
+z = -0.05: loops 4, area  0.0719, 0 open
+z =  0.00: loops 2, area  0.0726, 0 open
+z =  0.05: loops 2, area  0.0709, 0 open
+z =  0.10: loops 4, area  0.0928, 0 open
+z =  0.15: loops 4, area  0.0390, 0 open
+z =  0.20: loops 1, area  0.0515, 0 open
+z =  0.25: loops 2, area  0.0297, 0 open
+z =  0.30: loops 2, area  0.0035, 0 open

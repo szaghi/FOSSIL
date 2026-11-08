@@ -1,0 +1,11 @@
+$ tut16_a_batch
+on the device: T
+pseudo-normal : device vs host mismatches 0 of 13824
+winding number: device vs host mismatches 0 of 13824
+the two signs disagree at 180 points; |d| differs at 0
+24 host calls of one slice vs one device batch: mismatches 0 of 13824
+fossil_surface_stl_object%distance_many_device: refused -- sign_algorithm must be SIGN_PSEUDO_NORMAL or SIGN_FAST_WINDING_NUMBER on the device.
+ray-intersection sign on the device refused: T
+fossil_surface_stl_object%enter_device: refused -- device path requires AABB_TREE_SAH_BVH.
+octree on the device: F
+after exit_device: F

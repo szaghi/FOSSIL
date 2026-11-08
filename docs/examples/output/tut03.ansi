@@ -1,6 +1,7 @@
-$ tut03_manipulation
-box min     -0.2232  -0.5000  -0.3531
-box max      0.2232   0.5000   0.3531
-volume     0.054283
-clip y<=0 3738 facets, remainder 2848
-merged    7476 facets (half + mirrored half)
+$ tut03_a_place
+CAD box min  -10.8287  -4.1883   5.2821
+CAD box max    9.6461   4.9512  19.7413
+scale        0.048841
+box min       -0.2232  -0.5000  -0.3531
+box max        0.2232   0.5000   0.3531
+volume       0.054283
