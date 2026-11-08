@@ -131,7 +131,7 @@ moved sources in `exe/`: delete them by hand, or `run_tests.sh` runs them.
 fobis rule --ex makedoc   # Requires 'formal' and npm/VitePress
 fobis rule --ex deldoc    # Delete doc build artifacts
 bash scripts/docs_examples.sh   # rebuild static-gnu, compile and run docs/examples/src/*.f90, regenerate
-                                # docs/examples/{snippets,output,images} (~4 min); never edit those by hand
+                                # docs/examples/{snippets,output,images} (~5 min); never edit those by hand
 cd docs && npm run docs:build   # API pages (formal) + VitePress site
 ```
 
@@ -147,9 +147,12 @@ casts, `scripts/mesh2svg.py` the figures (`!fig NAME`: the program writes NAME.f
 `check_doc_snippets.sh`). Brand: `docs/brand/marks.py` generates `docs/public/{logo,logo-dark,favicon}.svg` (the carved ammonite);
 palette in `docs/.vitepress/theme/custom.css`. `scripts/check_doc_snippets.sh` still compiles the fortran blocks of
 the hand-written reference pages, and runs `scripts/check_doc_coverage.py --strict` (issue #77): every reference page
-and tutorial chapter shows a generated figure and a run example (`ref_<page>.f90`, `fig_ref_<page>_*.f90`), every
-feature-map row links a tutorial chapter or a recipe (Tutorial and Cookbook columns), the landing cards equal the
-gallery tiles, every example program is shown somewhere, every included file exists. A new feature needs all of them.
+and tutorial chapter shows a generated figure and a run example (`ref_<page>.f90`, `fig_ref_<page>_*.f90`), and
+(issue #85) a figure in every explaining `##` section (exempt titles in the script), an animation on the pages of
+iterative or time-dependent features (`ANIMATED`) and in every tutorial chapter (with at least two runs), every
+feature-map entry point in a cookbook recipe's snippet; every feature-map row links a tutorial chapter or a recipe
+(Tutorial and Cookbook columns), the landing cards equal the gallery tiles, every example program is shown somewhere,
+every included file exists. A new feature needs all of them.
 
 ### Alternative build (fpm)
 
