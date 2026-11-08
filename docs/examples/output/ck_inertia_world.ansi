@@ -1,0 +1,6 @@
+$ ck_inertia_world
+body frame:  Ixx, Iyy, Izz   0.510250  0.392500  0.196250
+world frame: Ixx, Iyy, Ixy   0.480813  0.421938  0.050987
+largest difference from the turned body  4.163E-17
+largest moment  0.510250 about the axis (x, y)   -0.8660  -0.5000
+R diag(moments) R^T vs world  1.110E-16

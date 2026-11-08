@@ -1,0 +1,5 @@
+$ ck_topology_3d
+face 1: abut     face 2, transform  1  2  3
+face 2: abut     face 1, transform  1  2  3
+face 3: singular collapsed along direction 1
+face 4: singular collapsed along direction 1

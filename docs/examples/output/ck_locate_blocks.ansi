@@ -1,0 +1,5 @@
+$ ck_locate_blocks
+point 1: block 2, cell  5  5  5, xi 0.7500 0.5000 0.2500, status 1
+point 2: block 1, cell  1  6  2, xi 0.9351 0.3895 0.0633, status 1
+point 3: block 2, cell  8  8  4, xi 0.7500 0.7500 1.0000, status 1
+point 4: block 0, cell  0  0  0, xi 0.0000 0.0000 0.0000, status 2

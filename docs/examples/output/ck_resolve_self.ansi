@@ -1,0 +1,3 @@
+$ ck_resolve_self
+resolve_self_intersections: status 0, volume  2.0000, watertight F, crossing pairs 52
+result: facets 132, volume  1.6570, watertight T, crossing pairs 0

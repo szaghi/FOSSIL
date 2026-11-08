@@ -1,0 +1,4 @@
+$ ck_query_point
+point 1: d  0.3000, foot  0.300  0.150  1.000, face  , normal  0.000  0.000  1.000
+point 2: d  0.4243, foot  1.000  0.300  1.000, edge  , normal  0.707  0.000  0.707
+point 3: d  0.5196, foot  1.000  1.000  1.000, vertex, normal  0.577  0.577  0.577

@@ -1,0 +1,5 @@
+$ ck_hole_cutting_3d
+cutter facets 528, watertight T
+background holes by signed distance 595
+by hole map 595, differ 0, unresolved 0
+by X-rays   575, differ 68

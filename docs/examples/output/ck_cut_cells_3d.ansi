@@ -1,0 +1,5 @@
+$ ck_cut_cells_3d
+cells 4096, cut 554, solid 274
+fluid volume           7.000000000000
+block - cube volume    7.000000000000
+wetted area            6.000000000000

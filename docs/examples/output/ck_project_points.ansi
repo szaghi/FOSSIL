@@ -1,0 +1,6 @@
+$ ck_project_points
+point 1 (  0.40  0.50  1.08) -> patch  (  0.40  0.50  1.00), moved  0.0800
+point 2 (  0.92  0.50  1.07) -> curve  (  1.00  0.50  1.00), moved  0.1063
+point 3 (  0.92  0.20  0.92) -> curve  (  1.00  0.20  1.00), moved  0.1131
+point 4 (  1.08  0.65  1.04) -> curve  (  1.00  0.65  1.00), moved  0.0894
+point 5 (  0.93  1.07  0.95) -> corner (  1.00  1.00  1.00), moved  0.1109

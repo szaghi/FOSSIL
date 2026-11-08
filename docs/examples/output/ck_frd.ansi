@@ -1,0 +1,9 @@
+$ ck_frd
+smallest piece 71 in cell 11  5, area fraction  0.0452
+  member   71 in cell 11  5, kappa  0.0452, weight  0.0144
+  member   72 in cell 12  5, kappa  0.7085, weight  0.2260
+  member   59 in cell 11  4, kappa  0.8794, weight  0.2805
+  member   60 in cell 12  4, kappa  1.0000, weight  0.3189
+  member   82 in cell 12  6, kappa  0.0452, weight  0.0144
+  member   58 in cell 10  4, kappa  0.4572, weight  0.1458
+  sum of the weights  1.000000000

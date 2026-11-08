@@ -1,0 +1,5 @@
+$ ck_swept_cells_3d
+exact T, sum of the swept volumes -8.23E-18
+fluid gained  0.004102, lost  0.004102
+cells cleared 2, covered 0
+max |volume balance residual|  6.88E-18

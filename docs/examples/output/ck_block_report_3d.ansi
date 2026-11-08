@@ -1,0 +1,5 @@
+$ ck_block_report_3d
+first height  3.153E-05, wall points 205, u_tau estimated T
+y1+ min mean max   0.9285  1.0154  1.2589
+fraction of wall points above y1+ = 1:  0.4634
+growth ratio max  1.2000, cells not certified valid 0

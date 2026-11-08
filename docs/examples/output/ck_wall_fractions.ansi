@@ -1,0 +1,4 @@
+$ ck_wall_fractions
+centres inside 76, fractions >= 0 (links cut by the wall) 80, bad lines 0
+cell (3, 8): inside F, fractions -u +u -v +v -1.0000  0.7328 -1.0000 -1.0000
+cell (4, 8): inside T, fractions -u +u -v +v  0.2672 -1.0000 -1.0000 -1.0000

@@ -1,0 +1,5 @@
+$ ck_cut_coarsen_3d
+pieces: fine 3836, coarse 500
+largest |alpha coarsened - alpha direct|  6.66E-16
+largest |wet area coarsened - direct|     7.63E-17
+coarse cells cut 134, fine pieces mapped 3836

@@ -1,0 +1,4 @@
+$ ck_curve_corners
+vertices 60, corners 2
+corner at vertex 29:   0.75000 -0.00126
+corner at vertex 31:   0.75000  0.00126

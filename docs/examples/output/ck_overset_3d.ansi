@@ -1,0 +1,4 @@
+$ ck_overset_3d
+block 1: field 1625, holes 0, receptors 325, orphans 0
+block 2: field 4452, holes 147, receptors 314, orphans 0
+background INNER 1 fringe 314, shell OUTER 1 fringe 325

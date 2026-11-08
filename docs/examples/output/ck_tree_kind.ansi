@@ -1,0 +1,3 @@
+$ ck_tree_kind
+points 1000, largest |d_bvh - d_octree|  0.000E+00
+d range   -4.5588   7.6467
