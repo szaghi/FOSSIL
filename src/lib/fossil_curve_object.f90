@@ -32,6 +32,7 @@ use fossil_line_query,         only : curve_line_crossings_oac, line_crossing_be
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
 use fossil_cut_moments,        only : MOMENTS_MAX
 use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate, pose_interpolate, pose_angle_2d
+use fossil_projection,         only : projection_target_t, build_target_2d
 use fossil_ccd,                only : ccd_evaluator_t, ccd_advance, motion_bound_2d, CCD_INVALID_INPUT, CCD_SEPARATE
 use fossil_predicates,         only : orient2d_xy
 use fossil_mass_properties,    only : moments_accumulator_t, accumulate_segment, moments_to_properties_2d, symmetric2_eigen
@@ -108,6 +109,7 @@ type :: curve_object
       procedure, pass(self) :: set_patch            !< Assign segments to a named patch.
       procedure, pass(self) :: distance_to          !< Distance to another curve, with the closest pair (issue #67).
       procedure, pass(self) :: time_of_impact       !< Time of first contact with another moving curve (issue #73).
+      procedure, pass(self) :: projection_target    !< Target of the constrained projection (issue #74).
       procedure, pass(self) :: box_classify_many    !< Classify boxes: cut, near, inside, outside (issue #38).
       procedure, pass(self) :: box_intersects_curve !< True if a box meets the curve (issue #38).
       procedure, pass(self) :: box_classify_many_device !< box_classify_many on the device (issue #38).
@@ -419,6 +421,26 @@ contains
    enddo
    if (present(tested)) tested = ntest
    endsubroutine first_impact_2d
+
+   subroutine projection_target(self, target, corner_angle, status)
+   !< The target of the constrained projection (issue #74, `fossil_projection`): the segments by patch with one tree
+   !< per patch, the corners (open ends, turning above `corner_angle`, default 30 degrees, and the points where two
+   !< patches meet).
+   class(curve_object),       intent(in)            :: self         !< Curve.
+   type(projection_target_t), intent(out)           :: target       !< Target.
+   real(R8P),                 intent(in),  optional :: corner_angle !< Corner threshold [degrees].
+   integer(I4P),              intent(out), optional :: status       !< STATUS_OK, STATUS_INVALID_INPUT.
+   real(R8P)                                        :: ca           !< Threshold.
+   integer(I4P), allocatable                        :: sp(:)        !< Segment patches.
+
+   if (present(status)) status = STATUS_INVALID_INPUT
+   ca = FEATURE_EDGE_DEFAULT_ANGLE ; if (present(corner_angle)) ca = corner_angle
+   if (self%nv == 0_I4P .or. .not. (ca >= 0._R8P .and. ca <= 180._R8P)) return
+   allocate(sp(self%nv)) ; sp = 1_I4P
+   if (allocated(self%seg_patch)) sp = max(1_I4P, self%seg_patch(1:self%nv))
+   call build_target_2d(self%u(1:self%nv), self%v(1:self%nv), self%next(1:self%nv), self%prev(1:self%nv), sp, ca, target)
+   if (present(status)) status = STATUS_OK
+   endsubroutine projection_target
 
    subroutine segment_pair(a0, a1, b0, b1, d2, pa, pb, meet)
    !< Squared distance between segments (a0, a1) and (b0, b1) with witness points; 0 and `meet` when they cross or touch

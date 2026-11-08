@@ -39,6 +39,7 @@ use fossil_alpha_wrap, only : awrap_run, &
                               AWRAP_STATUS_DEGENERATE, AWRAP_STATUS_NOT_CONVERGED
 use fossil_csr_matrix, only : csr_matrix_t
 use fossil_body_distance, only : body_distance, body_safe_step
+use fossil_projection, only : projection_target_t, build_target_3d
 use fossil_deviation, only : deviation_evaluator_t, deviation_sampled, deviation_certified, DEV_STATUS_OK, &
                              DEV_STATUS_BAD_INPUT
 use fossil_feature_edges, only : find_feature_edges, FEATURE_EDGE_DEFAULT_ANGLE, feature_cos
@@ -228,6 +229,7 @@ type :: surface_stl_object
       procedure, pass(self) :: load_from_files      !< Load several STL files, one patch per file (issue #66).
       procedure, pass(self) :: distance_to          !< Distance to another body, with the closest pair (issue #67).
       procedure, pass(self) :: time_of_impact       !< Time of first contact with another moving body (issue #73).
+      procedure, pass(self) :: projection_target    !< Target of the constrained projection (issue #74).
       procedure, pass(self) :: proximity_pairs      !< Pairs of bodies of the surface closer than a cutoff (issue #67).
       procedure, pass(self) :: save_into_file       !< Save STL to a file path.
       procedure, pass(self) :: save_aabb_into_file  !< Save the AABB tree leaves as separate STL files.
@@ -5034,6 +5036,30 @@ contains
       enddo
    enddo
    endsubroutine deviation_mesh
+
+   subroutine projection_target(self, target, angle, corner_angle, status)
+   !< The target of the constrained projection (issue #74, `fossil_projection`): the facets by patch with one tree per
+   !< patch, the constraint curves (feature edges of #61, sharp above `angle`, default 30 degrees, plus the patch
+   !< boundaries) chained between corners (turning above `corner_angle`, default 30 degrees), the corners.
+   class(surface_stl_object), intent(in)            :: self         !< Surface.
+   type(projection_target_t), intent(out)           :: target       !< Target.
+   real(R8P),                 intent(in),  optional :: angle        !< Sharp-edge threshold [degrees].
+   real(R8P),                 intent(in),  optional :: corner_angle !< Corner threshold [degrees].
+   integer(I4P),              intent(out), optional :: status       !< STATUS_OK, STATUS_INVALID_INPUT.
+   real(R8P),    allocatable                        :: v(:,:)       !< Vertices.
+   integer(I4P), allocatable                        :: fv(:,:)      !< Facets.
+   real(R8P)                                        :: a, ca        !< Thresholds.
+   integer(I4P)                                     :: i            !< Counter.
+
+   if (present(status)) status = STATUS_INVALID_INPUT
+   a = FEATURE_EDGE_DEFAULT_ANGLE ; if (present(angle)) a = angle
+   ca = FEATURE_EDGE_DEFAULT_ANGLE ; if (present(corner_angle)) ca = corner_angle
+   if (self%facets_number == 0_I4P .or. .not. (a >= 0._R8P .and. a <= 180._R8P) .or. &
+       .not. (ca >= 0._R8P .and. ca <= 180._R8P)) return
+   call deviation_mesh(self, v, fv)
+   call build_target_3d(v, fv, [(max(1_I4P, self%facet(i)%patch), i = 1, self%facets_number)], a, ca, target)
+   if (present(status)) status = STATUS_OK
+   endsubroutine projection_target
 
    subroutine feature_edges(self, edges, kinds, corners, polyline_start, polyline_vertices, angle, corner_angle, &
                             include_boundary, include_nonmanifold, degenerate, status)
