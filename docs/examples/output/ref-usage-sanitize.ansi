@@ -1,0 +1,19 @@
+$ ref_usage_repair sanitize
+WARNING: sanitize: 62 duplicate facet(s) removed
+WARNING: sanitize: 129 facet(s) with 1 disconnected edge remain
+WARNING: sanitize: 14 facet(s) with 2 disconnected edges remain
+WARNING: sanitize: 49 facet(s) with 3 disconnected edges remain
+WARNING: sanitize: 54 non-manifold edge(s) (3+ incident facets) detected
+X extents: [-0.10828700065612793E+002, +0.96460599899291992E+001]
+Y extents: [-0.41883192062377930E+001, +0.49512038230895996E+001]
+Z extents: [+0.52821402549743652E+001, +0.19741262435913086E+002]
+volume: +0.46588084411411188E+003
+centroid: [-0.12166249553566366E+001, +0.80652024443980008E+000, +0.10307739535120760E+002]
+number of facets: +6526
+number of facets with 1 edges disconnected: +129
+number of facets with 2 edges disconnected: +14
+number of facets with 3 edges disconnected: +49
+number of non-manifold edges (3+ incident facets): +54
+degenerate facets removed (last pass): +0
+duplicate facets removed (last pass): +62
+number of AABB refinement levels: -1

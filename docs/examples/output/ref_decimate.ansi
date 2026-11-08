@@ -1,0 +1,5 @@
+$ ref_decimate
+input:           6632 facets, volume  4.17489 (sphere: 4.18879)
+target  1658:  1658 facets, volume  4.16597, closed manifold T, Hausdorff 0.0033 .. 0.0068
+target   414:   414 facets, volume  4.13080, closed manifold T, Hausdorff 0.0144 .. 0.0179
+target   103:   102 facets, volume  3.98898, closed manifold T, Hausdorff 0.0585 .. 0.0619

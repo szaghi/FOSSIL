@@ -1,0 +1,8 @@
+$ ref_usage_analysis validity
+dragon.stl as loaded:
+surface has boundary or non-manifold edges
+surface has non-manifold edges (3+ incidences)
+volume is not physically meaningful: do not trust get_volume()/get_centroid()
+  is_watertight F  is_manifold F  is_volume F
+cube-01.stl after sanitize:
+  is_watertight T  is_manifold T  is_volume T

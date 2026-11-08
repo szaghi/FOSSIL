@@ -1,0 +1,8 @@
+$ ref_winding_number
+centre   w =  1.000000000
+face     w =  0.500000000
+edge     w =  0.250000000
+corner   w =  0.125000000
+outside  w =  0.000000000
+open box: watertight F, w at the centre 0.8333, below the opening 0.5886
+dragon, max |fast - exact|: beta 2 3.27E-04, beta 4 3.67E-05

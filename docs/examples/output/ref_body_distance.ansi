@@ -1,0 +1,10 @@
+$ ref_body_distance
+one surface, 3 bodies, cutoff 0.62:
+  bodies 1 and 2:  0.2500
+  bodies 1 and 3:  0.6000
+three surfaces, cutoff 0.62:
+  surfaces 1 and 2:  0.2500
+  surfaces 1 and 3:  0.6000
+cubes 1 and 3:  0.6000, facets 1 and 5
+  from  0.00  1.00  0.00 to  0.00  1.60  0.00
+2-D:  0.29289 (exact  0.29289) from 0.50000 0.00000 to 0.79289 0.00000

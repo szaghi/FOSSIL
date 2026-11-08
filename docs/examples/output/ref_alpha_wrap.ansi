@@ -1,0 +1,6 @@
+$ ref_alpha_wrap
+input:   47 facets, watertight F, volume F
+alpha 0.60: ok T, 110 facets, watertight T, manifold T, volume  1.0878
+alpha 0.15: ok T, 1856 facets, watertight T, manifold T, volume  0.3951
+alpha < 0:   AWRAP_STATUS_BAD_INPUT  T
+alpha > box: AWRAP_STATUS_DEGENERATE T

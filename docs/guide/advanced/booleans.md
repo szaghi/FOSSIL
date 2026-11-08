@@ -96,30 +96,42 @@ runtime check — set them up yourself):
 
 ## Example
 
-Two unit cubes offset diagonally by `(0.5, 0.5, 0.5)` — the canonical
-mesh-arrangement test case:
+The four operations on the canonical pair, two unit cubes offset
+diagonally by `(0.5, 0.5, 0.5)`. `boolean` replaces `self`, so each one
+works on a copy of A. The cookbook's
+[Unite two bodies](/manual/cookbook#unite-two-bodies) is the one-call
+version.
 
-```fortran
-program ex_boolean
-use fossil
-use penf,   only : I4P, R8P
-use vecfor, only : vector_R8P
-implicit none
+<<< @/examples/snippets/ref_booleans-ops.f90
 
-type(surface_stl_object) :: a, b
-integer(I4P)             :: status
+Exactly coplanar overlapping faces (B offset along x only, see
+[Coplanar faces](#coplanar-faces)):
 
-call a%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-call b%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-call b%translate(delta=vector_R8P(0.5_R8P, 0.5_R8P, 0.5_R8P))
-call b%analyze
+<<< @/examples/snippets/ref_booleans-coplanar.f90
 
-! In-place boolean: a is replaced by (a OP b).
-call a%boolean(other=b, op=BOOL_DIFFERENCE, status=status)
-print '(A,I0,A,F8.4)', 'A \ B  status=', status, '  vol=', a%get_volume()
-! Expected analytic volume: 1 - 0.5^3 = 0.875
-endprogram ex_boolean
-```
+Two cubes side by side with a gap of 1e-13, the "same vertices up to
+round-off" case, united without and with `weld`:
+
+<<< @/examples/snippets/ref_booleans-weld.f90
+
+<<< @/examples/output/ref_booleans.ansi{ansi}
+
+- **Volumes.** Every result matches its analytic volume, 2 − 0.5³,
+  0.5³, 1 − 0.5³ and 2 − 2 · 0.5³, to 4.4e-16 or better.
+- **Symmetric difference.** Neither watertight nor manifold, by
+  definition: its boundary is the whole boundary of both inputs, and
+  along the curve where they cross four facets share each edge. Its
+  volume is right; do not feed it to operations that need a manifold
+  solid.
+- **Coplanar difference.** Four faces of B lie in the planes of four
+  faces of A and overlap them on half their area. The result is the box
+  0.5 × 1 × 1 (volume 0.5000), watertight and manifold, with no
+  perturbation.
+- **`weld`.** Without it the two cubes stay apart, as they are: two
+  shells. With `weld=1e-9` every vertex of B on the face x = 1 + 1e-13
+  takes the coordinates of A's vertex at x = 1, the two faces become
+  exactly coincident and opposite, and the union is one shell, the
+  2 × 1 × 1 box.
 
 ## Visual reference
 
@@ -162,26 +174,11 @@ cube. The caption gives the residual of each step:
 
 Two unit cubes offset along x only: their y and z faces are coplanar and
 overlap. This is the box ∖ body configuration of cut-cell meshing, and it
-needs no perturbation:
+needs no perturbation (the `coplanar` lines of the [Example](#example)).
+With an offset of 0.3 the union shows how the merged faces are
+triangulated:
 
-```fortran
-program ex_boolean_coplanar
-use fossil
-use penf,   only : I4P, R8P
-use vecfor, only : vector_R8P
-implicit none
-type(surface_stl_object) :: a, b
-integer(I4P)             :: status
-
-call a%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-call b%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-call b%translate(delta=vector_R8P(0.5_R8P, 0._R8P, 0._R8P))
-call b%analyze
-call a%boolean(other=b, op=BOOL_DIFFERENCE, status=status)
-print '(A,I0,A,F8.5,A,L1,A,L1)', 'status ', status, '  volume ', a%get_volume(), &
-      ' (analytic 0.5)  watertight ', a%is_watertight(), '  manifold ', a%is_manifold()
-endprogram ex_boolean_coplanar
-```
+![two unit cubes offset by 0.3 along x, united: on the four merged faces the triangulation is cut along the edges of both cubes, at x = 0.3, 0.5, 0.8 and 1 and along both cubes' diagonals; the outlines of A (gold) and B (teal) drawn as boxes](../../examples/images/ref-booleans-coplanar.svg){.fossil-figure}
 
 How the coplanar overlap is handled:
 

@@ -1,0 +1,14 @@
+$ ref_usage_analysis statistics
+X extents: [+0.00000000000000000E+000, +0.10000000000000000E+001]
+Y extents: [+0.00000000000000000E+000, +0.10000000000000000E+001]
+Z extents: [+0.00000000000000000E+000, +0.10000000000000000E+001]
+volume: +0.99999999999999956E+000
+centroid: [+0.50000000000000000E+000, +0.50000000000000000E+000, +0.50000000000000000E+000]
+number of facets: +48
+number of facets with 1 edges disconnected: +0
+number of facets with 2 edges disconnected: +0
+number of facets with 3 edges disconnected: +0
+number of non-manifold edges (3+ incident facets): +0
+degenerate facets removed (last pass): +0
+duplicate facets removed (last pass): +0
+number of AABB refinement levels: -1

@@ -1,0 +1,10 @@
+$ ref_curvature
+sphere: vertices 3318, watertight T
+                   mean     2%    98%   (percentiles over the vertices)
+  K angle defect  0.991  0.085  1.943
+  H cotangent     1.046  0.549  1.951
+  H jet           0.999  0.931  1.045
+sphere: sum K_i A_i / (2 pi) - 2 -1.1E-13
+torus:  sum K_i A_i / (2 pi)     -1.5E-13
+torus:  k1 - 1/r,   rms and max  0.0759 0.3366
+        k2 - exact, rms and max  0.0660 0.4036

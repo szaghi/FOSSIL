@@ -61,8 +61,9 @@ call surface%decimate(target_facets, status)
     one below: the dragon's 6588 / 4 = 1647 ends at 1646).
   - `DEC_STATUS_NO_PROGRESS` — couldn't reach the target; surface is
     at the smallest count the safety checks allowed.
-  - `DEC_STATUS_BAD_INPUT` — `target_facets <= 0`, or the input
-    surface has no facets.
+  - `DEC_STATUS_BAD_INPUT` — the input surface has no facets.
+    `target_facets <= 0` is not rejected: it collapses everything and
+    returns `DEC_STATUS_OK` with an empty surface.
 
 After return, `self`'s AABB tree, vertex pool, connectivity, and
 pseudo-normals are all rebuilt — no further user action needed before
@@ -70,25 +71,35 @@ calling `distance`, `winding_number`, `boolean`, or any other query.
 
 ## Example
 
-```fortran
-program ex_decimate
-use fossil
-use penf, only : I4P, R8P
-implicit none
+The cookbook's [Decimate a mesh](/manual/cookbook#decimate-a-mesh)
+reduces the dragon once. Here the question is how far each level moves
+the surface, on a body whose shape is known: a unit sphere by
+[marching cubes](/guide/advanced/marching-cubes) (41³ samples of
+[-1.5, 1.5]³, cleaned by `sanitize`):
 
-type(surface_stl_object) :: bunny
-integer(I4P)             :: n0, status
+<<< @/examples/snippets/ref_decimate-sphere.f90
 
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-n0 = bunny%get_facets_number()
-print '(A,I0)', 'input bunny: n_facets = ', n0
+Three levels, each a quarter of the previous, measured against the
+input by the certified [Hausdorff distance](/guide/advanced/surface-deviation):
 
-! Decimate to 25% of original.
-call bunny%decimate(target_facets=n0 / 4_I4P, status=status)
-print '(A,I0,A,I0)', 'after 25%: n_facets = ', bunny%get_facets_number(), &
-                     '  status=', status
-endprogram ex_decimate
-```
+<<< @/examples/snippets/ref_decimate-levels.f90
+
+<<< @/examples/output/ref_decimate.ansi{ansi}
+
+- **Count.** Each level reaches its target with `DEC_STATUS_OK`. An odd
+  target ends one below (103 asked, 102 given): a collapse removes two
+  facets.
+- **Distance.** The Hausdorff interval brackets the true distance to
+  the input: 0.0033 to 0.0068 for a quarter of the facets, 0.0585 to
+  0.0619 for 1/64. It grows about 4× per level, as the sagitta of a
+  chord, $e^2/8$ for an edge $e$ on a unit sphere, does when the facet
+  area quadruples.
+- **Volume.** It drifts down level after level: 0.2 %, 1.1 % and
+  4.5 % below the input's (see
+  [Known limitations](#known-limitations)).
+- **Topology.** Every level stays watertight and manifold on this
+  input. Check it on yours: on flat regions the safety checks can miss
+  a pinch (below).
 
 ## Visual reference
 
@@ -121,18 +132,21 @@ Production-grade quality requires fixing all four:
   cube-shaped inputs, where any collapse produces equally-valid (or
   equally-bad) output.
 - **No volume-preservation term.** Collapses pull vertices inward,
-  so volume drifts down monotonically with iteration. Sphere-via-MC
-  decimated to 50 % / 25 % / 10 % loses ~9 % / ~13 % / ~24 % of
-  volume respectively. Lindstrom-Turk 1998 adds a volume-
+  so volume drifts down monotonically with iteration. The
+  marching-cubes sphere of the [Example](#example) (6632 facets)
+  decimated to 1/4, 1/16 and 1/64 of its facets loses 0.2 %, 1.1 % and
+  4.5 % of its volume. Lindstrom-Turk 1998 adds a volume-
   preservation Lagrange multiplier; deferred.
 - **No boundary preservation.** Edges on a mesh boundary (open
   shells) are treated like interior edges; the boundary moves
   during collapse. Irrelevant for closed solids (the typical CFD
   case); breaks open shell decimation.
 - **No link condition.** Some edge collapses produce non-manifold
-  vertices even when the per-edge safety checks pass. In practice,
-  the three existing checks catch ~99 % of pathological cases on
-  CFD-relevant inputs.
+  edges even when the per-edge safety checks pass. `cube-01.stl`
+  (48 facets, watertight) decimated to 36 facets keeps its area and
+  volume exactly but has 2 non-manifold edges and 2 shells; the curved
+  sphere of the [Example](#example) stays manifold at every level.
+  Check `is_manifold()` after decimating inputs with flat regions.
 
 ## See also
 

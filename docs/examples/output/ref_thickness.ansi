@@ -1,0 +1,6 @@
+$ ref_thickness
+ray, 31 rays in 60 degrees: min, max   0.10718  0.10718 over 16 facets
+ray, axial ray only       : min, max   0.10000  0.10000 over 16 facets
+medial                    : min, max   0.10000  0.10000 over 16 facets
+gap huge on every facet: T, invalid 0
+gap between the plates, medial: min, max   0.20000  0.20000 over 16 facets

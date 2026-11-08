@@ -79,65 +79,37 @@ call self%resample_via_distance_field(resolution, surface_out, status)
 - `surface_out` must be **distinct** from `self` — aliasing them
   would consume `self%facet` mid-loop.
 
-## Examples
+## Example
 
-### Sphere from analytic SDF
+`extract_isosurface` on the signed distance of the unit sphere, sampled
+on [-1.5, 1.5]³ with the spacing `h` halved twice, measured against the
+exact volume $4\pi/3$:
 
-```fortran
-program ex_extract_isosurface
-use fossil
-use fossil_facet_object, only : facet_object
-use penf, only : I4P, R8P
-use vecfor, only : vector_R8P
-implicit none
+<<< @/examples/snippets/ref_marching_cubes-sphere.f90
 
-type(surface_stl_object)        :: sphere
-type(facet_object), allocatable :: sphere_facets(:)
-real(R8P), allocatable          :: values(:, :, :)
-type(vector_R8P)                :: bmin, bmax
-real(R8P)                       :: x, y, z, dx
-integer(I4P), parameter         :: NG = 64_I4P
-integer(I4P)                    :: i, j, k, status
+`resample_via_distance_field` on `cube-01.stl`, at three resolutions:
 
-allocate(values(NG, NG, NG))
-dx = 4._R8P / real(NG - 1, R8P)
-do k = 1_I4P, NG
-   z = -2._R8P + (k - 1) * dx
-   do j = 1_I4P, NG
-      y = -2._R8P + (j - 1) * dx
-      do i = 1_I4P, NG
-         x = -2._R8P + (i - 1) * dx
-         values(i, j, k) = sqrt(x**2 + y**2 + z**2) - 1._R8P  ! unit-sphere SDF
-      enddo
-   enddo
-enddo
-bmin = vector_R8P(-2._R8P, -2._R8P, -2._R8P)
-bmax = vector_R8P( 2._R8P,  2._R8P,  2._R8P)
-call extract_isosurface(values=values, bmin=bmin, bmax=bmax, iso=0._R8P, &
-                        surface=sphere_facets, status=status)
-call sphere%adopt_facets(facets=sphere_facets)
-print '(A,I0,A,F8.4)', 'sphere: n_facets=', sphere%get_facets_number(), &
-                       '  vol=', sphere%get_volume()  ! ≈ 4.19 = (4/3)π
-endprogram ex_extract_isosurface
-```
+<<< @/examples/snippets/ref_marching_cubes-resample.f90
 
-### Cube SDF→STL roundtrip via `resample_via_distance_field`
+<<< @/examples/output/ref_marching_cubes.ansi{ansi}
 
-```fortran
-program ex_resample_via_distance_field
-use fossil
-use penf, only : I4P, R8P
-implicit none
-type(surface_stl_object) :: cube_in, cube_resampled
-integer(I4P)             :: status
-
-call cube_in%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-call cube_in%resample_via_distance_field(resolution=64_I4P, &
-                                          surface_out=cube_resampled, status=status)
-print '(A,I0,A,F8.4)', 'resampled cube: n_facets=', cube_resampled%get_facets_number(), &
-                       '  vol=', cube_resampled%get_volume()  ! ≈ 1.0
-endprogram ex_resample_via_distance_field
-```
+- **Watertight.** Every extraction is closed once `adopt_facets` has
+  merged the vertices that neighbouring cells emit twice: no `sanitize`
+  is needed on these smooth fields.
+- **Second order.** The sphere's volume error falls by 3.97 and 4.02
+  when `h` halves: the linear interpolation along the cell edges puts
+  the vertices on the sphere to O(h²), and the chords between them cut
+  inside it by O(h²). The facet count grows as $1/h^2$ (1064, 4280,
+  17192).
+- **Corners and edges.** On the cube, the distance is linear across
+  every face, so the faces come out flat and exact; the deficit comes
+  from the cells across the 12 edges and 8 corners, where the chords
+  cut them. How much depends on where the faces fall inside the cells
+  (the grid spans the box plus a 5 % margin), so it does not fall
+  smoothly with the resolution: 1.43e-2, 1.20e-2, 2.41e-3.
+- **Count.** 1196 to 21164 facets for a body of 48:
+  [`decimate`](/guide/advanced/decimate) brings the count back down
+  when it matters.
 
 ## Visual reference
 

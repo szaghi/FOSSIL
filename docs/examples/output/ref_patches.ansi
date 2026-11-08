@@ -1,0 +1,14 @@
+$ ref_patches
+union: 84 facets
+  patch      low: facets   24, area  3.00000000
+  patch     high: facets   18, area  2.25000000
+  patch    b_low: facets   18, area  2.25000000
+  patch   b_high: facets   24, area  3.00000000
+remeshed: 610 facets
+  patch      low: facets  166, area  3.00000000
+  patch     high: facets  125, area  2.25000000
+  patch    b_low: facets  139, area  2.25000000
+  patch   b_high: facets  180, area  3.00000000
+section z = 0.75: 46 segments
+  patch     high: length  3.00000000
+  patch    b_low: length  3.00000000

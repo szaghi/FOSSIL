@@ -102,6 +102,12 @@ a few cells. It works with `pose=` (body-frame points, as the other outputs). Th
 `feature_point_distance_oac`, and gives the same bits. `build_features` must come first (and `enter_device` for the
 device), else `STATUS_INVALID_INPUT`.
 
+![the unit cube's 12 feature edges in ember and a plane of query points at mid-height, z = 0.5, over [-0.5, 1.5]^2, coloured by the distance to the nearest feature edge: light where the plane crosses the four vertical edges, darkening towards the plane's corners and the cube's axis, from 0.029 to 0.678](../../examples/images/ref-feature-distance.svg){.fossil-figure}
+
+On the unit cube at mid-height the nearest feature is a vertical edge almost everywhere: the field is the distance to
+the closest of the four lines where the plane crosses them, light around them and darkest at the plane's corners and
+on the cube's axis, 0.71 from every edge.
+
 ## 2-D: corners
 
 For a [curve](/guide/advanced/2d-geometry) the features are its corners:

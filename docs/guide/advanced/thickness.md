@@ -224,6 +224,28 @@ call surface%thickness(thickness, gap, method, cone_angle, rays, vertex_thicknes
 Every argument is optional, and at least one output is required. The constants `THICKNESS_RAY`, `THICKNESS_MEDIAL`,
 `THICKNESS_DEFAULT_CONE`, `THICKNESS_DEFAULT_RAYS` and `THICKNESS_DEFAULT_SEPARATION` come from `use fossil`.
 
+## Example
+
+The cookbook's [Find walls too thin for my grid](/manual/cookbook#find-walls-too-thin-for-my-grid)
+sweeps `thin_regions` over h on the wing. Here the two methods on the case whose answer is known: a plate
+1 × 1 × 0.1 (`cube-01.stl` resized), measured on the facets of its two large faces (the `flat` mask; `show` prints
+the minimum and maximum over them):
+
+<<< @/examples/snippets/ref_thickness-plate.f90
+
+A second plate 0.2 above the first, merged into the same surface: the gap is measured from the two facing faces.
+
+<<< @/examples/snippets/ref_thickness-gap.f90
+
+<<< @/examples/output/ref_thickness.ansi{ansi}
+
+- **Cone bias.** The default ray thickness is 0.10718 = 1.072 t on every facet: the lower median of the 31 oblique
+  lengths $t/\cos\theta_k$, the closed form of [Bias of the cone](#bias-of-the-cone). With `rays=1` only the axial
+  chord counts, and the value is t.
+- **Medial.** The shrinking ball stops at the opposite face: t exactly, with no cone to bias it.
+- **Gap.** On a single plate nothing is in front of any facet: every gap is `huge`, and none of them is invalid. With
+  the second plate, the facing faces see it at 0.2.
+
 ## Validation
 
 `src/tests/fossil_test_thickness_ray.f90`:

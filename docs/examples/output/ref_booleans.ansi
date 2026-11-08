@@ -1,0 +1,8 @@
+$ ref_booleans
+union     : facets  84, volume 1.8750, error  4.4E-16, watertight T, manifold T
+intersect : facets  12, volume 0.1250, error  1.4E-17, watertight T, manifold T
+difference: facets  48, volume 0.8750, error  2.2E-16, watertight T, manifold T
+symdiff   : facets  96, volume 1.7500, error  4.4E-16, watertight F, manifold F
+coplanar difference: facets 32, volume 0.5000, watertight T, manifold T
+side by side, no weld: shells 2, volume 2.0000
+weld 1e-9:             shells 1, volume 2.0000, watertight T

@@ -136,120 +136,55 @@ internally. The `mean_curvature` sign-disambiguation step is the only
 direct consumer of pseudo-normals among the curvature TBPs; Gaussian
 does not depend on them.
 
-## Examples
+## Example
 
-### Gaussian curvature on a sphere
+A unit sphere and a torus (R = 1, r = 0.45) by
+[marching cubes](/guide/advanced/marching-cubes) on 41³ samples of
+[-1.5, 1.5]³, cleaned by `sanitize(fill_holes=.true.)`, which drops the
+slivers marching cubes leaves (the helper `implicit_body` in the
+[full program](#the-whole-program)). On the sphere, the three operators
+side by side:
 
-```fortran
-program ex_gaussian_curvature
-use fossil
-use fossil_facet_object, only : facet_object
-use penf,                only : I4P, R8P
-use vecfor,              only : vector_R8P
-implicit none
+<<< @/examples/snippets/ref_curvature-sphere.f90
 
-type(surface_stl_object)        :: sphere
-type(facet_object), allocatable :: facets(:)
-real(R8P),          allocatable :: values(:,:,:), curv_k(:)
-real(R8P)                       :: x, y, z, dx
-integer(I4P), parameter         :: ng = 32_I4P
-integer(I4P)                    :: ix, iy, iz, status
+The angle defect integrates exactly. With the barycentric areas $A_i$
+(the diagonal of the [mass matrix](/guide/advanced/cotangent-laplacian)),
+$\sum_i K_i A_i$ is the total angle defect, which the discrete
+Gauss-Bonnet theorem fixes at $2\pi\chi$ on any closed mesh:
 
-! Build a unit-sphere surface: sample the analytic SDF on a 32^3 grid
-! spanning [-2, 2]^3, then marching-cubes the iso=0 level set.
-allocate(values(ng, ng, ng))
-dx = 4._R8P / real(ng - 1_I4P, R8P)
-do iz = 1_I4P, ng
-   z = -2._R8P + (iz - 1_I4P) * dx
-   do iy = 1_I4P, ng
-      y = -2._R8P + (iy - 1_I4P) * dx
-      do ix = 1_I4P, ng
-         x = -2._R8P + (ix - 1_I4P) * dx
-         values(ix, iy, iz) = sqrt(x*x + y*y + z*z) - 1._R8P
-      enddo
-   enddo
-enddo
-call extract_isosurface(values=values, bmin=vector_R8P(-2._R8P, -2._R8P, -2._R8P), &
-                        bmax=vector_R8P(2._R8P, 2._R8P, 2._R8P), iso=0._R8P,       &
-                        surface=facets, status=status)
-call sphere%adopt_facets(facets=facets)
+<<< @/examples/snippets/ref_curvature-bonnet.f90
 
-call sphere%gaussian_curvature(K=curv_k, status=status)
-print '(A,I0)',      'curv status = ', status
-print '(A,I0)',      'n_vertices  = ', size(curv_k, kind=I4P)
-print '(A,ES12.5)',  'mean K      = ', sum(curv_k) / real(size(curv_k, kind=I4P), R8P)
-! A unit sphere has K = 1 everywhere: this extraction (watertight since
-! issue #48; with slits before, it printed -31.8) prints a mean of 0.971.
-! The per-vertex values scatter (see Known limitations); on the remeshed
-! sphere of the Visual reference the mean is 1.009.
-endprogram ex_gaussian_curvature
-```
+The principal curvatures follow from H and K pointwise,
+$\kappa_{1,2} = H \pm \sqrt{\max(0, H^2 - K)}$ (no separate routine).
+On the torus they are known: $1/r$ around the tube and
+$(\rho - R)/(r\rho)$ along it, with $\rho$ the distance from the axis:
 
-### Mean curvature on a unit sphere
+<<< @/examples/snippets/ref_curvature-principal.f90
 
-```fortran
-program ex_mean_curvature_sphere
-use fossil
-use fossil_facet_object, only : facet_object
-use penf,                only : I4P, R8P
-use vecfor,              only : vector_R8P
-implicit none
+<<< @/examples/output/ref_curvature.ansi{ansi}
 
-type(surface_stl_object)        :: sphere
-type(facet_object), allocatable :: facets(:)
-real(R8P),          allocatable :: values(:,:,:), h_curv(:)
-real(R8P)                       :: x, y, z, dx
-integer(I4P), parameter         :: ng = 32_I4P
-integer(I4P)                    :: ix, iy, iz, n_pos, n_total, status
+- **Means against pointwise values.** The angle-defect `K` and the
+  cotangent `H` average close to the exact 1 (0.991, 1.046), but their
+  per-vertex values spread from 0.085 to 1.943 and from 0.549 to 1.951
+  between the 2nd and 98th percentiles. `jet_curvature` keeps H between
+  0.931 and 1.045 on the same mesh. See
+  [Known limitations](#known-limitations).
+- **Gauss-Bonnet.** $\sum_i K_i A_i / 2\pi$ is 2 on the sphere and 0 on
+  the torus to 1.5e-13: the angle defects sum to $2\pi\chi$ whatever the
+  triangle shapes. A wrong value means a hole, a non-manifold vertex or
+  a second shell, not a bad mesh.
+- **Principal curvatures.** From the jet fit, both are within 0.08 rms
+  of the exact values, with outliers up to 0.40 on 41³ samples. The
+  clamp `max(0, ·)` absorbs round-off at umbilical points, where
+  $H^2 = K$.
+- For the curvature at the foot of a query point instead of at the
+  vertices, `query_many(curvatures=)` evaluates the jet fit there: see
+  the cookbook's
+  [Measure the curvature at a point](/manual/cookbook#measure-the-curvature-at-a-point).
 
-! Same unit-sphere construction as the Gaussian example above.
-allocate(values(ng, ng, ng))
-dx = 4._R8P / real(ng - 1_I4P, R8P)
-do iz = 1_I4P, ng
-   z = -2._R8P + (iz - 1_I4P) * dx
-   do iy = 1_I4P, ng
-      y = -2._R8P + (iy - 1_I4P) * dx
-      do ix = 1_I4P, ng
-         x = -2._R8P + (ix - 1_I4P) * dx
-         values(ix, iy, iz) = sqrt(x*x + y*y + z*z) - 1._R8P
-      enddo
-   enddo
-enddo
-call extract_isosurface(values=values, bmin=vector_R8P(-2._R8P, -2._R8P, -2._R8P), &
-                        bmax=vector_R8P(2._R8P, 2._R8P, 2._R8P), iso=0._R8P,       &
-                        surface=facets, status=status)
-call sphere%adopt_facets(facets=facets)
+### The whole program
 
-call sphere%mean_curvature(H=h_curv, status=status)
-n_total = size(h_curv, kind=I4P)
-n_pos   = count(h_curv > 0._R8P)
-print '(A,ES12.5,A)', 'mean H = ', sum(h_curv) / real(n_total, R8P), &
-                      '   (analytic value for a unit sphere = 1.0)'
-print '(A,I0,A,I0,A)', 'sign: ', n_pos, ' / ', n_total, ' vertices have H > 0'
-! Expected: ~100% positive — the sphere surface is convex outward everywhere.
-endprogram ex_mean_curvature_sphere
-```
-
-### Combining both for principal curvature follow-up
-
-The two scalars together carry the full second-fundamental-form
-trace + determinant:
-
-```fortran
-! Both shipped today:
-call surface%gaussian_curvature(K=K, status=stat_K)
-call surface%mean_curvature(H=H, status=stat_H)
-
-! Principal curvatures (not yet a TBP — small follow-up):
-!     kappa1 = H + sqrt(max(0, H^2 - K))
-!     kappa2 = H - sqrt(max(0, H^2 - K))
-! Pointwise on every vertex. Discriminant clamp guards floating-point
-! noise on near-umbilical (kappa1 = kappa2) points.
-```
-
-A `principal_curvatures` TBP is a documented follow-up — small wrapper,
-no new infrastructure. Tracked under [issue
-#18](https://github.com/szaghi/FOSSIL/issues/18).
+<<< @/examples/snippets/ref_curvature.f90
 
 ## Visual reference
 

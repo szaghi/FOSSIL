@@ -8,93 +8,58 @@ All examples use `use fossil` which re-exports `surface_stl_object` and `facet_o
 
 Numeric kinds (`I4P`, `R8P`) come from [PENF](https://github.com/szaghi/PENF); 3D vectors and unit versors (`ex_R8P`, `ey_R8P`, `ez_R8P`) come from [VecFor](https://github.com/szaghi/VecFor).
 
+Every block on this page is a region of a program in `docs/examples/src/` (`ref_usage_*.f90`), compiled and run when
+the site is built; the outputs shown are those runs. The bodies are the test fixtures `dragon.stl` (6588 facets, not
+watertight), `cube-01.stl` (the unit cube) and `naca0012-ascii.stl`.
+
 ## Loading an STL file
 
 ### Auto-detect format
 
 Pass `guess_format=.true.` to let FOSSIL determine whether the file is ASCII or binary automatically.
 
-```fortran
-use fossil
-use penf, only: R8P
-
-type(surface_stl_object) :: surface
-
-call surface%load_from_file(file_name='dragon.stl', guess_format=.true.)
-```
+<<< @/examples/snippets/ref_usage_io-load.f90
 
 `load_from_file` runs `analyze` internally — bounding box, connectivity, volume, centroid, AABB tree, and pseudo-normals are all populated before it returns. You typically call `sanitize` next to repair common STL defects.
 
+![the dragon as loaded, inside its bounding box with the corners bmin and bmax labelled, its centroid marked, and its boundary edges (edges with a single facet) in red at the jaws, the horns and the tail](../examples/images/ref-usage-analyze.svg){.fossil-figure}
+
 ### Explicit format
 
-```fortran
-! Explicitly ASCII
-call surface%load_from_file(file_name='naca0012.stl', is_ascii=.true.)
+<<< @/examples/snippets/ref_usage_io-explicit.f90
 
-! Explicitly binary
-call surface%load_from_file(file_name='part.stl', is_ascii=.false.)
-```
+`is_ascii` defaults to `.true.` when `guess_format` is absent or `.false.`.
 
 ### Load with on-the-fly clipping
 
-Facets whose vertices all lie outside the bounding box are discarded during the load itself, without a separate clip pass:
+Only the facets that overlap the box are loaded, without a separate clip pass; a facet crossing the box is kept whole,
+so the loaded surface can reach out of it:
 
-```fortran
-use fossil
-use penf, only: R8P
-use vecfor, only: vector_R8P
-
-type(surface_stl_object) :: surface
-type(vector_R8P)         :: bmin, bmax
-
-bmin%x = -15.0_R8P ; bmin%y = -5.0_R8P ; bmin%z = 0.0_R8P
-bmax%x =   0.0_R8P ; bmax%y =  5.0_R8P ; bmax%z = 20.0_R8P
-
-call surface%load_from_file(file_name='dragon.stl', guess_format=.true., &
-                            clip_min=bmin, clip_max=bmax)
-```
+<<< @/examples/snippets/ref_usage_io-clipped.f90
 
 ### Rejecting bad input
 
 If any vertex coordinate is `NaN` or `Inf`, `load_from_file` refuses the file via the optional `status` argument rather than letting the bad value propagate:
 
-```fortran
-use fossil
-use penf, only: I4P
-integer(I4P) :: stat
+<<< @/examples/snippets/ref_usage_io-reject.f90
 
-call surface%load_from_file(file_name='maybe_bad.stl', guess_format=.true., status=stat)
-if (stat == STATUS_INVALID_INPUT) then
-   write(*, '(A)') 'STL contains non-finite coordinates; aborting.'
-   stop
-endif
-```
+The run of the loading blocks (and of the save block below, which writes `dragon-out-binary.stl`): the clipped load
+keeps 3811 of the 6588 facets, and its x range ends at 1.2261, past the box face x = 0, because the facets crossing
+that face are kept whole.
+
+<<< @/examples/output/ref-usage-io.ansi{ansi}
 
 ---
 
 ## Printing statistics
 
-```fortran
-print '(A)', surface%statistics()
-```
+<<< @/examples/snippets/ref_usage_analysis-statistics.f90
 
-Example output (cube fixture, post-sanitize):
+The output for the cube fixture, post-sanitize:
 
-```
-X extents: [+0.000000000000000E+000, +0.100000000000000E+001]
-Y extents: [+0.000000000000000E+000, +0.100000000000000E+001]
-Z extents: [+0.000000000000000E+000, +0.100000000000000E+001]
-volume: +0.100000000000000E+001
-centroid: [+0.500000000000000E+000, +0.500000000000000E+000, +0.500000000000000E+000]
-number of facets: +12
-number of facets with 1 edges disconnected: +0
-number of facets with 2 edges disconnected: +0
-number of facets with 3 edges disconnected: +0
-number of non-manifold edges (3+ incident facets): +0
-degenerate facets removed (last pass): +0
-duplicate facets removed (last pass): +0
-number of AABB refinement levels: +1
-```
+<<< @/examples/output/ref-usage-statistics.ansi{ansi}
+
+The last line is the depth of the octree; the default SAH BVH has no levels and reports `AABB_AUTO_REFINEMENT` (-1).
 
 ::: tip
 Volume is positive for a closed body with outward-pointing normals (the standard divergence-theorem convention; `sanitize` produces this state). If you see a negative volume after sanitize, the mesh is probably non-watertight — check the non-manifold-edge and disconnected-edge counts.
@@ -104,13 +69,10 @@ Volume is positive for a closed body with outward-pointing normals (the standard
 
 ## Saving an STL file
 
-```fortran
-! Save as ASCII
-call surface%save_into_file(file_name='output.stl', is_ascii=.true.)
+<<< @/examples/snippets/ref_usage_io-save.f90
 
-! Save as binary (default)
-call surface%save_into_file(file_name='output.stl')
-```
+`is_ascii` defaults to `.true.`: pass `is_ascii=.false.` for a binary file. A surface with several patches is written as
+one `solid` block per patch in ASCII.
 
 ---
 
@@ -118,15 +80,12 @@ call surface%save_into_file(file_name='output.stl')
 
 `sanitize` is the orchestrator. It runs every repair pass in the right order and prints one stderr warning per defect class detected.
 
-```fortran
-use fossil
+<<< @/examples/snippets/ref_usage_repair-sanitize.f90
 
-type(surface_stl_object) :: surface
+On the dragon it removes 62 duplicate facets and reports what it cannot repair: facets with disconnected edges (the
+holes) and 54 non-manifold edges remain.
 
-call surface%load_from_file(file_name='messy.stl', guess_format=.true.)
-call surface%sanitize
-print '(A)', surface%statistics()
-```
+<<< @/examples/output/ref-usage-sanitize.ansi{ansi}
 
 The passes that run inside `sanitize`:
 
@@ -136,6 +95,8 @@ The passes that run inside `sanitize`:
 4. `remove_duplicate_facets` — drop literal duplicates, including reversed-orientation ones.
 5. `analyze` — rebuild after duplicate removal (only if any duplicates were dropped).
 6. `sanitize_normals` — BFS-propagate winding consistency, then global flip so volume > 0.
+7. `fill_holes` — only with `sanitize(fill_holes=.true.)`: close the boundary loops with minimum-weight patches
+   (`refine_holes` and `fair_holes` refine and fair the patches; see [Hole filling](./advanced/hole-filling.md)).
 
 Each individual pass is also callable directly if you want fine-grained control.
 
@@ -145,19 +106,17 @@ Each individual pass is also callable directly if you want fine-grained control.
 
 After `sanitize`, three named predicates summarise the mesh state:
 
-```fortran
-if (.not. surface%is_watertight()) print '(A)', 'surface has boundary or non-manifold edges'
-if (.not. surface%is_manifold())   print '(A)', 'surface has non-manifold edges (3+ incidences)'
-if (.not. surface%is_volume()) then
-   print '(A)', 'volume is not physically meaningful — do not trust get_volume()/get_centroid()'
-endif
-```
+<<< @/examples/snippets/ref_usage_analysis-validity.f90
 
 | Predicate | True iff |
 |---|---|
 | `is_watertight` | Every edge has exactly 2 incident facets |
 | `is_manifold`   | No non-manifold edges (boundary edges allowed) |
 | `is_volume`     | watertight AND volume > 0 AND finite centroid |
+
+The block run on the dragon as loaded, then on the cube after `sanitize`:
+
+<<< @/examples/output/ref-usage-validity.ansi{ansi}
 
 ---
 
@@ -169,257 +128,177 @@ values until then. One `analyze` after the last transform of a batch is enough.
 See [After a transform](/guide/api/surface-stl-object#after-a-transform).
 :::
 
+The blocks below start each operation from a copy of the dragon as loaded (`surface = dragon`), declared as:
+
+<<< @/examples/snippets/ref_usage_manipulation-declarations.f90
+
 ## Translate
 
-Move the surface by a vectorial delta or by individual axis components:
+Move the surface by a vectorial delta or by individual axis components (`delta` and `x`/`y`/`z` together are
+ambiguous: `status = STATUS_AMBIGUOUS_ARGS`, or an error stop without `status`):
 
-```fortran
-use fossil
-use vecfor, only: vector_R8P
+<<< @/examples/snippets/ref_usage_manipulation-translate.f90
 
-type(vector_R8P) :: delta
-
-delta%x = 1.0_R8P ; delta%y = 0.0_R8P ; delta%z = 0.0_R8P
-
-! Translate by a 3D vector
-call surface%translate(delta=delta)
-
-! Translate by scalar components (any combination)
-call surface%translate(x=2.0_R8P)
-call surface%translate(y=1.5_R8P)
-call surface%translate(x=1.0_R8P, y=2.0_R8P, z=0.5_R8P)
-```
+![the dragon as loaded as a translucent ghost and, solid, the dragon translated by (4, 3.5, 0.5), the segment between the two centroids marked](../examples/images/ref-usage-translate.svg){.fossil-figure}
 
 ---
 
 ## Rotate
 
-Rotate around an arbitrary axis by an angle in radians:
+Rotate around an arbitrary axis by an angle in radians; the pivot is the origin:
 
-```fortran
-use fossil
-use vecfor, only: ex_R8P, vector_R8P
-use penf, only: R8P
-
-type(vector_R8P) :: axis
-real(R8P)        :: angle
-
-axis  = ex_R8P        ! rotate around x-axis
-angle = 1.5707963_R8P ! π/2 radians
-
-call surface%rotate(axis=axis, angle=angle)
-```
+<<< @/examples/snippets/ref_usage_manipulation-rotate.f90
 
 Alternatively, provide a pre-built rotation matrix:
 
-```fortran
-use vecfor, only: rotation_matrix_R8P, vector_R8P
+<<< @/examples/snippets/ref_usage_manipulation-rotate_matrix.f90
 
-real(R8P) :: matrix(3,3)
-matrix = rotation_matrix_R8P(axis=ex_R8P, angle=1.5707963_R8P)
-call surface%rotate(matrix=matrix)
-```
+Both forms take an optional `center`, the pivot of the rotation:
+
+<<< @/examples/snippets/ref_usage_manipulation-rotate_center.f90
+
+![the dragon as loaded as a ghost above the x axis, and the dragon after a quarter turn about the x axis through the origin, lying below the axis](../examples/images/ref-usage-rotate.svg){.fossil-figure}
 
 ---
 
 ## Mirror
 
-Mirror with respect to a plane defined by its outward normal:
+Mirror with respect to a plane through the origin, defined by its normal (normalised inside):
 
-```fortran
-use fossil
-use vecfor, only: ex_R8P, ey_R8P, vector_R8P
+<<< @/examples/snippets/ref_usage_manipulation-mirror.f90
 
-type(vector_R8P) :: normal
-
-! Mirror with respect to the YZ-plane (normal = x-axis)
-normal = ex_R8P
-call surface%mirror(normal=normal)
-
-! Mirror with respect to an oblique plane
-normal = ex_R8P + ey_R8P
-call surface%mirror(normal=normal)
-```
+<<< @/examples/snippets/ref_usage_manipulation-mirror_oblique.f90
 
 Or by a pre-built mirror matrix:
 
-```fortran
-use vecfor, only: mirror_matrix_R8P
+<<< @/examples/snippets/ref_usage_manipulation-mirror_matrix.f90
 
-real(R8P) :: matrix(3,3)
-matrix = mirror_matrix_R8P(normal=ex_R8P)
-call surface%mirror(matrix=matrix)
-```
+![the dragon seen from above: the original as a ghost lying along x, and its reflection through the plane x + y = 0, drawn as a line, lying along y](../examples/images/ref-usage-mirror.svg){.fossil-figure}
 
 The facet winding is reversed together with the reflection, so an outward
 surface stays outward (the same holds for `resize` with an odd number of
-negative factors). As for every transform, call `surface%analyze` before
-queries.
+negative factors): the volumes of the mirrored dragons in the run below stay
++465.929. As for every transform, call `surface%analyze` before queries.
 
 ---
 
 ## Resize (scale)
 
-Scale all facets by a uniform or per-axis factor. The default pivot is the origin; pass `respect_centroid=.true.` to scale about the surface centroid instead:
+Scale all facets by a uniform or per-axis factor (`factor` and `x`/`y`/`z` together are ambiguous, as for
+`translate`). The default pivot is the origin:
 
-```fortran
-use fossil
-use vecfor, only: ex_R8P, ey_R8P, ez_R8P, vector_R8P
-use penf, only: R8P
+<<< @/examples/snippets/ref_usage_manipulation-resize.f90
 
-type(vector_R8P) :: factor
+<<< @/examples/snippets/ref_usage_manipulation-resize_axes.f90
 
-! Uniform scale by a 3D vector factor
-factor = 2.0_R8P * ex_R8P + 2.0_R8P * ey_R8P + 2.0_R8P * ez_R8P
-call surface%resize(factor=factor)
+Pass `respect_centroid=.true.` to scale about the surface centroid instead (the centroid of the last `analyze`):
 
-! Per-axis scalar scale
-call surface%resize(x=0.5_R8P, z=1.2_R8P)
+<<< @/examples/snippets/ref_usage_manipulation-resize_centroid.f90
 
-! Scale about the centroid
-call surface%resize(factor=factor, respect_centroid=.true.)
-```
+![the dragon as loaded as a ghost and, solid, the dragon scaled by 2 about the origin, marked below: twice as large and moved away from the origin](../examples/images/ref-usage-resize.svg){.fossil-figure}
 
 ---
 
 ## Clip
 
-Discard all facets outside a given axis-aligned bounding box. The removed facets can be captured as a separate surface:
+Keep only the facets that overlap a given axis-aligned bounding box (a facet crossing the box is kept whole). The removed facets can be captured as a separate surface:
 
-```fortran
-use fossil
-use vecfor, only: vector_R8P
+<<< @/examples/snippets/ref_usage_manipulation-clip.f90
 
-type(surface_stl_object) :: surface, remainder
-type(vector_R8P)         :: bmin, bmax
-
-bmin%x = -15.0_R8P ; bmin%y = -5.0_R8P ; bmin%z = 0.0_R8P
-bmax%x =   0.0_R8P ; bmax%y =  5.0_R8P ; bmax%z = 20.0_R8P
-
-call surface%clip(bmin=bmin, bmax=bmax, remainder=remainder)
-! `clip` re-runs analyze internally on both `surface` and `remainder`.
-```
+![the clip box around the head half of the dragon: the 3811 kept facets solid, reaching out of the box where they cross its face, and the 2777 facets of the remainder as a ghost](../examples/images/ref-usage-clip.svg){.fossil-figure}
 
 ---
 
 ## Merge
 
-Combine two surfaces into one. The result is stored in the first surface:
+Combine two surfaces into one. The result is stored in the first surface; here the two parts are the clip and its
+remainder, saved and loaded back:
 
-```fortran
-use fossil
+<<< @/examples/snippets/ref_usage_manipulation-merge.f90
 
-type(surface_stl_object) :: surface_1, surface_2
+![the merged surface: the facets of dragon_part_1 in stone and those of dragon_part_2 in ember, together the whole dragon again](../examples/images/ref-usage-merge.svg){.fossil-figure}
 
-call surface_1%load_from_file(file_name='dragon_part_1.stl', guess_format=.true.)
-call surface_2%load_from_file(file_name='dragon_part_2.stl', guess_format=.true.)
+The run of every block of the manipulation sections: the box and the volume that `analyze` computes after each
+operation. Rotations, mirrors and translations keep the volume 465.929; the uniform factor 2 multiplies it by 8
+(3727.429), the factors (0.5, 1, 1.2) by 0.6 (279.557). The merge gives back the 6588 facets and the box of the
+dragon.
 
-call surface_1%merge_solids(other=surface_2)
-call surface_1%analyze        ! rebuild connectivity / tree after the merge
-call surface_1%save_into_file(file_name='dragon_merged.stl')
-```
+<<< @/examples/output/ref-usage-manipulation.ansi{ansi}
 
 ---
 
 ## Distance queries
 
+The first blocks query the unit cube `cube-01.stl`:
+
+<<< @/examples/snippets/ref_usage_distance-load.f90
+
 ### Unsigned distance (squared, default)
 
-```fortran
-use fossil
-use vecfor, only: ex_R8P, ey_R8P, ez_R8P
-use penf, only: R8P
-
-real(R8P) :: d2
-
-d2 = surface%distance(point=2.0_R8P * ex_R8P + 0.0_R8P * ey_R8P + 0.0_R8P * ez_R8P)
-```
+<<< @/examples/snippets/ref_usage_distance-unsigned.f90
 
 ### Euclidean (non-squared) distance
 
-```fortran
-d = surface%distance(point=p, is_square_root=.true.)
-```
+<<< @/examples/snippets/ref_usage_distance-euclidean.f90
 
 ### Signed distance
 
 Negative inside, positive outside. Default sign algorithm is `SIGN_PSEUDO_NORMAL` (Bærentzen–Aanæs); pass `sign_algorithm=` to override.
 
-```fortran
-real(R8P) :: sd
-sd = surface%distance(point=p, is_signed=.true., is_square_root=.true.)
-
-! Override the sign algorithm for benchmarking or for meshes whose orientation
-! cannot be sanitised (e.g. open shells where outward is ill-defined).
-sd = surface%distance(point=p, is_signed=.true., is_square_root=.true., &
-                      sign_algorithm=SIGN_RAY_INTERSECTIONS)
-```
+<<< @/examples/snippets/ref_usage_distance-signed.f90
 
 ### Point-in-polyhedron test
 
-```fortran
-logical :: inside
+<<< @/examples/snippets/ref_usage_distance-inside.f90
 
-inside = surface%is_point_inside(point=0.5_R8P * ex_R8P + 0.5_R8P * ey_R8P + 0.5_R8P * ez_R8P)
-if (inside) print *, 'point is inside the surface'
-```
+### Closest point and normal
+
+`compute_distance` returns the distance together with the closest facet, the local edge (0 if the closest point is not on
+an edge) and the local vertex (0 if it is not on a vertex) of that facet, the closest point and the pseudo-normal there:
+
+<<< @/examples/snippets/ref_usage_distance-closest.f90
+
+![probe points around the dragon, each joined to its closest point on the surface, with the pseudo-normal drawn as a short segment from the closest point; where the closest point lies on an edge or a vertex the normal is not the facet normal](../examples/images/ref-usage-closest.svg){.fossil-figure}
+
+### Batched distances
+
+`distance_many` is a loop of `distance` over a point array, OpenMP-parallel, with the same options for every point;
+`distances` is allocated by the caller, and a size mismatch returns `STATUS_INVALID_INPUT`:
+
+<<< @/examples/snippets/ref_usage_distance-batched.f90
 
 ### Choosing the AABB tree kind
 
-The default `AABB_TREE_SAH_BVH` is faster on every measured mesh (see [Features](./features.md#aabb-acceleration)). The legacy octree is still selectable:
+The default `AABB_TREE_SAH_BVH` is faster on every measured mesh (see [AABB tree](./api/aabb-tree-object.md) and
+[tutorial 5](/manual/tutorial/05-batched)). The legacy octree is still selectable:
 
-```fortran
-call surface%load_from_file(file_name='dragon.stl', guess_format=.true., &
-                            aabb_tree_kind=AABB_TREE_OCTREE)
-```
+<<< @/examples/snippets/ref_usage_distance-tree_kind.f90
 
-Both kinds produce bit-exact distance results — the difference is purely query speed.
+Both kinds produce bit-exact distance results — the difference is purely query speed. The run of the distance blocks:
+
+<<< @/examples/output/ref-usage-distance.ansi{ansi}
 
 ---
 
 ## Connect nearby vertices (repair)
 
-`sanitize` calls this internally when needed; you only invoke it directly if you want to repair a surface without running the full pipeline:
+`sanitize` calls this internally when needed; you only invoke it directly if you want to repair a surface without
+running the full pipeline. The surface here is the cube with its first facet shifted by 1e-4 along x, which
+disconnects its three edges from the neighbours:
 
-```fortran
-use fossil
+<<< @/examples/snippets/ref_usage_repair-crack.f90
 
-type(surface_stl_object) :: surface
+<<< @/examples/snippets/ref_usage_repair-connect.f90
 
-call surface%load_from_file(file_name='disconnected.stl', guess_format=.true.)
-print '(A)', surface%statistics()   ! shows disconnected edge counts
+Each group of nearby vertices is replaced by its centroid, so the crack closes (no disconnected edges after) but the
+merged vertices sit between the old positions: the volume moves from 0.9999958 to 0.9999948.
 
-call surface%connect_nearby_vertices
-call surface%analyze
-print '(A)', surface%statistics()   ! disconnected edges should be reduced
-```
+<<< @/examples/output/ref-usage-connect.ansi{ansi}
 
 ---
 
 ## Full workflow example
 
-```fortran
-use fossil
-use penf, only: R8P
-use vecfor, only: ex_R8P, ey_R8P, ez_R8P
+<<< @/examples/snippets/ref_usage_workflow.f90
 
-type(surface_stl_object) :: surface
-
-! 1. Load (analyze runs internally).
-call surface%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
-
-! 2. Run the full repair pipeline.
-call surface%sanitize
-print '(A)', surface%statistics()
-
-! 3. Center at origin and rescale to fit in a unit box.
-associate(c => surface%get_centroid(), bmin => surface%get_bmin(), bmax => surface%get_bmax())
-   call surface%translate(delta=-c)
-   call surface%resize(factor=(1.0_R8P / maxval([bmax%x - bmin%x, bmax%y - bmin%y, bmax%z - bmin%z])) * &
-                              (ex_R8P + ey_R8P + ez_R8P))
-end associate
-call surface%analyze
-
-! 4. Save.
-call surface%save_into_file(file_name='dragon-normalized.stl')
-```
+<<< @/examples/output/ref-usage-workflow.ansi{ansi}

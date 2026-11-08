@@ -113,47 +113,40 @@ call surface%alpha_wrap(alpha, offset, max_iterations, wrapped, status)
 
 ## Example
 
-A "broken" cube, `cube.stl` minus one facet (a triangular hole of
-inradius 0.29), wrapped twice:
+The unit cube without its first facet: a triangular hole of legs 0.5
+(inradius 0.146) on the face x = 0. The input is open, so it is not a
+volume:
 
-```fortran
-program ex_alpha_wrap
-use fossil
-use fossil_facet_object, only : facet_object
-use penf,   only : I4P, R8P
-implicit none
+<<< @/examples/snippets/ref_alpha_wrap-input.f90
 
-type(surface_stl_object) :: source, holed, wrapped
-type(facet_object), pointer :: facets(:)
-type(facet_object), allocatable, target :: holed_facets(:)
-integer(I4P)            :: status, i
+Wrapped twice: with a ball wider than the hole, then with one that
+passes through it.
 
-! Build a "broken" cube by dropping one facet from cube.stl.
-call source%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-facets => source%facets_ref()
-allocate(holed_facets(size(facets) - 1_I4P))
-do i = 1_I4P, size(holed_facets, kind=I4P)
-   holed_facets(i) = facets(i + 1_I4P)
-enddo
-call holed%adopt_facets(facets=holed_facets)
-print '(A,L1)', 'input watertight? ', holed%is_watertight()  ! .false. — has a hole
+<<< @/examples/snippets/ref_alpha_wrap-wrap.f90
 
-! A ball larger than the hole: the wrap caps it.
-call holed%alpha_wrap(alpha=0.6_R8P, wrapped=wrapped, status=status)
-print '(A,I0,A,L1,A,F8.4)', 'output status=', status, &
-      '  watertight? ', wrapped%is_watertight(), &
-      '  vol = ', wrapped%get_volume()
-endprogram ex_alpha_wrap
-```
+The two failures `status` reports before any work is done:
 
-With `alpha = 0.6` the ball cannot pass the hole: `status` is
-`AWRAP_STATUS_OK`, the wrap is watertight and manifold (116 facets),
-and its volume is 1.089. The cube grown by the offset (0.02) has
-volume 1.124; the difference is the dimple the cap makes into the hole
-and the chords of the coarse wrap across the rounded edges. With the default
-`alpha` (0.035) the hole is far wider than the ball. The wrap is then
-one closed shell lining both sides of every wall, of volume 0.0135 and
-not a solid. Check `get_volume()`, not only `is_watertight()`.
+<<< @/examples/snippets/ref_alpha_wrap-status.f90
+
+<<< @/examples/output/ref_alpha_wrap.ansi{ansi}
+
+- **`alpha = 0.6`**: the ball (radius 0.3) does not fit through the
+  hole, so the wrap caps it. The result is the cube grown by the offset,
+  110 facets and volume 1.0878: less than $(1 + 2\cdot 0.02)^3 = 1.125$
+  because of the cap that dips into the hole and of the chords the
+  coarse wrap lays across the rounded edges.
+- **`alpha = 0.15`**: the ball passes the hole (0.075 + 0.033 <
+  0.146), carves the inside too, and the wrap lines both sides of every
+  wall. It is watertight and manifold, yet its volume is 0.3951: about
+  $2\varepsilon$ times the cube's area 6 (0.396), a hollow shell, not a
+  solid. `is_watertight()` alone does not tell the two cases apart;
+  `get_volume()` does.
+- **`alpha < 0`** gives `AWRAP_STATUS_BAD_INPUT`, and **`alpha` at
+  least the bounding-box diagonal** ($\sqrt 3$ here)
+  `AWRAP_STATUS_DEGENERATE`, with an empty `wrapped`.
+- `self` is `intent(in)`: `holed` is wrapped four times from the same
+  input. The cutaways under [Visual reference](#visual-reference) show
+  the two wraps.
 
 ## Visual reference
 

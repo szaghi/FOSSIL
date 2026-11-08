@@ -44,7 +44,8 @@ The patch id travels with the facet, so every operation that keeps or copies fac
 `boolean` and `resolve_self_intersections` keep the patch of every facet: a sub-triangle of the arrangement takes
 its parent facet's patch, so the area of a patch in the result is the area of its parent patch outside (or inside) the
 other body, as the operation selects. The other surface's patches join the table by name before the arrangement:
-`A ∪ B` of a body with patches `low`, `high` and one with `b_low`, `b_high` has all four, and equal names merge.
+`A ∪ B` of a body with patches `low`, `high` and one with `b_low`, `b_high` has all four, and equal names merge (the
+[Example](#example) measures it, through a remesh too).
 
 ## Through remeshing
 
@@ -95,7 +96,32 @@ and the curve takes the surface's names. `query_many(_device)(patches=)`, `probe
 ## Example
 
 The cookbook recipe [wall, inlet and outlet from one STL](/manual/cookbook#wall-inlet-and-outlet-from-one-stl) tags
-the faces of a box, writes them as three blocks, reads them back and queries the patch at three points.
+the faces of a box, writes them as three blocks, reads them back and queries the patch at three points. Here the
+patches go through a boolean, a remesh and a section. Two unit boxes, each split at its mid-height into a lower and
+an upper patch (the helper `split_box` of the program, which calls `set_patch` twice), the second moved by
+(0.5, 0.5, 0.5), united:
+
+<<< @/examples/snippets/ref_patches-boolean.f90
+
+Then remeshed, and cut by the plane z = 0.75 (`areas` and `lengths` sum the facet areas and the segment lengths of
+every patch):
+
+<<< @/examples/snippets/ref_patches-remesh.f90
+
+<<< @/examples/snippets/ref_patches-slice.f90
+
+<<< @/examples/output/ref_patches.ansi{ansi}
+
+- **Boolean.** The union's patches are the four input ones, merged into one table by name. Each keeps the area of its
+  parent patch outside the other body: `low` and `b_high` lie wholly outside (area 3 each), while `high` and `b_low`
+  lose the three quarter-faces inside the other box (3 − 0.75 = 2.25). The four sum to the union's area, 10.5.
+- **Remesh.** 84 facets become 610, but each patch keeps its area to the printed digits: the patch boundaries, the
+  mid-height lines and the intersection curve, are locked, so no facet crosses them.
+- **Section.** The curve's segments take the patch of the facet they are cut from, and the curve takes the surface's
+  names. At z = 0.75 the section meets `high` (A's upper half) and `b_low` (B's lower half), 3 each: the perimeter of
+  each square outside the other.
+
+![the union of the two split boxes after the remesh, every facet coloured by its patch: low teal, high stone, b_low gold, b_high ember; the boundaries between the colours are the straight mid-height lines and the intersection curve](../../examples/images/ref-patches-remeshed.svg){.fossil-figure}
 
 ## API
 

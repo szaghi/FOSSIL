@@ -124,72 +124,48 @@ Status codes:
   tolerance during the per-step Laplacian assembly; the iteration
   proceeded on the rest. The surface is still re-adopted at the end.
 
-## Examples
+## Example
 
-### Taubin denoising of a scanned bunny
+Explicit against Taubin, at the same cost. A unit sphere by
+[marching cubes](/guide/advanced/marching-cubes) (41³ samples), every
+vertex moved by Gaussian noise of σ = 0.035 (a deterministic function of
+its coordinates, the `noise` helper of the program):
 
-```fortran
-program ex_smooth_taubin
-use fossil
-use penf, only : I4P, R8P
-implicit none
+<<< @/examples/snippets/ref_smoothing-noisy.f90
 
-type(surface_stl_object) :: bunny
-real(R8P)                :: v_before, v_after, a_before, a_after
-integer(I4P)             :: status
+Smoothed by 10 explicit steps and by 5 Taubin pairs, both 10
+applications of the Laplacian; `report` prints the mean and rms of
+`|v| - 1` over the vertices, and the volume change:
 
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-v_before = bunny%get_volume()
-a_before = bunny%get_area()
+<<< @/examples/snippets/ref_smoothing-smooth.f90
 
-! 5 Taubin (lambda, mu) pairs = 10 Laplacian applies. Defaults: lambda=0.5, mu=-0.53.
-call bunny%smooth(method=SMOOTH_METHOD_TAUBIN, status=status)
-v_after = bunny%get_volume()
-a_after = bunny%get_area()
+The band-pass condition, checked before anything moves:
 
-print '(A,ES12.5,A,ES12.5)', 'volume before / after = ', v_before, ' / ', v_after
-print '(A,ES12.5,A,ES12.5)', 'area   before / after = ', a_before, ' / ', a_after
-print '(A,F6.3,A)',           'volume drift = ', 100._R8P * abs(v_after - v_before) / v_before, ' %'
-print '(A,F6.3,A)',           'area drop    = ', 100._R8P * (a_before - a_after) / a_before, ' %'
-! Expected: volume drift < 1 %, area drop ~ 0.5-1 % (visible smoothing).
-endprogram ex_smooth_taubin
-```
+<<< @/examples/snippets/ref_smoothing-reject.f90
 
-### Explicit shrink for a building block
+<<< @/examples/output/ref_smoothing.ansi{ansi}
 
-```fortran
-program ex_smooth_explicit
-use fossil
-use penf, only : I4P, R8P
-implicit none
+- **Explicit.** The smoothest result (rms 0.0131), but the mean radius
+  falls to 0.9885 and the volume by 3.56 %: every step pulls every
+  vertex towards the centroid of its neighbours, which on a convex
+  surface lies inside.
+- **Taubin.** The rms error halves (0.0356 → 0.0162) and the volume
+  stays within 0.05 %: the negative μ step undoes the shrinkage of the λ
+  step at low frequencies.
+- **Rejected input.** `mu = -0.4` with `lambda = 0.5` gives
+  `SMOOTH_STATUS_BAD_INPUT` and leaves the surface as it was: with
+  `μ ≥ −λ` the transfer function $(1 - \lambda k)(1 - \mu k)$ is below 1
+  at every low frequency $k$: no pass band, the filter shrinks like the
+  explicit one.
 
-type(surface_stl_object) :: noisy
-integer(I4P)             :: status
+The section z = 0 of the three surfaces, with the radial error
+magnified ten times so that a 1 % shrinkage shows:
 
-call noisy%load_from_file(file_name='noisy_input.stl', guess_format=.true.)
+![the section z = 0 of the noisy sphere (grey, spiky), of the explicit result (ember, smooth and inside the unit circle all around) and of the Taubin result (teal, on the unit circle, still wavy), the radial error magnified ten times, the unit circle in gold](../../examples/images/ref-smoothing-sections.svg){.fossil-figure}
 
-! One pass at half-strength, only as part of a larger pipeline
-! (e.g. before decimation, where local shrinkage doesn't matter).
-call noisy%smooth(method=SMOOTH_METHOD_EXPLICIT, lambda=0.25_R8P, &
-                  iterations=1_I4P, status=status)
-call noisy%save_into_file(file_name='preprocessed.stl')
-endprogram ex_smooth_explicit
-```
-
-### Custom Taubin parameters
-
-```fortran
-! Stronger smoothing, more iterations:
-call surface%smooth(method=SMOOTH_METHOD_TAUBIN,    &
-                    lambda=0.7_R8P, mu=-0.75_R8P,   &  ! mu < -lambda — band-pass holds
-                    iterations=10_I4P, status=status)
-
-! Catches the band-pass violation:
-call surface%smooth(method=SMOOTH_METHOD_TAUBIN,    &
-                    lambda=0.5_R8P, mu=-0.4_R8P,    &  ! mu > -lambda — REJECTED
-                    iterations=5_I4P, status=status)
-! status == SMOOTH_STATUS_BAD_INPUT, no mutation
-```
+The explicit section lies inside the circle all the way round; the
+Taubin section stays on it, with a low-frequency waviness that five
+pairs do not remove.
 
 ## Visual reference
 

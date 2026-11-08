@@ -65,7 +65,7 @@ angles `(α_i, α_j, α_k)`:
    exact in floating point — independent of how cotangents accumulate
    per row.
 
-The result is a CSR-stored `L` (symmetric, sparse, positive-semidefinite
+The result is a CSR-stored `L` (symmetric, sparse, negative-semidefinite
 when triangles are non-obtuse) and a diagonal `M`. Both are returned to
 the caller via `csr_matrix_t` containers; the diagonal `M` is just a
 length-N CSR with one entry per row.
@@ -99,70 +99,33 @@ Status codes:
 
 ## Example
 
-### Constant-vector kernel check (sanity)
+Three identities of the operator, checked on `cube-01.stl` (the unit
+cube, 8 facets per face): its kernel, its mass, and its quadratic form.
 
-```fortran
-program ex_cotangent_laplacian_kernel
-use fossil
-use penf, only : I4P, R8P
-implicit none
+<<< @/examples/snippets/ref_cotangent_laplacian-build.f90
 
-type(surface_stl_object) :: sphere
-type(csr_matrix_t)       :: L, M
-real(R8P), allocatable   :: ones(:), Lones(:)
-integer(I4P)             :: i, n, status
+<<< @/examples/snippets/ref_cotangent_laplacian-checks.f90
 
-! Build a sphere via marching cubes (any closed surface works).
-call build_unit_sphere(sphere)
+<<< @/examples/output/ref_cotangent_laplacian.ansi{ansi}
 
-call sphere%cotangent_laplacian(L=L, M=M, status=status)
-print '(A,I0)', 'lapl status = ', status
+- **Size.** One row per pool vertex (26 for this cube), and 170
+  nonzeros: the 26 diagonal entries and two per edge. `is_symmetric`
+  with tolerance 0 holds: `L` is assembled symmetric, bit for bit.
+- **Kernel.** `L · 1` is zero to the last bit, because the diagonal is
+  set to minus the row sum of the off-diagonals. Any constant field is
+  harmonic, on any mesh.
+- **Mass.** The barycentric masses `M_ii` (a third of the area of every
+  incident triangle) partition the area: their sum equals
+  `get_area()`, 6.
+- **Quadratic form.** For a linear field the cotangent formula is
+  exact on every triangle: $-x^T L x = \sum_T A_T\,|\nabla_T x|^2$.
+  On the cube, $|\nabla_T x| = 1$ on the four faces parallel to x and 0
+  on the two normal to it, so the sum is their area, 4. The form is
+  negative semi-definite with this sign convention (positive
+  off-diagonals).
 
-n = L%get_nrows()
-allocate(ones(n), Lones(n))
-ones = 1._R8P
-call L%multiply_vector(x=ones, y=Lones)
-
-print '(A,ES12.5)', 'max |L * 1| = ', maxval(abs(Lones))
-! Expected: < 1e-12 — the constant kernel must be exact in floating point.
-
-contains
-   subroutine build_unit_sphere(s)
-   type(surface_stl_object), intent(out) :: s
-   ! ... typical SDF-via-MC sphere construction ...
-   endsubroutine
-endprogram ex_cotangent_laplacian_kernel
-```
-
-### Mass diagonal sums to total surface area
-
-```fortran
-program ex_cotangent_laplacian_mass
-use fossil
-use penf, only : I4P, R8P
-implicit none
-
-type(surface_stl_object) :: cube
-type(csr_matrix_t)       :: L, M
-real(R8P)                :: m_sum, area
-integer(I4P)             :: i, n, status
-
-call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-call cube%cotangent_laplacian(L=L, M=M, status=status)
-
-n = M%get_nrows()
-m_sum = 0._R8P
-do i = 1_I4P, n
-   m_sum = m_sum + M%get_value(i, i)
-enddo
-
-area = cube%get_area()
-print '(A,ES12.5)', 'sum(diag(M)) = ', m_sum
-print '(A,ES12.5)', 'surface area = ', area
-print '(A,ES12.5)', '|diff|       = ', abs(m_sum - area)
-! Expected: |diff| < 1e-12 — barycentric mass partitions area exactly.
-endprogram ex_cotangent_laplacian_mass
-```
+The action of `L` on a curved surface, where the coordinate field is no
+longer harmonic, is in the figure below.
 
 ## Visual reference
 

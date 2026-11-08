@@ -1,0 +1,5 @@
+$ ref_smoothing
+noisy           : mean |v|  1.0018, rms(|v| - 1)  0.0356, volume  4.1843 (  0.00 %)
+explicit, 10    : mean |v|  0.9885, rms(|v| - 1)  0.0131, volume  4.0354 ( -3.56 %)
+Taubin, 5 pairs : mean |v|  1.0009, rms(|v| - 1)  0.0162, volume  4.1865 (  0.05 %)
+mu = -0.4 > -lambda: SMOOTH_STATUS_BAD_INPUT T

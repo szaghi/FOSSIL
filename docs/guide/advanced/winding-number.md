@@ -103,64 +103,35 @@ inside = surface%winding_number(point=q) > 0.5_R8P
 
 ## Example
 
-Closed cube, far-field decay, and the dirty-mesh graceful-degradation
-property all in one program:
+On `cube-01.stl` (the unit cube, 8 facets per face), at the centre, on
+a face, on an edge, at a corner and outside:
 
-```fortran
-program ex_winding_number
-use fossil, only : surface_stl_object
-use penf,   only : I4P, R8P
-use vecfor, only : vector_R8P
-implicit none
+<<< @/examples/snippets/ref_winding_number-cube.f90
 
-type(surface_stl_object) :: cube
-type(vector_R8P)         :: p_in, p_out, p_far
-real(R8P)                :: w_in, w_out, w_far
+The same cube without its top face (8 facets dropped), so not closed:
 
-call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+<<< @/examples/snippets/ref_winding_number-holed.f90
 
-p_in  = vector_R8P(0.5_R8P, 0.5_R8P, 0.5_R8P)   ! cube centroid
-p_out = vector_R8P(2.0_R8P, 2.0_R8P, 2.0_R8P)   ! outside the bbox
-p_far = vector_R8P(1.0e3_R8P, 0._R8P, 0._R8P)   ! far field
+The fast evaluation against the exact sum (`beta = -1`, or any
+non-positive value) on the dragon, at 125 points spread over its box:
 
-w_in  = cube%winding_number(point=p_in)         ! ≈ 1.0
-w_out = cube%winding_number(point=p_out)        ! ≈ 0.0
-w_far = cube%winding_number(point=p_far)        ! < 1e-10
+<<< @/examples/snippets/ref_winding_number-beta.f90
 
-print '(A,F12.9)', 'inside  : w = ', w_in
-print '(A,F12.9)', 'outside : w = ', w_out
-print '(A,ES12.4)', 'far     : w = ', w_far
-endprogram ex_winding_number
-```
+<<< @/examples/output/ref_winding_number.ansi{ansi}
 
-To force exact (non-hierarchical) evaluation — useful for ground-truth
-testing or for inputs where the AABB tree isn't trustworthy — pass
-`beta = -1.0` or any non-positive value:
-
-```fortran
-program ex_winding_number_exact
-use fossil, only : surface_stl_object
-use penf,   only : I4P, R8P
-use vecfor, only : vector_R8P
-implicit none
-
-type(surface_stl_object) :: cube
-type(vector_R8P)         :: q
-real(R8P)                :: w_fast, w_exact
-
-call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-q = vector_R8P(0.3_R8P, 0.3_R8P, 0.3_R8P)
-
-w_fast  = cube%winding_number(point=q, beta=2._R8P)   ! Barnes-Hut, default
-w_exact = cube%winding_number(point=q, beta=-1._R8P)  ! exact O(N) sum
-
-print '(A,F12.9,A,F12.9)', 'fast = ', w_fast, '   exact = ', w_exact
-endprogram ex_winding_number_exact
-```
-
-The two are identical to ~1e-12 absolute on small inputs (a 12-facet
-cube has nothing to truncate); on the dragon mesh the gap is ~1e-3 at
-β=2.0 and ~1e-5 at β=4.0.
+- **Closed cube.** `w` is the fraction of the full solid angle the
+  surface covers seen from the point: 1 inside, 1/2 on a face, 1/4 on
+  an edge, 1/8 at a corner, 0 outside, all to the printed digits.
+- **Open box.** At the centre each face subtends 1/6 of the sphere;
+  without the top, `w` = 5/6 = 0.8333. Below the opening, at z = 0.9,
+  it is still 0.5886: above the 0.5 threshold, so the point stays
+  inside, where the ray parity of an open mesh has no answer. The
+  [slice below](#cube-reference) shows the whole field.
+- **Fast against exact.** At the default β = 2 the multipole
+  approximation differs from the exact sum by at most 3.27e-4 over the
+  125 points; β = 4 brings that to 3.67e-5, at the price of more
+  recursion. Both are far below what the 0.5 threshold can feel, except
+  for points within that distance of `w = 0.5`.
 
 ## Cube reference
 

@@ -78,6 +78,7 @@ def main() -> int:
     front = (DOCS / "index.md").read_text().split("---")[1]
     cards = re.findall(r"^\s+title:\s*(.+)$", front.split("features:")[1], re.M)
     cards = [c.strip().strip('"') for c in cards]
+    sys.dont_write_bytecode = True  # no __pycache__ in scripts/
     sys.path.insert(0, str(ROOT / "scripts"))
     import gallery  # noqa: E402
     tiles = [c[0] for c in gallery.CARDS]

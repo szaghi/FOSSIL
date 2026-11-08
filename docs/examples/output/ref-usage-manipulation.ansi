@@ -1,0 +1,16 @@
+$ ref_usage_manipulation
+as loaded      box   -10.829   -4.188    5.282 ..    9.646    4.951   19.741  volume   465.929
+translate      box    -6.829   -0.688    5.782 ..   13.646    8.451   20.241  volume   465.929
+rotate         box   -10.829  -19.741   -4.188 ..    9.646   -5.282    4.951  volume   465.929
+rotate matrix  box   -10.829  -19.741   -4.188 ..    9.646   -5.282    4.951  volume   465.929
+rotate centre  box   -10.829   -8.626    5.314 ..    9.646    5.833   14.453  volume   465.929
+mirror x       box    -9.646   -4.188    5.282 ..   10.829    4.951   19.741  volume   465.929
+mirror x+y     box    -4.951   -9.646    5.282 ..    4.188   10.829   19.741  volume   465.929
+mirror matrix  box    -9.646   -4.188    5.282 ..   10.829    4.951   19.741  volume   465.929
+resize x2      box   -21.657   -8.377   10.564 ..   19.292    9.902   39.483  volume  3727.429
+resize x,z     box    -5.414   -4.188    6.339 ..    4.823    4.951   23.690  volume   279.557
+resize centre  box   -20.441   -9.183    0.256 ..   20.508    9.096   29.174  volume  3727.429
+clip           kept 3811, remainder 2777, of 6588
+clip           box   -10.829   -4.188    5.283 ..    1.226    4.242   19.741  volume   288.640
+merge          6588 facets
+merge          box   -10.829   -4.188    5.282 ..    9.646    4.951   19.741  volume   465.929

@@ -1,0 +1,5 @@
+$ ref_cotangent_laplacian
+vertices 26, nonzeros of L 170, symmetric T
+max |L 1|            0.00E+00
+sum of M_ii       6.000000000, area  6.000000000
+x^T L x          -4.000000000, exact -4 (area of the faces not normal to x)

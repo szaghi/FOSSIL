@@ -1,0 +1,27 @@
+$ ref_usage_repair connect
+before X extents: [+0.00000000000000000E+000, +0.10000000000000000E+001]
+before Y extents: [+0.00000000000000000E+000, +0.10000000000000000E+001]
+before Z extents: [+0.00000000000000000E+000, +0.10000000000000000E+001]
+before volume: +0.99999583333333364E+000
+before centroid: [+0.50000312470051955E+000, +0.49999895832899305E+000, +0.50000104167100701E+000]
+before number of facets: +48
+before number of facets with 1 edges disconnected: +3
+before number of facets with 2 edges disconnected: +0
+before number of facets with 3 edges disconnected: +1
+before number of non-manifold edges (3+ incident facets): +0
+before degenerate facets removed (last pass): +0
+before duplicate facets removed (last pass): +0
+before number of AABB refinement levels: -1
+after  X extents: [+0.00000000000000000E+000, +0.10000000000000000E+001]
+after  Y extents: [+0.00000000000000000E+000, +0.10000000000000000E+001]
+after  Z extents: [+0.00000000000000000E+000, +0.10000000000000000E+001]
+after  volume: +0.99999479166666694E+000
+after  centroid: [+0.50000260414189079E+000, +0.49999874131288879E+000, +0.50000125868711121E+000]
+after  number of facets: +48
+after  number of facets with 1 edges disconnected: +0
+after  number of facets with 2 edges disconnected: +0
+after  number of facets with 3 edges disconnected: +0
+after  number of non-manifold edges (3+ incident facets): +0
+after  degenerate facets removed (last pass): +0
+after  duplicate facets removed (last pass): +0
+after  number of AABB refinement levels: -1

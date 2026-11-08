@@ -1,0 +1,9 @@
+$ ref_usage_workflow
+WARNING: sanitize: 62 duplicate facet(s) removed
+WARNING: sanitize: 129 facet(s) with 1 disconnected edge remain
+WARNING: sanitize: 14 facet(s) with 2 disconnected edges remain
+WARNING: sanitize: 49 facet(s) with 3 disconnected edges remain
+WARNING: sanitize: 54 non-manifold edge(s) (3+ incident facets) detected
+box min        -0.4695  -0.2440  -0.2455
+box max         0.5305   0.2024   0.4607
+centroid within 1e-12 of the origin T

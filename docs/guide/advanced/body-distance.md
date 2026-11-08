@@ -36,11 +36,37 @@ walls come within a few cells, and collision response.
 
 ## Example
 
-```fortran
-call a%distance_to(b, distance=d, point_self=pa, point_other=pb, facet_self=fa, facet_other=fb, &
-                   intersecting=hit)
-call a%distance_to(b, distance=d, pose_self=pose_a, pose_other=pose_b) ! moving bodies, trees as built
-```
+The cookbook's [How close are my two bodies?](/manual/cookbook#how-close-are-my-two-bodies) measures one pair, with a
+pose. Here many bodies, the witness points and the 2-D twin. Three unit cubes, the second 0.25 beyond the first
+along x, the third 0.6 beyond it along y, given once as the three bodies of one surface and once as three surfaces:
+
+<<< @/examples/snippets/ref_body_distance-pairs.f90
+
+The closest pair of the first and third cubes, which face each other across a whole face:
+
+<<< @/examples/snippets/ref_body_distance-witness.f90
+
+In 2-D, a 64-gon of radius 0.5 against a unit square turned by 45° about its centre and placed at (1.5, 0) by a
+pose, so that a corner points at the polygon:
+
+<<< @/examples/snippets/ref_body_distance-curves.f90
+
+<<< @/examples/output/ref_body_distance.ansi{ansi}
+
+- **Pairs.** Both calls list the pairs closer than the cutoff 0.62: (1, 2) at 0.25 and (1, 3) at 0.6. The pair
+  (2, 3), at $\sqrt{0.25^2 + 0.6^2} = 0.65$, is beyond it and not listed; `proximity_pairs_of` skips it on its
+  bounding boxes alone, 0.65 apart. `proximity_pairs` numbers the bodies by `facet_body`, `proximity_pairs_of` the surfaces by
+  their index in the array.
+- **Ties.** Every point of the facing faces is at 0.6, so many facet pairs realize the distance. The tie rule takes
+  the smallest (facet_self, facet_other): facets 1 and 5, with the witness points at the corner (0, 1, 0) and
+  (0, 1.6, 0). The same rule makes the descent bit-identical to the brute-force loop.
+- **2-D.** The square's corner lands at $1.5 - \sqrt{2}/2 = 0.79289$ on the x axis, and the polygon has a vertex at
+  (0.5, 0): the distance is $1 - \sqrt{2}/2 = 0.29289$, between those two points. The square is queried where the
+  pose puts it, without a `move`.
+
+![three unit cubes drawn translucent, the second 0.25 beyond the first along x, the third 0.6 beyond it along y; the closest pair of each body pair under the cutoff 0.62 drawn as a gold segment labelled 0.25 and 0.60](../../examples/images/ref-body-distance-pairs.svg){.fossil-figure}
+
+### Moving bodies
 
 ![a cube of side 0.25 approaching the dragon on a screw motion, half a turn about (1, 1, 1): each frame the closest pair joined by a segment and the gap, down to the first contact](../../examples/images/anim-body-distance.svg){.fossil-figure}
 

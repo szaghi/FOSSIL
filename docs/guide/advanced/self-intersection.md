@@ -89,8 +89,8 @@ call self%boolean(other=self, op=BOOL_UNION, status=status)
 The §1.1 arrangement code treats `self vs self` symmetrically: every
 self-crossing becomes an arrangement segment, every input triangle
 gets retriangulated, the per-sub-triangle winding-number tagging
-keeps only the outer-manifold sub-triangles. Inherits §1.1's
-[axis-aligned coplanar limitation](/guide/advanced/booleans#known-limitations).
+is meant to keep only the outer-manifold sub-triangles. It does not yet:
+see [Known limitations](#known-limitations).
 
 ## API
 
@@ -125,59 +125,46 @@ call surface%resolve_self_intersections(status=status)
    integer(I4P), intent(out), optional :: status  ! BOOL_STATUS_*
 ```
 
-Mutates `self` in place. Output is self-intersection-free **modulo the
-§1.1 coplanar limitation** — perturb the input by `~1e-6 * bbox_diag`
-along each axis if you suspect coplanar self-overlaps.
+Mutates `self` in place. It does not currently remove the crossings:
+see [Known limitations](#known-limitations).
 
-## Example: detection
+## Example
 
-The dragon fixture in this repo is **known dirty** — it ships with
-1191 self-intersection pairs: 1167 crossings (759 before issue #46 added the pairs sharing one vertex) and, since issue #69, 24 pairs of sheets crossing at its non-manifold edges. It is the regression workhorse for §1.2:
+Two unit cubes, the second moved by (0.3, 0.4, 0.45), merged into one
+surface by `merge_solids`: each shell is closed, so the surface is
+watertight, yet the shells pass through each other. Detection finds the
+crossings, and removing them goes through the union of the two bodies
+as separate surfaces (`report` prints the facets, closure, shells,
+volume and remaining pairs; `split_shells` copies the facets of each
+shell, by `facet_shell`, into a surface of its own):
 
-```fortran
-program ex_find_self_intersections
-use fossil
-use penf,   only : I4P
-implicit none
+<<< @/examples/snippets/ref_self_intersection-merge.f90
 
-type(surface_stl_object)               :: dragon
-type(intersection_pair_t), allocatable :: pairs(:)
-integer(I4P)                           :: status
+<<< @/examples/snippets/ref_self_intersection-detect.f90
 
-call dragon%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
-call dragon%find_self_intersections(pairs=pairs, status=status)
-print '(A,I0,A,I0)', 'dragon: ', dragon%get_facets_number(), &
-      ' facets, ', size(pairs), ' self-intersection pairs'
-endprogram ex_find_self_intersections
-```
+<<< @/examples/snippets/ref_self_intersection-split.f90
 
-For a clean mesh (`cube.stl`, `bunny.stl`), the same call returns
-`size(pairs) == 0` — the no-false-positive guarantee of the
-adjacency filter (every shared edge and every fan around a vertex would
-otherwise register as a pseudo-intersection).
+<<< @/examples/output/ref_self_intersection.ansi{ansi}
 
-## Example: resolution
+- **Watertight is not enough.** The merged surface passes
+  `is_watertight()` with two shells and volume 2, the overlap counted
+  twice.
+- **Detection.** 32 pairs, all `SELFINT_CROSSING`: no facets of the two
+  cubes are coplanar at this offset. Their segments join into one closed
+  curve, the seam where the two boundaries cross (figure below).
+- **Removal.** The [boolean](/guide/advanced/booleans) union of the two
+  shells is watertight, one shell, of volume 1.7690 = 2 − 0.7 · 0.6 ·
+  0.55, with no self-intersection left. It needs the bodies as separate,
+  individually clean surfaces; for a self-intersecting single shell see
+  [Known limitations](#known-limitations).
 
-```fortran
-program ex_resolve_self_intersections
-use fossil
-use penf,   only : I4P
-implicit none
+![two unit cubes merged into one surface, drawn translucent, the second moved by (0.3, 0.4, 0.45); the 32 crossing segments find_self_intersections reports form one closed ember curve where the two boundaries cross](../../examples/images/ref-self-intersection-cubes.svg){.fossil-figure}
 
-type(surface_stl_object)               :: dragon
-type(intersection_pair_t), allocatable :: pairs(:)
-integer(I4P)                           :: status
-
-call dragon%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
-call dragon%find_self_intersections(pairs=pairs, status=status)
-print '(A,I0)', 'before: ', size(pairs)
-
-call dragon%resolve_self_intersections(status=status)
-
-call dragon%find_self_intersections(pairs=pairs, status=status)
-print '(A,I0,A,I0)', 'after:  ', size(pairs), '  status=', status
-endprogram ex_resolve_self_intersections
-```
+On the dragon fixture (6588 facets) the same call reports 1191 pairs:
+1167 crossings and, since issue #69, 24 pairs of sheets crossing at its
+non-manifold edges. For a clean mesh (`cube-01.stl`, `bunny.stl`) it
+returns no pair: shared edges and the fans around shared vertices never
+register as intersections.
 
 ## Visual reference
 
@@ -194,17 +181,17 @@ inspection and that `is_watertight()` doesn't catch.
 
 ## Known limitations
 
-- **Resolution inherits §1.1's coplanar limitation**. Self-
-  intersections that involve **coplanar facet pairs** (axis-aligned
-  cases especially) may produce a `resolve` output with the same
-  silent-wrong-volume behaviour documented for the boolean. Workaround
-  is the same: perturb by `~1e-6 * bbox_diag`. Most real-world dirty
-  STL has *generic-position* self-intersections (random angles, no
-  coplanar overlap) and the resolution works cleanly.
-- **`resolve_self_intersections` returns the topology of `BOOL_UNION`**
-  applied to the surface against itself. Interior cavities formed by
-  self-intersections are dropped, not re-meshed — if the input had
-  meaningful interior structure, it's gone after resolve.
+- **`resolve_self_intersections` does not resolve.** It currently
+  returns the arrangement unselected: on the two crossing cubes of the
+  [Example](#example) it returns `BOOL_STATUS_OK` with 224 facets,
+  volume 2.0 (the overlap counted twice) and a surface that is not
+  watertight, and on `dragon.stl` it returns status 1 and leaves the
+  surface unchanged; a library issue is pending. Until it is fixed,
+  unite separate bodies with `boolean`, as the Example does, or wrap
+  the input with [`alpha_wrap`](/guide/advanced/alpha-wrap).
+- **Intended behaviour of the resolution.** Once fixed, `resolve_self_intersections` returns the topology of
+  `BOOL_UNION` applied to the surface against itself (see [Pipeline](#pipeline-resolution)): the outer manifold only,
+  so interior cavities formed by the self-intersections are dropped, not re-meshed.
 - **Detection is `O(n_pairs)` in the worst case**, where `n_pairs` is
   the number of overlapping leaf-pairs found in the broad phase. For
   the dragon fixture (~6.6k facets) this is ~10× faster than brute-

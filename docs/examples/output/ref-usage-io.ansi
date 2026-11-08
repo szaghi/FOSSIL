@@ -1,0 +1,7 @@
+$ ref_usage_io
+dragon.stl             facets 6588
+naca0012-ascii.stl     facets 188
+dragon-out-binary.stl  facets 6588
+clipped load           facets 3811
+clipped load           x in [ -10.8287,   1.2261]
+STL contains non-finite coordinates; aborting.

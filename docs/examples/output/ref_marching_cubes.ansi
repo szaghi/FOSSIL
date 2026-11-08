@@ -1,0 +1,9 @@
+$ ref_marching_cubes
+sphere, h 0.18750:  1064 facets, watertight T, volume error 8.72E-02
+sphere, h 0.09375:  4280 facets, watertight T, volume error 2.20E-02
+                    error ratio to the previous h 3.97
+sphere, h 0.04688: 17192 facets, watertight T, volume error 5.47E-03
+                    error ratio to the previous h 4.02
+cube at 12:  1196 facets, watertight T, volume 0.98567, deficit 1.43E-02
+cube at 24:  4796 facets, watertight T, volume 0.98800, deficit 1.20E-02
+cube at 48: 21164 facets, watertight T, volume 0.99759, deficit 2.41E-03

@@ -70,7 +70,8 @@ call surface%isotropic_remesh(target_length, iterations, preserve_features, stat
   input's scale that evens the distribution (on an input with a long
   tail of long edges, such as the dragon below, the splits outnumber
   the collapses and the facet count grows). Pass a smaller
-  value to densify, larger to coarsen.
+  value to densify, larger to coarsen (on closed meshes the collapse
+  pass does not coarsen: see [Known limitations](#known-limitations)).
 - **`iterations`**: outer-loop count. Default `5`. Convergence is
   typically visible after 3 passes; further iterations smooth the edge-
   length distribution further but also accumulate the inward Laplacian
@@ -83,32 +84,38 @@ Mutates `self` in place.
 
 ## Example
 
-Remesh a cube with sharp-feature preservation, then a sphere without
-(the sphere has no sharp features so the flag is moot):
+The cookbook's
+[Remesh to a uniform edge length](/manual/cookbook#remesh-to-a-uniform-edge-length)
+remeshes the cube once. Here, what `preserve_features` changes on it,
+then a curved body watched one iteration at a time.
 
-```fortran
-program ex_isotropic_remesh
-use fossil
-use penf,   only : I4P, R8P
-implicit none
-type(surface_stl_object) :: cube, sphere
-integer(I4P)             :: status
+The unit cube (`cube-01.stl`, edges 0.5 and 0.71) remeshed to
+`L = 0.2`, without and with feature preservation:
 
-! Cube — preserve the 12 sharp edges through remeshing.
-call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-print '(A,I0,A,F8.4)', 'cube before: n_facets = ', cube%get_facets_number(), &
-                       '   smallest edge = ', cube%smallest_edge_len()
-call cube%isotropic_remesh(target_length=0.2_R8P, iterations=3_I4P, &
-                            preserve_features=.true., status=status)
-print '(A,I0,A,F8.4)', 'cube after : n_facets = ', cube%get_facets_number(), &
-                       '   smallest edge = ', cube%smallest_edge_len()
+<<< @/examples/snippets/ref_isotropic_remesh-cube.f90
 
-! Sphere — no sharp features, smooth remesh OK.
-call sphere%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-call sphere%isotropic_remesh(iterations=3_I4P, status=status)
-print '(A,I0)', 'sphere remeshed: n_facets = ', sphere%get_facets_number()
-endprogram ex_isotropic_remesh
-```
+A unit sphere by [marching cubes](/guide/advanced/marching-cubes) on 25³
+samples, whose edges range over an order of magnitude, remeshed to
+`L = 0.1` by three calls of one iteration each (the state carries over
+from call to call), then measured against the input by the certified
+[Hausdorff distance](/guide/advanced/surface-deviation):
+
+<<< @/examples/snippets/ref_isotropic_remesh-sphere.f90
+
+<<< @/examples/output/ref_isotropic_remesh.ansi{ansi}
+
+- **Features off.** The relaxation moves the vertices of the cube's
+  edges and corners like any other, and the projection puts them back
+  on the nearest face: the edges are chamfered. Area 4.969 and volume
+  0.891 instead of 6 and 1.
+- **Features on.** The 12 edges (dihedral 90°, above 30°) are locked,
+  the midpoints inserted on them too: area and volume stay 6 and 1 to
+  the printed digits.
+- **Sphere.** The splits raise the facet count from 2312 to 4224 and
+  the shortest edge from 0.0173 to 0.034; the longest falls from 0.20
+  to 0.13, below `4L/3`. Each iteration costs volume: 0.28 %, 0.15 %,
+  0.09 % (see [Known limitations](#known-limitations)). The remeshed
+  surface is within 0.0100 of the input.
 
 ## Dragon remesh — visual reference
 
@@ -139,8 +146,9 @@ area falls by 10 % (742 → 666), the volume by 1.7 %.
   by ~`r · (1 - cos θ)` per relax step on a region of radius `r` with
   half-aperture `θ`. The projection step after relaxation pulls the
   vertex back toward the input surface but doesn't fully compensate.
-  **Net effect**: a sphere loses ~5% volume per outer iteration even
-  with projection enabled. For convex inputs where preservation
+  **Net effect**: the marching-cubes sphere of the [Example](#example)
+  loses 0.28 %, 0.15 % and 0.09 % of its volume in its first three
+  iterations, even with projection enabled. For convex inputs where preservation
   matters, run fewer iterations (2-3) or use the `target_length`
   parameter conservatively. Tighter preservation requires
   normal-direction projection or scaled-step heuristics; deferred to a
@@ -158,11 +166,18 @@ area falls by 10 % (742 → 666), the volume by 1.7 %.
   Per-pass cost is `O(N log N)` instead of `O(δ_changed)`. Acceptable
   for typical inputs; a 70k-facet remesh runs in ~1 s. For million-
   facet meshes consider running fewer iterations.
-- **Volume drift compounds across iterations.** A sphere remeshed for
-  10 iterations loses ~40% volume — verifiable via
-  `surface%get_volume()` before and after. The current MVP-grade
-  implementation should not be used for volume-critical pipelines
-  without an explicit post-remesh volume-restoration pass.
+- **Volume drift compounds across iterations.** It shrinks per
+  iteration (see the first item) but does not stop: verify it with
+  `surface%get_volume()` before and after. Do not use the remesh in
+  volume-critical pipelines without an explicit post-remesh
+  volume-restoration pass.
+- **The collapse pass does not coarsen closed meshes.** Its
+  non-manifold check also rejects the two apexes the edge's own facets
+  share, so on a closed manifold mesh almost no collapse passes: the
+  sphere of the [Example](#example) keeps its 2312 facets at
+  `L = 0.2`, 0.4 and 0.8, and `cube-01.stl` its 48 at `L = 1`. A
+  larger `target_length` does not reduce the count; use
+  [`decimate`](/guide/advanced/decimate) for that.
 
 ## See also
 
