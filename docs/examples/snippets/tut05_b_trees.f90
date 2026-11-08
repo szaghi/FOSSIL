@@ -1,12 +1,7 @@
 !< Tutorial 5, second run: the same batch on the two kinds of AABB tree. The figures draw the boxes of the BVH four
-!< levels below the root and of the octree two levels below (its leaves at the default depth), built over the facets
-!< of the placed dragon by fossil_aabb_tree_object as analyze builds them (the surface's own tree is private): the BVH
-!< splits the facets, the octree splits the space.
+!< levels below the root and of the octree two levels below (its leaves at the default depth), read from each
+!< surface's own tree by tree_boxes (issue #89): the BVH splits the facets, the octree splits the space.
 program tut05_b_trees
-use fossil_aabb_tree_object, only : aabb_tree_object
-use fossil_aabb_node_object, only : aabb_node_object, bvh_bmin_x_oac, bvh_bmin_y_oac, bvh_bmin_z_oac, &
-                                    bvh_bmax_x_oac, bvh_bmax_y_oac, bvh_bmax_z_oac
-use fossil_facet_object,     only : facet_object
 use fossil_fig,              only : fig_open, fig_surface, fig_box, fig_close
 use fossil,                  only : surface_stl_object, AABB_TREE_OCTREE, AABB_TREE_SAH_BVH
 use penf,                    only : I4P, R8P
@@ -34,58 +29,30 @@ call octree%distance_many(points=points, distances=d_oct, is_signed=.true., is_s
 print '(A,I0)',     'points                ', size(points)
 print '(A,ES10.3)', 'max ||bvh| - |oct||  ', maxval(abs(abs(d_bvh) - abs(d_oct)))
 print '(A,I0)',     'bvh, oct signs differ ', count(d_bvh * d_oct < 0._R8P)
-call draw('tut05-bvh', AABB_TREE_SAH_BVH, 'SAH BVH', 4_I4P)
-call draw('tut05-octree', AABB_TREE_OCTREE, 'octree', 2_I4P)
+call draw(bvh, 'tut05-bvh', 'SAH BVH', 4_I4P)
+call draw(octree, 'tut05-octree', 'octree', 2_I4P)
 contains
-   subroutine draw(name, kind, title, depth)
-   !< The boxes of a tree of the given kind `depth` levels below the root, over the dragon.
-   character(*), intent(in)        :: name, title !< Figure name, tree name.
-   integer(I4P), intent(in)        :: kind        !< Tree kind.
-   integer(I4P), intent(in)        :: depth       !< Levels below the root.
-   type(aabb_tree_object)          :: tree
-   type(facet_object), allocatable :: facet(:)
-   type(aabb_node_object), pointer :: node
-   integer(I4P), allocatable       :: level(:), next(:)
-   integer(I4P)                    :: child(8), nchild, f, c, l, u
-   real(R8P)                       :: longest
-   character(96)                   :: caption
+   subroutine draw(s, name, title, depth)
+   !< The boxes of the tree of s `depth` levels below the root, over the dragon.
+   type(surface_stl_object), intent(in) :: s           !< Surface.
+   character(*),             intent(in) :: name, title !< Figure name, tree name.
+   integer(I4P),             intent(in) :: depth       !< Levels below the root.
+   type(vector_R8P), allocatable        :: bmin(:), bmax(:)
+   integer(I4P),     allocatable        :: level(:)
+   integer(I4P)                         :: c, u, all
+   character(96)                        :: caption
 
-   allocate(facet(bvh%get_facets_number()))
-   longest = 0._R8P
-   do f = 1, size(facet)
-      facet(f) = bvh%facet_at(f)
-      longest = max(longest, edge(facet(f)%vertex(1), facet(f)%vertex(2)), edge(facet(f)%vertex(2), facet(f)%vertex(3)), &
-                    edge(facet(f)%vertex(3), facet(f)%vertex(1)))
-   enddo
-   call tree%set_tree_kind(kind)
-   call tree%initialize(facet=facet, largest_edge_len=longest)
-   level = [0_I4P]                                             ! the root, then its children, depth times
-   do l = 1, depth
-      allocate(next(0))
-      do f = 1, size(level)
-         call tree%enumerate_children(level(f), child, nchild)
-         next = [next, child(1:nchild)]
-      enddo
-      call move_alloc(next, level)
-   enddo
-   write(caption, '(A,A,I0,A,I0,A,I0,A)') title, ': ', size(level), ' boxes ', depth, ' levels below the root, ', &
-                                          tree%get_nodes_number(), ' nodes in all'
+   call s%tree_boxes(bmin=bmin, bmax=bmax)                    ! the whole tree
+   all = size(bmin)
+   call s%tree_boxes(bmin=bmin, bmax=bmax, depth=level, max_depth=depth)
+   write(caption, '(A,A,I0,A,I0,A,I0,A)') title, ': ', count(level == depth), ' boxes ', depth, &
+                                          ' levels below the root, ', all, ' nodes in all'
    print '(A)', trim(caption)
    call fig_open(u, name, trim(caption), -60._R8P, 22._R8P)
-   call fig_surface(u, 'body', bvh)
+   call fig_surface(u, 'body', s)
    do c = 1, size(level)
-      node => tree%node_at(level(c))
-      call fig_box(u, 'accent', bvh_bmin_x_oac(node) * ex_R8P + bvh_bmin_y_oac(node) * ey_R8P + bvh_bmin_z_oac(node) * ez_R8P, &
-                   bvh_bmax_x_oac(node) * ex_R8P + bvh_bmax_y_oac(node) * ey_R8P + bvh_bmax_z_oac(node) * ez_R8P)
+      if (level(c) == depth) call fig_box(u, 'accent', bmin(c), bmax(c))
    enddo
    call fig_close(u)
    endsubroutine draw
-
-   pure function edge(a, b) result(l)
-   !< Length of the edge a-b.
-   type(vector_R8P), intent(in) :: a, b !< Ends.
-   real(R8P)                    :: l    !< Length.
-
-   l = norm2([b%x - a%x, b%y - a%y, b%z - a%z])
-   endfunction edge
 endprogram tut05_b_trees

@@ -1,5 +1,6 @@
 !< Example of the reference page "Ray queries": the three queries on the unit cube cube-01.stl (48 facets, four per
-!< face around its centre), then the cases at its edges: an origin on the surface, and a ray through a shared edge.
+!< face around its centre), then the cases at its edges: an origin on the surface, a ray through a shared edge and one
+!< through the face centres, where four facets meet: one hit per crossing (issue #82).
 program ref_ray_queries
 use fossil,              only : surface_stl_object, ray_hit_t, RAY_STATUS_OK
 use fossil_facet_object, only : facet_object
@@ -37,9 +38,14 @@ print '(A,I0,A,F6.3)', 'origin on the surface: first facet ', hit%facet_id, ', t
 own = hit%facet_id
 call cube%intersect_ray_first(ray_origin=origin, ray_direction=ex_R8P, hit=hit, has_hit=has_hit, exclude=own)
 print '(A,I0,A,F6.3)', '  the same, that facet excluded: facet ', hit%facet_id, ', t ', hit%t
+call cube%intersect_ray_all(ray_origin=origin, ray_direction=ex_R8P, hits=hits)
+print '(A,I0,A,2F6.3)', '  all: ', size(hits), ' hits, t', hits(:)%t
+call cube%intersect_ray_all(ray_origin=origin, ray_direction=ex_R8P, hits=hits, exclude=own)
+print '(A,I0,A,F6.3)', '  all, that facet excluded: ', size(hits), ' hit, t', hits(1)%t
 origin = vector_R8P(-1._R8P, 0.3_R8P, 0.3_R8P)                               ! through the edge of two facets
 call cube%intersect_ray_all(ray_origin=origin, ray_direction=ex_R8P, hits=hits)
-print '(A,I0,A,I0,A)', 'through a shared edge: ', size(hits), ' hits, ', count(hits(2:)%t /= hits(:size(hits) - 1)%t) + 1, &
-                       ' distinct t'
-print '(A,8I4)', '  facets', hits(:)%facet_id
+print '(A,I0,A,2I4)', 'through a shared edge: ', size(hits), ' hits, facets', hits(:)%facet_id
+origin = vector_R8P(-1._R8P, 0.5_R8P, 0.5_R8P)                               ! through the vertex of four facets
+call cube%intersect_ray_all(ray_origin=origin, ray_direction=ex_R8P, hits=hits)
+print '(A,I0,A,2F6.3)', 'through the face centres: ', size(hits), ' hits, t', hits(:)%t
 endprogram ref_ray_queries

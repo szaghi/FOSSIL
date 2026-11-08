@@ -10,3 +10,5 @@ dragon, (0, 0, 25): distance    6.2099
 distance_many: 21 points, equal to distance bit for bit T
   inside 8
 octree and SAH BVH: equal bit for bit T
+BVH boxes 313, leaves 157, depth 10
+octree boxes 59, leaves 50, depth 2

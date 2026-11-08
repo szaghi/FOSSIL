@@ -80,6 +80,7 @@ endprogram curve_tour
 | `curve_markers(dx, centroids, lengths, normals, spacing_fraction, spacings, status)` | Exact arc-length resampling into nint(L/dx) pieces per loop: markers on the polyline, lengths, normals (issue #42). |
 | `cut_cells(x, y, cut, status)` | Exact cut cells (`cut_cells_2d_t`): fractions, apertures, centroids, wetted boundary, pieces. See [Cut-cell geometry](/guide/advanced/cut-cells). |
 | `tag_block(x, y, band, tags, sign_algorithm, status)` | Signed tag bands on a block of cells given its edges. See [AMR tagging](/guide/advanced/amr-tagging). |
+| `tree_boxes(bmin, bmax, depth, leaf, max_depth, parent, segment_start, segment_ids, status)` | The boxes of the segment BVH (issue #89, twin of `surface%tree_boxes`), `[2, n]` in (u, v), breadth first from the root, down to `max_depth`; the segments of the leaves in CSR form. |
 
 `sign_algorithm` is `SIGN_PSEUDO_NORMAL` or `SIGN_FAST_WINDING_NUMBER`; the
 latter is robust on open loops and gaps. The point queries default to the

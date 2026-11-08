@@ -301,8 +301,9 @@ digits shown. See [winding number](/guide/advanced/winding-number).
 ![a ray cast along +y from (0, -20, 12) to its first hit on the dragon, the facet hit in ember](../examples/images/ck-ray_hit.svg){.fossil-figure}
 
 `t` is the parameter along the ray, `point = origin + t direction`; the direction need not be a unit vector.
-`intersect_ray_all` returns every hit and `intersect_ray_any` stops at the first one. See
-[ray queries](/guide/advanced/ray-queries).
+`intersect_ray_all` returns every crossing, once each even through a shared edge or vertex (so the parity of the
+count on a closed surface tells inside from outside), and `intersect_ray_any` stops at the first one. A ray cast from
+a facet skips it with `exclude=`. See [ray queries](/guide/advanced/ray-queries).
 
 ### Choose the acceleration tree
 
@@ -316,6 +317,18 @@ or `analyze` picks it: `AABB_TREE_SAH_BVH` (the default, a binary tree built by 
 the distances agree bit for bit: the largest difference over the 1000 points is 0. They differ in speed only, and
 the SAH tree is the faster on every measured mesh. See
 [choosing the AABB tree kind](/guide/usage#choosing-the-aabb-tree-kind).
+
+### Read the acceleration tree
+
+<<< @/examples/snippets/ck_tree_boxes.f90
+
+<<< @/examples/output/ck_tree_boxes.ansi{ansi}
+
+`tree_boxes` returns the boxes of the surface's own tree, breadth first from the root, with the optional depth, leaf
+flags, parents and the facets of each leaf (`facet_ids(facet_start(i):facet_start(i+1)-1)`). Every facet is in
+exactly one leaf. Above, the leaf boxes that touch a region give the facets a query there would test; the same list
+serves to tag the cells of a block or to see where a query spends its time. `max_depth=` stops at a level,
+`curve%tree_boxes` reads the segment BVH of a curve. See [reading the tree](/guide/usage#reading-the-tree).
 
 ### Run a batch of queries on the GPU
 

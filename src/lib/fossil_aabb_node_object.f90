@@ -8,7 +8,7 @@ module fossil_aabb_node_object
 use fossil_aabb_object, only : aabb_object
 use fossil_facet_object, only : facet_object
 use fossil_list_id_object, only : list_id_object
-use fossil_ray_query, only : ray_hit_t
+use fossil_ray_query, only : ray_hit_t, ray_exact_t, ray_facet_crossing
 use penf, only : I4P, R8P, MaxR8P
 use vecfor, only : vector_R8P
 
@@ -386,8 +386,9 @@ contains
    if (self%is_present) do_intersect = self%aabb%do_ray_intersect(ray_origin=ray_origin, ray_direction=ray_direction)
    endfunction do_ray_intersect
 
-   subroutine intersect_ray_all_facets(self, facet, ray_origin, ray_direction, tmp, n_hits, n_overflow)
-   !< Append every facet hit on this node into `tmp` (issue #18 §2.5).
+   subroutine intersect_ray_all_facets(self, facet, ray, tmp, n_hits, n_overflow, exclude)
+   !< Append every facet hit on this node into `tmp` (issue #18 §2.5), decided by the exact kernel (issue #82); the facet
+   !< `exclude` is skipped.
    !<
    !< `n_hits` is the running write index, advanced once per accepted hit. If
    !< `n_hits` would exceed `size(tmp)`, the hit is counted in `n_overflow`
@@ -395,23 +396,24 @@ contains
    !< pre-sizes `tmp` generously).
    class(aabb_node_object),      intent(in)    :: self           !< AABB node.
    type(facet_object),           intent(in)    :: facet(:)       !< Facets list.
-   type(vector_R8P),             intent(in)    :: ray_origin     !< Ray origin.
-   type(vector_R8P),             intent(in)    :: ray_direction  !< Ray direction.
+   type(ray_exact_t),            intent(in)    :: ray            !< Prepared ray (issue #82).
    type(ray_hit_t), allocatable, intent(inout) :: tmp(:)         !< Hit accumulator.
    integer(I4P),                 intent(inout) :: n_hits         !< Write index (advanced).
    integer(I4P),                 intent(inout) :: n_overflow     !< Hits dropped because tmp was full.
+   integer(I4P), optional,       intent(in)    :: exclude        !< Facet to skip (issue #82).
    integer(I4P)                                :: nf, f, fid     !< Facet-list counters.
-   real(R8P)                                   :: t, u, v        !< Per-facet output.
+   real(R8P)                                   :: t              !< Per-facet output.
    logical                                     :: facet_hit      !< Per-facet flag.
 
    if (.not. self%is_present) return
    nf = self%aabb%facet_id%ids_number
    do f = 1_I4P, nf
       fid = self%aabb%facet_id%id(f)
-      call facet(fid)%intersect_ray(ray_origin=ray_origin, ray_direction=ray_direction, &
-                                    t=t, u=u, v=v, hit=facet_hit)
+      if (present(exclude)) then
+         if (fid == exclude) cycle
+      endif
+      call ray_facet_crossing(ray, facet(fid), facet_hit, t)
       if (.not. facet_hit) cycle
-      if (t < 0._R8P) cycle
       if (n_hits + 1_I4P > size(tmp, kind=I4P)) then
          n_overflow = n_overflow + 1_I4P
          cycle
@@ -419,11 +421,11 @@ contains
       n_hits = n_hits + 1_I4P
       tmp(n_hits)%facet_id = fid
       tmp(n_hits)%t        = t
-      tmp(n_hits)%point    = ray_origin + t * ray_direction
+      tmp(n_hits)%point    = vector_R8P(ray%o(1) + t * ray%d(1), ray%o(2) + t * ray%d(2), ray%o(3) + t * ray%d(3))
    enddo
    endsubroutine intersect_ray_all_facets
 
-   subroutine intersect_ray_first_facets(self, facet, ray_origin, ray_direction, hit, has_hit, t_best, exclude)
+   subroutine intersect_ray_first_facets(self, facet, ray, hit, has_hit, t_best, exclude)
    !< Update closest hit using this node's facets (issue #18 §2.5).
    !<
    !< Mutates `hit / has_hit / t_best` if any facet on this node hits at
@@ -431,14 +433,13 @@ contains
    !< call this on a node whose AABB the ray missed). The facet `exclude` (issue #62) is skipped.
    class(aabb_node_object), intent(in)    :: self           !< AABB node.
    type(facet_object),      intent(in)    :: facet(:)       !< Facets list.
-   type(vector_R8P),        intent(in)    :: ray_origin     !< Ray origin.
-   type(vector_R8P),        intent(in)    :: ray_direction  !< Ray direction.
+   type(ray_exact_t),       intent(in)    :: ray            !< Prepared ray (issue #82).
    type(ray_hit_t),         intent(inout) :: hit            !< Running closest hit.
    logical,                 intent(inout) :: has_hit        !< Set true on first hit.
    real(R8P),               intent(inout) :: t_best         !< Running best t.
    integer(I4P), optional,  intent(in)    :: exclude        !< Facet to skip (the ray source, issue #62).
    integer(I4P)                           :: nf, f, fid     !< Counters.
-   real(R8P)                              :: t, u, v        !< Per-facet output.
+   real(R8P)                              :: t              !< Per-facet output.
    logical                                :: facet_hit      !< Per-facet flag.
 
    if (.not. self%is_present) return
@@ -448,49 +449,47 @@ contains
       if (present(exclude)) then
          if (fid == exclude) cycle
       endif
-      call facet(fid)%intersect_ray(ray_origin=ray_origin, ray_direction=ray_direction, &
-                                    t=t, u=u, v=v, hit=facet_hit)
+      call ray_facet_crossing(ray, facet(fid), facet_hit, t)
       if (.not. facet_hit) cycle
-      if (t < 0._R8P) cycle
-      if (t >= t_best) cycle
+      if (t > t_best) cycle
+      if (t == t_best .and. has_hit) then
+         if (fid > hit%facet_id) cycle ! equal t: the lower facet id, as the sorted list of `_all`
+      endif
       t_best = t
       has_hit = .true.
       hit%facet_id = fid
       hit%t        = t
-      hit%point    = ray_origin + t * ray_direction
+      hit%point    = vector_R8P(ray%o(1) + t * ray%d(1), ray%o(2) + t * ray%d(2), ray%o(3) + t * ray%d(3))
    enddo
    endsubroutine intersect_ray_first_facets
 
-   subroutine intersect_ray_any_facets(self, facet, ray_origin, ray_direction, max_t, found)
+   subroutine intersect_ray_any_facets(self, facet, ray, max_t, found)
    !< Set `found = .true.` and return as soon as any facet on this node hits at
    !< `0 <= t <= max_t` (issue #18 §2.5). No record kept; the caller only cares
    !< about existence (shadow ray, occlusion test).
    class(aabb_node_object), intent(in)    :: self           !< AABB node.
    type(facet_object),      intent(in)    :: facet(:)       !< Facets list.
-   type(vector_R8P),        intent(in)    :: ray_origin     !< Ray origin.
-   type(vector_R8P),        intent(in)    :: ray_direction  !< Ray direction.
+   type(ray_exact_t),       intent(in)    :: ray            !< Prepared ray (issue #82).
    real(R8P),               intent(in)    :: max_t          !< Upper t bound (use MaxR8P for "any hit").
    logical,                 intent(inout) :: found          !< Set true on first hit; left untouched otherwise.
    integer(I4P)                           :: nf, f, fid     !< Counters.
-   real(R8P)                              :: t, u, v        !< Per-facet output.
+   real(R8P)                              :: t              !< Per-facet output.
    logical                                :: facet_hit      !< Per-facet flag.
 
    if (.not. self%is_present) return
    nf = self%aabb%facet_id%ids_number
    do f = 1_I4P, nf
       fid = self%aabb%facet_id%id(f)
-      call facet(fid)%intersect_ray(ray_origin=ray_origin, ray_direction=ray_direction, &
-                                    t=t, u=u, v=v, hit=facet_hit)
+      call ray_facet_crossing(ray, facet(fid), facet_hit, t)
       if (.not. facet_hit) cycle
-      if (t < 0._R8P) cycle
       if (t > max_t)   cycle
       found = .true.
       return
    enddo
    endsubroutine intersect_ray_any_facets
 
-   pure subroutine ray_slab_interval(self, ray_origin, ray_direction, t_near, t_far, do_intersect)
-   !< Forward to `aabb%ray_slab_interval`. Returns `do_intersect = .false.` and a
+   pure subroutine ray_slab_interval(self, ray_origin, ray_direction, t_near, t_far, do_intersect, pad)
+   !< Forward to `aabb%ray_slab_interval` (`pad`: the box padded, issue #82). Returns `do_intersect = .false.` and a
    !< degenerate interval when this node carries no AABB (unallocated container).
    class(aabb_node_object), intent(in)  :: self          !< AABB node.
    type(vector_R8P),        intent(in)  :: ray_origin    !< Ray origin.
@@ -498,12 +497,13 @@ contains
    real(R8P),               intent(out) :: t_near        !< Slab interval near (entry) parameter.
    real(R8P),               intent(out) :: t_far         !< Slab interval far (exit) parameter.
    logical,                 intent(out) :: do_intersect  !< True if half-ray hits the box.
+   real(R8P), optional,     intent(in)  :: pad           !< Box pad (issue #82).
 
    t_near = 0._R8P
    t_far  = 0._R8P
    do_intersect = .false.
    if (self%is_present) call self%aabb%ray_slab_interval(ray_origin=ray_origin, ray_direction=ray_direction, &
-                                                              t_near=t_near, t_far=t_far, do_intersect=do_intersect)
+                                                              t_near=t_near, t_far=t_far, do_intersect=do_intersect, pad=pad)
    endsubroutine ray_slab_interval
 
    pure function facet_id(self)

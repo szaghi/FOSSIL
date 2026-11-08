@@ -15,9 +15,9 @@ use fossil_aabb_node_object, only : aabb_node_object,                           
 use fossil_facet_object, only : facet_object, triangle_point_distance_sq
 use fossil_solid_angle,  only : solid_angle_oac
 use fossil_list_id_object, only : list_id_object
-use fossil_ray_query, only : ray_hit_t
+use fossil_ray_query, only : ray_hit_t, ray_exact_t, ray_prepare, sort_hits_by_t
 use penf, only : I4P, R8P, MaxR8P, str
-use vecfor, only : vector_R8P
+use vecfor, only : vector_R8P, normL2_R8P
 
 implicit none
 private
@@ -183,6 +183,9 @@ type :: aabb_tree_object
    type(facet_distance_payload), allocatable, public :: payload(:) !< Flat distance SoA (issue #19 §B1). PUBLIC for device access (Step 5).
    logical                             :: is_initialized=.false. !< Sentinel to check is AABB tree is initialized.
    logical                             :: use_index=.true.       !< Dispatch knob: .true.=use index tree, .false.=brute-force scan.
+   real(R8P)                           :: reach=0._R8P           !< Octree: max distance of a facet point from the box of its
+                                                                 !< node (a node holds the facets whose centroid it contains);
+                                                                 !< 0 for the BVH, whose boxes bound their facets (issue #82).
    contains
       ! read-only accessors (pure, inlined at -O2, zero data copy)
       procedure, pass(self) :: get_refinement_levels !< Return refinement_levels.
@@ -210,6 +213,8 @@ type :: aabb_tree_object
       procedure, pass(self) :: intersect_ray_all_tree      !< Tree-accelerated all-hits ray query (issue #18 §2.5).
       procedure, pass(self) :: intersect_ray_first_tree    !< Tree-accelerated first-hit ray query (issue #18 §2.5).
       procedure, pass(self) :: intersect_ray_any_tree      !< Tree-accelerated any-hit ray query with early exit (issue #18 §2.5).
+      procedure, pass(self) :: prepare_ray                 !< Ray prepared for the exact kernel (issue #82).
+      procedure, pass(self) :: node_boxes                  !< Node boxes breadth first down to a depth (issue #89).
       procedure, pass(self) :: save_geometry_tecplot_ascii !< Save AABB tree boxes geometry into Tecplot ascii file.
       procedure, pass(self) :: translate                   !< Translate AABB tree by delta.
       ! operators
@@ -564,6 +569,13 @@ contains
    integer(I4P)                           :: parent     !< Parent node index.
    integer(I4P), allocatable              :: ids(:)     !< Facets IDs, contiguous.
 
+   self%reach = 0._R8P ! a facet lies within reach of its centroid, so of the box of its node (issue #82)
+   do b = 1, size(facet, dim=1)
+      do bb = 1, 3
+         self%reach = max(self%reach, normL2_R8P(facet(b)%vertex(bb) - facet(b)%centroid))
+      enddo
+   enddo
+   self%reach = self%reach * (1._R8P + 1.e-12_R8P)
    associate(node=>self%node)
       ! add facets to nodes
       allocate(ids(size(facet, dim=1)))
@@ -1296,6 +1308,7 @@ contains
    if (allocated(rhs%payload)) lhs%payload = rhs%payload
    lhs%is_initialized = rhs%is_initialized
    lhs%use_index      = rhs%use_index
+   lhs%reach          = rhs%reach
    endsubroutine aabb_tree_assign_aabb_tree
 
    ! private methods
@@ -1993,30 +2006,35 @@ contains
    endassociate
    endfunction ray_intersections_number_node
 
-   subroutine intersect_ray_all_tree(self, facet, ray_origin, ray_direction, hits)
+   subroutine intersect_ray_all_tree(self, facet, ray_origin, ray_direction, hits, exclude)
    !< Tree-accelerated all-hits ray query (issue #18 §2.5).
    !<
-   !< Returns every facet hit by the half-ray `t >= 0`, sorted ascending by `t`.
-   !< Equivalent contract to `ray_intersect_all_flat` (sorted, no duplicates), only
-   !< faster: prunes whole subtrees whose AABB the ray misses.
+   !< Returns every facet hit by the half-ray `t >= 0`, sorted ascending by `t` (then facet id): one hit per crossing,
+   !< decided exactly (issue #82, `fossil_ray_query`), the facet `exclude` skipped. Equivalent contract to
+   !< `ray_intersect_all_flat`, only faster: prunes whole subtrees whose (padded) AABB the ray misses.
    class(aabb_tree_object),      intent(in)  :: self           !< AABB tree.
    type(facet_object),           intent(in)  :: facet(:)       !< Facets list.
    type(vector_R8P),             intent(in)  :: ray_origin     !< Ray origin.
    type(vector_R8P),             intent(in)  :: ray_direction  !< Ray direction.
    type(ray_hit_t), allocatable, intent(out) :: hits(:)        !< Sorted hit records.
+   integer(I4P), optional,       intent(in)  :: exclude        !< Facet to skip (issue #82).
+   type(ray_exact_t)                         :: ray            !< Prepared ray.
    type(ray_hit_t), allocatable              :: tmp(:)         !< Pre-sort buffer.
    integer(I4P)                              :: n_hits         !< Running hit count.
    integer(I4P)                              :: n_overflow     !< Hits dropped because tmp was full (re-runs).
    integer(I4P)                              :: cap            !< Capacity of tmp.
 
+   if (self%nodes_number <= 0_I4P) then
+      allocate(hits(0)) ; return
+   endif
+   ray = self%prepare_ray(ray_origin, ray_direction)
    cap = max(16_I4P, size(facet, kind=I4P) / 8_I4P)  ! guess: ~12.5% of facets are hit
    do
       allocate(tmp(cap))
       n_hits = 0_I4P
       n_overflow = 0_I4P
-      call self%intersect_ray_all_node(n=0_I4P, facet=facet, ray_origin=ray_origin, &
-                                       ray_direction=ray_direction, tmp=tmp, n_hits=n_hits, &
-                                       n_overflow=n_overflow)
+      call self%intersect_ray_all_node(n=0_I4P, facet=facet, ray=ray, tmp=tmp, n_hits=n_hits, &
+                                       n_overflow=n_overflow, exclude=exclude)
       if (n_overflow == 0_I4P) exit
       ! Re-run with a buffer big enough to hold the hits we observed plus the overflow.
       cap = (n_hits + n_overflow) * 2_I4P
@@ -2027,19 +2045,18 @@ contains
    call sort_hits_by_t(hits)
    endsubroutine intersect_ray_all_tree
 
-   recursive subroutine intersect_ray_all_node(self, n, facet, ray_origin, ray_direction, &
-                                                tmp, n_hits, n_overflow)
+   recursive subroutine intersect_ray_all_node(self, n, facet, ray, tmp, n_hits, n_overflow, exclude)
    !< Recursive descent under `intersect_ray_all_tree`. At each node: prune via the
    !< slab test; at a leaf, delegate the per-facet sweep to `node%intersect_ray_all_facets`.
    !< Tree-kind-agnostic via `enumerate_children`.
    class(aabb_tree_object),      intent(in)    :: self           !< AABB tree.
    integer(I4P),                 intent(in)    :: n              !< Current AABB node.
    type(facet_object),           intent(in)    :: facet(:)       !< Facets list.
-   type(vector_R8P),             intent(in)    :: ray_origin     !< Ray origin.
-   type(vector_R8P),             intent(in)    :: ray_direction  !< Ray direction.
+   type(ray_exact_t),            intent(in)    :: ray            !< Prepared ray (issue #82).
    type(ray_hit_t), allocatable, intent(inout) :: tmp(:)         !< Hit accumulator.
    integer(I4P),                 intent(inout) :: n_hits         !< Running hit count.
    integer(I4P),                 intent(inout) :: n_overflow     !< Capacity-overflow counter.
+   integer(I4P), optional,       intent(in)    :: exclude        !< Facet to skip.
    integer(I4P)                                :: child_idx(TREE_RATIO)
    integer(I4P)                                :: nchild         !< Number of allocated children.
    integer(I4P)                                :: i              !< Loop counter.
@@ -2048,19 +2065,17 @@ contains
 
    associate(node=>self%node)
       if (.not. node(n)%is_allocated()) return
-      call node(n)%ray_slab_interval(ray_origin=ray_origin, ray_direction=ray_direction, &
-                                     t_near=t_near, t_far=t_far, do_intersect=hits_box)
+      call node(n)%ray_slab_interval(ray_origin=origin_of(ray), ray_direction=direction_of(ray), &
+                                     t_near=t_near, t_far=t_far, do_intersect=hits_box, pad=ray%pad)
       if (.not. hits_box) return
       call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
       if (nchild == 0_I4P) then
-         call node(n)%intersect_ray_all_facets(facet=facet, ray_origin=ray_origin, &
-                                               ray_direction=ray_direction, tmp=tmp, &
-                                               n_hits=n_hits, n_overflow=n_overflow)
+         call node(n)%intersect_ray_all_facets(facet=facet, ray=ray, tmp=tmp, &
+                                               n_hits=n_hits, n_overflow=n_overflow, exclude=exclude)
       else
          do i = 1_I4P, nchild
-            call self%intersect_ray_all_node(n=child_idx(i), facet=facet, ray_origin=ray_origin, &
-                                             ray_direction=ray_direction, tmp=tmp, n_hits=n_hits, &
-                                             n_overflow=n_overflow)
+            call self%intersect_ray_all_node(n=child_idx(i), facet=facet, ray=ray, tmp=tmp, n_hits=n_hits, &
+                                             n_overflow=n_overflow, exclude=exclude)
          enddo
       endif
    endassociate
@@ -2079,24 +2094,24 @@ contains
    logical,                 intent(out) :: has_hit        !< True if any facet was hit.
    integer(I4P), optional,  intent(in)  :: exclude        !< Facet to skip (the ray source, issue #62).
    real(R8P)                            :: t_best         !< Running best t (start at +inf).
+   type(ray_exact_t)                    :: ray            !< Prepared ray (issue #82).
 
    has_hit = .false.
    t_best = MaxR8P
-   call self%intersect_ray_first_node(n=0_I4P, facet=facet, ray_origin=ray_origin, &
-                                      ray_direction=ray_direction, hit=hit, has_hit=has_hit, t_best=t_best, &
+   if (self%nodes_number <= 0_I4P) return
+   ray = self%prepare_ray(ray_origin, ray_direction)
+   call self%intersect_ray_first_node(n=0_I4P, facet=facet, ray=ray, hit=hit, has_hit=has_hit, t_best=t_best, &
                                       exclude=exclude)
    endsubroutine intersect_ray_first_tree
 
-   recursive subroutine intersect_ray_first_node(self, n, facet, ray_origin, ray_direction, &
-                                                  hit, has_hit, t_best, exclude)
+   recursive subroutine intersect_ray_first_node(self, n, facet, ray, hit, has_hit, t_best, exclude)
    !< Best-first recursive descent. Children are sorted by their slab `t_near` so
    !< the closest box is visited first; once `t_best` shrinks below a sibling's
    !< `t_near`, that sibling and its subtree are pruned.
    class(aabb_tree_object), intent(in)    :: self           !< AABB tree.
    integer(I4P),            intent(in)    :: n              !< Current AABB node.
    type(facet_object),      intent(in)    :: facet(:)       !< Facets list.
-   type(vector_R8P),        intent(in)    :: ray_origin     !< Ray origin.
-   type(vector_R8P),        intent(in)    :: ray_direction  !< Ray direction.
+   type(ray_exact_t),       intent(in)    :: ray            !< Prepared ray (issue #82).
    type(ray_hit_t),         intent(inout) :: hit            !< Running closest hit.
    logical,                 intent(inout) :: has_hit        !< True once any hit recorded.
    real(R8P),               intent(inout) :: t_best         !< Running best t (used for pruning).
@@ -2112,14 +2127,13 @@ contains
 
    associate(node=>self%node)
       if (.not. node(n)%is_allocated()) return
-      call node(n)%ray_slab_interval(ray_origin=ray_origin, ray_direction=ray_direction, &
-                                     t_near=t_near, t_far=t_far, do_intersect=hits_box)
+      call node(n)%ray_slab_interval(ray_origin=origin_of(ray), ray_direction=direction_of(ray), &
+                                     t_near=t_near, t_far=t_far, do_intersect=hits_box, pad=ray%pad)
       if (.not. hits_box) return
-      if (t_near >= t_best) return  ! whole subtree is past the running best
+      if (t_near > t_best) return  ! whole subtree is past the running best (equal: a lower facet id may tie)
       call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
       if (nchild == 0_I4P) then
-         call node(n)%intersect_ray_first_facets(facet=facet, ray_origin=ray_origin, &
-                                                 ray_direction=ray_direction, hit=hit, &
+         call node(n)%intersect_ray_first_facets(facet=facet, ray=ray, hit=hit, &
                                                  has_hit=has_hit, t_best=t_best, exclude=exclude)
       else
          ! Score children by their own slab t_near, then visit ascending.
@@ -2128,8 +2142,9 @@ contains
                child_tnear(i) = MaxR8P
                cycle
             endif
-            call node(child_idx(i))%ray_slab_interval(ray_origin=ray_origin, ray_direction=ray_direction, &
-                                                      t_near=child_tnear(i), t_far=t_far, do_intersect=hits_box)
+            call node(child_idx(i))%ray_slab_interval(ray_origin=origin_of(ray), ray_direction=direction_of(ray), &
+                                                      t_near=child_tnear(i), t_far=t_far, do_intersect=hits_box, &
+                                                      pad=ray%pad)
             if (.not. hits_box) child_tnear(i) = MaxR8P
          enddo
          ! Insertion sort (nchild <= 8).
@@ -2147,9 +2162,8 @@ contains
             child_idx(j + 1_I4P)   = swap_i
          enddo
          do i = 1_I4P, nchild
-            if (child_tnear(i) >= t_best) exit  ! all remaining are pruned
-            call self%intersect_ray_first_node(n=child_idx(i), facet=facet, ray_origin=ray_origin, &
-                                               ray_direction=ray_direction, hit=hit, has_hit=has_hit, &
+            if (child_tnear(i) > t_best) exit  ! all remaining are pruned
+            call self%intersect_ray_first_node(n=child_idx(i), facet=facet, ray=ray, hit=hit, has_hit=has_hit, &
                                                t_best=t_best, exclude=exclude)
          enddo
       endif
@@ -2172,19 +2186,20 @@ contains
    type(vector_R8P),        intent(in)  :: ray_direction  !< Ray direction.
    real(R8P),               intent(in)  :: max_t          !< Upper t bound (parametric).
    logical,                 intent(out) :: found          !< True iff at least one hit in [0, max_t].
+   type(ray_exact_t)                    :: ray            !< Prepared ray (issue #82).
 
    found = .false.
-   call self%intersect_ray_any_node(n=0_I4P, facet=facet, ray_origin=ray_origin, &
-                                    ray_direction=ray_direction, max_t=max_t, found=found)
+   if (self%nodes_number <= 0_I4P) return
+   ray = self%prepare_ray(ray_origin, ray_direction)
+   call self%intersect_ray_any_node(n=0_I4P, facet=facet, ray=ray, max_t=max_t, found=found)
    endsubroutine intersect_ray_any_tree
 
-   recursive subroutine intersect_ray_any_node(self, n, facet, ray_origin, ray_direction, max_t, found)
+   recursive subroutine intersect_ray_any_node(self, n, facet, ray, max_t, found)
    !< Depth-first early-exit recursion. Returns immediately once `found` is set.
    class(aabb_tree_object), intent(in)    :: self           !< AABB tree.
    integer(I4P),            intent(in)    :: n              !< Current AABB node.
    type(facet_object),      intent(in)    :: facet(:)       !< Facets list.
-   type(vector_R8P),        intent(in)    :: ray_origin     !< Ray origin.
-   type(vector_R8P),        intent(in)    :: ray_direction  !< Ray direction.
+   type(ray_exact_t),       intent(in)    :: ray            !< Prepared ray (issue #82).
    real(R8P),               intent(in)    :: max_t          !< Upper t bound.
    logical,                 intent(inout) :: found          !< Early-exit flag.
    integer(I4P)                           :: child_idx(TREE_RATIO)
@@ -2196,42 +2211,21 @@ contains
    if (found) return
    associate(node=>self%node)
       if (.not. node(n)%is_allocated()) return
-      call node(n)%ray_slab_interval(ray_origin=ray_origin, ray_direction=ray_direction, &
-                                     t_near=t_near, t_far=t_far, do_intersect=hits_box)
+      call node(n)%ray_slab_interval(ray_origin=origin_of(ray), ray_direction=direction_of(ray), &
+                                     t_near=t_near, t_far=t_far, do_intersect=hits_box, pad=ray%pad)
       if (.not. hits_box) return
       if (t_near > max_t) return  ! whole subtree begins past max_t
       call self%enumerate_children(n=n, out_idx=child_idx, nchild=nchild)
       if (nchild == 0_I4P) then
-         call node(n)%intersect_ray_any_facets(facet=facet, ray_origin=ray_origin, &
-                                               ray_direction=ray_direction, max_t=max_t, found=found)
+         call node(n)%intersect_ray_any_facets(facet=facet, ray=ray, max_t=max_t, found=found)
       else
          do i = 1_I4P, nchild
             if (found) return
-            call self%intersect_ray_any_node(n=child_idx(i), facet=facet, ray_origin=ray_origin, &
-                                             ray_direction=ray_direction, max_t=max_t, found=found)
+            call self%intersect_ray_any_node(n=child_idx(i), facet=facet, ray=ray, max_t=max_t, found=found)
          enddo
       endif
    endassociate
    endsubroutine intersect_ray_any_node
-
-   pure subroutine sort_hits_by_t(hits)
-   !< Insertion sort hits ascending by `t`. Hit counts are typically small (~2..20),
-   !< so the O(n^2) constant beats library-call overhead.
-   type(ray_hit_t), intent(inout) :: hits(:)
-   type(ray_hit_t)                :: key
-   integer(I4P)                   :: i, j
-
-   do i = 2_I4P, size(hits, kind=I4P)
-      key = hits(i)
-      j = i - 1_I4P
-      do while (j >= 1_I4P)
-         if (hits(j)%t <= key%t) exit
-         hits(j + 1_I4P) = hits(j)
-         j = j - 1_I4P
-      enddo
-      hits(j + 1_I4P) = key
-   enddo
-   endsubroutine sort_hits_by_t
 
    ! non TBP
    pure function first_child_node(node)
@@ -2411,4 +2405,84 @@ contains
       str_location_code = str_location_code//trim(str(no_sign=.true., n=code(c)))
    enddo
    endfunction str_location_code
+   pure subroutine node_boxes(self, max_depth, bmin, bmax, depth, leaf, parent, facet_start, facet_ids)
+   !< The boxes of the allocated nodes, breadth first from the root (issue #89), down to `max_depth` (root = 0): box,
+   !< depth, leaf flag (no children: a node at max_depth with children is not a leaf), parent (position in the output,
+   !< 0 for the root) and, for the leaves, their facets in CSR form (facet_ids(facet_start(i):facet_start(i+1)-1)).
+   !< The tree's own node numbering is not exposed: the octree's root is node 0 and its nodes are implicit, the BVH's
+   !< are explicit; the output order is the same rule for both. Octree boxes are the cells of the space partition (a
+   !< leaf holds the facets whose centroid it contains, which may stick out of it); BVH boxes bound their facets.
+   class(aabb_tree_object),   intent(in)  :: self           !< AABB tree.
+   integer(I4P),              intent(in)  :: max_depth      !< Deepest level returned (root = 0).
+   type(vector_R8P),          allocatable, intent(out) :: bmin(:), bmax(:) !< Boxes.
+   integer(I4P),              allocatable, intent(out) :: depth(:)          !< Depths.
+   logical,                   allocatable, intent(out) :: leaf(:)           !< Leaf flags.
+   integer(I4P),              allocatable, intent(out) :: parent(:)         !< Parents (0: root).
+   integer(I4P),              allocatable, intent(out) :: facet_start(:)    !< CSR start [n + 1].
+   integer(I4P),              allocatable, intent(out) :: facet_ids(:)      !< Facets of the leaves.
+   integer(I4P), allocatable                           :: idx(:), dep(:), par(:) !< Queue.
+   logical,      allocatable                           :: lf(:)  !< Leaf flags (queue).
+   integer(I4P)                                        :: child(TREE_RATIO), nchild, n, head, c, k, m !< Counters.
+
+   n = 0_I4P
+   if (self%nodes_number > 0_I4P) then
+      allocate(idx(self%nodes_number), dep(self%nodes_number), par(self%nodes_number), lf(self%nodes_number))
+      if (self%node(0)%is_allocated()) then
+         n = 1_I4P ; idx(1) = 0_I4P ; dep(1) = 0_I4P ; par(1) = 0_I4P
+      endif
+      head = 1_I4P
+      do while (head <= n)
+         call self%enumerate_children(n=idx(head), out_idx=child, nchild=nchild)
+         lf(head) = nchild == 0_I4P
+         if (dep(head) < max_depth) then
+            do c = 1_I4P, nchild
+               n = n + 1_I4P
+               idx(n) = child(c) ; dep(n) = dep(head) + 1_I4P ; par(n) = head
+            enddo
+         endif
+         head = head + 1_I4P
+      enddo
+   endif
+   allocate(bmin(n), bmax(n), depth(n), leaf(n), parent(n), facet_start(n + 1_I4P))
+   facet_start(1) = 1_I4P
+   do k = 1_I4P, n
+      bmin(k) = self%node(idx(k))%bmin() ; bmax(k) = self%node(idx(k))%bmax()
+      depth(k) = dep(k) ; leaf(k) = lf(k) ; parent(k) = par(k)
+      m = 0_I4P ; if (leaf(k)) m = self%node(idx(k))%facet_id_count()
+      facet_start(k + 1_I4P) = facet_start(k) + m
+   enddo
+   allocate(facet_ids(facet_start(n + 1_I4P) - 1_I4P))
+   do k = 1_I4P, n
+      do m = 1_I4P, facet_start(k + 1_I4P) - facet_start(k)
+         facet_ids(facet_start(k) + m - 1_I4P) = self%node(idx(k))%facet_id_at(m)
+      enddo
+   enddo
+   endsubroutine node_boxes
+
+   pure function prepare_ray(self, ray_origin, ray_direction) result(ray)
+   !< The ray prepared for the exact kernel (issue #82): far point beyond the root box, slab pad (plus the octree's
+   !< facet reach).
+   class(aabb_tree_object), intent(in) :: self          !< AABB tree (nodes_number > 0).
+   type(vector_R8P),        intent(in) :: ray_origin    !< Ray origin.
+   type(vector_R8P),        intent(in) :: ray_direction !< Ray direction.
+   type(ray_exact_t)                   :: ray           !< Prepared ray.
+
+   ray = ray_prepare(ray_origin, ray_direction, self%node(0)%bmin(), self%node(0)%bmax(), reach=self%reach)
+   endfunction prepare_ray
+
+   pure function origin_of(ray) result(o)
+   !< Origin of a prepared ray.
+   type(ray_exact_t), intent(in) :: ray !< Prepared ray.
+   type(vector_R8P)              :: o   !< Origin.
+
+   o = vector_R8P(ray%o(1), ray%o(2), ray%o(3))
+   endfunction origin_of
+
+   pure function direction_of(ray) result(d)
+   !< Direction of a prepared ray.
+   type(ray_exact_t), intent(in) :: ray !< Prepared ray.
+   type(vector_R8P)              :: d   !< Direction.
+
+   d = vector_R8P(ray%d(1), ray%d(2), ray%d(3))
+   endfunction direction_of
 endmodule fossil_aabb_tree_object

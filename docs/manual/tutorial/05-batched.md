@@ -41,14 +41,17 @@ The two trees give the same distance magnitudes bit for bit: the traversal never
 sign differs. At that point several facets are equally close, the trees report different ones, and on a
 non-manifold surface their pseudo-normals disagree.
 
-The trees are private to the surface. The figures build them again over the same facets with
-`fossil_aabb_tree_object`, as `analyze` does, and draw their boxes:
+The trees are private to the surface, but `tree_boxes` reads them: the boxes of every node down to `max_depth`,
+breadth first from the root, with their depth (and, optionally, the leaf flags, the parents and the facets of the
+leaves). The figures draw each surface's own tree with it:
+
+<<< @/examples/snippets/tut05_b_trees-boxes.f90
 
 <div class="fossil-pair">
 
 ![the SAH BVH of the placed dragon: the 16 boxes four levels below the root, each wrapping a group of facets tightly, overlapping where the body folds; 313 nodes in all](../../examples/images/tut05-bvh.svg)
 
-![the octree of the placed dragon: the 50 non-empty cells two levels below the root, equal cubes of the space around the body whether it fills them or not; 73 nodes in all](../../examples/images/tut05-octree.svg)
+![the octree of the placed dragon: the 50 non-empty cells two levels below the root, equal cubes of the space around the body whether it fills them or not; 59 nodes in all](../../examples/images/tut05-octree.svg)
 
 </div>
 

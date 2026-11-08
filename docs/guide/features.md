@@ -49,7 +49,8 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 | Generalized and fast winding number (Jacobson 2013, Barill 2018) | `surface%winding_number` | [Winding number](/guide/advanced/winding-number) | | [1](/manual/cookbook#measure-how-much-of-a-surface-surrounds-a-point) |
 | Batched distances, OpenMP-parallel and bit-exact with serial | `surface%distance_many` | [I/O, analysis, manipulation](/guide/usage) | [5](/manual/tutorial/05-batched) | [1](/manual/cookbook#compute-the-signed-distance-on-a-whole-grid) |
 | SAH BVH (default) or octree acceleration | `aabb_tree_kind=` | [I/O, analysis, manipulation](/guide/usage) | [5](/manual/tutorial/05-batched) | [1](/manual/cookbook#choose-the-acceleration-tree) |
-| Ray queries: first hit, all hits, any hit | `intersect_ray_first`, `_all`, `_any` | [Ray queries](/guide/advanced/ray-queries) | | [1](/manual/cookbook#cast-a-ray) |
+| Read-only access to the acceleration tree: node boxes down to a depth, leaves and their facets (both kinds; curve twin) | `surface%tree_boxes`, `curve%tree_boxes` | [I/O, analysis, manipulation](/guide/usage#reading-the-tree) | [5](/manual/tutorial/05-batched) | [1](/manual/cookbook#read-the-acceleration-tree) |
+| Ray queries: first hit, all hits (one per crossing, exact), any hit | `intersect_ray_first`, `_all`, `_any` | [Ray queries](/guide/advanced/ray-queries) | | [1](/manual/cookbook#cast-a-ray) |
 | Signed-distance field on a stretched grid: exact band, flood-fill signs, fast sweeping | `distance_field_object%compute` | [Signed-distance fields](/guide/advanced/distance-field) | [6](/manual/tutorial/06-distance-field) | [1](/manual/cookbook#compute-the-signed-distance-on-a-whole-grid) |
 | Eikonal diagnostic of a field | `distance_field_object%gradient_diagnostic` | [Signed-distance fields](/guide/advanced/distance-field) | | [1](/manual/cookbook#check-a-distance-field-by-the-eikonal-diagnostic) |
 

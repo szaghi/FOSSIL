@@ -17,10 +17,11 @@ intersection in flavours that match the canonical use cases:
   `max_t`?" For *shadow rays* and conservative inside-test
   rejection.
 
-All three share the same Möller-Trumbore facet-test
-(`facet%intersect_ray`) and the same AABB tree traversal pattern (the
-`enumerate_children` dispatcher used by §1.4 and §1.2). Both SAH BVH
-and octree tree kinds are supported transparently.
+All three share one exact ray-facet test (issue #82) and the same AABB tree traversal pattern (the
+`enumerate_children` dispatcher used by §1.4 and §1.2). Both SAH BVH and octree tree kinds are supported
+transparently. Every hit is decided exactly, so a ray crosses the surface **once per crossing**: through a shared edge
+or vertex it hits one of the facets there, and on a closed surface the parity of the hit count is the state of the
+origin.
 
 ![the dragon, with 35 rays from an eye point below and in front of it, aimed at a grid over its box: 23 rays drawn in gold up to their first hit, the facets they picked in ember, the 12 that miss drawn faint past the dragon](../../examples/images/ref-ray-queries-picking.svg){.fossil-figure}
 
@@ -35,10 +36,17 @@ For each query:
 1. **Tree traversal**. Starting from the root, walk down to leaves
    whose AABB the ray pierces. The slab-test produces a `[t_near,
    t_far]` interval per box; subtree pruning uses `t_near` for
-   ordering.
-2. **Per-leaf facet sweep**. For each owned facet, run Möller-
-   Trumbore (`facet%intersect_ray`) which returns the parametric `t`
-   plus barycentrics `(u, v)`.
+   ordering. The boxes are padded by 1e-9 of the ray's extent over the surface box (and, for the octree, by the
+   facets' reach: an octree node holds the facets whose centroid it contains, which stick out of its box), so no
+   crossing is lost to round-off at a box face.
+2. **Per-leaf facet sweep**. For each owned facet, the exact test of `fossil_ray_query`. The ray is the line through
+   the origin `o` and a far point `q = o + s·d` beyond the surface box (rounded once, the same for every facet).
+   It crosses triangle ABC iff the three side tests `orient3d(o, q, A, B)`, `(o, q, B, C)`, `(o, q, C, A)` have one
+   sign; a zero (the ray meets an edge's line) is settled by one symbolic perturbation of the ray, the same for every
+   facet, so the two facets of an edge always see it on opposite sides. An axis-aligned ray takes the kernel of
+   [`line_crossings`](/guide/advanced/cut-cells) instead (the global perturbation of issue #69), so it agrees with
+   the line queries and the cut cells. The crossing is ahead iff `o` and `q` lie on opposite sides of the facet's
+   plane (`orient3d`, exact); `t` itself is rounded, from the barycentric weights of the side tests.
 3. **Per-flavour assembly**:
    - `_first` — keep the smallest `t ≥ 0`; prune any subtree whose
      `t_near ≥ t_best`.
@@ -52,7 +60,8 @@ it operates on `facet(:)` directly. Standard surfaces from
 
 ![one picked facet of the dragon, zoomed, split at the hit point into three sub-triangles, each shaded by the barycentric weight of the vertex opposite it; the vertices labelled 1 - u - v = 0.340, u = 0.432, v = 0.228; the ray arriving at the hit point](../../examples/images/ref-ray-queries-facet.svg){.fossil-figure}
 
-Step 2 on one of those hits: `facet%intersect_ray` returns t = 0.8543 and (u, v), the weights (0.340, 0.432, 0.228) of
+One of those hits, seen through the per-facet Möller-Trumbore test `facet%intersect_ray` (the queries decide the hit
+exactly, as step 2 says, but the parameter is the same): t = 0.8543 and (u, v), the weights (0.340, 0.432, 0.228) of
 vertices 1, 2 and 3. Each weight is the area fraction of the sub-triangle opposite its vertex (shaded). The point at t
 along the ray and the barycentric point agree with `hit%point` within 1e-12.
 
@@ -78,12 +87,13 @@ call surface%intersect_ray_first(ray_origin, ray_direction, hit, has_hit, status
 ### All hits
 
 ```fortran
-call surface%intersect_ray_all(ray_origin, ray_direction, hits, status)
-   type(ray_hit_t), allocatable, intent(out) :: hits(:)
+call surface%intersect_ray_all(ray_origin, ray_direction, hits, status, exclude)
+   type(ray_hit_t), allocatable, intent(out)           :: hits(:)
+   integer(I4P),                 intent(in),  optional :: exclude   ! facet to skip (issue #82)
 ```
 
-`hits` is **always allocated** (zero-length if no hits found), and
-**sorted ascending by `t`**.
+`hits` is **always allocated** (zero-length if no hits found), **sorted ascending by `t`** (then by facet id), with
+**one hit per crossing** of the surface. `exclude` drops one facet, as for `_first`: the facet a ray is cast from.
 
 ![the dragon, translucent, crossed by a horizontal ray from the origin on the left: the 10 hits of intersect_ray_all marked in gold, the stretches of the ray inside the body (from an odd hit to the next) in ember, the stretches outside in teal](../../examples/images/ref-ray-queries-all.svg){.fossil-figure}
 
@@ -125,13 +135,16 @@ unit cube `cube-01.stl`, then the two cases where the surface's own edges matter
 - **`_all`** returns the entry at `t = 1` and the exit at `t = 2`, sorted. Which is which is not in the record: the
   sign of the hit facet's normal against the direction tells it.
 - **`_any`** with `max_t = 1` finds the hit at exactly `t = 1`: the bound is inclusive.
-- **An origin on the surface** is hit at `t = 0`: hits at `t = 0` are kept, not filtered. To leave the facet the ray
-  starts from, pass it as `exclude`: the next hit is the far face at `t = 1`.
-- **A ray through a shared edge** hits both facets of the edge, at the same `t`: 4 hits, 2 distinct crossings. A
-  parity count (inside if the number of hits is odd) must merge equal `t` first, and even then a ray grazing an edge
-  or through a vertex is ambiguous. `SIGN_RAY_INTERSECTIONS` makes it unlikely with three fixed generic directions
-  and a majority vote; for a robust inside test on any mesh use the
-  [fast winding number](/guide/advanced/winding-number).
+- **An origin on the surface** is hit at `t = 0`: hits at `t = 0` are kept, by `_first`, `_all` and `_any` alike.
+  The crossing is at the origin, so it is a hit; whether the ray then enters or leaves depends on the direction. To
+  leave the facet the ray starts from, pass it as `exclude` (to `_first` or `_all`): the next hit is the far face at
+  `t = 1`.
+- **A ray through a shared edge** hits one of its two facets: 2 hits for 2 crossings. **Through the face centres**,
+  where four facets meet at a vertex, it hits one of the four: 2 hits again (12 before issue #82). A parity count
+  needs no merging: on a closed surface, an odd number of hits means the origin is inside, whatever edges and
+  vertices the ray passes through, and a ray that only touches the surface at an edge or lies in a face plane counts
+  0 or 2. The `fossil_test_ray_crossings` test checks it on rays along the grid lines of a marching-cubes sphere, the
+  diagonals of the cube's faces and aimed at mesh vertices: parity equals `is_point_inside` on every one.
 
 ## Known limitations
 
@@ -140,12 +153,12 @@ unit cube `cube-01.stl`, then the two cases where the surface's own edges matter
   `direction` isn't unit. Normalize the direction yourself if you
   want `t` to mean Euclidean distance.
 - **Hits exactly at `t = 0`** (origin on the surface) are returned
-  by `_first` and `_all`, as the example shows. For a ray cast from a
-  facet, pass that facet as `exclude` to `_first` (no origin offset
-  needed); `_all` has no `exclude`: drop the facet from the list.
-- **Hits at shared edges and vertices are repeated**, once per facet
-  that contains the crossing point, with the same `t`. Merge equal `t`
-  before counting.
+  by `_first`, `_all` and `_any`, as the example shows. For a ray cast
+  from a facet, pass that facet as `exclude` to `_first` or `_all` (no
+  origin offset needed); a ray from a point on an edge or vertex still
+  hits one of the other facets there at `t = 0`.
+- **`t` is rounded**, the hit decisions are exact: two crossings closer
+  than round-off keep their order by facet id when their `t` are equal.
 - **Boundary-touching cases at `t = max_t`** are *included* by
   `_any` (the contract is `t ≤ max_t`, inclusive).
 - **Two latent slab-test bugs** in the underlying AABB ray test were
@@ -161,8 +174,8 @@ unit cube `cube-01.stl`, then the two cases where the surface's own edges matter
 ## See also
 
 - [`facet%intersect_ray`](/guide/api/facet-object) — the per-facet
-  Möller-Trumbore that the AABB traversal calls into. Useful if you
-  want to test against a single triangle without building a surface.
+  Möller-Trumbore test, with barycentrics. Useful against a single
+  triangle; the surface queries use the exact test instead (issue #82).
 - [SDF segmentation](/guide/advanced/sdf-segmentation) — the
   cone-of-rays SDF query uses `intersect_ray_first` for every cone
   ray.
@@ -173,8 +186,10 @@ unit cube `cube-01.stl`, then the two cases where the surface's own edges matter
 ## References
 
 - Möller & Trumbore, *Fast, Minimum Storage Ray-Triangle
-  Intersection*, Journal of Graphics Tools 2(1), 1997. The per-facet
-  test.
+  Intersection*, Journal of Graphics Tools 2(1), 1997. `facet%intersect_ray`.
+- Woop, Benthin & Wald, *Watertight Ray/Triangle Intersection*, Journal
+  of Computer Graphics Techniques 2(1), 2013. The side tests, made exact
+  here with `orient3d` and a symbolic perturbation.
 - Smits, *Efficient Bounding Box Intersection*, Ray Tracing News
   15(1), 2002. The slab-based AABB ray test.
 - Williams, Barrus, Morley & Shirley, *An Efficient and Robust

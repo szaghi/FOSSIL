@@ -9,5 +9,8 @@ type(vector_R8P)         :: points(21)
 real(R8P)                :: d2, d, sd, sd_ray, dist, d_bvh(21), d_oct(21)
 logical                  :: inside, same
 integer(I4P)             :: facet, edge, vertex, i, status
+type(vector_R8P), allocatable :: bmin(:), bmax(:)
+integer(I4P),     allocatable :: depth(:)
+logical,          allocatable :: leaf(:)
 
 call surface%load_from_file(file_name='cube-01.stl', guess_format=.true.)  ! the unit cube [0, 1]^3

@@ -304,7 +304,20 @@ The default `AABB_TREE_SAH_BVH` is faster on every measured mesh (see [AABB tree
 
 <<< @/examples/snippets/ref_usage_distance-tree_kind.f90
 
-Both kinds produce bit-exact distance results — the difference is purely query speed. The run of the distance blocks:
+Both kinds produce bit-exact distance results — the difference is purely query speed.
+
+### Reading the tree
+
+The tree itself is private, but `tree_boxes` returns its boxes, read only (issue #89): every node down to
+`max_depth` (default: all), breadth first from the root, with the optional depth, leaf flag, parent and the facets of
+each leaf (CSR: `facet_ids(facet_start(i):facet_start(i+1)-1)`, every facet in exactly one leaf). For the BVH the
+boxes bound their facets and overlap; for the octree they are the cells of its partition, empty cells left out, and
+a leaf holds the facets whose centroid it contains. `save_aabb_into_file` writes one STL per leaf through it, for
+either kind; `curve%tree_boxes` is the 2-D twin over the segment BVH:
+
+<<< @/examples/snippets/ref_usage_distance-tree_boxes.f90
+
+The run of the distance blocks:
 
 <<< @/examples/output/ref-usage-distance.ansi{ansi}
 

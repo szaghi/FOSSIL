@@ -159,6 +159,7 @@ type :: curve_object
       procedure, pass(self) :: feature_corners      !< Corners: turning above an angle, ends of open loops (issue #61).
       procedure, pass(self) :: thickness => curve_thickness !< Local thickness and gap per segment (issue #62).
       procedure, pass(self) :: thin_regions => curve_thin_regions !< Segments thinner than factor*h, in runs (issue #62).
+      procedure, pass(self) :: tree_boxes => curve_tree_boxes !< Boxes of the segment BVH down to a depth (issue #89).
       procedure, pass(self) :: build_thin => curve_build_thin !< Local sizes for the thin tagging (issue #62).
       procedure, pass(self) :: box_thin_many => curve_box_thin_many !< Boxes meeting a thin segment (issue #62).
       procedure, pass(self) :: box_thin_many_device => curve_box_thin_many_device !< box_thin_many on the device (#62).
@@ -1046,6 +1047,68 @@ contains
       enddo
       endsubroutine medial
    endsubroutine curve_thickness
+
+   subroutine curve_tree_boxes(self, bmin, bmax, depth, leaf, max_depth, parent, segment_start, segment_ids, status)
+   !< The boxes of the curve's segment BVH, read only (issue #89; twin of `surface%tree_boxes`): every node down to
+   !< `max_depth` (root = 0; default: the whole tree), breadth first from the root (position 1), left child first.
+   !< Boxes in (u, v), [2, n]. Optional: `depth`, `leaf` (no children), `parent` (position, 0 for the root), the
+   !< segments of the leaves in CSR form (`segment_ids(segment_start(i):segment_start(i+1)-1)`), every segment in
+   !< exactly one leaf when the whole tree is returned. Empty curve: zero boxes. `max_depth < 0`: zero boxes and
+   !< STATUS_INVALID_INPUT.
+   class(curve_object),       intent(in)                        :: self             !< Curve.
+   real(R8P),    allocatable, intent(out)                        :: bmin(:,:)        !< Box minima [2, n].
+   real(R8P),    allocatable, intent(out)                        :: bmax(:,:)        !< Box maxima [2, n].
+   integer(I4P), allocatable, intent(out), optional              :: depth(:)         !< Depths (root = 0).
+   logical,      allocatable, intent(out), optional              :: leaf(:)          !< Leaf flags.
+   integer(I4P),              intent(in),  optional              :: max_depth        !< Deepest level (default: all).
+   integer(I4P), allocatable, intent(out), optional              :: parent(:)        !< Parents (0: root).
+   integer(I4P), allocatable, intent(out), optional              :: segment_start(:) !< CSR start [n+1].
+   integer(I4P), allocatable, intent(out), optional              :: segment_ids(:)   !< Leaf segments.
+   integer(I4P),              intent(out), optional              :: status           !< STATUS_OK, STATUS_INVALID_INPUT.
+   integer(I4P), allocatable                                     :: idx(:), dep(:), par(:), ss(:), si(:) !< Work.
+   logical,      allocatable                                     :: lf(:)            !< Work.
+   integer(I4P)                                                  :: md, n, head, k, m !< Counters.
+
+   if (present(status)) status = STATUS_OK
+   md = huge(1_I4P) ; if (present(max_depth)) md = max_depth
+   n = 0_I4P
+   if (md < 0_I4P) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+   elseif (self%bvh%nodes_number > 0_I4P) then
+      associate(t => self%bvh)
+         allocate(idx(t%nodes_number), dep(t%nodes_number), par(t%nodes_number))
+         n = 1_I4P ; idx(1) = 1_I4P ; dep(1) = 0_I4P ; par(1) = 0_I4P ; head = 1_I4P
+         do while (head <= n)
+            if (t%left(idx(head)) /= 0_I4P .and. dep(head) < md) then
+               idx(n + 1) = t%left(idx(head)) ; idx(n + 2) = t%right(idx(head))
+               dep(n + 1 : n + 2) = dep(head) + 1_I4P ; par(n + 1 : n + 2) = head
+               n = n + 2_I4P
+            endif
+            head = head + 1_I4P
+         enddo
+      endassociate
+   endif
+   allocate(bmin(2, n), bmax(2, n), lf(n), ss(n + 1))
+   ss(1) = 1_I4P
+   do k = 1_I4P, n
+      associate(t => self%bvh, i => idx(k))
+         bmin(:, k) = [t%lo_u(i), t%lo_v(i)] ; bmax(:, k) = [t%hi_u(i), t%hi_v(i)]
+         lf(k) = t%left(i) == 0_I4P
+         m = 0_I4P ; if (lf(k)) m = t%last(i) - t%first(i) + 1_I4P
+         ss(k + 1) = ss(k) + m
+      endassociate
+   enddo
+   allocate(si(ss(n + 1) - 1_I4P))
+   do k = 1_I4P, n
+      if (ss(k + 1) > ss(k)) si(ss(k) : ss(k + 1) - 1_I4P) = self%bvh%seg_id(self%bvh%first(idx(k)) : self%bvh%last(idx(k)))
+   enddo
+   if (.not. allocated(dep)) allocate(dep(0), par(0))
+   if (present(depth)) depth = dep(1:n)
+   if (present(leaf)) call move_alloc(from=lf, to=leaf)
+   if (present(parent)) parent = par(1:n)
+   if (present(segment_start)) call move_alloc(from=ss, to=segment_start)
+   if (present(segment_ids)) call move_alloc(from=si, to=segment_ids)
+   endsubroutine curve_tree_boxes
 
    subroutine ray_first_2d(self, o, d, excl, t, hs)
    !< First segment hit by the ray o + t d (t >= 0), the segment `excl` skipped: hs (0: none) and t. Segment tree,

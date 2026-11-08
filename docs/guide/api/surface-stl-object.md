@@ -1358,12 +1358,13 @@ endprogram ex_intersect_ray_first_api
 ### `intersect_ray_all`
 
 ```fortran
-call surface%intersect_ray_all(ray_origin, ray_direction, hits, status)
+call surface%intersect_ray_all(ray_origin, ray_direction, hits, status, exclude)
 ```
 
-**Purpose.** Return **every** ray-facet intersection, sorted ascending
-by `t`. For visibility / volume-counting queries (e.g. ray-cast inside
-test = odd number of hits).
+**Purpose.** Return **every** crossing of the ray with the surface, sorted ascending by `t` (then facet id), one
+hit per crossing, decided exactly (issue #82): a ray through a shared edge or vertex hits one facet there, so on a
+closed surface an odd number of hits means the origin is inside. Hits at `t = 0` (an origin on the surface) are
+kept.
 
 **Arguments.**
 
@@ -1373,6 +1374,7 @@ test = odd number of hits).
 | `ray_direction` | `in`         | `type(vector_R8P)`            | (required) Ray direction.                                                              |
 | `hits`          | `out`        | `type(ray_hit_t), allocatable`| (required) Always allocated (zero-length if no hits). Sorted ascending by `t`.         |
 | `status`        | `out`, opt.  | `integer(I4P)`                | `RAY_STATUS_OK` or `RAY_STATUS_BAD_INPUT`.                                             |
+| `exclude`       | `in`, opt.   | `integer(I4P)`                | A facet to skip, as for `intersect_ray_first` (issue #82).                             |
 
 **Example.**
 
@@ -2563,6 +2565,7 @@ one of them is `pure`.
 | `get_vertex_pool()`                   | Read-only pointer to the unique-vertex pool.                                           |
 | `facet_at(i)`                         | Pointer to facet `i`; `null()` if `i` is out of range.                                 |
 | `facets_ref()`                        | Pointer to the entire facet array.                                                     |
+| `tree_boxes(bmin, bmax, depth, leaf, max_depth, parent, facet_start, facet_ids, status)` | The boxes of the AABB tree (issue #89), breadth first from the root, down to `max_depth` (default all): depth, leaf flag, parent position, the facets of the leaves in CSR form. Both tree kinds. Not `pure` (a subroutine). `save_aabb_into_file(base_file_name, is_ascii)` writes one STL per leaf through it (the BVH too since #89). |
 
 And the three composite validity predicates:
 

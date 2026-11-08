@@ -232,7 +232,7 @@ contains
                                t_near=t_near, t_far=t_far, do_intersect=do_intersect)
    endfunction do_ray_intersect
 
-   pure subroutine ray_slab_interval(self, ray_origin, ray_direction, t_near, t_far, do_intersect)
+   pure subroutine ray_slab_interval(self, ray_origin, ray_direction, t_near, t_far, do_intersect, pad)
    !< Slab test (Smits / Williams 2005): return the parametric interval over which the
    !< ray lies inside the AABB, plus a hit flag. Used by both the bare `do_ray_intersect`
    !< query and the §2.5 tree traversals (`t_near` keys the best-first priority among
@@ -259,8 +259,12 @@ contains
    real(R8P),          intent(out) :: t_near        !< Slab-interval near (entry) parameter, clamped >= 0.
    real(R8P),          intent(out) :: t_far         !< Slab-interval far (exit) parameter.
    logical,            intent(out) :: do_intersect  !< True if the half-ray hits the box.
+   real(R8P), optional, intent(in) :: pad           !< Pad the box by pad (issue #82, the exact ray queries: a ray
+                                                    !< is parallel to a slab only if that component is zero).
    logical                         :: must_return   !< Helper-driven early-out flag.
    real(R8P)                       :: tmin, tmax    !< Running slab-interval bounds.
+   real(R8P)                       :: p             !< Pad.
+   real(R8P)                       :: ptol          !< Parallel-ray cutoff.
 
    t_near = 0._R8P
    t_far  = 0._R8P
@@ -268,28 +272,32 @@ contains
    must_return = .false.
    tmin = 0._R8P
    tmax = MaxR8P
-   call check_slab(aabb_min=self%bmin%x, aabb_max=self%bmax%x, &
-                   o=ray_origin%x, d=ray_direction%x, must_return=must_return, tmin=tmin, tmax=tmax)
+   p = 0._R8P ; ptol = 1.0e-12_R8P
+   if (present(pad)) then
+      p = pad ; ptol = 4._R8P * tiny(1._R8P)
+   endif
+   call check_slab(aabb_min=self%bmin%x - p, aabb_max=self%bmax%x + p, &
+                   o=ray_origin%x, d=ray_direction%x, ptol=ptol, must_return=must_return, tmin=tmin, tmax=tmax)
    if (must_return) return
-   call check_slab(aabb_min=self%bmin%y, aabb_max=self%bmax%y, &
-                   o=ray_origin%y, d=ray_direction%y, must_return=must_return, tmin=tmin, tmax=tmax)
+   call check_slab(aabb_min=self%bmin%y - p, aabb_max=self%bmax%y + p, &
+                   o=ray_origin%y, d=ray_direction%y, ptol=ptol, must_return=must_return, tmin=tmin, tmax=tmax)
    if (must_return) return
-   call check_slab(aabb_min=self%bmin%z, aabb_max=self%bmax%z, &
-                   o=ray_origin%z, d=ray_direction%z, must_return=must_return, tmin=tmin, tmax=tmax)
+   call check_slab(aabb_min=self%bmin%z - p, aabb_max=self%bmax%z + p, &
+                   o=ray_origin%z, d=ray_direction%z, ptol=ptol, must_return=must_return, tmin=tmin, tmax=tmax)
    if (must_return) return
    t_near = tmin
    t_far  = tmax
    do_intersect = .true.
    contains
-      pure subroutine check_slab(aabb_min, aabb_max, o, d, must_return, tmin, tmax)
+      pure subroutine check_slab(aabb_min, aabb_max, o, d, ptol, must_return, tmin, tmax)
       real(R8P), intent(in)    :: aabb_min, aabb_max
       real(R8P), intent(in)    :: o, d
+      real(R8P), intent(in)    :: ptol
       logical,   intent(inout) :: must_return
       real(R8P), intent(inout) :: tmin, tmax
       real(R8P)                :: ood, t1, t2, tmp
-      real(R8P), parameter     :: PARALLEL_TOL = 1.0e-12_R8P
 
-      if (abs(d) < PARALLEL_TOL) then
+      if (abs(d) < ptol) then
          if ((o < aabb_min).or.(o > aabb_max)) then
             must_return = .true.
             return

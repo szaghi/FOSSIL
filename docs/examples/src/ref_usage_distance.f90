@@ -14,6 +14,9 @@ type(vector_R8P)         :: points(21)
 real(R8P)                :: d2, d, sd, sd_ray, dist, d_bvh(21), d_oct(21)
 logical                  :: inside, same
 integer(I4P)             :: facet, edge, vertex, i, status
+type(vector_R8P), allocatable :: bmin(:), bmax(:)
+integer(I4P),     allocatable :: depth(:)
+logical,          allocatable :: leaf(:)
 
 call surface%load_from_file(file_name='cube-01.stl', guess_format=.true.)  ! the unit cube [0, 1]^3
 !endregion load
@@ -66,4 +69,10 @@ call dragon_octree%load_from_file(file_name='dragon.stl', guess_format=.true., a
 call dragon_octree%distance_many(points=points, distances=d_oct, is_signed=.true., is_square_root=.true.)
 print '(A,L1)', 'octree and SAH BVH: equal bit for bit ', all(d_bvh == d_oct)
 !endregion tree_kind
+!region tree_boxes
+call dragon%tree_boxes(bmin=bmin, bmax=bmax, depth=depth, leaf=leaf)                ! the whole SAH BVH
+print '(A,I0,A,I0,A,I0)', 'BVH boxes ', size(bmin), ', leaves ', count(leaf), ', depth ', maxval(depth)
+call dragon_octree%tree_boxes(bmin=bmin, bmax=bmax, depth=depth, leaf=leaf)
+print '(A,I0,A,I0,A,I0)', 'octree boxes ', size(bmin), ', leaves ', count(leaf), ', depth ', maxval(depth)
+!endregion tree_boxes
 endprogram ref_usage_distance

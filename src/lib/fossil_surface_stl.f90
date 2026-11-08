@@ -234,6 +234,7 @@ type :: surface_stl_object
       procedure, pass(self) :: proximity_pairs      !< Pairs of bodies of the surface closer than a cutoff (issue #67).
       procedure, pass(self) :: save_into_file       !< Save STL to a file path.
       procedure, pass(self) :: save_aabb_into_file  !< Save the AABB tree leaves as separate STL files.
+      procedure, pass(self) :: tree_boxes           !< Boxes of the AABB tree down to a depth, read only (issue #89).
       ! public methods
       procedure, pass(self) :: allocate_facets                 !< Allocate facets.
       procedure, pass(self) :: analyze                         !< Analize STL.
@@ -4308,9 +4309,11 @@ contains
    if (present(spacings)) call move_alloc(from=sp, to=spacings)
    endsubroutine surface_markers
 
-   subroutine intersect_ray_all(self, ray_origin, ray_direction, hits, status)
-   !< Return every ray-facet intersection on this surface, sorted by `t` ascending
-   !< (issue #18 §2.5).
+   subroutine intersect_ray_all(self, ray_origin, ray_direction, hits, status, exclude)
+   !< Return every crossing of the ray with this surface, sorted by `t` ascending (issue #18 §2.5): one hit per crossing,
+   !< decided exactly (issue #82, `fossil_ray_query`: a ray through a shared edge or vertex hits one facet there, so the
+   !< parity of the hit count on a closed surface is the state of the origin). Hits at t = 0 (an origin on the surface)
+   !< are kept; the facet `exclude` is skipped (a ray cast from a facet).
    !<
    !< Tree-accelerated: prunes whole subtrees whose AABB the ray misses. Falls
    !< back to `ray_intersect_all_flat` (the step-1 reference oracle) when the
@@ -4321,6 +4324,7 @@ contains
    type(vector_R8P),             intent(in)            :: ray_direction  !< Ray direction (need not be unit).
    type(ray_hit_t), allocatable, intent(out)           :: hits(:)        !< Sorted hit records.
    integer(I4P),                 intent(out), optional :: status         !< Status code.
+   integer(I4P),                 intent(in),  optional :: exclude        !< Facet to skip (issue #82).
    real(R8P)                                           :: dir_norm2      !< |dir|^2 for the BAD_INPUT guard.
 
    if (present(status)) status = RAY_STATUS_OK
@@ -4337,10 +4341,10 @@ contains
    endif
    if (self%aabb%get_nodes_number() > 0_I4P) then
       call self%aabb%intersect_ray_all_tree(facet=self%facet, ray_origin=ray_origin, &
-                                            ray_direction=ray_direction, hits=hits)
+                                            ray_direction=ray_direction, hits=hits, exclude=exclude)
    else
       call ray_intersect_all_flat(facet=self%facet, ray_origin=ray_origin, ray_direction=ray_direction, &
-                                  hits=hits, status=status)
+                                  hits=hits, status=status, exclude=exclude)
    endif
    endsubroutine intersect_ray_all
 
@@ -4362,7 +4366,6 @@ contains
    integer(I4P),              intent(in),  optional :: exclude        !< Facet to skip (issue #62).
    real(R8P)                                        :: dir_norm2      !< |dir|^2 for BAD_INPUT guard.
    type(ray_hit_t), allocatable                     :: fallback_hits(:) !< Used only when AABB is absent.
-   integer(I4P)                                     :: k              !< Counter.
 
    has_hit = .false.
    if (present(status)) status = RAY_STATUS_OK
@@ -4379,18 +4382,12 @@ contains
       call self%aabb%intersect_ray_first_tree(facet=self%facet, ray_origin=ray_origin, &
                                               ray_direction=ray_direction, hit=hit, has_hit=has_hit, exclude=exclude)
    else
-      ! Fallback: build the all-hits list and pick the first by t (other than `exclude`).
+      ! Fallback: build the all-hits list (other than `exclude`) and pick the first.
       call ray_intersect_all_flat(facet=self%facet, ray_origin=ray_origin, ray_direction=ray_direction, &
-                                  hits=fallback_hits, status=status)
-      if (allocated(fallback_hits)) then
-         do k = 1_I4P, size(fallback_hits, kind=I4P)
-            if (present(exclude)) then
-               if (fallback_hits(k)%facet_id == exclude) cycle
-            endif
-            hit = fallback_hits(k)
-            has_hit = .true.
-            exit
-         enddo
+                                  hits=fallback_hits, status=status, exclude=exclude)
+      if (size(fallback_hits) > 0) then
+         hit = fallback_hits(1)
+         has_hit = .true.
       endif
    endif
    endsubroutine intersect_ray_first
@@ -4415,9 +4412,7 @@ contains
    integer(I4P),              intent(out), optional :: status         !< Status code.
    real(R8P)                                        :: cap            !< Effective max_t.
    real(R8P)                                        :: dir_norm2      !< |dir|^2 for BAD_INPUT guard.
-   integer(I4P)                                     :: f              !< Fallback loop counter.
-   real(R8P)                                        :: t, u, v        !< Per-facet output (fallback).
-   logical                                          :: facet_hit      !< Per-facet flag (fallback).
+   type(ray_hit_t), allocatable                     :: hits(:)        !< Hits (fallback).
 
    found = .false.
    if (present(status)) status = RAY_STATUS_OK
@@ -4437,16 +4432,10 @@ contains
       call self%aabb%intersect_ray_any_tree(facet=self%facet, ray_origin=ray_origin, &
                                             ray_direction=ray_direction, max_t=cap, found=found)
    else
-      ! Flat fallback: scan facets, exit on first hit in [0, cap].
-      do f = 1_I4P, self%facets_number
-         call self%facet(f)%intersect_ray(ray_origin=ray_origin, ray_direction=ray_direction, &
-                                          t=t, u=u, v=v, hit=facet_hit)
-         if (.not. facet_hit) cycle
-         if (t < 0._R8P) cycle
-         if (t > cap)    cycle
-         found = .true.
-         return
-      enddo
+      ! Flat fallback: the exact all-hits list (issue #82), any hit in [0, cap].
+      call ray_intersect_all_flat(facet=self%facet, ray_origin=ray_origin, ray_direction=ray_direction, hits=hits)
+      found = size(hits) > 0
+      if (found) found = hits(1)%t <= cap
    endif
    endsubroutine intersect_ray_any
 
@@ -7117,26 +7106,77 @@ contains
    endsubroutine save_into_file
 
    subroutine save_aabb_into_file(self, base_file_name, is_ascii)
-   !< Save each AABB tree leaf as a separate STL file.
+   !< Save the facets of each leaf of the AABB tree (either kind) as a separate STL file, through `tree_boxes` (issue
+   !< #89: before it, the BVH wrote nothing).
    !<
-   !< File name pattern: `<base_file_name>aabb-l_<level>-b_<box>.stl`.
+   !< File name pattern: `<base_file_name>aabb-l_<depth>-b_<box>.stl`, with the depth (root = 0) and the position of the
+   !< box in the order of `tree_boxes` (breadth first, root = 1).
    class(surface_stl_object), intent(in)           :: self           !< Surface STL.
    character(*),              intent(in)           :: base_file_name !< Base file-name prefix.
    logical,                   intent(in), optional :: is_ascii       !< Write as ASCII (default .true.).
-   type(facet_object), allocatable                 :: aabb_facet(:)  !< AABB leaf facets.
+   type(facet_object), allocatable                 :: aabb_facet(:)  !< Leaf facets.
    type(surface_stl_object)                        :: leaf           !< Scratch surface for save.
-   integer(I4P)                                    :: b, l           !< Counters.
+   type(vector_R8P), allocatable                   :: bmin(:), bmax(:) !< Boxes.
+   integer(I4P), allocatable                       :: depth(:), start(:), ids(:) !< Depths, leaf facets (CSR).
+   logical, allocatable                            :: is_leaf(:)     !< Leaf flags.
+   integer(I4P)                                    :: b, k           !< Counters.
    character(len=:), allocatable                   :: file_name      !< Composed file name.
 
-   if (.not. self%aabb%get_is_initialized()) return
-   do while (self%aabb%loop_node(facet=self%facet, aabb_facet=aabb_facet, b=b, l=l))
-      file_name = trim(adjustl(base_file_name))//'aabb-l_'//trim(str(l, .true.))//'-b_'//trim(str(b, .true.))//'.stl'
+   call self%tree_boxes(bmin=bmin, bmax=bmax, depth=depth, leaf=is_leaf, facet_start=start, facet_ids=ids)
+   do b = 1, size(bmin)
+      if (.not. is_leaf(b) .or. start(b + 1) == start(b)) cycle
+      file_name = trim(adjustl(base_file_name))//'aabb-l_'//trim(str(depth(b), .true.))//'-b_'//trim(str(b, .true.))//'.stl'
+      allocate(aabb_facet(start(b + 1) - start(b)))
+      do k = start(b), start(b + 1) - 1
+         aabb_facet(k - start(b) + 1) = self%facet(ids(k))
+      enddo
       call leaf%adopt_facets(facets=aabb_facet)
       call leaf%set_header(self%header)
       call leaf%save_into_file(file_name=file_name, is_ascii=is_ascii)
       call leaf%destroy
    enddo
    endsubroutine save_aabb_into_file
+
+   subroutine tree_boxes(self, bmin, bmax, depth, leaf, max_depth, parent, facet_start, facet_ids, status)
+   !< The boxes of the surface's AABB tree, read only (issue #89): every node down to `max_depth` (root = 0; default:
+   !< the whole tree), breadth first from the root (position 1), the children of a node in the tree's order. Both tree
+   !< kinds: the SAH BVH's boxes bound their facets and overlap; the octree's are the cells of its space partition
+   !< (empty cells are not nodes), and a leaf holds the facets whose centroid lies in it, which may stick out of it.
+   !<
+   !< Optional outputs: `depth`; `leaf` (the node has no children: a node at `max_depth` with children is not a leaf);
+   !< `parent` (position of the parent in the output, 0 for the root); the facets of the leaves in CSR form, those of
+   !< box i in `facet_ids(facet_start(i):facet_start(i+1)-1)` (none for an inner node), every facet in exactly one leaf
+   !< when the whole tree is returned. An empty surface has no tree: zero boxes. `max_depth < 0`: zero boxes and
+   !< STATUS_INVALID_INPUT.
+   class(surface_stl_object), intent(in)                        :: self           !< Surface.
+   type(vector_R8P),          allocatable, intent(out)           :: bmin(:)        !< Box minima.
+   type(vector_R8P),          allocatable, intent(out)           :: bmax(:)        !< Box maxima.
+   integer(I4P),              allocatable, intent(out), optional :: depth(:)       !< Depths (root = 0).
+   logical,                   allocatable, intent(out), optional :: leaf(:)        !< Leaf flags.
+   integer(I4P),                           intent(in),  optional :: max_depth      !< Deepest level (default: all).
+   integer(I4P),              allocatable, intent(out), optional :: parent(:)      !< Parents (0: root).
+   integer(I4P),              allocatable, intent(out), optional :: facet_start(:) !< CSR start of the leaf facets [n+1].
+   integer(I4P),              allocatable, intent(out), optional :: facet_ids(:)   !< Leaf facets.
+   integer(I4P),                           intent(out), optional :: status         !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P), allocatable                                     :: dep(:), par(:), fs(:), fi(:) !< Work.
+   logical,      allocatable                                     :: lf(:)          !< Work.
+   integer(I4P)                                                  :: md             !< Effective max_depth.
+
+   if (present(status)) status = STATUS_OK
+   md = huge(1_I4P) ; if (present(max_depth)) md = max_depth
+   if (md < 0_I4P) then
+      allocate(bmin(0), bmax(0), dep(0), lf(0), par(0), fs(1), fi(0)) ; fs = 1_I4P
+      if (present(status)) status = STATUS_INVALID_INPUT
+   else
+      call self%aabb%node_boxes(max_depth=md, bmin=bmin, bmax=bmax, depth=dep, leaf=lf, parent=par, facet_start=fs, &
+                                facet_ids=fi)
+   endif
+   if (present(depth)) call move_alloc(from=dep, to=depth)
+   if (present(leaf)) call move_alloc(from=lf, to=leaf)
+   if (present(parent)) call move_alloc(from=par, to=parent)
+   if (present(facet_start)) call move_alloc(from=fs, to=facet_start)
+   if (present(facet_ids)) call move_alloc(from=fi, to=facet_ids)
+   endsubroutine tree_boxes
 
    ! internal I/O helpers (module-private; not exposed as TBPs)
 

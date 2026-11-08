@@ -115,7 +115,7 @@ the same block.
 
 <<< @/examples/output/tut09d.ansi{ansi}
 
-- 2465 of the 6586 facets are thinner than a cell side, 0.0375.
+- 2468 of the 6586 facets are thinner than a cell side, 0.0375.
 - Of the 1689 cut cells, 867 hold a feature edge, 56 more meet a thin wall, and 766 are neither: refining on the
   three fields together puts the finest cells on half the wall.
 
