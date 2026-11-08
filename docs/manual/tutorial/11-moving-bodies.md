@@ -102,4 +102,4 @@ few cells, for a collision.
 [Body–body distance](/guide/advanced/body-distance).
 :::
 
-Next: [12. On the GPU](./12-gpu).
+Next: [12. Geometry processing and analysis](./12-geometry).

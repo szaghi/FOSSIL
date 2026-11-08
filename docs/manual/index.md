@@ -16,8 +16,10 @@ The body is `dragon.stl`, a real mesh with real defects: it is not watertight, a
 The tutorial keeps it that way on purpose, so that it shows where an open surface changes the answer and which
 queries tolerate it. Chapters 1 to 3 load, repair and place the dragon in the domain [-0.6, 0.6]³; chapters 4 to 6
 compute its signed distance, point by point, in batches and as a field; chapter 7 goes to 2-D with a section of it;
-chapters 8 to 11 answer what an immersed-boundary or cut-cell solver asks, for a fixed and then a moving body;
-chapter 12 moves the batch to the GPU.
+chapters 8 to 11 answer what an immersed-boundary or cut-cell solver asks, for a fixed and then a moving body.
+Chapters 12 to 15 widen the scope: processing and analysing a surface, structured blocks and overset grids, contact
+between bodies, and body-fitted grids; they build their own geometry and need no file from the earlier chapters.
+Chapter 16 moves the batch to the GPU.
 
 | Chapter | You learn |
 |---|---|
@@ -32,7 +34,11 @@ chapter 12 moves the batch to the GPU.
 | [9. AMR tagging](./tutorial/09-amr-tagging) | `box_classify_many` (cut, near, inside, outside), `tag_block` |
 | [10. Cut cells](./tutorial/10-cut-cells) | `curve%cut_cells` and `cut_cells_3d`: fractions, apertures, fluid pieces, flagged cells |
 | [11. Moving bodies](./tutorial/11-moving-bodies) | poses, `pose=` queries, `move`, `state_changes`, `swept_cells_2d` |
-| [12. On the GPU](./tutorial/12-gpu) | `enter_device`, `distance_many_device`, `exit_device`; the nvfortran build |
+| [12. Geometry processing and analysis](./tutorial/12-geometry) | `boolean`, `set_patch`, `isotropic_remesh`, `deviation`, `feature_edges`, `thickness`, `thin_regions`, `mass_properties` |
+| [13. Structured blocks and overset grids](./tutorial/13-blocks-overset) | `curvilinear_block_2d_t`, `detect_topology_2d`, `validity`, `quality`, `locate_many`, `stencils`; `wall_cutter_2d`, `hole_flags_2d`, `donor_candidates_2d`, `classify_2d`, orphans, `save_connectivity` |
+| [14. Contact: distance and collision](./tutorial/14-contact) | `distance_to` with poses, `time_of_impact` (plain and `directional=`), `first_impact`; `curve%time_of_impact`, `first_impact_2d` |
+| [15. Body-fitted grids](./tutorial/15-body-fitted) | `projection_target`, `classify_points`, `project_points`, `project_block_face`, `geometric_spacing`, `hyperbolic_grid_2d`, `block_report_2d`, `save_block_report` |
+| [16. On the GPU](./tutorial/16-gpu) | `enter_device`, `distance_many_device`, `exit_device`; the nvfortran build |
 
 The chapters pass files to each other, so run them in order:
 
@@ -41,7 +47,7 @@ flowchart LR
   dragon[(dragon.stl)] --> c1["1: load"]
   dragon --> c2["2: repair"] --> clean[(dragon-clean.stl)]
   clean --> c3["3: place"] --> placed[(dragon-placed.stl)]
-  placed --> c4to6["4-6, 8, 9, 12"]
+  placed --> c4to6["4-6, 8, 9, 16"]
   placed --> c7["7: slice"] --> section[(dragon-section.dat)]
   section --> c10["10: cut cells"]
   placed --> c10

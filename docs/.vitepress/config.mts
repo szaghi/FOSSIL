@@ -26,7 +26,11 @@ const docs = [
       { text: '9. AMR tagging', link: '/manual/tutorial/09-amr-tagging' },
       { text: '10. Cut cells', link: '/manual/tutorial/10-cut-cells' },
       { text: '11. Moving bodies', link: '/manual/tutorial/11-moving-bodies' },
-      { text: '12. On the GPU', link: '/manual/tutorial/12-gpu' },
+      { text: '12. Geometry processing', link: '/manual/tutorial/12-geometry' },
+      { text: '13. Blocks and overset', link: '/manual/tutorial/13-blocks-overset' },
+      { text: '14. Contact', link: '/manual/tutorial/14-contact' },
+      { text: '15. Body-fitted grids', link: '/manual/tutorial/15-body-fitted' },
+      { text: '16. On the GPU', link: '/manual/tutorial/16-gpu' },
     ],
   },
   {

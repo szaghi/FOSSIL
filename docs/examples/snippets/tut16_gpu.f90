@@ -1,7 +1,5 @@
-!run tut12 tut12_gpu
-!< Tutorial 12: the distance batch on the device (OpenACC), checked against the host batch.
-program tut12_gpu
-!region device
+!< Tutorial 16: the distance batch on the device (OpenACC), checked against the host batch.
+program tut16_gpu
 use fossil, only : surface_stl_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, STATUS_OK
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P, ex_R8P, ey_R8P, ez_R8P
@@ -35,5 +33,4 @@ do s = 1, 2
                              count(d_device /= d_host), ' of ', size(points)
 enddo
 call surface%exit_device                                    ! release the device copies
-!endregion device
-endprogram tut12_gpu
+endprogram tut16_gpu

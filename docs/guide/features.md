@@ -83,7 +83,7 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 
 | Capability | Entry point | Reference | Tutorial |
 |---|---|---|---|
-| Distance, rich queries, wall distance, box classification, posed queries on the device (OpenACC), bit-exact against the CPU path | `enter_device`, `*_device`, `exit_device` | [GPU queries](/guide/advanced/device-distance) | [12](/manual/tutorial/12-gpu) |
+| Distance, rich queries, wall distance, box classification, posed queries on the device (OpenACC), bit-exact against the CPU path | `enter_device`, `*_device`, `exit_device` | [GPU queries](/guide/advanced/device-distance) | [16](/manual/tutorial/16-gpu) |
 
 ## `fossilizer` CLI
 

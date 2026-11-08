@@ -1,9 +1,9 @@
-# 12. On the GPU
+# 16. On the GPU
 
 A large grid asks for millions of distances per regrid. The last chapter runs the batch of chapter 5 on the device
 with OpenACC and checks it against the host batch.
 
-<<< @/examples/snippets/tut12_gpu-device.f90
+<<< @/examples/snippets/tut16_gpu-device.f90
 
 - `enter_device` copies the flat arrays the device kernels read (the BVH nodes, the triangle payload, the
   pseudo-normals, the winding-number cache) to the device, once. The surface must be analyzed with the SAH BVH, the
@@ -21,13 +21,13 @@ with OpenACC and checks it against the host batch.
 
 ## Running it
 
-<<< @/examples/output/tut12.ansi{ansi}
+<<< @/examples/output/tut16.ansi{ansi}
 
 This output comes from a gfortran build. Without an OpenACC compiler the `!$acc` directives are comments, so the
 "device" batch runs on the host, through the same kernels, and matches the host batch bit for bit: 0 mismatches of
 13824 for both signs. The program is still useful there, as a check that the device code path is correct.
 
-![the plane z = -0.026 of the batch, each point's cell shaded by the signed distance distance_many_device returns with the winding-number sign, teal inside and ember outside, the dragon cut by the plane in yellow; none of the 576 values differs from distance_many](../../examples/images/tut12-slice.svg){.fossil-figure}
+![the plane z = -0.026 of the batch, each point's cell shaded by the signed distance distance_many_device returns with the winding-number sign, teal inside and ember outside, the dragon cut by the plane in yellow; none of the 576 values differs from distance_many](../../examples/images/tut16-slice.svg){.fossil-figure}
 
 The figure is drawn from that run: the device code path, executed on the host, not a GPU.
 
@@ -38,7 +38,7 @@ On a GPU, build FOSSIL with nvfortran 26.9 or later (NVIDIA HPC SDK). The `stati
 ```bash
 fobis build --mode static-nvidia --varset local_nvf
 fobis build --mode tests-nvidia --varset local_nvf
-nvfortran -acc -gpu=cc89,nofma -Mnofma -I static/mod docs/examples/src/tut12_gpu.f90 static/libfossil.a -o tut12_gpu
+nvfortran -acc -gpu=cc89,nofma -Mnofma -I static/mod docs/examples/src/tut16_gpu.f90 static/libfossil.a -o tut16_gpu
 ```
 
 The flags `-gpu=nofma -Mnofma` turn off fused multiply-add contraction on the device and on the host. FMA contraction
