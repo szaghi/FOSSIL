@@ -147,7 +147,7 @@ The Laplacian itself is a sparse matrix — there is nothing to "see" in
 the operator. What *is* worth visualising is its **action**. Below,
 `M⁻¹ L x` is mapped onto a unit sphere, where `x` is the per-vertex
 x-coordinate field (the remeshed marching-cubes sphere of the
-[curvature page](/guide/advanced/curvature), 1302 vertices; each facet
+[curvature page](/guide/advanced/curvature), 1305 vertices; each facet
 shows the mean of its three vertex values, halved, so that the colour
 saturates at ±2):
 
@@ -162,7 +162,7 @@ vertex to vertex; up to that scaling it is the x-component of the
 mean-curvature normal). Hence the dipole aligned with the ±x axis:
 `+2` on the −x cap, `−2` on the +x cap, zero on the band x = 0. The
 facet-scale speckle is the operator's pointwise error on an irregular
-mesh (RMS 0.15 against `-2x`, up to 0.73 at a few vertices: the same
+mesh (RMS 0.16 against `-2x`, up to 0.96 at a few vertices: the same
 non-convergence discussed on the [curvature
 page](/guide/advanced/curvature)), not marching-cubes noise: the
 sphere was remeshed. The figure is drawn by

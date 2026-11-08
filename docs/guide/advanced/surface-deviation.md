@@ -243,8 +243,8 @@ once and stated with a margin; no tolerance is loosened to make a test pass.
 | Test | Operation | Certified result when written | Asserted |
 |---|---|---|---|
 | `fossil_test_isotropic_remesh` | fine remesh of the cube, features preserved | h ≤ 1.0e-2 at tolerance 1e-2 (the true distance is ~0) | h ≤ 1.2e-2: a #42-style chamfer (~0.03) fails |
-| | marching-cubes sphere, 2 iterations | 7.33e-3 ≤ h ≤ 8.22e-3 at tolerance 1e-3 (5.61e-3–6.55e-3 before the collapse pass coarsened, issue #79) | h ≤ 9.0e-3 |
-| `fossil_test_remesh_coarsen` | marching-cubes sphere coarsened to L = 0.4 (2312 → 298 facets) | 4.14e-2 ≤ h ≤ 4.22e-2 at tolerance 1e-3 | h ≤ 4.5e-2 |
+| | marching-cubes sphere, 2 iterations | 7.38e-3 ≤ h ≤ 8.38e-3 at tolerance 1e-3 (5.61e-3–6.55e-3 before the collapse pass coarsened, issue #79; 7.33e-3–8.22e-3 before the tangential relaxation, issue #91) | h ≤ 9.0e-3 |
+| `fossil_test_remesh_coarsen` | marching-cubes sphere coarsened to L = 0.4 (2312 → 332 facets) | 2.63e-2 ≤ h ≤ 2.72e-2 at tolerance 1e-3 (4.14e-2–4.22e-2, 298 facets, before the error bound of issue #91) | h ≤ 3.0e-2 |
 | `fossil_test_decimate` | sphere to 50 %, 25 %, 10 % | h ≤ 8.0e-3, 1.4e-2, 2.7e-2 | ≤ 1.5 × those; growing with the decimation |
 | `fossil_test_smoothing` | dragon, Taubin and explicit, 5 iterations | Taubin 0.307–0.333, explicit 0.565–0.589 | Taubin's upper below explicit's lower; Taubin ≤ 0.45 |
 | `fossil_test_hole_fair` | holed icosphere filled plain, refined, faired | plain 0.147–0.151, refined 0.161–0.164, faired 0.093–0.096 | faired's upper below plain's lower |

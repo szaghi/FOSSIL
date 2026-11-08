@@ -3,5 +3,5 @@ boolean result:   524 facets, edges from  0.0038 to 1.1180
 iterations 1:   980 facets, edges from  0.0038 to 1.1180, watertight T
 iterations 2:  1142 facets, edges from  0.0038 to 1.0308, watertight T
 iterations 4:  1158 facets, edges from  0.0038 to 0.5590, watertight T
-iterations 6:   962 facets, edges from  0.0038 to 0.3310, watertight T
-target 0.4 on the remeshed part: 962 -> 620 facets
+iterations 6:   990 facets, edges from  0.0038 to 0.3352, watertight T
+target 0.4 on the remeshed part: 990 -> 620 facets

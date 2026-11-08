@@ -249,8 +249,8 @@ All of them are lengths for `probe_many`:
 | foot curvature, cylinder R = 1/2 (16, 32, 64 sectors) | maximum error 0.21, 0.046, 0.011 |
 | foot curvature, flat faces | 0 exactly |
 | foot curvature, regular N-gons R = 1 | (π/N)/sin(π/N) exactly: the error against 1/R falls by 4.0 per halving of h |
-| markers, unit icosphere, Δx = 0.06 | 1962 markers, area within 0.6 %, 91 % of spacings in [0.8, 1.2] Δx |
-| markers, unit cube, Δx = 0.1, features kept | area 6 to round-off, 72 % of spacings in the window |
+| markers, unit icosphere, Δx = 0.06 | 2030 markers, area within 0.5 %, 97 % of spacings in [0.8, 1.2] Δx |
+| markers, unit cube, Δx = 0.1, features kept | area 6 to round-off, 53 % of spacings in the window |
 | curve markers, square and 64-gon | on the polyline (distance ≤ 6.6e-17), equal lengths summing to the perimeter |
 
 ## Limitations
@@ -265,7 +265,7 @@ All of them are lengths for `probe_many`:
   coarse meshes the error is large: 18 % on an icosphere with 320 facets.
   Across sharp edges the value is meaningless.
 - **Marker spacing follows the remesher.** Most spacings land inside
-  [0.8, 1.2] Δx on a smooth body (99 % on a sphere), fewer with sharp
+  [0.8, 1.2] Δx on a smooth body (97 % on a sphere), fewer with sharp
   edges kept (53 to 61 % on a cube: the locked edge vertices keep the
   spacing of their splits, and the spacings next to them gather near
   1.25 Δx). `spacing_fraction` reports how many do.

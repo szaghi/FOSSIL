@@ -4170,8 +4170,12 @@ contains
    !<   1. Split edges longer than 4 L / 3.
    !<   2. Collapse edges shorter than 4 L / 5.
    !<   3. Flip interior edges to balance vertex valences toward 6.
-   !<   4. Tangential relaxation (area-weighted Laplacian) + projection
-   !<      onto the original surface.
+   !<   4. Tangential relaxation (area-weighted Laplacian update projected on
+   !<      the vertex tangent plane, issue #91) + projection onto the original
+   !<      surface.
+   !< Collapse, flip and relaxation refuse a change whose new facets leave the
+   !< input by more than `REMESH_ERROR_TOL` (0.07) times the target length
+   !< (issue #91): a target near the size of the body no longer collapses it.
    !<
    !< Arguments:
    !<   - `target_length`: desired edge length. If <= 0 (default), uses
@@ -4189,11 +4193,7 @@ contains
    !< adopts the result back via `adopt_facets` (which rebuilds AABB tree,
    !< vertex pool, connectivity, pseudo-normals).
    !<
-   !< Documented limitations (see `fossil_remesh` module header for the
-   !< full discussion):
-   !<   - Area-weighted Laplacian has known inward bias on convex regions.
-   !<     Volume drift on a sphere is ~5% per iteration even with projection.
-   !<     Tighter preservation needs normal-direction projection (deferred).
+   !< Documented limitations: see isotropic-remesh.md.
    class(surface_stl_object),     intent(inout)        :: self
    real(R8P),                     intent(in), optional :: target_length     !< Target edge length; <= 0 → median.
    integer(I4P),                  intent(in), optional :: iterations        !< Outer-loop count; default 5.

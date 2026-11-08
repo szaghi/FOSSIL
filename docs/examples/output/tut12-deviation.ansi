@@ -1,5 +1,5 @@
 $ tut12_c_deviation
-h(mesh, part):  2.29E-02 <= h <=  2.52E-02
-  at the vertices  9.79E-14, mean over the mesh  6.60E-04
-h(part, mesh):  2.28E-02 <= h <=  2.78E-02
-volume change, relative: -3.53E-03
+h(mesh, part):  9.92E-03 <= h <=  1.22E-02
+  at the vertices  1.10E-14, mean over the mesh  3.55E-04
+h(part, mesh):  9.87E-03 <= h <=  1.49E-02
+volume change, relative: -1.09E-03

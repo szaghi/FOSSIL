@@ -16,7 +16,9 @@ module fossil_remesh
 !< STEP 4: pass_collapse — collapse short edges with safety checks.
 !< STEP 5: pass_flip — flip interior edges when doing so improves valence
 !< balance.
-!< STEP 6: pass_relax — area-weighted Laplacian smoothing + projection.
+!< STEP 6: pass_relax — area-weighted Laplacian update projected on the vertex tangent plane (issue #91) +
+!< projection onto the input. Issue #91 also bounds the error of collapse, flip and relax: a change whose new facets
+!< leave the input surface by more than REMESH_ERROR_TOL * L is refused (Dunyach et al. 2013).
 !< STEP 7 (this commit): feature preservation via dihedral-angle vertex
 !< lock + the public TBP `surface_stl_object%isotropic_remesh`. Vertices
 !< incident to any edge whose dihedral angle exceeds the threshold
@@ -47,6 +49,11 @@ public :: run_full_pipeline
 integer(I4P), parameter :: MAX_VAL = 32_I4P  !< Max vertex valence supported (rectangular incidence cap).
 real(R8P),    parameter :: FEATURE_DIHEDRAL_DEG = FEATURE_EDGE_DEFAULT_ANGLE !< Sharp-edge threshold (shared, issue #61).
 
+!< Error bound of the collapse, flip and relax passes, relative to the target length L (issue #91, after Dunyach et al.
+!< 2013): a collapse, a flip or a relaxation move is refused when a facet it creates has a sample (centroid, edge
+!< midpoints) farther than REMESH_ERROR_TOL * L from the input surface. 0.07 from a sweep over 0.03..0.3 (cube-01 at
+!< L = 1 keeps 95 % of its volume, a unit sphere at L = 0.4 still coarsens 7-fold); see isotropic-remesh.md.
+real(R8P), parameter, public :: REMESH_ERROR_TOL = 0.07_R8P
 integer(I4P), parameter :: REM_STATUS_OK        = 0_I4P
 integer(I4P), parameter :: REM_STATUS_BAD_INPUT = 1_I4P  !< Empty input or vertex_id unset.
 
@@ -141,14 +148,25 @@ contains
                                 vertex_locked=new_lock, alive=facet_alive, f_p=f_p)
          vertex_locked = vertex_locked .or. new_lock(1:size(vertex_locked))
       endif
-      call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
-                               nf_alive=nf_alive, vertex_locked=vertex_locked)
-      call apply_flip_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
-                           vertex_locked=vertex_locked)
+      if (present(reference_facet) .and. present(reference_tree)) then
+         call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
+                                  nf_alive=nf_alive, vertex_locked=vertex_locked, &
+                                  reference_facet=reference_facet, reference_tree=reference_tree)
+      else
+         call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
+                                  nf_alive=nf_alive, vertex_locked=vertex_locked)
+      endif
+      if (present(reference_facet) .and. present(reference_tree)) then
+         call apply_flip_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, vertex_locked=vertex_locked, &
+                              reference_facet=reference_facet, reference_tree=reference_tree, tolerance=REMESH_ERROR_TOL * L)
+      else
+         call apply_flip_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
+                              vertex_locked=vertex_locked)
+      endif
       if (present(reference_facet) .and. present(reference_tree)) then
          call apply_relax_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                                reference_facet=reference_facet, reference_tree=reference_tree, &
-                               vertex_locked=vertex_locked)
+                               vertex_locked=vertex_locked, tolerance=REMESH_ERROR_TOL * L)
       endif
    enddo
 
@@ -654,7 +672,7 @@ contains
    ! Step 4: collapse pass
    ! ===========================================================================
 
-   subroutine apply_collapse_pass(L, f_v, vcoord, facet_alive, nf_alive, vertex_locked)
+   subroutine apply_collapse_pass(L, f_v, vcoord, facet_alive, nf_alive, vertex_locked, reference_facet, reference_tree)
    !< Walk every alive edge; for each edge shorter than 4*L/5, attempt the
    !< collapse with normal-flip / duplicate-vertex / non-manifold safety
    !< checks. Vertex `va` (lower id) is kept and moved to the collapse
@@ -666,6 +684,9 @@ contains
    !< lock stays with the vertex that carries it).
    !< Otherwise, target is the edge midpoint.
    !<
+   !< With the reference surface, a collapse whose new fan leaves it by more
+   !< than REMESH_ERROR_TOL * L is refused (issue #91).
+   !<
    !< One collapse per vertex per pass (issue #79): a collapse leaves the
    !< incidence lists of its two endpoints stale (they are rebuilt by the
    !< next pass), so an edge with an endpoint already collapsed waits.
@@ -675,6 +696,8 @@ contains
    logical,      allocatable, intent(inout) :: facet_alive(:)
    integer(I4P),              intent(inout) :: nf_alive
    logical,                   intent(in)    :: vertex_locked(:)
+   type(facet_object),        intent(in), optional :: reference_facet(:) !< Input surface (error bound, issue #91).
+   type(aabb_tree_object),    intent(in), optional :: reference_tree     !< Its AABB tree.
    integer(I4P), allocatable                :: e_v(:, :), e_facets(:, :)
    integer(I4P), allocatable                :: v2f_count(:), v2f(:, :)
    integer(I4P)                             :: ne, e, va, vb, f1, f2, nv
@@ -731,7 +754,9 @@ contains
       call try_collapse_edge(va=va, vb=vb, f1=f1, f2=f2, target=target, &
                               f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                               v2f=v2f, v2f_count=v2f_count, nf_alive=nf_alive, &
-                              on_boundary=on_boundary, high=(4._R8P / 3._R8P) * L, collapsed=collapsed)
+                              on_boundary=on_boundary, high=(4._R8P / 3._R8P) * L, collapsed=collapsed, &
+                              reference_facet=reference_facet, reference_tree=reference_tree, &
+                              tolerance=REMESH_ERROR_TOL * L)
       if (collapsed) then
          touched(va) = .true. ; touched(vb) = .true.
       endif
@@ -769,7 +794,7 @@ contains
 
    subroutine try_collapse_edge(va, vb, f1, f2, target, &
                                  f_v, vcoord, facet_alive, v2f, v2f_count, nf_alive, on_boundary, high, &
-                                 collapsed)
+                                 collapsed, reference_facet, reference_tree, tolerance)
    !< Attempt to collapse edge (va, vb) to position `target`. Runs the
    !< topological checks (the edge has exactly its facets f1, f2; not an
    !< interior edge between two boundary vertices; not a tetrahedron; the
@@ -792,6 +817,9 @@ contains
    logical,      intent(in)            :: on_boundary(:)  !< Vertex on a boundary edge.
    real(R8P),    intent(in)            :: high            !< Longest edge a collapse may create (4L/3).
    logical,      intent(out)           :: collapsed       !< The collapse was applied.
+   type(facet_object),     intent(in), optional :: reference_facet(:) !< Input surface (error bound, issue #91).
+   type(aabb_tree_object), intent(in), optional :: reference_tree     !< Its AABB tree.
+   real(R8P),              intent(in), optional :: tolerance          !< Largest distance of the new fan from the input.
    integer(I4P)                        :: i, f, j, k, w, w1, w2, na, nb
    logical                             :: would_flip, would_dup, would_nonmanifold
 
@@ -900,6 +928,14 @@ contains
    enddo
    if (would_nonmanifold) return
 
+   ! Safety check 4 (issue #91): the fan around the merged vertex stays within `tolerance` of the input surface.
+   if (present(reference_facet) .and. present(reference_tree) .and. present(tolerance)) then
+      if (fan_off_reference(va=va, vb=vb, f1=f1, f2=f2, target=target, f_v=f_v, vcoord=vcoord, &
+                            facet_alive=facet_alive, v2f=v2f, v2f_count=v2f_count, &
+                            reference_facet=reference_facet, reference_tree=reference_tree, &
+                            tolerance=tolerance)) return
+   endif
+
    ! All checks passed — apply.
    vcoord(:, va) = target
    do i = 1, v2f_count(vb)
@@ -914,6 +950,80 @@ contains
    if (f2 > 0_I4P) then ; facet_alive(f2) = .false. ; nf_alive = nf_alive - 1 ; endif
    collapsed = .true.
    endsubroutine try_collapse_edge
+
+   function fan_off_reference(va, vb, f1, f2, target, f_v, vcoord, facet_alive, v2f, v2f_count, &
+                              reference_facet, reference_tree, tolerance) result(off)
+   !< Whether the facets around the vertex merged at `target` move off the input surface by more than `tolerance`
+   !< (issue #91, the approximation-error test of Dunyach et al. 2013). Each new facet is sampled at its centroid and at
+   !< its three edge midpoints, the target itself too; a sample with no input facet within `tolerance` (the tree search
+   !< is bounded by it) rejects the change. With vb = va and f1 = f2 = 0 it tests the fan of va moved to `target`.
+   integer(I4P),           intent(in) :: va, vb, f1, f2         !< Edge, its facets.
+   real(R8P),              intent(in) :: target(3)              !< Merged position.
+   integer(I4P),           intent(in) :: f_v(:, :)              !< Facet vertices.
+   real(R8P),              intent(in) :: vcoord(:, :)           !< Vertex coordinates.
+   logical,                intent(in) :: facet_alive(:)         !< Live facets.
+   integer(I4P),           intent(in) :: v2f(:, :), v2f_count(:) !< Vertex-facet incidence.
+   type(facet_object),     intent(in) :: reference_facet(:)     !< Input surface.
+   type(aabb_tree_object), intent(in) :: reference_tree         !< Its AABB tree.
+   real(R8P),              intent(in) :: tolerance              !< Largest distance allowed.
+   logical                            :: off                    !< A sample is farther than `tolerance`.
+   real(R8P)                          :: p(3, 3)                !< New facet corners.
+   integer(I4P)                       :: i, j, f, v             !< Counters.
+
+   off = .not. near_reference(target, reference_facet, reference_tree, tolerance)
+   if (off) return
+   do i = 1, v2f_count(va) + merge(0_I4P, v2f_count(vb), vb == va)
+      if (i <= v2f_count(va)) then
+         f = v2f(i, va)
+      else
+         f = v2f(i - v2f_count(va), vb)
+      endif
+      if (f == f1 .or. f == f2 .or. .not. facet_alive(f)) cycle
+      do j = 1, 3
+         v = f_v(j, f)
+         if (v == va .or. v == vb) then
+            p(:, j) = target
+         else
+            p(:, j) = vcoord(:, v)
+         endif
+      enddo
+      if (triangle_off_reference(p, reference_facet, reference_tree, tolerance)) then
+         off = .true. ; return
+      endif
+   enddo
+   endfunction fan_off_reference
+
+   function triangle_off_reference(p, reference_facet, reference_tree, tolerance) result(off)
+   !< Whether a sample of the triangle p (centroid, edge midpoints) is farther than `tolerance` from the input.
+   real(R8P),              intent(in) :: p(3, 3)            !< Corners.
+   type(facet_object),     intent(in) :: reference_facet(:) !< Input surface.
+   type(aabb_tree_object), intent(in) :: reference_tree     !< Its AABB tree.
+   real(R8P),              intent(in) :: tolerance          !< Distance bound.
+   logical                            :: off                !< A sample is off.
+   integer(I4P)                       :: j                  !< Counter.
+
+   off = .not. near_reference((p(:, 1) + p(:, 2) + p(:, 3)) / 3._R8P, reference_facet, reference_tree, tolerance)
+   do j = 1, 3
+      if (off) return
+      off = .not. near_reference(0.5_R8P * (p(:, j) + p(:, mod(j, 3) + 1)), reference_facet, reference_tree, tolerance)
+   enddo
+   endfunction triangle_off_reference
+
+   function near_reference(q, reference_facet, reference_tree, tolerance) result(near)
+   !< Whether the input surface has a facet within `tolerance` of q (tree search bounded by tolerance^2).
+   real(R8P),              intent(in) :: q(3)               !< Point.
+   type(facet_object),     intent(in) :: reference_facet(:) !< Input surface.
+   type(aabb_tree_object), intent(in) :: reference_tree     !< Its AABB tree.
+   real(R8P),              intent(in) :: tolerance          !< Distance bound.
+   logical                            :: near               !< Within the bound.
+   real(R8P)                          :: d2                 !< Squared distance found.
+   integer(I4P)                       :: cf, cr             !< Closest facet, region.
+
+   call reference_tree%distance_tree_with_region(facet=reference_facet, point=vector_R8P(q(1), q(2), q(3)), &
+                                                 distance=d2, closest_facet=cf, closest_region=cr, &
+                                                 max_distance2=tolerance**2)
+   near = cf > 0_I4P
+   endfunction near_reference
 
    pure function facet_would_flip(f_v, vcoord, f, va, vb, target) result(yes)
    !< True iff replacing va or vb with `target` in facet f would invert its
@@ -972,14 +1082,17 @@ contains
    ! Step 5: edge flip pass
    ! ===========================================================================
 
-   subroutine apply_flip_pass(f_v, vcoord, facet_alive, vertex_locked)
+   subroutine apply_flip_pass(f_v, vcoord, facet_alive, vertex_locked, reference_facet, reference_tree, tolerance)
    !< Walk every interior edge (one shared by exactly 2 facets); flip the
    !< diagonal of the resulting quad if doing so reduces the total deviation
    !< from the target valence (6 for interior vertices) AND the post-flip
    !< triangles are geometrically valid (no normal flip, no degenerate area)
    !< AND the new diagonal doesn't duplicate an existing edge AND none of
    !< the four involved vertices is locked (locked vertices anchor sharp
-   !< features; flipping an edge incident to one risks moving a feature).
+   !< features; flipping an edge incident to one risks moving a feature)
+   !< AND, with the reference surface, the two new facets stay within
+   !< `tolerance` of it, unless the old ones did not (issue #91: a flip across
+   !< a crease cuts it).
    !<
    !< Convention for the flip: edge `(va, vb)` shared by facets `f1` and
    !< `f2` with apexes `w1` and `w2` becomes edge `(w1, w2)`; the new facets
@@ -998,6 +1111,9 @@ contains
    real(R8P),    intent(in)    :: vcoord(:, :)
    logical,      intent(inout) :: facet_alive(:)
    logical,      intent(in)    :: vertex_locked(:)
+   type(facet_object),     intent(in), optional :: reference_facet(:) !< Input surface (error bound, issue #91).
+   type(aabb_tree_object), intent(in), optional :: reference_tree     !< Its AABB tree.
+   real(R8P),              intent(in), optional :: tolerance          !< Error bound.
    integer(I4P), allocatable   :: e_v(:, :), e_facets(:, :), valence(:)
    integer(I4P), allocatable   :: new_edges(:, :)
    integer(I4P)                :: n_new
@@ -1044,6 +1160,15 @@ contains
       if (dev_after >= dev_before) cycle
       if (flip_would_break(va=va, vb=vb, w1=w1, w2=w2, f1=f1, f2=f2, &
                             f_v=f_v, vcoord=vcoord)) cycle
+      ! error bound (issue #91): a flip that takes the quad off the input (across a crease) is refused, unless the
+      ! quad is off already
+      if (present(reference_facet) .and. present(reference_tree) .and. present(tolerance)) then
+         if (triangle_off_reference(vcoord(:, [va, w2, w1]), reference_facet, reference_tree, tolerance) .or. &
+             triangle_off_reference(vcoord(:, [vb, w1, w2]), reference_facet, reference_tree, tolerance)) then
+            if (.not. (triangle_off_reference(vcoord(:, f_v(:, f1)), reference_facet, reference_tree, tolerance) .or. &
+                       triangle_off_reference(vcoord(:, f_v(:, f2)), reference_facet, reference_tree, tolerance))) cycle
+         endif
+      endif
       f_v(:, f1) = [va, w2, w1]
       f_v(:, f2) = [vb, w1, w2]
       valence(va) = valence(va) - 1
@@ -1130,32 +1255,26 @@ contains
    ! Step 6: tangential relaxation + projection
    ! ===========================================================================
 
-   subroutine apply_relax_pass(f_v, vcoord, facet_alive, reference_facet, reference_tree, vertex_locked)
-   !< For each (non-locked, non-boundary) vertex, move it toward the area-
-   !< weighted centroid of its incident-facet centroids, then project the
-   !< new position onto the reference surface via the closest-point query
-   !< on `reference_tree`.
-   !<
-   !< Algorithm (Botsch-Kobbelt area-weighted Laplacian):
-   !<   target_v = Σ_f area(f) * centroid(f) / Σ_f area(f)
-   !< over facets f incident to v. The projection step keeps the remeshed
-   !< surface on the original geometry; without it, the relaxation drifts
-   !< the whole surface inward (each smoothing step shrinks the convex
-   !< hull slightly).
-   !<
-   !< Locked-vertex / feature handling: skipped for now — feature
-   !< preservation is wired in step 7 via a `vertex_locked` array. For
-   !< step 6 every alive non-boundary vertex relaxes.
+   subroutine apply_relax_pass(f_v, vcoord, facet_alive, reference_facet, reference_tree, vertex_locked, tolerance)
+   !< For each non-locked vertex: the area-weighted centroid of its incident-facet centroids,
+   !<   c = sum_f area(f) * centroid(f) / sum_f area(f),
+   !< gives the update c - v; its component along the vertex normal n (sum of the incident area vectors) is dropped
+   !< (tangential relaxation, Botsch & Kobbelt 2004, issue #91: the full update pulled every vertex inward), and the
+   !< new position v + (I - n n^T)(c - v) is projected onto the reference surface by the closest-point query on
+   !< `reference_tree`. With `tolerance`, a move whose fan leaves the reference by more than it is refused (unless the
+   !< fan is off already): a vertex at a corner or on a crease does not slide off it.
    integer(I4P),                  intent(in)            :: f_v(:, :)
    real(R8P),                     intent(inout)         :: vcoord(:, :)
    logical,                       intent(in)            :: facet_alive(:)
    type(facet_object),            intent(in)            :: reference_facet(:)
    type(aabb_tree_object),        intent(in)            :: reference_tree
    logical,                       intent(in)            :: vertex_locked(:)
+   real(R8P),                     intent(in), optional  :: tolerance     !< Error bound (issue #91).
    integer(I4P), allocatable                            :: v2f_count(:), v2f(:, :)
    integer(I4P)                                         :: nv, v, i, f
    real(R8P)                                            :: total_area, area_f, centroid_f(3)
    real(R8P)                                            :: target(3)
+   real(R8P)                                            :: nrm(3), delta(3), nn
    type(vector_R8P)                                     :: probe, closest
    real(R8P)                                            :: dummy_d
    integer(I4P)                                         :: closest_facet, closest_region
@@ -1190,6 +1309,20 @@ contains
       enddo
       if (total_area <= tiny(1._R8P)) cycle
       target = target / total_area
+      ! tangential update (issue #91): drop the component of target - v along the vertex normal (sum of the incident
+      ! facets' area vectors), so the relaxation slides the vertex on its tangent plane and does not pull it inward
+      nrm = 0._R8P
+      do i = 1, v2f_count(v)
+         f = v2f(i, v)
+         if (.not. facet_alive(f)) cycle
+         nrm = nrm + cross(vcoord(:, f_v(2, f)) - vcoord(:, f_v(1, f)), vcoord(:, f_v(3, f)) - vcoord(:, f_v(1, f)))
+      enddo
+      nn = norm2(nrm)
+      if (nn > 0._R8P) then
+         nrm = nrm / nn
+         delta = target - vcoord(:, v)
+         target = vcoord(:, v) + delta - dot_product(delta, nrm) * nrm
+      endif
       ! Project onto reference surface.
       probe = vector_R8P(target(1), target(2), target(3))
       closest_facet = 0_I4P ; closest_region = 0_I4P ; dummy_d = 0._R8P
@@ -1200,12 +1333,21 @@ contains
       if (closest_facet > 0_I4P .and. closest_facet <= size(reference_facet)) then
          call reference_facet(closest_facet)%compute_distance_with_region( &
             point=probe, distance=dummy_d, closest=closest, region=closest_region)
-         vcoord(1, v) = closest%x
-         vcoord(2, v) = closest%y
-         vcoord(3, v) = closest%z
-      else
-         vcoord(:, v) = target
+         target = [closest%x, closest%y, closest%z]
       endif
+      ! error bound (issue #91): a move that takes the vertex's fan off the input by more than `tolerance` is refused
+      ! (unless the fan is off already), so a vertex at a corner or on a crease does not slide off it
+      if (present(tolerance)) then
+         if (fan_off_reference(va=v, vb=v, f1=0_I4P, f2=0_I4P, target=target, f_v=f_v, vcoord=vcoord, &
+                               facet_alive=facet_alive, v2f=v2f, v2f_count=v2f_count, reference_facet=reference_facet, &
+                               reference_tree=reference_tree, tolerance=tolerance)) then
+            if (.not. fan_off_reference(va=v, vb=v, f1=0_I4P, f2=0_I4P, target=vcoord(:, v), f_v=f_v, vcoord=vcoord, &
+                                        facet_alive=facet_alive, v2f=v2f, v2f_count=v2f_count, &
+                                        reference_facet=reference_facet, reference_tree=reference_tree, &
+                                        tolerance=tolerance)) cycle
+         endif
+      endif
+      vcoord(:, v) = target
    enddo
    endsubroutine apply_relax_pass
 

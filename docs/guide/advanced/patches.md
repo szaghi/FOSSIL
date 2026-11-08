@@ -80,7 +80,7 @@ every facet keeps a patch:
 - `alpha_wrap`: each facet of the wrap takes the patch of the input facet closest to its centroid.
 
 A marching-cubes sphere (2312 facets) in two patches, north and south, split along a zigzag of facet edges near the
-equator; remeshed (`L = 0.08`, 4862 facets) and decimated (384 facets), the zigzag stays where it is:
+equator; remeshed (`L = 0.08`, 4832 facets) and decimated (384 facets), the zigzag stays where it is:
 
 ![three spheres in a row, the northern patch in ember and the southern in teal: the input, its isotropic remesh with many more facets and its decimation with few, each with the same zigzag boundary between the two colours](../../examples/images/ref-patches-remesh.svg){.fossil-figure}
 

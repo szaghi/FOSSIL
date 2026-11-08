@@ -5,12 +5,19 @@
 !< count. The check is now the link condition (the endpoints share no neighbour but the two apexes).
 !< 1. cube-01 at L = 1, features on: the edges and corners are locked, the 6 face centres collapse onto them (36
 !<    facets, 48 before #79), area and volume stay 6 and 1.
-!< 2. The dragon at L = 1.5, 3 iterations: far fewer than its 6588 facets, no new boundary or non-manifold edge.
+!< 2. The dragon at L = 1.5, 3 iterations: far fewer than its 6588 facets (2280 since the error bound of issue #91, 1398
+!<    before), no new boundary or non-manifold edge.
 !< 3. A marching-cubes sphere (25^3, as on isotropic-remesh.md) at L = 0.1, one iteration per call: the number of edges
 !<    shorter than 4L/5 falls from call to call (before #79 it grew: 696, 2017, 2382).
-!< 4. The same sphere at L = 0.4, 3 iterations: coarser (2312 -> 298 facets), watertight, manifold, certified one-sided
-!<    deviation from the input 4.14e-2 <= h <= 4.22e-2 at tolerance 1e-3 when written (bound 4.5e-2). Edges near 0.4 on a
-!<    unit sphere: the chords alone put the facet centres about L^2/6 = 2.7e-2 inside.
+!< 4. The same sphere at L = 0.4, 3 iterations: coarser (2312 -> 332 facets), watertight, manifold, certified one-sided
+!<    deviation from the input 2.63e-2 <= h <= 2.72e-2 at tolerance 1e-3 (bound 3.0e-2; 4.14e-2 <= h <= 4.22e-2 with 298
+!<    facets and the bound 4.5e-2 before issue #91, whose error bound refuses the collapses that leave the input by more
+!<    than 0.07 L = 2.8e-2). Edges near 0.4 on a unit sphere: the chords alone put the facet centres about L^2/6 = 2.7e-2
+!<    inside.
+!< 5. cube-01 at L = 1 (the size of the body), features off (issue #91). Before, the collapses, the flips across the edges
+!<    and the full Laplacian ate the corners: a flat tetrahedron, volume 4e-4, after 3 calls of one iteration. With the
+!<    tangential relaxation and the error bound (REMESH_ERROR_TOL): one call of 3 iterations keeps volume 0.9488 (bound:
+!<    loss below 0.06), three calls of one 0.8227 (each call bounds its error against its own input; bound 0.2).
 program fossil_test_remesh_coarsen
 
 use fossil, only : surface_stl_object, facet_object, extract_isosurface, MC_STATUS_OK, REM_STATUS_OK, DEV_STATUS_OK
@@ -23,8 +30,10 @@ type(surface_stl_object)        :: s, input
 type(facet_object), allocatable :: facets(:)
 real(R8P)                       :: phi(25, 25, 25), lower, upper
 integer(I4P)                    :: i, j, k, status, nbe0, nnm0, short(0:3)
-logical                         :: ok(4)
-real(R8P), parameter            :: HSPHERE = 4.5e-2_R8P !< Deviation bound of case 4 (measured 4.14e-2 .. 4.22e-2).
+logical                         :: ok(5)
+real(R8P), parameter            :: VCUBE = 0.06_R8P    !< Volume loss bound of case 5, one call (measured 0.0512).
+real(R8P), parameter            :: VCUBE3 = 0.2_R8P    !< Volume loss bound of case 5, three calls (measured 0.177).
+real(R8P), parameter            :: HSPHERE = 3.0e-2_R8P !< Deviation bound of case 4 (measured 2.63e-2 .. 2.72e-2).
 
 ok = .false.
 
@@ -73,7 +82,23 @@ print '(A,I0,A,I0,A,L1,A,L1,A,2ES12.4)', '4. sphere L=0.4: facets ', input%get_f
 ok(4) = status == REM_STATUS_OK .and. k == DEV_STATUS_OK .and. s%get_facets_number() < input%get_facets_number() / 4 .and. &
         s%is_watertight() .and. s%is_manifold() .and. upper <= HSPHERE
 
-print '(A,4L2)', 'per-case results: ', ok
+! 5. cube-01 at L = 1 (the size of the body), features off: one call of 3 iterations, then three calls of one (each call
+!    bounds its error against its own input, so the error of the second accumulates)
+call s%load_from_file(file_name='src/tests/cube-01.stl', guess_format=.true.)
+call s%isotropic_remesh(target_length=1._R8P, iterations=3_I4P, preserve_features=.false., status=status)
+print '(A,I0,A,F12.9,A,F12.9,A,L1)', '5. cube L=1, features off, 1 x 3: facets ', s%get_facets_number(), ', area ', &
+      s%get_area(), ', volume ', s%get_volume(), ', watertight ', s%is_watertight()
+ok(5) = status == REM_STATUS_OK .and. s%is_watertight() .and. s%is_manifold() .and. abs(s%get_volume() - 1._R8P) < VCUBE
+call s%load_from_file(file_name='src/tests/cube-01.stl', guess_format=.true.)
+do k = 1, 3
+   call s%isotropic_remesh(target_length=1._R8P, iterations=1_I4P, preserve_features=.false., status=status)
+enddo
+print '(A,I0,A,F12.9,A,F12.9,A,L1)', '5. cube L=1, features off, 3 x 1: facets ', s%get_facets_number(), ', area ', &
+      s%get_area(), ', volume ', s%get_volume(), ', watertight ', s%is_watertight()
+ok(5) = ok(5) .and. status == REM_STATUS_OK .and. s%is_watertight() .and. s%is_manifold() .and. &
+        abs(s%get_volume() - 1._R8P) < VCUBE3
+
+print '(A,5L2)', 'per-case results: ', ok
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
 

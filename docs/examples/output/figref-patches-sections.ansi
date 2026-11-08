@@ -10,6 +10,6 @@ block minus sphere: 2292 facets, the dimple in patch "sphere"
   patch block (40)
   patch lid (102)
   patch sphere (2150)
-input 2312, isotropic_remesh 4862, decimate 384 facets: the boundary is kept
+input 2312, isotropic_remesh 4832, decimate 384 facets: the boundary is kept
 section z = 0.25: 16 segments, 5 patches
 section z = 0.75: 24 segments, 5 patches

@@ -8,7 +8,9 @@ program fossil_test_surface_markers
 !< - A unit cube (faces split in 2 x 2) with sharp features kept, dx = 0.1: area 6 to round-off, normals
 !<   on the six axis directions, spacing fraction above 0.48 (0.723 on the first run; 0.528 since the remesher
 !<   coarsens, issue #79: its edges are closer to the target, but on the cube the crease vertices, locked at the
-!<   spacing of the splits, leave a second mode of spacings near 1.25 dx; the sphere rose from 0.912 to 0.987).
+!<   spacing of the splits, leave a second mode of spacings near 1.25 dx; the sphere rose from 0.912 to 0.987). Issue #91
+!<   (tangential relaxation, error bound) leaves the cube at 0.528: its faces are flat, where the tangential update is the
+!<   full one and nothing leaves the input, and the crease mode stays; the sphere 0.972.
 !< - The input surface is unchanged (intent(in)); dx <= 0 is refused (negative control).
 !< - Curves: a unit square and a 64-gon resampled exactly: every marker on the polyline (distance
 !<   below 1e-15), lengths all equal to L / n with n = nint(L / dx), summing to the perimeter; an open

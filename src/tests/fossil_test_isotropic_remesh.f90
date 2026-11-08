@@ -257,7 +257,7 @@ are_tests_passed(9) = status == DEV_STATUS_OK .and. dev_upper <= 1.2e-2_R8P
 ! Step 10: the remeshed sphere (2 iterations, no features) stays within a measured bound of the input sphere: its
 ! one-sided deviation, certified at tolerance 1e-3, was 5.61e-3 <= h <= 6.55e-3 when written (the bound 7.5e-3), and
 ! 7.33e-3 <= h <= 8.22e-3 since the collapse pass coarsens (issue #79: 1742 facets instead of 2312, longer chords;
-! the bound 9.0e-3). The two
+! the bound 9.0e-3); 7.38e-3 <= h <= 8.38e-3 with the tangential relaxation (issue #91, 1740 facets). The two
 ! spheres cross each other: near the crossings d is small and the branch and bound refines a strip down to the
 ! tolerance, so a tighter one, or both directions, would exceed the test's time budget.
 call sphere_tbp%deviation(sphere_ref, lower=dev_lower, upper=dev_upper, tolerance=1.e-3_R8P, status=status)
