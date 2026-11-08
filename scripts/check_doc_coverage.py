@@ -5,6 +5,10 @@ Usage: check_doc_coverage.py            report the gaps, exit 0 unless an includ
        check_doc_coverage.py --strict   exit 1 on any gap too (scripts/check_doc_snippets.sh runs it so)
 
 Rules:
+  - (issue #85) every level-2 section of a reference page or tutorial chapter that explains something (not API,
+    Example, Known limitations, ...) shows a generated figure; every tutorial chapter shows an animation and at least
+    two runs; the reference pages of iterative or time-dependent features (ANIMATED) show an animation; every entry
+    point of the feature map appears in the snippet of a cookbook recipe;
   - every reference page (docs/guide/usage.md, docs/guide/advanced/*.md) and every tutorial chapter shows at least one
     generated figure (docs/examples/images/*.svg) and at least one run example (docs/examples/output/*.ansi);
   - every row of the feature map (docs/guide/features.md, tables with a Tutorial column) links a tutorial chapter or a
@@ -37,6 +41,56 @@ def includes(text: str) -> list[str]:
     return INCLUDE.findall(text) + INCLUDE_HTML.findall(text)
 
 
+# sections that need no figure (issue #85): reference material, not explanation
+SECTION_EXEMPT_REF = re.compile(r"^(API|Example|See also|References?|Left out|Known limitations|Limitations|"
+                                r"Design|Sources?|Status|Notation|Proved and measured|Measured|Results|"
+                                r"Compilers|Further reading|Related|Benchmarks?|Performance|Changelog|Command line|Validation|Limits|"
+                                r"Where the library|Placement rules|Output for inspection|Recommendation)\b", re.I)
+SECTION_EXEMPT_TUT = re.compile(r"^(Running it|Run it|Next|What next|Summary|Recap|Build|Building)\b", re.I)
+# reference pages of iterative or time-dependent features: they show an animation (issue #85)
+ANIMATED = {"isotropic-remesh", "decimate", "smoothing", "hole-filling", "alpha-wrap", "booleans", "distance-field",
+            "cut-cells", "moving-bodies", "cut-solver", "curvilinear-blocks", "overset", "collision", "body-fitted",
+            "surface-deviation", "thickness", "feature-edges", "mass-properties", "body-distance", "amr-tagging",
+            "ib-queries"}
+# feature-map entry points that are not routines a recipe calls
+ENTRY_SKIP = {"_all", "_any", "_device", "fossil_cut_cells_3d", "pose", "geometry", "quality", "validity", "compute"}
+
+
+def sections(text: str) -> list[tuple[str, str]]:
+    """The level-2 sections of a page: (title, body), code fences ignored."""
+    out, title, body, fence = [], None, [], False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            fence = not fence
+        if not fence and line.startswith("## "):
+            if title is not None:
+                out.append((title, "\n".join(body)))
+            title, body = line[3:].strip(), []
+        elif title is not None:
+            body.append(line)
+    if title is not None:
+        out.append((title, "\n".join(body)))
+    return out
+
+
+def is_animation(inc: str) -> bool:
+    """A generated image with SMIL frames."""
+    path = DOCS / inc
+    return path.suffix == ".svg" and path.exists() and "<animate" in path.read_text()
+
+
+def entry_points() -> list[str]:
+    """The routine names of the feature map's Entry point column."""
+    names: set[str] = set()
+    for line in (DOCS / "guide/features.md").read_text().splitlines():
+        cells = line.split("|")
+        if not line.startswith("| ") or len(cells) < 4 or "`" not in cells[2]:
+            continue
+        for code in re.findall(r"`([^`]+)`", cells[2]):
+            names.update(re.findall(r"[a-z_][a-z0-9_]*", code.split("(")[0].split("%")[-1]))
+    return sorted(n for n in names if n not in ENTRY_SKIP)
+
+
 def main() -> int:
     strict = "--strict" in sys.argv[1:]
     gaps: list[str] = []
@@ -53,12 +107,37 @@ def main() -> int:
     ref = [DOCS / "guide/usage.md"] + sorted((DOCS / "guide/advanced").glob("*.md"))
     tut = sorted((DOCS / "manual/tutorial").glob("*.md"))
     for page in ref + tut:
-        inc = includes(page.read_text())
+        text = page.read_text()
+        inc = includes(text)
         figs = [i for i in inc if i.startswith("examples/images/")]
         runs = [i for i in inc if i.startswith("examples/output/")]
+        name = page.relative_to(ROOT)
         missing = [what for what, n in (("figure", figs), ("run example", runs)) if not n]
         if missing:
-            gaps.append(f"{page.relative_to(ROOT)}: no {' and no '.join(missing)}")
+            gaps.append(f"{name}: no {' and no '.join(missing)}")
+        # issue #85: a figure in every section that explains something
+        exempt = SECTION_EXEMPT_TUT if page in tut else SECTION_EXEMPT_REF
+        for title, body in sections(text):
+            if exempt.search(title):
+                continue
+            if not any(i.startswith("examples/images/") for i in includes(body)):
+                gaps.append(f"{name}: section '{title}' has no figure")
+        anims = [f for f in figs if is_animation(f)]
+        if page in tut:
+            if not anims:
+                gaps.append(f"{name}: no animation")
+            if len(set(runs)) < 2:
+                gaps.append(f"{name}: fewer than two runs")
+        elif page.stem in ANIMATED and not anims:
+            gaps.append(f"{name}: no animation (an iterative or time-dependent feature)")
+
+    # issue #85: every entry point of the feature map shown by a recipe
+    cook = (DOCS / "manual/cookbook.md").read_text()
+    recipe_code = "\n".join((DOCS / i).read_text() for i in includes(cook)
+                            if i.startswith("examples/snippets/") and (DOCS / i).exists())
+    for entry in entry_points():
+        if not re.search(rf"\b{re.escape(entry)}\b", recipe_code):
+            gaps.append(f"docs/manual/cookbook.md: no recipe shows `{entry}`")
 
     rows = 0
     for table in re.split(r"\n\s*\n", (DOCS / "guide/features.md").read_text()):
