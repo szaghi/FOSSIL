@@ -44,6 +44,7 @@ use fossil_facet_object, only : facet_object
 use fossil_vertex_pool_object, only : vertex_pool_object
 use penf, only : I4P, R8P
 use vecfor, only : vector_R8P
+use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
 
 implicit none
 private
@@ -51,13 +52,16 @@ private
 public :: build_gaussian_curvature
 public :: build_mean_curvature
 public :: build_jet_curvature
-public :: CURV_STATUS_OK, CURV_STATUS_BAD_INPUT, CURV_STATUS_DEGENERATE_TRIANGLE
+public :: CURV_STATUS_OK, CURV_STATUS_BAD_INPUT, CURV_STATUS_DEGENERATE_TRIANGLE, CURV_STATUS_FIT_FAILED
 
 integer(I4P), parameter :: CURV_STATUS_OK                   = 0_I4P
 integer(I4P), parameter :: CURV_STATUS_BAD_INPUT            = 1_I4P  !< Empty facet array or pool not initialized.
 integer(I4P), parameter :: CURV_STATUS_DEGENERATE_TRIANGLE  = 2_I4P  !< At least one triangle has area below tolerance; affected vertices skip that triangle.
+integer(I4P), parameter :: CURV_STATUS_FIT_FAILED           = 3_I4P  !< Jet fit rank deficient at a vertex: H, K NaN there (#91).
 
 real(R8P), parameter :: DEGENERATE_AREA_TOL = 1.0e-30_R8P
+real(R8P), parameter :: JET_MERGE_TOL = 1.0e-8_R8P !< Ring vertices closer than this times the ring radius are one point.
+integer(I4P), parameter :: JET_MAX_RINGS = 4_I4P   !< Largest ring grown when merged points leave too few for the fit.
 real(R8P), parameter :: PI = 4._R8P * atan(1._R8P)
 
 contains
@@ -344,6 +348,16 @@ contains
    !< their maximum error stays near 15 % at the valence-5 vertices). A vertex with fewer than 6
    !< 2-ring vertices takes the cotangent / angle-defect value. Flat neighbourhoods give 0 exactly.
    !<
+   !< Conditioning (issue #91): ring vertices within 1e-8 of the ring radius of the centre or of an earlier
+   !< ring vertex are one point (marching cubes leaves vertices 1e-12 apart around a grid node 1e-12 off the
+   !< level); if merging removed points and fewer than 12 distinct ones remain, the ring grows by one
+   !< neighbourhood at a time, up to the 4-ring. The columns of the least-squares matrix are scaled by powers
+   !< of two (exact) before the QR, whose rank check (a diagonal of R below 1e-12 of the largest) is then
+   !< relative to equilibrated columns. If the cubic and the quadratic fits are both rank deficient, or
+   !< merging left fewer than 6 distinct points, H and K are NaN at that vertex (not a number, rather than
+   !< a wrong one) and `status` = CURV_STATUS_FIT_FAILED (a ring on two lines, for instance; a ring with all
+   !< heights exactly 0 still gives 0). Without merged points the ring and the fit are those of before.
+   !<
    !< Sign convention as `build_mean_curvature`: H > 0 where the surface is convex seen from the side
    !< the normals point to (sphere: H = 1/R, K = 1/R^2).
    type(facet_object),       intent(in)            :: facet(:) !< Facets.
@@ -364,6 +378,8 @@ contains
    logical                       :: ok                          !< Fit succeeded.
    integer(I4P)                  :: st                          !< Builder status.
    type(vector_R8P)              :: pv                          !< Pool vertex.
+   integer(I4P)                  :: keep(MAXN), nd, nd_at, lo, hi, layer !< Distinct ring vertices (for nd_at), layers.
+   logical                       :: failed                      !< Some vertex fit failed.
 
    if (present(status)) status = CURV_STATUS_OK
    nf = size(facet, kind=I4P)
@@ -412,6 +428,7 @@ contains
       enddo
    enddo
    stamp = 0_I4P
+   failed = .false.
    do i = 1_I4P, nv
       if (.not. pn_set(i)) cycle
       nn = pn(:, i) ; hs = norm2(nn)
@@ -425,16 +442,32 @@ contains
             stamp(j) = i ; nr = nr + 1_I4P ; ring(nr) = j
          endif
       enddo
-      m = nr
-      do ii = 1_I4P, m
-         do jj = off(ring(ii)), off(ring(ii) + 1) - 1_I4P
-            j = adj(jj)
-            if (stamp(j) /= i .and. nr < MAXN) then
-               stamp(j) = i ; nr = nr + 1_I4P ; ring(nr) = j
-            endif
+      lo = 1_I4P ; hi = nr ; nd_at = -1_I4P
+      do layer = 2_I4P, JET_MAX_RINGS ! layer 2 always; more only while merged points leave < 12 distinct ones
+         if (layer > 2_I4P) then
+            call distinct_ring(xyz=xyz, centre=i, ring=ring(1:nr), keep=keep, nd=nd) ; nd_at = nr
+            if (nd == nr .or. nd >= 12_I4P .or. hi < lo) exit
+         endif
+         m = nr
+         do ii = lo, hi
+            do jj = off(ring(ii)), off(ring(ii) + 1) - 1_I4P
+               j = adj(jj)
+               if (stamp(j) /= i .and. nr < MAXN) then
+                  stamp(j) = i ; nr = nr + 1_I4P ; ring(nr) = j
+               endif
+            enddo
          enddo
+         lo = m + 1_I4P ; hi = nr
       enddo
       if (nr < 6_I4P) cycle ! keep the fallback
+      if (nd_at /= nr) call distinct_ring(xyz=xyz, centre=i, ring=ring(1:nr), keep=keep, nd=nd)
+      if (nd < nr) then ! merged: the fit runs on the distinct points
+         if (nd < 6_I4P) then
+            H(i) = ieee_value(1._R8P, ieee_quiet_nan) ; K(i) = H(i) ; failed = .true.
+            cycle
+         endif
+         ring(1:nd) = ring(keep(1:nd)) ; nr = nd
+      endif
       ! tangent frame
       if (abs(nn(1)) < 0.9_R8P) then
          t1 = [0._R8P, -nn(3), nn(2)] ! e_x x n
@@ -462,7 +495,14 @@ contains
          if (ok .or. np == 5_I4P) exit
          np = 5_I4P
       enddo
-      if (.not. ok) cycle
+      if (.not. ok) then
+         if (any([(abs(dot_product(xyz(:, ring(ii)) - xyz(:, i), nn)), ii = 1_I4P, nr)] > 0._R8P)) then
+            H(i) = ieee_value(1._R8P, ieee_quiet_nan) ; K(i) = H(i) ; failed = .true.
+         else ! every height exactly 0: flat
+            H(i) = 0._R8P ; K(i) = 0._R8P
+         endif
+         cycle
+      endif
       ! graph z = f(x, y) at the origin: f_x = d, f_y = e, f_xx = 2a, f_xy = b, f_yy = 2c
       w2 = 1._R8P + coef(1)**2 + coef(2)**2
       eg = w2 ! (1 + d^2)(1 + e^2) - (d e)^2
@@ -473,11 +513,44 @@ contains
       H(i) = -hh / hs
       K(i) = kk / (hs * hs)
    enddo
+   if (failed .and. present(status)) status = CURV_STATUS_FIT_FAILED
    endsubroutine build_jet_curvature
+
+   pure subroutine distinct_ring(xyz, centre, ring, keep, nd)
+   !< Positions in `ring` of its distinct vertices (issue #91): a vertex within JET_MERGE_TOL of the ring
+   !< radius (largest distance from the centre) of the centre or of an earlier kept vertex is dropped.
+   !< Ring order is kept, so a ring without such vertices gives keep = 1..size(ring).
+   real(R8P),    intent(in)  :: xyz(:,:) !< Coordinates [3, n].
+   integer(I4P), intent(in)  :: centre   !< Centre vertex.
+   integer(I4P), intent(in)  :: ring(:)  !< Ring vertices.
+   integer(I4P), intent(out) :: keep(:)  !< Positions in ring of the distinct vertices [nd].
+   integer(I4P), intent(out) :: nd       !< Distinct vertices.
+   real(R8P)                 :: tol2     !< Squared merge distance.
+   integer(I4P)              :: a, b     !< Counters.
+   logical                   :: dup      !< Vertex a merged.
+
+   tol2 = 0._R8P
+   do a = 1_I4P, size(ring, kind=I4P)
+      tol2 = max(tol2, sum((xyz(:, ring(a)) - xyz(:, centre))**2))
+   enddo
+   tol2 = JET_MERGE_TOL**2 * tol2
+   nd = 0_I4P
+   do a = 1_I4P, size(ring, kind=I4P)
+      dup = sum((xyz(:, ring(a)) - xyz(:, centre))**2) <= tol2
+      do b = 1_I4P, nd
+         if (dup) exit
+         dup = sum((xyz(:, ring(a)) - xyz(:, ring(keep(b))))**2) <= tol2
+      enddo
+      if (dup) cycle
+      nd = nd + 1_I4P ; keep(nd) = a
+   enddo
+   endsubroutine distinct_ring
 
    pure subroutine householder_lsq(a, b, m, n, x, ok)
    !< Least-squares solution of a(1:m, 1:n) x = b(1:m) by Householder QR (m >= n, n <= 9). `ok` is false
-   !< if m < n or the system is rank deficient (a diagonal of R below 1e-12 of the largest).
+   !< if m < n or the system is rank deficient (a diagonal of R below 1e-12 of the largest). The columns
+   !< are first scaled by powers of two to unit size (exact, so the solution's bits do not change; issue
+   !< #91), which makes the rank check relative to equilibrated columns.
    real(R8P),    intent(inout) :: a(:,:) !< Matrix (overwritten).
    real(R8P),    intent(inout) :: b(:)   !< Right-hand side (overwritten).
    integer(I4P), intent(in)    :: m, n   !< Rows, columns.
@@ -486,9 +559,14 @@ contains
    real(R8P)                   :: alpha, vnorm2, s, rmax !< Work.
    real(R8P)                   :: v(size(a, 1))           !< Householder vector.
    integer(I4P)                :: j, k                    !< Counters.
+   integer(I4P)                :: ce(n)                   !< Column scale exponents.
 
    x = 0._R8P ; ok = .false.
    if (m < n) return
+   do j = 1_I4P, n
+      ce(j) = exponent(maxval(abs(a(1:m, j))))
+      a(1:m, j) = scale(a(1:m, j), -ce(j))
+   enddo
    rmax = 0._R8P
    do k = 1_I4P, n
       alpha = -sign(norm2(a(k:m, k)), a(k, k))
@@ -509,6 +587,9 @@ contains
    enddo
    do k = n, 1_I4P, -1_I4P
       x(k) = (b(k) - dot_product(a(k, k + 1:n), x(k + 1:n))) / a(k, k)
+   enddo
+   do k = 1_I4P, n
+      x(k) = scale(x(k), -ce(k))
    enddo
    ok = .true.
    endsubroutine householder_lsq

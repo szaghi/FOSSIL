@@ -1876,6 +1876,8 @@ contains
    !< weights from the per-vertex `jet_curvature` (cubic fit over the 2-ring, error O(h^2)). Sign: H > 0
    !< where the surface is convex seen from outside (from the side the normals point to): a sphere has
    !< (1/R, 1/R^2), a cylinder (1/(2R), 0). The per-vertex fields are built once per call, O(facets).
+   !< Where the vertex fit is rank deficient (`jet_curvature` returns CURV_STATUS_FIT_FAILED, issue #91) the
+   !< vertex values are NaN, and so are the curvatures of the feet whose facet uses that vertex.
    class(surface_stl_object), intent(in)            :: self               !< Surface.
    type(vector_R8P),          intent(in)            :: points(:)          !< Query points [n].
    real(R8P),                 intent(out)           :: distances(:)       !< Distances [n].
@@ -4639,7 +4641,8 @@ contains
    !< jet, Cazals & Pouget 2005; issue #42): cubic jet, error O(h^2) on any sampling, unlike
    !< `mean_curvature` / `gaussian_curvature`, which do not converge pointwise on irregular meshes.
    !< Sign as `mean_curvature` (H > 0 convex seen from the normals' side; sphere (1/R, 1/R^2)).
-   !< See `fossil_curvature%build_jet_curvature`.
+   !< Near-coincident ring vertices are merged; a vertex whose fit stays rank deficient gets NaN and
+   !< `status` = CURV_STATUS_FIT_FAILED (issue #91). See `fossil_curvature%build_jet_curvature`.
    class(surface_stl_object), intent(in)            :: self   !< Surface.
    real(R8P), allocatable,    intent(out)           :: H(:)   !< Mean curvature per pool vertex.
    real(R8P), allocatable,    intent(out)           :: K(:)   !< Gaussian curvature per pool vertex.
@@ -5983,7 +5986,7 @@ contains
 
    ! pure subroutine sanitize(self, do_analysis)
    subroutine fill_holes(self, max_hole_edges, max_hole_size, holes_filled, holes_skipped, open_edges, status, refine, fair, &
-                         nonmanifold_edges)
+                         nonmanifold_edges, manifold_only)
    !< Close small holes: boundary loops filled with Liepa minimum-weight patches (issue #31).
    !<
    !< Every closed loop of facet edges without a neighbour (`fcon_edge == 0`) is a candidate. A loop
@@ -5997,6 +6000,9 @@ contains
    !< orientation, non-manifold boundaries) are reported in `open_edges` and left alone; the
    !< non-manifold edges met are reported in `nonmanifold_edges`, once per edge: they are not holes
    !< (issue #88: before, their unchained facet edges were counted in `open_edges`).
+   !< `manifold_only=.true.` (issue #91) chains loops through true boundary edges only, never along a
+   !< non-manifold edge: the boundary edges that then close no loop are counted in `open_edges`. Default
+   !< .false., both kinds are chained (bit-identical to before the option).
    !<
    !< `refine=.true.` refines each patch to the edge density of its loop (`refine_patch`, Liepa
    !< 2003: centroid splits plus Delaunay edge flips, loop vertices fixed). `fair=.true.` (implies
@@ -6014,6 +6020,7 @@ contains
    logical,                   intent(in),  optional :: refine         !< Refine patches to the loop's edge density (default .false.).
    logical,                   intent(in),  optional :: fair           !< Fair refined patches (bi-Laplacian; implies refine; default .false.).
    integer(I4P),              intent(out), optional :: nonmanifold_edges !< Non-manifold edges met (3+ facets), not filled.
+   logical,                   intent(in),  optional :: manifold_only  !< Loops through true boundary edges only (default .false.).
    type(boundary_loop_t), allocatable :: loops(:)
    logical                            :: refine_ !< Resolved refine flag.
    logical                            :: fair_   !< Resolved fair flag.
@@ -6033,7 +6040,8 @@ contains
    n_filled = 0_I4P ; n_skipped = 0_I4P ; n_open = 0_I4P ; n_nonmanifold = 0_I4P
    if (present(status)) status = STATUS_OK
    if (self%facets_number > 0_I4P) then
-      call extract_boundary_loops(facet=self%facet, loops=loops, n_open=n_open, n_nonmanifold=n_nonmanifold)
+      call extract_boundary_loops(facet=self%facet, loops=loops, n_open=n_open, n_nonmanifold=n_nonmanifold, &
+                                  manifold_only=manifold_only)
       diag = sqrt((self%bmax%x - self%bmin%x)**2 + (self%bmax%y - self%bmin%y)**2 + (self%bmax%z - self%bmin%z)**2)
       allocate(patches(0)) ; n_new = 0_I4P
       do k = 1, size(loops)
@@ -6079,7 +6087,8 @@ contains
    if (present(nonmanifold_edges)) nonmanifold_edges = n_nonmanifold
    endsubroutine fill_holes
 
-   subroutine sanitize(self, do_analysis, status, fill_holes, max_hole_edges, max_hole_size, refine_holes, fair_holes)
+   subroutine sanitize(self, do_analysis, status, fill_holes, max_hole_edges, max_hole_size, refine_holes, fair_holes, &
+                       manifold_holes)
    !< Sanitize STL — top-level orchestrator for the mesh-repair pipeline.
    !<
    !< Runs every repair pass in the correct order:
@@ -6113,6 +6122,7 @@ contains
    real(R8P),                 intent(in), optional :: max_hole_size  !< Passed to fill_holes (default 0.1).
    logical,                   intent(in), optional :: refine_holes   !< Passed to fill_holes as `refine` (default .false.).
    logical,                   intent(in), optional :: fair_holes     !< Passed to fill_holes as `fair` (default .false.).
+   logical,                   intent(in), optional :: manifold_holes !< Passed to fill_holes as `manifold_only` (default .false.).
    integer(I4P),              intent(out), optional :: status     !< 0=success (reserved for future use).
    integer(I4P)                                    :: flipped_count !< Facets reversed by sanitize_normals.
    integer(I4P)                                    :: holes_filled, holes_skipped, open_edges !< fill_holes report.
@@ -6148,7 +6158,8 @@ contains
       holes_filled = 0_I4P ; holes_skipped = 0_I4P ; open_edges = 0_I4P
       if (fill_holes_) then
          call self%fill_holes(max_hole_edges=max_hole_edges, max_hole_size=max_hole_size, holes_filled=holes_filled, &
-                              holes_skipped=holes_skipped, open_edges=open_edges, refine=refine_holes, fair=fair_holes)
+                              holes_skipped=holes_skipped, open_edges=open_edges, refine=refine_holes, fair=fair_holes, &
+                              manifold_only=manifold_holes)
          if (holes_filled > 0_I4P) then
             call self%sanitize_normals(flipped_count=flipped_count)
             if (flipped_count > 0) call self%analyze(aabb_refinement_levels=self%aabb%get_refinement_levels())

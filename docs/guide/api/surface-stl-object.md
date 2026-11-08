@@ -289,6 +289,7 @@ The fixed pipeline is:
 | `max_hole_size`  | `in`, opt. | `real(R8P)`    | Passed to `fill_holes` (default 0.1 of the bounding-box diagonal).                    |
 | `refine_holes`   | `in`, opt. | `logical`      | Passed to `fill_holes` as `refine` (default `.false.`): patches refined to the loop's edge density. |
 | `fair_holes`     | `in`, opt. | `logical`      | Passed to `fill_holes` as `fair` (default `.false.`, implies refine): thin-plate fairing of the patches. |
+| `manifold_holes` | `in`, opt. | `logical`      | Passed to `fill_holes` as `manifold_only` (default `.false.`): loops through true boundary edges only. |
 
 **Example.** Load a deliberately broken mesh and verify repair.
 
@@ -473,6 +474,10 @@ re-analysed afterwards. See [Hole filling](/guide/advanced/hole-filling).
 | `holes_skipped`  | `out`, opt.  | `integer(I4P)` | Loops left open by the thresholds.                                 |
 | `open_edges`     | `out`, opt.  | `integer(I4P)` | Boundary edges that do not close into a loop.                      |
 | `status`         | `out`, opt.  | `integer(I4P)` | `STATUS_OK`.                                                       |
+| `refine`         | `in`, opt.   | `logical`      | Refine patches to the loop's edge density (default `.false.`).     |
+| `fair`           | `in`, opt.   | `logical`      | Thin-plate fairing of refined patches (default `.false.`; implies `refine`). |
+| `nonmanifold_edges` | `out`, opt. | `integer(I4P)` | Non-manifold edges (3+ facets) met along the boundary, once per edge. |
+| `manifold_only`  | `in`, opt.   | `logical`      | Chain loops through true boundary edges only, never along a non-manifold edge (default `.false.`, issue #91). |
 
 **See also.** [`sanitize`](#sanitize), [`is_watertight`](#getters-and-predicates).
 
@@ -2535,12 +2540,15 @@ fit (issue #42).
   icosphere.
 - Sign as `mean_curvature`: a sphere gives (1/R, 1/R²). Flat
   neighbourhoods give 0 exactly. `query_many(curvatures=)` uses it.
+- Near-coincident ring vertices (within 1e-8 of the ring radius) are merged, and the ring grows up to the 4-ring
+  if fewer than 12 distinct ones remain. A vertex whose fit stays rank deficient gets NaN and `status` =
+  `CURV_STATUS_FIT_FAILED` (issue #91).
 
 | Argument | Intent      | Type                  | Notes                                               |
 | -------- | ----------- | --------------------- | --------------------------------------------------- |
 | `H`      | `out`       | `real(R8P), alloc(:)` | Mean curvature, indexed by pool vertex id.          |
 | `K`      | `out`       | `real(R8P), alloc(:)` | Gaussian curvature, indexed by pool vertex id.      |
-| `status` | `out`, opt. | `integer(I4P)`        | `CURV_STATUS_*` (as `mean_curvature`).              |
+| `status` | `out`, opt. | `integer(I4P)`        | `CURV_STATUS_*` (as `mean_curvature`, and `CURV_STATUS_FIT_FAILED`). |
 
 ---
 

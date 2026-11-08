@@ -28,6 +28,11 @@ the surface:
   - The two operators above stall near 15 % at the valence-5 vertices.
   - Use it when pointwise values matter, as for the wall curvature at a
     foot point (`query_many(curvatures=)`).
+  - Ring vertices closer than 1e-8 of the ring radius count as one point,
+    and the ring grows (up to the 4-ring) if merging leaves fewer than 12
+    (issue #91). Where the fit is still rank deficient (a ring on two
+    lines, for instance) H and K are NaN and the status is
+    `CURV_STATUS_FIT_FAILED`: no number rather than a wrong one.
 
 The first two build on [cotangent Laplacian + barycentric mass](/guide/advanced/cotangent-laplacian).
 The mean variant in particular is a one-liner on top of `(L, M)`:
@@ -140,6 +145,10 @@ Shared status codes:
 - `CURV_STATUS_DEGENERATE_TRIANGLE` — at least one triangle had area
   below tolerance and was skipped. The curvature field is still
   returned; degenerate vertices receive 0.
+- `CURV_STATUS_FIT_FAILED` (`jet_curvature` only, issue #91) — the jet
+  fit was rank deficient at one vertex or more, even after merging
+  near-coincident ring vertices; those vertices get NaN (test with
+  `ieee_is_nan`), the others their fitted values.
 
 **Pre-condition.** `analyze` must have run (pseudo-normals populated).
 Every public construction path on `surface_stl_object` ensures this —
@@ -253,6 +262,15 @@ any case. The figures are drawn by
   remeshing](/guide/advanced/isotropic-remesh) or [§1.3
   decimation](/guide/advanced/decimate) first if the input is
   pathological.
+- **Near-coincident vertices and the jet fit.** Marching cubes on a
+  field whose grid nodes lie 1e-12 off the level, beyond its snap of
+  issue #87, leaves vertices 1e-12 apart around such a node (facets of
+  area 2e-23). Their 2-ring held 8 vertices but 3 distinct points, the
+  fit failed and they kept the cotangent value: H = 7.4e9 on a unit
+  sphere, with status OK. Since issue #91 such vertices are merged and
+  the ring grows: the same sphere gives H within 0.1 of 1 at the
+  vertices (`fossil_test_foot_curvature`). A fit that stays rank
+  deficient returns NaN and `CURV_STATUS_FIT_FAILED`.
 - **Mean-curvature sign relies on the pseudo-normal.** If the surface
   has inconsistent normal orientation (one patch flipped), the
   per-vertex pseudo-normal may point inward at some vertices and the

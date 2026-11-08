@@ -2,17 +2,17 @@
 !< Example of the reference page "Hole filling": three holes in the unit cube cube-01.stl (48 facets, each face a 2 x 2
 !< grid of quads split in two). The face z = 0 is removed whole (one loop of 8 edges); on the face z = 1 two facets are
 !< removed that touch only at the centre of the face: one walk through that vertex twice, split into two loops of 3.
-!< The size threshold decides which loops are filled.
+!< The size threshold decides which loops are filled. Then the dragon, after sanitize, with and without manifold_only.
 program ref_hole_filling
 !region cut
 use fossil,              only : surface_stl_object
 use fossil_facet_object, only : facet_object
 use penf,                only : I4P, R8P
 implicit none
-type(surface_stl_object)        :: cube, holed
+type(surface_stl_object)        :: cube, holed, dragon, strict
 type(facet_object), allocatable :: kept(:), every(:)
 type(facet_object), pointer     :: f
-integer(I4P)                    :: i, m, filled, skipped, open_edges
+integer(I4P)                    :: i, m, filled, skipped, open_edges, nonmanifold
 
 call cube%load_from_file(file_name='cube-01.stl', guess_format=.true.)
 allocate(kept(cube%get_facets_number()))
@@ -39,4 +39,15 @@ print '(A,I0,A,I0)', 'max_hole_size 1:           filled ', filled, ', skipped ',
 print '(A,I0,A,L1,A,F8.5)', 'result: ', holed%get_facets_number(), ' facets, watertight ', holed%is_watertight(), &
                             ', volume ', holed%get_volume()
 !endregion fill
+!region manifold
+call dragon%load_from_file(file_name='dragon.stl', guess_format=.true.)
+call dragon%sanitize
+strict = dragon
+call dragon%fill_holes(holes_filled=filled, open_edges=open_edges, nonmanifold_edges=nonmanifold)
+print '(A,I0,A,I0,A,I0)', 'dragon, default:              filled ', filled, ', open edges ', open_edges, &
+                          ', non-manifold edges ', nonmanifold
+call strict%fill_holes(holes_filled=filled, open_edges=open_edges, nonmanifold_edges=nonmanifold, manifold_only=.true.)
+print '(A,I0,A,I0,A,I0)', 'dragon, manifold_only=.true.: filled ', filled, ', open edges ', open_edges, &
+                          ', non-manifold edges ', nonmanifold
+!endregion manifold
 endprogram ref_hole_filling

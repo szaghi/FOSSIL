@@ -15,6 +15,10 @@
 !<      with 3+ facets met along the boundary. The dragon after sanitize (duplicates gone): 0 boundary edges left
 !<      after filling, 54 non-manifold edges (tutorial 2's measurement); before #88 open_edges counted the facet edges
 !<      on non-manifold edges as boundary edges. The cube minus 1 facet keeps 0 / 0.
+!<   h. issue #91 step 5, `manifold_only=.true.`: loops are chained through true boundary edges only. The dragon after
+!<      sanitize (128 true boundary edges, 54 non-manifold edges): 20 loops filled, the 65 boundary edges that close no
+!<      loop without a non-manifold edge reported in open_edges, no manifold loop left (the default fills 54 loops, case
+!<      c, through the non-manifold edges); the cube minus 1 facet gives the same facets with and without the option.
 !<   f. signed distance on the filled cube-02 equals the intact cube-02 at grid points away
 !<      from the hole (1e-12).
 
@@ -27,10 +31,13 @@ use vecfor,              only : vector_R8P
 
 implicit none
 
-logical :: ok(7)
+logical :: ok(8)
 real(R8P), parameter :: CELL_2X2(6,2) = reshape([0._R8P, 0.5_R8P, 0._R8P, 0.5_R8P, 0._R8P, 0._R8P, &
                                                  0.75_R8P, 1._R8P, 0.75_R8P, 1._R8P, 0._R8P, 0._R8P], [6, 2])
-type(surface_stl_object) :: s, ref, dragon
+type(surface_stl_object) :: s, ref, dragon, s2
+type(facet_object), pointer :: fa, fb
+integer(I4P)             :: i
+logical                  :: same
 integer(I4P)             :: filled, skipped, open_edges, loops_before, loops_after, n0, nonmanifold
 
 ! a.
@@ -87,6 +94,27 @@ call s%fill_holes(max_hole_size=1._R8P, open_edges=open_edges, nonmanifold_edges
 ok(7) = ok(7) .and. open_edges == 0 .and. nonmanifold == 0
 print '(A,I0,A,I0,A,L1)', 'g cube minus 1 facet: open edges=', open_edges, ' non-manifold=', nonmanifold, ' ok=', ok(7)
 
+! h.
+s = dragon
+call s%fill_holes(holes_filled=filled, holes_skipped=skipped, open_edges=open_edges, nonmanifold_edges=nonmanifold, &
+                  manifold_only=.true.)
+loops_after = count_loops(s, manifold_only=.true.)
+ok(8) = filled == 20 .and. skipped == 0 .and. open_edges == 65 .and. nonmanifold == 54 .and. loops_after == 0
+print '(A,I0,A,I0,A,I0,A,I0,A,I0,A,L1)', 'h dragon manifold_only: filled=', filled, ' skipped=', skipped, ' open edges=', &
+      open_edges, ' non-manifold=', nonmanifold, ' manifold loops after=', loops_after, ' ok=', ok(8)
+call holed(s, 'src/tests/cube.stl', remove_first=.true., boxes=reshape([real(R8P) ::], [6, 0]), keep_only_z0=.false.)
+s2 = s
+call s%fill_holes(max_hole_size=1._R8P, holes_filled=filled)
+call s2%fill_holes(max_hole_size=1._R8P, holes_filled=n0, manifold_only=.true.)
+same = filled == 1 .and. n0 == 1 .and. s%get_facets_number() == s2%get_facets_number()
+do i = 1, s%get_facets_number()
+   fa => s%facet_at(i) ; fb => s2%facet_at(i)
+   same = same .and. all(fa%vertex(:)%x == fb%vertex(:)%x) .and. all(fa%vertex(:)%y == fb%vertex(:)%y) .and. &
+          all(fa%vertex(:)%z == fb%vertex(:)%z)
+enddo
+ok(8) = ok(8) .and. same
+print '(A,L1,A,L1)', 'h cube minus 1 facet: same facets with manifold_only ', same, ' ok=', ok(8)
+
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
 
@@ -123,13 +151,14 @@ contains
    call s%adopt_facets(facets=keep)
    endsubroutine holed
 
-   function count_loops(s) result(n)
-   type(surface_stl_object), intent(in) :: s
+   function count_loops(s, manifold_only) result(n)
+   type(surface_stl_object), intent(in)           :: s
+   logical,                  intent(in), optional :: manifold_only
    integer(I4P)                         :: n, n_open
    type(boundary_loop_t), allocatable   :: loops(:)
    type(facet_object), pointer          :: facets(:)
    facets => s%facets_ref()
-   call extract_boundary_loops(facet=facets, loops=loops, n_open=n_open)
+   call extract_boundary_loops(facet=facets, loops=loops, n_open=n_open, manifold_only=manifold_only)
    n = size(loops)
    endfunction count_loops
 

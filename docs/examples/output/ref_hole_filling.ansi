@@ -4,3 +4,10 @@ default max_hole_size 0.1: filled 0, skipped 3, open edges 0
 max_hole_size 0.5:         filled 2, skipped 1
 max_hole_size 1:           filled 1, skipped 0
 result: 46 facets, watertight T, volume  1.00000
+WARNING: sanitize: 62 duplicate facet(s) removed
+WARNING: sanitize: 129 facet(s) with 1 disconnected edge remain
+WARNING: sanitize: 14 facet(s) with 2 disconnected edges remain
+WARNING: sanitize: 49 facet(s) with 3 disconnected edges remain
+WARNING: sanitize: 54 non-manifold edge(s) (3+ incident facets) detected
+dragon, default:              filled 54, open edges 0, non-manifold edges 54
+dragon, manifold_only=.true.: filled 20, open edges 65, non-manifold edges 54

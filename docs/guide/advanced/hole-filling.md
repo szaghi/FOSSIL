@@ -45,6 +45,10 @@ box diagonal) and stays open:
      The non-manifold edges met are reported as `nonmanifold_edges`, once per
      edge: they are not holes. Before issue #88 their facet edges left out of
      the loops were counted in `open_edges`.
+   - By default a loop may pass through the facet edges of a non-manifold
+     edge. `manifold_only=.true.` (issue #91) chains true boundary edges
+     only: the boundary edges that then close no loop are reported as
+     `open_edges` and left open.
 2. **Selection.** A loop is filled only if both hold:
    - it has at most `max_hole_edges` edges (default 200; the triangulation is
      O(n³));
@@ -112,7 +116,7 @@ is then oriented by its nesting parity.
 
 ```fortran
 call surface%fill_holes(max_hole_edges, max_hole_size, holes_filled, holes_skipped, open_edges, status, refine, fair, &
-                        nonmanifold_edges)
+                        nonmanifold_edges, manifold_only)
    class(surface_stl_object), intent(inout)         :: self
    integer(I4P),              intent(in),  optional :: max_hole_edges ! default 200
    real(R8P),                 intent(in),  optional :: max_hole_size  ! default 0.1 (of the bbox diagonal)
@@ -123,8 +127,10 @@ call surface%fill_holes(max_hole_edges, max_hole_size, holes_filled, holes_skipp
    logical,                   intent(in),  optional :: refine         ! default .false.
    logical,                   intent(in),  optional :: fair           ! default .false.; implies refine
    integer(I4P),              intent(out), optional :: nonmanifold_edges ! non-manifold edges met (3+ facets)
+   logical,                   intent(in),  optional :: manifold_only  ! default .false.: loops through true boundary edges only
 
-call surface%sanitize(fill_holes=.true., max_hole_edges=..., max_hole_size=..., refine_holes=..., fair_holes=...)
+call surface%sanitize(fill_holes=.true., max_hole_edges=..., max_hole_size=..., refine_holes=..., fair_holes=..., &
+                      manifold_holes=...)
 ```
 
 The surface must be analysed: `load_from_file`, `adopt_facets` and
@@ -163,6 +169,18 @@ decide which are filled:
   the square. Each call works on the loops still open, so the counts are per call.
 - **The result.** The two triangles take one facet each (the original facets again, since a 3-edge loop has one
   triangulation) and the square six: 38 + 2 + 6 = 46 facets, watertight, volume 1 to the printed digits.
+
+The last region repairs the dragon with `sanitize` and fills its holes twice, with and without `manifold_only` (the
+last two lines of the output above):
+
+<<< @/examples/snippets/ref_hole_filling-manifold.f90
+
+- **Default.** `sanitize` removes 62 duplicate facets, which opens holes next to the dragon's 54 non-manifold edges
+  (its warnings precede the two lines). The default chains boundary edges and the facet edges on non-manifold edges
+  alike and fills 54 loops, no boundary edge left over.
+- **`manifold_only=.true.`** Only 20 loops close through true boundary edges alone. The other 65 boundary edges end at
+  a non-manifold edge, close no loop and stay open, reported in `open_edges`. Use it when a patch must never be glued
+  to a non-manifold edge; the default suits a repair that wants every boundary edge closed.
 
 ## Known limitations
 

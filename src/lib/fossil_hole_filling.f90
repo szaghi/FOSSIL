@@ -39,7 +39,7 @@ type :: boundary_loop_t
 endtype boundary_loop_t
 
 contains
-   subroutine extract_boundary_loops(facet, loops, n_open, n_nonmanifold)
+   subroutine extract_boundary_loops(facet, loops, n_open, n_nonmanifold, manifold_only)
    !< Extract every closed boundary loop of the facet set.
    !<
    !< Requires pool vertex ids (`vertex_id`, set by `analyze`) and connectivity (`fcon_edge`).
@@ -48,10 +48,14 @@ contains
    !< left out of every closed loop (open chains, inconsistent orientation, two-edge cycles) are
    !< counted in `n_open`; the non-manifold edges met are counted in `n_nonmanifold`, once per edge
    !< (before #88 their facet edges left unchained were counted in `n_open` as boundary edges).
+   !< `manifold_only=.true.` (issue #91) chains true boundary edges only: the facet edges on non-manifold
+   !< edges are left out of every walk, so a loop never passes through one; the boundary edges that then
+   !< close no loop count in `n_open`. Default .false.: both kinds are chained (the #88 behaviour).
    type(facet_object),                 intent(in)            :: facet(:)      !< Facets (analyzed).
    type(boundary_loop_t), allocatable, intent(out)           :: loops(:)      !< Closed simple loops.
    integer(I4P),                       intent(out)           :: n_open        !< Boundary edges left out of loops.
    integer(I4P),                       intent(out), optional :: n_nonmanifold !< Non-manifold edges met (3+ facets).
+   logical,                            intent(in),  optional :: manifold_only !< Chain true boundary edges only.
    integer(I4P),     allocatable :: e_start(:), e_end(:), e_owner(:) !< Directed boundary edges (patch order).
    type(vector_R8P), allocatable :: e_xs(:)                        !< Start coordinates of each edge.
    integer(I4P),     allocatable :: head(:), next(:)               !< Per-start-vertex linked lists of edges.
@@ -121,6 +125,9 @@ contains
       endif
    enddo
    if (present(n_nonmanifold)) n_nonmanifold = n_nm
+   if (present(manifold_only)) then
+      if (manifold_only) used = nonman ! never walked: loops through true boundary edges only
+   endif
    ! 3. Greedy closed walks, each split into simple loops.
    allocate(buf(8)) ; n_loops = 0_I4P
    do e0 = 1, n_edges

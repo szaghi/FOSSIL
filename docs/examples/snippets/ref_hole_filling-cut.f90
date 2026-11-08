@@ -2,10 +2,10 @@ use fossil,              only : surface_stl_object
 use fossil_facet_object, only : facet_object
 use penf,                only : I4P, R8P
 implicit none
-type(surface_stl_object)        :: cube, holed
+type(surface_stl_object)        :: cube, holed, dragon, strict
 type(facet_object), allocatable :: kept(:), every(:)
 type(facet_object), pointer     :: f
-integer(I4P)                    :: i, m, filled, skipped, open_edges
+integer(I4P)                    :: i, m, filled, skipped, open_edges, nonmanifold
 
 call cube%load_from_file(file_name='cube-01.stl', guess_format=.true.)
 allocate(kept(cube%get_facets_number()))

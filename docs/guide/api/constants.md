@@ -402,6 +402,7 @@ Conceptual overview on the
 | `CURV_STATUS_OK`                      | Curvature field built successfully.                                                                    |
 | `CURV_STATUS_BAD_INPUT`               | Empty surface or uninitialised pool.                                                                   |
 | `CURV_STATUS_DEGENERATE_TRIANGLE`     | At least one triangle had area below tolerance and was skipped; degenerate vertices receive 0.         |
+| `CURV_STATUS_FIT_FAILED`              | `jet_curvature`: the fit was rank deficient at one vertex or more; H and K are NaN there (issue #91).   |
 
 ---
 

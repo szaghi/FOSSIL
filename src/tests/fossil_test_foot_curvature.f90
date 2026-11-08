@@ -20,12 +20,21 @@ program fossil_test_foot_curvature
 !<   sample lay within round-off of the sphere, until issue #87): at the foot of every facet centroid seen from
 !<   radius 1.02, max |H - 1| < 0.1
 !<   (issue #51: a foot on a collapsed facet returned H = 0; before #48 the unwelded sphere gave up to 3.8).
+!< - Issue #91 step 4: the same sphere with the level moved 1e-12 off the nodes that lie on it (beyond marching cubes'
+!<   snap of #87): six vertices 1e-12 apart around such a node, facets of area 2e-23, a 2-ring of 8 vertices but 3
+!<   distinct points. The jet fit failed there and the vertices kept the cotangent value, 7.4e9: max |H - 1| at the
+!<   feet was 7.4e9 with status OK. Now near-coincident ring vertices are merged and the ring grows: status OK, max
+!<   |H - 1| 0.049 at the feet and 0.091 at the vertices (the level 1e-12 inside the nodes, no slivers: 0.041, 0.091);
+!<   bounds 0.1 and 0.15.
+!<   A two-row strip (a ring on two lines, so the quadric y (y - 1) is in the null space of the fit) returns
+!<   CURV_STATUS_FIT_FAILED and NaN at the rank-deficient vertices instead of a number.
 
 use fossil, only : extract_isosurface, surface_stl_object, facet_object, curve_object, rigid_pose_t, rigid_pose_2d_t, &
-                   pose_from_axis_angle, &
+                   pose_from_axis_angle, CURV_STATUS_OK, CURV_STATUS_FIT_FAILED, &
                    pose_2d, to_world, to_body, STATUS_INVALID_INPUT, STATUS_OK
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
+use, intrinsic :: ieee_arithmetic, only : ieee_is_nan, ieee_is_finite
 
 implicit none
 
@@ -39,7 +48,7 @@ type(rigid_pose_t)              :: p
 real(R8P)                       :: mx(3), d(NP), cv(2, NP), cv2(2, NP), dir(3, NP), eh(3), ek(3), r(3), e2(3), &
                                    pts(2, NP), k1(NP), k2(NP), u(64), v(64), t
 integer(I4P)                    :: i, lev, st, nn
-logical                         :: ok(7), exact
+logical                         :: ok(9), exact
 
 call random_seed(size=nn)
 call random_seed(put=[(7 + i, i = 1, nn)])
@@ -133,6 +142,10 @@ print '(A,F9.5,A,ES9.1,A,L1)', 'hole r=1/2: k ', sum(k1) / NP, '  open line max 
 
 ok(7) = mc_sphere_ok()
 print '(A,L1)', 'marching-cubes sphere with collapsed facets, max |H - 1| < 0.1: ', ok(7)
+ok(8) = mc_offset_ok()
+print '(A,L1)', 'marching-cubes sphere with the level 1e-12 off the nodes, finite H: ', ok(8)
+ok(9) = strip_ok()
+print '(A,L1)', 'two-row strip, rank-deficient fit: status and NaN: ', ok(9)
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
 
@@ -177,6 +190,62 @@ contains
    print '(A,I0,A,ES9.2,A,F8.4)', 'mc sphere: facets ', n, '  smallest area ', amin, '  max |H - 1| ', &
          maxval(abs(hk(1, :) - 1._R8P))
    endfunction mc_sphere_ok
+
+   function mc_offset_ok() result(ok8)
+   !< The marching-cubes unit sphere (31^3, step 0.1) of the level 1e-12 off the nodes on it (issue #91): every facet's
+   !< foot from radius 1.02 and every vertex within the bound of H = 1, jet status OK.
+   logical                         :: ok8
+   type(surface_stl_object)        :: sp
+   type(facet_object), allocatable :: mcf(:)
+   type(facet_object), pointer     :: fp
+   type(vector_R8P), allocatable   :: q(:)
+   real(R8P), allocatable          :: dd(:), hk(:,:), hv(:), kv(:)
+   real(R8P)                       :: phi(31, 31, 31), x(3), amin
+   integer(I4P)                    :: i, j, k, n, st
+
+   do k = 1, 31 ; do j = 1, 31 ; do i = 1, 31
+      phi(i, j, k) = norm2(-1.5_R8P + 0.1_R8P * ([i, j, k] - 1)) - 1._R8P - 1.e-12_R8P
+   enddo ; enddo ; enddo
+   call extract_isosurface(values=phi, bmin=vector_R8P(-1.5_R8P, -1.5_R8P, -1.5_R8P), &
+                           bmax=vector_R8P(1.5_R8P, 1.5_R8P, 1.5_R8P), iso=0._R8P, surface=mcf)
+   call sp%adopt_facets(facets=mcf)
+   n = sp%get_facets_number() ; allocate(q(n), dd(n), hk(2, n))
+   amin = huge(1._R8P)
+   do i = 1, n
+      fp => sp%facet_at(i)
+      x = [fp%centroid%x, fp%centroid%y, fp%centroid%z] ; x = 1.02_R8P * x / norm2(x)
+      q(i) = vector_R8P(x(1), x(2), x(3)) ; amin = min(amin, fp%area())
+   enddo
+   call sp%query_many(points=q, distances=dd, curvatures=hk)
+   call sp%jet_curvature(H=hv, K=kv, status=st)
+   ok8 = amin < 1.e-20_R8P .and. st == CURV_STATUS_OK .and. all(ieee_is_finite(hk)) .and. &
+         maxval(abs(hk(1, :) - 1._R8P)) < 0.1_R8P .and. maxval(abs(hv - 1._R8P)) < 0.15_R8P
+   print '(A,I0,A,ES9.2,A,I0,A,ES9.2,A,ES9.2)', 'mc sphere 1e-12 off: facets ', n, '  smallest area ', amin, &
+         '  status ', st, '  max |H - 1| feet ', maxval(abs(hk(1, :) - 1._R8P)), ' vertices ', maxval(abs(hv - 1._R8P))
+   endfunction mc_offset_ok
+
+   function strip_ok() result(ok9)
+   !< A strip of two rows of 8 vertices on z = 0.1 x y (y = 0, 1): every 2-ring lies on two lines, so y (y - 1) is in
+   !< the null space of the jet fit: CURV_STATUS_FIT_FAILED, NaN at those vertices, no other non-finite value.
+   logical                         :: ok9
+   type(surface_stl_object)        :: sp
+   type(facet_object), allocatable :: fo(:)
+   real(R8P), allocatable          :: hv(:), kv(:)
+   integer(I4P)                    :: k, m, st
+
+   allocate(fo(14)) ; m = 0
+   do k = 0, 6
+      m = m + 1 ; call put(fo, m, [real(k, R8P), 0._R8P, 0._R8P], [k + 1._R8P, 0._R8P, 0._R8P], &
+                           [k + 1._R8P, 1._R8P, 0.1_R8P * (k + 1)])
+      m = m + 1 ; call put(fo, m, [real(k, R8P), 0._R8P, 0._R8P], [k + 1._R8P, 1._R8P, 0.1_R8P * (k + 1)], &
+                           [real(k, R8P), 1._R8P, 0.1_R8P * k])
+   enddo
+   call sp%adopt_facets(facets=fo)
+   call sp%jet_curvature(H=hv, K=kv, status=st)
+   ok9 = st == CURV_STATUS_FIT_FAILED .and. count(ieee_is_nan(hv)) > 0 .and. all(ieee_is_nan(hv) .eqv. ieee_is_nan(kv)) &
+         .and. all(ieee_is_finite(pack(hv, .not. ieee_is_nan(hv))))
+   print '(A,I0,A,I0,A,I0)', 'strip: status ', st, '  NaN vertices ', count(ieee_is_nan(hv)), ' of ', size(hv)
+   endfunction strip_ok
 
    subroutine put(fo, k, a, b, cc)
    !< Facet k from three points.

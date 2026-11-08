@@ -180,6 +180,10 @@ returns it as an optional output (issue #42, CPU):
     function over each vertex's 2-ring (Cazals & Pouget 2005). It is
     rebuilt once per call, at O(facets) cost.
   - The error is O(h²) pointwise, on any sampling.
+  - Near-coincident ring vertices are merged before the fit (issue #91).
+    Where a vertex fit stays rank deficient (`jet_curvature` returns
+    `CURV_STATUS_FIT_FAILED`), its values are NaN, and so are the
+    curvatures of the feet on its facets: test with `ieee_is_nan`.
   - H > 0 where the surface is convex seen from the side the normals point
     to: a sphere gives (1/R, 1/R²), a cylinder (1/(2R), 0).
 - **Curves: `curvatures(n)`.** Each vertex gets its turning angle over the
