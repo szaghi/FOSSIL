@@ -1,6 +1,6 @@
 $ tut12_f_mass
-mass   2707.87 kg, centre of mass  1.1704  0.5000  0.3186
-principal moment   346.283 about  0.9956  0.0000  0.0940
-principal moment   890.883 about  0.0000  1.0000  0.0000
-principal moment  1000.382 about -0.0940  0.0000  0.9956
-mass of the part before the remesh, relative difference: -4.94E-05
+mass   2698.44 kg, centre of mass  1.1682  0.4999  0.3169
+principal moment   344.237 about  0.9958 -0.0002  0.0917
+principal moment   888.622 about  0.0003  1.0000 -0.0010
+principal moment   998.998 about -0.0917  0.0010  0.9958
+mass of the part before the remesh, relative difference: -3.53E-03

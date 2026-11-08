@@ -1,2 +1,2 @@
 $ fig_ref_isotropic_remesh_torus
-input 5280 facets, edges 0.001-0.137; remeshed 6938, 0.013-0.114
+input 5280 facets, edges 0.001-0.137; remeshed 3088, 0.034-0.131

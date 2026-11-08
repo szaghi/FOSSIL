@@ -79,7 +79,7 @@ bodies, a stencil that reaches through the other wall, and a point with two foot
   cube's face, x = 1. At x = 1.05 the first cube is closer by 0.1 and the point is not flagged.
 - `wall_distance_many` with cutoff 0.3: the cube centre is 0.5 from every wall and the point (1.7, 0.5, 1.6) is 0.6
   above the second cube, so both get the cutoff and body 0. The point at x = 1.3 is 0.1 from the second cube, body 2.
-- `surface_markers` on one cube: 288 markers whose areas sum to the cube's area, 6, with 81.2 % of the
+- `surface_markers` on one cube: 256 markers whose areas sum to the cube's area, 6, with 60.5 % of the
   nearest-neighbour spacings in [0.8, 1.2] Δx.
 - The vector level set, `distance_field_object%compute(store_closest=.true.)`, stores the same closest point and
   normal on the band cells of a [distance field](/guide/advanced/distance-field).
@@ -190,7 +190,7 @@ returns it as an optional output (issue #42, CPU):
 
 Both work with `pose=`, since curvature is invariant under rigid motion.
 
-![an ellipsoid with semi-axes 1, 0.7 and 0.45 from marching cubes (5136 facets), each facet coloured by the mean curvature H at the foot of its centroid, from 0.69 (teal) at the ends of the short axis to 3.48 (ember) at the ends of the long axis](../../examples/images/ref-ib-queries-curvature.svg){.fossil-figure}
+![an ellipsoid with semi-axes 1, 0.7 and 0.45 from marching cubes (5112 facets), each facet coloured by the mean curvature H at the foot of its centroid, from 0.69 (teal) at the ends of the short axis to 3.48 (ember) at the ends of the long axis](../../examples/images/ref-ib-queries-curvature.svg){.fossil-figure}
 
 The exact values are 0.684 at the ends of the short axis, (c/a² + c/b²)/2, and 3.49 at the ends of the long axis,
 (a/b² + a/c²)/2.
@@ -217,7 +217,7 @@ forcing needs a spacing of 0.8–1.2 Δx (Cheylan et al. 2023).
   nint(L/Δx) pieces of equal arc length. The markers sit at the piece
   midpoints, on the polyline.
 
-![the unit cube with the 288 markers of surface_markers at dx = 0.1 with features kept, about 48 per face, evenly spaced up to the edges](../../examples/images/ref-ib-queries-markers.svg){.fossil-figure}
+![the unit cube with the 256 markers of surface_markers at dx = 0.1 with features kept, about 43 per face, evenly spaced up to the edges](../../examples/images/ref-ib-queries-markers.svg){.fossil-figure}
 
 ## Placement rules from the literature
 
@@ -261,8 +261,10 @@ All of them are lengths for `probe_many`:
   coarse meshes the error is large: 18 % on an icosphere with 320 facets.
   Across sharp edges the value is meaningless.
 - **Marker spacing follows the remesher.** Most spacings land inside
-  [0.8, 1.2] Δx (91 % on a sphere, 72 % on a cube), but not all.
-  `spacing_fraction` reports how many do.
+  [0.8, 1.2] Δx on a smooth body (99 % on a sphere), fewer with sharp
+  edges kept (53 to 61 % on a cube: the locked edge vertices keep the
+  spacing of their splits, and the spacings next to them gather near
+  1.25 Δx). `spacing_fraction` reports how many do.
 - **3-D visibility uses ray casting.** A ray grazing an edge exactly may
   count or miss a hit, as in any ray caster. The 2-D test is exact.
 

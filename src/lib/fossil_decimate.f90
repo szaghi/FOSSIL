@@ -13,26 +13,30 @@ module fossil_decimate
 !<      found by solving the 3×3 linear system `[Q_uv]_{1:3,1:3} v* = -[Q_uv]_{1:3,4}`,
 !<      with midpoint fallback when the matrix is singular.
 !<   3. Per-edge cost `cost = v*^T Q_uv v*`.
-!<   4. Min-heap keyed by cost. Pop cheapest, run safety checks (normal-flip,
-!<      manifold), collapse if accepted. Update neighbor quadrics and re-cost.
+!<   4. Min-heap keyed by cost. Pop cheapest, run safety checks (link
+!<      condition, normal-flip), collapse if accepted. Update neighbor quadrics and re-cost.
 !<   5. Stop when facet count reaches `target_facets` or heap empty.
 !<
 !< Safety checks implemented:
+!<   - **Link condition** (Dey, Edelsbrunner, Guha, Nekhayev 1999; issue #81):
+!<     edge (a, b) collapses only if Lk(a) ∩ Lk(b) = Lk(ab), i.e. the common
+!<     neighbours of a and b are the apexes of the edge's facets and no
+!<     tetrahedron (a, c, d), (b, c, d) closes over it; on an open surface
+!<     the links are taken with a dummy vertex joined to the boundary (two
+!<     boundary vertices merge only along a boundary edge). The result stays a
+!<     2-manifold of the input's topology (a tetrahedron is not collapsed
+!<     into two coincident facets).
 !<   - **Normal-flip rejection**: a candidate collapse that would reverse the
-!<     normal of any surviving incident facet is rejected. Without this,
+!<     normal of any surviving incident facet, or collapse it to zero area
+!<     (issue #81: two pool vertices at one place, merged into a pinch by the
+!<     re-analysis; a flat cube ended with non-manifold edges and two
+!<     shells), is rejected. Without this,
 !<     decimation produces inverted facets that downstream rendering and
 !<     volume computation interpret backwards.
-!<   - **Non-manifold-edge rejection**: a candidate collapse that would
-!<     create an edge with more than 2 incident facets is rejected. Catches
-!<     the topology-violating cases that produce the worst output artifacts.
-!<   - **Duplicate-facet rejection**: rejected if the collapse would produce
-!<     two facets with identical vertex sets (the "fold" case at the end of
-!<     a triangle strip).
+!<   - **Degenerate-facet rejection**: rejected if a surviving facet would
+!<     get two equal vertices.
 !<
 !< Not implemented (deferred):
-!<   - Link condition (Dey, Edelsbrunner, Guha 1998) — slightly stronger
-!<     topology guarantee than the manifold check; rarely matters on
-!<     non-pathological inputs.
 !<   - Boundary-preservation weights — the original Garland-Heckbert paper
 !<     adds a heavy penalty to collapses that move a boundary vertex.
 !<     FOSSIL inputs are typically closed solids (no boundary), so this
@@ -55,7 +59,7 @@ public :: decimate
 public :: DEC_STATUS_OK, DEC_STATUS_BAD_INPUT, DEC_STATUS_NO_PROGRESS
 
 integer(I4P), parameter :: DEC_STATUS_OK          = 0_I4P
-integer(I4P), parameter :: DEC_STATUS_BAD_INPUT   = 1_I4P  !< Empty facet array or vertex_ids unset.
+integer(I4P), parameter :: DEC_STATUS_BAD_INPUT   = 1_I4P  !< Empty facet array, vertex_ids unset or target <= 0.
 integer(I4P), parameter :: DEC_STATUS_NO_PROGRESS = 2_I4P  !< Heap exhausted before reaching target (target unreachable due to safety rejections).
 
 ! Quadric is a 4×4 symmetric matrix; store as 10-entry upper-triangle vector.
@@ -125,7 +129,7 @@ contains
       return
    endif
    nf_in = size(facet, dim=1)
-   if (nf_in == 0_I4P) then
+   if (nf_in == 0_I4P .or. target_facets <= 0_I4P) then
       if (present(status)) status = DEC_STATUS_BAD_INPUT
       return
    endif
@@ -775,7 +779,7 @@ contains
    integer(I4P)                             :: i, j, f, e, k, w
    integer(I4P)                             :: shared_facets(2), n_shared
    real(R8P)                                :: old_xyz_a(3)
-   logical                                  :: would_flip, would_dup, would_nonmanifold
+   logical                                  :: would_flip, would_dup
 
    accepted = .false.
 
@@ -788,6 +792,10 @@ contains
    ! vb slot rewritten to va.
    call find_shared_facets(va=va, vb=vb, f_v=f_v, facet_alive=facet_alive, &
                            shared_facets=shared_facets, n_shared=n_shared)
+
+   ! --- Safety check 0: the link condition (issue #81): the collapse keeps the surface a 2-manifold (with boundary). ---
+   if (.not. link_condition_holds(va=va, vb=vb, v2f_head=v2f_head, v2f_count=v2f_count, v2f_val=v2f_val, &
+                                  f_v=f_v, facet_alive=facet_alive, shared_facets=shared_facets, n_shared=n_shared)) return
 
    ! --- Safety check 1: would the collapse flip any non-deleted facet's normal? ---
    old_xyz_a(1) = vcoord(1, va) ; old_xyz_a(2) = vcoord(2, va) ; old_xyz_a(3) = vcoord(3, va)
@@ -820,17 +828,6 @@ contains
    enddo
    if (would_dup) return
 
-   ! --- Safety check 3: would the collapse create a non-manifold edge? ---
-   ! After the collapse, vertex va inherits vb's other-endpoint set. If any
-   ! other vertex w is a neighbor of BOTH va and vb (excluding the shared
-   ! facets' apexes), the post-collapse edge (va, w) would inherit two
-   ! incident facets from each side → 3+ incidents → non-manifold.
-   would_nonmanifold = check_nonmanifold(va=va, vb=vb, &
-                                          v2e_head=v2e_head, v2e_count=v2e_count, v2e_val=v2e_val, &
-                                          e_v=e_v, e_alive=e_alive, &
-                                          shared_facets=shared_facets, n_shared=n_shared, &
-                                          f_v=f_v)
-   if (would_nonmanifold) return
 
    ! --- Apply the collapse. ---
    ! 1. Move va to target.
@@ -982,7 +979,10 @@ contains
          if (j == 3) p3 = p_new
       enddo
       n_new = cross(p2 - p1, p3 - p1)
-      if (dot_product(n_old, n_new) < 0._R8P) then
+      ! a facet collapsed to zero area counts as flipped: it would put two pool vertices at one place, which the
+      ! re-analysis merges into a pinch (issue #81: cube-01 to 36 facets, 2 non-manifold edges, 2 shells)
+      if (dot_product(n_old, n_new) < 0._R8P .or. norm2(n_new) <= 1.e-12_R8P * norm2(n_old) .or. &
+          all(n_new == 0._R8P)) then
          would_flip = .true. ; return
       endif
    enddo
@@ -1035,7 +1035,10 @@ contains
          if (j == 3) p3 = p_new
       enddo
       n_new = cross(p2 - p1, p3 - p1)
-      if (dot_product(n_old, n_new) < 0._R8P) then
+      ! a facet collapsed to zero area counts as flipped: it would put two pool vertices at one place, which the
+      ! re-analysis merges into a pinch (issue #81: cube-01 to 36 facets, 2 non-manifold edges, 2 shells)
+      if (dot_product(n_old, n_new) < 0._R8P .or. norm2(n_new) <= 1.e-12_R8P * norm2(n_old) .or. &
+          all(n_new == 0._R8P)) then
          would_flip = .true. ; return
       endif
    enddo
@@ -1049,57 +1052,111 @@ contains
    c(3) = a(1)*b(2) - a(2)*b(1)
    endfunction cross
 
-   function check_nonmanifold(va, vb, v2e_head, v2e_count, v2e_val, e_v, e_alive, &
-                               shared_facets, n_shared, f_v) result(would_nonmanifold)
-   !< Detect the "1-ring intersection" non-manifold case: if vertex w is
-   !< a neighbor of both va and vb (and w is not part of the shared facets),
-   !< then collapsing (va, vb) creates a duplicated edge (va, w) which
-   !< produces a non-manifold edge with 4 incident facets.
+   function link_condition_holds(va, vb, v2f_head, v2f_count, v2f_val, f_v, facet_alive, &
+                                 shared_facets, n_shared) result(holds)
+   !< Link condition (Dey, Edelsbrunner, Guha, Nekhayev 1999) for the collapse of edge (va, vb): the collapse keeps a
+   !< 2-manifold a 2-manifold of the same topology iff Lk(va) ∩ Lk(vb) = Lk(va vb). A surface with boundary is coned
+   !< to a dummy vertex omega joined to every boundary vertex (a boundary edge has one incident facet), so that:
+   !<   - the edge has one or two incident facets, with distinct apexes (else no collapse);
+   !<   - every common neighbour of va and vb is an apex of the edge (vertex part; omega: va and vb are both on the
+   !<     boundary only if (va, vb) is a boundary edge);
+   !<   - no edge is in both links: not both facets (va, c, d) and (vb, c, d), c and d the apexes (a tetrahedron), and
+   !<     no vertex u with (va, u) and (vb, u) both boundary edges (the edge (u, omega)).
    integer(I4P),              intent(in) :: va, vb
-   integer(I4P), allocatable, intent(in) :: v2e_head(:), v2e_val(:)
-   integer(I4P),              intent(in) :: v2e_count(:)
-   integer(I4P),              intent(in) :: e_v(:, :)
-   logical,                   intent(in) :: e_alive(:)
+   integer(I4P), allocatable, intent(in) :: v2f_head(:), v2f_val(:)
+   integer(I4P),              intent(in) :: v2f_count(:)
+   integer(I4P),              intent(in) :: f_v(:, :)
+   logical,                   intent(in) :: facet_alive(:)
    integer(I4P),              intent(in) :: shared_facets(2)
    integer(I4P),              intent(in) :: n_shared
-   integer(I4P),              intent(in) :: f_v(:, :)
-   logical                               :: would_nonmanifold
-   integer(I4P)                          :: i, e, w, j, s, k
-   logical                               :: w_in_va_ring, w_is_apex
+   logical                               :: holds
+   integer(I4P), allocatable             :: nb_a(:), cnt_a(:), nb_b(:), cnt_b(:) !< 1-rings and facets per neighbour.
+   integer(I4P)                          :: n_a, n_b, apex(2), i, j, s, k
+   logical                               :: bnd_a, bnd_b
 
-   would_nonmanifold = .false.
-   do i = 1, v2e_count(vb)
-      e = v2e_val(v2e_head(vb) + i - 1)
-      if (.not. e_alive(e)) cycle
-      if (e_v(1, e) == vb) then ; w = e_v(2, e) ; else ; w = e_v(1, e) ; endif
-      if (w == va) cycle  ! the collapsed edge itself
-      ! Is w one of the shared-facet apexes? Those are legitimately shared
-      ! between va and vb's 1-rings and don't indicate non-manifold.
-      w_is_apex = .false.
-      do s = 1, n_shared
-         do k = 1, 3
-            if (f_v(k, shared_facets(s)) == w) then
-               if (f_v(k, shared_facets(s)) /= va .and. &
-                   f_v(k, shared_facets(s)) /= vb) w_is_apex = .true.
-            endif
+   holds = .false.
+   if (n_shared < 1_I4P .or. n_shared > 2_I4P) return
+   apex = 0_I4P
+   do s = 1, n_shared
+      do k = 1, 3
+         if (f_v(k, shared_facets(s)) /= va .and. f_v(k, shared_facets(s)) /= vb) apex(s) = f_v(k, shared_facets(s))
+      enddo
+   enddo
+   if (n_shared == 2_I4P .and. apex(1) == apex(2)) return
+   call vertex_ring(v=va, v2f_head=v2f_head, v2f_count=v2f_count, v2f_val=v2f_val, f_v=f_v, facet_alive=facet_alive, &
+                    nb=nb_a, cnt=cnt_a, n=n_a)
+   call vertex_ring(v=vb, v2f_head=v2f_head, v2f_count=v2f_count, v2f_val=v2f_val, f_v=f_v, facet_alive=facet_alive, &
+                    nb=nb_b, cnt=cnt_b, n=n_b)
+   bnd_a = any(cnt_a(1:n_a) == 1_I4P)
+   bnd_b = any(cnt_b(1:n_b) == 1_I4P)
+   if (n_shared == 2_I4P .and. bnd_a .and. bnd_b) return
+   do i = 1, n_a
+      if (nb_a(i) == vb) cycle
+      do j = 1, n_b
+         if (nb_b(j) /= nb_a(i)) cycle
+         if (all(apex(1:n_shared) /= nb_a(i))) return
+         if (cnt_a(i) == 1_I4P .and. cnt_b(j) == 1_I4P) return
+      enddo
+   enddo
+   if (n_shared == 2_I4P) then
+      if (has_facet(v=va, c=apex(1), d=apex(2), v2f_head=v2f_head, v2f_count=v2f_count, v2f_val=v2f_val, f_v=f_v, &
+                    facet_alive=facet_alive) .and. &
+          has_facet(v=vb, c=apex(1), d=apex(2), v2f_head=v2f_head, v2f_count=v2f_count, v2f_val=v2f_val, f_v=f_v, &
+                    facet_alive=facet_alive)) return
+   endif
+   holds = .true.
+   endfunction link_condition_holds
+
+   subroutine vertex_ring(v, v2f_head, v2f_count, v2f_val, f_v, facet_alive, nb, cnt, n)
+   !< The 1-ring of vertex v: its n neighbours nb(1:n) and the number of live facets cnt(1:n) on each edge (v, nb).
+   integer(I4P),              intent(in)  :: v
+   integer(I4P), allocatable, intent(in)  :: v2f_head(:), v2f_val(:)
+   integer(I4P),              intent(in)  :: v2f_count(:)
+   integer(I4P),              intent(in)  :: f_v(:, :)
+   logical,                   intent(in)  :: facet_alive(:)
+   integer(I4P), allocatable, intent(out) :: nb(:), cnt(:)
+   integer(I4P),              intent(out) :: n
+   integer(I4P)                           :: i, f, k, w, j
+
+   allocate(nb(2 * v2f_count(v)), cnt(2 * v2f_count(v)))
+   n = 0_I4P
+   do i = 1, v2f_count(v)
+      f = v2f_val(v2f_head(v) + i - 1)
+      if (.not. facet_alive(f)) cycle
+      if (all(f_v(:, f) /= v)) cycle
+      do k = 1, 3
+         w = f_v(k, f)
+         if (w == v) cycle
+         do j = 1, n
+            if (nb(j) == w) exit
          enddo
-      enddo
-      if (w_is_apex) cycle
-      ! Is w in va's 1-ring?
-      w_in_va_ring = .false.
-      do j = 1, v2e_count(va)
-         e = v2e_val(v2e_head(va) + j - 1)
-         if (.not. e_alive(e)) cycle
-         if ((e_v(1, e) == va .and. e_v(2, e) == w) .or. &
-             (e_v(2, e) == va .and. e_v(1, e) == w)) then
-            w_in_va_ring = .true. ; exit
+         if (j > n) then
+            n = n + 1 ; nb(n) = w ; cnt(n) = 0_I4P
          endif
+         cnt(j) = cnt(j) + 1
       enddo
-      if (w_in_va_ring) then
-         would_nonmanifold = .true. ; return
+   enddo
+   endsubroutine vertex_ring
+
+   function has_facet(v, c, d, v2f_head, v2f_count, v2f_val, f_v, facet_alive) result(found)
+   !< True if a live facet has the vertices v, c and d.
+   integer(I4P),              intent(in) :: v, c, d
+   integer(I4P), allocatable, intent(in) :: v2f_head(:), v2f_val(:)
+   integer(I4P),              intent(in) :: v2f_count(:)
+   integer(I4P),              intent(in) :: f_v(:, :)
+   logical,                   intent(in) :: facet_alive(:)
+   logical                               :: found
+   integer(I4P)                          :: i, f
+
+   found = .false.
+   do i = 1, v2f_count(v)
+      f = v2f_val(v2f_head(v) + i - 1)
+      if (.not. facet_alive(f)) cycle
+      if (any(f_v(:, f) == v) .and. any(f_v(:, f) == c) .and. any(f_v(:, f) == d)) then
+         found = .true. ; return
       endif
    enddo
-   endfunction check_nonmanifold
+   endfunction has_facet
 
    function find_edge(va, vw, v2e_head, v2e_count, v2e_val, e_v, e_alive) result(e_found)
    !< Look up an existing alive edge (va, vw) in va's incidence list.

@@ -34,7 +34,10 @@ module fossil_marching_cubes
 !< (issue #48: every crossing is interpolated from the lower grid node of its
 !< edge, whatever the cell's local edge direction), so the exact vertex weld of
 !< `surface%adopt_facets(...)` -> `analyze` joins them. Triangles with
-!< coincident vertices (a corner value equal to iso) are not emitted.
+!< coincident vertices (a corner value equal to iso) are not emitted. A
+!< corner within round-off of iso (every crossing on its grid edges within
+!< 1e-12 of a cell side of it) takes the value iso (issue #87), so its
+!< crossings coincide too instead of making slivers of area ~1e-32.
 !< Hash-based per-edge dedup inside the MC loop would cut the output size by
 !< ~3x; deferred as future work.
 !<
@@ -456,7 +459,8 @@ contains
    integer(I4P)                                           :: cap, used
    type(facet_object)                                     :: f
    integer(I4P)                                           :: ev0, ev1
-   real(R8P)                                              :: t_interp
+   real(R8P)                                              :: t_interp, v_snap
+   logical                                                :: snapped
    integer(I4P), parameter :: INITIAL_CAP = 1024_I4P
 
    if (present(status)) status = MC_STATUS_OK
@@ -492,6 +496,25 @@ contains
             enddo
             edge_mask = MC_EDGE_TABLE(cube_case)
             if (edge_mask == 0_I4P) cycle  ! cell entirely inside or entirely outside
+            ! a node within round-off of iso (issue #87) takes the value iso, the same in every cell (a property of the
+            ! node): its crossings coincide with it and the triangles they collapse are dropped below; a cell that
+            ! the snap empties emitted only such triangles
+            snapped = .false.
+            do c = 0, 7
+               v_snap = snapped_value(values, i + VOX(0, c), j + VOX(1, c), k + VOX(2, c), iso)
+               if (v_snap /= corner_val(c)) then
+                  corner_val(c) = v_snap
+                  snapped = .true.
+               endif
+            enddo
+            if (snapped) then
+               cube_case = 0_I4P
+               do c = 0, 7
+                  if (corner_val(c) < iso) cube_case = ior(cube_case, ishft(1_I4P, c))
+               enddo
+               edge_mask = MC_EDGE_TABLE(cube_case)
+               if (edge_mask == 0_I4P) cycle
+            endif
             ! Linear interpolation along each active edge.
             do c = 0, 11
                if (iand(edge_mask, ishft(1_I4P, c)) == 0_I4P) cycle
@@ -503,6 +526,13 @@ contains
                   ev0 = EDGE_VERTEX(2, c) ; ev1 = EDGE_VERTEX(1, c)
                endif
                t_interp = interp_t(corner_val(ev0), corner_val(ev1), iso)
+               if (t_interp == 1._R8P) then
+                  ! the crossing is the high node (its value equal to iso, issue #87): its own coordinates, bit for bit,
+                  ! as t = 0 gives the low node's; p0 + (p1 - p0) can miss p1 by an ulp, and the crossings of the edges
+                  ! meeting at the node then made 1e-15-wide slivers instead of coincident (dropped) vertices
+                  edge_pt(c) = corner_pos(ev1)
+                  cycle
+               endif
                edge_pt(c)%x = corner_pos(ev0)%x + t_interp * (corner_pos(ev1)%x - corner_pos(ev0)%x)
                edge_pt(c)%y = corner_pos(ev0)%y + t_interp * (corner_pos(ev1)%y - corner_pos(ev0)%y)
                edge_pt(c)%z = corner_pos(ev0)%z + t_interp * (corner_pos(ev1)%z - corner_pos(ev0)%z)
@@ -547,6 +577,39 @@ contains
    allocate(surface(used))
    surface(1:used) = buf(1:used)
    endsubroutine extract_isosurface
+
+   pure function snapped_value(values, i, j, k, iso) result(v)
+   !< Value of node (i, j, k), or iso if the node lies within round-off of the level (issue #87): every crossing on its
+   !< grid edges is within SNAP_T of the node, t = |v - iso| / |v_nb - v| over the neighbours on the other side of iso
+   !< (`< iso` inside, else outside). A field zero in exact arithmetic but 1e-16 off in floating point (norm2(p) - 1 at
+   !< (0, -0.6, -0.8)) otherwise gives crossings 1e-16 from the node with distinct bits: slivers of area 1e-32.
+   real(R8P),    intent(in) :: values(:, :, :) !< Scalar field at grid corners.
+   integer(I4P), intent(in) :: i, j, k        !< Node.
+   real(R8P),    intent(in) :: iso            !< Iso-value.
+   real(R8P)                :: v              !< Value of the node, snapped.
+   integer(I4P), parameter  :: NB(3, 6) = reshape([-1, 0, 0, 1, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, -1, 0, 0, 1], [3, 6])
+   real(R8P),    parameter  :: SNAP_T = 1.e-12_R8P
+   real(R8P)                :: w, gap
+   integer(I4P)             :: n, a, b, c
+   logical                  :: inside, any_crossing
+
+   v = values(i, j, k)
+   if (v == iso) return
+   inside = v < iso
+   gap = huge(1._R8P)
+   any_crossing = .false.
+   do n = 1, 6
+      a = i + NB(1, n) ; b = j + NB(2, n) ; c = k + NB(3, n)
+      if (a < 1 .or. b < 1 .or. c < 1 .or. a > size(values, 1) .or. b > size(values, 2) .or. c > size(values, 3)) cycle
+      w = values(a, b, c)
+      if ((w < iso) .eqv. inside) cycle
+      any_crossing = .true.
+      gap = min(gap, abs(w - v))
+   enddo
+   if (any_crossing) then
+      if (abs(v - iso) <= SNAP_T * gap) v = iso
+   endif
+   endfunction snapped_value
 
    pure function same_point(a, b) result(same)
    !< True if a and b are the same point, bit for bit.

@@ -1,4 +1,8 @@
 $ tut12_e_thickness
-thinner than h = 0.1: 76 facets in 2 regions; invalid 0
-  region 1: 14 facets, area  0.1599, thinnest  0.0672
-  region 2: 62 facets, area  0.1216, thinnest  0.0646
+thinner than h = 0.1: 43 facets in 6 regions; invalid 0
+  region 1: 9 facets, area  0.1608, thinnest  0.0678
+  region 2: 29 facets, area  0.1139, thinnest  0.0655
+  region 3: 2 facets, area  0.0018, thinnest  0.0782
+  region 4: 1 facets, area  0.0005, thinnest  0.0430
+  region 5: 1 facets, area  0.0005, thinnest  0.0444
+  region 6: 1 facets, area  0.0005, thinnest  0.0583

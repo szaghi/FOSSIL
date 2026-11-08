@@ -4126,9 +4126,10 @@ contains
    !< boolean, ...) work without further user action.
    !<
    !< If the algorithm cannot reach `target_facets` (every remaining edge
-   !< collapse would violate a safety check — normal-flip, non-manifold edge,
-   !< duplicate facet), it returns DEC_STATUS_NO_PROGRESS and leaves `self`
-   !< at the smallest count it could safely reach.
+   !< collapse would violate a safety check — link condition, normal-flip,
+   !< degenerate facet), it returns DEC_STATUS_NO_PROGRESS and leaves `self`
+   !< at the smallest count it could safely reach, a valid surface.
+   !< `target_facets <= 0` returns DEC_STATUS_BAD_INPUT, `self` untouched (issue #81).
    !<
    !< Pre-condition: `self` must have been analyzed (i.e. `vertex_id` and
    !< `fcon_edge` populated). All public construction paths
@@ -4140,7 +4141,7 @@ contains
    integer(I4P)                                        :: dec_status
 
    if (present(status)) status = DEC_STATUS_OK
-   if (self%facets_number == 0_I4P) then
+   if (self%facets_number == 0_I4P .or. target_facets <= 0_I4P) then
       if (present(status)) status = DEC_STATUS_BAD_INPUT
       return
    endif

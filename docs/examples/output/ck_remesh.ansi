@@ -1,4 +1,4 @@
 $ ck_remesh
 before: 48 facets, edges  0.5000 to  0.7071
-after:  2346 facets, edges  0.0282 to  0.1352
+after:  1336 facets, edges  0.0639 to  0.1409
 volume   1.00000

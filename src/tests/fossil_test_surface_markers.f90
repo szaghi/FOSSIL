@@ -6,7 +6,9 @@ program fossil_test_surface_markers
 !<   the normals are unit and outward, and the nearest-marker spacings lie in [0.8, 1.2] dx for more
 !<   than 85 % of the markers (0.912 on the first run).
 !< - A unit cube (faces split in 2 x 2) with sharp features kept, dx = 0.1: area 6 to round-off, normals
-!<   on the six axis directions, spacing fraction above 0.65 (0.723 on the first run).
+!<   on the six axis directions, spacing fraction above 0.48 (0.723 on the first run; 0.528 since the remesher
+!<   coarsens, issue #79: its edges are closer to the target, but on the cube the crease vertices, locked at the
+!<   spacing of the splits, leave a second mode of spacings near 1.25 dx; the sphere rose from 0.912 to 0.987).
 !< - The input surface is unchanged (intent(in)); dx <= 0 is refused (negative control).
 !< - Curves: a unit square and a 64-gon resampled exactly: every marker on the polyline (distance
 !<   below 1e-15), lengths all equal to L / n with n = nint(L / dx), summing to the perimeter; an open
@@ -45,7 +47,7 @@ call box(2_I4P, f) ; call s%adopt_facets(facets=f)
 call s%surface_markers(dx=0.1_R8P, centroids=cen, areas=area, normals=nrm, spacing_fraction=frac, preserve_features=.true., &
                        status=st)
 ok(2) = st == STATUS_OK .and. abs(sum(area) - 6._R8P) < 1.e-12_R8P .and. all(maxval(abs(nrm), dim=1) > 1._R8P - 1.e-9_R8P) .and. &
-        frac > 0.65_R8P
+        frac > 0.48_R8P
 print '(A,I0,A,F8.5,A,F6.3,A,L1)', 'cube dx=0.1: markers ', size(area), '  area ', sum(area), '  spacing in [0.8, 1.2] dx: ', &
       frac, '  ok ', ok(2)
 call s%surface_markers(dx=0._R8P, centroids=cen, areas=area, normals=nrm, status=st)

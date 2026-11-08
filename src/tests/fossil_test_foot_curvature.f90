@@ -15,8 +15,10 @@ program fossil_test_foot_curvature
 !<   is refused (negative control).
 !< - Regular N-gons of circumradius 1 (N = 16, 32, 64): every foot gives (pi/N)/sin(pi/N), the error
 !<   against 1/R falls by 4 per halving of h; a hole gives the opposite sign; an open straight line 0.
-!< - The marching-cubes unit sphere on a 31^3 grid of step 0.1 (samples on the sphere: collapsed facets, the
-!<   smallest of area ~1e-31): at the foot of every facet centroid seen from radius 1.02, max |H - 1| < 0.1
+!< - The marching-cubes unit sphere on a 31^3 grid of step 0.1 with collapsed facets: one facet (a, b, c) split at
+!<   m = b into (a, b, m), (a, m, c) and (b, c, m), two of them of zero area (marching cubes left such facets where a
+!<   sample lay within round-off of the sphere, until issue #87): at the foot of every facet centroid seen from
+!<   radius 1.02, max |H - 1| < 0.1
 !<   (issue #51: a foot on a collapsed facet returned H = 0; before #48 the unwelded sphere gave up to 3.8).
 
 use fossil, only : extract_isosurface, surface_stl_object, facet_object, curve_object, rigid_pose_t, rigid_pose_2d_t, &
@@ -140,7 +142,8 @@ contains
    !< a collapsed facet present (area < 1e-20), so that the degenerate-facet path is exercised.
    logical                         :: ok7
    type(surface_stl_object)        :: sp
-   type(facet_object), allocatable :: mcf(:)
+   type(facet_object), allocatable :: mcf(:), grown(:)
+   type(vector_R8P)                :: va, vb, vc, vm
    type(facet_object), pointer     :: fp
    type(vector_R8P), allocatable   :: q(:)
    real(R8P), allocatable          :: dd(:), hk(:,:)
@@ -152,6 +155,15 @@ contains
    enddo ; enddo ; enddo
    call extract_isosurface(values=phi, bmin=vector_R8P(-1.5_R8P, -1.5_R8P, -1.5_R8P), &
                            bmax=vector_R8P(1.5_R8P, 1.5_R8P, 1.5_R8P), iso=0._R8P, surface=mcf)
+   ! collapsed facets (marching cubes no longer leaves any, issue #87): (a, b, c) -> (a, b, m), (a, m, c), (b, c, m), m = b
+   n = size(mcf, kind=I4P)
+   allocate(grown(n + 2))
+   grown(1:n) = mcf
+   va = mcf(1)%vertex(1) ; vb = mcf(1)%vertex(2) ; vc = mcf(1)%vertex(3)
+   vm = vb
+   grown(1)%vertex = [va, vb, vm] ; grown(n + 1)%vertex = [va, vm, vc] ; grown(n + 2)%vertex = [vb, vc, vm]
+   call grown(1)%compute_metrix ; call grown(n + 1)%compute_metrix ; call grown(n + 2)%compute_metrix
+   call move_alloc(from=grown, to=mcf)
    call sp%adopt_facets(facets=mcf)
    n = sp%get_facets_number() ; allocate(q(n), dd(n), hk(2, n))
    amin = huge(1._R8P)

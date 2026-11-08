@@ -1,5 +1,5 @@
 $ ck_markers
-markers 288
-sum of the areas   6.000000, mean area  2.083E-02
-spacings within [0.8, 1.2] dx:  0.8125
-marker 1 at   0.0833  1.0000  0.0833, normal   0.0  1.0  0.0
+markers 256
+sum of the areas   6.000000, mean area  2.344E-02
+spacings within [0.8, 1.2] dx:  0.6055
+marker 1 at   0.1411  0.9423  0.0000, normal   0.0  0.0 -1.0

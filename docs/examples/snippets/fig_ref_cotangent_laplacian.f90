@@ -1,5 +1,5 @@
 !< Figure of the reference page "Cotangent Laplacian": the remeshed unit sphere of the curvature page (marching cubes
-!< on 31^3 samples of [-1.5, 1.5]^3, sanitize(fill_holes), isotropic_remesh), cotangent_laplacian(L, M), and the
+!< on 31^3 samples of [-1.5, 1.5]^3, no slivers since issue #87, isotropic_remesh), cotangent_laplacian(L, M), and the
 !< action of the operator on the x-coordinate field: (M^-1 L x)_i = (L x)_i / M_ii, which on the unit sphere tends to
 !< the Laplace-Beltrami of x, -2 x. Each facet is coloured by the mean of its three vertex values, divided by 2
 !< (teal -1 at +x, ember +1 at -x); the caption gives the RMS and maximum deviation from -2 x over the vertices.
@@ -29,7 +29,6 @@ call extract_isosurface(values=phi, bmin=vector_R8P(-1.5_R8P, -1.5_R8P, -1.5_R8P
                         bmax=vector_R8P(1.5_R8P, 1.5_R8P, 1.5_R8P), iso=0._R8P, surface=facets, status=status)
 if (status /= MC_STATUS_OK) error stop 'marching cubes failed'
 call sphere%adopt_facets(facets=facets)
-call sphere%sanitize(fill_holes=.true.)                                      ! drops the slivers, closes the holes that leaves
 call sphere%isotropic_remesh(status=status)
 if (.not. sphere%is_watertight()) error stop 'sphere not watertight'
 call sphere%cotangent_laplacian(L=lap, M=mass, status=status)

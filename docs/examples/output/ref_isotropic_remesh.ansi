@@ -1,8 +1,8 @@
 $ ref_isotropic_remesh
-cube, preserve_features F:  408 facets, edges 0.0619 to 0.2989, area 4.96912, volume 0.89133
-cube, preserve_features T:  600 facets, edges 0.0681 to 0.3593, area 6.00000, volume 1.00000
+cube, preserve_features F:  282 facets, edges 0.1186 to 0.3107, area 4.83257, volume 0.87230
+cube, preserve_features T:  406 facets, edges 0.0951 to 0.3350, area 6.00000, volume 1.00000
 sphere input:  2312 facets, edges 0.0173 to 0.2011, volume 4.14990
-iteration 1:   3952 facets, edges 0.0352 to 0.1906, volume 4.13821
-iteration 2:   4208 facets, edges 0.0344 to 0.1480, volume 4.13198
-iteration 3:   4224 facets, edges 0.0340 to 0.1338, volume 4.12810
-Hausdorff distance to the input 0.0066 .. 0.0100
+iteration 1:   3654 facets, edges 0.0397 to 0.1989, volume 4.13728
+iteration 2:   3060 facets, edges 0.0509 to 0.1620, volume 4.12707
+iteration 3:   2868 facets, edges 0.0638 to 0.1524, volume 4.12081
+Hausdorff distance to the input 0.0083 .. 0.0117

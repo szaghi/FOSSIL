@@ -18,11 +18,16 @@
 !<      and no zero-area facet. Before #48 radius 1 on 31^3 had 336 boundary edges, 12 non-manifold edges and 26
 !<      zero-area facets: each cell interpolated a shared grid edge in its own direction, so the copies of a crossing
 !<      differed in the last bits and the exact weld left them apart.
+!<   6. A sphere through grid nodes (issue #87): the unit sphere's distance on grids of spacing 0.1, 0.2 and 0.25 that
+!<      hold nodes on the sphere, (+-1, 0, 0), (0.6, 0, -0.8), ..., where norm2(p) - 1 is 0 or one ulp off. No facet of
+!<      zero area (|cross| < 1e-30, the tolerance of the curvature and smoothing routines), watertight, the three vertex
+!<      curvatures and `smooth` return status 0. Before #87 the nodes 1.1e-16 off the level made 12 to 24 slivers of
+!<      area 1e-32 per sphere (crossings 1e-16 from the node with distinct bits) and every curvature returned status 2.
 
 program fossil_test_marching_cubes
 
 use fossil, only : surface_stl_object, &
-                   extract_isosurface, MC_STATUS_OK
+                   extract_isosurface, MC_STATUS_OK, CURV_STATUS_OK, SMOOTH_STATUS_OK
 use fossil_facet_object, only : facet_object
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
@@ -40,7 +45,11 @@ type(surface_stl_object) :: mc
 type(facet_object), pointer :: fp
 real(R8P)                :: radius(5)
 integer(I4P)             :: ir, ig, nbad, f
-logical                  :: are_tests_passed(5)
+logical                  :: are_tests_passed(6)
+real(R8P), allocatable   :: curv_h(:), curv_k(:)
+type(vector_R8P)         :: cr
+real(R8P)                :: lo, h
+integer(I4P)             :: curv_status(4), nzero
 
 integer(I4P), parameter :: N_GRID         = 32_I4P
 real(R8P),    parameter :: PI             = 3.141592653589793_R8P
@@ -166,7 +175,41 @@ do ig = 31, 32
 enddo
 print '(A,L1)', 'spheres watertight with no repair (2 grids x 5 radii): ', are_tests_passed(5)
 
-print '(A,5L2)', 'per-case results: ', are_tests_passed
+! ----- 6. Sphere through grid nodes: no zero-area facet, curvature and smoothing status 0 (issue #87).
+are_tests_passed(6) = .true.
+do ig = 1, 3
+   select case (ig)
+   case (1) ; n = 31 ; lo = -1.5_R8P ; h = 0.1_R8P
+   case (2) ; n = 15 ; lo = -1.4_R8P ; h = 0.2_R8P
+   case (3) ; n = 17 ; lo = -2._R8P  ; h = 0.25_R8P
+   endselect
+   if (allocated(values)) deallocate(values)
+   allocate(values(n, n, n))
+   do k = 1, n ; do j = 1, n ; do i = 1, n
+      values(i, j, k) = norm2(lo + h * ([i, j, k] - 1)) - 1._R8P
+   enddo ; enddo ; enddo
+   nzero = count(abs(values) < 1.e-15_R8P)
+   call extract_isosurface(values=values, bmin=vector_R8P(lo, lo, lo), &
+                           bmax=vector_R8P(lo + h * (n - 1), lo + h * (n - 1), lo + h * (n - 1)), iso=0._R8P, &
+                           surface=facets, status=status)
+   nbad = 0
+   do f = 1, size(facets)
+      cr = (facets(f)%vertex(2) - facets(f)%vertex(1)) .cross. (facets(f)%vertex(3) - facets(f)%vertex(1))
+      if (cr%normL2() < 1.e-30_R8P) nbad = nbad + 1
+   enddo
+   call mc%destroy
+   call mc%adopt_facets(facets=facets)
+   call mc%gaussian_curvature(K=curv_k, status=curv_status(1))
+   call mc%mean_curvature(H=curv_h, status=curv_status(2))
+   call mc%jet_curvature(H=curv_h, K=curv_k, status=curv_status(3))
+   call mc%smooth(status=curv_status(4))
+   print '(A,F5.2,A,I0,A,I0,A,4I2,A,L1)', 'sphere through nodes, h ', h, ': nodes on it ', nzero, ', zero-area facets ', &
+      nbad, ', curvature/smooth status', curv_status, ', watertight ', mc%is_watertight()
+   if (nzero == 0 .or. nbad /= 0 .or. any(curv_status /= [CURV_STATUS_OK, CURV_STATUS_OK, CURV_STATUS_OK, &
+       SMOOTH_STATUS_OK]) .or. .not. mc%is_watertight() .or. status /= MC_STATUS_OK) are_tests_passed(6) = .false.
+enddo
+
+print '(A,6L2)', 'per-case results: ', are_tests_passed
 print '(A,L1)',  'Are all tests passed? ', all(are_tests_passed)
 if (.not. all(are_tests_passed)) error stop 1
 

@@ -661,9 +661,14 @@ contains
    !< target; `vb` is removed.
    !<
    !< Locked-vertex handling: if BOTH endpoints are locked, skip (can't
-   !< merge two distinct features). If ONE endpoint is locked, the target
-   !< becomes the locked endpoint's position (so the feature stays put).
+   !< merge two distinct features). If ONE endpoint is locked, it is the one
+   !< kept and the target is its position (so the feature stays put, and the
+   !< lock stays with the vertex that carries it).
    !< Otherwise, target is the edge midpoint.
+   !<
+   !< One collapse per vertex per pass (issue #79): a collapse leaves the
+   !< incidence lists of its two endpoints stale (they are rebuilt by the
+   !< next pass), so an edge with an endpoint already collapsed waits.
    real(R8P),                 intent(in)    :: L
    integer(I4P), allocatable, intent(inout) :: f_v(:, :)
    real(R8P),    allocatable, intent(inout) :: vcoord(:, :)
@@ -675,7 +680,8 @@ contains
    integer(I4P)                             :: ne, e, va, vb, f1, f2, nv
    real(R8P)                                :: thr, dx, dy, dz, len_e
    real(R8P)                                :: target(3)
-   logical                                  :: lock_va, lock_vb
+   logical                                  :: lock_va, lock_vb, collapsed
+   logical,      allocatable                :: on_boundary(:), touched(:)
 
    thr = (4._R8P / 5._R8P) * L
 
@@ -686,9 +692,16 @@ contains
 
    call build_edges_with_facets(f_v=f_v, facet_alive=facet_alive, &
                                  e_v=e_v, e_facets=e_facets, ne=ne)
+   allocate(on_boundary(nv), touched(nv), source=.false.)
+   do e = 1, ne
+      if (e_facets(2, e) == 0_I4P) then
+         on_boundary(e_v(1, e)) = .true. ; on_boundary(e_v(2, e)) = .true.
+      endif
+   enddo
 
    do e = 1, ne
       va = e_v(1, e) ; vb = e_v(2, e)
+      if (touched(va) .or. touched(vb)) cycle
       f1 = e_facets(1, e) ; f2 = e_facets(2, e)
       if (f1 > 0_I4P) then ; if (.not. facet_alive(f1)) cycle ; endif
       if (f2 > 0_I4P) then ; if (.not. facet_alive(f2)) cycle ; endif
@@ -704,10 +717,12 @@ contains
       lock_vb = (vb <= size(vertex_locked))
       if (lock_vb) lock_vb = vertex_locked(vb)
       if (lock_va .and. lock_vb) cycle  ! can't merge two distinct features
+      if (lock_vb) then                 ! keep the locked endpoint
+         va = e_v(2, e) ; vb = e_v(1, e)
+         lock_va = .true.
+      endif
       if (lock_va) then
          target = vcoord(:, va)
-      else if (lock_vb) then
-         target = vcoord(:, vb)
       else
          target(1) = 0.5_R8P * (vcoord(1, va) + vcoord(1, vb))
          target(2) = 0.5_R8P * (vcoord(2, va) + vcoord(2, vb))
@@ -715,7 +730,11 @@ contains
       endif
       call try_collapse_edge(va=va, vb=vb, f1=f1, f2=f2, target=target, &
                               f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
-                              v2f=v2f, v2f_count=v2f_count, nf_alive=nf_alive)
+                              v2f=v2f, v2f_count=v2f_count, nf_alive=nf_alive, &
+                              on_boundary=on_boundary, high=(4._R8P / 3._R8P) * L, collapsed=collapsed)
+      if (collapsed) then
+         touched(va) = .true. ; touched(vb) = .true.
+      endif
    enddo
    endsubroutine apply_collapse_pass
 
@@ -749,10 +768,14 @@ contains
    endsubroutine build_v2f
 
    subroutine try_collapse_edge(va, vb, f1, f2, target, &
-                                 f_v, vcoord, facet_alive, v2f, v2f_count, nf_alive)
-   !< Attempt to collapse edge (va, vb) to position `target`. Runs three
-   !< safety checks (normal-flip on facets touching va or vb, duplicate-
-   !< vertex, non-manifold) and applies the collapse if all pass.
+                                 f_v, vcoord, facet_alive, v2f, v2f_count, nf_alive, on_boundary, high, &
+                                 collapsed)
+   !< Attempt to collapse edge (va, vb) to position `target`. Runs the
+   !< topological checks (the edge has exactly its facets f1, f2; not an
+   !< interior edge between two boundary vertices; not a tetrahedron; the
+   !< link condition), then the geometric ones (no edge longer than `high`
+   !< at the target, Botsch & Kobbelt 2004; normal-flip on facets touching
+   !< va or vb; duplicate-vertex) and applies the collapse if all pass.
    !<
    !< Convention: keep va (lower id), remove vb. The 2 shared facets get
    !< killed; all other vb-incident facets get their vb slot rewritten to
@@ -766,12 +789,58 @@ contains
    logical,      intent(inout)         :: facet_alive(:)
    integer(I4P), intent(in)            :: v2f(:, :), v2f_count(:)
    integer(I4P), intent(inout)         :: nf_alive
-   integer(I4P)                        :: i, f, j, k, w
+   logical,      intent(in)            :: on_boundary(:)  !< Vertex on a boundary edge.
+   real(R8P),    intent(in)            :: high            !< Longest edge a collapse may create (4L/3).
+   logical,      intent(out)           :: collapsed       !< The collapse was applied.
+   integer(I4P)                        :: i, f, j, k, w, w1, w2, na, nb
    logical                             :: would_flip, would_dup, would_nonmanifold
+
+   collapsed = .false.
+   if (vb < 1_I4P .or. vb > size(v2f_count)) return  ! defensive
+   if (va < 1_I4P .or. va > size(v2f_count)) return  ! defensive
+   if (f1 <= 0_I4P) return
+   ! An incidence list at its cap may have dropped facets: the checks below would be incomplete.
+   if (v2f_count(va) >= MAX_VAL .or. v2f_count(vb) >= MAX_VAL) return
+
+   ! Topology 1: the edge is shared by f1 (and f2) only; a non-manifold edge is not collapsed.
+   k = 0_I4P ; na = 0_I4P
+   do i = 1, v2f_count(va)
+      f = v2f(i, va)
+      if (.not. facet_alive(f)) cycle
+      na = na + 1
+      if (any(f_v(:, f) == vb)) k = k + 1
+   enddo
+   if (k /= merge(2_I4P, 1_I4P, f2 > 0_I4P)) return
+   ! Topology 2: an interior edge between two boundary vertices would pinch the surface.
+   if (f2 > 0_I4P .and. on_boundary(va) .and. on_boundary(vb)) return
+   ! Topology 3: both endpoints of valence 3 (a tetrahedron): the collapse leaves two coincident facets.
+   nb = 0_I4P
+   do i = 1, v2f_count(vb)
+      if (facet_alive(v2f(i, vb))) nb = nb + 1
+   enddo
+   if (na <= 3_I4P .and. nb <= 3_I4P) return
+   ! The apexes of the two collapsing facets: the only vertices va and vb may share (issue #79).
+   w1 = facet_apex(f_v=f_v, f=f1, va=va, vb=vb)
+   w2 = 0_I4P ; if (f2 > 0_I4P) w2 = facet_apex(f_v=f_v, f=f2, va=va, vb=vb)
+
+   ! Safety check 0: no edge from the target to a neighbour of va or vb longer than `high`, or the next split pass
+   ! undoes the collapse (Botsch & Kobbelt 2004).
+   do i = 1, v2f_count(va) + v2f_count(vb)
+      if (i <= v2f_count(va)) then
+         f = v2f(i, va)
+      else
+         f = v2f(i - v2f_count(va), vb)
+      endif
+      if (.not. facet_alive(f)) cycle
+      do j = 1, 3
+         w = f_v(j, f)
+         if (w == va .or. w == vb) cycle
+         if (norm2(vcoord(:, w) - target) > high) return
+      enddo
+   enddo
 
    ! Safety check 1: normal-flip on every facet touching va or vb (other
    ! than the 2 shared ones which get deleted).
-   if (vb < 1_I4P .or. vb > size(v2f_count)) return  ! defensive
    would_flip = .false.
    do i = 1, v2f_count(vb)
       f = v2f(i, vb)
@@ -782,7 +851,6 @@ contains
       endif
    enddo
    if (would_flip) return
-   if (va < 1_I4P .or. va > size(v2f_count)) return  ! defensive
    do i = 1, v2f_count(va)
       f = v2f(i, va)
       if (f == f1 .or. f == f2) cycle
@@ -809,10 +877,12 @@ contains
    enddo
    if (would_dup) return
 
-   ! Safety check 3: non-manifold (1-ring intersection).
+   ! Safety check 3: non-manifold (1-ring intersection, the link condition).
    ! For each w that's a neighbor of vb (via shared facets in v2f) and that
-   ! is NOT one of the shared apexes, check if w is also a neighbor of va.
-   ! If so, collapse would create duplicate edge (va, w).
+   ! is NOT one of the shared apexes w1, w2, check if w is also a neighbor of va.
+   ! If so, collapse would create duplicate edge (va, w). The apexes neighbour
+   ! both va and vb through the other facets of the ring; before issue #79
+   ! they were not skipped and almost every collapse was rejected.
    would_nonmanifold = .false.
    do i = 1, v2f_count(vb)
       f = v2f(i, vb)
@@ -820,7 +890,7 @@ contains
       if (.not. facet_alive(f)) cycle
       do j = 1, 3
          w = f_v(j, f)
-         if (w == va .or. w == vb) cycle
+         if (w == va .or. w == vb .or. w == w1 .or. w == w2) cycle
          if (vertex_neighbor_of(va=va, w=w, f_v=f_v, v2f=v2f, v2f_count=v2f_count, &
                                 facet_alive=facet_alive, exclude1=f1, exclude2=f2)) then
             would_nonmanifold = .true. ; exit
@@ -842,6 +912,7 @@ contains
    enddo
    if (f1 > 0_I4P) then ; facet_alive(f1) = .false. ; nf_alive = nf_alive - 1 ; endif
    if (f2 > 0_I4P) then ; facet_alive(f2) = .false. ; nf_alive = nf_alive - 1 ; endif
+   collapsed = .true.
    endsubroutine try_collapse_edge
 
    pure function facet_would_flip(f_v, vcoord, f, va, vb, target) result(yes)

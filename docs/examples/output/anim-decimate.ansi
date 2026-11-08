@@ -2,5 +2,4 @@ $ anim_decimate
 decimate(target_facets=3294): 3294 facets
 decimate(target_facets=1647): 1646 facets
 decimate(target_facets=823): 822 facets
-decimate(target_facets=411): 410 facets
-decimate(target_facets=205): 204 facets
+decimate(target_facets=411): 572 facets, NO_PROGRESS

@@ -39,16 +39,25 @@ triangles; the rounded edges and corners keep the small ones:
    supported (~80 LOC inline) so neighbour edges can have their costs
    re-evaluated after each collapse without rebuilding the heap.
 4. **Iterative collapse** with **three safety checks** per candidate:
+   - **Link condition** (Dey, Edelsbrunner, Guha, Nekhayev 1999): the
+     edge $(a, b)$ collapses only if $\mathrm{Lk}(a) \cap \mathrm{Lk}(b) =
+     \mathrm{Lk}(ab)$: the only common neighbours of $a$ and $b$ are the
+     apexes of the edge's two facets, and no tetrahedron $(a, c, d)$,
+     $(b, c, d)$ closes over it. On an open surface the links include a
+     dummy vertex joined to the boundary, so two boundary vertices merge
+     only along a boundary edge. A manifold stays a manifold of the same
+     topology: no non-manifold edge, no pinched shell.
    - **Normal-flip rejection**: if any incident triangle's normal would
-     flip, the collapse is skipped.
-   - **Duplicate-vertex rejection**: if the collapse would merge two
-     vertices that already exist on the same facet (creating a
-     degenerate triangle), skipped.
-   - **Non-manifold-edge rejection**: if the collapse would create an
-     edge with > 2 incident facets, skipped.
+     flip, or the triangle would collapse to zero area, the collapse is
+     skipped. A zero-area triangle puts two vertices at one place, which
+     the rebuilt vertex pool merges into a pinch: on flat faces, where
+     every collapse costs 0, this gave `cube-01.stl` decimated to 36
+     facets 2 non-manifold edges and 2 shells with `DEC_STATUS_OK`.
+   - **Degenerate-facet rejection**: if a surviving facet would get two
+     equal vertices, skipped.
    When all remaining edges fail one of these checks, the algorithm
-   returns `DEC_STATUS_NO_PROGRESS` — the smallest count it could
-   safely reach.
+   returns `DEC_STATUS_NO_PROGRESS` with the smallest valid surface it
+   reached.
 
 Stages 1 and 2 computed on the rounded box above (by the figure program,
 from the facet planes and the vertex ids of the pool): each facet
@@ -62,7 +71,7 @@ cost up to 7.8e-4. The heap takes the cream edges first:
 
 Decimated to targets halved one after the other (each a fresh call on the
 input), the box loses its flat-face triangles first and the corners last;
-the volume moves by 2e-14 down to 806 facets, by -0.86 % at 100:
+the volume moves by 2e-14 down to 806 facets, by -1.1 % at 100:
 
 ![an animation of the rounded box decimated to 6460, 3230, 1614, 806, 402, 200 and 100 facets, each frame with the volume change: the flat faces empty first into a few large triangles, the cylindrical edges thin into long strips, the corners coarsen last](../../examples/images/anim-ref-decimate-target.svg){.fossil-figure}
 
@@ -84,9 +93,8 @@ call surface%decimate(target_facets, status)
     one below: the dragon's 6588 / 4 = 1647 ends at 1646).
   - `DEC_STATUS_NO_PROGRESS` — couldn't reach the target; surface is
     at the smallest count the safety checks allowed.
-  - `DEC_STATUS_BAD_INPUT` — the input surface has no facets.
-    `target_facets <= 0` is not rejected: it collapses everything and
-    returns `DEC_STATUS_OK` with an empty surface.
+  - `DEC_STATUS_BAD_INPUT` — the input surface has no facets, or
+    `target_facets <= 0`; the surface is left untouched.
 
 After return, `self`'s AABB tree, vertex pool, connectivity, and
 pseudo-normals are all rebuilt — no further user action needed before
@@ -120,9 +128,8 @@ input by the certified [Hausdorff distance](/guide/advanced/surface-deviation):
 - **Volume.** It drifts down level after level: 0.2 %, 1.1 % and
   4.5 % below the input's (see
   [Known limitations](#known-limitations)).
-- **Topology.** Every level stays watertight and manifold on this
-  input. Check it on yours: on flat regions the safety checks can miss
-  a pinch (below).
+- **Topology.** Every level stays watertight and manifold: the link
+  condition keeps the input's topology on any manifold input.
 
 ## Visual reference
 
@@ -146,14 +153,24 @@ takes most of the collapses.
 ## Known limitations
 
 These are the **documented gaps** from §1.3's implementation issue,
-deliberately surfaced here so the user knows what they're getting.
-Production-grade quality requires fixing all four:
+deliberately surfaced here so the user knows what they're getting:
 
 - **No tie-breaking heuristic.** On perfectly flat inputs (a flat
   cube face, an axis-aligned rectangle) every edge has cost ≈ 0 and
-  the algorithm picks arbitrarily. Result: degenerates on
-  cube-shaped inputs, where any collapse produces equally-valid (or
-  equally-bad) output.
+  the algorithm picks arbitrarily among the valid collapses.
+  `cube-01.stl` (48 facets) decimated to 36 facets stays watertight,
+  manifold and one shell with the unit volume; asked for 4 facets, it
+  ends at a tetrahedron of volume 0.158.
+- **No cost ceiling.** The loop collapses the cheapest edge until the
+  target is met or no edge passes the checks, whatever the cost: a
+  target too low for the shape is met by distorting it. On the bracket
+  of [tutorial 12](/manual/tutorial/12-geometry) built with 128-sided
+  prisms (1868 facets), the patch boundaries (three rims of 128
+  vertices, never merged) leave few cheap collapses: decimating to 1000
+  or 600 facets stops with `DEC_STATUS_NO_PROGRESS` at 1582 facets, a
+  valid closed surface with 37 % of the volume lost: once the cheap
+  collapses are spent, the base box is sheared along its edges.
+  Compare the volume before and after.
 - **No volume-preservation term.** Collapses pull vertices inward,
   so volume drifts down monotonically with iteration. The
   marching-cubes sphere of the [Example](#example) (6632 facets)
@@ -162,14 +179,8 @@ Production-grade quality requires fixing all four:
   preservation Lagrange multiplier; deferred.
 - **No boundary preservation.** Edges on a mesh boundary (open
   shells) are treated like interior edges; the boundary moves
-  during collapse. Irrelevant for closed solids (the typical CFD
-  case); breaks open shell decimation.
-- **No link condition.** Some edge collapses produce non-manifold
-  edges even when the per-edge safety checks pass. `cube-01.stl`
-  (48 facets, watertight) decimated to 36 facets keeps its area and
-  volume exactly but has 2 non-manifold edges and 2 shells; the curved
-  sphere of the [Example](#example) stays manifold at every level.
-  Check `is_manifold()` after decimating inputs with flat regions.
+  during collapse (the link condition keeps it one loop per hole).
+  Irrelevant for closed solids (the typical CFD case).
 
 ## See also
 
@@ -183,6 +194,9 @@ Production-grade quality requires fixing all four:
 
 - Garland & Heckbert, *Surface Simplification Using Quadric Error
   Metrics*, SIGGRAPH 1997. The reference algorithm.
+- Dey, Edelsbrunner, Guha & Nekhayev, *Topology preserving edge
+  contraction*, Publ. Inst. Math. (Beograd) 66, 1999. The link
+  condition.
 - Lindstrom & Turk, *Fast and memory efficient polygonal
   simplification*, IEEE Visualization 1998. Adds the volume-
   preservation term that addresses the documented sphere drift.

@@ -461,8 +461,9 @@ visible, next to a thin wall or a narrow gap some are not. `surface_stl_object` 
 ![the unit cube's edges and the markers surface_markers places on its three faces in view for a grid of spacing 0.1, evenly spread over each face, each with its unit normal](../examples/images/ck-markers.svg){.fossil-figure}
 
 `surface_markers` remeshes a copy of the surface to an edge length of sqrt(3) dx and returns the facet centroids,
-areas and normals. The 288 areas add up to 6.000000, the cube's area. Direct forcing wants the markers dx apart:
-0.8125 of the spacings lie within [0.8, 1.2] dx. `curve_markers` is the 2-D twin, exact along the arc length. See
+areas and normals. The 256 areas add up to 6.000000, the cube's area. Direct forcing wants the markers dx apart:
+0.6055 of the spacings lie within [0.8, 1.2] dx (the locked edges of the cube keep the spacing of their splits, so
+the markers next to them are farther apart; on a smooth body the fraction is higher). `curve_markers` is the 2-D twin, exact along the arc length. See
 [grid-adapted markers](/guide/advanced/ib-queries#grid-adapted-markers).
 
 ### Place markers on a curve
@@ -975,10 +976,12 @@ same values into refinement tags. See [thickness and gaps](/guide/advanced/thick
 
 <<< @/examples/output/ck_decimate.ansi{ansi}
 
-![the dragon decimated again and again to half its facets, 6588, 3294, 1646, 822, 410 and 204, from the same camera](../examples/images/anim-decimate.svg){.fossil-figure}
+![the dragon decimated again and again to half its facets, 6588, 3294, 1646 and 822, then asked for 411 and stopped at 572 with NO_PROGRESS, from the same camera](../examples/images/anim-decimate.svg){.fossil-figure}
 
-Quadric edge collapses remove two facets each, so the result stops at or just below the target (1646 for 1647). See
-[decimation](/guide/advanced/decimate).
+Quadric edge collapses remove two facets each, so the result stops at or just below the target (1646 for 1647). No
+collapse may change the topology: the dragon is not a manifold (61 non-manifold edges, 83 shells), and halving it a
+fourth time stops at 572 facets with `DEC_STATUS_NO_PROGRESS`, a valid surface larger than asked. Check the status.
+See [decimation](/guide/advanced/decimate).
 
 ### Unite two bodies
 
@@ -1001,12 +1004,12 @@ Two unit cubes overlapping on a cube of side 0.5 give 2 - 0.125 = 1.875. `BOOL_I
 
 ![the unit cube as loaded: 48 facets, edges from 0.5 to 0.71](../examples/images/ck-remesh-before.svg)
 
-![the same cube after isotropic_remesh with target length 0.1 and features preserved: 2346 facets, sharp edges kept](../examples/images/ck-remesh-after.svg)
+![the same cube after isotropic_remesh with target length 0.1 and features preserved: 1336 facets, sharp edges kept](../examples/images/ck-remesh-after.svg)
 
 </div>
 
 `preserve_features=.true.` keeps the twelve sharp edges of the cube, so the volume stays 1. After 10 iterations the
-edges are between 0.0282 and 0.1352 for a target of 0.1. See [isotropic remeshing](/guide/advanced/isotropic-remesh).
+edges are between 0.0639 and 0.1409 for a target of 0.1: the band (0.08, 0.133) except along the locked edges. See [isotropic remeshing](/guide/advanced/isotropic-remesh).
 
 ### Measure the curvature at a point
 
@@ -1028,10 +1031,11 @@ vertices around it: on this unit sphere of 6632 facets, H = 0.9944 and K = 0.989
 
 ![the marching-cubes unit sphere twice, coloured by H − 1 per facet: left the cotangent-Laplacian H, mottled teal and ember; right the cubic-jet H, nearly uniform](../examples/images/ck-vertex-curvature.svg){.fossil-figure}
 
-Three per-vertex estimates on a unit sphere (exact H = K = 1) meshed by marching cubes. `gaussian_curvature` (angle
+Three per-vertex estimates on a unit sphere (exact H = K = 1) meshed by marching cubes, on a grid with 30 nodes on the
+sphere: the extraction has no degenerate facet there (issue #87), and the three return `CURV_STATUS_OK`. `gaussian_curvature` (angle
 defect) and `mean_curvature` (cotangent Laplacian) are integral measures divided by a vertex area: on an irregular
-mesh they do not converge pointwise, and here they range from 0.0417 to 3.3482 (K) and 0.3387 to 5.2865 (H).
-`jet_curvature` fits a cubic over the 2-ring and stays within 0.7448 to 1.1353 (K) and 0.8662 to 1.0656 (H), with an
+mesh they do not converge pointwise, and here they range from 0.1956 to 2.5433 (K) and 0.4169 to 2.6044 (H).
+`jet_curvature` fits a cubic over the 2-ring and stays within 0.8243 to 1.1003 (K) and 0.9088 to 1.0492 (H), with an
 error O(h²). Use the jet for pointwise values; the angle defect keeps its global meaning, Σ K A = 4π on a closed
 genus-0 surface (discrete Gauss–Bonnet). See
 [per-vertex curvature](/guide/advanced/curvature).
@@ -1062,9 +1066,9 @@ caller's. See [cotangent Laplacian](/guide/advanced/cotangent-laplacian).
 </div>
 
 Taubin smoothing alternates a shrinking step (λ) and an inflating one (μ), so it removes noise without shrinking the
-body. Ten pairs bring the rms radial error from 0.02077 to 0.00796 and the area from 14.428 back towards the sphere's
-12.566 (12.613); the volume moves by 0.3 %. `smooth` skips the near-degenerate facets marching cubes leaves (status
-`SMOOTH_STATUS_DEGENERATE`, not an error). See [smoothing](/guide/advanced/smoothing).
+body. Ten pairs bring the rms radial error from 0.02077 to 0.00762 and the area from 14.428 back towards the sphere's
+12.566 (12.610); the volume moves by 0.3 %. The grid has nodes on the sphere, and the extraction has no degenerate
+facet (issue #87), so `smooth` returns `SMOOTH_STATUS_OK`. See [smoothing](/guide/advanced/smoothing).
 
 ### Extract an isosurface from a sampled field
 
@@ -1072,7 +1076,7 @@ body. Ten pairs bring the rms radial error from 0.02077 to 0.00796 and the area 
 
 <<< @/examples/output/ck_isosurface.ansi{ansi}
 
-![the torus extract_isosurface draws from 31 x 31 x 11 samples of its signed distance, 4232 facets, inside the sampling box](../examples/images/ck-isosurface.svg){.fossil-figure}
+![the torus extract_isosurface draws from 31 x 31 x 11 samples of its signed distance, 4208 facets, inside the sampling box](../examples/images/ck-isosurface.svg){.fossil-figure}
 
 `extract_isosurface` runs marching cubes on values sampled at the nodes of a uniform grid between `bmin` and `bmax`
 and returns facets for `adopt_facets`; the result is watertight. At spacing 0.1 for a tube radius 0.4 the volume is

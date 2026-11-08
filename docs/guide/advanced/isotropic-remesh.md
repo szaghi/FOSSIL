@@ -14,7 +14,7 @@ bands. Isotropic remeshing rewrites the tessellation driving every edge
 towards the band `(4L/5, 4L/3)` about a target length `L`, producing a
 mesh whose facets have roughly the same shape and size (the band is a
 goal, not a bound: on the dragon below, after 3 iterations at `L = 0.46`,
-90 % of the edges lie in 0.16–0.52).
+90 % of the edges lie in 0.30–0.57).
 
 Complementary to [decimation (§1.3)](https://github.com/szaghi/FOSSIL/issues/18):
 decimation reduces facet *count* while preserving the silhouette;
@@ -24,7 +24,7 @@ isotropic remeshing to make any model's tessellation regular.
 
 A torus by marching cubes on cells 2.75 times flatter than wide, so its
 triangles are stretched (edges 0.001 to 0.137, 5280 facets), remeshed
-with `L = 0.08`, 3 iterations (edges 0.013 to 0.114, 6938 facets):
+with `L = 0.08`, 3 iterations (edges 0.034 to 0.131, 3088 facets):
 
 ![left, the torus by marching cubes, its facets coloured by their longest edge over L, a patchwork of dark long triangles and light small ones; right, the torus after isotropic_remesh, an even light colour: every facet's longest edge close to L](../../examples/images/ref-isotropic-remesh-torus.svg){.fossil-figure}
 
@@ -34,9 +34,15 @@ Each outer iteration runs four passes (Botsch & Kobbelt 2004):
 
 1. **Split** edges longer than `4L/3`. New vertex at the midpoint;
    incident triangles re-triangulated.
-2. **Collapse** edges shorter than `4L/5`. Reuses §1.3's safety
-   predicates: reject the collapse if it would flip a triangle's
-   normal, create a duplicate vertex, or open a non-manifold edge.
+2. **Collapse** edges shorter than `4L/5`, into the midpoint (or into
+   the endpoint that is locked, see feature preservation). A collapse
+   is rejected if it would break the topology: a non-manifold edge, an
+   interior edge between two boundary vertices, a tetrahedron, or two
+   endpoints that share a neighbour other than the apexes of the edge's
+   two facets (the link condition); or if it would create an edge
+   longer than `4L/3` (which the next split would undo), flip a
+   triangle's normal or duplicate a vertex. A vertex takes part in one
+   collapse per pass.
 3. **Flip** interior edges to drive vertex valence toward 6 (the
    regular-triangulation ideal). Rejects flips that would create a
    duplicate edge or a degenerate triangle.
@@ -58,13 +64,13 @@ vertices with a valence other than 6 for the flips:
 ![a zoom on the marching-cubes sphere with its edges coloured by the pass that acts on them: long edges to split in ember, short edges to collapse in teal, the others grey; the vertices of valence other than 6 as gold points, about half of them](../../examples/images/ref-isotropic-remesh-passes.svg){.fossil-figure}
 
 The same classes after each of five calls of one iteration. The long
-edges go: 1424, 143, 8, 1, 1, 0. The short ones do not: 696, 2017, 2382,
-2380, 2389, 2405, because the splits halve edges just above `4L/3` into
-edges just below `4L/5` and the collapse pass does not remove them (it
-does not coarsen; see [Known limitations](#known-limitations)). The facet
-count grows from 2312 to 4228 and settles:
+edges go: 1424, 133, 30, 10, 2, 4. The short ones rise first, 696 to
+1458, because the splits halve edges just above `4L/3` into edges just
+below `4L/5` and a vertex collapses once per pass; then the collapses
+take them: 396, 136, 57, 27. The facet count rises from 2312 to 3654
+and falls back to 2776; 4133 of the 4164 edges end in the band:
 
-![an animation of the sphere after 0 to 5 iterations of isotropic_remesh at L = 0.1, edges coloured as above: the ember edges disappear in the first two iterations, the teal ones multiply and stay, the facets settle at 4228](../../examples/images/anim-ref-isotropic-remesh-iterations.svg){.fossil-figure}
+![an animation of the sphere after 0 to 5 iterations of isotropic_remesh at L = 0.1, edges coloured as above: the ember edges disappear in the first two iterations, the teal ones multiply after the first and then fade, the facets settle at 2776](../../examples/images/anim-ref-isotropic-remesh-iterations.svg){.fossil-figure}
 
 **Feature preservation** is optional and off by default. When enabled,
 edges with dihedral angle > 30° are flagged as **sharp**, and their
@@ -92,8 +98,9 @@ call surface%isotropic_remesh(target_length, iterations, preserve_features, stat
   input's scale that evens the distribution (on an input with a long
   tail of long edges, such as the dragon below, the splits outnumber
   the collapses and the facet count grows). Pass a smaller
-  value to densify, larger to coarsen (on closed meshes the collapse
-  pass does not coarsen: see [Known limitations](#known-limitations)).
+  value to densify, larger to coarsen (on the sphere of the
+  [Example](#example), `L = 0.4` takes 2312 facets to 298 in 3
+  iterations).
 - **`iterations`**: outer-loop count. Default `5`. Convergence is
   typically visible after 3 passes; further iterations smooth the edge-
   length distribution further but also accumulate the inward Laplacian
@@ -128,16 +135,17 @@ from call to call), then measured against the input by the certified
 
 - **Features off.** The relaxation moves the vertices of the cube's
   edges and corners like any other, and the projection puts them back
-  on the nearest face: the edges are chamfered. Area 4.969 and volume
-  0.891 instead of 6 and 1.
+  on the nearest face: the edges are chamfered. Area 4.833 and volume
+  0.872 instead of 6 and 1.
 - **Features on.** The 12 edges (dihedral 90°, above 30°) are locked,
   the midpoints inserted on them too: area and volume stay 6 and 1 to
   the printed digits.
-- **Sphere.** The splits raise the facet count from 2312 to 4224 and
-  the shortest edge from 0.0173 to 0.034; the longest falls from 0.20
-  to 0.13, below `4L/3`. Each iteration costs volume: 0.28 %, 0.15 %,
-  0.09 % (see [Known limitations](#known-limitations)). The remeshed
-  surface is within 0.0100 of the input.
+- **Sphere.** The splits raise the facet count from 2312 to 3654, then
+  the collapses bring it down to 2868; the shortest edge rises from
+  0.0173 to 0.064, the longest falls from 0.20 to 0.15. Each iteration
+  costs volume: 0.30 %, 0.25 %, 0.15 % (see
+  [Known limitations](#known-limitations)). The remeshed surface is
+  within 0.0117 of the input.
 
 ## Dragon remesh — visual reference
 
@@ -150,16 +158,16 @@ triangles:
 After 3 iterations of `isotropic_remesh` at the default target (the
 median input edge):
 
-![the same dragon after 3 iterations of isotropic_remesh at the default target: 12924 facets, edge median 0.359, standard deviation 0.109](../../examples/images/ref-remesh-dragon-output.svg){.fossil-figure}
+![the same dragon after 3 iterations of isotropic_remesh at the default target: 7730 facets, edge median 0.451, standard deviation 0.091](../../examples/images/ref-remesh-dragon-output.svg){.fossil-figure}
 
 The silhouette is preserved; the per-facet edge-length distribution
-tightens (standard deviation 0.389 → 0.109, 3.6×). Remeshing isn't
-decimation, but neither does it keep the facet count: the dragon's
-edges have a long tail above the median (5 % are longer than 1.32,
-2.9× the median), every edge above `4L/3` is split, and the count
-roughly doubles (6588 → 12924), the median dropping below `L`
-(0.462 → 0.359). The thin features (horns, claws) are smoothed: the
-area falls by 10 % (742 → 666), the volume by 1.7 %.
+tightens (standard deviation 0.389 → 0.091, 4.3×) and its median stays
+near `L` (0.462 → 0.451). Remeshing isn't decimation, but neither does
+it keep the facet count: the dragon's edges have a long tail above the
+median (5 % are longer than 1.32, 2.9× the median), every edge above
+`4L/3` is split, and the count grows (6588 → 7730), while the edges
+below `4L/5` collapse. The thin features (horns, claws) are smoothed:
+the area falls by 14 % (742 → 636), the volume by 2.1 %.
 
 ## Known limitations
 
@@ -169,7 +177,7 @@ area falls by 10 % (742 → 666), the volume by 1.7 %.
   half-aperture `θ`. The projection step after relaxation pulls the
   vertex back toward the input surface but doesn't fully compensate.
   **Net effect**: the marching-cubes sphere of the [Example](#example)
-  loses 0.28 %, 0.15 % and 0.09 % of its volume in its first three
+  loses 0.30 %, 0.25 % and 0.15 % of its volume in its first three
   iterations, even with projection enabled. For convex inputs where preservation
   matters, run fewer iterations (2-3) or use the `target_length`
   parameter conservatively. Tighter preservation requires
@@ -193,13 +201,23 @@ area falls by 10 % (742 → 666), the volume by 1.7 %.
   `surface%get_volume()` before and after. Do not use the remesh in
   volume-critical pipelines without an explicit post-remesh
   volume-restoration pass.
-- **The collapse pass does not coarsen closed meshes.** Its
-  non-manifold check also rejects the two apexes the edge's own facets
-  share, so on a closed manifold mesh almost no collapse passes: the
-  sphere of the [Example](#example) keeps its 2312 facets at
-  `L = 0.2`, 0.4 and 0.8, and `cube-01.stl` its 48 at `L = 1`. A
-  larger `target_length` does not reduce the count; use
-  [`decimate`](/guide/advanced/decimate) for that.
+- **A target near the size of the body.** The relaxation is a full
+  (not tangential) Laplacian followed by the projection, so a mesh
+  coarsened to a few dozen facets drifts: `cube-01.stl` at `L = 1`
+  without `preserve_features` collapses to a flat tetrahedron (volume
+  4e-4) in 3 iterations of one call each. Keep `L` well below the size of the
+  features you want, or lock them with `preserve_features`
+  (`cube-01.stl` at `L = 1` with it: 36 facets, area 6, volume 1).
+- **Locked vertices do not collapse into each other.** Edges between two
+  locked vertices (on a crease or a patch boundary) keep their length:
+  the bracket of [tutorial 12](/manual/tutorial/12-geometry) keeps its
+  0.0038 edges at the rims. A dirty input keeps short edges where its
+  non-manifold edges block the collapses: the dragon at `L = 1.5`
+  goes from 6588 to 1398 facets, with edges of 2e-4 left.
+- Before [issue #79](https://github.com/szaghi/FOSSIL/issues/79) the
+  collapse pass did not coarsen: its 1-ring check counted the apexes of
+  the edge's own facets, so it rejected almost every collapse on a
+  closed mesh. `fossil_test_remesh_coarsen` guards the fix.
 
 ## See also
 

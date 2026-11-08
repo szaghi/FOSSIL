@@ -1,7 +1,7 @@
 $ tut12_d_features
-patch base: 1324 facets
-patch boss: 454 facets
-patch bore: 440 facets
+patch base: 588 facets
+patch boss: 168 facets
+patch bore: 206 facets
 part:     feature edges 260, corners 8, polylines 16
 remeshed: feature edges 292, corners 8, polylines 16, all sharp 292
   closed loops without a corner 4, chains between corners 12

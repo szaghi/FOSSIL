@@ -46,7 +46,7 @@ real(R8P)    :: x, y, z, dx
 logical      :: are_tests_passed(10)
 real(R8P)    :: vol_cube0
 real(R8P)    :: dev_lower, dev_upper           !< Hausdorff bounds (issue #60).
-real(R8P), parameter :: HSPHERE = 7.5e-3_R8P   !< Bound of the remeshed sphere's deviation from the input (step 10).
+real(R8P), parameter :: HSPHERE = 9.0e-3_R8P   !< Bound of the remeshed sphere's deviation from the input (step 10).
 type(surface_stl_object) :: cube_input
 real(R8P), parameter :: SHARP_DIHEDRAL_DEG = 60._R8P  ! cube edges (90°) above this threshold; smooth regions below
 logical      :: all_facets_valid
@@ -255,7 +255,9 @@ call cube_features%deviation(cube_input, lower=dev_lower, upper=dev_upper, toler
 print '(A,2ES12.4)', 'cube fine features: deviation from the input ', dev_lower, dev_upper
 are_tests_passed(9) = status == DEV_STATUS_OK .and. dev_upper <= 1.2e-2_R8P
 ! Step 10: the remeshed sphere (2 iterations, no features) stays within a measured bound of the input sphere: its
-! one-sided deviation, certified at tolerance 1e-3, was 5.61e-3 <= h <= 6.55e-3 when written (the bound 7.5e-3). The two
+! one-sided deviation, certified at tolerance 1e-3, was 5.61e-3 <= h <= 6.55e-3 when written (the bound 7.5e-3), and
+! 7.33e-3 <= h <= 8.22e-3 since the collapse pass coarsens (issue #79: 1742 facets instead of 2312, longer chords;
+! the bound 9.0e-3). The two
 ! spheres cross each other: near the crossings d is small and the branch and bound refines a strip down to the
 ! tolerance, so a tighter one, or both directions, would exceed the test's time budget.
 call sphere_tbp%deviation(sphere_ref, lower=dev_lower, upper=dev_upper, tolerance=1.e-3_R8P, status=status)

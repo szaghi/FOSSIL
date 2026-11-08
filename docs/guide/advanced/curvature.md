@@ -201,9 +201,9 @@ $(\rho - R)/(r\rho)$ along it, with $\rho$ the distance from the axis:
 ## Visual reference
 
 A unit sphere by marching cubes (the `|x| - 1` field on 31³ samples of
-[-1.5, 1.5]³, cleaned by `sanitize(fill_holes=.true.)`, which drops
-the slivers marching cubes leaves), then isotropically remeshed with the defaults
-(5436 facets). Each facet is coloured by the mean of its three vertex
+[-1.5, 1.5]³; 30 grid nodes lie on the sphere, and the extraction has
+no degenerate facet there since issue #87), then isotropically remeshed
+with the defaults (2600 facets). Each facet is coloured by the mean of its three vertex
 values minus the exact value 1 (teal below, ember above; the scale is
 in the caption). Gaussian curvature `K` by `gaussian_curvature`:
 
@@ -214,23 +214,23 @@ Signed mean curvature `H` on the same surface, by `mean_curvature`
 
 <div class="fossil-pair">
 
-![the same sphere coloured by H - 1 from mean_curvature, saturating at +-0.5: a speckle over the whole surface, values from 0.33 to 1.79](../../examples/images/ref-curvature-sphere-mean.svg)
+![the same sphere coloured by H - 1 from mean_curvature, saturating at +-0.5: a speckle over the whole surface, values from 0.78 to 1.32](../../examples/images/ref-curvature-sphere-mean.svg)
 
-![the same sphere coloured by H - 1 from jet_curvature, same scale: an almost uniform cream, values from 0.86 to 1.16](../../examples/images/ref-curvature-sphere-jet.svg)
+![the same sphere coloured by H - 1 from jet_curvature, same scale: an almost uniform cream, values from 0.94 to 1.09](../../examples/images/ref-curvature-sphere-jet.svg)
 
 </div>
 
 **Read these figures honestly.** The means are right (`K` and `H`
-average 1.009 and 1.005 over the vertices, the exact value is 1), but the
+average 1.011 and 1.007 over the vertices, the exact value is 1), but the
 per-vertex values of the angle-defect and cotangent operators are not:
 on this irregular triangulation they scatter over the whole surface, no
-cluster or region in particular (2nd-98th percentile: `K` from -0.16 to
-2.95, `H` from 0.33 to 1.79). This is the non-convergence described in
+cluster or region in particular (2nd-98th percentile: `K` from 0.57 to
+1.64, `H` from 0.78 to 1.32). This is the non-convergence described in
 [Known limitations](#known-limitations) below, not a rendering bug or a
 bug in the curvature TBPs: it is what the discrete formulae genuinely
 produce on a mesh whose vertex valences and triangle shapes vary from
-vertex to vertex. `jet_curvature` on the same mesh stays within 0.86 to
-1.16. Use it when the pointwise value matters; on real CAD STL, run
+vertex to vertex. `jet_curvature` on the same mesh stays within 0.94 to
+1.09. Use it when the pointwise value matters; on real CAD STL, run
 [§1.7 isotropic remeshing](/guide/advanced/isotropic-remesh) first in
 any case. The figures are drawn by
 `docs/examples/src/fig_ref_curvature.f90`.

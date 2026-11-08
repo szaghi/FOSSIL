@@ -11,4 +11,4 @@ gap point x = 1.05  d  0.050  ambiguous F  second foot x = 1.00
 wall distance at 0.50 0.50 0.50   0.300  body 0
 wall distance at 1.30 0.50 0.50   0.100  body 2
 wall distance at 1.70 0.50 1.60   0.300  body 0
-markers on one cube, dx 0.1: 288, area  6.000000, spacings in [0.8, 1.2] dx: 0.812
+markers on one cube, dx 0.1: 256, area  6.000000, spacings in [0.8, 1.2] dx: 0.605

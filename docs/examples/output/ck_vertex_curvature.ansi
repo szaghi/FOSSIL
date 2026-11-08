@@ -1,6 +1,6 @@
 $ ck_vertex_curvature
-vertices 1896, exact H = K = 1
-angle defect K: min   0.0417, max   3.3482
-cotangent H:    min   0.3387, max   5.2865
-jet K:          min   0.7448, max   1.1353
-jet H:          min   0.8662, max   1.0656
+vertices 1806, exact H = K = 1
+angle defect K: min   0.1956, max   2.5433
+cotangent H:    min   0.4169, max   2.6044
+jet K:          min   0.8243, max   1.1003
+jet H:          min   0.9088, max   1.0492

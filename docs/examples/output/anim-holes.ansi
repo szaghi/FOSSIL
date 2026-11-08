@@ -1,6 +1,4 @@
 $ anim_holes
-WARNING: sanitize: 18 hole(s) filled
-WARNING: sanitize: 60 degenerate facet(s) (zero-area / sliver) removed
 sphere: 2200 facets, watertight T
 hole 1: loop size  0.111
 hole 2: loop size  0.226

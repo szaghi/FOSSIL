@@ -84,17 +84,18 @@ side. On 2000 random triangles the bound is never exceeded on a 60 × 60 lattice
 - When `max_triangles` triangles have been created first, the run stops with `DEV_STATUS_NOT_CONVERGED`. The bounds
   are still valid, only wider.
 
-![the dragon decimated to a quarter of its facets, each facet coloured from cream to ember by the distance of its centroid to the original dragon; the caption gives the certified bounds 0.229 <= h <= 0.256](../../examples/images/ref-deviation-dragon.svg){.fossil-figure}
+![the dragon decimated to a quarter of its facets, each facet coloured from cream to ember by the distance of its centroid to the original dragon; the caption gives the certified bounds 0.226 <= h <= 0.243](../../examples/images/ref-deviation-dragon.svg){.fossil-figure}
 
 The dragon decimated to a quarter of its facets, each facet coloured by the distance of its centroid to the original
 (ember the largest). Quadric decimation keeps the vertices close to the surface, so the deviation peaks inside the
 facets that bridge concave parts. The certified bounds are in the caption.
 
-![the dragon decimated again and again to half of its facets, 3294 to 204, each level coloured by its deviation from the original and captioned with its certified bounds, from 0.10 to 1.4](../../examples/images/anim-deviation.svg){.fossil-figure}
+![the dragon decimated again and again to half of its facets, 3294 to 572, each level coloured by its deviation from the original and captioned with its certified bounds, from 0.13 to 1.9](../../examples/images/anim-deviation.svg){.fossil-figure}
 
-The animation repeats the decimation down to 204 facets, with the certified bounds of each level. Each bound converged
-to the default tolerance (1e-3 of the bounding-box diagonal) in at most 155 000 triangles; the whole sweep takes
-1.5 s.
+The animation repeats the decimation until a level cannot halve: asked for 411 facets, the dragon stops at 572 with
+`DEC_STATUS_NO_PROGRESS` (it is not a manifold, and no collapse may change its topology). Each level shows its
+certified bounds. Each bound converged to the default tolerance (1e-3 of the bounding-box diagonal) in at most
+118 000 triangles.
 
 ## API
 
@@ -242,7 +243,8 @@ once and stated with a margin; no tolerance is loosened to make a test pass.
 | Test | Operation | Certified result when written | Asserted |
 |---|---|---|---|
 | `fossil_test_isotropic_remesh` | fine remesh of the cube, features preserved | h ≤ 1.0e-2 at tolerance 1e-2 (the true distance is ~0) | h ≤ 1.2e-2: a #42-style chamfer (~0.03) fails |
-| | marching-cubes sphere, 2 iterations | 5.61e-3 ≤ h ≤ 6.55e-3 at tolerance 1e-3 | h ≤ 7.5e-3 |
+| | marching-cubes sphere, 2 iterations | 7.33e-3 ≤ h ≤ 8.22e-3 at tolerance 1e-3 (5.61e-3–6.55e-3 before the collapse pass coarsened, issue #79) | h ≤ 9.0e-3 |
+| `fossil_test_remesh_coarsen` | marching-cubes sphere coarsened to L = 0.4 (2312 → 298 facets) | 4.14e-2 ≤ h ≤ 4.22e-2 at tolerance 1e-3 | h ≤ 4.5e-2 |
 | `fossil_test_decimate` | sphere to 50 %, 25 %, 10 % | h ≤ 8.0e-3, 1.4e-2, 2.7e-2 | ≤ 1.5 × those; growing with the decimation |
 | `fossil_test_smoothing` | dragon, Taubin and explicit, 5 iterations | Taubin 0.307–0.333, explicit 0.565–0.589 | Taubin's upper below explicit's lower; Taubin ≤ 0.45 |
 | `fossil_test_hole_fair` | holed icosphere filled plain, refined, faired | plain 0.147–0.151, refined 0.161–0.164, faired 0.093–0.096 | faired's upper below plain's lower |

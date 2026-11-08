@@ -1,11 +1,12 @@
 !< Figure and animation of the reference page "Surface deviation". The dragon is decimated again and again to half of
-!< its facets (quadric edge collapses, down to about 200 facets); each level is coloured by its deviation from the
+!< its facets (quadric edge collapses), until a call stops with DEC_STATUS_NO_PROGRESS (the dragon is not a manifold
+!< and no collapse may change its topology, issue #81; that level is kept); each level is coloured by its deviation from the
 !< original: each facet by the distance of its centroid to the original (distance_many), over the largest of the level
 !< (cream 0, ember the largest), the certified bounds lower <= h <= upper from deviation(original, lower=, upper=) in
 !< the caption. The vertices of a quadric decimation stay close to the surface: the deviation peaks inside the
 !< facets that bridge the concave parts. The still ref-deviation-dragon is the level of a quarter of the facets.
 program anim_deviation
-use fossil,              only : surface_stl_object, facet_object, DEC_STATUS_OK, DEV_STATUS_OK
+use fossil,              only : surface_stl_object, facet_object, DEC_STATUS_OK, DEC_STATUS_NO_PROGRESS, DEV_STATUS_OK
 use fossil_fig,          only : fig_open, fig_anim, fig_frame, fig_surface, fig_triangle, fig_close
 use vecfor,              only : vector_R8P
 use penf,                only : I4P, R8P
@@ -17,27 +18,30 @@ real(R8P),   allocatable :: dc(:)
 type(vector_R8P), allocatable :: centres(:)
 real(R8P)                :: lower(NLEV), upper(NLEV)
 character(96)            :: caption
-integer(I4P)             :: u, k, status, triangles
+integer(I4P)             :: u, k, status, triangles, n_levels
 
 call original%load_from_file(file_name='dragon.stl', guess_format=.true.)
 coarse(1) = original
+n_levels = NLEV
 do k = 1, NLEV                                                    ! the sweep and its bounds
    if (k > 1) coarse(k) = coarse(k - 1)
    call coarse(k)%decimate(target_facets=coarse(k)%get_facets_number() / 2, status=status)
-   if (status /= DEC_STATUS_OK) error stop 'decimate failed'
+   if (status /= DEC_STATUS_OK .and. status /= DEC_STATUS_NO_PROGRESS) error stop 'decimate failed'
+   if (status == DEC_STATUS_NO_PROGRESS) n_levels = k
    call coarse(k)%deviation(original, lower=lower(k), upper=upper(k), triangles=triangles, status=status)
    if (status /= DEV_STATUS_OK) error stop 'deviation did not converge'
    print '(I6,A,ES10.3,A,ES10.3,A,I0,A)', coarse(k)%get_facets_number(), ' facets: ', lower(k), ' <= h <= ', upper(k), &
                                          '  (', triangles, ' triangles)'
+   if (n_levels == k) exit
 enddo
 
 call fig_open(u, 'anim-deviation', '', -60._R8P, 22._R8P)
 call fig_anim(u, 1.2_R8P)
 call fig_frame(u, caption='dragon.stl as loaded: 6588 facets, h = 0')
 call fig_surface(u, 'body', original)
-do k = 1, NLEV
+do k = 1, n_levels
    write(caption, '(I0,A,ES9.2,A,ES9.2)') coarse(k)%get_facets_number(), ' facets: ', lower(k), ' <= h <= ', upper(k)
-   if (k == NLEV) then
+   if (k == n_levels) then
       call fig_frame(u, caption=trim(caption), seconds=2.5_R8P)
    else
       call fig_frame(u, caption=trim(caption))

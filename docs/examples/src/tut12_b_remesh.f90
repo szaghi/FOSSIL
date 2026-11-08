@@ -1,6 +1,6 @@
 !run tut12-remesh tut12_b_remesh
-!< Tutorial 12, step 2: the bracket of step 1 remeshed towards edges of 0.2, iteration after iteration; then the limit
-!< of the remesh: it refines, it does not coarsen (issue #79).
+!< Tutorial 12, step 2: the bracket of step 1 remeshed towards edges of 0.2, iteration after iteration; then the same
+!< remesh towards 0.4, which coarsens it (before issue #79 the collapse pass rejected almost every edge).
 program tut12_b_remesh
 use fossil, only : surface_stl_object, facet_object, BOOL_UNION, BOOL_DIFFERENCE, BOOL_STATUS_OK, REM_STATUS_OK
 use penf,   only : I4P, R8P
@@ -28,7 +28,7 @@ enddo
 n0 = mesh%get_facets_number()
 call mesh%isotropic_remesh(target_length=0.4_R8P, iterations=6_I4P, preserve_features=.true., status=status)
 print '(A,I0,A,I0,A)', 'target 0.4 on the remeshed part: ', n0, ' -> ', mesh%get_facets_number(), &
-                       ' facets (no collapse, issue #79)'
+                       ' facets'
 !endregion coarsen
 contains
    subroutine bracket(part, mesh)

@@ -19,10 +19,10 @@ real(R8P)                       :: phi(31, 31, 31)
 integer(I4P)                    :: i, j, k, status, u
 
 do k = 1, 31 ; do j = 1, 31 ; do i = 1, 31
-   phi(i, j, k) = norm2(-1.53_R8P + 0.1_R8P * ([i, j, k] - 1)) - 1._R8P
+   phi(i, j, k) = norm2(-1.5_R8P + 0.1_R8P * ([i, j, k] - 1)) - 1._R8P
 enddo ; enddo ; enddo
-call extract_isosurface(values=phi, bmin=vector_R8P(-1.53_R8P, -1.53_R8P, -1.53_R8P), &
-                        bmax=vector_R8P(1.47_R8P, 1.47_R8P, 1.47_R8P), iso=0._R8P, surface=facets, status=status)
+call extract_isosurface(values=phi, bmin=vector_R8P(-1.5_R8P, -1.5_R8P, -1.5_R8P), &
+                        bmax=vector_R8P(1.5_R8P, 1.5_R8P, 1.5_R8P), iso=0._R8P, surface=facets, status=status)
 call sphere%adopt_facets(facets=facets)
 call sphere%mean_curvature(H=h_cotan)
 call sphere%jet_curvature(H=h_jet, K=k_jet)

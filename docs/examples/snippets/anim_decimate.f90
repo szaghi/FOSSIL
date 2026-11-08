@@ -1,7 +1,9 @@
 !< Animation of the recipe "Decimate a mesh": the dragon as loaded, then decimated again and again to half of its
-!< facets by the recipe's call (quadric edge collapses), down to about 200 facets, seen from the same camera.
+!< facets by the recipe's call (quadric edge collapses), seen from the same camera, until a call cannot reach its target:
+!< the dragon is not a manifold (61 non-manifold edges, 83 shells), and no collapse may change its topology (issue #81),
+!< so the last call stops with DEC_STATUS_NO_PROGRESS above its target.
 program anim_decimate
-use fossil,     only : surface_stl_object, DEC_STATUS_OK
+use fossil,     only : surface_stl_object, DEC_STATUS_OK, DEC_STATUS_NO_PROGRESS
 use fossil_fig, only : fig_open, fig_surface, fig_anim, fig_frame, fig_close
 use penf,       only : I4P, R8P
 
@@ -19,15 +21,17 @@ call fig_surface(u, 'body', dragon)
 do k = 1, 5
    target = dragon%get_facets_number() / 2
    call dragon%decimate(target_facets=target, status=status)
-   if (status /= DEC_STATUS_OK) error stop 'decimate failed'
+   if (status /= DEC_STATUS_OK .and. status /= DEC_STATUS_NO_PROGRESS) error stop 'decimate failed'
    write(caption, '(A,I0,A,I0,A)') 'decimate(target_facets=', target, '): ', dragon%get_facets_number(), ' facets'
+   if (status == DEC_STATUS_NO_PROGRESS) caption = trim(caption)//', NO_PROGRESS'
    print '(A)', trim(caption)
-   if (k == 5) then
+   if (k == 5 .or. status == DEC_STATUS_NO_PROGRESS) then
       call fig_frame(u, caption=trim(caption), seconds=2.5_R8P)
    else
       call fig_frame(u, caption=trim(caption))
    endif
    call fig_surface(u, 'body', dragon)
+   if (status == DEC_STATUS_NO_PROGRESS) exit
 enddo
 call fig_close(u)
 endprogram anim_decimate

@@ -26,8 +26,8 @@ spacing (not the input's noisy tessellation).
 
 A rounded box decimated to 402 facets, most of them long slivers (the
 box of the [decimation](/guide/advanced/decimate) page), resampled at
-resolution 32: 4072 facets of the grid's size, watertight, volume
-1.9710 to 1.9584:
+resolution 32: 4192 facets of the grid's size, watertight, volume
+1.9710 to 1.9587:
 
 ![left, the decimated rounded box: its flat faces covered by a few long thin triangles; right, the same box after resample_via_distance_field(32): a regular mesh of small triangles, one pattern per grid cell, the rounded edges and corners kept](../../examples/images/ref-marching-cubes-resample.svg){.fossil-figure}
 
@@ -50,6 +50,18 @@ After extraction, adjacent cubes share edge-vertices that get emitted
 twice (once per cube). When the result is adopted into a
 `surface_stl_object`, `analyze` runs `connect_nearby_vertices` which
 dedupes them via the vertex pool, producing a watertight mesh.
+
+**Nodes on the level.** A node whose value equals `iso` counts as
+outside, and every crossing on its edges is the node itself, bit for
+bit: the triangles that collapse there have coincident vertices and are
+not emitted. A node within round-off of `iso` is treated the same
+way (issue #87): if every crossing on its grid edges lies within 1e-12
+of a cell side of it, it takes the value `iso`. A sphere sampled on a grid with
+nodes on it is the common case: `norm2(p) - 1` at (0, −0.6, −0.8) on a
+grid of spacing 0.1 is −1.1e-16, not 0, and the crossings 1e-16 from
+the node made slivers of area 1e-32 that the curvature and smoothing
+routines report as degenerate (status 2). Fields with no node that close
+to the level give the same triangles, bit for bit.
 
 The four stages on 3³ cells of side 1, the field the signed distance to a
 sphere of radius 2.3 about (3.4, −0.4, 3.4): 7 corners inside, 57

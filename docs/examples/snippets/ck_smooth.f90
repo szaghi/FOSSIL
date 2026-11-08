@@ -1,5 +1,5 @@
 program ck_smooth
-use fossil, only : surface_stl_object, facet_object, extract_isosurface, SMOOTH_METHOD_TAUBIN, SMOOTH_STATUS_BAD_INPUT
+use fossil, only : surface_stl_object, facet_object, extract_isosurface, SMOOTH_METHOD_TAUBIN, SMOOTH_STATUS_OK
 use penf,   only : I4P, R8P
 use vecfor, only : vector_R8P
 implicit none
@@ -21,7 +21,7 @@ enddo ; enddo
 call sphere%adopt_facets(facets=facets)
 call report('noisy:   ')
 call sphere%smooth(method=SMOOTH_METHOD_TAUBIN, iterations=10_I4P, status=status)
-if (status == SMOOTH_STATUS_BAD_INPUT) error stop 'bad smoothing parameters'
+if (status /= SMOOTH_STATUS_OK) error stop 'smoothing failed'
 call report('smoothed:')
 print '(A,F8.5,A,F8.5)', 'unit sphere:                   area ', 4 * acos(-1._R8P), ', volume ', 4 * acos(-1._R8P) / 3
 contains

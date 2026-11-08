@@ -5,8 +5,8 @@
 !< samples, target L = 0.1. The first figure is what the passes of the first iteration act on: the edges longer than
 !< 4L/3 (ember, split), shorter than 4L/5 (teal, collapsed) and in the band (grey), and the vertices of valence other
 !< than 6 (gold, the flips drive them towards 6). The animation calls isotropic_remesh(iterations=1) five times and
-!< draws the same classes after each call: the splits dominate (the input is coarser than L in places, and the
-!< remesh does not coarsen), the long edges disappear, the short ones fall to a fraction.
+!< draws the same classes after each call: the splits dominate the first (the input is coarser than L in places), the
+!< long edges disappear, the short ones rise once and then the collapses take them (issue #79).
 program anim_ref_isotropic_remesh_iterations
 use fossil,     only : surface_stl_object, facet_object, extract_isosurface, MC_STATUS_OK, REM_STATUS_OK
 use fossil_fig, only : fig_open, fig_zoom, fig_surface, fig_segments, fig_points, fig_anim, fig_frame, fig_close

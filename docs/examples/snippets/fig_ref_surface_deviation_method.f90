@@ -65,7 +65,6 @@ call extract_isosurface(values=phi, bmin=vector_R8P(-1.5_R8P, -1.5_R8P, -1.5_R8P
                         bmax=vector_R8P(1.5_R8P, 1.5_R8P, 1.5_R8P), iso=0._R8P, surface=f, status=status)
 if (status /= MC_STATUS_OK) error stop 'marching cubes failed'
 call sphere%adopt_facets(facets=f)
-call sphere%sanitize(fill_holes=.true.)
 ov = [vector_R8P(1._R8P, 0._R8P, 0._R8P), vector_R8P(-1._R8P, 0._R8P, 0._R8P), vector_R8P(0._R8P, 1._R8P, 0._R8P), &
       vector_R8P(0._R8P, -1._R8P, 0._R8P), vector_R8P(0._R8P, 0._R8P, 1._R8P), vector_R8P(0._R8P, 0._R8P, -1._R8P)]
 oct = reshape([1, 3, 5,  3, 2, 5,  2, 4, 5,  4, 1, 5,  3, 1, 6,  2, 3, 6,  4, 2, 6,  1, 4, 6], [3, 8])
