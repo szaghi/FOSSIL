@@ -1,0 +1,3 @@
+$ fig_ref_curvilinear_validity
+cells 240: valid 236, singular 2, invalid 2
+min J / mean J of the valid cells: lowest  0.5526, highest  1.0000

@@ -1,0 +1,14 @@
+$ ref_cut_solver
+3-D: pieces 485 (36 of zero volume), links 2304, unmatched regions 0
+  piece 1 ->    2 over face 2, area  0.0625
+  piece 1 ->    9 over face 4, area  0.0625
+  piece 1 ->   65 over face 6, area  0.0625
+  z edges with fluid 584 of 648
+2-D: pieces 50, small 10, regular 40
+  piece in cell  6  5, fraction  0.20, SRD members  21  22
+  member cells  7  5, eta_nb  0.300, eta_self  1.000
+  FRD set size 6, own weight  0.056
+  merge target in cell  7  5, normal-directed targets 1, weight  1.00
+  moments up to order 2 (6), / cell area:   0.20000  0.08000  0.00000  0.03267  0.00000  0.01667
+coarse (ratio 2): status 0, pieces 15, links 44, fraction of the cut column  0.10
+  the fine piece lands in coarse piece 7, in coarse cell 3

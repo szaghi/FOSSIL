@@ -13,6 +13,15 @@ the validation suite, not in the library. Sources are the llm-wiki bundle `overs
 path); statements from general knowledge are marked *(gk)*.
 :::
 
+## At a glance
+
+![an O-grid of 32 by 12 cells around a unit cylinder crossing a Cartesian background of 60 by 32 cells: per frame, the background holes inside the cylinder in red, the background receptors around them in teal, the O-grid's outer receptors in yellow, and ember squares on the orphans where the O-grid's outer boundary leaves the background](../../examples/images/anim-overset.svg){.fossil-figure}
+
+Each frame moves the O-grid and recomputes the assembly with the kernels of this page (`wall_cutter_2d`,
+`hole_flags_2d`, `donor_candidates_2d`, `classify_2d` with the explicit rule and 3-point stencils): 137 to 141
+background holes and 56 to 58 background receptors per frame. Orphans appear where the O-grid's outer boundary leaves
+the background: 9 in the first frame, 3 while it grazes the top, 10 in the last (`anim_overset.f90`).
+
 ## Principles
 
 1. **Points are vertices.** Every kernel works on the vertices of a set of `curvilinear_block_t` (2-D:
@@ -63,6 +72,13 @@ A point exactly on the wall is a field point (signed distance 0 is not inside), 
 its own wall. Which cutter cuts which block is the caller's choice (`cuts=`, default every block). Pass the blocks
 that contributed the cutter's patches as not cut when they move with a pose: their wall vertices, mapped to the world
 frame and back, land off the wall by round-off and would be blanked.
+
+![the rear half of a lens 0.008 thick at most and of chord 1 in a 241 by 41 background block, the vertical scale stretched 6 times: the background vertices inside the lens in teal (exact flags), six of them in ember near u = 0.78, the holes PEGASUS 5's line of sight misses on a 20 by 20 hole map, and in gold the vertices where X-rays through 41 rays differ from the exact flags, at u = 0.79 and at the trailing edge](../../examples/images/ref-overset-holes.svg){.fossil-figure}
+
+On this lens the exact flags find 433 holes. The hole map with the crossing parity agrees with them everywhere; with
+PEGASUS 5's line of sight it leaves 12 vertices unresolved and misses 12 holes, at u = 0.21 and u = 0.78: the rule
+takes the status of a visible uncut element, and inside a body thinner than the map elements there is none. X-rays
+through 41 rays differ from the exact flags at 7 vertices (`fig_ref_overset_holes.f90`).
 
 ## Donor candidates
 
@@ -116,6 +132,12 @@ the receptor block onto the donor block's wall (FOSSIL's closest point on it) an
 wall-normal grid line, decaying linearly to zero at a maximum distance. The shifted points are used for donor
 search and weights only; the grid is never moved.
 
+![an annulus unrolled, arc length across and 40 times the distance from its outer circle r = 2 upward, over 0.67 pi to 0.83 pi: three cells of the coarse block's two outer layers, its wall chords (gold) sagging below the circle; the fine block's wall on the circle, its vertices between the coarse vertices (ember) outside the coarse block, each moved by a short gold segment to its teal image on the coarse chord](../../examples/images/ref-overset-projection.svg){.fossil-figure}
+
+Two blocks share a concave wall: a fine one, 41 vertices over 0.9 π, and a coarse one, 9 over 0.4 π. Without
+projection, 12 fine wall vertices inside the coarse block's range have no donor; `wall_projection_2d` moves them by
+6.104e-3 at most, the chord sag, and every one finds a donor (`fig_ref_overset_projection.f90`).
+
 ## Moving grids
 
 `methods/moving-overset-grid.md`:
@@ -134,6 +156,33 @@ search and weights only; the grid is never moved.
 `connectivity_t` holds the mask, the fringe levels and orphan causes per block, and the receptor list (receptor block
 and vertex, donor block, stencil corner, ξ, width per direction, low-order flag, quality); `save_connectivity` writes
 it as plain text, one receptor per line, in the form the founding codes share (`definitions/domain-connectivity.md`).
+
+## Example
+
+A full assembly of the cylinder of the [cookbook recipe](/manual/cookbook#assemble-an-overset-grid) (an O-grid of
+32 × 12 cells to r = 2 over a Cartesian background of spacing 0.15), with the kernels the recipe skips: the hole
+offset and the distances, the pair matrix, the donor quality, the implicit rule, two fringe levels, the overlap width
+and the connectivity file.
+
+<<< @/examples/snippets/ref_overset.f90
+
+<<< @/examples/output/ref_overset.ansi{ansi}
+
+- **Holes.** The O-grid's wall cuts the background only (`cuts=[.false., .true.]`): 137 holes. `offset=0.3` also
+  blanks the vertices within 0.3 of the wall, 241 in all. `distances=` returns the signed distance of every vertex:
+  the nearest field vertex lies 0.0107 from the wall.
+- **Pairs and donors.** `overlap_matrix_2d` gives `PAIR_OVERLAP` (1) for the two blocks, printed column by column.
+  `donor_candidates_2d` keeps every candidate: all 429 O-grid vertices have a background cell, 416 background
+  vertices an O-grid cell. The donor/receptor volume ratio of the O-grid vertices runs from 0.7067 to 1.3286.
+- **Explicit rule.** With the offset holes and 3-point stencils, 33 O-grid vertices (its overlap boundary) and 72
+  background vertices receive, no orphan. The fixed point settles in 2 iterations, with no circular pair.
+- **Implicit rule.** Without holes, a vertex receives when a smaller donor cell exists: 191 and 132 receptors, a
+  different assembly from the same candidates, after 6 iterations.
+- **Fringes.** `levels=2` gives the two INNER levels around the holes (72 and 80 background vertices) and the two OUTER
+  levels on the O-grid (33 and 33). `overlap_width_2d` gives Chesshire's d = 0.5088 between the innermost receptors.
+- **Output.** `save_connectivity` writes the counts per block, then one receptor per line: receptor block and vertex,
+  donor block, stencil corner, ξ, width per direction, low-order flag and quality (the line is cut at 100 characters
+  here).
 
 ## API
 

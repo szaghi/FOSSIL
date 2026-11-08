@@ -1,0 +1,14 @@
+$ ref_overset
+holes 137, with offset 0.3 241, nearest field point to the wall  0.0107
+pair matrix  0 1 1 0
+candidates: O-grid vertices in the background 429, background vertices in the O-grid 416
+donor / receptor volume, O-grid vertices: min max   0.7067  1.3286
+explicit: receptors 33 + 72, orphans 0, iterations 2, circular 0
+implicit: receptors 191 + 132, holes 0, iterations 6
+fringe INNER 1, INNER 2 (background), OUTER 1, OUTER 2 (O-grid)    72   80   33   33
+overlap width   0.5088
+# FOSSIL overset connectivity (issue #72)
+# block 1 field 396 holes 0 receptors 33 orphans 0
+# block 2 field 1368 holes 241 receptors 72 orphans 0
+# receptors 105
+1 397 2 34 20 1   3.3333333333333337E-01   1.0000000000000000E+00   0.0000000000000000E+00 3 3 1 F

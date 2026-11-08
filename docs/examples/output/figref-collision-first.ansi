@@ -1,0 +1,4 @@
+$ fig_ref_collision_first
+mu   2.225  1.061  2.278  2.000  1.055
+pairs 10, boxes overlapping 8, time_of_impact runs 7
+contact T, pair 1 2, toi  0.91342

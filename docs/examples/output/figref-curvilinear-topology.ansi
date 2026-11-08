@@ -1,0 +1,6 @@
+$ fig_ref_curvilinear_topology
+C-grid record 1: abut, face 3, i 1..13, begin  1  1 -> face 3, begin 61  1, transform -1 -2
+C-grid record 2: abut, face 3, i 49..61, begin 49  1 -> face 3, begin 13  1, transform -1 -2
+disc record 1: abut, face 1, donor face 2
+disc record 2: abut, face 2, donor face 1
+disc record 3: singular, face 3, donor face 0

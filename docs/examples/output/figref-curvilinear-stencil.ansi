@@ -1,0 +1,6 @@
+$ fig_ref_curvilinear_stencil
+inside T, cell 55  1, xi  0.2918  0.2668
+stencil nodes (i, j), first row   8  2    7  2    6  2    5  2
+nodes mapped below the cut 4, weights sum  1.000
+width 2: error of exp(x) cos(3 y)   1.29E-01
+width 4: error of exp(x) cos(3 y)   5.23E-03

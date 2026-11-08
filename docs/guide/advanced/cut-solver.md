@@ -16,6 +16,15 @@ marked *(gk)*. A worked example is in the cookbook:
 [Neighbourhoods for a small-cell cure](/manual/cookbook#neighbourhoods-for-a-small-cell-cure).
 :::
 
+## At a glance
+
+![an ellipse translating and turning through 24 by 12 cells: per frame, the cut cells shaded by their fluid fraction, each small piece in teal joined to its merge target in yellow, and the cells of the smallest piece's state-redistribution neighbourhood outlined in ember](../../examples/images/anim-cut-solver.svg){.fossil-figure}
+
+Each frame recomputes the cut cells of a moving ellipse, their links, the
+state-redistribution neighbourhoods and the merge targets: 8 to 13 small
+pieces per frame (area below half the cell), the smallest down to 2.61e-05 of
+its cell (`anim_cut_solver.f90`).
+
 ## Principles
 
 1. **The piece is the unit.** Every neighbourhood, link and target is indexed by
@@ -50,32 +59,12 @@ from p's side in CSR form (`cut_links_t`): `start(np + 1)`, `piece(:)`,
 sorted by face, then by the piece across. Both directions are stored, with the
 same area.
 
-```fortran
-program piece_links
-use fossil, only : surface_stl_object, curve_object, cut_cells_2d_t, cut_cells_3d_t, cut_cells_3d, &
-                   cut_links_t, cut_links_2d
-use penf,   only : I4P, R8P
-implicit none
-type(surface_stl_object) :: surface
-type(curve_object)       :: curve
-type(cut_cells_2d_t)     :: cut2
-type(cut_cells_3d_t)     :: cut3
-type(cut_links_t)        :: links2, links3
-real(R8P)                :: x(9)
-integer(I4P)             :: i, k, p
+<<< @/examples/snippets/ref_cut_solver-links.f90
 
-x = [(-0.5_R8P + 0.25_R8P * i, i = 0, 8)]
-call surface%load_from_file(file_name='cube.stl', guess_format=.true.)
-call cut_cells_3d(surface, x, x, x, cut3, links=links3) ! 3-D: computed with the cut cells
-call curve%adopt_loops(u=[0._R8P, 1._R8P, 0._R8P], v=[0._R8P, 0._R8P, 1._R8P], loop_sizes=[3_I4P])
-call curve%cut_cells(x=x, y=x, cut=cut2)                 ! 2-D: from the cut cells
-call cut_links_2d(cut2, links2)
-p = 1
-do k = links3%start(p), links3%start(p + 1) - 1 ! piece p meets piece(k) over its face face(k), area area(k)
-   print '(3I6,ES12.4)', p, links3%piece(k), links3%face(k), links3%area(k)
-enddo
-endprogram piece_links
-```
+![a thin plate 0.03 thick, tilted, across 8 by 6 cells of 0.125: a dot at the centroid of every piece, ember for the 7 cells the plate splits into two pieces, teal for the others; gold lines join each piece to the middle of the fluid edge interval it shares with a neighbour, and on to that neighbour: the pieces above the plate link only to pieces above it, those below only to those below](../../examples/images/ref-cut-solver-links.svg){.fossil-figure}
+
+The plate splits 7 of the 48 cells: 55 pieces, 176 links counted in both directions, none across the plate
+(`fig_ref_cut_solver_links.f90`).
 
 - **2-D.** The fluid intervals of a cell edge are bounded by the crossings of
   the walk and the cell corners, the same points in the two cells that share
@@ -132,28 +121,7 @@ open; FOSSIL's is:
 - Each neighbourhood depends on its own piece only, so the result does not
   depend on the order in which pieces are visited.
 
-```fortran
-program srd_example
-use fossil, only : curve_object, cut_cells_2d_t, cut_links_t, cut_links_2d, srd_t, srd_neighbourhoods, SRD_COMPLETE
-use penf,   only : I4P, R8P
-implicit none
-type(curve_object)   :: curve
-type(cut_cells_2d_t) :: cut
-type(cut_links_t)    :: links
-type(srd_t)          :: srd
-real(R8P)            :: x(11)
-integer(I4P)         :: i, p
-
-x = [(0.1_R8P * i, i = 0, 10)]
-call curve%adopt_loops(u=[-1._R8P, 0.58_R8P, 0.58_R8P, -1._R8P], v=[-1._R8P, -1._R8P, 2._R8P, 2._R8P], loop_sizes=[4_I4P])
-call curve%cut_cells(x=x, y=x, cut=cut)
-call cut_links_2d(cut, links)
-call srd_neighbourhoods(links, cut%piece_cell, cut%piece_area, cut%piece_centroid, cut%piece_wet_normal, x, x, srd)
-do p = 1, srd%np ! 3-D: the same call with cut3%piece_volume, ..., z=z
-   if (srd%status(p) == SRD_COMPLETE) print '(I4,A,10I4)', p, ' merges with', srd%member(srd%start(p) + 1:srd%start(p + 1) - 1)
-enddo
-endprogram srd_example
-```
+<<< @/examples/snippets/ref_cut_solver-srd.f90
 
 Measured (`fossil_test_cut_srd`; 2-D circle, thin plate and half-plane, 3-D tilted
 wedge, cone and thin plate, τ = ½, 327 small pieces): every piece with volume is
@@ -179,6 +147,9 @@ by Barrio Sanchez et al. as a monotone index path through valid cells.
   no set.
 - `frd_neighbourhoods(links, piece_cell, piece_volume, x, y, frd, z=)` gives
   `frd_t` (`start`, `member` with the piece first, `weight`).
+
+<<< @/examples/snippets/ref_cut_solver-frd.f90
+
 - **Measured** (`fossil_test_cut_frd`; 2-D circle and thin plate, 3-D tilted
   wedge and thin plate, 654 cut pieces): every set equals a brute-force
   fixpoint that pulls pieces in from the cell grid (a formulation independent
@@ -217,6 +188,9 @@ Two families, both reported per piece:
 - `merge_targets(links, piece_cell, piece_volume, wet_normal, x, y, mt, z=, tau=, mask=, exclude=)`
   gives `merge_t` (`status`, `target`, `final_target`, `mix_start`,
   `mix_piece`, `mix_weight`).
+
+<<< @/examples/snippets/ref_cut_solver-merge.f90
+
 - **Measured** (`fossil_test_cut_merge`; 2-D half-plane, circle and a
   translating circle, 3-D tilted wedge, 250 served pieces): on the
   half-plane x < 0.58 every small cell targets the cell across its +x face,
@@ -283,6 +257,13 @@ Two families, both reported per piece:
     a lattice tetrahedron whose face arcs (the clipped traces, as its face
     areas) do not close.
 
+![a five-pointed star, the solid, on 4 by 4 cells of 0.25: the volume quadrature points of the cut pieces in teal where their weight is positive and in ember where it is negative, many of them inside the star's arms, and the wall points in gold along the star's edges](../../examples/images/ref-cut-solver-quadrature.svg){.fossil-figure}
+
+On the star, 14 of the 20 pieces are cut; their rules have 544 volume points, 98 of them with a negative weight, and
+72 wall points. The weights of every piece add up to its area within 3.82e-17 (`fig_ref_cut_solver_quadrature.f90`).
+A signed triangle from the cell centre covers what lies between the centre and the boundary, solid included: its
+points can lie outside the piece, and the triangles over the solid side carry the negative weights that cancel them.
+
 ## Coarsening
 
 Coarse–fine cut cells are where re-redistribution fails at κ < 10⁻⁴ (llm-wiki
@@ -300,6 +281,9 @@ cell counts multiples of r) is built from the fine one, never recomputed:
   ones. A coarse cell with an untrusted fine cell is untrusted. Face piece
   counts are not derived (−1); quadrature rules are not coarsened
   (concatenating the fine rules is exact).
+
+<<< @/examples/snippets/ref_cut_solver-coarsen.f90
+
 - **Measured** (`fossil_test_cut_coarsen`; tilted wedge, L-prism, thin plate,
   a 64-gon and a thin plate in 2-D; 2612 coarse cells at ratio 2): against
   the cut cells computed directly on the coarse grid, the same pieces in every
@@ -331,6 +315,29 @@ every grid node, `node_in(nx + 1, ny + 1, nz + 1)` (the z lines); the 2-D cut ce
   surface of a lattice tetrahedron, where the sections decide on rounded
   crossing points ([limitations](./cut-cells#limitations)); the 3-D flags are
   exact predicates on the input triangles.
+
+## Example
+
+The regions shown above, as one program: the cube-01 body on a 3-D block of 8³ cells of 0.25, then the half-plane
+x < 0.58 on 10 × 10 cells of 0.1 (the solid on the left, the fluid fraction of the cut column 0.2). The cookbook recipe
+[Neighbourhoods for a small-cell cure](/manual/cookbook#neighbourhoods-for-a-small-cell-cure) does the same on a disc.
+
+<<< @/examples/snippets/ref_cut_solver.f90
+
+<<< @/examples/output/ref_cut_solver.ansi{ansi}
+
+- **3-D links.** cube-01 lies on cell faces: 485 pieces, 36 of them of zero volume, where a face of the cube is the
+  high plane of a cell. The first piece, in the corner cell, links to its three neighbours over whole faces (0.0625).
+  `edges=.true.` gives the edge fractions: 584 of the 648 z edges hold fluid. No fluid region is unmatched.
+- **SRD.** The 10 pieces of the cut column are small (fraction 0.20 < τ = ½). The one in cell (6, 5) merges with the
+  piece of cell (7, 5) only, across its +x face, the wall normal; η^nb = (½ − 0.2) / 1 = 0.3.
+- **FRD.** Its flux set holds the 6 pieces of the 3 × 3 block that are fluid; its own weight is κ_p / Σ κ =
+  0.2 / 3.6 = 0.056.
+- **Merge.** Its single target is the piece across +x; it is also its only normal-directed target, weight 1.
+- **Moments.** In the cell's scaled coordinates the piece spans X ∈ [0.3, 0.5] and Y ∈ [−½, ½]: ∫1 = 0.2,
+  ∫X = 0.08, ∫X² = 0.03267, ∫Y² = 0.01667 (per cell area), in the order of `mono_exponents`: 1, X, Y, X², XY, Y².
+- **Coarsening.** At ratio 2 the 50 fine pieces become 15 coarse ones, the cut column's fraction 0.10, and the fine
+  piece maps to the coarse piece 7, in coarse column 3.
 
 ## Left out
 

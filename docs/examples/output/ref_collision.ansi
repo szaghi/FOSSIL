@@ -1,0 +1,6 @@
+$ ref_collision
+mu, frame origin at a corner:    3.22144
+mu, frame origin at the centre:  2.11072
+plain:       not converged  toi  0.250874, steps 1000, distance  4.000E-06
+directional: separate       toi  1.000000, steps 11, distance  1.000E+00, pairs 2662
+first impact: contact        pair 1 2, toi  0.689655, 3 of 6 pairs tested

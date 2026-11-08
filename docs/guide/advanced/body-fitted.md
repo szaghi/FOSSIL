@@ -19,6 +19,14 @@ Sources are the llm-wiki bundles `overset-grid-methods` and `turbulence-modellin
 Statements from general knowledge are marked *(gk)*. CPU only: these are set-up computations.
 :::
 
+## At a glance
+
+![an O-grid marched out of a NACA 0012 section, three layers per frame: the new layers filled, darker outwards, the grid marched so far in lines, up to 24 layers and 0.74 chord from the wall](../../examples/images/anim-hyperbolic.svg){.fossil-figure}
+
+`hyperbolic_grid_2d` marches 24 layers out of a NACA 0012 section, first height 4e-3 chord, growth 1.15; each frame
+shows three more layers of the block, up to 0.7367 chord from the wall, with 0 cells not certified valid
+(`anim_hyperbolic.f90`).
+
 ## Why projection needs constraints
 
 NASA's overset tool chain marches surface grids and projects them back on the body at each step. It calls surface
@@ -46,6 +54,12 @@ A `projection_target_t` is built once from a surface (2-D: a curve) and every qu
 - the **corners**: the vertices where the constraint edges meet in a number other than two, or turn by more than
   `corner_angle` (default 30 degrees).
 
+![the NACA 0012 wing with its rear facets in a second patch, the flap, in ember: the constraint curves in gold run along the two trailing-edge lines, the root and tip outlines and the two spanwise patch boundaries; teal dots mark the 18 corners where they meet or turn](../../examples/images/ref-body-fitted-target.svg){.fossil-figure}
+
+The wing of the test bodies (188 facets) with its rear facets moved to a patch `flap` has 27 constraint curves and 18
+corners (`fig_ref_body_fitted_target.f90`). The patch boundaries are constraint curves although the surface is smooth
+across them, so a grid line can be held on the edge of the flap.
+
 In 2-D, a curve's constraint points are its corners (`feature_corners`) and the points where two patches meet. A
 `PROJ_CURVE` constraint has no 2-D meaning.
 
@@ -68,6 +82,12 @@ round-off only.
 
 `project_block_face(block, face, target)` classifies and projects the vertices of one face of a block in place (2-D:
 `project_block_side`). Its corners go to corners, edge vertices to curves, and interior vertices stay on their patch.
+
+![a cylinder with a 9 by 9 squircle face placed 0.05 below its top cap and 0.04 wider than it: projected with tolerance 0.07, the face's boundary (gold) lies on the rim and its interior on the cap; projected with tolerance 0 (ember), every vertex goes to the patch of its nearest facet and the boundary row slides onto the side, 0.05 below the rim](../../examples/images/ref-body-fitted-face.svg){.fossil-figure}
+
+With tolerance 0.07 the 32 boundary vertices of the squircle face are classified `PROJ_CURVE` and land on the rim, the
+49 interior ones `PROJ_PATCH` on the cap. With tolerance 0 all 81 are `PROJ_PATCH`, and the boundary row, nearer the
+side than the cap, stays on the side at z = 1.95 (`fig_ref_body_fitted_face.f90`).
 
 ## The wall-spacing report
 
@@ -117,8 +137,41 @@ to the right of the curve's direction (outward for a counter-clockwise closed cu
   it, not with it). It does not cure a right-angled concave notch once the marched height passes the point spacing at
   its corners: a structured layer cannot drop the points that the offset of a concave corner swallows. The status
   reports the folds, and the caller limits the height or refines the boundary there.
+
+![three unit squares with a notch in the top side, each extruded by 25 layers (0.2 in all), top halves shown: a V notch 0.15 deep without smoothing, its cells folded at the notch outlined in ember; the same notch with the default smoothing, no fold; a right-angled notch 0.6 wide and 0.2 deep with the smoothing, folded at its two concave corners](../../examples/images/ref-body-fitted-notch.svg){.fossil-figure}
+
+The V notch folds 4 cells with `epsilon=0` and none with the default 0.5; the right-angled notch folds 26 cells even
+with it, and `status` is 2 (`fig_ref_body_fitted_notch.f90`).
+
 - **Spacing.** `geometric_spacing(h1, ratio, layers)` gives the layer heights. The first height can be set from a y₁⁺
   target with the report's definitions (y₁ = y₁⁺ ν / u_τ).
+
+## Example
+
+The wing of the figure above, with its flap, then an O-grid around a NACA 0012 section and its report. Cookbook
+recipes cover the plain cases: [a block face on a cube](/manual/cookbook#put-a-block-face-on-a-body-with-sharp-edges)
+and [an O-grid with a given u_τ](/manual/cookbook#extrude-an-o-grid-and-check-its-wall-spacing).
+
+<<< @/examples/snippets/ref_body_fitted.f90
+
+<<< @/examples/output/ref_body_fitted.ansi{ansi}
+
+- **The target.** `projection_target` builds the per-patch trees, the 27 constraint curves and the 18 corners once.
+- **Classification.** `classify_points` with tolerance 0.02 tags the four points `PROJ_CORNER` (corner 4, the
+  trailing-edge corner at the root), `PROJ_CURVE` (curve 9, the upper trailing-edge line; curve 12, the upper patch
+  boundary) and `PROJ_PATCH` (patch 1).
+- **Constrained against free feet.** The first three feet sit on the corner, the line and the patch boundary; the free
+  feet of the same points land on the faces next to them, nearer (0.00208 against 0.01151 for the first point) but
+  off the feature. The fourth point is far from every feature, and both feet agree.
+- **One patch.** `PROJ_PATCH` with id 2 keeps (0.45, 0.05, 0.5) on the flap: its foot is the flap's nearest point,
+  0.12636 away, at the patch boundary.
+- **Extrusion.** `hyperbolic_grid_2d` marches 50 layers from 2e-5 chord with growth 1.15: 130 × 51 vertices (the
+  closed curve repeats its first point), every cell certified valid.
+- **The report.** Without `u_tau`, `u_inf` and `x_le` select the flat-plate estimate (u_τ = 0.47578 at mid-chord for
+  U = 10, ν = 1.5e-5), and the report says so. With `cell_centred=.true.` there is one line per wall cell, 129. The
+  two heights differ most at wall cell 1, the trailing edge, where the grid line leaves the wall at an angle: 9.480e-6
+  along the line, 6.026e-6 to the wall. `save_block_report` writes the totals as `#` lines, then one line per wall
+  cell.
 
 ## API
 

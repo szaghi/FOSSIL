@@ -1,0 +1,20 @@
+$ ref_body_fitted
+target: patches 2, constraint curves 27, corners 18
+point 1: corner 4, foot  0.75000  0.00126  0.00000, moved  0.01151
+         free foot            0.74474  0.00194  0.01000, moved  0.00208
+point 2: curve 9, foot  0.75000  0.00126  0.50000, moved  0.01037
+         free foot            0.73982  0.00261  0.50000, moved  0.00141
+point 3: curve 12, foot  0.57833  0.02299  0.40043, moved  0.01090
+         free foot            0.56935  0.02395  0.40000, moved  0.00609
+point 4: patch 1, foot  0.19928  0.05549  0.50001, moved  0.01453
+         free foot            0.19928  0.05549  0.50001, moved  0.01453
+(0.45, 0.05, 0.5) on the flap   0.57342  0.02355  0.50589, moved  0.12636
+O-grid 130 x 51, status 0, not valid 0
+flat-plate u_tau at mid-chord  0.47578
+wall cells 129, cell centred T, u_tau estimated T
+y1+ min mean max   0.1784  0.3443  0.7145, fraction above 1  0.000
+y1 along the line  9.480E-06, to the wall  6.026E-06 at wall cell 1
+growth max  1.1520, skewness max  0.9113, cells not valid 0
+# FOSSIL block report (issue #74)
+# wall points 129, cell centred T, u_tau given F, u_tau estimated (flat plate) T
+# y1+ min max mean p95   1.783578E-01  7.145332E-01  3.442948E-01  4.982101E-01  target   1.0000E+00  fraction above   0.0000

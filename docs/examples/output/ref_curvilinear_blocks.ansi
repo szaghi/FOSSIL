@@ -1,0 +1,10 @@
+$ ref_curvilinear_blocks
+record 1: abut      face 1 -> face 2, transform  1  2  3
+record 2: abut      face 2 -> face 1, transform  1  2  3
+record 3: periodic  face 5 -> face 6, transform  1  2  3
+record 4: periodic  face 6 -> face 5, transform  1  2  3
+volume  9.364335457, largest face-vector sum of a cell  1.27E-17
+cells certified valid 2048 of 2048
+inside 400, walk equal bit for bit T, jumps 7273, fallbacks 1
+largest interpolation error, widths 2 and 4   7.91E-02  1.31E-02
+skewness max  0.097, orthogonality min  0.989, aspect max   3.13, warp max   3.71 deg, min J / mean  0.915

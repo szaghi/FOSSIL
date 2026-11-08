@@ -1,0 +1,3 @@
+$ fig_ref_collision_bound
+centre at x =  0.0 in the body frame: rho   0.5385  0.5385  0.5385  0.5385, mu   2.9340
+centre at x =  1.2 in the body frame: rho   0.7280  1.7117  1.7117  0.7280, mu   5.9445

@@ -16,6 +16,15 @@ and Bullet libraries)*. Statements from general knowledge are marked *(gk)*. CPU
 sequence of distance queries, and the device gains nothing there.
 :::
 
+## At a glance
+
+![two panels: a square sliding along a floor into a wall over one step, drawn at each conservative-advancement iterate up to its time of impact; the plain bound (top) creeps in 25 steps, the directional bound (bottom) reaches the same contact in 5](../../examples/images/anim-ccd.svg){.fossil-figure}
+
+A square slides 0.18 above a floor and turns 45 degrees on its way into a wall. Frame k calls
+`curve%time_of_impact(..., max_iterations=k)`, whose `toi` is the k-th iterate. The plain bound is held back by the
+floor gap and needs 25 steps; `directional=.true.` sees that the sliding does not close that gap and needs 5; both
+stop at s = 0.7728 (`anim_ccd.f90`).
+
 ## The motion over a step
 
 A step takes each body from a pose P0 = (R0, t0) at s = 0 to a pose P1 = (R1, t1) at s = 1, along the motion of
@@ -43,6 +52,13 @@ reached at a vertex. The bound of a body over the step is
 and no point of the body moves farther than μ |s2 − s1| between s1 and s2. In 2-D, ρ_v = |x_v| (the axis is the
 body origin). A body whose vertices lie far from its own frame origin has a large μ when it turns: it is its real
 motion, not slack. Measured in step 2: the bound is attained at the vertex farthest from the axis.
+
+![two panels with the same rectangle, 1 by 0.4, placed alike at s = 0 and s = 1 (a quarter turn and a shift of (2, 0.6)), filled; in between it is drawn at s = 1/4, 1/2, 3/4 with the paths of its four vertices in gold and the straight path of its body-frame origin in teal. Left, the origin at the centre: the paths are short arcs, mu 2.934. Right, the origin 1.2 to the left: the origin's path runs away from the body, the vertices swing wide, mu 5.945; the vertex of largest rho is marked in ember](../../examples/images/ref-collision-bound.svg){.fossil-figure}
+
+The end poses alone do not fix the motion: they fix it together with the body frame. With the frame origin at the
+rectangle's centre every vertex has ρ = 0.5385 and μ = 2.934; with the origin 1.2 to its left, between the same two
+placements, ρ reaches 1.7117 and μ = 5.945 (`fig_ref_collision_bound.f90`). Put the body frame at the centre of a body
+that turns, or accept twice the steps.
 
 ## Conservative advancement
 
@@ -112,6 +128,35 @@ bound cannot tell tangential motion from approach, and at a gap just above the t
   (the first advancement step, or 0 when the bodies may start within the tolerance); pairs run in the order of these
   bounds, and the search stops when the next bound exceeds the best contact found;
 - ties go to the lexicographically smallest pair, so the result equals the brute force over all pairs, bit for bit.
+
+![five squares of side 0.5 moving over one step: each at s = 0 (filled) and at s = 1 (outline), the path of its centre in teal, and its box at s = 0 grown by mu + tol/2 in thin lines; the boxes of squares 1 and 2 overlap, and the two squares are drawn in ember at the time of impact 0.91342, where they first touch](../../examples/images/ref-collision-first.svg){.fossil-figure}
+
+Of the 10 pairs, 8 have overlapping grown boxes. `first_impact_2d` runs `time_of_impact` on 7 of them: the last
+candidate's lower bound exceeds the contact already found, at s = 0.91342 between squares 1 and 2
+(`fig_ref_collision_first.f90`).
+
+## Example
+
+The cookbook recipe [When do my moving bodies first touch?](/manual/cookbook#when-do-my-moving-bodies-first-touch)
+shows one contact and a thin plate crossed within a step. This program measures the bound, the case the plain bound
+cannot finish, and several bodies.
+
+<<< @/examples/snippets/ref_collision.f90
+
+<<< @/examples/output/ref_collision.ansi{ansi}
+
+- **The bound.** cube-01 spans [0, 1]³, so its frame origin is a corner. For a quarter turn about z and a shift of 1,
+  `motion_bound_3d` gives μ = 1 + (π/2) √2 = 3.22144; the same vertices about the centre give 1 + (π/2)(√2/2) =
+  2.11072.
+- **Sliding.** The cube slides by 4 over the top face of the resting one, 4 tol above it. The plain bound cannot tell
+  the sliding from an approach: from s = 0.25, where the moving cube reaches the resting one, each step advances by
+  (4 − 1/2) tol / μ = 8.75e-7, and the loop stops at the cap, 1000 steps, with `CCD_NOT_CONVERGED` and s = 0.250874,
+  a certified lower bound on any contact. With `directional=.true.` the
+  separating planes of the facet pairs see that the gap does not close: 11 steps and 2662 exact pair evaluations
+  reach s = 1, `CCD_SEPARATE`.
+- **Several bodies.** Four unit cubes 3 apart, their frames at their centres: 1 and 2 close in at 1.5 and 1.4 per
+  step, 3 turns in place, 4 moves away. `first_impact` finds cubes 1 and 2 at s = 0.689655 = 2/2.9 (the gap 2 over
+  the closing speed 2.9) and runs `time_of_impact` on 3 of the 6 pairs.
 
 ## API
 

@@ -1,0 +1,4 @@
+$ fig_ref_body_fitted_notch
+V notch, epsilon 0:      status 2, cells not certified valid 4
+V notch, epsilon 0.5:    status 0, cells not certified valid 0
+right-angled notch, 0.5: status 2, cells not certified valid 26

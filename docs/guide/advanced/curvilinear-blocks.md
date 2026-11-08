@@ -17,6 +17,16 @@ the llm-wiki bundles `overset-grid-methods` and
 `curvilinear-metric-discretization`.
 :::
 
+## At a glance
+
+![an O-grid of 40 by 10 cells around a cylinder with three moving points and their paths: per frame, each point's start cell in teal and the cell its walk ends in, in ember, one point crossing the seam](../../examples/images/anim-block-walk.svg){.fossil-figure}
+
+Three points move through an O-grid and are located frame after frame by
+`locate_many(..., walk=.true., start=)`, each walk starting from the cell
+found at the previous frame: 3 to 7 cells crossed per frame by the three walks
+together, across the seam too, and 0 fallbacks to the robust path
+(`anim_block_walk.f90`).
+
 ## Principles
 
 1. **Exact where it decides, an honest status elsewhere.** The decisions FOSSIL
@@ -99,6 +109,13 @@ interior into the donor's exterior.
 Vertices that match nothing are physical boundary. The user can also give the
 records by hand, and every record **round-trips**: mapped vertices coincide.
 
+![left, a C-grid of 60 by 6 cells around an ellipse with its wake to x = 3: the lower wake vertices i = 1 to 13 of face 3 in teal and the upper ones i = 61 to 49 in ember, drawn just apart, the two abutting records of the wake cut; right, a disc of 32 by 8 cells: the seam between faces 1 and 2 in gold and the centre, where face 3 collapses, in ember](../../examples/images/ref-curvilinear-topology.svg){.fossil-figure}
+
+`detect_topology_2d` with no tolerance proposes these records (`fig_ref_curvilinear_topology.f90`): on the C-grid,
+two `TOPO_ABUT` records on face 3, i = 1..13 onto face 3 from i = 61 and i = 49..61 onto it from i = 13, both with
+the transform (−1, −2), the index reversal; on the disc, the seam (face 1 onto face 2 and back) and face 3
+`TOPO_SINGULAR`.
+
 ## Cell geometry
 
 Geometric layer (`definitions/jacobian.md`,
@@ -145,6 +162,11 @@ cell valid: a twisted cell can fold inside while every corner is positive
   valid, invalid, or singular (a corner value exactly zero, the others
   positive) exactly.
 - The certified lower bound of det J is kept for the quality metrics.
+
+![a 2-D block of 20 by 12 wavy cells, coloured by the minimum of det J over its mean from cream (1) to sepia: one vertex pushed across the next vertex line folds the two cells to its right, in ember; one edge collapsed onto its neighbour leaves two cells with a zero corner, singular, in teal](../../examples/images/ref-curvilinear-validity.svg){.fossil-figure}
+
+Of the 240 cells, 236 are valid (min J / mean J from 0.5526 to 1), 2 invalid where the pushed vertex folds them, and
+2 singular at the collapsed edge: exact zeros, decided by `orient2d` (`fig_ref_curvilinear_validity.f90`).
 
 ## Point location
 
@@ -220,6 +242,13 @@ a block built from the cell centres.
   q ≥ 2s + 1 when the overlap shrinks with h, q ≥ s + 1 when the overlap is a
   fixed number of cells. FOSSIL documents the rule; the caller chooses q.
 
+![the wake of the C-grid of the topology figure, zoomed: a point (gold) just above the wake cut (gold line) in cell (55, 1); its 4 by 4 stencil of vertices in teal, and in ember the stencil's first row, beyond face 3, mapped through the wake-cut record onto the lower wake, row j = 2](../../examples/images/ref-curvilinear-stencil.svg){.fossil-figure}
+
+The point lies in cell (55, 1), on the upper side of the wake cut. Its stencil of width 4 needs a row below j = 1:
+the record maps it to the vertices (8, 2), (7, 2), (6, 2), (5, 2) of the lower wake, the row a solver's ghost
+layer would hold. Interpolating exp(x) cos(3y) there, width 2 errs by 1.29e-1 and width 4 by 5.23e-3
+(`fig_ref_curvilinear_stencil.f90`).
+
 ## Quality metrics
 
 The wiki defines none, so FOSSIL defines them *(gk)*, per cell:
@@ -231,6 +260,31 @@ The wiki defines none, so FOSSIL defines them *(gk)*, per cell:
 | aspect ratio | the longest over the shortest of the mean edge lengths in the three index directions |
 | warp | max over faces of the angle between the normals of the two triangles each diagonal splits the face into |
 | min J | the certified lower bound of det J over the cell, over the mean det J |
+
+## Example
+
+A 3-D block end to end: a wavy annulus with a seam and periodic in z. The cookbook recipe
+[Locate a point in a curvilinear block](/manual/cookbook#locate-a-point-in-a-curvilinear-block) locates one point in
+a 2-D O-grid.
+
+<<< @/examples/snippets/ref_curvilinear_blocks.f90
+
+<<< @/examples/output/ref_curvilinear_blocks.ansi{ansi}
+
+- **Topology.** The annulus runs clockwise in i, so the block is right-handed (positive volumes). `detect_topology`
+  finds the seam (faces 1 and 2, transform (1, 2, 3)) and, with the translation (0, 0, 1), the periodic pair of faces
+  5 and 6: the end faces are flat and dyadic (z = 0 and 1), so z + 1 and z − 1 land on the partner exactly.
+- **Geometry.** The cell volumes sum to 9.364335457 = 48 sin(π/16), the volume of the prism over the 32-gon annulus
+  that bounds the block: the inner vertices moved by the wave change the cells, not the total. The six outward face
+  vectors of every cell sum to zero within 1.27e-17.
+- **Validity.** The wave keeps every cell valid: 2048 of 2048 certified.
+- **Location.** 400 points, all `LOC_INSIDE`. The walk (`walk=.true.`, each point starting from the previous one's
+  cell) returns the same cells, ξ and statuses bit for bit, after 7273 jumps, with 1 point handed to the robust path.
+- **Stencils.** A node beyond a periodic face is mapped to the vertex one period away, so the field read there must
+  be periodic too (here cos(2πz)), or the caller adds its jump. Width 2 errs by 7.91e-2, width 4 by 1.31e-2 at most over
+  the 400 points (8 cells per period in z).
+- **Quality.** The wave stays mild: skewness at most 0.097, warp 3.71 degrees, certified min J at least 0.915 of the
+  mean.
 
 ## API
 

@@ -1,0 +1,4 @@
+$ fig_ref_cut_solver_quadrature
+pieces 20, cut 14, volume points 544
+negative volume weights 98, wall points 72
+largest |sum of the weights - piece area|  3.82E-17
