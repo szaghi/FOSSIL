@@ -1,0 +1,7 @@
+$ anim_ref_decimate_bracket
+the bracket, 128-sided prisms: 1868 facets, 3 patches
+target_facets=1000: status 0, 1000 facets, volume change -6.04E-06; watertight, manifold, shells T T 1
+target_facets=600: status 0, 600 facets, volume change  2.16E-05; watertight, manifold, shells T T 1
+target_facets=300: status 0, 300 facets, volume change  2.37E-04; watertight, manifold, shells T T 1
+max_error=1e-2: status 2, 294 facets, volume change  1.90E-04; watertight, manifold, shells T T 1
+rim_collapses=.false., 600: status 2, 1580 facets, volume change -4.18E-01; watertight, manifold, shells T T 1

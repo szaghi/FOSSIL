@@ -2054,7 +2054,8 @@ call surface%decimate(target_facets=n0/4_I4P, status=status)
 **Purpose.** Reduce facet count to ≤ `target_facets` via QEM
 (Garland & Heckbert 1997) edge-collapse decimation. Quadric error
 metric per vertex; min-heap of edge collapse costs; three safety
-checks (normal-flip, duplicate-vertex, non-manifold-edge).
+checks (link condition, normal-flip, duplicate-vertex); facets keep
+their patch, rims coarsen as curves.
 Conceptual overview on the [§1.3 feature page](/guide/advanced/decimate).
 
 **Arguments.**
@@ -2062,7 +2063,9 @@ Conceptual overview on the [§1.3 feature page](/guide/advanced/decimate).
 | Argument        | Intent       | Type           | Notes                                                                                            |
 | --------------- | ------------ | -------------- | ------------------------------------------------------------------------------------------------ |
 | `target_facets` | `in`         | `integer(I4P)` | (required) Upper bound on the output facet count.                                                |
-| `status`        | `out`, opt.  | `integer(I4P)` | `DEC_STATUS_OK` (reached target), `_NO_PROGRESS` (couldn't reach), or `_BAD_INPUT`.              |
+| `max_error`     | `in`, opt.   | `real(R8P)`    | Cost ceiling, a distance: stop with `_NO_PROGRESS` when the cheapest collapse moves its vertex farther than this from an input plane it carries. Default: none. |
+| `rim_collapses` | `in`, opt.   | `logical`      | Default `.true.`: patch rims coarsen along themselves (corners kept); `.false.` locks them.      |
+| `status`        | `out`, opt.  | `integer(I4P)` | `DEC_STATUS_OK` (reached target), `_NO_PROGRESS` (couldn't reach, or `max_error` reached), or `_BAD_INPUT`. |
 
 Mutates `self` in place. After return, the AABB tree, vertex pool,
 connectivity, and pseudo-normals are all rebuilt — no further user

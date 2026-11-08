@@ -68,21 +68,25 @@ the cut) and 2150 `sphere`, the dimple:
 
 ## Through remeshing
 
-Patch boundaries are kept where they are, like the sharp edges of [feature edges](/guide/advanced/feature-edges), and
-every facet keeps a patch:
+Patch boundaries stay on the input's boundaries, like the sharp edges of [feature edges](/guide/advanced/feature-edges),
+and every facet keeps a patch:
 
 - `isotropic_remesh`: the vertices of the edges between two patches are locked (whatever `preserve_features` says),
   so those edges are never flipped or collapsed; a split facet's halves keep its patch, and a midpoint on a boundary
   edge becomes a boundary vertex.
-- `decimate`: two boundary vertices never merge, and an interior vertex merges onto a boundary one at its place; the
-  boundary vertices are the input ones exactly.
+- `decimate`: an interior vertex merges onto a boundary one at its place; two boundary vertices merge only along
+  their own boundary edge, onto one of its two endpoints, so a boundary coarsens as a curve whose vertices are a subset
+  of the input's, bit for bit (issue #81). A corner, where three or more patches meet, never moves, and no patch is
+  emptied. `decimate(rim_collapses=.false.)` locks the boundaries instead: two boundary vertices never merge, the
+  boundary vertices are the input ones exactly. See [decimation](/guide/advanced/decimate#patches).
 - `smooth`: the boundary vertices do not move.
 - `alpha_wrap`: each facet of the wrap takes the patch of the input facet closest to its centroid.
 
 A marching-cubes sphere (2312 facets) in two patches, north and south, split along a zigzag of facet edges near the
-equator; remeshed (`L = 0.08`, 4832 facets) and decimated (384 facets), the zigzag stays where it is:
+equator; remeshed (`L = 0.08`, 4832 facets) and decimated (384 facets), the zigzag stays on the input's: the remesh
+keeps all its vertices, the decimation 37 of its 68, joined by fewer, longer edges:
 
-![three spheres in a row, the northern patch in ember and the southern in teal: the input, its isotropic remesh with many more facets and its decimation with few, each with the same zigzag boundary between the two colours](../../examples/images/ref-patches-remesh.svg){.fossil-figure}
+![three spheres in a row, the northern patch in ember and the southern in teal: the input, its isotropic remesh with many more facets and its decimation with few, each with the zigzag boundary between the two colours, coarser after the decimation](../../examples/images/ref-patches-remesh.svg){.fossil-figure}
 
 ## In the queries
 

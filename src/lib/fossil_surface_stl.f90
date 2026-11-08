@@ -4119,7 +4119,7 @@ contains
    call surface_out%adopt_facets(facets=facets)
    endsubroutine resample_via_distance_field
 
-   subroutine decimate(self, target_facets, status)
+   subroutine decimate(self, target_facets, max_error, rim_collapses, status)
    !< Reduce `self`'s triangle count to ≤ `target_facets` via QEM edge
    !< collapse (issue #18 §1.3, Garland & Heckbert 1997).
    !<
@@ -4134,11 +4134,19 @@ contains
    !< at the smallest count it could safely reach, a valid surface.
    !< `target_facets <= 0` returns DEC_STATUS_BAD_INPUT, `self` untouched (issue #81).
    !<
+   !< Patches (issues #66, #81): every facet keeps its patch; a patch rim coarsens as a curve (two rim vertices merge
+   !< along their rim edge, onto one of its endpoints; corners where three or more patches meet stay), unless
+   !< `rim_collapses=.false.` locks the rims. `max_error` (a distance): the loop stops with DEC_STATUS_NO_PROGRESS when
+   !< the cheapest collapse moves its vertex farther than max_error from one of the input planes it carries (the square
+   !< root of the quadric error).
+   !<
    !< Pre-condition: `self` must have been analyzed (i.e. `vertex_id` and
    !< `fcon_edge` populated). All public construction paths
    !< (`load_from_file`, `adopt_facets`, `analyze`) ensure this.
    class(surface_stl_object),     intent(inout)        :: self
    integer(I4P),                  intent(in)           :: target_facets
+   real(R8P),                     intent(in),  optional :: max_error     !< Cost ceiling, a distance.
+   logical,                       intent(in),  optional :: rim_collapses !< Patch rims coarsen (default .true.).
    integer(I4P),                  intent(out), optional :: status
    type(facet_object), allocatable                     :: working(:)
    integer(I4P)                                        :: dec_status
@@ -4154,7 +4162,8 @@ contains
    allocate(working(self%facets_number))
    working(1:self%facets_number) = self%facet(1:self%facets_number)
 
-   call compute_decimate(facet=working, target_facets=target_facets, status=dec_status)
+   call compute_decimate(facet=working, target_facets=target_facets, max_error=max_error, rim_collapses=rim_collapses, &
+                         status=dec_status)
    if (present(status)) status = dec_status
    if (dec_status == DEC_STATUS_BAD_INPUT) return
    ! Adopt regardless of NO_PROGRESS — the output is still a valid mesh,

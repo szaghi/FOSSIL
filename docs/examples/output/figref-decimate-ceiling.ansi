@@ -1,0 +1,2 @@
+$ fig_ref_decimate_ceiling
+input 1868 facets; max_error 3e-3: 466, H <= 1.8E-03; 1e-2: 294, H <= 5.9E-03

@@ -983,6 +983,18 @@ collapse may change the topology: the dragon is not a manifold (61 non-manifold 
 fourth time stops at 572 facets with `DEC_STATUS_NO_PROGRESS`, a valid surface larger than asked. Check the status.
 See [decimation](/guide/advanced/decimate).
 
+### Decimate to a tolerance
+
+<<< @/examples/snippets/ck_decimate_tolerance.f90
+
+<<< @/examples/output/ck_decimate_tolerance.ansi{ansi}
+
+With `max_error`, the loop stops (`DEC_STATUS_NO_PROGRESS`) at the first collapse that would move its vertex farther
+than `max_error` from an input plane it carries; a target of 1 asks for as few facets as that allows. The open edges of
+the wing (its two ends) are held by constraint planes, so they do not slide along the span. `max_error` is a quadric
+bound, not a certificate: check the result with `hausdorff` when the bound matters. See
+[decimation](/guide/advanced/decimate#a-cost-ceiling).
+
 ### Unite two bodies
 
 <<< @/examples/snippets/ck_union.f90

@@ -4,8 +4,9 @@
 !< pipeline": a box remeshed to edge 0.15 with an inlet (z = 0), an outlet (z = 1) and walls, two inlet facets removed,
 !< then fill_holes: the hole inside the inlet takes the inlet's patch, the one on the inlet-wall edge the patch
 !< "filled". "Through booleans": a block with a lid minus a sphere: the dimple carries the sphere's patch. "Through
-!< remeshing": a sphere in a north and a south patch, remeshed and decimated: the zigzag patch boundary stays where it
-!< is. "2-D curves": the union of two split boxes (the page's example) cut at z = 0.25 and 0.75, every segment of the
+!< remeshing": a sphere in a north and a south patch, remeshed and decimated: the zigzag patch boundary stays on the
+!< input's (decimate coarsens it along itself, issue #81). "2-D curves": the union of two split boxes (the page's
+!< example) cut at z = 0.25 and 0.75, every segment of the
 !< sections in the colour of its patch.
 program fig_ref_patches_sections
 use fossil,     only : surface_stl_object, facet_object, curve_object, slice_surface, extract_isosurface, MC_STATUS_OK, &
@@ -115,8 +116,9 @@ if (status /= REM_STATUS_OK) error stop 'remesh failed'
 w = s
 call w%decimate(target_facets=s%get_facets_number() / 6, status=status)
 if (status /= DEC_STATUS_OK) error stop 'decimate failed'
-write(caption, '(A,I0,A,I0,A,I0,A)') 'input ', s%get_facets_number(), ', isotropic_remesh ', t%get_facets_number(), &
-      ', decimate ', w%get_facets_number(), ' facets: the boundary is kept'
+write(caption, '(A,I0,A,I0,A,I0,A,I0,A,I0,A)') 'input ', s%get_facets_number(), ', isotropic_remesh ', &
+      t%get_facets_number(), ', decimate ', w%get_facets_number(), ' facets; boundary vertices ', rim_count(s), ', ', &
+      rim_count(w), ' after decimate'
 print '(A)', trim(caption)
 right = vector_R8P(2.4_R8P * 0.866_R8P, 2.4_R8P * 0.5_R8P, 0._R8P)
 call fig_open(u, 'ref-patches-remesh', trim(caption), -60._R8P, 15._R8P, 760_I4P, 300_I4P)
@@ -238,6 +240,35 @@ contains
                         g%vertex(3) + delta)
    enddo
    endsubroutine draw
+
+   function rim_count(body) result(n)
+   !< The number of vertices shared by facets of two patches (compared by coordinates).
+   type(surface_stl_object), intent(in) :: body !< Surface.
+   integer(I4P)                         :: n
+   real(R8P),    allocatable            :: p(:, :)
+   integer(I4P), allocatable            :: pat(:)
+   logical,      allocatable            :: rim(:)
+   type(facet_object), pointer          :: g
+   integer(I4P)                         :: m, e, i, np
+
+   allocate(p(3, 3 * body%get_facets_number()), pat(3 * body%get_facets_number()), rim(3 * body%get_facets_number()))
+   np = 0
+   do m = 1, body%get_facets_number()
+      g => body%facet_at(m)
+      do e = 1, 3
+         do i = 1, np
+            if (all(p(:, i) == [g%vertex(e)%x, g%vertex(e)%y, g%vertex(e)%z])) exit
+         enddo
+         if (i > np) then
+            np = np + 1 ; p(:, np) = [g%vertex(e)%x, g%vertex(e)%y, g%vertex(e)%z] ; pat(np) = g%patch
+            rim(np) = .false.
+         elseif (pat(i) /= g%patch) then
+            rim(i) = .true.
+         endif
+      enddo
+   enddo
+   n = count(rim(1:np))
+   endfunction rim_count
 
    subroutine labels(body, lift)
    !< The name and facet count of every non-empty patch, at the centroid of its facets lifted by `lift` along z.

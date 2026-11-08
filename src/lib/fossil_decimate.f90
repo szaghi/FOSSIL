@@ -13,9 +13,11 @@ module fossil_decimate
 !<      found by solving the 3×3 linear system `[Q_uv]_{1:3,1:3} v* = -[Q_uv]_{1:3,4}`,
 !<      with midpoint fallback when the matrix is singular.
 !<   3. Per-edge cost `cost = v*^T Q_uv v*`.
-!<   4. Min-heap keyed by cost. Pop cheapest, run safety checks (link
+!<   4. Min-heap keyed by cost. Pop cheapest, apply the patch rules (the target of an edge touching a patch rim is
+!<      constrained, its cost re-evaluated lazily: the free optimum is a lower bound), run safety checks (link
 !<      condition, normal-flip), collapse if accepted. Update neighbor quadrics and re-cost.
-!<   5. Stop when facet count reaches `target_facets` or heap empty.
+!<   5. Stop when facet count reaches `target_facets`, the heap is empty, or (optional `max_error`) the cheapest
+!<      collapse costs more than max_error**2.
 !<
 !< Safety checks implemented:
 !<   - **Link condition** (Dey, Edelsbrunner, Guha, Nekhayev 1999; issue #81):
@@ -37,10 +39,11 @@ module fossil_decimate
 !<     get two equal vertices.
 !<
 !< Not implemented (deferred):
-!<   - Boundary-preservation weights — the original Garland-Heckbert paper
-!<     adds a heavy penalty to collapses that move a boundary vertex.
-!<     FOSSIL inputs are typically closed solids (no boundary), so this
-!<     penalty has been omitted.
+!<   - Boundary-preservation weights on mesh boundaries (open surfaces) by
+!<     default — the original Garland-Heckbert paper adds constraint planes
+!<     along them. FOSSIL inputs are typically closed solids (no boundary); the
+!<     planes are added along patch rims, and along open edges only with
+!<     `max_error` (issue #81).
 !<   - Texture / attribute preservation — out of scope for STL.
 !<
 !< Pre-conditions:
@@ -60,7 +63,7 @@ public :: DEC_STATUS_OK, DEC_STATUS_BAD_INPUT, DEC_STATUS_NO_PROGRESS
 
 integer(I4P), parameter :: DEC_STATUS_OK          = 0_I4P
 integer(I4P), parameter :: DEC_STATUS_BAD_INPUT   = 1_I4P  !< Empty facet array, vertex_ids unset or target <= 0.
-integer(I4P), parameter :: DEC_STATUS_NO_PROGRESS = 2_I4P  !< Heap exhausted before reaching target (target unreachable due to safety rejections).
+integer(I4P), parameter :: DEC_STATUS_NO_PROGRESS = 2_I4P  !< Target not reached: heap exhausted, or max_error.
 
 ! Quadric is a 4×4 symmetric matrix; store as 10-entry upper-triangle vector.
 ! Index convention: Q(i,j) with i<=j packs into the linear array as
@@ -73,10 +76,32 @@ integer(I4P), parameter :: QSIZE = 10_I4P
 ! Heap sentinel for "this edge is not in the heap".
 integer(I4P), parameter :: NOT_IN_HEAP = 0_I4P
 
+! Collapse target rules of an edge (patches, issues #66 and #81).
+integer(I4P), parameter :: MODE_FREE   = 0_I4P !< Both interior: the quadric optimum.
+integer(I4P), parameter :: MODE_AT_A   = 1_I4P !< va on a rim, vb interior: at va.
+integer(I4P), parameter :: MODE_AT_B   = 2_I4P !< vb on a rim, va interior: at vb.
+integer(I4P), parameter :: MODE_RIM    = 3_I4P !< A rim edge, no corner: at the cheaper endpoint.
+integer(I4P), parameter :: MODE_LOCKED = 4_I4P !< Two rim vertices otherwise: never.
+
 contains
 
-   subroutine decimate(facet, target_facets, status)
+   subroutine decimate(facet, target_facets, max_error, rim_collapses, status)
    !< Reduce `facet` to at most `target_facets` triangles via QEM edge collapse.
+   !<
+   !< Patches (issues #66, #81): facets keep their patch. A patch-boundary (rim) vertex stays where it is when an
+   !< interior vertex merges onto it. Two rim vertices merge only along their own rim edge (the edge between two facets
+   !< of different patches), onto the cheaper of its two endpoints, or onto the corner if one is a corner (a rim vertex
+   !< with other than two rim edges: three or more patches meet there; two corners never merge), and never so as to
+   !< empty a patch: a rim coarsens as a curve whose vertices are a subset of the input rim's, its corners kept.
+   !< `rim_collapses=.false.` locks the rims (two rim vertices never merge). Each rim edge adds to its endpoints'
+   !< quadrics the plane through it perpendicular to the mean normal of its two facets (Garland & Heckbert's boundary
+   !< constraint), so a rim within a plane is not free to straighten.
+   !<
+   !< `max_error` (a distance): the cost of a collapse is a sum of squared distances to planes of the input (unit
+   !< normals), so sqrt(cost) bounds the distance of the new vertex from each of those planes; when the cheapest
+   !< admissible collapse has sqrt(cost) > max_error, the loop stops with DEC_STATUS_NO_PROGRESS. With max_error the open
+   !< edges (one facet) get constraint planes too (through the edge, perpendicular to its facet), else a vertex of an
+   !< open edge slides along its plane for free. It bounds planes, not the surface: no certificate of the deviation.
    !<
    !< On success, `facet` is reallocated to the surviving (active) facets only,
    !< with their `compute_metrix` already invoked. On failure (`status /= 0`)
@@ -89,6 +114,8 @@ contains
    !< facet array from the surviving alive-facets and `move_alloc` it back.
    type(facet_object), allocatable, intent(inout)        :: facet(:)        !< Input facets; replaced by decimated set on success.
    integer(I4P),                    intent(in)           :: target_facets   !< Stop when active facet count reaches this.
+   real(R8P),                       intent(in),  optional :: max_error      !< Stop when the cheapest collapse exceeds it.
+   logical,                         intent(in),  optional :: rim_collapses  !< Rim vertices merge along rims (default).
    integer(I4P),                    intent(out), optional :: status         !< DEC_STATUS_*.
    integer(I4P)                                          :: nf_in           !< Input facet count.
    integer(I4P)                                          :: nv              !< Vertex count (max pool id).
@@ -121,7 +148,11 @@ contains
    integer(I4P)                                          :: e_top, va, vb
    logical,       allocatable                            :: v_bnd(:)        !< On a patch boundary (issue #66).
    real(R8P)                                             :: tgt(3)          !< Collapse target.
-   integer(I4P)                                          :: f, k
+   real(R8P)                                             :: cost            !< Collapse cost of the popped edge.
+   integer(I4P),  allocatable                            :: f_p(:)          !< Patch of each facet (nf_in).
+   integer(I4P),  allocatable                            :: p_live(:)       !< Live facets per patch.
+   integer(I4P)                                          :: f, k, mode
+   logical                                               :: rims            !< Rim collapses on.
 
    if (present(status)) status = DEC_STATUS_OK
    if (.not. allocated(facet)) then
@@ -148,8 +179,17 @@ contains
 
    allocate(facet_alive(nf_in), source=.true.)
    nf_alive = nf_in
-   ! patches (issue #66): a vertex whose facets are in two patches is on a patch boundary; boundaries stay where they
-   ! are: two boundary vertices never merge, and an interior vertex merges onto a boundary one at its place
+   rims = .true. ; if (present(rim_collapses)) rims = rim_collapses
+   allocate(f_p(nf_in))
+   do f = 1, nf_in
+      f_p(f) = max(1_I4P, facet(f)%patch)
+   enddo
+   allocate(p_live(maxval(f_p)), source=0_I4P)
+   do f = 1, nf_in
+      p_live(f_p(f)) = p_live(f_p(f)) + 1
+   enddo
+   ! patches (issue #66): a vertex whose facets are in two patches is on a patch boundary (a rim); an interior vertex
+   ! merges onto a rim one at its place, two rim vertices only along their rim edge (issue #81, see edge_mode)
    allocate(v_bnd(nv), source=.false.)
    block
       integer(I4P), allocatable :: vp(:)
@@ -172,6 +212,10 @@ contains
    ! --- Stage 3: build per-vertex quadrics from incident face planes. ---
    allocate(Q(QSIZE, nv), source=0._R8P)
    call build_quadrics(facet=facet, f_v=f_v, vcoord=vcoord, Q=Q)
+   ! constraint planes along the patch rims, and along the open edges with a cost ceiling (issue #81)
+   if (any(v_bnd) .or. present(max_error)) &
+      call add_constraint_planes(facet=facet, f_v=f_v, f_p=f_p, vcoord=vcoord, v2f_head=v2f_head, v2f_count=v2f_count, &
+                                 v2f_val=v2f_val, rims=any(v_bnd), open=present(max_error), Q=Q)
 
    ! --- Stage 4: build edge list (canonical, unique). ---
    call build_edges(facet=facet, f_v=f_v, e_v=e_v, ne=ne)
@@ -205,13 +249,25 @@ contains
          e_alive(e_top) = .false.
          cycle
       endif
-      tgt = e_target(:, e_top)
-      if (v_bnd(va) .and. v_bnd(vb)) then
+      ! the stored cost is the free optimum (a lower bound); the patch rules constrain the target: re-cost lazily
+      mode = edge_mode(va=va, vb=vb, v_bnd=v_bnd, rims=rims, f_v=f_v, f_p=f_p, facet_alive=facet_alive, &
+                       v2f_head=v2f_head, v2f_count=v2f_count, v2f_val=v2f_val)
+      if (mode == MODE_LOCKED) then
          e_alive(e_top) = .false.
          cycle
       endif
-      if (v_bnd(va)) tgt = vcoord(:, va)
-      if (v_bnd(vb)) tgt = vcoord(:, vb)
+      call cost_one_edge(va=va, vb=vb, vcoord=vcoord, Q=Q, target=tgt, cost=cost, mode=mode)
+      if (cost > e_cost(e_top) .or. cost < e_cost(e_top)) then ! changed (never true for a NaN)
+         e_cost(e_top) = cost ; e_target(:, e_top) = tgt
+         call heap_insert(heap=heap, e_heappos=e_heappos, e_cost=e_cost, heap_size=heap_size, e=e_top)
+         cycle
+      endif
+      if (present(max_error)) then
+         if (cost > max_error**2) then
+            if (present(status)) status = DEC_STATUS_NO_PROGRESS
+            exit
+         endif
+      endif
       ! Try the collapse; if rejected by safety checks, mark this edge dead
       ! and continue (its cost would not change, so no point re-queuing).
       if (.not. try_collapse(va=va, vb=vb, target=tgt, &
@@ -221,7 +277,7 @@ contains
                               v2e_head=v2e_head, v2e_count=v2e_count, v2e_cap=v2e_cap, v2e_val=v2e_val, &
                               e_v=e_v, e_alive=e_alive, &
                               Q=Q, &
-                              nf_alive=nf_alive, &
+                              nf_alive=nf_alive, f_p=f_p, p_live=p_live, &
                               e_target=e_target, e_cost=e_cost, &
                               heap=heap, e_heappos=e_heappos, heap_size=heap_size)) then
          e_alive(e_top) = .false.
@@ -526,7 +582,7 @@ contains
    enddo
    endsubroutine cost_all_edges
 
-   subroutine cost_one_edge(va, vb, vcoord, Q, target, cost)
+   subroutine cost_one_edge(va, vb, vcoord, Q, target, cost, mode)
    !< Compute the optimal collapse target and cost for edge (va, vb).
    !<
    !< Algorithm (Garland-Heckbert §4):
@@ -539,10 +595,26 @@ contains
    real(R8P),    intent(in)  :: Q(:, :)
    real(R8P),    intent(out) :: target(3)
    real(R8P),    intent(out) :: cost
+   integer(I4P), intent(in), optional :: mode !< MODE_*, default MODE_FREE.
    real(R8P)                 :: Quv(QSIZE)
-   real(R8P)                 :: A(3, 3), b(3), det
+   real(R8P)                 :: A(3, 3), b(3), det, cost_b
 
    Quv = Q(:, va) + Q(:, vb)
+   if (present(mode)) then
+      select case (mode)
+      case (MODE_AT_A)
+         target = vcoord(:, va) ; cost = quadric_eval(Q=Quv, x=target) ; return
+      case (MODE_AT_B)
+         target = vcoord(:, vb) ; cost = quadric_eval(Q=Quv, x=target) ; return
+      case (MODE_RIM)
+         target = vcoord(:, va) ; cost = quadric_eval(Q=Quv, x=target)
+         cost_b = quadric_eval(Q=Quv, x=vcoord(:, vb))
+         if (cost_b < cost) then
+            target = vcoord(:, vb) ; cost = cost_b
+         endif
+         return
+      endselect
+   endif
    ! Unpack the upper-3x3 block.
    A(1, 1) = Quv(1)  ; A(1, 2) = Quv(2)  ; A(1, 3) = Quv(3)
    A(2, 1) = Quv(2)  ; A(2, 2) = Quv(5)  ; A(2, 3) = Quv(6)
@@ -747,7 +819,7 @@ contains
                           v2e_head, v2e_count, v2e_cap, v2e_val, &
                           e_v, e_alive, &
                           Q, &
-                          nf_alive, &
+                          nf_alive, f_p, p_live, &
                           e_target, e_cost, &
                           heap, e_heappos, heap_size) result(accepted)
    !< Attempt to collapse edge (va, vb) to position `target`. Returns .true.
@@ -769,6 +841,8 @@ contains
    logical,                   intent(inout) :: e_alive(:)
    real(R8P),                 intent(inout) :: Q(:, :)
    integer(I4P),              intent(inout) :: nf_alive
+   integer(I4P),              intent(in)    :: f_p(:)    !< Patch of each facet.
+   integer(I4P),              intent(inout) :: p_live(:) !< Live facets per patch.
    real(R8P),                 intent(inout) :: e_target(:, :)
    real(R8P),                 intent(inout) :: e_cost(:)
    integer(I4P),              intent(inout) :: heap(:), e_heappos(:)
@@ -796,6 +870,15 @@ contains
    ! --- Safety check 0: the link condition (issue #81): the collapse keeps the surface a 2-manifold (with boundary). ---
    if (.not. link_condition_holds(va=va, vb=vb, v2f_head=v2f_head, v2f_count=v2f_count, v2f_val=v2f_val, &
                                   f_v=f_v, facet_alive=facet_alive, shared_facets=shared_facets, n_shared=n_shared)) return
+   ! --- a patch keeps at least one facet (issue #81: a rim collapse deletes facets of two patches). ---
+   if (n_shared == 2_I4P) then
+      if (f_p(shared_facets(1)) == f_p(shared_facets(2))) then
+         if (p_live(f_p(shared_facets(1))) <= 2_I4P) return
+      endif
+   endif
+   do i = 1, n_shared
+      if (p_live(f_p(shared_facets(i))) <= 1_I4P) return
+   enddo
 
    ! --- Safety check 1: would the collapse flip any non-deleted facet's normal? ---
    old_xyz_a(1) = vcoord(1, va) ; old_xyz_a(2) = vcoord(2, va) ; old_xyz_a(3) = vcoord(3, va)
@@ -850,6 +933,7 @@ contains
    do i = 1, n_shared
       facet_alive(shared_facets(i)) = .false.
       nf_alive = nf_alive - 1
+      p_live(f_p(shared_facets(i))) = p_live(f_p(shared_facets(i))) - 1
    enddo
    ! 5. Mark vb as not-alive.
    vertex_alive(vb) = .false.
@@ -1216,6 +1300,141 @@ contains
       endif
    enddo
    endsubroutine recost_va_edges
+
+   ! ===========================================================================
+   ! Patch rims (issues #66, #81)
+   ! ===========================================================================
+
+   function edge_mode(va, vb, v_bnd, rims, f_v, f_p, facet_alive, v2f_head, v2f_count, v2f_val) result(mode)
+   !< The target rule of edge (va, vb): free if both are interior, at the rim vertex if one is on a rim; two rim
+   !< vertices merge only if rims are on and (va, vb) is a rim edge (its facets in two patches): at the cheaper endpoint
+   !< (MODE_RIM) if neither is a corner (a rim vertex with other than two rim edges), at the corner if one is (corners
+   !< stay); else MODE_LOCKED.
+   integer(I4P),              intent(in) :: va, vb
+   logical,                   intent(in) :: v_bnd(:)
+   logical,                   intent(in) :: rims
+   integer(I4P),              intent(in) :: f_v(:, :), f_p(:)
+   logical,                   intent(in) :: facet_alive(:)
+   integer(I4P), allocatable, intent(in) :: v2f_head(:), v2f_val(:)
+   integer(I4P),              intent(in) :: v2f_count(:)
+   integer(I4P)                          :: mode
+   integer(I4P)                          :: da, db !< rim_degree of va and vb.
+
+   if (.not. v_bnd(va)) then
+      mode = MODE_FREE ; if (v_bnd(vb)) mode = MODE_AT_B
+      return
+   endif
+   if (.not. v_bnd(vb)) then
+      mode = MODE_AT_A ; return
+   endif
+   mode = MODE_LOCKED
+   if (.not. rims) return
+   da = rim_degree(v=va, w=vb, f_v=f_v, f_p=f_p, facet_alive=facet_alive, v2f_head=v2f_head, v2f_count=v2f_count, &
+                   v2f_val=v2f_val)
+   if (da >= 0_I4P) return ! not a rim edge
+   db = rim_degree(v=vb, w=va, f_v=f_v, f_p=f_p, facet_alive=facet_alive, v2f_head=v2f_head, v2f_count=v2f_count, &
+                   v2f_val=v2f_val)
+   if (da == -2_I4P .and. db == -2_I4P) then
+      mode = MODE_RIM
+   elseif (da == -2_I4P) then
+      mode = MODE_AT_B ! vb is a corner: it stays
+   elseif (db == -2_I4P) then
+      mode = MODE_AT_A
+   endif
+   endfunction edge_mode
+
+   function rim_degree(v, w, f_v, f_p, facet_alive, v2f_head, v2f_count, v2f_val) result(deg)
+   !< The number of rim edges at v (edges whose live facets are in two or more patches), negated if (v, w) is one of
+   !< them: -2 means v is on a rim, not a corner, and (v, w) is a rim edge.
+   integer(I4P),              intent(in) :: v, w
+   integer(I4P),              intent(in) :: f_v(:, :), f_p(:)
+   logical,                   intent(in) :: facet_alive(:)
+   integer(I4P), allocatable, intent(in) :: v2f_head(:), v2f_val(:)
+   integer(I4P),              intent(in) :: v2f_count(:)
+   integer(I4P)                          :: deg
+   integer(I4P), allocatable             :: nb(:), pat(:)
+   logical,      allocatable             :: rim(:)
+   integer(I4P)                          :: i, f, k, u, j, n
+
+   allocate(nb(2 * v2f_count(v)), pat(2 * v2f_count(v)), rim(2 * v2f_count(v)))
+   n = 0_I4P
+   do i = 1, v2f_count(v)
+      f = v2f_val(v2f_head(v) + i - 1)
+      if (.not. facet_alive(f)) cycle
+      if (all(f_v(:, f) /= v)) cycle
+      do k = 1, 3
+         u = f_v(k, f)
+         if (u == v) cycle
+         do j = 1, n
+            if (nb(j) == u) exit
+         enddo
+         if (j > n) then
+            n = n + 1 ; nb(n) = u ; pat(n) = f_p(f) ; rim(n) = .false.
+         elseif (pat(j) /= f_p(f)) then
+            rim(j) = .true.
+         endif
+      enddo
+   enddo
+   deg = count(rim(1:n))
+   do j = 1, n
+      if (nb(j) == w .and. rim(j)) deg = -deg
+   enddo
+   endfunction rim_degree
+
+   subroutine add_constraint_planes(facet, f_v, f_p, vcoord, v2f_head, v2f_count, v2f_val, rims, open, Q)
+   !< The boundary constraints of Garland & Heckbert 1997, weight 1 like the facet planes, added to the quadrics of the
+   !< edge's ends: for every rim edge (p, r) (two facets f, g of different patches; if `rims`) the plane through it with
+   !< normal (r - p) x (n_f + n_g); for every open edge (one facet f; if `open`) the plane with normal (r - p) x n_f.
+   type(facet_object),        intent(in)    :: facet(:)
+   integer(I4P),              intent(in)    :: f_v(:, :), f_p(:)
+   real(R8P),                 intent(in)    :: vcoord(:, :)
+   integer(I4P), allocatable, intent(in)    :: v2f_head(:), v2f_val(:)
+   integer(I4P),              intent(in)    :: v2f_count(:)
+   logical,                   intent(in)    :: rims, open
+   real(R8P),                 intent(inout) :: Q(:, :)
+   integer(I4P)                             :: f, g, k, i, p, r
+   real(R8P)                                :: nf(3)
+   logical                                  :: shared
+
+   do f = 1, size(f_v, dim=2)
+      nf = [facet(f)%normal%x, facet(f)%normal%y, facet(f)%normal%z]
+      do k = 1, 3
+         p = f_v(k, f) ; r = f_v(mod(k, 3) + 1, f)
+         shared = .false.
+         do i = 1, v2f_count(p)
+            g = v2f_val(v2f_head(p) + i - 1)
+            if (g == f .or. all(f_v(:, g) /= r)) cycle
+            shared = .true.
+            if (.not. rims .or. g < f .or. f_p(g) == f_p(f)) cycle ! a rim edge once, from its lower facet
+            call add_edge_plane(p=p, r=r, n=nf + [facet(g)%normal%x, facet(g)%normal%y, facet(g)%normal%z], &
+                                n_alt=nf, vcoord=vcoord, Q=Q)
+         enddo
+         if (open .and. .not. shared) call add_edge_plane(p=p, r=r, n=nf, n_alt=nf, vcoord=vcoord, Q=Q)
+      enddo
+   enddo
+   endsubroutine add_constraint_planes
+
+   subroutine add_edge_plane(p, r, n, n_alt, vcoord, Q)
+   !< Add the plane through the edge (p, r) with normal (r - p) x n (n_alt if n vanishes), unit, to Q(:, p), Q(:, r).
+   integer(I4P), intent(in)    :: p, r
+   real(R8P),    intent(in)    :: n(3), n_alt(3)
+   real(R8P),    intent(in)    :: vcoord(:, :)
+   real(R8P),    intent(inout) :: Q(:, :)
+   real(R8P)                   :: m(3), dpl, Kp(QSIZE)
+
+   if (norm2(n) > 1.e-12_R8P) then
+      m = cross(vcoord(:, r) - vcoord(:, p), n)
+   else
+      m = cross(vcoord(:, r) - vcoord(:, p), n_alt)
+   endif
+   if (norm2(m) <= 0._R8P) return
+   m = m / norm2(m)
+   dpl = -dot_product(m, vcoord(:, p))
+   Kp = [m(1) * m(1), m(1) * m(2), m(1) * m(3), m(1) * dpl, m(2) * m(2), m(2) * m(3), m(2) * dpl, &
+         m(3) * m(3), m(3) * dpl, dpl * dpl]
+   Q(:, p) = Q(:, p) + Kp
+   Q(:, r) = Q(:, r) + Kp
+   endsubroutine add_edge_plane
 
    subroutine materialize_output(facet, f_v, vcoord, facet_alive)
    !< Rebuild the public facet array from surviving (alive) facets, reading

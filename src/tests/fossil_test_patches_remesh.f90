@@ -5,7 +5,9 @@
 !< 1. isotropic_remesh (preserve_features off: the patch boundary is locked anyway): every input boundary vertex is still
 !<    a boundary vertex, every output boundary vertex lies on an input boundary edge (1e-12), every facet keeps a side
 !<    (centroid z of the same sign as its patch), the area per patch changes by < 2 %.
-!< 2. decimate to half: the boundary vertex set is the input one exactly; the same side and area checks (5 %).
+!< 2. decimate to half: every output boundary vertex is an input boundary vertex (bit for bit: the boundary coarsens
+!<    as a curve, issue #81), the same side and area checks (5 %); with rim_collapses=.false. the boundary vertex set is
+!<    the input one exactly.
 !< 3. smooth (Taubin): the boundary vertices do not move; side check.
 !< 4. alpha_wrap: each facet of the wrap takes the patch of the nearest input facet; facets with centroid z > 0.08 are
 !<    `top`, z < -0.08 `bottom`.
@@ -37,8 +39,13 @@ print '(A,L1,A,2F9.5,A,2F9.5)', '1. isotropic_remesh: ', ok1, '  areas ', a0, ' 
 r = s
 call r%decimate(target_facets=s%get_facets_number() / 2)
 a1 = patch_areas(r)
-ok2 = same_set(r, bv) .and. sides_ok(r, 0.08_R8P) .and. all(abs(a1 - a0) < 0.05_R8P * a0)
-print '(A,L1,A,2F9.5)', '2. decimate: ', ok2, '  areas ', a1
+ok2 = subset(r, bv) .and. sides_ok(r, 0.08_R8P) .and. all(abs(a1 - a0) < 0.05_R8P * a0)
+print '(A,L1,A,2F9.5,A,I0)', '2. decimate: ', ok2, '  areas ', a1, ', boundary vertices ', boundary_count(r)
+r = s
+call r%decimate(target_facets=s%get_facets_number() / 2, rim_collapses=.false.)
+a1 = patch_areas(r)
+ok2 = ok2 .and. same_set(r, bv) .and. sides_ok(r, 0.08_R8P) .and. all(abs(a1 - a0) < 0.05_R8P * a0)
+print '(A,L1,A,2F9.5)', '2. decimate, rims locked: ', ok2, '  areas ', a1
 
 r = s
 call r%smooth(iterations=10_I4P)
@@ -145,6 +152,31 @@ contains
    call boundary(x, w, e)
    ok = size(w, dim=2) == size(v, dim=2) .and. contains_all(x, v)
    endfunction same_set
+
+   function subset(x, v) result(ok)
+   !< Every boundary vertex of x is a vertex of v.
+   type(surface_stl_object), intent(in) :: x
+   real(R8P),                intent(in) :: v(:, :)
+   logical                              :: ok
+   real(R8P), allocatable               :: w(:, :), e(:, :, :)
+   integer(I4P)                         :: i, j
+
+   call boundary(x, w, e)
+   ok = size(w, dim=2) > 0
+   do i = 1, size(w, dim=2)
+      ok = ok .and. any([(all(v(:, j) == w(:, i)), j = 1, size(v, dim=2))])
+   enddo
+   endfunction subset
+
+   function boundary_count(x) result(n)
+   !< The number of boundary vertices of x.
+   type(surface_stl_object), intent(in) :: x
+   integer(I4P)                         :: n
+   real(R8P), allocatable               :: w(:, :), e(:, :, :)
+
+   call boundary(x, w, e)
+   n = size(w, dim=2)
+   endfunction boundary_count
 
    function on_boundary(x, e0) result(ok)
    !< Every boundary vertex of x lies on an edge of e0 (distance <= 1e-12).

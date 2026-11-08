@@ -1,0 +1,3 @@
+$ ck_decimate_tolerance
+decimated: 188 -> 101 facets
+max_error  1.42E-03, certified Hausdorff distance <=  1.03E-03
