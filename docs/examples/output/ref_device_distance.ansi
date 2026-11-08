@@ -1,0 +1,12 @@
+$ ref_device_distance
+cells 13824: inside 404, cut 2714, outside 10706
+device vs host, winding number: mismatches 0
+pseudo-normal vs winding number: 129 signs differ, 0 magnitudes differ
+fossil_surface_stl_object%distance_many_device: surface not on device -- call enter_device first.
+not entered:      status invalid T
+fossil_surface_stl_object%distance_many_device: refused -- sign_algorithm must be SIGN_PSEUDO_NORMAL or SIGN_FAST_WINDING_NUMBER on the device.
+solid angle:      status invalid T
+size mismatch:    status invalid T
+fossil_surface_stl_object%enter_device: refused -- device path requires AABB_TREE_SAH_BVH.
+fossil_surface_stl_object%distance_many_device: surface not on device -- call enter_device first.
+octree:           status invalid T

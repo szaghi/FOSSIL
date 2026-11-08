@@ -28,6 +28,8 @@ Three-stage pipeline (Shapira, Shamir & Cohen-Or 2008):
    ascending by mean so label 1 = thinnest features, label `k` =
    thickest.
 
+![the dragon with the default four labels: claws, fins, horns and the tail tip in teal (label 1, thinnest), the head edges, legs and back in pale teal (label 2), the body in pale ember (label 3), the belly in ember (label 4, thickest); 41 facets unassigned](../../examples/images/ref-sdf-segmentation-labels.svg){.fossil-figure}
+
 ## Pipeline detail
 
 For step 1: each facet emits `num_rays` rays (default 30) in a
@@ -48,6 +50,12 @@ empty-cluster collapse), log-sum-exp stable E step, 50-iteration cap
 with log-likelihood Δ < 1e-9 convergence. K-means++ init is
 **deterministic** (first center = median, subsequent = max-d²
 greedy) for reproducibility.
+
+![the dragon coloured by the smoothed shape diameter of each facet, from teal (0) to ember (4.92, the largest): thin on the claws, fins and horns, thickest across the belly](../../examples/images/ref-sdf-segmentation-sdf.svg){.fossil-figure}
+
+The smoothed shape diameter is the only input of the clustering: the labels above are this field cut into four
+intervals by the mixture (on the dragon, label 1 is 0.000 to 0.837, label 4 is 3.783 to 4.916; see the
+[example](#example)).
 
 ## API
 
@@ -73,35 +81,28 @@ should treat unassigned facets as their own implicit "unknown" group.
 
 ## Example
 
-```fortran
-program ex_segment_sdf
-use fossil
-use penf, only : I4P, R8P
-implicit none
+A plate 4 × 1 whose thickness steps from 0.1 to 0.5 at x = 2, built in code (watertight, outward), split into two
+labels; then the dragon with the defaults. For the per-facet thickness as a measurement rather than a feature, see
+[thickness and gaps](/guide/advanced/thickness).
 
-type(surface_stl_object)  :: bunny
-integer(I4P), allocatable :: labels(:)
-real(R8P),    allocatable :: sdf(:)
-integer(I4P)              :: status, k, lo, hi, n_unassigned
+<<< @/examples/snippets/ref_sdf_segmentation-plate.f90
 
-call bunny%load_from_file(file_name='src/tests/bunny.stl', guess_format=.true.)
-call bunny%segment_sdf(facet_labels=labels, sdf=sdf, num_clusters=4_I4P, status=status)
+<<< @/examples/snippets/ref_sdf_segmentation-dragon.f90
 
-lo = minval(labels)
-hi = maxval(labels)
-n_unassigned = count(labels == 0_I4P)
-print '(A,I0,A,I0,A,I0,A,I0,A,I0)', 'bunny labels: nf=', size(labels), &
-      '  range=[', lo, ',', hi, ']  unassigned=', n_unassigned
-do k = 1_I4P, 4_I4P
-   print '(A,I0,A,I0)', '  cluster ', k, ': nf = ', count(labels == k)
-enddo
-endprogram ex_segment_sdf
-```
+<<< @/examples/output/ref_sdf_segmentation.ansi{ansi}
 
-On the bunny fixture: 69 451 facets, labels in `[1, 4]`, zero
-unassigned (closed manifold, ray hit-rate ~100 %). The four cluster
-counts roughly correspond to "thinnest features" (ears, tail tips —
-label 1) through "thickest body region" (label 4).
+![the plate with the thickness step: the thin half in teal (label 1), the thick half, its ramp and the thin facets next to the ramp in ember (label 2), and a few facets of the thin end in ember too](../../examples/images/ref-sdf-segmentation-plate.svg){.fossil-figure}
+
+- `segment_sdf(facet_labels=, sdf=, num_clusters=2)` on the plate: label 1 holds 148 facets, all with a shape
+  diameter between 0.123 and 0.135, 1.23 to 1.35 times the thickness 0.1: the median of a 120° cone overestimates a
+  plate by about a third (see [the bias of the cone](/guide/advanced/thickness#bias-of-the-cone)).
+- Label 2 holds the 188 others, from 0.120 to 0.628. It takes the thick half and the thin facets near the ramp, whose
+  cone reaches the thick part: the label-1 centroids stop at x = 1.833.
+- Two facets of the thin end (shape diameter 0.120 and 0.121) are in label 2 although their value is the thin one.
+  They lie below the narrow component's range, where its density falls faster than the broad component's: the
+  argmax of the posterior is not monotone in the shape diameter. No graph cut repairs it (see below).
+- The dragon (6588 facets) is open: 41 facets get `SDF_LABEL_UNASSIGNED`, fewer than half of their rays hit
+  something. The four labels are disjoint intervals of the smoothed shape diameter.
 
 ## Known limitations
 

@@ -1,0 +1,14 @@
+$ ref_ib_queries
+facets 96, shells 2, bodies 2
+ghost 0.95 0.30 0.40  d -0.050  body 1  probe 1.300 0.300 0.400  visible F
+ghost 0.75 0.30 0.40  d -0.250  body 1  probe 1.300 0.300 0.400  visible F
+ghost 0.90 0.30 0.97  d -0.030  body 1  probe 0.900 0.300 1.300  visible T
+image 1: 1.050 0.300 0.400  visible T
+image 2: 1.250 0.300 0.400  visible F
+image 3: 0.900 0.300 1.030  visible T
+gap point x = 1.10  d  0.100  ambiguous T  second foot x = 1.00
+gap point x = 1.05  d  0.050  ambiguous F  second foot x = 1.00
+wall distance at 0.50 0.50 0.50   0.300  body 0
+wall distance at 1.30 0.50 0.50   0.100  body 2
+wall distance at 1.70 0.50 1.60   0.300  body 0
+markers on one cube, dx 0.1: 288, area  6.000000, spacings in [0.8, 1.2] dx: 0.812

@@ -1,0 +1,19 @@
+$ ref_amr_tagging
+level 0, side  1.50000: boxes    1, cut   1, near   0, inside   0, outside   0
+level 1, side  0.75000: boxes    4, cut   4, near   0, inside   0, outside   0
+level 2, side  0.37500: boxes   16, cut   8, near   0, inside   0, outside   8
+level 3, side  0.18750: boxes   32, cut  12, near   8, inside   0, outside  12
+level 4, side  0.09375: boxes   80, cut  24, near  24, inside   0, outside  32
+level 5, side  0.04688: boxes  192, cut  48, near  40, inside   0, outside 104
+level 6, side  0.02344: boxes  352, cut  96, near 126, inside  48, outside  82
+leaves 508, finest cut 96, uniform grid of the finest size 4096
+tag -4: cells 112
+tag -3: cells  74
+tag -2: cells  86
+tag -1: cells  98
+tag  0: cells 112
+tag  1: cells 120
+tag  2: cells 128
+tag  3: cells 136
+tag  4: cells 286
+cells holding a corner 4, within 2 cells of one 36

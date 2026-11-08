@@ -86,7 +86,8 @@ call field%initialize(x, y, z, ng, status)
    integer(I4P), intent(in),  optional :: ng               ! halo layers per side (default 0)
    integer(I4P), intent(out), optional :: status           ! STATUS_OK / STATUS_INVALID_INPUT
 
-call field%compute(surface, band, is_signed, sign_algorithm, use_device, tol, max_sweeps, sweeps, fallback_cells, status)
+call field%compute(surface, band, is_signed, sign_algorithm, use_device, tol, max_sweeps, sweeps, fallback_cells, &
+                   store_closest, status)
    type(surface_stl_object), intent(inout), target :: surface
    real(R8P),    intent(in),  optional :: band           ! default: 2 x the largest spacing near the surface
    logical,      intent(in),  optional :: is_signed      ! default .true.
@@ -96,6 +97,7 @@ call field%compute(surface, band, is_signed, sign_algorithm, use_device, tol, ma
    integer(I4P), intent(in),  optional :: max_sweeps     ! directional sweeps (default 400)
    integer(I4P), intent(out), optional :: sweeps         ! directional sweeps done
    integer(I4P), intent(out), optional :: fallback_cells ! cells signed by a point query
+   logical,      intent(in),  optional :: store_closest  ! keep closest, closest_id, closest_normal on the band
    integer(I4P), intent(out), optional :: status
 ```
 
@@ -162,51 +164,39 @@ at 64³ with extension cells, the field takes 1.33 s with `--device` against
 
 ## Example
 
-The unit cube on a stretched grid: a uniform core around the cube and 12
-points per side growing by 1.15, compared with the exact distance of the
-cube.
+The unit cube on a stretched grid, against the exact distance of a box. [Tutorial chapter
+6](/manual/tutorial/06-distance-field) builds the field of the dragon, and the cookbook computes
+[the field of a cube on a uniform grid](/manual/cookbook#compute-the-signed-distance-on-a-whole-grid); here the
+exact answer is known everywhere, so the band, the swept far field, the stored closest points and the eikonal
+diagnostic can each be checked.
 
-```fortran
-program ex_distance_field
-use fossil
-use penf, only : I4P, R8P
-implicit none
-type(surface_stl_object)    :: cube
-type(distance_field_object) :: field
-real(R8P), allocatable      :: x(:)
-real(R8P)                   :: h, q(3), exact, err
-integer(I4P)                :: i, j, k, m, sweeps, status
+<<< @/examples/snippets/ref_distance_field-grid.f90
 
-call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
+- Each axis is a uniform core of spacing 0.05 around the cube and 12 nodes per side growing by 1.15, so the far nodes
+  are 1.87 from the cube.
 
-! axis: 29 points with spacing 0.05 on [-0.2, 1.2], then 12 per side growing by 1.15
-x = [(-0.2_R8P + 0.05_R8P * real(i, R8P), i = 0, 28)]
-h = 0.05_R8P
-do m = 1, 12
-   h = 1.15_R8P * h
-   x = [x(1) - h, x, x(size(x)) + h]
-enddo
+<<< @/examples/snippets/ref_distance_field-compute.f90
 
-call field%initialize(x=x, y=x, z=x, status=status)
-call field%compute(surface=cube, sweeps=sweeps, status=status)
-if (status /= STATUS_OK) error stop 'distance field failed'
+- `store_closest=.true.` keeps `closest`, `closest_id` and `closest_normal` on the band cells (the vector level set).
+- `fallback_cells` counts the cells signed by their own point query; on a closed surface it is 0.
 
-err = 0._R8P
-do k = 1, size(x)
-   do j = 1, size(x)
-      do i = 1, size(x)
-         q = abs([x(i), x(j), x(k)] - 0.5_R8P) - 0.5_R8P
-         exact = sqrt(sum(max(q, 0._R8P)**2)) + min(maxval(q), 0._R8P)
-         err = max(err, abs(field%phi(i, j, k) - exact))
-      enddo
-   enddo
-enddo
-print '(A,I0,A,I0,A,F7.3,A)', 'grid ', size(x), '^3, band cells ', field%get_band_cells(), &
-      ', far field to ', x(size(x)), ''
-print '(A,I0,A,ES10.3,A,ES10.3)', 'sweeps ', sweeps, ', max |phi - exact| ', err, &
-      ', largest spacing ', maxval(x(2:) - x(:size(x) - 1))
-endprogram ex_distance_field
-```
+<<< @/examples/snippets/ref_distance_field-check.f90
+
+<<< @/examples/snippets/ref_distance_field-eikonal.f90
+
+- `gradient_diagnostic` returns q = |1 − |∇φ|| at every node (see
+  [IB queries](/guide/advanced/ib-queries#wall-distance-and-field-diagnostic)), −1 where a neighbour is unknown;
+  `flagged` counts the nodes with q above the threshold, 0.05 by default.
+
+<<< @/examples/output/ref_distance_field.ansi{ansi}
+
+- The band holds 11438 nodes within 0.1, twice the core spacing. Its values match the exact distance to 1.1e-16, and
+  the stored closest points to 5.6e-17: the band is exact.
+- Outside the band the sweeps (16, two cycles of 8 directions) give a far-field error of 0.178, below the largest
+  spacing, 0.268.
+- 6479 nodes have q > 0.05. 2395 of them are inside the cube, on its medial axis, where φ has a kink and q is large
+  by nature; 980 are band nodes, where that medial axis meets the cube's edges and corners. The rest are outside the
+  band, where the swept field is approximate (figures under [Accuracy](#accuracy)).
 
 ## Accuracy
 
@@ -226,6 +216,15 @@ box's corners and edges are such features, and most of its exterior lies in
 the fans they emit, so the mean error behaves the same way. On a 1.15-
 stretched grid reaching 2.5 body lengths out, the far-field max error stays
 below the largest spacing (0.23 against 0.35).
+
+![the grid plane z = 0.5 of the example, each node a cell coloured by the error of phi against the exact distance of the cube, from 0 (cream) to 0.102 (sepia): zero in the band, outlined in teal around the cube's section, growing with the stretched spacing towards the corners of the domain and darker along the fans that leave the cube's corners diagonally](../../examples/images/ref-distance-field-error.svg){.fossil-figure}
+
+![the same plane zoomed on the cube, coloured by the eikonal diagnostic q from 0 (cream) to 0.5 and above (sepia): q is large on the two diagonals of the cube's section, its medial axis, and at the four corners; faint fans leave the corners outside](../../examples/images/ref-distance-field-eikonal.svg){.fossil-figure}
+
+On the plane of the [example](#example) the error is 0 in the band and grows with the spacing, fastest along the
+diagonal fans of the corners. The eikonal diagnostic picks out the medial axis inside, where |∇φ| is not 1 by
+nature, and the same fans outside: mask the first with the band or the inside, and the second is where a wider band
+pays.
 
 ## Performance
 
@@ -283,8 +282,9 @@ How to read it:
 - **The device covers the distance queries only.** `use_device` moves the
   exact-distance batch of the band and the point queries of the sign stage
   to the GPU; the flood fill and the sweeps run on the host.
-- **No closest-facet field.** The band stores distances only, not the id of
-  the closest facet.
+- **Closest data on the band only.** `store_closest=.true.` keeps the
+  closest point, facet and normal on band cells; swept cells hold
+  `FAR_VALUE`, 0 and 0.
 - **`block_object%extrapolate_distances` is deprecated.** It copies boundary
   values outward, which are not distances.
 

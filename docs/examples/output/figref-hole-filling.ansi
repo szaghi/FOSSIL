@@ -1,0 +1,5 @@
+$ fig_ref_hole_filling
+sphere: 960 facets, watertight T, volume  4.12194
+refine F, fair F: holes 1, patch facets 30, max distance from the sphere  0.255, volume  3.88616, watertight T
+refine T, fair F: holes 1, patch facets 186, max distance from the sphere  0.292, volume  3.88616, watertight T
+refine T, fair T: holes 1, patch facets 186, max distance from the sphere  0.035, volume  4.14567, watertight T

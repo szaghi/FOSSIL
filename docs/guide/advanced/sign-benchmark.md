@@ -150,12 +150,25 @@ corner), the 0.01° cusp included, and every decade down to 10⁻¹² L.
   convex-vertex points, at every distance from the largest δ down. So the method as Mittal et al. describe it does
   misclassify. The angle-weighted pseudo-normal (Bærentzen–Aanæs) is what
   makes the distance-based sign sound.
+
+  ![the section of a 30-degree wedge at its apex edge, 72 points on a circle of radius 0.05 about the edge coloured by the side each sign gives (teal inside, ember outside): the naive closest-facet normal puts an arc of 12 points behind the apex inside, the pseudo-normal none](../../examples/images/ref-sign-benchmark-naive.svg){.fossil-figure}
+
+  Behind an acute edge the closest point is the edge itself, and the normal cone there spans 150°: the normal of
+  either facet makes an obtuse angle with part of it. The edge pseudo-normal is the bisector, at most 75° from any
+  direction of the cone.
 - **Holes and duplicated facets** break the ray test: rays through the
   hole, double hits. They also break the pseudo-normal, because the
   connectivity near the defect is wrong. They do not break the solid angle
   or the winding number: next to a missing planar facet the winding number
   tends to 0.5 from the correct side, so the 0.5 threshold still separates
   the two sides.
+
+  ![the section y = 0.5 of the wedge with the upper-face facet on its apex edge removed (the removed part in ember), a grid of 960 points coloured by the side each algorithm gives, one frame per algorithm: the pseudo-normal 111 wrong, the ray test 33, the solid angle and the fast winding number none](../../examples/images/ref-sign-benchmark-hole.svg){.fossil-figure}
+
+  On the holed wedge the pseudo-normal labels a block of outside points above and left of the apex as inside: their
+  closest point is on the apex edge, now a boundary edge with one facet, so its pseudo-normal is the lower face's
+  normal alone, the naive sign of the figure above. The ray test fails inside, next to the apex, where the rays
+  leave through the hole without a crossing.
 - **A flipped facet** breaks every sign test except the ray parity near the
   facet. That is the right failure: the orientation is the input. Running
   `sanitize` (BFS orientation repair) removes it.
@@ -164,6 +177,31 @@ corner), the 0.01° cusp included, and every decade down to 10⁻¹² L.
   most of the pseudo-normal, but hardly the fast winding number. A
   zero-length segment gives the pseudo-normal an undefined normal; `repair`
   merges such vertices.
+
+## Example
+
+The method on one body: a wedge of 30° built in code (8 facets), its upper-face facet on the apex edge removed (a
+hole) or flipped. The points are $x + \delta d$, as in the benchmark: $x$ on the upper face or on the apex edge,
+$d$ in the inside or the outside sector at least a sixth of its opening away from every face, $\delta$ from 10⁻¹ to
+10⁻¹². The program is `docs/examples/src/ref_sign_benchmark.f90`; the loop and the naive sign:
+
+<<< @/examples/snippets/ref_sign_benchmark-bench.f90
+
+<<< @/examples/snippets/ref_sign_benchmark-naive.f90
+
+<<< @/examples/output/ref_sign_benchmark.ansi{ansi}
+
+- **Clean:** the four algorithms make no error on the 204 points; the naive closest-facet normal makes 36, 3 at
+  every decade from 10⁻¹ to 10⁻¹². Its error does not shrink with δ: it is a wrong direction, not round-off.
+- **Hole:** the pseudo-normal (60) and the ray test (71) fail; the solid angle and the fast winding number do not,
+  as in the table above.
+- **Flipped facet:** every test fails except the ray parity, which does not read the orientation (117, 94 and 83
+  errors for the pseudo-normal, the solid angle and the winding number). `sanitize` repairs the orientation first.
+- `is_point_inside(point=, sign_algorithm=)` is the call; `compute_distance(..., facet_index=, closest_point=)`
+  gives what the naive sign needs. The naive counts on the dirty variants include its 36 clean errors.
+
+The recipe [Get a reliable sign on a mesh with holes](/manual/cookbook#get-a-reliable-sign-on-a-mesh-with-holes) is
+the practical side of this page: pseudo-normal against winding number on an open cube.
 
 ## Device
 

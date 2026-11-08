@@ -1,0 +1,7 @@
+$ ref_distance_field
+grid 53^3 on  -1.868 to   2.868
+band cells 11438 (half-width  0.100), point-query cells 0, sweeps 16
+max |phi - exact|: band  1.11E-16, far field  0.178, largest spacing  0.268
+band: max ||x - closest| - |phi||  5.55E-17
+eikonal q > 0.05 at 6479 of 148877 nodes; unknown neighbour 0
+  of them in the band 980, inside the cube 2395

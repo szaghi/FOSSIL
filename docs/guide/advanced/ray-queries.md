@@ -73,6 +73,12 @@ call surface%intersect_ray_all(ray_origin, ray_direction, hits, status)
 `hits` is **always allocated** (zero-length if no hits found), and
 **sorted ascending by `t`**.
 
+![the dragon, translucent, crossed by a horizontal ray from the origin on the left: the 10 hits of intersect_ray_all marked in gold, the stretches of the ray inside the body (from an odd hit to the next) in ember, the stretches outside in teal](../../examples/images/ref-ray-queries-all.svg){.fossil-figure}
+
+The ray above, along +x from (−14, −1.5, 7.857), passes through the dragon five times: 10 hits from t = 6.629 to
+22.151, entries and exits alternating (the program tells them by the sign of the facet normal's x component). The
+exit at t = 17.967 and the entry at t = 17.987 are 0.020 apart: a narrow gap between two parts of the body.
+
 ### Any hit (shadow ray)
 
 ```fortran
@@ -86,91 +92,34 @@ Returns immediately on the first hit with `0 ≤ t ≤ max_t`. Default
 target point (when direction is unit) to test occlusion of that
 target.
 
-## Examples
+![the dragon standing on a ground plane, and its shadow: each cell of the plane casts intersect_ray_any towards a distant light behind the dragon; the cells whose ray is blocked are sepia, the lit cells cream, so the dragon's silhouette is cast on the plane towards the viewer](../../examples/images/ref-ray-queries-shadow.svg){.fossil-figure}
 
-### Picking with `_first`
+Above, each of the 6860 cells of the ground casts one shadow ray towards the light, with no `max_t` (the light is at
+infinity); 2267 are blocked. A blocked ray returns at its first hit, wherever it is in the tree.
 
-```fortran
-program ex_intersect_ray_first
-use fossil
-use penf,   only : I4P, R8P
-use vecfor, only : vector_R8P, ex_R8P
-implicit none
+## Example
 
-type(surface_stl_object) :: cube
-type(ray_hit_t)          :: hit
-type(vector_R8P)         :: origin, direction
-logical                  :: has_hit
-integer(I4P)             :: status
+The cookbook [casts one ray at the dragon](/manual/cookbook#cast-a-ray). This program runs the three queries on the
+unit cube `cube-01.stl`, then the two cases where the surface's own edges matter:
 
-call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-origin    = vector_R8P(-1._R8P, 0.3_R8P, 0.6_R8P)
-direction = ex_R8P
-call cube%intersect_ray_first(ray_origin=origin, ray_direction=direction, &
-                              hit=hit, has_hit=has_hit, status=status)
-if (has_hit) then
-   print '(A,I0,A,F8.4)', 'first hit on facet ', hit%facet_id, ' at t = ', hit%t
-else
-   print '(A)', 'ray missed the cube'
-endif
-endprogram ex_intersect_ray_first
-```
+<<< @/examples/snippets/ref_ray_queries-queries.f90
 
-### Counting hits with `_all`
+<<< @/examples/snippets/ref_ray_queries-edges.f90
 
-```fortran
-program ex_intersect_ray_all
-use fossil
-use penf,   only : I4P, R8P
-use vecfor, only : vector_R8P, ex_R8P
-implicit none
+<<< @/examples/output/ref_ray_queries.ansi{ansi}
 
-type(surface_stl_object)     :: cube
-type(ray_hit_t), allocatable :: hits(:)
-type(vector_R8P)             :: origin, direction
-integer(I4P)                 :: status, i
-
-call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-origin    = vector_R8P(-1._R8P, 0.3_R8P, 0.6_R8P)
-direction = ex_R8P
-call cube%intersect_ray_all(ray_origin=origin, ray_direction=direction, &
-                            hits=hits, status=status)
-print '(A,I0)', 'n_hits = ', size(hits)
-do i = 1_I4P, size(hits, kind=I4P)
-   print '(A,I0,A,I0,A,F8.4)', '  hit ', i, ': facet=', hits(i)%facet_id, '  t=', hits(i)%t
-enddo
-endprogram ex_intersect_ray_all
-```
-
-### Shadow-ray with `_any`
-
-```fortran
-program ex_intersect_ray_any
-use fossil
-use penf,   only : I4P, R8P
-use vecfor, only : vector_R8P, ex_R8P
-implicit none
-
-type(surface_stl_object) :: cube
-type(vector_R8P)         :: origin, direction
-logical                  :: blocked
-integer(I4P)             :: status
-
-call cube%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-origin    = vector_R8P(-1._R8P, 0.3_R8P, 0.6_R8P)
-direction = ex_R8P
-
-! Is anything blocking the ray within distance 0.5? (cube is at x=0, so no)
-call cube%intersect_ray_any(ray_origin=origin, ray_direction=direction, &
-                            max_t=0.5_R8P, found=blocked, status=status)
-print '(A,L1)', 'blocked within 0.5? ', blocked
-
-! Within distance 1.5? (cube enters at t=1.0, so yes)
-call cube%intersect_ray_any(ray_origin=origin, ray_direction=direction, &
-                            max_t=1.5_R8P, found=blocked, status=status)
-print '(A,L1)', 'blocked within 1.5? ', blocked
-endprogram ex_intersect_ray_any
-```
+- **`_first`** returns the facet, `t` and the point. With the direction `2 ex` the same point has `t = 0.5`: `t` is
+  parametric, not a length.
+- **`_all`** returns the entry at `t = 1` and the exit at `t = 2`, sorted. Which is which is not in the record: the
+  sign of the hit facet's normal against the direction tells it.
+- **`_any`** with `max_t = 1` finds the hit at exactly `t = 1`: the bound is inclusive.
+- **An origin on the surface** is hit at `t = 0`: hits at `t = 0` are kept, not filtered. To leave the facet the ray
+  starts from, pass it as `exclude`: the next hit is the far face at `t = 1`.
+- **A ray through a shared edge** hits both facets of the edge, at the same `t`: 4 hits, 2 distinct crossings. A
+  parity count (inside if the number of hits is odd) must merge equal `t` first, and even then a ray grazing an edge
+  or through a vertex is ambiguous. `SIGN_RAY_INTERSECTIONS` makes it unlikely with three fixed generic directions
+  and a majority vote; for a robust inside test on any mesh use the
+  [fast winding number](/guide/advanced/winding-number).
 
 ## Known limitations
 
@@ -178,10 +127,13 @@ endprogram ex_intersect_ray_any
   (`origin + t·direction`), not the Euclidean distance, when
   `direction` isn't unit. Normalize the direction yourself if you
   want `t` to mean Euclidean distance.
-- **Hits exactly at `t = 0`** (origin lies on the surface) are
-  filtered out of `_first` and `_all` (they'd produce false self-
-  hits). For ray casts whose origin must be exactly on the surface,
-  offset the origin by a small `ε` along the direction first.
+- **Hits exactly at `t = 0`** (origin on the surface) are returned
+  by `_first` and `_all`, as the example shows. For a ray cast from a
+  facet, pass that facet as `exclude` to `_first` (no origin offset
+  needed); `_all` has no `exclude`: drop the facet from the list.
+- **Hits at shared edges and vertices are repeated**, once per facet
+  that contains the crossing point, with the same `t`. Merge equal `t`
+  before counting.
 - **Boundary-touching cases at `t = max_t`** are *included* by
   `_any` (the contract is `t ≤ max_t`, inclusive).
 - **Two latent slab-test bugs** in the underlying AABB ray test were

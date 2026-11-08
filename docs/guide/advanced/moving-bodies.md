@@ -21,34 +21,33 @@ two poses: fresh (solid → fluid) and dead (fluid → solid).
 `swept_cells_2d` / `swept_cells_3d` give the swept geometry a conservative
 moving cut-cell update needs over a step (see [Swept geometry](#swept-geometry)).
 
-## Usage
+## Example
 
-```fortran
-program moving
-use fossil, only : surface_stl_object, rigid_pose_t, pose_from_axis_angle, pose_identity
-use penf,   only : R8P
-use vecfor, only : vector_R8P
-implicit none
-type(surface_stl_object) :: body, moved
-type(rigid_pose_t)       :: p0, p1
-type(vector_R8P)         :: centres(2)
-real(R8P)                :: d(2)
-logical                  :: fresh(2), dead(2)
+The posed queries, `state_changes` and the 2-D swept area of a dragon section are in
+[tutorial chapter 11](/manual/tutorial/11-moving-bodies), and a posed query of a rotated cube in the
+[cookbook](/manual/cookbook#query-a-rotated-body-without-rebuilding-it). This program checks the pose algebra, compares
+the three ways to query a moved body, and runs the swept geometry of one step of the unit cube on each of its paths.
 
-call body%load_from_file(file_name='body.stl', guess_format=.true.)
-p0 = pose_identity()
-p1 = pose_from_axis_angle(axis=[0._R8P, 0._R8P, 1._R8P], angle=0.1_R8P, translation=[0.05_R8P, 0._R8P, 0._R8P])
-centres = [vector_R8P(0.5_R8P, 0.5_R8P, 0.5_R8P), vector_R8P(1.2_R8P, 0.3_R8P, 0.4_R8P)]
+<<< @/examples/snippets/ref_moving_bodies.f90
 
-! body-frame query: the points are in the world frame, the tree stays as built
-call body%distance_many(points=centres, distances=d, is_signed=.true., pose=p1)
-! cells that change state between the two poses
-call body%state_changes(pose0=p0, pose1=p1, points=centres, fresh=fresh, dead=dead)
-! a moved copy for grid-aligned queries (box tagging, line crossings, cut cells)
-moved = body
-call moved%move(p1)
-endprogram moving
-```
+<<< @/examples/output/ref_moving_bodies.ansi{ansi}
+
+- **Pose algebra.** `pose_compose(pose_inverse(p1), p1)` is the identity to 1.11·10⁻¹⁶, and `to_body` undoes
+  `to_world` to 5.55·10⁻¹⁷.
+- **Screw motion.** At s = 1/2 the rotation, squared, is R₁ to 1.11·10⁻¹⁶, and the translation is exactly t₁/2: the
+  angle and the translation are linear in s. The motion is not a power of a pose, so `pose_compose(half, half)` is
+  not p1 when the translation has a component off the axis. At s = 1 `pose_interpolate` returns p1 bit for bit.
+- **Three ways to query.** The posed query (`pose=`, tree as built) and the moved copy (`move`, tree refitted)
+  agree to 1.11·10⁻¹⁶ on 27 points, 4 of them inside. The refitted copy and the same copy re-analyzed from scratch
+  (`analyze`, tree rebuilt) agree bit for bit.
+- **Translation.** The cube faces cross the grid planes x = 0.03, 1.03 and y = 0.03, 1.03 during the step, and the
+  fluid areas of those planes jump at the crossings. The exact path places its breakpoints there: 14 evaluations on
+  the busiest plane, residual 2.52·10⁻¹⁷. The swept volumes add up to -5.90·10⁻¹⁷: a rigid motion keeps the volume.
+- **Gauss, the negative control.** `exact=.false.` integrates the same step with 4 Gauss nodes across the jumps:
+  residual 1.10·10⁻³; `error_estimate`, the largest face change from 4 to 8 nodes, is 1.13·10⁻².
+- **Rotation.** The same shift with a 0.2 rad turn about z takes the exact rotation path: 508 evaluations on the
+  busiest plane, residual 4.34·10⁻¹⁷. 12 cells are cleared (no fluid at the start, fluid at the end) and 9 covered.
+  Summed over the block, which holds the body at both poses, the projected walls cancel to 8.327·10⁻¹⁷.
 
 ## Poses
 
@@ -76,6 +75,11 @@ Closest points, second foot points and normals come back in the world frame.
   results are mapped back. Distances are invariant. The device twins map on
   the host with the CPU code, so the posed device results equal the posed
   CPU results bit for bit.
+
+  ![the unit cube at rest drawn by its edges and, translucent, at a pose turned 35 degrees about z and lifted by 0.25; a ring of 40 world points around the posed cube, each joined by a yellow segment to its closest point on the posed cube, teal where the point is outside, ember where a corner of the cube reaches past the ring](../../examples/images/ref-moving-bodies-posed.svg){.fossil-figure}
+
+  The tree of the figure is the one built at rest; `query_many(pose=)` returns the closest points on the posed cube,
+  in the world frame. 28 points are outside, 12 inside, with signed distances from -0.0684 to 0.0999.
 - **Move and refit.**
   - The vertices move, and everything derived from coordinates is
     recomputed exactly as `analyze` does.
@@ -119,6 +123,11 @@ follow from the fixed grid (issue #41):
 - **Motion.** By default the motion is `pose_interpolate`. A caller that
   knows the true motion, such as a 6-DOF integrator, can instead pass the
   poses at the Gauss nodes (`gauss_legendre_01`).
+
+![a 12 x 12 grid seen from above, the middle layer of a 12 x 12 x 3 block, each cell shaded by the volume the unit cube sweeps through it over one step of a screw motion (0.35 rad about a tilted axis plus a shift), divided by the cell volume: ember where the cell gains fluid on the trailing side, teal where it loses fluid on the leading side, cream elsewhere; the section of the cube at mid-layer at the start in dark brown and at the end in yellow](../../examples/images/ref-moving-bodies-swept.svg){.fossil-figure}
+
+In the figure the step takes the exact rotation path: the residual is at most 5.33·10⁻¹⁷ in every cell, and the
+swept volumes add up to -1.99·10⁻¹⁷.
 
 ```fortran
 call swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input)

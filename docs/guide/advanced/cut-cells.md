@@ -37,40 +37,32 @@ closures and sub-cell masks.
 | Wall fractions along the grid lines of a block | `surface%cell_wall_fractions` | `curve%cell_wall_fractions` |
 | Cut cells of a block | `cut_cells_3d(surface, x, y, z, cut)` | `curve%cut_cells(x, y, cut)` |
 
-## Usage
+## Example
 
-```fortran
-program cut_geometry
-use fossil, only : curve_object, cut_cells_2d_t, surface_stl_object, cut_cells_3d_t, cut_cells_3d
-use penf,   only : I4P, R8P
-implicit none
-type(curve_object)       :: c
-type(cut_cells_2d_t)     :: cut2
-type(surface_stl_object) :: body
-type(cut_cells_3d_t)     :: cut3
-real(R8P)                :: e(9), xc(8), frac(6, 8, 8, 8)
-logical                  :: inside(8, 8, 8)
-integer(I4P)             :: k
+The basic calls, on the dragon section and the dragon, are in
+[tutorial chapter 10](/manual/tutorial/10-cut-cells), and the solver data built on them (links, SRD and merge
+neighbourhoods) in the [cookbook](/manual/cookbook#neighbourhoods-for-a-small-cell-cure). This program runs the
+[checks](#checks-you-can-make) of this page on small cases with known answers.
 
-do k = 1, 9
-   e(k) = (k - 1) / 8._R8P ! cell edges
-enddo
-xc = 0.5_R8P * (e(1:8) + e(2:9)) ! cell centres
+<<< @/examples/snippets/ref_cut_cells.f90
 
-! 2-D: a square, cut cells of an 8 x 8 block
-call c%adopt_loops(u=[0.3_R8P, 0.7_R8P, 0.7_R8P, 0.3_R8P], v=[0.3_R8P, 0.3_R8P, 0.7_R8P, 0.7_R8P], loop_sizes=[4_I4P])
-call c%cut_cells(x=e, y=e, cut=cut2)
-print '(A,F8.5)', 'fluid fraction of cell (3, 3): ', cut2%alpha(3, 3)
+<<< @/examples/output/ref_cut_cells.ansi{ansi}
 
-! 3-D: wall fractions at the cell centres, then the cut cells
-call body%load_from_file(file_name='body.stl', guess_format=.true.)
-call body%cell_wall_fractions(x=xc, y=xc, z=xc, frac=frac, inside=inside)
-call cut_cells_3d(surface=body, x=e, y=e, z=e, cut=cut3)
-print '(A,I0)', 'fluid pieces of cell (4, 4, 4): ', cut3%pieces(4, 4, 4) ! -1: cell not trusted
-if (cut3%pieces(4, 4, 4) > 0) print '(A,ES12.4)', 'volume of its first piece: ', &
-   cut3%piece_volume(cut3%first_piece(4, 4, 4))
-endprogram cut_geometry
-```
+- **Thin strip, 2-D.** The solid strip, 0.05 thick, lies inside row 2 (v from 0.25 to 0.5), so each cell of the row
+  holds two fluid pieces, of 0.4 of the cell each, and `alpha` is 0.8. `piece_aperture` splits the edges between
+  them: each piece owns 0.4 of the -u and +u edges, the lower piece all of the -v edge and none of the +v edge, the
+  upper piece the reverse.
+- **Turned cube, 3-D.** `move` turns the unit cube 0.3 rad about (1, 1, 1) and shifts it, so no face is
+  grid-aligned. On the 6³ block, 125 cells are cut and none is flagged. 7 cells hold two pieces or more: the body is
+  convex, but where an edge of the cube runs through a cell, the solid wedge can split the cell's fluid in two.
+- **Covering sum.** The solid volume summed over the block differs from `get_volume` by 5.55·10⁻¹⁶.
+- **Divergence theorem.** The largest residual of the face-fraction differences against `wet_normal`, over every
+  cell, is 3.22·10⁻¹⁶.
+- **Small cells.** 5 cells have a fluid fraction below 10⁻², the smallest 1.576·10⁻⁵: the cells a
+  solver's small-cell treatment has to handle.
+- **Wall fractions.** `cell_wall_fractions` works on the cell centres, not the edges. Centre (2, 3, 3) is inside,
+  and its -x line meets the wall at 0.270 of the spacing to the neighbouring centre; -1 marks the directions with no
+  wall before the next centre.
 
 ## The exactness model
 
@@ -88,6 +80,14 @@ endprogram cut_geometry
   - On a watertight surface every crossing is counted exactly once, also on
     grid-aligned bodies.
   - Every point lies in exactly one half-open cell, (x_i, x_i+1].
+
+![a diamond on an 8 x 8 grid with its four vertices on grid nodes and its sides through grid nodes, the cells shaded by fluid fraction (cream solid, sepia fluid, the cut cells half and half), and the crossings of every horizontal grid line marked at the nodes, entering in teal on the left and leaving in ember on the right; the line through the bottom vertex has two crossings, the line through the top vertex none](../../examples/images/ref-cut-cells-crossings.svg){.fossil-figure}
+
+Every crossing of the diamond lies on a grid node, the worst case for a rounded test. The line v = 1/8 touches
+the bottom vertex: taken at v + ε it passes just above it and crosses both sides there, so it has 2 crossings, both at
+u = 0.5. The line v = 7/8 touches the top vertex and, taken at v + ε, misses it: 0 crossings. The other lines have one
+entering and one leaving crossing each, and the 12 cut cells are halved exactly: the solid area is 0.28125, the area
+of the diamond.
 - **2-D cut cells.**
   - Each segment is walked through the grid. Whether it leaves a cell
     through the vertical or the horizontal line first is decided by the
@@ -126,6 +126,12 @@ endprogram cut_geometry
   - So a passage narrower than the cell, whose fluid meets the cell boundary
     in two separate disks, is one piece, and a thin plate across the cell
     leaves two.
+
+![a plate 0.075 thick, 0.3 of the cell side, tilted across a 4 x 4 x 4 block and seen almost edge-on; the 22 cells it splits into two fluid pieces outlined in yellow, the centroid of the first piece of each in teal on one side of the plate and of the second in ember on the other](../../examples/images/ref-cut-cells-pieces.svg){.fossil-figure}
+
+The plate cuts 32 cells and splits 22 of them in two; none is flagged. The two centroids of each split cell lie on
+opposite sides of the plate.
+
   - **Piece measures.** The pieces of cell (i, j, k) are
     `first_piece(i, j, k)` to `first_piece(i, j, k) + pieces(i, j, k) - 1`;
     `piece_cell(:, p)` gives the cell back. For each piece:

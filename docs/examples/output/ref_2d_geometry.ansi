@@ -1,0 +1,13 @@
+$ ref_2d_geometry
+before repair: defect 4 at loop 2
+repair: gaps closed 1, loops reversed 1, still open 0
+after repair: valid T, loops 3, bodies 2, area  2.32322
+  loop 1: nesting depth 0, signed area   2.00000
+  loop 2: nesting depth 1, signed area  -0.17678
+  loop 3: nesting depth 0, signed area   0.50000
+p =  1.50 0.50: d -0.50000, foot  1.50000 0.00000, segment 1, vertex 0
+  w fast  1.00000, w sum  1.00000, w exact 1, inside T, inside (fwn) T
+p =  0.60 0.50: d  0.23097, foot  0.38661 0.58839, segment 8, vertex 0
+  w fast  0.00000, w sum  0.00000, w exact 0, inside F, inside (fwn) F
+p =  2.30 0.20: d  0.30000, foot  2.00000 0.20000, segment 2, vertex 0
+  w fast  0.00096, w sum  0.00000, w exact 0, inside F, inside (fwn) F

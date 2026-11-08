@@ -120,6 +120,12 @@ Choosing the sign:
   gracefully where the pseudo-normal is undefined. On the GPU it costs 3.5
   to 10 times the pseudo-normal query (see [Performance](#performance)).
 
+![a plane of the 24³ marker block around the open dragon, seen along y, shaded by the winding-number signed distance from teal (inside) to ember (outside), the dragon's section on top; 11 cells, most of them far from the body, outlined where the pseudo-normal gives the other sign](../../examples/images/ref-device-distance-signs.svg){.fossil-figure}
+
+On the open dragon of the [example](#example) the two device signs differ at 129 of the 13824 cell centres, with
+the same magnitudes: the pseudo-normal of a facet next to a hole points the wrong way for some far points. The
+figure shows the plane where they differ most.
+
 `status = STATUS_INVALID_INPUT`, with `distances` left untouched, when:
 
 - `size(distances) /= size(points)`;
@@ -165,68 +171,33 @@ builds and runs everywhere, and only goes faster where nvfortran is used.
 
 ## Example
 
-A minimal IB marker: classify the cell centres of a Cartesian block around
-the body as inside, outside or cut, with one device call for the whole block.
-A cell counts as cut when the surface passes within half a cell diagonal of
-its centre.
+An IB marker pass: the cell centres of a 24³ block around the dragon (its box grown by 10 %), classified inside,
+outside or cut (the surface within half a cell diagonal), with one device call for the whole block. The dragon has
+holes, so the sign is the winding number; the pseudo-normal is run too, to compare. The
+[GPU tutorial chapter](/manual/tutorial/16-gpu) runs the same check on the repaired dragon; here the surface is
+open, and the second part shows the calls the device path refuses.
 
-```fortran
-program ex_device_ib_marker
-use fossil
-use penf,   only : I4P, R8P
-use vecfor, only : vector_R8P
-implicit none
+<<< @/examples/snippets/ref_device_distance-marker.f90
 
-integer(I4P), parameter :: NC = 32_I4P            ! cells per direction
-type(surface_stl_object)      :: body
-type(vector_R8P)              :: bmin, bmax, h
-type(vector_R8P), allocatable :: centre(:)
-real(R8P),        allocatable :: d(:)
-real(R8P)                     :: half_diag
-integer(I4P)                  :: i, j, k, c, status
-integer(I4P)                  :: n_inside, n_outside, n_cut
+<<< @/examples/snippets/ref_device_distance-refusals.f90
 
-call body%load_from_file(file_name='src/tests/cube.stl', guess_format=.true.)
-call body%sanitize  ! the pseudo-normal sign needs outward normals
+<<< @/examples/output/ref_device_distance.ansi{ansi}
 
-! Block = body bounding box grown by 25% on each side.
-bmin = body%get_bmin()
-bmax = body%get_bmax()
-h    = bmax - bmin
-bmin = bmin - 0.25_R8P * h
-bmax = bmax + 0.25_R8P * h
-h    = (bmax - bmin) / real(NC, R8P)
-half_diag = 0.5_R8P * sqrt(h%x**2 + h%y**2 + h%z**2)
+![the middle plane of the 24³ marker block, seen along y: inside cells in teal, cut cells in gold, outside cells in ember, the dragon's section on top; 0 cells differ from distance_many](../../examples/images/ref-device-distance-marker.svg){.fossil-figure}
 
-allocate(centre(NC**3), d(NC**3))
-c = 0
-do k = 1, NC
-   do j = 1, NC
-      do i = 1, NC
-         c = c + 1
-         centre(c)%x = bmin%x + (real(i, R8P) - 0.5_R8P) * h%x
-         centre(c)%y = bmin%y + (real(j, R8P) - 0.5_R8P) * h%y
-         centre(c)%z = bmin%z + (real(k, R8P) - 0.5_R8P) * h%z
-      enddo
-   enddo
-enddo
-
-call body%enter_device()                         ! copy the BVH to the GPU once
-call body%distance_many_device(points=centre, distances=d, is_signed=.true., &
-                               is_square_root=.true., status=status)
-call body%exit_device()                          ! release before the surface dies
-if (status /= STATUS_OK) error stop 'distance_many_device failed'
-
-n_cut     = count(abs(d) <= half_diag)
-n_inside  = count(d < -half_diag)
-n_outside = count(d >  half_diag)
-print '(A,3(I0,A))', 'inside: ', n_inside, '  outside: ', n_outside, '  cut: ', n_cut, ''
-endprogram ex_device_ib_marker
-```
-
-In a real marker pass the surface stays resident across many calls (one per
-AMR block or per time step on a moving grid), and `exit_device` comes at the
-end of the run. The `enter_device` cost is paid once.
+- The docs are built with gfortran: `enter_device` only sets the residency flag and `distance_many_device` runs its
+  loop on the host. The program is the one that runs on the GPU when built with nvfortran (`static-nvidia`).
+- `enter_device` once, two batches (winding number, pseudo-normal), `exit_device` before anything else touches the
+  surface. Of the 13824 cells, 404 are inside, 2714 cut and 10706 outside.
+- `device vs host ... mismatches 0`: `distance_many` with the same sign gives the same bits.
+- The two signs disagree at 129 cells, the magnitudes nowhere: the distance does not depend on the sign algorithm,
+  and on an open surface the pseudo-normal is not the one to trust (see [Choosing the sign](#query)).
+- Each refusal returns `status = STATUS_INVALID_INPUT`: a surface not entered, a sign without a device port
+  (`SIGN_SOLID_ANGLE`), `size(distances) /= size(points)`, and an octree surface, which `enter_device` refuses, so
+  the query after it finds the surface not resident. All but the size mismatch also write one line to stderr,
+  shown in the output above.
+- The block stays resident across calls in a real marker pass (one call per AMR block or per time step on a moving
+  grid); `enter_device` is paid once.
 
 ## Performance
 

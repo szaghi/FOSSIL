@@ -1,0 +1,9 @@
+$ ref_sdf_segmentation
+plate: 336 facets, watertight T, unassigned 0
+  label 1: 148 facets, sdf  0.123 to  0.135, centroids x  0.000 to  1.833
+  label 2: 188 facets, sdf  0.120 to  0.628, centroids x  0.000 to  4.000
+dragon: 6588 facets, unassigned 41
+  label 1:  2192 facets, sdf  0.000 to  0.837
+  label 2:  1859 facets, sdf  0.838 to  1.916
+  label 3:  2089 facets, sdf  1.919 to  3.779
+  label 4:   407 facets, sdf  3.783 to  4.916

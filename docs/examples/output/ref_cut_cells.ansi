@@ -1,0 +1,10 @@
+$ ref_cut_cells
+strip: pieces of row 2  2 2 2 2
+  cell (2, 2): piece areas / cell   0.4000  0.4000, alpha   0.8000
+  apertures (-u, +u, -v, +v)   0.40  0.40  1.00  0.00 and   0.40  0.40  0.00  1.00
+cube: cut cells 125, multi-piece 7, flagged 0
+  covering sum: solid volume - body volume  5.55E-16
+  largest divergence residual  3.22E-16
+  small cells (0 < alpha < 1e-2) 5, smallest alpha  1.576E-05
+centres inside 64 of 216
+  centre (2, 3, 3): inside T, fractions (-x .. +z)  0.270 -1.000 -1.000 -1.000 -1.000 -1.000

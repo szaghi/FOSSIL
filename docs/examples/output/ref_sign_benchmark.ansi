@@ -1,0 +1,7 @@
+$ ref_sign_benchmark
+wedge of 30 degrees, 204 points (180 at the apex edge)
+variant    pseudo-normal  ray  solid angle  winding  naive normal
+clean                0    0            0        0            36
+hole                60   71            0        0            60
+flipped            117    0           94       83           129
+naive errors on the clean wedge by decade (1e-1 to 1e-12):  3  3  3  3  3  3  3  3  3  3  3  3

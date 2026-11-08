@@ -1,0 +1,6 @@
+$ ref_hole_filling
+cut cube: 38 facets, watertight F
+default max_hole_size 0.1: filled 0, skipped 3, open edges 0
+max_hole_size 0.5:         filled 2, skipped 1
+max_hole_size 1:           filled 1, skipped 0
+result: 46 facets, watertight T, volume  1.00000

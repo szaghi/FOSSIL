@@ -22,31 +22,40 @@ the tagging questions from the BVH alone, before any field exists:
 | Does one box meet the geometry? | `box_intersects_surface` | `box_intersects_curve` |
 | Signed tag bands on a block of cells | `tag_block(x, y, z, band, tags)` | `tag_block(x, y, band, tags)` |
 
-## Usage
+## Example
 
-```fortran
-program tag_blocks
-use fossil, only : surface_stl_object, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
-use penf,   only : I4P, R8P
-implicit none
-type(surface_stl_object) :: body
-real(R8P)                :: lo(3, 2), hi(3, 2), x(17)
-integer(I4P)             :: codes(2), tags(16, 16, 16), k
+The NACA 0012 section (the wing cut at z = 0.5, chord from −0.25 to 0.75) in 2-D: a quadtree built level by level
+from `box_classify_many`, then tag bands on one stretched block.
+[Tutorial chapter 9](/manual/tutorial/09-amr-tagging) classifies one level of blocks and tags a uniform block around
+the dragon; the cookbook [tags the cells near a cube](/manual/cookbook#tag-the-cells-near-the-wall). Here the
+classification drives a whole hierarchy, and the block is stretched. The 3-D calls are the same, with `lo(3, n)`,
+`hi(3, n)` and a `z` edge array.
 
-call body%load_from_file(file_name='body.stl', guess_format=.true.)
+<<< @/examples/snippets/ref_amr_tagging-tree.f90
 
-! two blocks: cut / near (within 0.05) / inside / outside
-lo(:, 1) = [0._R8P, 0._R8P, 0._R8P] ; hi(:, 1) = [0.5_R8P, 0.5_R8P, 0.5_R8P]
-lo(:, 2) = [2._R8P, 2._R8P, 2._R8P] ; hi(:, 2) = [2.5_R8P, 2.5_R8P, 2.5_R8P]
-call body%box_classify_many(lo=lo, hi=hi, codes=codes, radius=0.05_R8P)
+- Each level is one `box_classify_many` batch over all its boxes. A box is refined when it is `BOX_CUT`, or
+  `BOX_NEAR` within `radius` = the diagonal of its children: the criterion of Matsushita & Aoki (2021), decided from
+  the tree before any field exists.
+- The rest become leaves. Their code says what they are: outside or inside (one fast-winding-number query at the
+  centre), or, at the last level, cut and near.
 
-! tag bands on a 16^3 block: 0 cut, -d inside, +d outside, |d| <= 5
-do k = 1, 17
-   x(k) = (k - 1) / 32._R8P
-enddo
-call body%tag_block(x=x, y=x, z=x, band=4, tags=tags)
-endprogram tag_blocks
-```
+<<< @/examples/snippets/ref_amr_tagging-tags.f90
+
+- `tag_block` takes the cell edges `x(49)`, `y(25)`; the y spacing starts at 0.006 at the chord line and grows by
+  1.1. The tags count cells, not lengths, so a band of 3 is thin where the cells are thin.
+- `feature_band=` and `feature_tags=` add the second field: the Chebyshev cell distance to the cells holding a corner
+  of the curve, a vertex where it turns by more than `feature_angle` (default 30°). The only one here is the trailing
+  edge.
+
+<<< @/examples/output/ref_amr_tagging.ansi{ansi}
+
+- Six levels end with 508 leaves; the uniform grid of the finest size (side 0.0234) has 4096 cells. No box is inside
+  before level 6: none of side 0.047 or more fits in an airfoil 0.12 thick.
+- The leaves of the last level are 96 cut, 126 near and 48 inside boxes: the near ring is wider than the cut ring
+  because the radius is the children's diagonal, 0.0166, against a box side of 0.0234.
+- On the block, 112 cells are cut; the counts per ring grow outward with the stretched cells, and 286 cells beyond
+  the band get the cap, +4. Inside, 112 cells get −4: the airfoil is more than three of the thin cells thick there.
+- 4 cells hold the trailing edge, and 36 are within 2 cells of it.
 
 ## Definitions
 
@@ -88,6 +97,8 @@ endprogram tag_blocks
   `band = 4` gives the cut, neighbour (±1), extension (±3) and
   reinitialisation (±4) rings of Hoppe et al. (2022).
 
+![a block of 48 by 24 cells around the NACA 0012 section, stretched away from the chord line, coloured by its tags with band 3: the cut cells in cream along the airfoil, the inside cells in teal, the outside rings in darker ember up to the cap +4; the cells within 2 cells of the trailing-edge corner outlined in teal](../../examples/images/ref-amr-tagging-tags.svg){.fossil-figure}
+
 ## How it works
 
 - **Box queries.** A BVH traversal prunes every node whose box does not meet
@@ -114,6 +125,11 @@ endprogram tag_blocks
 | Refine where the smallest \|φ\| in a cell is below the diagonal of its children (Matsushita & Aoki 2021) | `radius` = child diagonal: refine `BOX_CUT` and `BOX_NEAR` |
 | Keep coarse–fine boundaries away from cut cells (Giuliani et al. 2022) | `tag_block`: refine where \|tag\| ≤ the required buffer |
 | Tag bands for cut cells, neighbours, extension, reinitialisation (Hoppe et al. 2022) | `tag_block(..., band=4)` |
+
+![the quadtree of the example around the NACA 0012 section, six levels from a root box of side 1.5: the outside leaves outlined, growing away from the airfoil; at the finest level the cut leaves in cream along the airfoil, the near leaves in ember around them and the inside leaves in teal](../../examples/images/ref-amr-tagging-quadtree.svg){.fossil-figure}
+
+The quadtree of the [example](#example) uses the second criterion: every box is refined while it is cut or near
+within its children's diagonal, so the finest level wraps the airfoil in a ring of near cells.
 
 ## Results
 

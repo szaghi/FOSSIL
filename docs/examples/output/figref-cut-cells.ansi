@@ -1,0 +1,12 @@
+$ fig_ref_cut_cells
+diamond: solid area  0.28125, cut cells 12
+  line v = 0.000: 0 crossings at u =
+  line v = 0.125: 2 crossings at u = 0.500, 0.500
+  line v = 0.250: 2 crossings at u = 0.375, 0.625
+  line v = 0.375: 2 crossings at u = 0.250, 0.750
+  line v = 0.500: 2 crossings at u = 0.125, 0.875
+  line v = 0.625: 2 crossings at u = 0.250, 0.750
+  line v = 0.750: 2 crossings at u = 0.375, 0.625
+  line v = 0.875: 0 crossings at u =
+  line v = 1.000: 0 crossings at u =
+plate: cells cut 32, with 2 pieces 22, flagged 0

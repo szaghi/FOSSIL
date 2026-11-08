@@ -1,0 +1,11 @@
+$ ref_moving_bodies
+p1^-1 o p1 - identity:  1.11E-16
+to_body(to_world(x)) - x:  5.55E-17
+R(1/2)^2 - R1:  1.11E-16, t(1/2) - t1/2:  0.00E+00
+interpolate(p0, p1, 1) = p1 bit for bit: T
+posed - moved:  1.11E-16, inside 4
+moved = rebuilt, bit for bit: T
+translation: exact T, evaluations 14, residual  2.52E-17, sum of swept -5.90E-17
+  Gauss:     exact F, nodes 4, residual  1.10E-03, estimate  1.13E-02
+rotation:    exact T, evaluations 508, residual  4.34E-17
+  cleared 12, covered 9, wall sum  8.327E-17

@@ -40,6 +40,8 @@ open by two size thresholds.
      (default 0.1).
 
    Larger loops are counted in `holes_skipped`.
+
+   ![a sphere with four round holes of different sizes, closed one per frame by fill_holes(refine, fair) as max_hole_size grows past each loop's size: the patches in ember, the loops still open outlined](../../examples/images/anim-holes.svg){.fossil-figure}
 3. **Triangulation.** Liepa's minimum-weight dynamic programming over the
    loop's sub-polygons. The weight is compared lexicographically:
    - first the largest dihedral angle between a patch triangle and its
@@ -71,6 +73,22 @@ open by two size thresholds.
    planar hole stays planar.
 6. **Re-analysis.** The patches are appended and the surface is re-analysed
    with the same AABB tree kind and refinement.
+
+The three stages on a unit sphere of 32 × 16 longitude-latitude facets (volume 4.12194) with the cap z > 0.7
+removed, filled with `max_hole_size=1` (the program is `docs/examples/src/fig_ref_hole_filling.f90`):
+
+![the sphere with its cap filled by the minimum-weight patch alone, in ember: a flat disk of 30 long thin triangles fanning across the planar loop](../../examples/images/ref-hole-filling-plain.svg){.fossil-figure}
+
+![the same hole with refine: still a flat disk, now of 186 triangles about as large as the facets around the loop](../../examples/images/ref-hole-filling-refined.svg){.fossil-figure}
+
+![the same hole with fair: the 186 triangles raised into a dome that continues the sphere's curvature across the loop](../../examples/images/ref-hole-filling-faired.svg){.fossil-figure}
+
+<<< @/examples/output/figref-hole-filling.ansi{ansi}
+
+The loop is a planar ring, so the minimum-weight patch is flat and refinement keeps it flat: both enclose 3.88616.
+Fairing raises it to the thin plate through the loop and its ring: the patch centroids lie within 0.035 of the
+sphere, against 0.255 for the flat patch. The thin plate is not the sphere: the faired volume, 4.14567, is more
+than the closed polyhedron's 4.12194 and less than the sphere's 4π/3 = 4.18879.
 
 Inside `sanitize` (with `fill_holes=.true.`) the fill runs **after**
 orientation: loops are chained along consistently wound edges, and on mixed
@@ -111,33 +129,26 @@ patch is used unfaired and a warning is written to stderr.
 
 ## Example
 
-The unit cube with one facet removed: a hole whose diagonal spans most of
-the body, so the size threshold is raised.
+[Tutorial 2](/manual/tutorial/02-repair) closes a hole in the dragon with `sanitize(fill_holes=.true.)`, and the
+cookbook [closes the open top of a box](/manual/cookbook#close-the-holes-of-a-surface). This program makes three
+holes in the unit cube `cube-01.stl`, whose faces are 2 × 2 grids of quads split in two, and lets the size threshold
+decide which are filled:
 
-```fortran
-program ex_fill_holes
-use fossil
-use penf, only : I4P, R8P
-implicit none
-type(surface_stl_object)        :: cube, holed
-type(facet_object), allocatable :: facets(:)
-type(facet_object), pointer     :: f
-integer(I4P)                    :: i, filled, skipped
+<<< @/examples/snippets/ref_hole_filling-cut.f90
 
-call cube%load_from_file(file_name='cube.stl', guess_format=.true.)
-allocate(facets(cube%get_facets_number() - 1))
-do i = 2, cube%get_facets_number()
-   f => cube%facet_at(i)
-   facets(i - 1) = f
-enddo
-call holed%adopt_facets(facets=facets)
-print '(A,L1)', 'watertight before: ', holed%is_watertight()
+<<< @/examples/snippets/ref_hole_filling-fill.f90
 
-call holed%fill_holes(max_hole_size=1._R8P, holes_filled=filled, holes_skipped=skipped)
-print '(A,I0,A,I0)', 'holes filled: ', filled, '  skipped: ', skipped
-print '(A,L1,A,F8.5)', 'watertight after: ', holed%is_watertight(), '  volume: ', holed%get_volume()
-end program ex_fill_holes
-```
+<<< @/examples/output/ref_hole_filling.ansi{ansi}
+
+- **The holes.** The face z = 0 is removed whole: one loop of 8 edges around the square. On the face z = 1 two
+  facets are removed that touch only at the centre of the face: their boundary is one walk through that vertex
+  twice, which the pinch rule splits into two loops of 3 edges. Three loops in all, none of them leftover
+  `open_edges`.
+- **The size threshold.** The cube's bounding-box diagonal is √3. The triangles' loops have a diagonal of
+  0.5√2 = 0.41 of it, the square's √2 = 0.82: the default 0.1 skips all three, 0.5 fills the two triangles, 1 fills
+  the square. Each call works on the loops still open, so the counts are per call.
+- **The result.** The two triangles take one facet each (the original facets again, since a 3-edge loop has one
+  triangulation) and the square six: 38 + 2 + 6 = 46 facets, watertight, volume 1 to the printed digits.
 
 ## Known limitations
 

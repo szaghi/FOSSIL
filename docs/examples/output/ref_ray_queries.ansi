@@ -1,0 +1,12 @@
+$ ref_ray_queries
+first: T, facet 44, t  1.000, point  0.000 0.300 0.600
+first, direction 2 ex: t  0.500
+all: hit 1, facet 44, t  1.000, enters
+all: hit 2, facet 38, t  2.000, leaves
+any: within t <=  0.5: F
+any: within t <=  1.0: T
+any: within t <=  1.5: T
+origin on the surface: first facet 44, t  0.000
+  the same, that facet excluded: facet 38, t  1.000
+through a shared edge: 4 hits, 2 distinct t
+  facets  45  48  37  40

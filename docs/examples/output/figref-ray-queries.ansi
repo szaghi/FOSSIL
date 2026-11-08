@@ -1,0 +1,5 @@
+$ fig_ref_ray_queries
+intersect_ray_all: 10 hits at t =
+  6.629 11.066 12.301 12.472 16.378 17.967 17.987 18.191 19.267 22.151
+     E     L     E     L     E     L     E     L     E     L
+intersect_ray_any: 2267 of 6860 ground cells in shadow

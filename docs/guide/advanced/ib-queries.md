@@ -31,40 +31,47 @@ batches, on the CPU or the device, for surfaces (3-D) and
 | Bodies | `get_bodies_number`, `facet_body`, `get_shells_number`, `facet_shell` | `get_bodies_number`, `loop_body` |
 | Vector level set | `distance_field_object%compute(..., store_closest=.true.)` | same, 2-D field |
 
-## Usage
+## Example
 
-```fortran
-program ghost_points
-use fossil, only : surface_stl_object, distance_field_object, FEATURE_FACE
-use penf,   only : I4P, R8P
-use vecfor, only : vector_R8P
-implicit none
-type(surface_stl_object)    :: body
-type(distance_field_object) :: field
-type(vector_R8P)            :: ghost(2)
-real(R8P)                   :: d(2), foot(3, 2), nrm(3, 2), img(3, 2), probe(3, 2), x(32)
-integer(I4P)                :: feat(2), bod(2), k
-logical                     :: vis(2), amb(2)
+Two unit cubes 0.2 apart, loaded as one surface: the smallest case where a stencil can reach through another wall.
+[Tutorial chapter 8](/manual/tutorial/08-ib-queries) runs the same calls on the ghost points of a grid around the
+dragon; the cookbook has the one-point [closest point](/manual/cookbook#find-the-closest-point-and-its-normal),
+[wall distance](/manual/cookbook#compute-the-wall-distance-up-to-a-cutoff) and
+[curvature](/manual/cookbook#measure-the-curvature-at-a-point) recipes. This example covers what those skip: two
+bodies, a stencil that reaches through the other wall, and a point with two foot points.
 
-call body%load_from_file(file_name='body.stl', guess_format=.true.)
-ghost(1) = vector_R8P(0.5_R8P, 0.5_R8P, 0.9_R8P)
-ghost(2) = vector_R8P(0.1_R8P, 0.2_R8P, 0.3_R8P)
+<<< @/examples/snippets/ref_ib_queries-bodies.f90
 
-! wall intercept, normal, feature and body of each ghost point
-call body%query_many(points=ghost, distances=d, closest_points=foot, features=feat, normals=nrm, bodies=bod, &
-                     ambiguous=amb)
-! mirror images (2 foot - x) and probes at sqrt(2) dx, with visibility
-call body%image_points(points=ghost, images=img, visible=vis)
-call body%probe_many(points=ghost, lengths=[(sqrt(2._R8P) * 0.05_R8P, k = 1, 2)], probe_points=probe, visible=vis)
+- `merge_solids` appends the second cube's facets, and `analyze` rebuilds the connectivity: two shells, neither inside
+  the other, so two bodies.
 
-! vector level set: closest point, facet and normal stored on the band cells
-do k = 1, 32
-   x(k) = -0.5_R8P + (k - 0.5_R8P) / 16._R8P
-enddo
-call field%initialize(x=x, y=x, z=x)
-call field%compute(surface=body, store_closest=.true.)
-endprogram ghost_points
-```
+<<< @/examples/snippets/ref_ib_queries-probes.f90
+
+- `probe_many` places each probe 0.3 along the outward normal from the wall point; `image_points` mirrors each ghost
+  point through it. `visible` is false when the segment from the wall point to that point crosses a facet.
+
+<<< @/examples/snippets/ref_ib_queries-gap.f90
+
+- `ambiguous` and `second_foot_points` are optional outputs of the same batch, CPU only. The second foot point is the
+  wall point itself where the point is not ambiguous.
+
+<<< @/examples/snippets/ref_ib_queries-wall.f90
+
+<<< @/examples/snippets/ref_ib_queries-markers.f90
+
+<<< @/examples/output/ref_ib_queries.ansi{ansi}
+
+- The ghost point 0.05 inside the first cube has its probe at x = 1.3, inside the second cube: not visible. Its image
+  at x = 1.05 is in the gap, visible. The ghost point 0.25 deep has its image at x = 1.25, inside the second cube:
+  not visible. The third point is nearer the top face, so its probe and image go up, into free space.
+- At mid-gap, x = 1.1, the two cubes are equally far: `ambiguous` is true and the second foot point is on the first
+  cube's face, x = 1. At x = 1.05 the first cube is closer by 0.1 and the point is not flagged.
+- `wall_distance_many` with cutoff 0.3: the cube centre is 0.5 from every wall and the point (1.7, 0.5, 1.6) is 0.6
+  above the second cube, so both get the cutoff and body 0. The point at x = 1.3 is 0.1 from the second cube, body 2.
+- `surface_markers` on one cube: 288 markers whose areas sum to the cube's area, 6, with 81.2 % of the
+  nearest-neighbour spacings in [0.8, 1.2] Δx.
+- The vector level set, `distance_field_object%compute(store_closest=.true.)`, stores the same closest point and
+  normal on the band cells of a [distance field](/guide/advanced/distance-field).
 
 ## Definitions
 
@@ -93,12 +100,20 @@ endprogram ghost_points
     diagonal are ignored: those are the facets containing the foot point.
   - **2-D:** exact, with `orient2d`, skipping the segments that contain the
     foot point.
+
+![two unit cubes 0.2 apart seen from above, a row of 20 ghost points (teal) inside the first one at depths 0.01 to 0.39 from its face x = 1, each joined through its wall point to its image: the 10 images that land in the gap are yellow, the 10 that land inside the second cube are ember](../../examples/images/ref-ib-queries-images.svg){.fossil-figure}
 - **Ambiguous foot point.** Another facet or segment whose closest point is
   separate from the foot point (by more than `foot_tolerance`, default
   10⁻⁹ of the box diagonal) lies within (1 + `rel_tolerance`) of the minimum
   distance (default 10⁻⁶). This happens on the medial axis and in thin gaps.
   FOSSIL reports the second foot point and the caller decides; the
   literature gives no rule.
+
+![the plane z = 0.5 through the two cubes seen from above: the 131 grid points flagged ambiguous (ember), each joined to its two foot points, lie on the diagonals of each cube's square section and on the line x = 1.1 midway between the cubes, which extends beyond them](../../examples/images/ref-ib-queries-ambiguous.svg){.fossil-figure}
+
+On a grid of spacing 0.05 the flagged points trace the medial axis: the diagonals inside each cube and the mid-plane
+of the gap, which continues past the cubes because beyond their edges the two nearest features are still one edge of
+each cube.
 
 ## Wall distance and field diagnostic
 
@@ -142,6 +157,11 @@ returns it as an optional output (issue #42, CPU):
 
 Both work with `pose=`, since curvature is invariant under rigid motion.
 
+![an ellipsoid with semi-axes 1, 0.7 and 0.45 from marching cubes (5136 facets), each facet coloured by the mean curvature H at the foot of its centroid, from 0.69 (teal) at the ends of the short axis to 3.48 (ember) at the ends of the long axis](../../examples/images/ref-ib-queries-curvature.svg){.fossil-figure}
+
+The exact values are 0.684 at the ends of the short axis, (c/a² + c/b²)/2, and 3.49 at the ends of the long axis,
+(a/b² + a/c²)/2.
+
 ## Grid-adapted markers
 
 Wall models evaluated at surface points (van Noordt et al.) and
@@ -163,6 +183,8 @@ forcing needs a spacing of 0.8–1.2 Δx (Cheylan et al. 2023).
   spacings)`** resamples every loop exactly along the polyline into
   nint(L/Δx) pieces of equal arc length. The markers sit at the piece
   midpoints, on the polyline.
+
+![the unit cube with the 288 markers of surface_markers at dx = 0.1 with features kept, about 48 per face, evenly spaced up to the edges](../../examples/images/ref-ib-queries-markers.svg){.fossil-figure}
 
 ## Placement rules from the literature
 

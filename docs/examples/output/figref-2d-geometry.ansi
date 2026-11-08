@@ -1,0 +1,3 @@
+$ fig_ref_2d_geometry
+section of the cut dragon: 4 loops, 1 open, 171 segments, gap  0.957
+cells: 645 of 11400 with 0.05 < w < 0.95; near the gap 39 where the pseudo-normal and the fast winding number signs disagree

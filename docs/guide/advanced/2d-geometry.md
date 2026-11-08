@@ -57,71 +57,36 @@ What it covers:
   point queries are plain floating point, as in 3-D, so they run unchanged
   on the device.
 
-## Usage
+## Example
 
-```fortran
-program naca_field
-use fossil, only : curve_object, distance_field_object
-use penf,   only : I4P, R8P
-implicit none
-real(R8P), parameter        :: PI = acos(-1._R8P)
-type(curve_object)          :: airfoil
-type(distance_field_object) :: field
-real(R8P)                   :: u(400), v(400), x(257), y(129), xi, t
-integer(I4P)                :: k, j, st
+[Tutorial 7](/manual/tutorial/07-curves) slices the dragon and computes a field from the section; the cookbook
+[cuts a section of a wing](/manual/cookbook#cut-a-2-d-section-of-an-stl) and
+[measures the distance to a polygon](/manual/cookbook#compute-the-signed-distance-to-a-polygon). This program builds
+a curve from vertex arrays with two defects, checks it, repairs it and queries it:
 
-! NACA 0012, closed trailing edge, cosine spacing, counter-clockwise
-j = 0
-do k = 200, 0, -1
-   xi = 0.5_R8P * (1._R8P - cos(PI * k / 200)) ; t = thickness(xi)
-   j = j + 1 ; u(j) = xi ; v(j) = t
-enddo
-do k = 1, 199
-   xi = 0.5_R8P * (1._R8P - cos(PI * k / 200)) ; t = thickness(xi)
-   j = j + 1 ; u(j) = xi ; v(j) = -t
-enddo
-call airfoil%adopt_loops(u=u, v=v, loop_sizes=[400_I4P])
+<<< @/examples/snippets/ref_2d_geometry-build.f90
 
-print *, 'signed distance at mid-chord: ', airfoil%distance([0.5_R8P, 0._R8P])
-print *, 'inside: ', airfoil%is_point_inside([0.5_R8P, 0._R8P])
+<<< @/examples/snippets/ref_2d_geometry-check.f90
 
-! 2-D field on a stretched grid: initialize without z
-do k = 1, 257
-   x(k) = -1._R8P + 3._R8P * (1._R8P - cos(PI * (k - 1) / 256._R8P)) / 2._R8P
-enddo
-do k = 1, 129
-   y(k) = tanh(2._R8P * (-1._R8P + 2._R8P * (k - 1) / 128._R8P)) / tanh(2._R8P)
-enddo
-call field%initialize(x=x, y=y)
-call field%compute(curve=airfoil, status=st)
-print *, 'band cells: ', field%get_band_cells(), '  phi(1,1): ', field%phi(1, 1, 1)
+<<< @/examples/snippets/ref_2d_geometry-query.f90
 
-contains
-   pure function thickness(s) result(h)
-   real(R8P), intent(in) :: s
-   real(R8P)             :: h
-   h = 0.6_R8P * (0.2969_R8P * sqrt(s) - 0.1260_R8P * s - 0.3516_R8P * s**2 + 0.2843_R8P * s**3 - 0.1036_R8P * s**4)
-   endfunction thickness
-endprogram naca_field
-```
+<<< @/examples/output/ref_2d_geometry.ansi{ansi}
 
-Slicing an STL and repairing the section:
-
-```fortran
-program section
-use fossil, only : surface_stl_object, curve_object, slice_surface, CURVE_VALID
-use penf,   only : I4P, R8P
-implicit none
-type(surface_stl_object) :: body
-type(curve_object)       :: cut
-integer(I4P)             :: n_open, gaps
-
-call body%load_from_file(file_name='body.stl', guess_format=.true.)
-call slice_surface(body, 3_I4P, 0.4_R8P, cut, merge_collinear=.true., open_loops=n_open)
-if (n_open > 0) call cut%repair(tolerance=1.e-6_R8P, gaps_closed=gaps)
-if (cut%check_validity() == CURVE_VALID) call cut%save_into_file(file_name='section.dat')
-endprogram section
-```
+- **Building.** `adopt_loops` takes the vertices of every loop one after the other, `loop_sizes` and, per loop,
+  `closed`. The third loop is passed open: its last vertex lies 1e-7 from its first, as a chain that missed closing
+  by round-off would.
+- **Checking.** `check_validity` returns the first defect, here `CURVE_WRONG_ORIENTATION` (4) at loop 2: the octagon
+  lies inside the plate (nesting depth 1), so it is a hole and must run clockwise. The open loop 3 is a second defect,
+  not reported: only the first is.
+- **Repairing.** `repair(tolerance=1.e-6)` closes the open chain onto its own start (one gap) and reverses the hole.
+  The curve is then valid, self-intersections included, with two bodies: the plate with its hole and the triangle.
+  The hole's signed area is negative, −0.17678 = −2√2 r² for the octagon of radius 0.25, and the total 2.32322 is
+  2 − 0.17678 + 0.5.
+- **Querying.** `compute_distance` returns the foot point, the segment and, if the foot is a vertex, the vertex (0 in
+  a segment interior). The point in the hole is outside (d > 0). The fast winding number is 1 or 0 to round-off
+  here, except at the last point, 0.3 from the plate's edge, where the far-field expansion leaves 0.00096; the
+  brute-force sum (`use_brute_force=.true.`) is exact to round-off, and `winding_number_exact` is the integer from
+  exact `orient2d` decisions. Both inside tests agree with it.
 
 ## How it works
 
@@ -136,12 +101,23 @@ endprogram section
   Bærentzen and Aanæs reduces to the bisector of the two segment normals.
   At a vertex the distance is computed from the vertex itself, so the two
   segments sharing it give the same bits.
+
+  Near an open end the two signs differ. The fast winding number closes the gap by the straight chord between the
+  ends, where w crosses 0.5; the pseudo-normal takes the side of the nearest feature, an end vertex for the points
+  beyond the gap. On the open dragon section they disagree on 39 cells of 0.05, all in a wedge outside the chord:
+
+  ![a close-up of the gap of the open dragon section: the cells inside by the fast winding number in teal, outside in ember, the boundary between them following the curve and the straight chord between its two open ends; a small wedge of gold cells just outside the chord marks where the pseudo-normal sign says inside instead](../../examples/images/ref-2d-geometry-signs.svg){.fossil-figure}
 - **Winding number.** w = (1/2π) Σ (angle subtended by each segment): 1
   inside, 0 outside or in a hole, fractional near an open end.
   `winding_number` evaluates it hierarchically, the 2-D analogue of the fast
   winding number (Barill et al. 2018). A node far enough away contributes
   the second-order expansion of (1/2π) ∫ n·(x − p)/|x − p|² ds from its
   dipole and second moments, which are exact for straight segments.
+
+  ![a section of the dragon at z = 9.62 seen from above, with the facets within 0.5 of a point of the section removed so that one loop is open, its two ends marked in ember; the background cells are coloured by the generalized winding number, teal 1 inside the five closed regions, ember 0 outside, and a cream fan of fractional values spreading out of the gap of the open loop](../../examples/images/ref-2d-geometry-winding.svg){.fossil-figure}
+
+  On the open section of the dragon above, 645 of the 11400 cells have 0.05 < w < 0.95: all of them in the fan
+  around the gap of 0.957 between the two open ends. Elsewhere w is 0 or 1, as for closed loops.
 - **Slicing.**
   - A vertex on the plane counts as above it. A facet is therefore crossed
     along exactly two edges or not at all, and a facet lying in the plane is
@@ -183,6 +159,12 @@ endprogram section
 - **A coarse join rule in repair.** It joins open chains greedily by nearest
   end within the tolerance. Ambiguous gaps (several ends within the
   tolerance) take the nearest.
+- **One tolerance for joins and merges.** `repair` also merges consecutive
+  vertices closer than `tolerance`. A tolerance large enough to bridge a
+  real gap (a missing facet, as in the figures above) also drops every
+  segment shorter than the gap and coarsens the curve. It is meant for
+  round-off gaps, as in the example; a real gap needs the open-loop queries
+  (fast winding number sign) or a repaired surface.
 
 ## API
 
