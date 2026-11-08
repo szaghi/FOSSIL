@@ -1,0 +1,8 @@
+$ anim_ref_smoothing_torus
+10 Laplacian applications; volume: noisy 1.2230, explicit 1.1052, Taubin 1.2270
+0 applications; volume change: explicit   0.00 %, Taubin   0.00 %
+10 applications; volume change: explicit  -9.63 %, Taubin   0.33 %
+20 applications; volume change: explicit -18.14 %, Taubin   0.58 %
+40 applications; volume change: explicit -32.58 %, Taubin   1.12 %
+80 applications; volume change: explicit -53.90 %, Taubin   2.21 %
+160 applications; volume change: explicit -77.94 %, Taubin   4.43 %

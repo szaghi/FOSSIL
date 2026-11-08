@@ -29,6 +29,12 @@ silently produces wrong inside/outside labels — `is_watertight()`
 returning `.true.` is **necessary but not sufficient** for a usable
 solid. Alpha wrapping is what makes that assumption true.
 
+The dragon fixture as loaded is such an input: 61 non-manifold edges, so
+neither watertight nor manifold. Its wrap at `alpha` = diagonal/14 is
+1628 facets, watertight and manifold:
+
+![left, the dragon as loaded with its non-manifold edges in gold; right, its wrap at alpha = diagonal/14: one closed surface of 1628 facets around the same shape, the gaps narrower than the ball between the claws, the horns and the coils closed](../../examples/images/ref-alpha-wrap-dragon.svg){.fossil-figure}
+
 ## Pipeline
 
 Portaneri et al. carve a 3-D Delaunay triangulation. FOSSIL carves a
@@ -80,6 +86,18 @@ same rule, and puts the vertices on the offset surface (issue #50):
 8. **Refinement loop.** A level that still has a defect is redone with
    `h/2`, up to `max_iterations` levels (default 5) and `2^23` cells.
 
+The rules of stages 1 to 3 evaluated on one plane of the
+[Example](#example)'s input (the cube with a triangular hole on the face
+x = 0), `alpha` 0.15, `offset` 0.033, cells of `alpha/4`. The plane
+y = 0.8333 passes through the hole. The figure program computes `u` with
+`surface%distance`, flood-fills the free cells from the corner within the
+plane, and carves; the library works on the 3-D grid, so this is the
+rule drawn, not the library's own grid. Over it, the section of the wrap
+`alpha_wrap` returns: 1234 cells reached (inside the cube too, through
+the hole), 411 carved, 145 barrier cells along the walls, 59 solid:
+
+![the plane y = 0.8333 through the holed cube, cells of side 0.0375 coloured by stage: teal where the ball's centre is reached from the grid corner, outside the cube and, through the gap of the hole in the left wall, inside it; pale teal for the carved cells around them; ember for the barrier cells touching the walls; cream for the few solid cells left. The input's section is a gold square open at the hole; the wrap's section, in red, runs along both sides of every wall and through the hole](../../examples/images/ref-alpha-wrap-stages.svg){.fossil-figure}
+
 ## API
 
 ```fortran
@@ -96,6 +114,12 @@ call surface%alpha_wrap(alpha, offset, max_iterations, wrapped, status)
   which gaps are closed. The defaults follow CGAL's `Alpha_wrap_3`.
   The coarsened output has edges up to about `α/2` on flat parts, so
   halving `alpha` roughly quadruples the facet count.
+
+  The dragon wrapped at `alpha` = diagonal/4, /6, /9, /14 and /20: 258,
+  450, 772, 1628 and 2872 facets, volume 930.4 down to 554.2, as the
+  ball enters the gaps and the wrap settles onto the input:
+
+  ![an animation of the dragon, solid, inside its wrap drawn translucent, one frame per alpha from diagonal/4 to diagonal/20: the wrap starts as a rounded hull around the whole body and tightens frame by frame between the coils, the claws and the horns](../../examples/images/anim-ref-alpha-wrap-shrink.svg){.fossil-figure}
 - **`offset`** is the distance from the input at which the wrap lies.
 - **`max_iterations`** is the number of grid levels the refinement
   loop may use.

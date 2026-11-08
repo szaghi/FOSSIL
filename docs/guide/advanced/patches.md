@@ -4,13 +4,13 @@ title: Named patches
 
 # Named patches
 
-![a box with its patches: the inlet (z-) in teal, the outlet (z+) in ember, the side walls in stone](../../examples/images/ref-patches.svg){.fossil-figure}
-
 ## What it does
 
 A CFD body carries several boundary conditions: walls, inlets, outlets, porous or heated regions. Exporters write
 them as named `solid <name> … endsolid` blocks of one ASCII STL, or as one STL file per patch. FOSSIL keeps them
 (issue #66): every facet carries a patch id (`facet%patch`), an index into the surface's table of patch names.
+
+![a box with its patches: the inlet (z-) in teal, the outlet (z+) in ember, the side walls in stone](../../examples/images/ref-patches.svg){.fossil-figure}
 
 ## Reading and writing
 
@@ -24,6 +24,12 @@ them as named `solid <name> … endsolid` blocks of one ASCII STL, or as one STL
   to a named patch, created if new.
 
 Before issue #66 the ASCII reader stopped with "malformed STL" at the first `endsolid` of a multi-solid file.
+
+The dragon split by x into thirds (`set_patch` three times), saved as ASCII and loaded back: three `solid` blocks,
+read as the patches head (2238 facets), middle (2296) and tail (2054), 6588 facets in all. The names come from the
+file (`patch_name` pads them with NUL characters, issue #84: the figure program strips them):
+
+![the dragon loaded back from its three-block ASCII file, each patch in its colour with its name and facet count as read: head (2238) in stone, middle (2296) in teal, tail (2054) in ember](../../examples/images/ref-patches-files.svg){.fossil-figure}
 
 ## Through the pipeline
 
@@ -39,6 +45,12 @@ The patch id travels with the facet, so every operation that keeps or copies fac
   patch named `filled` otherwise (a hole across a wall/inlet edge has no single right answer; the caller can
   `set_patch` it).
 
+A box remeshed to edge 0.15 with an inlet (z = 0), an outlet and walls, two inlet facets removed, one inside the
+inlet and one on its edge with a wall: `fill_holes` closes both, the first with an `inlet` facet, the second with a
+facet of the new patch `filled`:
+
+![the inlet face of the box seen from below, zoomed: the inlet in ember, the wall in teal; two new facets outlined in gold, one inside the inlet labelled "new: inlet" in the inlet's colour, one against the wall labelled "new: filled" in the colour of the new patch](../../examples/images/ref-patches-fill.svg){.fossil-figure}
+
 ## Through booleans
 
 `boolean` and `resolve_self_intersections` keep the patch of every facet: a sub-triangle of the arrangement takes
@@ -46,6 +58,12 @@ its parent facet's patch, so the area of a patch in the result is the area of it
 other body, as the operation selects. The other surface's patches join the table by name before the arrangement:
 `A ∪ B` of a body with patches `low`, `high` and one with `b_low`, `b_high` has all four, and equal names merge (the
 [Example](#example) measures it, through a remesh too).
+
+A unit block (patch `block`, its top face `lid`) minus a sphere of radius 0.4 about the centre of the lid (patch
+`sphere`): the result's 2292 facets keep their parents' patches, 40 `block`, 102 `lid` (the lid retriangulated around
+the cut) and 2150 `sphere`, the dimple:
+
+![the block minus the sphere: the sides in teal (block), the top face cut by a round dimple in ember (lid), the dimple's spherical surface in the sphere's own colour](../../examples/images/ref-patches-difference.svg){.fossil-figure}
 
 ## Through remeshing
 
@@ -59,6 +77,11 @@ every facet keeps a patch:
   boundary vertices are the input ones exactly.
 - `smooth`: the boundary vertices do not move.
 - `alpha_wrap`: each facet of the wrap takes the patch of the input facet closest to its centroid.
+
+A marching-cubes sphere (2312 facets) in two patches, north and south, split along a zigzag of facet edges near the
+equator; remeshed (`L = 0.08`, 6682 facets) and decimated (384 facets), the zigzag stays where it is:
+
+![three spheres in a row, the northern patch in ember and the southern in teal: the input, its isotropic remesh with many more facets and its decimation with few, each with the same zigzag boundary between the two colours](../../examples/images/ref-patches-remesh.svg){.fossil-figure}
 
 ## In the queries
 
@@ -78,6 +101,11 @@ patch through joins, merges and reversals; `slice_surface` gives each segment th
 and the curve takes the surface's names. `query_many(_device)(patches=)`, `probe_many(patches=)` and
 `image_points(patches=)` return the patch of the closest segment (device: host lookup, bit-identical). API:
 `get_patches_number`, `patch_name`, `segment_patch`, `set_patch`.
+
+The union of the [Example](#example) (two split boxes) cut at z = 0.25 and z = 0.75: at z = 0.25 the section meets
+only `low`, at z = 0.75 it meets `high` and `b_low`, each segment in the colour of the facet it is cut from:
+
+![the union of the two boxes drawn translucent with two sections: at z = 0.25 a square in teal (low); at z = 0.75 the outline of the two overlapping squares, the part on A in ember (high) and the part on B in gold (b_low)](../../examples/images/ref-patches-curves.svg){.fossil-figure}
 
 ```text
 # patch wall

@@ -1,0 +1,6 @@
+$ fig_ref_booleans_ops
+UNION: facets  2954, volume  1.78593
+INTERSECT: facets   614, volume  0.11228
+DIFFERENCE: facets   650, volume  0.88772
+SYMDIFF: facets  3568, volume  1.67366
+A: 121 inside B (ember), 157 outside; B: 493 inside A (teal), 2799 outside

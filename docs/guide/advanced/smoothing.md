@@ -30,6 +30,20 @@ FOSSIL. The public API is forward-compatible with it: when the solver
 lands, the new variant ships as `SMOOTH_METHOD_IMPLICIT` and no
 caller-side change is needed.
 
+A torus (marching cubes) with Gaussian noise of σ = 0.03 on every
+vertex, then the same 10 applications of the Laplacian as explicit
+steps and as Taubin pairs: the explicit torus is smooth but its volume
+falls from 1.2230 to 1.1052; the Taubin one keeps it (1.2270) and some of
+the noise:
+
+![three tori in a row: the noisy input, spiky; after 10 explicit steps, smooth and visibly thinner; after 5 Taubin pairs, as thick as the input, still bumpy](../../examples/images/ref-smoothing-torus.svg){.fossil-figure}
+
+Over more iterations the difference grows: after 160 applications the
+explicit torus has lost 77.9 % of its volume, the Taubin one has gained
+4.4 %:
+
+![an animation of the explicit (left) and Taubin (right) tori after 0, 10, 20, 40, 80 and 160 applications, with the volume change of each: the explicit torus shrinks and thins frame by frame (-9.6 %, -18.1 %, -32.6 %, -53.9 %, -77.9 %), the Taubin one stays the same size (+0.3 % to +4.4 %) with its low-frequency bumps](../../examples/images/anim-ref-smoothing-torus.svg){.fossil-figure}
+
 ## Why uniform weights, not cotangent
 
 A natural reading of the [cotangent Laplacian](/guide/advanced/cotangent-laplacian)
@@ -48,6 +62,14 @@ deliberately. The reason:
   is unconditionally stable for any `λ ≤ 1`. It loses the discrete-
   geometry consistency of `M⁻¹ L` but is the right operator for
   *iterative noise filtering*, which is what `surface%smooth` is for.
+
+The bound on the [Example](#example)'s sphere (marching cubes, 41³
+samples), from `cotangent_laplacian`: `M_ii / L_ii` ranges from 7.9e-6
+to 1.8e-3, median 6.6e-4. The explicit cotangent step is limited by the
+smallest, two decades below the median, at the vertices that marching
+cubes surrounds with slivers:
+
+![the marching-cubes sphere with each facet coloured by the smallest M_ii / L_ii of its vertices on a log scale: mostly cream, with sepia patches where small sliver triangles cluster around a vertex](../../examples/images/ref-smoothing-stability.svg){.fossil-figure}
 
 If you need the area-normalised mean-curvature flow (e.g. for
 implicit-fairing experiments), build `(L, M)` via the
@@ -85,6 +107,13 @@ Per smoothing step (one for explicit, two — `λ` then `μ` — for Taubin):
    pseudo-normals are coherent with the smoothed positions. No further
    user action is needed before calling `distance`, `winding_number`,
    `mean_curvature`, etc.
+
+One Taubin pair on the noisy sphere of the [Example](#example), zoomed:
+from each vertex, its λ = 0.5 step towards the centroid of its
+neighbours, then the μ = −0.53 step, which moves it back out by a little
+more than the low-frequency part of the first:
+
+![a zoom on the noisy sphere drawn translucent, each vertex a gold point with two short segments: in ember its displacement by the lambda step, then in teal from there its displacement by the mu step, pointing back roughly the opposite way](../../examples/images/ref-smoothing-steps.svg){.fossil-figure}
 
 ## API
 

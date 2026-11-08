@@ -24,6 +24,13 @@ into a level-set repair tool. Sample SDF, extract iso=0, get a
 watertight triangulation whose distribution is determined by the grid
 spacing (not the input's noisy tessellation).
 
+A rounded box decimated to 402 facets, most of them long slivers (the
+box of the [decimation](/guide/advanced/decimate) page), resampled at
+resolution 32: 4072 facets of the grid's size, watertight, volume
+1.9710 to 1.9584:
+
+![left, the decimated rounded box: its flat faces covered by a few long thin triangles; right, the same box after resample_via_distance_field(32): a regular mesh of small triangles, one pattern per grid cell, the rounded edges and corners kept](../../examples/images/ref-marching-cubes-resample.svg){.fossil-figure}
+
 ## Pipeline
 
 For each grid cell with corners `(i..i+1, j..j+1, k..k+1)`:
@@ -43,6 +50,13 @@ After extraction, adjacent cubes share edge-vertices that get emitted
 twice (once per cube). When the result is adopted into a
 `surface_stl_object`, `analyze` runs `connect_nearby_vertices` which
 dedupes them via the vertex pool, producing a watertight mesh.
+
+The four stages on 3³ cells of side 1, the field the signed distance to a
+sphere of radius 2.3 about (3.4, −0.4, 3.4): 7 corners inside, 57
+outside, 13 triangles. Every triangle vertex lies on a cell edge between
+an inside and an outside corner:
+
+![a 3 by 3 by 3 grid of cells drawn as grey lines, its corners as points, teal inside the sphere and ember outside; the 13 triangles marching cubes emits in the cells near the front corner, where the sphere cuts the grid, with their vertices as gold points on the cell edges](../../examples/images/ref-marching-cubes-cells.svg){.fossil-figure}
 
 ## API
 

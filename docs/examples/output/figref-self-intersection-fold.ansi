@@ -1,0 +1,4 @@
+$ fig_ref_self_intersection_fold
+corner pushed through the bottom: watertight T, shells 1, 10 crossing pairs
+resolve_self_intersections: BOOL_STATUS_OK T
+resolve_self_intersections: 88 facets, watertight F, 20 crossing pairs left

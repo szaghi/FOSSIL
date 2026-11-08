@@ -1,0 +1,4 @@
+$ fig_ref_usage_files
+statistics() after sanitize: 48 facets, volume 1.0000, every normal outward
+save_into_file: 48 facets, 144 vertex records for 26 distinct vertices
+loaded back: 48 facets, volume 1.0000

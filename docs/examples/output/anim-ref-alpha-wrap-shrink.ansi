@@ -1,0 +1,7 @@
+$ anim_ref_alpha_wrap_shrink
+alpha = diagonal/4 =  6.67: 258 facets, volume   930.4
+alpha = diagonal/6 =  4.45: 450 facets, volume   843.1
+alpha = diagonal/9 =  2.96: 772 facets, volume   729.7
+alpha = diagonal/14 =  1.91: 1628 facets, volume   623.9
+alpha = diagonal/20 =  1.33: 2872 facets, volume   554.2
+input: 61 non-manifold edges; wrap: 1628 facets, watertight T, manifold T

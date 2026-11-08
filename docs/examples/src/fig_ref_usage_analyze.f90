@@ -1,7 +1,7 @@
 !run figref-usage-analyze fig_ref_usage_analyze
 !fig ref-usage-analyze
 !< Figure of the usage reference, "Printing statistics": what analyze computes on the dragon as loaded: the bounding
-!< box (its extents), the centroid, and the boundary edges (edges with one facet) that make is_watertight false.
+!< box (its extents), the centroid, and the edges without a neighbouring facet record (on this file, all on its non-manifold edges).
 program fig_ref_usage_analyze
 use fossil,     only : surface_stl_object
 use fossil_fig, only : fig_open, fig_surface, fig_boundary, fig_box, fig_points, fig_label, fig_close
@@ -16,7 +16,7 @@ character(120)           :: caption
 
 call dragon%load_from_file(file_name='dragon.stl', guess_format=.true.)
 bmin = dragon%get_bmin() ; bmax = dragon%get_bmax() ; c = dragon%get_centroid()
-write(caption, '(A,I0,A,L1,A)') 'analyze: bounding box, centroid, boundary edges (', dragon%get_facets_number(), &
+write(caption, '(A,I0,A,L1,A)') 'analyze: bounding box, centroid, unmatched edges (', dragon%get_facets_number(), &
                                 ' facets, is_watertight ', dragon%is_watertight(), ')'
 call fig_open(u, 'ref-usage-analyze', trim(caption), -60._R8P, 22._R8P)
 call fig_surface(u, 'body', dragon)

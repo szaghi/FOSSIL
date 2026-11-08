@@ -1,0 +1,7 @@
+$ anim_ref_usage_sanitize
+as loaded: 49 facets, 25 boundary edges, watertight F
+1. remove_degenerate_facets: 1 removed (the gold points)
+2-3. connect_nearby_vertices, analyze: crack closed, 12 boundary edges left
+4-5. remove_duplicate_facets, analyze: 1 removed, 3 boundary edges (the hole)
+6. sanitize_normals: 2 facets flipped, every normal outward
+7. fill_holes: 1 filled, watertight T, volume 1.0000

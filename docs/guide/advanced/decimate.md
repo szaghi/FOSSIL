@@ -18,6 +18,13 @@ changing the count. Reach for decimation when "this 2 M-facet STL
 needs to fit in 100 k facets for cut-cell tagging." Reach for remesh
 when "the tessellation is irregular and tripping AABB query balance."
 
+A rounded box (half-sides 0.8, 0.45, 0.3, corner radius 0.15) by marching
+cubes, 6460 facets, decimated to a sixteenth: 402 facets, the volume
+1.971 to the printed digits. The flat faces are left with a few large
+triangles; the rounded edges and corners keep the small ones:
+
+![left, the rounded box by marching cubes, a regular mesh of 6460 small triangles; right, the same box after decimate to 402 facets: the flat faces covered by a few long triangles, the rounded edges by strips along them, the corners by fans of small triangles](../../examples/images/ref-decimate-box.svg){.fossil-figure}
+
 ## Pipeline
 
 1. **Per-vertex 4×4 quadrics**. For each vertex, accumulate
@@ -42,6 +49,22 @@ when "the tessellation is irregular and tripping AABB query balance."
    When all remaining edges fail one of these checks, the algorithm
    returns `DEC_STATUS_NO_PROGRESS` — the smallest count it could
    safely reach.
+
+Stages 1 and 2 computed on the rounded box above (by the figure program,
+from the facet planes and the vertex ids of the pool): each facet
+coloured by its cheapest edge, the cost $\bar m^T (Q_u + Q_v) \bar m$ at
+the edge midpoint. On 5604 of the 6460 facets it is below 1e-10: on the
+flat faces, and along the cylindrical edges, where a collapse along the
+axis moves no vertex off its planes. Only the corners, curved both ways,
+cost up to 7.8e-4. The heap takes the cream edges first:
+
+![the rounded box with every facet coloured by its cheapest edge collapse on a log scale: cream on the flat faces and along the cylindrical edges, sepia only on the eight spherical corners](../../examples/images/ref-decimate-quadric.svg){.fossil-figure}
+
+Decimated to targets halved one after the other (each a fresh call on the
+input), the box loses its flat-face triangles first and the corners last;
+the volume moves by 2e-14 down to 806 facets, by -0.86 % at 100:
+
+![an animation of the rounded box decimated to 6460, 3230, 1614, 806, 402, 200 and 100 facets, each frame with the volume change: the flat faces empty first into a few large triangles, the cylindrical edges thin into long strips, the corners coarsen last](../../examples/images/anim-ref-decimate-target.svg){.fossil-figure}
 
 ## API
 

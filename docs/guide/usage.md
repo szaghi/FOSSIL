@@ -22,7 +22,7 @@ Pass `guess_format=.true.` to let FOSSIL determine whether the file is ASCII or 
 
 `load_from_file` runs `analyze` internally — bounding box, connectivity, volume, centroid, AABB tree, and pseudo-normals are all populated before it returns. You typically call `sanitize` next to repair common STL defects.
 
-![the dragon as loaded, inside its bounding box with the corners bmin and bmax labelled, its centroid marked, and its boundary edges (edges with a single facet) in red at the jaws, the horns and the tail](../examples/images/ref-usage-analyze.svg){.fossil-figure}
+![the dragon as loaded, inside its bounding box with the corners bmin and bmax labelled, its centroid marked, and in red the edges without a single neighbouring facet (fcon_edge = 0) at the jaws, the horns and the tail: on the dragon as loaded these are its 61 non-manifold edges, not open boundaries (see Validity predicates)](../examples/images/ref-usage-analyze.svg){.fossil-figure}
 
 ### Explicit format
 
@@ -61,6 +61,11 @@ The output for the cube fixture, post-sanitize:
 
 The last line is the depth of the octree; the default SAH BVH has no levels and reports `AABB_AUTO_REFINEMENT` (-1).
 
+The same cube drawn with what the statistics describe: the box of the extents, the centroid, and the 48 facet normals,
+all pointing out, which is why the divergence-theorem volume is +1.0000:
+
+![the cube fixture after sanitize drawn translucent inside its bounding box, the extents [0, 1] labelled, its centroid (0.5, 0.5, 0.5) marked, and the normal of each of its 48 facets drawn from the facet centroid, every one pointing outwards](../examples/images/ref-usage-statistics.svg){.fossil-figure}
+
 ::: tip
 Volume is positive for a closed body with outward-pointing normals (the standard divergence-theorem convention; `sanitize` produces this state). If you see a negative volume after sanitize, the mesh is probably non-watertight — check the non-manifold-edge and disconnected-edge counts.
 :::
@@ -73,6 +78,14 @@ Volume is positive for a closed body with outward-pointing normals (the standard
 
 `is_ascii` defaults to `.true.`: pass `is_ascii=.false.` for a binary file. A surface with several patches is written as
 one `solid` block per patch in ASCII.
+
+An STL file has no shared vertices: each facet is written on its own, its normal and its three vertices. The cube
+fixture saved this way holds 144 vertex records for its 26 distinct vertices; `load_from_file` welds them back
+(`analyze` builds the vertex pool), and the file loaded back has the same 48 facets and volume 1.0000:
+
+![the cube fixture exploded, every facet facing the camera shrunk towards its centroid and pushed out along its normal, each with its own three vertices as gold points; one facet's normal is drawn and labelled, one of its vertices labelled](../examples/images/ref-usage-saving.svg){.fossil-figure}
+
+The [Named patches](./advanced/patches.md#reading-and-writing) page shows a multi-patch file read back.
 
 ---
 
@@ -98,7 +111,15 @@ The passes that run inside `sanitize`:
 7. `fill_holes` — only with `sanitize(fill_holes=.true.)`: close the boundary loops with minimum-weight patches
    (`refine_holes` and `fair_holes` refine and fair the patches; see [Hole filling](./advanced/hole-filling.md)).
 
-Each individual pass is also callable directly if you want fine-grained control.
+Each individual pass is also callable directly if you want fine-grained control. Called one by one, in this order, on
+the unit cube with one defect of each kind (a degenerate facet, a facet shifted by 1e-4, a duplicate facet, two facets
+wound inwards and a missing facet), each pass removes its own defect:
+
+![an animation of the unit cube with five defects labelled (a degenerate facet as three gold points on the top front edge, a crack along a shifted facet in red, a duplicate facet in brown, two facets wound inwards in ember, a hole), then one frame per pass: remove_degenerate_facets removes 1 facet, connect_nearby_vertices closes the crack, remove_duplicate_facets removes 1 and leaves the 3 boundary edges of the hole, sanitize_normals flips 2 facets, fill_holes closes the hole: watertight, volume 1.0000](../examples/images/anim-ref-usage-sanitize.svg){.fossil-figure}
+
+On the dragon the passes show a less obvious effect: as loaded it has no open boundary at all, only 61 non-manifold
+edges, several of them made by duplicate facets; removing the 62 duplicates turns those edges into 128 boundary edges
+(see the next section).
 
 ---
 
@@ -117,6 +138,12 @@ After `sanitize`, three named predicates summarise the mesh state:
 The block run on the dragon as loaded, then on the cube after `sanitize`:
 
 <<< @/examples/output/ref-usage-validity.ansi{ansi}
+
+What the predicates see on the dragon, from `feature_edges` (boundary edges have one facet, non-manifold edges three or
+more): as loaded, 0 boundary and 61 non-manifold edges; after `sanitize`, 128 boundary and 54 non-manifold edges. All
+three predicates stay false in both states:
+
+![an animation of the dragon drawn translucent in two frames: as loaded, with its 61 non-manifold edges in gold and no boundary edge; after sanitize, with 128 boundary edges in red, where duplicate facets were removed, and 54 non-manifold edges in gold](../examples/images/anim-ref-usage-validity.svg){.fossil-figure}
 
 ---
 
@@ -295,6 +322,10 @@ merged vertices sit between the old positions: the volume moves from 0.9999958 t
 
 <<< @/examples/output/ref-usage-connect.ansi{ansi}
 
+Zoomed on one corner of the shifted facet, at the point (0, 0.5, 0), 4e-4 across:
+
+![an animation of two frames zoomed on a corner of the cube, 4e-4 across: before, the shifted facet's vertex and the neighbours' vertex as two gold points 1e-4 apart, with the disconnected edges in red; after connect_nearby_vertices, one vertex at the centroid of the group and no red edge](../examples/images/anim-ref-usage-connect.svg){.fossil-figure}
+
 ---
 
 ## Full workflow example
@@ -302,3 +333,5 @@ merged vertices sit between the old positions: the volume moves from 0.9999958 t
 <<< @/examples/snippets/ref_usage_workflow.f90
 
 <<< @/examples/output/ref-usage-workflow.ansi{ansi}
+
+![the dragon after the workflow: its centroid at the origin, marked, with the x, y and z axes drawn from it, inside its bounding box, whose longest side (along x) is 1 and whose corner bmin is (-0.4695, -0.2440, -0.2455)](../examples/images/ref-usage-workflow.svg){.fossil-figure}

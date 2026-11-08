@@ -1,0 +1,3 @@
+$ fig_ref_decimate_quadric
+input 6460 facets, decimated 402; volume  1.971 ->  1.971
+cheapest collapse: 5604 of 6460 facets below 1e-10 (cream), max  7.8E-04

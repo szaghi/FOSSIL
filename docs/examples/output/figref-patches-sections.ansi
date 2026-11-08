@@ -1,0 +1,15 @@
+$ fig_ref_patches_sections
+dragon-patches.stl read back: 3 solid blocks, 6588 facets
+  patch head (2238)
+  patch middle (2296)
+  patch tail (2054)
+fill_holes: 2 holes; the new facets take the inlet or the patch "filled"
+  new facet 345: patch filled
+  new facet 346: patch inlet
+block minus sphere: 2292 facets, the dimple in patch "sphere"
+  patch block (40)
+  patch lid (102)
+  patch sphere (2150)
+input 2312, isotropic_remesh 6682, decimate 384 facets: the boundary is kept
+section z = 0.25: 16 segments, 5 patches
+section z = 0.75: 24 segments, 5 patches

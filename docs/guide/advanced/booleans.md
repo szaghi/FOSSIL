@@ -18,6 +18,12 @@ a part for CFD analysis, building wings from intersecting NACA
 sections. FOSSIL's boolean is on par with libigl's `igl::mesh_boolean`
 and CGAL's nef-polyhedra-free boolean for the *generic* case.
 
+The four operations on A, the unit cube, and B, a sphere of radius 0.6
+about its corner (1, 1, 1) (marching cubes on 22³ samples). The
+symmetric difference has two parts, drawn apart: A ∖ B and B ∖ A.
+
+![four results side by side, each with its volume: UNION 1.7859, the cube with the sphere bulging from its corner; INTERSECT 0.1123, the corner of the cube rounded by the sphere; DIFFERENCE 0.8877, the cube with a spherical bite at the corner; SYMDIFF 1.6737, the bitten cube next to the sphere with the cube's corner cut out of it, in ember, moved apart along (1, 1, 1)](../../examples/images/ref-booleans-ops.svg){.fossil-figure}
+
 ## Pipeline
 
 The implementation follows Zhou et al. (SIGGRAPH 2016), *Mesh Arrangements for Solid Geometry*, made exact after
@@ -53,6 +59,14 @@ a tolerance:
 
 6. **Adopt** the surviving sub-triangles into `self` via `adopt_facets` (rebuilds AABB tree, vertex pool,
    connectivity, pseudo-normals).
+
+The arrangement of the cube and the sphere above, read back from the results: A's sub-triangles inside B are those of
+`A ∩ B` that lie on A, its outside ones those of `A ∖ B`; B's come from `A ∩ B` and `A ∪ B`. The facets of A crossed
+by the sphere are cut along the curve where the two surfaces meet, and every sub-triangle is on one side of it: 121 of
+A's inside B, 157 outside; 493 of B's inside A, 2799 outside. UNION keeps the two outside sets, INTERSECT the two
+inside sets, DIFFERENCE A's outside and B's inside.
+
+![the unit cube with its corner sub-triangles inside the sphere in ember, retriangulated along the red cut curve, the rest of its faces in stone; the sphere, moved away along (1, 1, 1) and drawn translucent, with its sub-triangles inside the cube in teal](../../examples/images/ref-booleans-patches.svg){.fossil-figure}
 
 ## API
 

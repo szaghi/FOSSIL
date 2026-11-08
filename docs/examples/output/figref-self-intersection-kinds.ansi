@@ -1,0 +1,7 @@
+$ fig_ref_self_intersection_kinds
+pair 1: CROSSING
+pair 2: TOUCHING
+pair 3: COPLANAR
+pair 4: EDGE_FOLD
+pair 5: none
+pair 6: none

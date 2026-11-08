@@ -24,6 +24,13 @@ for cut-cell — silently produces wrong answers. Detection is the first
 step; resolution is what you reach for when sanitize alone can't fix
 the input.
 
+One closed shell that passes through itself: the unit cube with its
+corner (1, 1, 1) pushed to (0.3, 0.35, −0.3), through its own bottom
+face. It is watertight and one shell; `find_self_intersections` reports
+10 crossing pairs:
+
+![the unit cube drawn translucent with its corner pushed down through the bottom face: the six facets around the moved corner form a spike, in ember with the bottom facets they cross, the crossing segments in red](../../examples/images/ref-self-intersection-fold.svg){.fossil-figure}
+
 ## Pipeline (detection)
 
 1. **Tree-vs-tree broad phase.** Walk the AABB tree against itself,
@@ -77,6 +84,12 @@ the input.
 Not reported: duplicate facets (three shared vertices), which
 `remove_duplicate_facets` handles.
 
+Six pairs in one surface, each a triangle in the plane z = 0 and a
+second one placed against it, with the kind reported for it
+(`include_touching=.true.`):
+
+![six triangle pairs in a row, a stone triangle in the plane z = 0 and a teal one: the teal triangle piercing the stone one, reported CROSSING; touching its interior with one vertex, TOUCHING; overlapping it in the same plane, COPLANAR; sharing an edge and folded back over it in the plane, EDGE_FOLD (the shared edge in red); sharing an edge at an angle, none; lying above it, none](../../examples/images/ref-self-intersection-kinds.svg){.fossil-figure}
+
 ## Pipeline (resolution)
 
 `resolve_self_intersections` is a **one-line wrapper** over the
@@ -91,6 +104,14 @@ self-crossing becomes an arrangement segment, every input triangle
 gets retriangulated, the per-sub-triangle winding-number tagging
 is meant to keep only the outer-manifold sub-triangles. It does not yet:
 see [Known limitations](#known-limitations).
+
+On the pushed-corner cube above it returns `BOOL_STATUS_OK` but leaves
+88 facets, not watertight, with 20 crossing pairs instead of 10:
+
+![the pushed-corner cube after resolve_self_intersections, translucent: the spike is now split into thin slivers fanning from the moved corner, in ember, the crossings still there](../../examples/images/ref-self-intersection-resolve.svg){.fossil-figure}
+
+For bodies that are separate shells, the [Example](#example) removes the
+crossings by splitting the shells and uniting them with `boolean`.
 
 ## API
 

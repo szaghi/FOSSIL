@@ -22,6 +22,12 @@ isotropic remeshing equalizes edge *length* without preferring either
 direction. Use decimation to make a million-facet model tractable; use
 isotropic remeshing to make any model's tessellation regular.
 
+A torus by marching cubes on cells 2.75 times flatter than wide, so its
+triangles are stretched (edges 0.001 to 0.137, 5280 facets), remeshed
+with `L = 0.08`, 3 iterations (edges 0.013 to 0.114, 6938 facets):
+
+![left, the torus by marching cubes, its facets coloured by their longest edge over L, a patchwork of dark long triangles and light small ones; right, the torus after isotropic_remesh, an even light colour: every facet's longest edge close to L](../../examples/images/ref-isotropic-remesh-torus.svg){.fossil-figure}
+
 ## Pipeline
 
 Each outer iteration runs four passes (Botsch & Kobbelt 2004):
@@ -43,6 +49,22 @@ Three to five outer iterations is typical. Connectivity is rebuilt from
 scratch between passes — chosen after the first attempt's packed-array
 incremental design produced uncatchable heap corruption; the
 "rebuild every pass" approach trades speed for debuggability.
+
+What the first iteration acts on, on the sphere of the [Example](#example)
+(marching cubes on 25³ samples, `L = 0.1`): 1424 edges longer than
+`4L/3` to split, 696 shorter than `4L/5` to collapse, 508 of the 1158
+vertices with a valence other than 6 for the flips:
+
+![a zoom on the marching-cubes sphere with its edges coloured by the pass that acts on them: long edges to split in ember, short edges to collapse in teal, the others grey; the vertices of valence other than 6 as gold points, about half of them](../../examples/images/ref-isotropic-remesh-passes.svg){.fossil-figure}
+
+The same classes after each of five calls of one iteration. The long
+edges go: 1424, 143, 8, 1, 1, 0. The short ones do not: 696, 2017, 2382,
+2380, 2389, 2405, because the splits halve edges just above `4L/3` into
+edges just below `4L/5` and the collapse pass does not remove them (it
+does not coarsen; see [Known limitations](#known-limitations)). The facet
+count grows from 2312 to 4228 and settles:
+
+![an animation of the sphere after 0 to 5 iterations of isotropic_remesh at L = 0.1, edges coloured as above: the ember edges disappear in the first two iterations, the teal ones multiply and stay, the facets settle at 4228](../../examples/images/anim-ref-isotropic-remesh-iterations.svg){.fossil-figure}
 
 **Feature preservation** is optional and off by default. When enabled,
 edges with dihedral angle > 30° are flagged as **sharp**, and their

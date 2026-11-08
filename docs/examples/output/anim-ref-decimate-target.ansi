@@ -1,0 +1,8 @@
+$ anim_ref_decimate_target
+target_facets 6460: 6460 facets, volume change  0.00E+00; watertight, manifold T T
+target_facets 3230: 3230 facets, volume change  1.31E-14; watertight, manifold T T
+target_facets 1615: 1614 facets, volume change  1.84E-14; watertight, manifold T T
+target_facets 807: 806 facets, volume change  1.98E-14; watertight, manifold T T
+target_facets 403: 402 facets, volume change -2.44E-04; watertight, manifold T T
+target_facets 201: 200 facets, volume change -1.27E-03; watertight, manifold T T
+target_facets 100: 100 facets, volume change -8.55E-03; watertight, manifold T T

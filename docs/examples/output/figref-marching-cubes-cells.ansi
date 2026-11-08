@@ -1,0 +1,3 @@
+$ fig_ref_marching_cubes_cells
+input 402 facets, volume 1.9710; resampled at 32: 4072, watertight T, volume 1.9584
+27 cells: 7 corners inside (teal), 57 outside (ember), 13 triangles

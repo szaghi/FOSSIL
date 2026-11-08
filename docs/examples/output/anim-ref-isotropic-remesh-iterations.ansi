@@ -1,0 +1,9 @@
+$ anim_ref_isotropic_remesh_iterations
+input: 2312 facets; edges > 4L/3 1424, < 4L/5 696, in band 1348
+vertices 1158, valence other than 6: 508
+input: 2312 facets; edges > 4L/3 1424, < 4L/5 696, in band 1348
+iteration 1: 3952 facets; edges > 4L/3 143, < 4L/5 2017, in band 3768
+iteration 2: 4208 facets; edges > 4L/3 8, < 4L/5 2382, in band 3922
+iteration 3: 4224 facets; edges > 4L/3 1, < 4L/5 2380, in band 3955
+iteration 4: 4226 facets; edges > 4L/3 1, < 4L/5 2389, in band 3949
+iteration 5: 4228 facets; edges > 4L/3 0, < 4L/5 2405, in band 3937

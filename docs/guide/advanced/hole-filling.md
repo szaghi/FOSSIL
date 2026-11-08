@@ -19,6 +19,13 @@ surfaces. A filled surface can also be checked with `is_watertight()`.
 Genuine open boundaries (a sheet, an inlet cut, a symmetry plane) are left
 open by two size thresholds.
 
+A unit sphere (marching cubes) with three small holes and its cap above
+z = 0.55 cut off. `fill_holes` at its defaults closes the three holes
+with 11 facets; the opening is larger than `max_hole_size` (0.1 of the
+box diagonal) and stays open:
+
+![left, a sphere with its top cut off and three small holes on its side, every boundary loop in red; right, after fill_holes: the three holes closed by small ember patches, the cut at the top still outlined in red](../../examples/images/ref-hole-filling-open.svg){.fossil-figure}
+
 ## Pipeline
 
 1. **Boundary loops.**
