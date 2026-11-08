@@ -66,9 +66,9 @@ The second program reads `dragon-clean.stl` back and lists what is still wrong w
 
 <<< @/examples/output/tut02-left.ansi{ansi}
 
-- The repaired dragon has no boundary edge. The 136 edges `sanitize` reports as "not forming a closed loop" are not
-  holes: every facet edge without a single neighbour, 216 of them, lies on one of the 54 non-manifold edges, four
-  facets to an edge.
+- The repaired dragon has no boundary edge, and `sanitize` reports none left open. Every facet edge without a single
+  neighbour, 216 of them, lies on one of the 54 non-manifold edges, four facets to an edge: they are not holes, and
+  the last warning of the first run says so.
 - It is still 76 shells in 37 bodies. One shell holds 6292 of the 6586 facets; the other 75 are small pieces that
   overlap it, the source of the non-manifold edges.
 

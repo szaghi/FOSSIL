@@ -29,17 +29,22 @@ box diagonal) and stays open:
 ## Pipeline
 
 1. **Boundary loops.**
-   - After `analyze`, every facet edge without a neighbour (`fcon_edge == 0`)
-     is a boundary edge. Edges are matched on the welded vertex pool, so
-     coincident coordinates count as one vertex.
+   - After `analyze`, a facet edge without a neighbour (`fcon_edge == 0`) is
+     either a **boundary edge** (one incident facet) or lies on a
+     **non-manifold edge** (three or more incident facets, none linked). Both
+     are chained; the counts tell them apart. Edges are matched on the welded
+     vertex pool, so coincident coordinates count as one vertex.
    - Each boundary edge is reversed with respect to its facet: a patch
      triangle sharing it must traverse it the other way to keep the surface
      consistently oriented.
    - Edges are chained into closed walks. A walk that passes a vertex twice (a
      **pinch**, where two holes touch at a corner) is split there into simple
      loops, so no angle heuristic is needed.
-   - Edges that cannot close a walk (inconsistent winding, non-manifold
-     boundaries) are reported as `open_edges` and left alone.
+   - Boundary edges that cannot close a walk (inconsistent winding,
+     non-manifold boundaries) are reported as `open_edges` and left alone.
+     The non-manifold edges met are reported as `nonmanifold_edges`, once per
+     edge: they are not holes. Before issue #88 their facet edges left out of
+     the loops were counted in `open_edges`.
 2. **Selection.** A loop is filled only if both hold:
    - it has at most `max_hole_edges` edges (default 200; the triangulation is
      O(n³));
@@ -106,7 +111,8 @@ is then oriented by its nesting parity.
 ## API
 
 ```fortran
-call surface%fill_holes(max_hole_edges, max_hole_size, holes_filled, holes_skipped, open_edges, status, refine, fair)
+call surface%fill_holes(max_hole_edges, max_hole_size, holes_filled, holes_skipped, open_edges, status, refine, fair, &
+                        nonmanifold_edges)
    class(surface_stl_object), intent(inout)         :: self
    integer(I4P),              intent(in),  optional :: max_hole_edges ! default 200
    real(R8P),                 intent(in),  optional :: max_hole_size  ! default 0.1 (of the bbox diagonal)
@@ -116,6 +122,7 @@ call surface%fill_holes(max_hole_edges, max_hole_size, holes_filled, holes_skipp
    integer(I4P),              intent(out), optional :: status         ! STATUS_OK
    logical,                   intent(in),  optional :: refine         ! default .false.
    logical,                   intent(in),  optional :: fair           ! default .false.; implies refine
+   integer(I4P),              intent(out), optional :: nonmanifold_edges ! non-manifold edges met (3+ facets)
 
 call surface%sanitize(fill_holes=.true., max_hole_edges=..., max_hole_size=..., refine_holes=..., fair_holes=...)
 ```

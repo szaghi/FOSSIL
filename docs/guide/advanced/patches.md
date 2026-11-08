@@ -15,7 +15,8 @@ them as named `solid <name> … endsolid` blocks of one ASCII STL, or as one STL
 ## Reading and writing
 
 - `load_from_file` reads one patch per `solid` block of an ASCII file, named after the block, in file order; blocks
-  with the same name merge. A file with one block, or a binary file, is one patch named after the header.
+  with the same name merge. A file with one block, or a binary file, is one patch named after the header; a binary
+  header is cut at its first NUL character (the 80 bytes are NUL-padded) and trimmed (issue #83).
 - `load_from_files(file_names)` reads several files as one surface, one patch per file (or per block), named after
   the `solid` name or, when that is empty, the file name.
 - `save_into_file(is_ascii=.true.)` writes one block per patch; a single-patch surface writes exactly the file it
@@ -27,7 +28,7 @@ Before issue #66 the ASCII reader stopped with "malformed STL" at the first `end
 
 The dragon split by x into thirds (`set_patch` three times), saved as ASCII and loaded back: three `solid` blocks,
 read as the patches head (2238 facets), middle (2296) and tail (2054), 6588 facets in all. The names come from the
-file (`patch_name` pads them with NUL characters, issue #84: the figure program strips them):
+file:
 
 ![the dragon loaded back from its three-block ASCII file, each patch in its colour with its name and facet count as read: head (2238) in stone, middle (2296) in teal, tail (2054) in ember](../../examples/images/ref-patches-files.svg){.fossil-figure}
 

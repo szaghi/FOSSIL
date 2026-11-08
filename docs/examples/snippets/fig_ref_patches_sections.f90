@@ -58,7 +58,7 @@ call s%fill_holes(max_hole_size=0.5_R8P, holes_filled=filled)
 write(caption, '(A,I0,A)') 'fill_holes: ', filled, ' holes; the new facets take the inlet or the patch "filled"'
 print '(A)', trim(caption)
 do i = n + 1, s%get_facets_number()
-   print '(A,I0,A,A)', '  new facet ', i, ': patch ', clean(s%patch_name(s%facet_patch(i)))
+   print '(A,I0,A,A)', '  new facet ', i, ': patch ', s%patch_name(s%facet_patch(i))
 enddo
 call fig_open(u, 'ref-patches-fill', trim(caption), -60._R8P, -40._R8P)
 call fig_zoom(u, vector_R8P(0.5_R8P, 0.3_R8P, 0._R8P), 0.42_R8P)
@@ -67,7 +67,7 @@ do i = n + 1, s%get_facets_number()                                  ! the new f
    f => s%facet_at(i)
    call fig_segment(u, 'accent', f%vertex(1), f%vertex(2)) ; call fig_segment(u, 'accent', f%vertex(2), f%vertex(3))
    call fig_segment(u, 'accent', f%vertex(3), f%vertex(1))
-   call fig_label(u, 'accent', f%centroid, 'new: '//clean(s%patch_name(s%facet_patch(i))))
+   call fig_label(u, 'accent', f%centroid, 'new: '//s%patch_name(s%facet_patch(i)))
 enddo
 call fig_close(u)
 
@@ -147,7 +147,7 @@ do z = 1, 2
       do i = 1, section%get_vertices_number()
          if (section%segment_patch(i) /= k .or. section%get_next(i) == 0) cycle
          call fig_label(u, trim(STYLE(k)), point(section%get_vertex(i), 0.5_R8P * z - 0.25_R8P), &
-                        clean(section%patch_name(k)))
+                        section%patch_name(k))
          exit
       enddo
    enddo
@@ -256,25 +256,11 @@ contains
          c = c + g%centroid ; cnt = cnt + 1
       enddo
       if (cnt == 0) cycle
-      write(text, '(A,A,I0,A)') clean(body%patch_name(q)), ' (', cnt, ')'
+      write(text, '(A,A,I0,A)') body%patch_name(q), ' (', cnt, ')'
       print '(A,A)', '  patch ', trim(text)
       call fig_label(u, trim(STYLE(min(5, q))), c / real(cnt, R8P) + vector_R8P(0._R8P, 0._R8P, lift), trim(text))
    enddo
    endsubroutine labels
-
-   function clean(name) result(text)
-   !< A patch name without its NUL padding (issue #84) and trailing blanks.
-   character(*), intent(in)  :: name !< Name as returned.
-   character(:), allocatable :: text !< Name.
-   integer(I4P)              :: m
-
-   m = index(name, char(0))
-   if (m > 0) then
-      text = trim(name(:m - 1))
-   else
-      text = trim(name)
-   endif
-   endfunction clean
 
    function point(uv, level) result(p)
    !< The 3-D point of a section of the plane z = level.

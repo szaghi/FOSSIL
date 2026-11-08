@@ -2,8 +2,10 @@
 module fossil_hole_filling
 !< Close small holes of a triangulated surface.
 !<
-!< A hole is a closed loop of boundary edges: facet edges with no neighbour (`fcon_edge == 0`
-!< after `analyze`). Loops are built on pool vertex ids (welded vertices), so coincident
+!< A hole is a closed loop of facet edges without a unique neighbour (`fcon_edge == 0` after
+!< `analyze`). Such an edge is a boundary edge (one incident facet) or lies on a non-manifold edge
+!< (3+ incident facets, none linked); loops are chained over both kinds, as before issue #88, but
+!< the counts tell them apart. Loops are built on pool vertex ids (welded vertices), so coincident
 !< coordinates count as one vertex.
 !<
 !< Orientation: a boundary edge of facet f runs `vertex(e) -> vertex(e+1)` in f's winding. A
@@ -37,15 +39,19 @@ type :: boundary_loop_t
 endtype boundary_loop_t
 
 contains
-   subroutine extract_boundary_loops(facet, loops, n_open)
+   subroutine extract_boundary_loops(facet, loops, n_open, n_nonmanifold)
    !< Extract every closed boundary loop of the facet set.
    !<
    !< Requires pool vertex ids (`vertex_id`, set by `analyze`) and connectivity (`fcon_edge`).
-   !< Boundary edges that cannot be chained into a closed walk (inconsistent orientation or a
-   !< non-manifold boundary) are counted in `n_open` and left out.
-   type(facet_object),                 intent(in)  :: facet(:)  !< Facets (analyzed).
-   type(boundary_loop_t), allocatable, intent(out) :: loops(:)  !< Closed simple loops.
-   integer(I4P),                       intent(out) :: n_open    !< Boundary edges left in open chains.
+   !< A facet edge without a unique neighbour is a boundary edge if no other facet has it, else it
+   !< lies on a non-manifold edge (issue #88). Both kinds are chained into loops. Boundary edges
+   !< left out of every closed loop (open chains, inconsistent orientation, two-edge cycles) are
+   !< counted in `n_open`; the non-manifold edges met are counted in `n_nonmanifold`, once per edge
+   !< (before #88 their facet edges left unchained were counted in `n_open` as boundary edges).
+   type(facet_object),                 intent(in)            :: facet(:)      !< Facets (analyzed).
+   type(boundary_loop_t), allocatable, intent(out)           :: loops(:)      !< Closed simple loops.
+   integer(I4P),                       intent(out)           :: n_open        !< Boundary edges left out of loops.
+   integer(I4P),                       intent(out), optional :: n_nonmanifold !< Non-manifold edges met (3+ facets).
    integer(I4P),     allocatable :: e_start(:), e_end(:), e_owner(:) !< Directed boundary edges (patch order).
    type(vector_R8P), allocatable :: e_xs(:)                        !< Start coordinates of each edge.
    integer(I4P),     allocatable :: head(:), next(:)               !< Per-start-vertex linked lists of edges.
@@ -53,8 +59,12 @@ contains
    integer(I4P),     allocatable :: walk(:)                        !< Edge indices of the current walk.
    type(boundary_loop_t), allocatable :: buf(:), tmp(:)            !< Loop accumulator.
    integer(I4P) :: n_edges, f, e, k, v_max, e0, cur, nxt, n_walk, n_loops
+   integer(I4P) :: q, mult, n_nm                                   !< Same-edge search.
+   logical      :: first                                           !< Lowest slot of its edge.
+   logical,      allocatable :: nonman(:)                          !< Edge k lies on a non-manifold edge.
 
-   n_open = 0_I4P
+   n_open = 0_I4P ; n_nm = 0_I4P
+   if (present(n_nonmanifold)) n_nonmanifold = 0_I4P
    ! 1. Directed boundary edges, reversed to patch orientation.
    n_edges = 0_I4P
    do f = 1, size(facet)
@@ -86,6 +96,31 @@ contains
       next(k) = head(e_start(k))
       head(e_start(k)) = k
    enddo
+   ! 2b. A facet edge whose edge another unlinked slot shares (either direction) lies on a
+   ! non-manifold edge (two linked facets never leave a 0).
+   allocate(nonman(n_edges)) ; nonman = .false.
+   do k = 1, n_edges
+      mult = 0_I4P ; first = .true.
+      q = head(e_start(k))
+      do while (q > 0_I4P)
+         if (q /= k .and. e_end(q) == e_end(k)) then
+            mult = mult + 1_I4P ; if (q < k) first = .false.
+         endif
+         q = next(q)
+      enddo
+      q = head(e_end(k))
+      do while (q > 0_I4P)
+         if (q /= k .and. e_end(q) == e_start(k)) then
+            mult = mult + 1_I4P ; if (q < k) first = .false.
+         endif
+         q = next(q)
+      enddo
+      if (mult > 0_I4P) then
+         nonman(k) = .true.
+         if (first) n_nm = n_nm + 1_I4P
+      endif
+   enddo
+   if (present(n_nonmanifold)) n_nonmanifold = n_nm
    ! 3. Greedy closed walks, each split into simple loops.
    allocate(buf(8)) ; n_loops = 0_I4P
    do e0 = 1, n_edges
@@ -101,7 +136,7 @@ contains
          n_walk = n_walk + 1_I4P ; walk(n_walk) = nxt ; used(nxt) = .true. ; cur = nxt
       enddo
       if (e_end(cur) /= e_start(e0)) then
-         n_open = n_open + n_walk
+         n_open = n_open + count(.not. nonman(walk(1:n_walk)), kind=I4P)
          cycle
       endif
       call split_walk(walk(1:n_walk))
@@ -142,7 +177,7 @@ contains
       integer(I4P)             :: m
 
       if (size(edges) < 3) then
-         n_open = n_open + size(edges, kind=I4P)  ! degenerate (two-edge) cycle: not a fillable hole
+         n_open = n_open + count(.not. nonman(edges), kind=I4P)  ! degenerate (two-edge) cycle: not a fillable hole
          return
       endif
       if (n_loops == size(buf)) then

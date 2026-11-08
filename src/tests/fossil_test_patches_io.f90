@@ -8,6 +8,8 @@
 !< 4. A single-solid ASCII file and a binary file: one patch named after the header; the written ASCII file is the
 !<    single block it was before #66 (first line `solid <header>`, last line `endsolid <header>`).
 !< 5. `set_patch` creates a named patch and moves facets into it; an empty patch writes no block.
+!< 6. A binary header becomes a patch name cut at its first NUL and trimmed (issue #83: cube-01.stl's 80-byte header
+!<    has 46 NUL bytes, and `patch_name(1)` returned them); the ASCII file written from it has no NUL either.
 program fossil_test_patches_io
 
 use fossil, only : surface_stl_object, facet_object
@@ -16,11 +18,11 @@ use penf,   only : I4P, R8P
 implicit none
 
 character(*), parameter  :: D = 'fossil_test_patches_io'
-character(3), parameter  :: SUFFIX(6) = ['-3 ', '-rt', '-a ', '-b ', '-c ', '-1 ']
+character(3), parameter  :: SUFFIX(7) = ['-3 ', '-rt', '-a ', '-b ', '-c ', '-1 ', '-6 ']
 type(surface_stl_object) :: s, r, m, c
 type(facet_object), pointer :: f, g
 integer(I4P)             :: k, u, n
-logical                  :: ok1, ok2, ok3, ok4, ok5
+logical                  :: ok1, ok2, ok3, ok4, ok5, ok6
 character(256)           :: first, last, line
 
 call write_cube_blocks(D//'-3.stl')
@@ -68,11 +70,21 @@ call r%load_from_file(file_name=D//'-1.stl', guess_format=.true.)
 ok5 = ok5 .and. r%get_patches_number() == 1 .and. r%patch_name(1) == 'all' .and. r%get_facets_number() == 12
 print '(A,L1)', '5. set_patch: ', ok5
 
-do k = 1, 6
+call r%load_from_file(file_name='src/tests/cube-01.stl', guess_format=.true.) ! binary, NUL-padded header
+ok6 = index(r%patch_name(1), char(0)) == 0 .and. len(r%patch_name(1)) > 0 .and. &
+      len(r%patch_name(1)) == len_trim(r%patch_name(1)) .and. index(r%get_header(), r%patch_name(1)) == 1
+call r%save_into_file(file_name=D//'-6.stl', is_ascii=.true.)
+open(newunit=u, file=D//'-6.stl', action='read')
+read(u, '(A)') first
+close(u)
+ok6 = ok6 .and. index(first, char(0)) == 0 .and. trim(first) == 'solid '//r%patch_name(1)
+print '(A,L1,3A)', '6. binary header as patch name: ', ok6, ' [', r%patch_name(1), ']'
+
+do k = 1, 7
    open(newunit=u, file=D//trim(SUFFIX(k))//'.stl')
    close(u, status='delete')
 enddo
-print '(A,L1)', 'Are all tests passed? ', ok1 .and. ok2 .and. ok3 .and. ok4 .and. ok5
+print '(A,L1)', 'Are all tests passed? ', ok1 .and. ok2 .and. ok3 .and. ok4 .and. ok5 .and. ok6
 
 contains
    subroutine write_cube_blocks(name, only)

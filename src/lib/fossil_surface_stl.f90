@@ -472,7 +472,7 @@ contains
    if (allocated(self%patch_names)) then
       if (i >= 1 .and. i <= size(self%patch_names)) name = trim(self%patch_names(i))
    elseif (i == 1_I4P) then
-      name = trim(self%header)
+      name = trim(header_patch_name(self%header))
    endif
    endfunction patch_name
 
@@ -508,10 +508,10 @@ contains
    integer(I4P)                             :: f, pmax !< Counter, largest id.
 
    if (.not. allocated(self%patch_names)) then
-      allocate(self%patch_names(1)) ; self%patch_names(1) = self%header
+      allocate(self%patch_names(1)) ; self%patch_names(1) = header_patch_name(self%header)
    endif
    if (size(self%patch_names) == 0) then
-      deallocate(self%patch_names) ; allocate(self%patch_names(1)) ; self%patch_names(1) = self%header
+      deallocate(self%patch_names) ; allocate(self%patch_names(1)) ; self%patch_names(1) = header_patch_name(self%header)
    endif
    pmax = 1_I4P
    do f = 1, self%facets_number
@@ -538,6 +538,21 @@ contains
    names = [names, nm]
    p = size(names)
    endfunction find_or_add_patch
+
+   pure function header_patch_name(header) result(name)
+   !< The name a header gives a patch (issue #83): cut at the first NUL (a binary STL header is NUL-padded to 80 bytes)
+   !< and blank-padded; `trim` it for the name itself.
+   character(*), intent(in) :: header !< Header as read.
+   character(FRLEN)         :: name   !< Name.
+   integer(I4P)             :: m      !< First NUL.
+
+   m = index(header, achar(0))
+   if (m > 0) then
+      name = header(:m - 1)
+   else
+      name = header
+   endif
+   endfunction header_patch_name
 
    pure function get_header(self) result(h)
    !< Return STL header (the 80-char "solid <name>" string).
@@ -5938,17 +5953,21 @@ contains
    endsubroutine reverse_normals
 
    ! pure subroutine sanitize(self, do_analysis)
-   subroutine fill_holes(self, max_hole_edges, max_hole_size, holes_filled, holes_skipped, open_edges, status, refine, fair)
+   subroutine fill_holes(self, max_hole_edges, max_hole_size, holes_filled, holes_skipped, open_edges, status, refine, fair, &
+                         nonmanifold_edges)
    !< Close small holes: boundary loops filled with Liepa minimum-weight patches (issue #31).
    !<
-   !< Every closed loop of boundary edges (facet edges without a neighbour) is a candidate. A loop
+   !< Every closed loop of facet edges without a neighbour (`fcon_edge == 0`) is a candidate. A loop
    !< is filled only if it has at most `max_hole_edges` edges (default 200; the triangulation is
    !< O(n^3)) and its bounding-box diagonal is at most `max_hole_size` times the surface's
    !< (default 0.1), so genuine open boundaries (a sheet, an inlet cut) stay open. Patches are
    !< oriented like the surrounding mesh and reuse its vertices exactly, so after the closing
    !< `analyze` (same tree kind and refinement) the filled surface is connected across them.
-   !< Boundary edges that do not close into a loop (inconsistent orientation, non-manifold
-   !< boundaries) are reported in `open_edges` and left alone.
+   !< Such an edge is a boundary edge (one incident facet) or lies on a non-manifold edge (3+
+   !< incident facets, none linked). Boundary edges that do not close into a loop (inconsistent
+   !< orientation, non-manifold boundaries) are reported in `open_edges` and left alone; the
+   !< non-manifold edges met are reported in `nonmanifold_edges`, once per edge: they are not holes
+   !< (issue #88: before, their unchained facet edges were counted in `open_edges`).
    !<
    !< `refine=.true.` refines each patch to the edge density of its loop (`refine_patch`, Liepa
    !< 2003: centroid splits plus Delaunay edge flips, loop vertices fixed). `fair=.true.` (implies
@@ -5965,12 +5984,14 @@ contains
    integer(I4P),              intent(out), optional :: status         !< STATUS_OK.
    logical,                   intent(in),  optional :: refine         !< Refine patches to the loop's edge density (default .false.).
    logical,                   intent(in),  optional :: fair           !< Fair refined patches (bi-Laplacian; implies refine; default .false.).
+   integer(I4P),              intent(out), optional :: nonmanifold_edges !< Non-manifold edges met (3+ facets), not filled.
    type(boundary_loop_t), allocatable :: loops(:)
    logical                            :: refine_ !< Resolved refine flag.
    logical                            :: fair_   !< Resolved fair flag.
    integer(I4P)                       :: fst     !< fair_patch status.
    type(facet_object),    allocatable :: patch(:), merged(:)
    integer(I4P)                       :: max_edges_, n_filled, n_skipped, n_open, k, ist, n_new, cursor
+   integer(I4P)                       :: n_nonmanifold !< Non-manifold edges met.
    real(R8P)                          :: max_size_, diag, loop_diag
    type(facet_object),    allocatable :: patches(:)
    integer(I4P)                       :: pid     !< Patch of the filled facets (issue #66).
@@ -5980,10 +6001,10 @@ contains
    refine_    = .false.   ; if (present(refine))         refine_    = refine
    fair_      = .false.   ; if (present(fair))           fair_      = fair
    if (fair_) refine_ = .true. ! a plain patch has no interior vertex to move
-   n_filled = 0_I4P ; n_skipped = 0_I4P ; n_open = 0_I4P
+   n_filled = 0_I4P ; n_skipped = 0_I4P ; n_open = 0_I4P ; n_nonmanifold = 0_I4P
    if (present(status)) status = STATUS_OK
    if (self%facets_number > 0_I4P) then
-      call extract_boundary_loops(facet=self%facet, loops=loops, n_open=n_open)
+      call extract_boundary_loops(facet=self%facet, loops=loops, n_open=n_open, n_nonmanifold=n_nonmanifold)
       diag = sqrt((self%bmax%x - self%bmin%x)**2 + (self%bmax%y - self%bmin%y)**2 + (self%bmax%z - self%bmin%z)**2)
       allocate(patches(0)) ; n_new = 0_I4P
       do k = 1, size(loops)
@@ -6026,6 +6047,7 @@ contains
    if (present(holes_filled))  holes_filled  = n_filled
    if (present(holes_skipped)) holes_skipped = n_skipped
    if (present(open_edges))    open_edges    = n_open
+   if (present(nonmanifold_edges)) nonmanifold_edges = n_nonmanifold
    endsubroutine fill_holes
 
    subroutine sanitize(self, do_analysis, status, fill_holes, max_hole_edges, max_hole_size, refine_holes, fair_holes)
@@ -6106,7 +6128,7 @@ contains
          if (holes_skipped > 0) write(stderr,'(A,I0,A)') 'WARNING: sanitize: ', holes_skipped, &
                                                            ' hole(s) left open (over max_hole_edges / max_hole_size)'
          if (open_edges > 0) write(stderr,'(A,I0,A)') 'WARNING: sanitize: ', open_edges, &
-                                                        ' boundary edge(s) not forming a closed loop'
+                                                        ' boundary edge(s) (1 incident facet) not forming a closed loop'
       endif
       if (self%degenerate_facets_removed > 0) &
          write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%degenerate_facets_removed, &
@@ -6120,9 +6142,16 @@ contains
          write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%facet_2_de%ids_number,' facet(s) with 2 disconnected edges remain'
       if (self%facet_3_de%ids_number>0) &
          write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%facet_3_de%ids_number,' facet(s) with 3 disconnected edges remain'
-      if (self%non_manifold_edges_number > 0) &
-         write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%non_manifold_edges_number, &
-                                  ' non-manifold edge(s) (3+ incident facets) detected'
+      ! with fill_holes, say that they are not holes (issue #88: the old boundary-edge count included their facet edges)
+      if (self%non_manifold_edges_number > 0) then
+         if (fill_holes_) then
+            write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%non_manifold_edges_number, &
+                                     ' non-manifold edge(s) (3+ incident facets) left: not holes, fill_holes leaves them'
+         else
+            write(stderr,'(A,I0,A)') 'WARNING: sanitize: ',self%non_manifold_edges_number, &
+                                     ' non-manifold edge(s) (3+ incident facets) detected'
+         endif
+      endif
    endif
    endsubroutine sanitize
 
@@ -6575,7 +6604,7 @@ contains
    endif
    call stl_load_facets_number(file_unit=file_unit, is_ascii=is_ascii_, facets_number=facets_number)
    call stl_load_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header)
-   names = [self%header] ; p = 1_I4P
+   names = [header_patch_name(self%header)] ; p = 1_I4P
    if (present(clip_min).and.present(clip_max)) then
       ! two-pass: count, then re-read and keep facets inside the AABB
       ff = 0
@@ -6592,7 +6621,7 @@ contains
                                     v3=facet_clip%vertex(3))) ff = ff + 1
       enddo
       call stl_load_header(file_unit=file_unit, is_ascii=is_ascii_, header=self%header)
-      names = [self%header] ; p = 1_I4P
+      names = [header_patch_name(self%header)] ; p = 1_I4P
       allocate(facets(1:ff), stat=istat, errmsg=msg)
       if (istat /= 0) then
          if (present(status)) then ; status = STATUS_ALLOC_FAIL ; close(file_unit) ; return ; endif
@@ -6804,6 +6833,8 @@ contains
    subroutine proximity_pairs_of(surfaces, cutoff, pairs, distances, status)
    !< The pairs of surfaces closer than `cutoff` (issue #67): a broad phase on the bounding boxes (pairs whose boxes are
    !< farther than `cutoff` are skipped), then `distance_to` for the others; pairs(:, k) = [i, j], i < j, in order.
+   !< The pairs found go into work buffers grown by doubling (move_alloc), and the results are allocated once at the end
+   !< (issue #76: no self-referencing array growth, which corrupted the heap under nvfortran 26.9 elsewhere).
    type(surface_stl_object),  intent(in)            :: surfaces(:)  !< Bodies.
    real(R8P),                 intent(in)            :: cutoff       !< Distance cutoff (>= 0).
    integer(I4P), allocatable, intent(out)           :: pairs(:, :)  !< Surface pairs [2, n].
@@ -6811,14 +6842,18 @@ contains
    integer(I4P),              intent(out), optional :: status       !< STATUS_OK, STATUS_INVALID_INPUT.
    type(vector_R8P)                                 :: l1, h1, l2, h2
    real(R8P)                                        :: d, g
-   integer(I4P)                                     :: i, j
+   integer(I4P)                                     :: i, j, m
+   integer(I4P), allocatable                        :: wp(:, :), tp(:, :) !< Pair buffer and its grown copy.
+   real(R8P),    allocatable                        :: wd(:), td(:)       !< Distance buffer and its grown copy.
 
    if (present(status)) status = STATUS_OK
-   allocate(pairs(2, 0), distances(0))
    if (.not. cutoff >= 0._R8P) then
+      allocate(pairs(2, 0), distances(0))
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
+   m = 0_I4P
+   allocate(wp(2, 16), wd(16))
    do i = 1, size(surfaces)
       if (surfaces(i)%facets_number == 0) cycle
       l1 = surfaces(i)%bmin ; h1 = surfaces(i)%bmax
@@ -6830,10 +6865,17 @@ contains
          if (g > cutoff * cutoff * (1._R8P + 1.e-10_R8P)) cycle
          call surfaces(i)%distance_to(surfaces(j), d)
          if (d > cutoff) cycle
-         pairs = reshape([reshape(pairs, [2 * size(distances)]), i, j], [2, size(distances) + 1])
-         distances = [distances, d]
+         if (m == size(wd)) then
+            allocate(tp(2, 2 * m), td(2 * m))
+            tp(:, 1:m) = wp(:, 1:m) ; td(1:m) = wd(1:m)
+            call move_alloc(from=tp, to=wp) ; call move_alloc(from=td, to=wd)
+         endif
+         m = m + 1_I4P
+         wp(1, m) = i ; wp(2, m) = j ; wd(m) = d
       enddo
    enddo
+   allocate(pairs(2, m), distances(m))
+   pairs(:, 1:m) = wp(:, 1:m) ; distances(1:m) = wd(1:m)
    endsubroutine proximity_pairs_of
 
    subroutine first_impact(surfaces, poses0, poses1, toi, pair, status, tolerance, directional, tested)
@@ -7031,7 +7073,7 @@ contains
          call self%facet(f)%save_into_file_binary(file_unit=file_unit)
       enddo
    endif
-   if (is_ascii_) write(file_unit, '(A)') 'endsolid '//trim(self%header)
+   if (is_ascii_) write(file_unit, '(A)') 'endsolid '//trim(header_patch_name(self%header))
    close(file_unit)
    endsubroutine save_into_file
 
@@ -7142,10 +7184,11 @@ contains
 
    if (present(status)) status = STATUS_OK
    file_unit = -1
+   ! status='replace' truncates an existing file (issue #80: a binary file written over a longer one kept its tail)
    if (is_ascii) then
-      open(newunit=file_unit, file=file_name, form='formatted', iostat=ios)
+      open(newunit=file_unit, file=file_name, form='formatted', status='replace', iostat=ios)
    else
-      open(newunit=file_unit, file=file_name, access='stream', form='unformatted', iostat=ios)
+      open(newunit=file_unit, file=file_name, access='stream', form='unformatted', status='replace', iostat=ios)
    endif
    if (ios /= 0) then
       write(stderr, '(A)') 'error: cannot open "'//file_name//'" for writing'
@@ -7203,7 +7246,7 @@ contains
 
    rewind(file_unit)
    if (is_ascii) then
-      write(file_unit, '(A)') 'solid '//trim(header)
+      write(file_unit, '(A)') 'solid '//trim(header_patch_name(header))
    else
       write(file_unit) header
       write(file_unit) facets_number

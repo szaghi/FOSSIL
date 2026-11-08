@@ -77,7 +77,8 @@ Volume is positive for a closed body with outward-pointing normals (the standard
 <<< @/examples/snippets/ref_usage_io-save.f90
 
 `is_ascii` defaults to `.true.`: pass `is_ascii=.false.` for a binary file. A surface with several patches is written as
-one `solid` block per patch in ASCII.
+one `solid` block per patch in ASCII. An existing file is replaced: a binary file is 84 + 50 n bytes for n facets
+whatever was there before (issue #80).
 
 An STL file has no shared vertices: each facet is written on its own, its normal and its three vertices. The cube
 fixture saved this way holds 144 vertex records for its 26 distinct vertices; `load_from_file` welds them back
@@ -95,8 +96,10 @@ The [Named patches](./advanced/patches.md#reading-and-writing) page shows a mult
 
 <<< @/examples/snippets/ref_usage_repair-sanitize.f90
 
-On the dragon it removes 62 duplicate facets and reports what it cannot repair: facets with disconnected edges (the
-holes) and 54 non-manifold edges remain.
+On the dragon it removes 62 duplicate facets and reports what it cannot repair: facets with disconnected edges and 54
+non-manifold edges remain. A disconnected edge is a facet edge without a single neighbour: a boundary edge of the holes
+the duplicates leave (128 of them, which `sanitize(fill_holes=.true.)` closes), or a facet edge on a non-manifold edge,
+which is not a hole.
 
 <<< @/examples/output/ref-usage-sanitize.ansi{ansi}
 

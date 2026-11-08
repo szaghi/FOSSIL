@@ -11,6 +11,10 @@
 !<   d. open sheet (the z = 0 face of cube-02): its single loop is as large as the surface, so the
 !<      default max_hole_size keeps it open; the facet count is unchanged.
 !<   e. max_hole_edges below the loop size: the hole is skipped.
+!<   g. issue #88: open_edges counts true boundary edges (one incident facet) only, nonmanifold_edges the edges
+!<      with 3+ facets met along the boundary. The dragon after sanitize (duplicates gone): 0 boundary edges left
+!<      after filling, 54 non-manifold edges (tutorial 2's measurement); before #88 open_edges counted the facet edges
+!<      on non-manifold edges as boundary edges. The cube minus 1 facet keeps 0 / 0.
 !<   f. signed distance on the filled cube-02 equals the intact cube-02 at grid points away
 !<      from the hole (1e-12).
 
@@ -23,11 +27,11 @@ use vecfor,              only : vector_R8P
 
 implicit none
 
-logical :: ok(6)
+logical :: ok(7)
 real(R8P), parameter :: CELL_2X2(6,2) = reshape([0._R8P, 0.5_R8P, 0._R8P, 0.5_R8P, 0._R8P, 0._R8P, &
                                                  0.75_R8P, 1._R8P, 0.75_R8P, 1._R8P, 0._R8P, 0._R8P], [6, 2])
-type(surface_stl_object) :: s, ref
-integer(I4P)             :: filled, skipped, open_edges, loops_before, loops_after, n0
+type(surface_stl_object) :: s, ref, dragon
+integer(I4P)             :: filled, skipped, open_edges, loops_before, loops_after, n0, nonmanifold
 
 ! a.
 call holed(s, 'src/tests/cube.stl', remove_first=.true., boxes=reshape([real(R8P) ::], [6, 0]), keep_only_z0=.false.)
@@ -45,6 +49,7 @@ print '(A,2I4,A,L1,A,F9.6,A,L1)', 'b cube-02 two holes: filled/skipped', filled,
 ! c.
 call s%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
 call s%sanitize
+dragon = s                                                                    ! for case g
 loops_before = count_loops(s)
 call s%fill_holes(holes_filled=filled, holes_skipped=skipped, open_edges=open_edges)
 loops_after = count_loops(s)
@@ -70,6 +75,17 @@ call ref%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true.)
 call ref%sanitize
 ok(6) = filled == 1 .and. s%is_watertight() .and. same_far_distances(s, ref)
 print '(A,L1)', 'f signed distance away from the patch unchanged: ', ok(6)
+
+! g.
+s = dragon
+call s%fill_holes(holes_filled=filled, holes_skipped=skipped, open_edges=open_edges, nonmanifold_edges=nonmanifold)
+ok(7) = open_edges == 0 .and. nonmanifold == 54 .and. nonmanifold == s%get_non_manifold_edges_number()
+print '(A,I0,A,I0,A,I0,A,I0,A,L1)', 'g dragon: filled=', filled, ' open edges=', open_edges, ' non-manifold=', &
+      nonmanifold, ' (surface ', s%get_non_manifold_edges_number(), ') ok=', ok(7)
+call holed(s, 'src/tests/cube.stl', remove_first=.true., boxes=reshape([real(R8P) ::], [6, 0]), keep_only_z0=.false.)
+call s%fill_holes(max_hole_size=1._R8P, open_edges=open_edges, nonmanifold_edges=nonmanifold)
+ok(7) = ok(7) .and. open_edges == 0 .and. nonmanifold == 0
+print '(A,I0,A,I0,A,L1)', 'g cube minus 1 facet: open edges=', open_edges, ' non-manifold=', nonmanifold, ' ok=', ok(7)
 
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
