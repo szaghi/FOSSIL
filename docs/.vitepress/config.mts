@@ -81,6 +81,7 @@ const docs = [
       { text: 'Overset assembly', link: '/guide/advanced/overset' },
       { text: 'Moving bodies', link: '/guide/advanced/moving-bodies' },
       { text: 'Continuous collision detection', link: '/guide/advanced/collision' },
+      { text: 'Body-fitted grid support', link: '/guide/advanced/body-fitted' },
     ],
   },
   {
