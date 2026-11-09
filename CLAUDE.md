@@ -363,8 +363,11 @@ fobis fetch            # --update to re-fetch
   (`facet_drop == 0`) with `degenerate_pair_meet` (public in `fossil_tritri_exact` since issue #99; segment/point vs
   triangle by orient3d sides and edges, orient2d in the plane; segment vs segment by exact coplanarity, lexicographic
   intervals when collinear), then the 15 sub-distances.
-  The boolean and `find_self_intersections` still call `pair_cut` unguarded (CDT_FAILED / false TOUCHING on a
-  degenerate facet: issue #98).
+  Every `pair_cut` caller filters degenerate pairs (issue #98, plan #99): the boolean arrangement (`collect_pair`) by
+  `degenerate_pair_meet` (no contact: the zero-area facet passes through uncut; contact: `BOOL_STATUS_INVALID_INPUT`,
+  surface unchanged; in `resolve_self_intersections` a sliver closing a T-junction is dropped once the facet across
+  it is split at its middle vertex), `find_self_intersections` by `degenerate_pair_contact` (exact SEPARATED /
+  CROSSING / TOUCHING, `beyond_shared` for adjacent pairs; fans with a degenerate facet skipped).
 - `fossil_ccd.f90` — continuous collision detection (issue #73, roadmap #68 WP4; design in
   `docs/guide/advanced/collision.md`): the motion of `pose_interpolate` (rotation about the axis through the BODY-FRAME
   origin, angle and translation linear in s) has the exact speed bound `motion_bound_3d/_2d` (|dt| + |theta| max_v rho_v,
@@ -400,7 +403,8 @@ fobis fetch            # --update to re-fetch
 
 ## Known limitations
 
-- **`surface%boolean` / `surface%resolve_self_intersections`**: exact
+- **`surface%boolean` / `surface%resolve_self_intersections`**: zero-area facets that touch the other body (or
+  another part of the body) are rejected with `BOOL_STATUS_INVALID_INPUT` (issue #98; `sanitize` first). Exact
   arrangement since issue #65, no tolerance anywhere: cut points are
   implicit points (`fossil_implicit_points`), pairs are classified by
   `pair_cut` / `coplanar_cut` (`fossil_tritri_exact`), the registry merges
