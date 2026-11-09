@@ -254,7 +254,13 @@ Around the disc 10 of the 88 pieces are small and all 10 merge directly (`MERGE_
   plate, and to 3.6·10⁻¹⁵ in 2-D (a 64-gon); the zeroth and first moments
   equal the piece volumes and centroids, the wall ones the wetted areas and
   centroids (2.0·10⁻¹⁵ of the cell); the face moments of the pieces add up to
-  the plane sections' (5.7·10⁻¹⁵ of the face).
+  the plane sections' (5.7·10⁻¹⁵ of the face). The moments do not depend on
+  the order of the loops (`fossil_test_cut_moments_order`, issue #95: up to
+  v3.0.0 a cell joining three or more wall chains lost the moments of a chain
+  charged to a root that a later union absorbed): four corner squares in all 24
+  loop orders agree to 1.2·10⁻¹⁷ relative and with the closed form to
+  4.4·10⁻¹⁶; in 3-D the zeroth moments equal the piece volumes to 2.4·10⁻¹⁵ of
+  the cell.
 - **Quadrature** (`cut_cells_3d(..., quadrature=.true.)`, 2-D
   `curve%cut_cells(..., quadrature=.true.)`): per piece `quad_start`,
   `quad_point`, `quad_weight`, and `wall_quad_start`, `wall_quad_point`,

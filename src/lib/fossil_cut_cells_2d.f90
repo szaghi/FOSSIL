@@ -322,6 +322,10 @@ contains
          return
       endif
       if (lg(1) < 0._R8P) then ! clockwise: a hole, a piece of its own
+         if (ns >= MAXS) then ! no slot left (issue #95): no measures, as for too many sub-intervals
+            call mark_open
+            return
+         endif
          nh = nh + 1 ; hole_area(nh) = -lg(1) ; hole_first(nh) = s0 ; hole_n(nh) = nloopp - s0 + 1
          ns = ns + 1 ; par(ns) = ns ; sfl(ns) = .false. ; hole_root(nh) = ns
          acc(:, ns) = 0._R8P ; wn(:, ns) = 0._R8P ; accm(:, ns) = 0._R8P ; wallm(:, ns) = 0._R8P
@@ -514,6 +518,9 @@ contains
       lq = qq ; guard = 0
       do
          if (pvis(lq)) exit
+         if (nloopp >= MAXS) then ! no slot left for the loop pieces (issue #95)
+            good = .false. ; exit
+         endif
          pvis(lq) = .true.
          cur = cx%pord(cx%pstart(cid) + lq - 1)
          nloopp = nloopp + 1 ; loopp(nloopp) = cur
@@ -703,7 +710,8 @@ contains
       endfunction find
 
       subroutine unite(a_, b_)
-      !< Union (smaller root wins, deterministic).
+      !< Union (smaller root wins, deterministic). The loser's accumulators move to the winner, moments included (issue
+      !< #95: they were dropped, so a root charged with a chain before losing a later union lost its moments).
       integer(I4P), intent(in) :: a_, b_ !< Elements.
       integer(I4P) :: ra, rb !< Roots.
 
@@ -712,9 +720,13 @@ contains
       if (ra < rb) then
          par(rb) = ra ; acc(:, ra) = acc(:, ra) + acc(:, rb) ; acc(:, rb) = 0._R8P
          wn(:, ra) = wn(:, ra) + wn(:, rb) ; wn(:, rb) = 0._R8P
+         accm(:, ra) = accm(:, ra) + accm(:, rb) ; accm(:, rb) = 0._R8P
+         wallm(:, ra) = wallm(:, ra) + wallm(:, rb) ; wallm(:, rb) = 0._R8P
       else
          par(ra) = rb ; acc(:, rb) = acc(:, rb) + acc(:, ra) ; acc(:, ra) = 0._R8P
          wn(:, rb) = wn(:, rb) + wn(:, ra) ; wn(:, ra) = 0._R8P
+         accm(:, rb) = accm(:, rb) + accm(:, ra) ; accm(:, ra) = 0._R8P
+         wallm(:, rb) = wallm(:, rb) + wallm(:, ra) ; wallm(:, ra) = 0._R8P
       endif
       endsubroutine unite
 
