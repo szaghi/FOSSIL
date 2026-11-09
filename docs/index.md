@@ -27,92 +27,92 @@ hero:
       link: https://github.com/szaghi/FOSSIL
 
 features:
-  - icon: 📂
+  - icon: { light: /icons/stl.svg, dark: /icons/stl-dark.svg, width: 48, height: 48, alt: "two triangular facets sharing an edge" }
     title: STL in, STL out
     details: "ASCII or binary, format detected, NaN and Inf rejected with a status; analyze gives the box, volume, centroid, connectivity, shells and bodies."
     link: /manual/tutorial/01-first-surface
     linkText: First surface
-  - icon: 🩹
+  - icon: { light: /icons/repair.svg, dark: /icons/repair-dark.svg, width: 48, height: 48, alt: "a bowl mended along its crack in the seal colour (kintsugi)" }
     title: Repair dirty meshes
     details: "sanitize removes slivers and duplicates, closes gaps and orients the normals outward; fill_holes patches and fairs the holes left."
     link: /manual/tutorial/02-repair
     linkText: Repair
-  - icon: 🛠️
+  - icon: { light: /icons/processing.svg, dark: /icons/processing-dark.svg, width: 48, height: 48, alt: "a square and a circle overlapping, as in a boolean" }
     title: Geometry processing
     details: "Exact booleans and self-intersections, decimation, isotropic remeshing, smoothing, alpha wrapping, marching cubes, segmentation."
     link: /manual/tutorial/12-geometry
     linkText: Processing and analysis
-  - icon: 🔬
+  - icon: { light: /icons/analysis.svg, dark: /icons/analysis-dark.svg, width: 48, height: 48, alt: "a pebble measured by a dimension line" }
     title: Geometry analysis
     details: "Mass properties, certified deviation and Hausdorff distance, feature edges, local thickness and gaps, curvature, named patches."
     link: /manual/tutorial/12-geometry
     linkText: Processing and analysis
-  - icon: 📏
+  - icon: { light: /icons/distance.svg, dark: /icons/distance-dark.svg, width: 48, height: 48, alt: "a query point as a ring, the perpendicular stroke to its closest point on a curved wall, and the right-angle mark at the foot" }
     title: Signed distance
     details: "Closest facet on a SAH BVH, bit-exact against brute force; four sign algorithms, the fast winding number for surfaces with holes."
     link: /manual/tutorial/04-distance
     linkText: Distance
-  - icon: 🌊
+  - icon: { light: /icons/level-sets.svg, dark: /icons/level-sets-dark.svg, width: 48, height: 48, alt: "a stone with the raked gravel round it in level lines (karesansui)" }
     title: Level sets
     details: "A signed-distance field on a stretched grid: exact narrow band, flood-fill signs, fast sweeping, an eikonal diagnostic."
     link: /manual/tutorial/06-distance-field
     linkText: Distance fields
-  - icon: 〰️
+  - icon: { light: /icons/curves.svg, dark: /icons/curves-dark.svg, width: 48, height: 48, alt: "one closed brush loop, an aerofoil section" }
     title: 2-D curves
     details: "Closed and open polylines for quadtree solvers, with the same queries as the surfaces; sections of any STL by a grid plane."
     link: /manual/tutorial/07-curves
     linkText: Curves
-  - icon: 🎯
+  - icon: { light: /icons/ib.svg, dark: /icons/ib-dark.svg, width: 48, height: 48, alt: "layered strata cut by the boundary of a body, one point marked on it" }
     title: Immersed-boundary queries
     details: "Per point: closest point, feature, pseudo-normal and body; image points and probes; wall distance with cutoff; wall curvature."
     link: /manual/tutorial/08-ib-queries
     linkText: IB queries
-  - icon: 🧭
+  - icon: { light: /icons/amr.svg, dark: /icons/amr-dark.svg, width: 48, height: 48, alt: "a square refined twice toward a brush stroke" }
     title: AMR tagging
     details: "Blocks and cells classified as cut, near, inside or outside from the tree alone; signed tag bands on a block."
     link: /manual/tutorial/09-amr-tagging
     linkText: AMR tagging
-  - icon: 🧱
+  - icon: { light: /icons/cut-cells.svg, dark: /icons/cut-cells-dark.svg, width: 48, height: 48, alt: "a grid cell cut by a curve, its solid side hatched" }
     title: Exact cut cells
     details: "Grid-line crossings decided by exact predicates; 2-D and 3-D fluid fractions, apertures and fluid pieces with their own volumes."
     link: /manual/tutorial/10-cut-cells
     linkText: Cut cells
-  - icon: 🧩
+  - icon: { light: /icons/cut-solver.svg, dark: /icons/cut-solver-dark.svg, width: 48, height: 48, alt: "a 2 by 2 patch of cells cut by a wall, the small sliver left in the corner cell linked by an arrow across the shared face into its larger neighbour" }
     title: Cut-cell solver support
     details: "Links between pieces, state- and flux-redistribution neighbourhoods, merge targets, moments, quadrature rules and coarse levels."
     link: /guide/advanced/cut-solver
     linkText: Solver support
-  - icon: 🔄
+  - icon: { light: /icons/moving.svg, dark: /icons/moving-dark.svg, width: 48, height: 48, alt: "a round body with the trail of its motion" }
     title: Moving bodies
     details: "Body-frame queries without a rebuild, an O(N) tree refit, and the swept geometry of a time step: exact swept volumes."
     link: /manual/tutorial/11-moving-bodies
     linkText: Moving bodies
-  - icon: 💥
+  - icon: { light: /icons/collision.svg, dark: /icons/collision-dark.svg, width: 48, height: 48, alt: "two round bodies just touching, the contact marked" }
     title: Collision detection
     details: "Body-body distance with the closest pair; the time of first contact by conservative advancement, with no tunnelling; the first impact among many bodies."
     link: /manual/tutorial/14-contact
     linkText: Contact
-  - icon: 🕸️
+  - icon: { light: /icons/blocks.svg, dark: /icons/blocks-dark.svg, width: 48, height: 48, alt: "a bent grid of a few curvilinear lines" }
     title: Structured blocks
     details: "Curvilinear blocks: topology detection, certified cell validity, point location by tree or stencil walk, interpolation stencils, quality."
     link: /manual/tutorial/13-blocks-overset
     linkText: Blocks and overset
-  - icon: 🔗
+  - icon: { light: /icons/overset.svg, dark: /icons/overset-dark.svg, width: 48, height: 48, alt: "two square grids overlapping, one turned" }
     title: Overset assembly
     details: "Holes by winding number, hole map or X-rays; donor candidates with their quality; explicit or implicit classification, orphans by cause, connectivity."
     link: /manual/tutorial/13-blocks-overset
     linkText: Blocks and overset
-  - icon: 📐
+  - icon: { light: /icons/body-fitted.svg, dark: /icons/body-fitted-dark.svg, width: 48, height: 48, alt: "an O-grid fitted to an elongated solid body: offset rings and lines along its normals" }
     title: Body-fitted grids
     details: "Projection constrained to patches, feature curves and corners; 2-D hyperbolic extrusion; a wall-spacing and quality report with y1+."
     link: /manual/tutorial/15-body-fitted
     linkText: Body-fitted grids
-  - icon: 🚀
+  - icon: { light: /icons/gpu.svg, dark: /icons/gpu-dark.svg, width: 48, height: 48, alt: "a chip with its pins, the die in the seal colour" }
     title: On the GPU, bit for bit
     details: "OpenACC kernels shared with the CPU path: distances, rich queries, tagging and posed queries equal the CPU results bit for bit."
     link: /manual/tutorial/16-gpu
     linkText: GPU
-  - icon: 🆓
+  - icon: { light: /icons/portable.svg, dark: /icons/portable-dark.svg, width: 48, height: 48, alt: "a ginkgo leaf, its blade fanned brush presses with a notch" }
     title: Free and portable
     details: "Pure Fortran 2003+, no C; gfortran, ifx, nvfortran; FoBiS or fpm; GPLv3, BSD or MIT."
     link: /guide/installation
