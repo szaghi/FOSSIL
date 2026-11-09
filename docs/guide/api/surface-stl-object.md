@@ -1812,7 +1812,7 @@ and full pipeline on the [§1.1 feature page](/guide/advanced/booleans).
 | -------- | ------------ | --------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `other`  | `in`         | `class(surface_stl_object)` | (required) The right-hand-side solid. Unchanged on return.                                                  |
 | `op`     | `in`         | `integer(I4P)`              | (required) `BOOL_UNION`, `BOOL_INTERSECT`, `BOOL_DIFFERENCE`, or `BOOL_SYMDIFF`.                            |
-| `status` | `out`, opt.  | `integer(I4P)`              | `BOOL_STATUS_OK`, `BOOL_STATUS_CDT_FAILED`, `BOOL_STATUS_NOT_IMPLEMENTED`, or `BOOL_STATUS_EMPTY_INPUT`.    |
+| `status` | `out`, opt.  | `integer(I4P)`              | `BOOL_STATUS_OK`, `BOOL_STATUS_CDT_FAILED`, `BOOL_STATUS_NOT_IMPLEMENTED`, `BOOL_STATUS_EMPTY_INPUT`, or `BOOL_STATUS_INVALID_INPUT` (a zero-area facet meets the other body: `sanitize` first). |
 | `weld`   | `in`, opt.   | `real(R8P)`                 | Opt-in vertex weld distance (default off): vertices of `other` within it of a vertex of `self` take its coordinates bit for bit (unique nearest, never two onto one). |
 
 Pre-conditions for clean output: both inputs must be watertight
@@ -1935,7 +1935,7 @@ self-intersection free and keeps the input's patches.
 
 | Argument | Intent       | Type           | Notes                                                              |
 | -------- | ------------ | -------------- | ------------------------------------------------------------------ |
-| `status` | `out`, opt.  | `integer(I4P)` | `BOOL_STATUS_OK`, `BOOL_STATUS_CDT_FAILED`, `BOOL_STATUS_NOT_CLOSED` or `BOOL_STATUS_EMPTY_INPUT`. |
+| `status` | `out`, opt.  | `integer(I4P)` | `BOOL_STATUS_OK`, `BOOL_STATUS_CDT_FAILED`, `BOOL_STATUS_NOT_CLOSED`, `BOOL_STATUS_INVALID_INPUT` or `BOOL_STATUS_EMPTY_INPUT`. |
 
 Mutates `self` in place on `BOOL_STATUS_OK` only; a surface with no
 self-intersection is returned unchanged.
@@ -1965,6 +1965,11 @@ endprogram ex_resolve_self_intersections_api
   `BOOL_STATUS_NOT_CLOSED` (it is open).
 - `BOOL_STATUS_NOT_CLOSED`: the selection has boundary edges, because
   the input is not closed (its winding number is not an integer).
+- `BOOL_STATUS_INVALID_INPUT`: a zero-area facet meets a
+  self-intersecting facet, or a cut lies on it (issue #99): `sanitize`
+  first. A zero-area facet away from the cuts passes through; a sliver
+  closing a T-junction is dropped when the arrangement splits the facet
+  across it at its middle vertex (the split closes the T-junction).
 - Interior cavities formed by self-intersections are **dropped**, not
   re-meshed, and so are inverted pockets (winding number −1). If the
   input had meaningful interior structure, it's gone after resolve.

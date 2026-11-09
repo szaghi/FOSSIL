@@ -36,12 +36,17 @@ module fossil_boolean
 !< sub-triangle. Shared (coplanar) sub-triangles are decided exactly (`coplanar_partner`). Faces coplanar by
 !< construction but off by round-off are no longer merged: they cross exactly, and the result keeps the slivers
 !< (watertight, the right volume; its rounding to doubles can fold a sliver by an ulp).
+!<
+!< Exactly degenerate (zero-area) facets (issues #98, #99): one that does not meet the other surface (the
+!< self-intersecting facets, for the self-union) passes through uncut and is selected with its patch; one that touches
+!< or crosses it makes the operation return `BOOL_STATUS_INVALID_INPUT` with no result (a zero-area facet cannot be
+!< cut; `sanitize` the inputs first, `remove_degenerate_facets` drops it).
 
 use fossil_arrangement,    only : arrangement_t, arrangement_initialize, &
                                   arrangement_collect_intersections, &
                                   arrangement_retriangulate, coplanar_partner, cut_sources, &
                                   arrangement_collect_pairs, coplanar_cover, &
-                                  ARR_STATUS_OK, ARR_STATUS_CDT_FAILED
+                                  ARR_STATUS_OK, ARR_STATUS_CDT_FAILED, ARR_STATUS_DEGENERATE
 use fossil_aabb_tree_object, only : aabb_tree_object, wn_node_t
 use fossil_facet_object,   only : facet_object
 use fossil_implicit_points, only : ip_orient3d
@@ -54,7 +59,7 @@ implicit none
 private
 public :: BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF
 public :: BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, BOOL_STATUS_EMPTY_INPUT
-public :: BOOL_STATUS_NOT_CLOSED
+public :: BOOL_STATUS_NOT_CLOSED, BOOL_STATUS_INVALID_INPUT
 public :: boolean_compute
 public :: self_union_compute
 public :: weld_vertices
@@ -71,6 +76,9 @@ integer(I4P), parameter :: BOOL_STATUS_CDT_FAILED      = 1_I4P  !< Retriangulati
 integer(I4P), parameter :: BOOL_STATUS_NOT_IMPLEMENTED = 2_I4P  !< Op code is none of BOOL_UNION/INTERSECT/DIFFERENCE/SYMDIFF.
 integer(I4P), parameter :: BOOL_STATUS_EMPTY_INPUT     = 3_I4P  !< One of the input surfaces has zero facets.
 integer(I4P), parameter :: BOOL_STATUS_NOT_CLOSED      = 4_I4P  !< The self-union is not closed (issue #78).
+integer(I4P), parameter :: BOOL_STATUS_INVALID_INPUT   = 5_I4P  !< A zero-area facet meets the other surface (or, for
+                                                                !< the self-union, a self-intersecting facet): sanitize
+                                                                !< the inputs first (issue #99).
 
 ! Three-state classification thresholds for the WN test:
 !   wn > 0.5 + WN_BOUNDARY_TOL  → strictly inside
@@ -123,11 +131,17 @@ contains
    call arrangement_initialize(arr=arr, facet_a=facet_a, tree_a=tree_a, &
                                         facet_b=facet_b, tree_b=tree_b)
    call arrangement_collect_intersections(arr=arr)
+   if (arr%degenerate_contact) then ! a zero-area facet meets the other surface (issue #99)
+      if (present(status)) status = BOOL_STATUS_INVALID_INPUT
+      allocate(kept_facet(0))
+      return
+   endif
    call arrangement_retriangulate(arr=arr, sub_facet=sub_facet, sub_owner=sub_owner, &
                                   sub_source=sub_source, status=arr_status, sub_pid=sub_pid, &
                                   sub_cut=sub_cut)
    if (arr_status /= ARR_STATUS_OK) then
-      if (present(status)) status = BOOL_STATUS_CDT_FAILED
+      if (present(status)) status = merge(BOOL_STATUS_INVALID_INPUT, BOOL_STATUS_CDT_FAILED, &
+                                          arr_status == ARR_STATUS_DEGENERATE)
       allocate(kept_facet(0))
       return
    endif
@@ -289,7 +303,7 @@ contains
    integer(I4P),                    intent(in)            :: pa(:)      !< First facet of each self-intersecting pair.
    integer(I4P),                    intent(in)            :: pb(:)      !< Second facet of each pair.
    type(facet_object), allocatable, intent(out)           :: kept_facet(:) !< The self-union.
-   integer(I4P),                    intent(out), optional :: status     !< BOOL_STATUS_OK or BOOL_STATUS_CDT_FAILED.
+   integer(I4P),                    intent(out), optional :: status     !< BOOL_STATUS_OK, _CDT_FAILED, _INVALID_INPUT.
    integer(I4P), parameter                                :: N_PROBES = 3_I4P
    type(arrangement_t)                                    :: arr
    type(facet_object), allocatable                        :: sub_facet(:), buf(:)
@@ -308,10 +322,16 @@ contains
    endif
    call arrangement_initialize(arr=arr, facet_a=facet, tree_a=tree, facet_b=facet(1:0), tree_b=tree)
    call arrangement_collect_pairs(arr=arr, pa=pa, pb=pb)
+   if (arr%degenerate_contact) then ! a zero-area facet meets a facet it is paired with (issue #99)
+      if (present(status)) status = BOOL_STATUS_INVALID_INPUT
+      allocate(kept_facet(0))
+      return
+   endif
    call arrangement_retriangulate(arr=arr, sub_facet=sub_facet, sub_owner=sub_owner, sub_source=sub_source, &
                                   status=arr_status, sub_pid=sub_pid, sub_cut=sub_cut)
-   if (arr_status /= ARR_STATUS_OK) then
-      if (present(status)) status = BOOL_STATUS_CDT_FAILED
+   if (arr_status /= ARR_STATUS_OK) then ! ARR_STATUS_DEGENERATE: a neighbour's cut point on a zero-area facet
+      if (present(status)) status = merge(BOOL_STATUS_INVALID_INPUT, BOOL_STATUS_CDT_FAILED, &
+                                          arr_status == ARR_STATUS_DEGENERATE)
       allocate(kept_facet(0))
       return
    endif

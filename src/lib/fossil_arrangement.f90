@@ -21,6 +21,13 @@ module fossil_arrangement
 !<    with its cuts as constraints; sub-triangles keep the parent's orientation and carry their registry vertices and
 !<    which of their edges lie on a cut (for the selection by patches in `fossil_boolean`).
 !<
+!< Exactly degenerate facets (zero area, `facet_drop` = 0; issues #98, #99): `pair_cut` needs two non-degenerate
+!< triangles, so a pair with a degenerate facet is decided by `degenerate_pair_meet` (exact) instead. No contact: the
+!< pair is skipped (no cut, no partner) and the facet passes through the arrangement uncut, as in the input. Contact
+!< (touching or crossing): the arrangement is flagged (`degenerate_contact`) and not retriangulated
+!< (ARR_STATUS_DEGENERATE): a zero-area facet cannot be cut, and its neighbours' cuts along it would leave a
+!< T-junction. The boolean reports it as BOOL_STATUS_INVALID_INPUT (`sanitize` the inputs first).
+!<
 !< Classification, selection and stitching are in `fossil_boolean`.
 
 use fossil_aabb_node_object, only : aabb_node_object
@@ -30,7 +37,8 @@ use fossil_facet_object,     only : facet_object
 use fossil_implicit_points,  only : implicit_point_t, ip_explicit, ip_approx, ip_orient2d, ip_lex_compare, &
                                     ip_identity_compare, ip_rank, ip_compare, ip_tpi
 use fossil_list_id_object,   only : list_id_object
-use fossil_tritri_exact,     only : pair_cut, coplanar_cut, facet_drop, PAIR_CROSSING, PAIR_COPLANAR
+use fossil_tritri_exact,     only : pair_cut, coplanar_cut, facet_drop, degenerate_pair_meet, PAIR_CROSSING, &
+                                    PAIR_COPLANAR
 use fossil_utils,            only : EPS
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
@@ -48,13 +56,14 @@ public :: coplanar_cover
 public :: cut_sources
 public :: project_to_plane
 public :: lift_from_plane
-public :: ARR_STATUS_OK, ARR_STATUS_CDT_FAILED
+public :: ARR_STATUS_OK, ARR_STATUS_CDT_FAILED, ARR_STATUS_DEGENERATE
 
 integer(I4P), parameter :: MAX_CHILDREN = 8_I4P  !< Buffer size for `enumerate_children` (octree fan-out).
 
 ! Status codes for arrangement_retriangulate.
 integer(I4P), parameter :: ARR_STATUS_OK         = 0_I4P  !< Retriangulation completed successfully.
 integer(I4P), parameter :: ARR_STATUS_CDT_FAILED = 1_I4P  !< CDT could not recover one or more constraint segments.
+integer(I4P), parameter :: ARR_STATUS_DEGENERATE = 2_I4P  !< A zero-area facet meets a facet it is paired with (#99).
 
 type :: cut_list_t
    !< Per-facet cuts (issue #65): segments between implicit points of the arrangement's registry (`arrangement_t%pts`),
@@ -91,6 +100,8 @@ type :: arrangement_t
    type(implicit_point_t), allocatable :: pts(:)        !< Registry of the cut points (implicit, issue #65).
    real(R8P),          allocatable    :: xyz(:, :)      !< Rounded coordinates of the registry points (3, n_pts).
    integer(I4P),       allocatable    :: corner(:, :)   !< Registry indices of the vertices of every facet (3, n_a + n_b).
+   integer(I4P),       allocatable    :: drop(:)        !< `facet_drop` of every facet, 0 if exactly degenerate (#99).
+   logical                            :: degenerate_contact = .false. !< A degenerate facet meets its pair (#99).
 endtype arrangement_t
 
 contains
@@ -122,6 +133,7 @@ contains
    allocate(arr%facet(n_total))
    allocate(arr%owner(n_total))
    allocate(arr%cut(n_total))
+   allocate(arr%drop(n_total))
 
    do i = 1, arr%n_a
       arr%facet(i) = facet_a(i)
@@ -130,6 +142,9 @@ contains
    do i = 1, arr%n_b
       arr%facet(arr%n_a + i) = facet_b(i)
       arr%owner(arr%n_a + i) = 2_I4P
+   enddo
+   do i = 1, n_total
+      arr%drop(i) = facet_drop(arr%facet(i)%vertex)
    enddo
 
    arr%tree_a => tree_a
@@ -823,6 +838,8 @@ contains
    !< Intersect facets gi (of A) and gj (of B) exactly (`pair_cut`, issue #65) and append a crossing segment to both
    !< facets' cut lists, its endpoints registered as implicit points. Touching pairs (one common point) add no cut. An
    !< exactly coplanar pair cuts each facet along the portions of the other facet's edges inside it (`coplanar_cut`).
+   !< A pair with an exactly degenerate facet (`arr%drop` = 0, issue #99) is never cut: no contact
+   !< (`degenerate_pair_meet`, exact) skips it, contact flags the arrangement (`degenerate_contact`).
    type(arrangement_t), intent(inout) :: arr    !< Arrangement.
    integer(I4P),        intent(in)    :: gi, gj !< Global facet indices (A, B).
    integer(I4P)                       :: kind   !< PAIR_* code.
@@ -830,6 +847,11 @@ contains
    integer(I4P)                       :: e, ip, iq
    logical                            :: found  !< Coplanar portion found.
 
+   if (arr%drop(gi) == 0_I4P .or. arr%drop(gj) == 0_I4P) then
+      if (degenerate_pair_meet(plane_of(arr, gi), plane_of(arr, gj), drop_a=arr%drop(gi), drop_b=arr%drop(gj))) &
+         arr%degenerate_contact = .true.
+      return
+   endif
    call pair_cut(ta=arr%facet(gi)%vertex, tb=arr%facet(gj)%vertex, kind=kind, p=p, q=q)
    if (kind == PAIR_CROSSING) then
       call register_point(arr, p, ip) ; call register_point(arr, q, iq)
@@ -954,8 +976,13 @@ contains
    !< are its cut segments (split at the points on them by the triangulator). The projection drops an axis where the
    !< facet is exactly non-degenerate (`facet_drop`). A sub-triangle has the orientation of its parent (the
    !< triangulator keeps that of points 1, 2, 3 exactly); its vertices are the registry points rounded once
-   !< (`arr%xyz`), the same bits in every facet that shares them. A triangulation failure (a degenerate facet with cuts,
-   !< crossing constraints from a self-intersecting input) returns ARR_STATUS_CDT_FAILED.
+   !< (`arr%xyz`), the same bits in every facet that shares them. A triangulation failure (crossing constraints from a
+   !< self-intersecting input) returns ARR_STATUS_CDT_FAILED. Exactly degenerate facets (issue #99) are never cut: an
+   !< arrangement with `degenerate_contact`, or a degenerate facet with a cut (a cut point of a neighbour inside one of
+   !< its edges, propagated as an isolated point), returns ARR_STATUS_DEGENERATE and no sub-triangles; a degenerate
+   !< facet without cuts passes through. A sliver closing a T-junction whose only isolated point is its own middle
+   !< vertex (the facet across the T-junction is split there, by the cuts of a self-arrangement along the T-junction's
+   !< collinear edges) is dropped: the split closes the T-junction, the sliver would be a fin on a non-manifold edge.
    type(arrangement_t),             intent(in)            :: arr
    type(facet_object), allocatable, intent(out)           :: sub_facet(:)
    integer(I4P),       allocatable, intent(out)           :: sub_owner(:)
@@ -973,11 +1000,29 @@ contains
    integer(I4P)                                           :: cap, used
 
    if (present(status)) status = ARR_STATUS_OK
+   if (arr%degenerate_contact) then
+      if (present(status)) status = ARR_STATUS_DEGENERATE
+      allocate(sub_facet(0), sub_owner(0), sub_source(0))
+      if (present(sub_pid)) allocate(sub_pid(3, 0))
+      if (present(sub_cut)) allocate(sub_cut(3, 0))
+      return
+   endif
    n_total = arr%n_a + arr%n_b
    cap = max(64_I4P, n_total)
    allocate(buf_facet(cap), buf_owner(cap), buf_source(cap), buf_pid(3, cap), buf_cut(3, cap))
    used = 0_I4P
    do gi = 1, n_total
+      if (arr%drop(gi) == 0_I4P) then ! exactly degenerate (issue #99): never cut
+         if (.not. uncut_degenerate(arr, gi)) then
+            if (present(status)) status = ARR_STATUS_DEGENERATE
+            return
+         endif
+         if (arr%cut(gi)%n_steiner > 0_I4P) cycle ! the facet across its T-junction split at its middle vertex: dropped
+         call grow_cut
+         call push(buf_facet, buf_owner, buf_source, used, cap, arr%facet(gi), arr%owner(gi), gi, buf_pid)
+         buf_pid(:, used) = arr%corner(:, gi) ; buf_cut(:, used) = .false.
+         cycle
+      endif
       if (arr%cut(gi)%n_segments == 0_I4P .and. arr%cut(gi)%n_steiner == 0_I4P .and. &
           arr%cut(gi)%n_coplanar == 0_I4P) then
          call grow_cut
@@ -1007,10 +1052,6 @@ contains
          k = k + 1_I4P ; lsegs(:, k) = [a, b]
       enddo
       drop = facet_drop(arr%facet(gi)%vertex)
-      if (drop == 0_I4P) then
-         if (present(status)) status = ARR_STATUS_CDT_FAILED
-         return
-      endif
       call cdt_facet(pts=lp(1:nl), drop=drop, segs=lsegs(:, 1:k), tris=tris, ntri=ntri, status=st, tcon=tcon)
       if (st /= CDTI_OK) then
          if (present(status)) status = ARR_STATUS_CDT_FAILED
@@ -1062,6 +1103,23 @@ contains
       l = 0_I4P
       endfunction local
    endsubroutine arrangement_retriangulate
+
+   pure function uncut_degenerate(arr, gi) result(yes)
+   !< Facet gi is exactly degenerate and uncut (issue #99): no segments, no partners, and its isolated points are its
+   !< own vertices (the middle vertex of a sliver closing a T-junction, propagated back to it when the facet across
+   !< the T-junction is split there).
+   type(arrangement_t), intent(in) :: arr !< Arrangement.
+   integer(I4P),        intent(in) :: gi  !< Facet.
+   logical                         :: yes !< Degenerate and uncut.
+   integer(I4P)                    :: k
+
+   yes = arr%drop(gi) == 0_I4P .and. arr%cut(gi)%n_segments == 0_I4P .and. arr%cut(gi)%n_coplanar == 0_I4P
+   if (.not. yes) return
+   do k = 1, arr%cut(gi)%n_steiner
+      yes = any(arr%corner(:, gi) == arr%cut(gi)%steiner(k))
+      if (.not. yes) return
+   enddo
+   endfunction uncut_degenerate
 
    subroutine push(buf_facet, buf_owner, buf_source, used, cap, f, owner, source, buf_pid)
    !< Append (f, owner, source) to the parallel-array accumulator, doubling

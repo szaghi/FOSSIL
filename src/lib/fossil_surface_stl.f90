@@ -65,7 +65,7 @@ use fossil_remesh, only : compute_remesh => isotropic_remesh, &
 use fossil_boolean, only : compute_boolean => boolean_compute, compute_self_union => self_union_compute, &
                            BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF, &
                            BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, &
-                           BOOL_STATUS_EMPTY_INPUT, BOOL_STATUS_NOT_CLOSED, weld_vertices
+                           BOOL_STATUS_EMPTY_INPUT, BOOL_STATUS_NOT_CLOSED, BOOL_STATUS_INVALID_INPUT, weld_vertices
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 use penf, only : I4P, I8P, R8P, MaxR8P, str
@@ -83,7 +83,7 @@ public :: STATUS_OK, STATUS_ALLOC_FAIL, STATUS_AMBIGUOUS_ARGS, STATUS_FILE_NOT_F
 public :: STATUS_INVALID_INPUT
 public :: BOOL_UNION, BOOL_INTERSECT, BOOL_DIFFERENCE, BOOL_SYMDIFF
 public :: BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED, BOOL_STATUS_NOT_IMPLEMENTED, BOOL_STATUS_EMPTY_INPUT
-public :: BOOL_STATUS_NOT_CLOSED
+public :: BOOL_STATUS_NOT_CLOSED, BOOL_STATUS_INVALID_INPUT
 
 ! Point-in-polyhedron algorithm selector for `is_point_inside`, `compute_distance`,
 ! and `distance` (when `is_signed=.true.`):
@@ -3797,6 +3797,14 @@ contains
    !<         convex-flip-greedy recovery (see fossil_dt docstring); on
    !<         degenerate inputs, returns BOOL_STATUS_CDT_FAILED.
    !<
+   !< ## Zero-area facets (issues #98, #99)
+   !<
+   !< An exactly degenerate facet (collinear or coincident vertices) that
+   !< does not meet the other surface passes through uncut, as in the input
+   !< (decided exactly by `degenerate_pair_meet`). One that touches or
+   !< crosses it returns BOOL_STATUS_INVALID_INPUT with `self` unchanged:
+   !< `sanitize` the inputs first (`remove_degenerate_facets` drops it).
+   !<
    !< ## Coplanar faces, shared edges, contacts (issues #33, #65)
    !<
    !< Exact since issue #65, with no tolerance: facet pairs are classified by
@@ -4007,6 +4015,8 @@ contains
    !<     it); cuts of three facets meeting at a point inside a facet are split at their three-plane point (IPK_TPI,
    !<     issue #91). See the Known limitations of the reference page;
    !<   - NOT_CLOSED: the selection is not closed (an input that is not closed has no well-defined winding number);
+   !<   - INVALID_INPUT: an exactly degenerate (zero-area) facet meets a self-intersecting facet, or a cut point of its
+   !<     neighbours lies on it (issue #99): `sanitize` first. A degenerate facet away from the cuts passes through;
    !<   - EMPTY_INPUT: no facets.
    class(surface_stl_object),     intent(inout)        :: self   !< Surface; replaced by its self-union on success.
    integer(I4P),                  intent(out), optional :: status !< BOOL_STATUS_*.

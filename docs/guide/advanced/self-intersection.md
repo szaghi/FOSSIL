@@ -175,6 +175,12 @@ and leaves it unchanged otherwise:
   (see [Known limitations](#known-limitations));
 - `BOOL_STATUS_NOT_CLOSED` — the selection has boundary edges: the
   input is not closed, so its winding number is not an integer;
+- `BOOL_STATUS_INVALID_INPUT` — a zero-area facet meets a
+  self-intersecting facet or lies on a cut (issue #99): run `sanitize`
+  first. A zero-area facet away from the cuts passes through, as in the
+  boolean; a sliver closing a T-junction is dropped when the arrangement
+  splits the facet across it at its middle vertex (the facets on either
+  side of the T-junction are reported, and cut, along the split edge);
 - `BOOL_STATUS_EMPTY_INPUT` — no facets.
 
 ## Example

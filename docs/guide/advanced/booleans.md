@@ -87,10 +87,12 @@ call surface%boolean(other, op, status, weld)
   - `BOOL_DIFFERENCE` — inside `self` (A) but not inside `other` (B)
   - `BOOL_SYMDIFF` — inside exactly one of `self`, `other`
 - **`status`** ∈ `{BOOL_STATUS_OK, BOOL_STATUS_CDT_FAILED,
-  BOOL_STATUS_NOT_IMPLEMENTED, BOOL_STATUS_EMPTY_INPUT}`. With the exact
-  triangulation, `BOOL_STATUS_CDT_FAILED` means an input the arrangement
-  cannot represent: cuts that cross inside a facet (a self-intersecting
-  input) or a degenerate facet with cuts. No validation case returns it.
+  BOOL_STATUS_NOT_IMPLEMENTED, BOOL_STATUS_EMPTY_INPUT,
+  BOOL_STATUS_INVALID_INPUT}`. With the exact triangulation,
+  `BOOL_STATUS_CDT_FAILED` means an input the arrangement cannot
+  represent: cuts that cross inside a facet (a self-intersecting input).
+  No validation case returns it. `BOOL_STATUS_INVALID_INPUT`: a
+  zero-area facet meets the other body (see below).
 - **`weld`** (opt-in, default off): before the arrangement, every vertex
   of B within `weld` of a vertex of A takes that vertex's coordinates bit
   for bit, when it is the unique nearest, no other vertex of B goes to it,
@@ -109,6 +111,17 @@ runtime check — set them up yourself):
 - Neither input intersects itself. Coplanar faces, shared edges and
   touching contacts are handled; see [Known limitations](#known-limitations)
   for the exactness statement.
+
+**Zero-area facets** (issues #98, #99). A facet with exactly collinear or
+coincident vertices has no plane, so the arrangement decides its pairs
+with an exact segment / point test (`degenerate_pair_meet`) instead of
+the triangle-triangle classification. A zero-area facet that does not
+meet the other body passes through uncut, as in the input (the sliver
+that closes a T-junction of a split edge, a common exporter artefact,
+stays in the result with its patch). One that touches or crosses the
+other body cannot be cut: the boolean returns `BOOL_STATUS_INVALID_INPUT`
+and leaves `self` unchanged. Run `sanitize` (its
+`remove_degenerate_facets` drops such facets) on the inputs first.
 
 ## Example
 
@@ -441,9 +454,10 @@ gates its case, the sphere translated by 1e-6.
   a facet cannot fail on cuts that meet only at their ends. Two cuts by
   transversal facets that cross inside a facet (a self-intersecting input)
   meet at a three-plane point, inserted since issue #91. It still fails on
-  a degenerate facet with cuts, or on a cut along the edge of a coplanar
-  facet crossed by another cut inside the facet (the arrangement constructs
-  no point there). None in the validation.
+  a cut along the edge of a coplanar facet crossed by another cut inside
+  the facet (the arrangement constructs no point there). None in the
+  validation. A zero-area facet with cuts is `BOOL_STATUS_INVALID_INPUT`
+  since issue #99.
 
 ## See also
 
