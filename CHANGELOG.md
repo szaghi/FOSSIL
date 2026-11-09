@@ -4,6 +4,31 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.0.1] — 2026-11-09
+### Documentation
+- **brand**: The ammonite in the Sumi hand
+
+- **brand**: The feature cards in Sumi marks
+
+- CLAUDE.md notes and the wp1 baseline of #94
+
+- CLAUDE.md notes for the fixes of #95 and #96
+
+
+### Fixed
+- **body**: Exact contact for degenerate facets in tri_tri_distance
+
+- **cut**: Keep the moments of a root that loses a union
+
+
+### Performance
+- **swept**: Slice the posed surface instead of moving a copy per node
+
+- **cut**: Clear only the scratch columns a cut cell uses
+
+- **body**: Pose each facet once per call and skip exact work on far pairs
+
+
 ## [3.0.0] — 2026-11-09
 ### Added
 - **selfint**: Exact narrow phase for facets with no shared vertex
