@@ -58,6 +58,7 @@ contains
    endfunction mono_exponents
 
    pure subroutine segment_green_moments(p0, q0, e, sc, mom)
+   !$acc routine seq
    !< Add the Green integrals of the straight path p0 -> q0 (scaled cell coordinates (X, Y)) to the 2-D moments:
    !< mom(k) += sc int X^(a+1) / (a+1) Y^b dY, sc = h_x h_y (the cell area), exact (3-point Gauss, degree <= 5). Summed
    !< counter-clockwise around a region it gives int X^a Y^b dx dy.
@@ -192,6 +193,7 @@ contains
    endsubroutine tensor_rule
 
    pure function cell_moments(e, vc) result(m)
+   !$acc routine seq
    !< Moments of a whole cell: vc prod_i int_{-1/2}^{1/2} X^a_i dX (zero for an odd exponent, 1 / ((a + 1) 2^a) else).
    integer(I4P), intent(in) :: e(:,:) !< Exponents [d, n].
    real(R8P),    intent(in) :: vc     !< Cell volume (area).

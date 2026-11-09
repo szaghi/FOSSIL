@@ -91,31 +91,9 @@ type :: piece_t
    integer(I4P) :: ta = 0_I4P, tb = 0_I4P !< End tags: crossing id (> 0) or -vertex (< 0).
 endtype piece_t
 
-type :: ctx_t
-   !< Working data of one block, shared by the cell routines.
-   integer(I4P)               :: nx = 0_I4P, ny = 0_I4P !< Cells.
-   real(R8P),     allocatable :: x(:), y(:)       !< Edges.
-   logical,       allocatable :: node_in(:,:)     !< Node inside flags.
-   type(xing_t),  allocatable :: xs(:)            !< Crossings.
-   type(piece_t), allocatable :: ps(:)            !< Pieces.
-   integer(I4P),  allocatable :: xstart(:), xord(:), pstart(:), pord(:) !< Indexes.
-   integer(I4P)               :: npb = 0_I4P      !< Pieces in the buffers.
-   real(R8P),     allocatable :: pa(:), pcx(:), pcy(:), pwl(:), pwx(:), pwy(:) !< Piece buffers.
-   integer(I4P),  allocatable :: pci(:), pcj(:)   !< Piece cells.
-   real(R8P),     allocatable :: pap(:,:)         !< Piece apertures [4, capacity].
-   integer(I4P)               :: niv = 0_I4P      !< Piece intervals in the buffers.
-   logical                    :: with_iv = .true. !< Record them.
-   integer(I4P)               :: nm = 0_I4P       !< Moments per piece (0: none).
-   integer(I4P),  allocatable :: me(:,:)          !< Their exponents [2, nm].
-   real(R8P),     allocatable :: pmom(:,:), pwm(:,:) !< Piece moments, wall moments [nm, capacity].
-   logical                    :: with_bnd = .false. !< Record the oriented boundaries of the pieces.
-   integer(I4P)               :: nbd = 0_I4P      !< Boundary segments in the buffers.
-   real(R8P),     allocatable :: bd(:,:)          !< Segments [4, capacity].
-   logical,       allocatable :: bdw(:)           !< Wall flags.
-   integer(I4P),  allocatable :: bdp(:)           !< Pieces.
-   integer(I4P),  allocatable :: ivp(:), ive(:)   !< Interval piece, edge.
-   real(R8P),     allocatable :: ivl(:), ivh(:)   !< Interval range.
-endtype ctx_t
+integer(I4P), parameter :: NHDR = 7_I4P !< Header of a cut cell's integer workspace (issue #100): status (0 nothing to
+                                        !< write, 1 pieces, 2 the whole cell fluid), ns, nh, nsb, chains and loops, crossings,
+                                        !< wall pieces.
 
 contains
    subroutine compute_cut_cells_2d(u, v, next, x, y, cc, status, with_iv, order, with_bnd, with_quad)
@@ -123,6 +101,18 @@ contains
    !<
    !< Segment i runs from vertex i to vertex next(i) (next(i) = 0: no segment). `status` = 0, or 1 on
    !< bad edges.
+   !<
+   !< Per-cell kernels, count then fill (issue #100): the segments are walked through the grid on the host (`walk_all`,
+   !< `index_crossings`, `index_pieces`, as flat arrays); then
+   !< 1. every cell is classified quiet (no wall piece, no crossing, equal corner flags) or cut, and each cut cell gets
+   !<    a workspace slice sized by `cut_cell_2d_sizes` from its crossing and wall-piece counts;
+   !< 2. `cut_cell_2d_count` gives each cut cell its cell measures and the exact numbers of its pieces, fluid edge
+   !<    intervals and boundary segments, keeping its pieces in its workspace;
+   !< 3. a prefix sum over the cells in order gives every cell its first piece, interval and boundary segment;
+   !< 4. `quiet_cell_2d_kernel` and `cut_cell_2d_fill` write each cell's pieces into its slices of the outputs.
+   !< The kernels take plain arrays and scalars only (the `!$acc routine seq` form of #20), so the same code can run per
+   !< cell on the device; the outputs are those of the cell-by-cell loop with growing buffers that they replace, bit for
+   !< bit and in the same order.
    real(R8P),            intent(in)  :: u(:), v(:) !< Vertices.
    integer(I4P),         intent(in)  :: next(:)    !< Next vertex (0: none).
    real(R8P),            intent(in)  :: x(:), y(:) !< Cell edges (strictly increasing).
@@ -132,8 +122,28 @@ contains
    integer(I4P),         intent(in)  :: order      !< Order of the moments (0: none; issue #70).
    logical,              intent(in)  :: with_bnd   !< Record the oriented boundaries of the pieces (issue #70).
    logical,              intent(in)  :: with_quad  !< Quadrature rules of the pieces (issue #70; implies with_bnd).
-   type(ctx_t)  :: cx                  !< Working data.
-   integer(I4P) :: nx, ny, nxs, nps, ne, ncell, c, npb !< Work.
+   logical,       allocatable :: node_in(:,:)            !< Node inside flags.
+   type(xing_t),  allocatable :: xs(:)                   !< Crossings.
+   type(piece_t), allocatable :: ps(:)                   !< Wall pieces.
+   integer(I4P),  allocatable :: xstart(:), xord(:)      !< Crossings by edge.
+   integer(I4P),  allocatable :: pstart(:), pord(:)      !< Wall pieces by cell.
+   real(R8P),     allocatable :: xp(:,:)                 !< Crossing points [2, nxs].
+   real(R8P),     allocatable :: pab(:,:)                !< Wall piece end points (a, b) [4, nps].
+   integer(I4P),  allocatable :: ptg(:,:)                !< Wall piece end tags (ta, tb) [2, nps].
+   integer(I4P),  allocatable :: me(:,:)                 !< Moment exponents [2, nm].
+   integer(I4P),  allocatable :: ckind(:)                !< Per cell: -1 quiet solid, 0 quiet fluid, k > 0 cut cell k.
+   integer(I4P),  allocatable :: cutc(:)                 !< Cell of cut cell k.
+   integer(I4P),  allocatable :: rwo(:), iwo(:)          !< Workspace slices of the cut cells [ncut + 1].
+   integer(I4P),  allocatable :: cnt(:,:)                !< Intervals, boundary segments of each cut cell [2, ncut].
+   integer(I4P),  allocatable :: ivo(:), bdo(:)          !< Intervals, boundary segments before each cell [ncell].
+   real(R8P),     allocatable :: rw(:)                   !< Real workspace.
+   integer(I4P),  allocatable :: iw(:)                   !< Integer workspace.
+   real(R8P),     allocatable :: pmom(:,:), pwmom(:,:)   !< Piece moments, wall moments [nm, np].
+   integer(I4P),  allocatable :: bstart(:)               !< Boundary segments of the pieces [np + 1].
+   real(R8P),     allocatable :: bseg(:,:)               !< Boundary segments [4, nbd].
+   logical,       allocatable :: bwall(:)                !< Wall flags [nbd].
+   integer(I4P) :: nx, ny, nxs, nps, ne, ncell, c, i, j, k, ncut, nm, np, niv, nbd, nxc, nrw, niw, eid(4) !< Work.
+   logical      :: wbnd                                  !< Record the boundaries.
 
    status = 0_I4P
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
@@ -143,683 +153,1075 @@ contains
    if (any(x(2:) <= x(:nx)) .or. any(y(2:) <= y(:ny))) then
       status = 1_I4P ; return
    endif
-   cc%nx = nx ; cc%ny = ny ; cx%nx = nx ; cx%ny = ny ; cx%x = x ; cx%y = y
+   cc%nx = nx ; cc%ny = ny
    allocate(cc%alpha(nx, ny), cc%aperture(4, nx, ny), cc%centroid(2, nx, ny), cc%wet_length(nx, ny), &
             cc%wet_centroid(2, nx, ny), cc%wet_normal(2, nx, ny), cc%pieces(nx, ny), cc%first_piece(nx, ny), &
             cc%closed(nx, ny))
-   call node_flags(u, v, next, x, y, cx%node_in)
-   cc%node_in = cx%node_in
-   call walk_all(u, v, next, x, y, cx%xs, nxs, cx%ps, nps)
+   call node_flags(u, v, next, x, y, node_in)
+   cc%node_in = node_in
+   call walk_all(u, v, next, x, y, xs, nxs, ps, nps)
    ne = (nx + 1_I4P) * ny + nx * (ny + 1_I4P) ; ncell = nx * ny
-   call index_crossings(cx%xs, nxs, ne, cx%xstart, cx%xord)
-   call index_pieces(cx%ps, nps, ncell, cx%pstart, cx%pord)
-   allocate(cx%pa(16), cx%pcx(16), cx%pcy(16), cx%pwl(16), cx%pwx(16), cx%pwy(16), cx%pci(16), cx%pcj(16), cx%pap(4, 16))
-   allocate(cx%ivp(16), cx%ive(16), cx%ivl(16), cx%ivh(16))
-   cx%npb = 0_I4P ; cx%niv = 0_I4P ; cx%with_iv = with_iv
-   cx%nm = 0_I4P ; if (order > 0_I4P) cx%nm = mono_count(2_I4P, order)
+   call index_crossings(xs, nxs, ne, xstart, xord)
+   call index_pieces(ps, nps, ncell, pstart, pord)
+   allocate(xp(2, nxs), pab(4, nps), ptg(2, nps))
+   do k = 1_I4P, nxs
+      xp(:, k) = xs(k)%p
+   enddo
+   do k = 1_I4P, nps
+      pab(1:2, k) = ps(k)%a ; pab(3:4, k) = ps(k)%b ; ptg(1, k) = ps(k)%ta ; ptg(2, k) = ps(k)%tb
+   enddo
+   nm = 0_I4P ; if (order > 0_I4P) nm = mono_count(2_I4P, order)
    cc%moments_order = max(0_I4P, order)
-   if (order > 0_I4P) cx%me = mono_exponents(2_I4P, order)
-   allocate(cx%pmom(cx%nm, 16), cx%pwm(cx%nm, 16))
-   cx%with_bnd = with_bnd .or. with_quad ; cx%nbd = 0_I4P
-   allocate(cx%bd(4, 16), cx%bdw(16), cx%bdp(16))
-   do c = 1_I4P, ncell ! a cell without wall pieces or crossings takes the short path (issue #70: the large work arrays of
-      if (quiet(cx, c)) then ! one_cell, NaN-initialised in debug builds, made the plane sections of the 3-D cut cells slow)
-         call quiet_cell(c, cx, cc)
+   if (order > 0_I4P) then
+      me = mono_exponents(2_I4P, order)
+   else
+      allocate(me(2, 0))
+   endif
+   wbnd = with_bnd .or. with_quad
+   ! 1. classify the cells; workspace slices of the cut cells
+   allocate(ckind(ncell)) ; ncut = 0_I4P
+   do c = 1_I4P, ncell ! a cell without wall pieces or crossings takes the short path (issue #70)
+      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      call cell_edge_ids(nx, ny, i, j, eid)
+      if (cell_is_quiet(pstart(c + 1) - pstart(c), eid, ne, xstart, node_in(i, j), node_in(i + 1, j), &
+                        node_in(i + 1, j + 1), node_in(i, j + 1))) then
+         ckind(c) = 0_I4P ; if (node_in(i, j)) ckind(c) = -1_I4P
       else
-         call one_cell(c, cx, cc)
+         ncut = ncut + 1_I4P ; ckind(c) = ncut
       endif
    enddo
-   npb = cx%npb ; cc%np = npb
-   allocate(cc%piece_cell(2, npb))
-   cc%piece_cell(1, :) = cx%pci(1:npb) ; cc%piece_cell(2, :) = cx%pcj(1:npb)
-   cc%piece_area = cx%pa(1:npb)
-   allocate(cc%piece_centroid(2, npb), cc%piece_wet_length(npb), cc%piece_wet_normal(2, npb))
-   cc%piece_centroid(1, :) = cx%pcx(1:npb) ; cc%piece_centroid(2, :) = cx%pcy(1:npb)
-   cc%piece_wet_length = cx%pwl(1:npb)
-   cc%piece_wet_normal(1, :) = cx%pwx(1:npb) ; cc%piece_wet_normal(2, :) = cx%pwy(1:npb)
-   cc%piece_aperture = cx%pap(:, 1:npb)
-   if (cx%nm > 0_I4P) then
-      cc%piece_moments = cx%pmom(:, 1:npb) ; cc%piece_wall_moments = cx%pwm(:, 1:npb)
+   allocate(cutc(ncut), rwo(ncut + 1), iwo(ncut + 1), cnt(2, ncut))
+   rwo(1) = 1_I4P ; iwo(1) = 1_I4P
+   do c = 1_I4P, ncell
+      k = ckind(c)
+      if (k <= 0_I4P) cycle
+      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      call cell_edge_ids(nx, ny, i, j, eid)
+      nxc = sum(xstart(eid + 1) - xstart(eid))
+      call cut_cell_2d_sizes(nxc, pstart(c + 1) - pstart(c), nm, nrw, niw)
+      cutc(k) = c ; rwo(k + 1) = rwo(k) + nrw ; iwo(k + 1) = iwo(k) + niw
+   enddo
+   allocate(rw(rwo(ncut + 1) - 1), iw(iwo(ncut + 1) - 1))
+   ! 2. count: the cut cells' measures and output counts
+   do k = 1_I4P, ncut
+      c = cutc(k) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      call cell_edge_ids(nx, ny, i, j, eid)
+      call cut_cell_2d_count(x(i), x(i + 1), y(j), y(j + 1), node_in(i, j), node_in(i + 1, j), node_in(i + 1, j + 1), &
+                             node_in(i, j + 1), eid, ne, nxs, xstart, xord, xp, pstart(c + 1) - pstart(c), pstart(c) - 1_I4P, &
+                             nps, pord, pab, ptg, nm, me, with_iv, wbnd, rwo(k + 1) - rwo(k), rw(rwo(k)), &
+                             iwo(k + 1) - iwo(k), iw(iwo(k)), cc%closed(i, j), cc%alpha(i, j), cc%aperture(1, i, j), &
+                             cc%centroid(1, i, j), cc%wet_length(i, j), cc%wet_centroid(1, i, j), cc%wet_normal(1, i, j), &
+                             cc%pieces(i, j), cnt(1, k), cnt(2, k))
+   enddo
+   ! 3. prefix sums over the cells in order
+   allocate(ivo(ncell), bdo(ncell)) ; np = 0_I4P ; niv = 0_I4P ; nbd = 0_I4P
+   do c = 1_I4P, ncell
+      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      cc%first_piece(i, j) = np + 1_I4P ; ivo(c) = niv ; bdo(c) = nbd
+      k = ckind(c)
+      if (k == 0_I4P) then
+         np = np + 1_I4P
+         if (with_iv) niv = niv + 4_I4P
+         if (wbnd) nbd = nbd + 4_I4P
+      elseif (k > 0_I4P) then
+         np = np + cc%pieces(i, j) ; niv = niv + cnt(1, k) ; nbd = nbd + cnt(2, k)
+      endif
+   enddo
+   ! 4. fill
+   cc%np = np
+   allocate(cc%piece_cell(2, np), cc%piece_area(np), cc%piece_centroid(2, np), cc%piece_wet_length(np), &
+            cc%piece_wet_normal(2, np), cc%piece_aperture(4, np), pmom(nm, np), pwmom(nm, np), cc%piece_iv_start(np + 1), &
+            cc%piece_iv_edge(niv), cc%piece_iv_lo(niv), cc%piece_iv_hi(niv), bstart(np + 1), bseg(4, nbd), bwall(nbd))
+   do c = 1_I4P, ncell
+      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      call cell_edge_ids(nx, ny, i, j, eid)
+      k = ckind(c)
+      if (k <= 0_I4P) then
+         call quiet_cell_2d_kernel(x(i), x(i + 1), y(j), y(j + 1), i, j, k < 0_I4P, eid, nm, me, with_iv, wbnd, &
+                                   cc%closed(i, j), cc%alpha(i, j), cc%aperture(1, i, j), cc%centroid(1, i, j), &
+                                   cc%wet_length(i, j), cc%wet_centroid(1, i, j), cc%wet_normal(1, i, j), cc%pieces(i, j), &
+                                   cc%first_piece(i, j) - 1_I4P, ivo(c), bdo(c), np, cc%piece_cell, cc%piece_area, &
+                                   cc%piece_centroid, cc%piece_wet_length, cc%piece_wet_normal, cc%piece_aperture, pmom, &
+                                   pwmom, cc%piece_iv_start, niv, cc%piece_iv_edge, cc%piece_iv_lo, cc%piece_iv_hi, bstart, &
+                                   nbd, bseg, bwall)
+      else
+         call cut_cell_2d_fill(x(i), x(i + 1), y(j), y(j + 1), i, j, eid, nm, me, with_iv, wbnd, rwo(k + 1) - rwo(k), &
+                               rw(rwo(k)), iwo(k + 1) - iwo(k), iw(iwo(k)), cc%first_piece(i, j) - 1_I4P, ivo(c), bdo(c), &
+                               np, cc%piece_cell, cc%piece_area, cc%piece_centroid, cc%piece_wet_length, &
+                               cc%piece_wet_normal, cc%piece_aperture, pmom, pwmom, cc%piece_iv_start, niv, &
+                               cc%piece_iv_edge, cc%piece_iv_lo, cc%piece_iv_hi, bstart, nbd, bseg, bwall)
+      endif
+   enddo
+   cc%piece_iv_start(np + 1) = niv + 1_I4P ; bstart(np + 1) = nbd + 1_I4P
+   if (nm > 0_I4P) then
+      call move_alloc(pmom, cc%piece_moments) ; call move_alloc(pwmom, cc%piece_wall_moments)
    endif
-   if (cx%with_bnd) call boundaries_out(cx, cc)
+   if (wbnd) then
+      call move_alloc(bstart, cc%piece_seg_start) ; call move_alloc(bseg, cc%piece_seg) ; call move_alloc(bwall, cc%piece_seg_wall)
+   endif
    if (with_quad) call quadrature_out(cc, x, y)
-   ! intervals per piece (CSR; appended piece by piece, so already grouped)
-   allocate(cc%piece_iv_start(npb + 1)) ; cc%piece_iv_start = 0_I4P
-   do c = 1_I4P, cx%niv
-      cc%piece_iv_start(cx%ivp(c) + 1) = cc%piece_iv_start(cx%ivp(c) + 1) + 1_I4P
-   enddo
-   cc%piece_iv_start(1) = 1_I4P
-   do c = 1_I4P, npb
-      cc%piece_iv_start(c + 1) = cc%piece_iv_start(c + 1) + cc%piece_iv_start(c)
-   enddo
-   cc%piece_iv_edge = cx%ive(1:cx%niv) ; cc%piece_iv_lo = cx%ivl(1:cx%niv) ; cc%piece_iv_hi = cx%ivh(1:cx%niv)
    endsubroutine compute_cut_cells_2d
 
-   subroutine one_cell(cid, cx, cc)
-   !< Measures and pieces of the cell cid.
-   integer(I4P),         intent(in)    :: cid !< Cell id.
-   type(ctx_t),          intent(inout) :: cx  !< Working data.
-   type(cut_cells_2d_t), intent(inout) :: cc  !< Cut cells.
-   integer(I4P), parameter :: MAXS = 512 !< Sub-intervals per cell.
-   integer(I4P), parameter :: ORDER(4) = [4_I4P, 2_I4P, 1_I4P, 3_I4P] !< Edges (counter-clockwise ids) as (-u, +u, -v, +v).
-   integer(I4P) :: i, j, e, k, m, ns, q, r, nb, h, s0 !< Work.
-   real(R8P)    :: sa(2, MAXS), sb(2, MAXS) !< Sub-interval end points (counter-clockwise).
-   logical      :: sfl(MAXS)                !< Sub-interval is fluid.
-   integer(I4P) :: sx(MAXS)                 !< Crossing at the end of sub-interval k (0: corner).
-   integer(I4P) :: sed(MAXS)                !< Edge (1 bottom, 2 right, 3 top, 4 left) of sub-interval k.
-   integer(I4P) :: par(MAXS)                !< Union-find parents.
-   integer(I4P) :: xsub(2, MAXS)            !< For each crossing slot: (crossing id, sub-interval before it).
-   real(R8P)    :: x0, x1, y0, y1, area_c, len(4), flen(4), gs(3) !< Work.
-   logical      :: state, ok                !< Work.
-   integer(I4P) :: nxc                      !< Crossing slots.
-   integer(I4P) :: nsb                      !< Boundary sub-intervals.
-   integer(I4P) :: eid(4)                   !< Edge ids of the cell.
-   real(R8P)    :: acc(7, MAXS)             !< Per root: area, mx, my, wet len, wet mx, wet my, (unused).
-   real(R8P)    :: wn(2, MAXS)              !< Per root: wet normal.
-   logical,      allocatable :: pvis(:)     !< Visited pieces.
-   integer(I4P) :: p0, p1                   !< Work.
-   real(R8P)    :: lg(3), lw(4), lwn(2)     !< Loop accumulators.
-   real(R8P)    :: hole_area(MAXS)          !< Areas of the hole loops.
-   integer(I4P) :: hole_root(MAXS), hole_first(MAXS), hole_n(MAXS) !< Hole pieces.
-   integer(I4P) :: nh, nisl, isl_first(MAXS), isl_n(MAXS), loopp(MAXS), nloopp !< Loops.
-   real(R8P)    :: isl_g(3, MAXS), isl_w(4, MAXS), isl_wn(2, MAXS) !< Island contributions.
-   real(R8P)    :: accm(cx%nm, MAXS), wallm(cx%nm, MAXS) !< Per root: moments, wall moments (issue #70).
-   real(R8P)    :: cgm(cx%nm), cwm(cx%nm)                !< The chain being followed: Green moments, wall moments.
-   real(R8P)    :: isl_gm(cx%nm, MAXS), isl_wm(cx%nm, MAXS) !< Island moments.
-   real(R8P)    :: sm(2), hm(2)                           !< Cell centre and size (scaled coordinates).
-   real(R8P),    allocatable :: cs(:,:)                   !< Chain segments of the cell, reversed (fluid on the left) [4, m].
-   integer(I4P), allocatable :: csl(:)                    !< Their slot (the root they were charged to; 0 pending).
-   integer(I4P) :: ncs, c0s                               !< Count, first segment of the chain being followed.
-   integer(I4P) :: isl_s0(MAXS), isl_s1(MAXS)              !< Island segment ranges.
+   pure subroutine cell_edge_ids(nx, ny, i, j, eid)
+   !< Edge ids of cell (i, j) counter-clockwise: bottom, right, top, left. Vertical edge (l, k) = l + (k - 1) (nx + 1),
+   !< horizontal edge (k, l) = (nx + 1) ny + k + (l - 1) nx.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: nx, ny, i, j !< Cells, cell.
+   integer(I4P), intent(out) :: eid(4)       !< Edge ids.
 
-   i = mod(cid - 1_I4P, cx%nx) + 1_I4P ; j = (cid - 1_I4P) / cx%nx + 1_I4P
-   x0 = cx%x(i) ; x1 = cx%x(i + 1) ; y0 = cx%y(j) ; y1 = cx%y(j + 1)
+   eid(1) = (nx + 1_I4P) * ny + i + (j - 1_I4P) * nx
+   eid(2) = i + 1_I4P + (j - 1_I4P) * (nx + 1_I4P)
+   eid(3) = (nx + 1_I4P) * ny + i + j * nx
+   eid(4) = i + (j - 1_I4P) * (nx + 1_I4P)
+   endsubroutine cell_edge_ids
+
+   pure logical function cell_is_quiet(nb, eid, ne, xstart, f00, f10, f11, f01)
+   !< The cell has no wall piece, no crossing on its edges and four equal corner flags.
+   !$acc routine seq
+   integer(I4P), intent(in) :: nb                 !< Wall pieces in the cell.
+   integer(I4P), intent(in) :: eid(4)             !< Edge ids.
+   integer(I4P), intent(in) :: ne                 !< Edges of the block.
+   integer(I4P), intent(in) :: xstart(ne + 1)     !< Crossings by edge.
+   logical,      intent(in) :: f00, f10, f11, f01 !< Corner flags (i, j), (i+1, j), (i+1, j+1), (i, j+1).
+   integer(I4P)             :: e                  !< Counter.
+
+   cell_is_quiet = nb == 0_I4P
+   if (.not. cell_is_quiet) return
+   do e = 1, 4
+      if (xstart(eid(e) + 1) /= xstart(eid(e))) then
+         cell_is_quiet = .false. ; return
+      endif
+   enddo
+   cell_is_quiet = (f10 .eqv. f00) .and. (f01 .eqv. f00) .and. (f11 .eqv. f00)
+   endfunction cell_is_quiet
+
+   pure subroutine cut_cell_2d_sizes(nxc, nb, nm, nrw, niw)
+   !< Workspace of one cut cell with nxc crossings on its four edges, nb wall pieces and nm moments (issue #100).
+   !<
+   !< With S = 4 + nxc + nb, the most sub-intervals the cell can hold (nxc + 4 on its boundary, then one hole slot per
+   !< closed loop, at most one loop per wall piece):
+   !<    nrw = S (12 + 2 nm) + nb (13 + 2 nm) + 2 nm + 1 reals,  niw = NHDR + 4 S + 2 nxc + 14 nb + 1 integers
+   !< (layout in `cut_cell_2d_layout`; the + 1 keeps every slice start inside the slice when the last parts are empty).
+   !< Every count of the cell is bounded by its part (sub-intervals <= S, crossing slots <= nxc, loops, holes, islands,
+   !< chains, loop pieces <= nb), so the overflow paths of the fixed 512-column arrays (issue #95) cannot occur.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: nxc, nb, nm !< Crossings, wall pieces, moments.
+   integer(I4P), intent(out) :: nrw, niw    !< Reals, integers.
+   integer(I4P)              :: s           !< Sub-interval slots.
+
+   s = 4_I4P + nxc + nb
+   nrw = s * (12_I4P + 2_I4P * nm) + nb * (13_I4P + 2_I4P * nm) + 2_I4P * nm + 1_I4P
+   niw = NHDR + 4_I4P * s + 2_I4P * nxc + 14_I4P * nb + 1_I4P
+   endsubroutine cut_cell_2d_sizes
+
+   pure subroutine cut_cell_2d_layout(nxc, nb, nm, ro, io)
+   !< Start of each part of a cut cell's workspace (sizes in `cut_cell_2d_sizes`; S = 4 + nxc + nb).
+   !< Reals: sa(2, S), sb(2, S), acc(6, S), wn(2, S), accm(nm, S), wallm(nm, S), hole area(nb), island Green(3, nb),
+   !< island wet(3, nb), island normal(2, nb), island moments(nm, nb), island wall moments(nm, nb), the cell's wall
+   !< pieces (4, nb), chain moments(nm), chain wall moments(nm).
+   !< Integers (after the NHDR header): fluid flag(S), end crossing(S), edge(S), union-find parent(S), crossing slots
+   !< (2, nxc), visited(nb), loop pieces(nb), hole root(nb), hole first(nb), hole length(nb), island first(nb), island
+   !< length(nb), island traversal(nb), traversal kind(nb), start(nb), length(nb), slot(nb), wall piece tags(2, nb).
+   !$acc routine seq
+   integer(I4P), intent(in)  :: nxc, nb, nm  !< Crossings, wall pieces, moments.
+   integer(I4P), intent(out) :: ro(15)       !< Real parts.
+   integer(I4P), intent(out) :: io(18)       !< Integer parts.
+   integer(I4P)              :: s, k         !< Work.
+
+   s = 4_I4P + nxc + nb
+   ro(1) = 1_I4P
+   ro(2) = ro(1) + 2_I4P * s ; ro(3) = ro(2) + 2_I4P * s ; ro(4) = ro(3) + 6_I4P * s ; ro(5) = ro(4) + 2_I4P * s
+   ro(6) = ro(5) + nm * s ; ro(7) = ro(6) + nm * s ; ro(8) = ro(7) + nb ; ro(9) = ro(8) + 3_I4P * nb
+   ro(10) = ro(9) + 3_I4P * nb ; ro(11) = ro(10) + 2_I4P * nb ; ro(12) = ro(11) + nm * nb ; ro(13) = ro(12) + nm * nb
+   ro(14) = ro(13) + 4_I4P * nb ; ro(15) = ro(14) + nm
+   io(1) = NHDR + 1_I4P
+   do k = 2, 4
+      io(k) = io(k - 1) + s
+   enddo
+   io(5) = io(4) + s ; io(6) = io(5) + 2_I4P * nxc
+   do k = 7, 18
+      io(k) = io(k - 1) + nb
+   enddo
+   endsubroutine cut_cell_2d_layout
+
+   subroutine cut_cell_2d_count(x0, x1, y0, y1, f00, f10, f11, f01, eid, ne, nxs, xstart, xord, xp, nb, pofs, nps, pord, &
+                                pab, ptg, nm, me, with_iv, with_bnd, nrw, rw, niw, iw, closed, alpha, aperture, centroid, &
+                                wet_length, wet_centroid, wet_normal, npieces, nivc, nbdc)
+   !< Kernel, count pass (issue #100): measures and pieces of the cut cell [x0, x1] x [y0, y1]; its cell outputs are
+   !< written, its pieces stay in its workspace (rw, iw) for `cut_cell_2d_fill`; npieces, nivc, nbdc are the numbers
+   !< of pieces, fluid edge intervals and boundary segments that the fill writes.
+   !$acc routine seq
+   real(R8P),    intent(in)    :: x0, x1, y0, y1         !< Cell.
+   logical,      intent(in)    :: f00, f10, f11, f01     !< Corner flags (i, j), (i+1, j), (i+1, j+1), (i, j+1).
+   integer(I4P), intent(in)    :: eid(4)                 !< Edge ids (bottom, right, top, left).
+   integer(I4P), intent(in)    :: ne, nxs                !< Edges of the block, crossings.
+   integer(I4P), intent(in)    :: xstart(ne + 1)         !< Crossings by edge.
+   integer(I4P), intent(in)    :: xord(nxs)              !< Crossings ordered along each edge.
+   real(R8P),    intent(in)    :: xp(2, nxs)             !< Crossing points.
+   integer(I4P), intent(in)    :: nb, pofs, nps          !< Wall pieces of the cell, first - 1 in pord, wall pieces.
+   integer(I4P), intent(in)    :: pord(nps)              !< Wall pieces by cell.
+   real(R8P),    intent(in)    :: pab(4, nps)            !< Wall piece end points.
+   integer(I4P), intent(in)    :: ptg(2, nps)            !< Wall piece end tags.
+   integer(I4P), intent(in)    :: nm                     !< Moments.
+   integer(I4P), intent(in)    :: me(2, nm)              !< Moment exponents.
+   logical,      intent(in)    :: with_iv, with_bnd      !< Count the intervals, the boundary segments.
+   integer(I4P), intent(in)    :: nrw, niw               !< Workspace sizes (`cut_cell_2d_sizes`).
+   real(R8P),    intent(inout) :: rw(nrw)                !< Real workspace.
+   integer(I4P), intent(inout) :: iw(niw)                !< Integer workspace.
+   logical,      intent(out)   :: closed                 !< The cell boundary closed.
+   real(R8P),    intent(out)   :: alpha, aperture(4), centroid(2), wet_length, wet_centroid(2), wet_normal(2) !< Measures.
+   integer(I4P), intent(out)   :: npieces, nivc, nbdc    !< Pieces, intervals, boundary segments.
+   integer(I4P)                :: nxc, e, s, ro(15), io(18) !< Work.
+
+   nxc = 0_I4P
+   do e = 1, 4
+      nxc = nxc + xstart(eid(e) + 1) - xstart(eid(e))
+   enddo
+   call cut_cell_2d_layout(nxc, nb, nm, ro, io)
+   s = 4_I4P + nxc + nb
+   call count_core(x0, x1, y0, y1, f00, f10, f11, f01, eid, ne, nxs, xstart, xord, xp, nb, pofs, nps, pord, pab, ptg, &
+                   nm, me, with_iv, with_bnd, s, nxc, rw(ro(1)), rw(ro(2)), rw(ro(3)), rw(ro(4)), rw(ro(5)), rw(ro(6)), &
+                   rw(ro(7)), rw(ro(8)), rw(ro(9)), rw(ro(10)), rw(ro(11)), rw(ro(12)), rw(ro(13)), rw(ro(14)), &
+                   rw(ro(15)), iw(1), iw(io(1)), iw(io(2)), iw(io(3)), iw(io(4)), iw(io(5)), iw(io(6)), iw(io(7)), &
+                   iw(io(8)), iw(io(9)), iw(io(10)), iw(io(11)), iw(io(12)), iw(io(13)), iw(io(14)), iw(io(15)), &
+                   iw(io(16)), iw(io(17)), iw(io(18)), closed, alpha, aperture, centroid, wet_length, wet_centroid, &
+                   wet_normal, npieces, nivc, nbdc)
+   endsubroutine cut_cell_2d_count
+
+   subroutine cut_cell_2d_fill(x0, x1, y0, y1, i, j, eid, nm, me, with_iv, with_bnd, nrw, rw, niw, iw, p0, iv0, bd0, &
+                               np, pcell, parea, pcen, pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, &
+                               bwall)
+   !< Kernel, fill pass (issue #100): the pieces of cut cell (i, j) kept in its workspace by `cut_cell_2d_count`, written
+   !< as pieces p0 + 1.., fluid edge intervals iv0 + 1.. and boundary segments bd0 + 1.. of the block.
+   !$acc routine seq
+   real(R8P),    intent(in)    :: x0, x1, y0, y1       !< Cell.
+   integer(I4P), intent(in)    :: i, j                 !< Cell indexes.
+   integer(I4P), intent(in)    :: eid(4)               !< Edge ids (bottom, right, top, left).
+   integer(I4P), intent(in)    :: nm                   !< Moments.
+   integer(I4P), intent(in)    :: me(2, nm)            !< Moment exponents.
+   logical,      intent(in)    :: with_iv, with_bnd    !< Write the intervals, the boundary segments.
+   integer(I4P), intent(in)    :: nrw, niw             !< Workspace sizes.
+   real(R8P),    intent(in)    :: rw(nrw)              !< Real workspace.
+   integer(I4P), intent(in)    :: iw(niw)              !< Integer workspace.
+   integer(I4P), intent(in)    :: p0, iv0, bd0         !< Pieces, intervals, boundary segments before the cell's.
+   integer(I4P), intent(in)    :: np, niv, nbd         !< Pieces, intervals, boundary segments of the block.
+   integer(I4P), intent(inout) :: pcell(2, np)         !< Cell of each piece.
+   real(R8P),    intent(inout) :: parea(np), pcen(2, np), pwl(np), pwn(2, np), pap(4, np) !< Piece measures.
+   real(R8P),    intent(inout) :: pmom(nm, np), pwmom(nm, np) !< Piece moments, wall moments.
+   integer(I4P), intent(inout) :: ivs(np + 1)          !< First interval of each piece.
+   integer(I4P), intent(inout) :: ive(niv)             !< Interval edges.
+   real(R8P),    intent(inout) :: ivl(niv), ivh(niv)   !< Interval ranges.
+   integer(I4P), intent(inout) :: bds(np + 1)          !< First boundary segment of each piece.
+   real(R8P),    intent(inout) :: bseg(4, nbd)         !< Boundary segments.
+   logical,      intent(inout) :: bwall(nbd)           !< Wall flags.
+   integer(I4P)                :: nxc, nb, s, ro(15), io(18) !< Work.
+
+   if (iw(1) == 0_I4P) return
+   if (iw(1) == 2_I4P) then
+      call quiet_piece_2d(x0, x1, y0, y1, i, j, eid, nm, me, with_iv, with_bnd, p0, iv0, bd0, np, pcell, parea, pcen, &
+                          pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+      return
+   endif
+   nxc = iw(6) ; nb = iw(7)
+   call cut_cell_2d_layout(nxc, nb, nm, ro, io)
+   s = 4_I4P + nxc + nb
+   call fill_core(x0, x1, y0, y1, i, j, eid, nb, nm, with_iv, with_bnd, s, rw(ro(1)), rw(ro(2)), rw(ro(3)), rw(ro(4)), &
+                  rw(ro(5)), rw(ro(6)), rw(ro(13)), iw(1), iw(io(1)), iw(io(3)), iw(io(4)), iw(io(7)), iw(io(14)), &
+                  iw(io(15)), iw(io(16)), iw(io(17)), iw(io(18)), p0, iv0, bd0, np, pcell, parea, pcen, pwl, pwn, pap, &
+                  pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+   endsubroutine cut_cell_2d_fill
+
+   subroutine count_core(x0, x1, y0, y1, f00, f10, f11, f01, eid, ne, nxs, xstart, xord, xp, nb, pofs, nps, pord, pab, &
+                         ptg, nm, me, with_iv, with_bnd, s, nxm, sa, sb, acc, wn, accm, wallm, harea, ig, iwl, iwn, igm, &
+                         iwm, lp, cgm, cwm, hdr, sfl, sx, sed, par, xsub, pvis, loopp, hroot, hfirst, hn, ifirst, inn, it, &
+                         tkind, tstart, tn, tslot, lt, closed, alpha, aperture, centroid, wet_length, wet_centroid, &
+                         wet_normal, npieces, nivc, nbdc)
+   !< The count pass on the workspace parts (see `cut_cell_2d_layout`). Sub-intervals of the cell boundary
+   !< counter-clockwise (1 bottom, 2 right, 3 top, 4 left), union-find over the fluid ones, the wall chains between
+   !< crossings, the closed loops inside the cell (holes: pieces of their own; islands: into their host), Green sums.
+   !$acc routine seq
+   real(R8P),    intent(in)    :: x0, x1, y0, y1         !< Cell.
+   logical,      intent(in)    :: f00, f10, f11, f01     !< Corner flags.
+   integer(I4P), intent(in)    :: eid(4)                 !< Edge ids.
+   integer(I4P), intent(in)    :: ne, nxs                !< Edges, crossings.
+   integer(I4P), intent(in)    :: xstart(ne + 1)         !< Crossings by edge.
+   integer(I4P), intent(in)    :: xord(nxs)              !< Crossings ordered along each edge.
+   real(R8P),    intent(in)    :: xp(2, nxs)             !< Crossing points.
+   integer(I4P), intent(in)    :: nb, pofs, nps          !< Wall pieces of the cell, offset, wall pieces.
+   integer(I4P), intent(in)    :: pord(nps)              !< Wall pieces by cell.
+   real(R8P),    intent(in)    :: pab(4, nps)            !< Wall piece end points.
+   integer(I4P), intent(in)    :: ptg(2, nps)            !< Wall piece tags.
+   integer(I4P), intent(in)    :: nm                     !< Moments.
+   integer(I4P), intent(in)    :: me(2, nm)              !< Exponents.
+   logical,      intent(in)    :: with_iv, with_bnd      !< Count intervals, boundary segments.
+   integer(I4P), intent(in)    :: s, nxm                 !< Sub-interval slots, crossing slots.
+   real(R8P),    intent(inout) :: sa(2, s), sb(2, s)     !< Sub-interval end points (counter-clockwise).
+   real(R8P),    intent(inout) :: acc(6, s)              !< Per root: area, mx, my, wet length, wet mx, wet my.
+   real(R8P),    intent(inout) :: wn(2, s)               !< Per root: wet normal.
+   real(R8P),    intent(inout) :: accm(nm, s), wallm(nm, s) !< Per root: moments, wall moments.
+   real(R8P),    intent(inout) :: harea(nb)              !< Hole areas.
+   real(R8P),    intent(inout) :: ig(3, nb), iwl(3, nb), iwn(2, nb) !< Island Green, wet, normal.
+   real(R8P),    intent(inout) :: igm(nm, nb), iwm(nm, nb) !< Island moments, wall moments.
+   real(R8P),    intent(inout) :: lp(4, nb)              !< The cell's wall pieces (a, b).
+   real(R8P),    intent(inout) :: cgm(nm), cwm(nm)       !< Chain moments, wall moments.
+   integer(I4P), intent(inout) :: hdr(NHDR)              !< Header.
+   integer(I4P), intent(inout) :: sfl(s), sx(s), sed(s), par(s) !< Fluid (1), end crossing (0 corner), edge, parent.
+   integer(I4P), intent(inout) :: xsub(2, nxm)           !< Crossing slots: (crossing id, sub-interval before it).
+   integer(I4P), intent(inout) :: pvis(nb), loopp(nb)    !< Visited (1), loop pieces.
+   integer(I4P), intent(inout) :: hroot(nb), hfirst(nb), hn(nb) !< Hole slot, loop range.
+   integer(I4P), intent(inout) :: ifirst(nb), inn(nb), it(nb) !< Island loop range, traversal.
+   integer(I4P), intent(inout) :: tkind(nb), tstart(nb), tn(nb), tslot(nb) !< Traversals: 1 chain from wall piece tstart,
+                                                         !< 2 loop of tn pieces from loopp(tstart); charged slot.
+   integer(I4P), intent(inout) :: lt(2, nb)              !< The cell's wall piece tags (ta, tb).
+   logical,      intent(out)   :: closed                 !< Closed.
+   real(R8P),    intent(out)   :: alpha, aperture(4), centroid(2), wet_length, wet_centroid(2), wet_normal(2) !< Measures.
+   integer(I4P), intent(out)   :: npieces, nivc, nbdc    !< Counts.
+   real(R8P)    :: area_c, len(4), flen(4), gs(3), sm(2), hm(2), lg(3), lw(4), lwn(2), sw5, sw6 !< Work.
+   integer(I4P) :: q, k, m, r, h, rr, ns, nsb, nxc, nh, nisl, nloopp, nt, ncs, s0, p1, pid, nfl !< Work.
+   logical      :: state, ok !< Work.
+
    area_c = (x1 - x0) * (y1 - y0)
    len = [y1 - y0, y1 - y0, x1 - x0, x1 - x0]
    sm = 0.5_R8P * [x0 + x1, y0 + y1] ; hm = [x1 - x0, y1 - y0]
-   cc%closed(i, j) = .true. ; cc%pieces(i, j) = 0_I4P ; cc%first_piece(i, j) = cx%npb + 1_I4P
-   cc%wet_length(i, j) = 0._R8P ; cc%wet_centroid(:, i, j) = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
-   cc%wet_normal(:, i, j) = 0._R8P
-   ! edges counter-clockwise: bottom (+u), right (+v), top (-u), left (-v)
-   eid = [hedge(cx, i, j), vedge(cx, i + 1_I4P, j), hedge(cx, i, j + 1_I4P), vedge(cx, i, j)]
-   ns = 0 ; nxc = 0 ; ok = .true. ; flen = 0._R8P
-   state = cx%node_in(i, j)
-   do e = 1, 4
-      call edge_subs(e, eid(e))
+   closed = .true. ; npieces = 0_I4P ; nivc = 0_I4P ; nbdc = 0_I4P
+   wet_length = 0._R8P ; wet_centroid = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)] ; wet_normal = 0._R8P
+   hdr = 0_I4P ; hdr(6) = nxm ; hdr(7) = nb
+   do q = 1, nb
+      pid = pord(pofs + q) ; lp(:, q) = pab(:, pid) ; lt(:, q) = ptg(:, pid)
    enddo
-   if (state .neqv. cx%node_in(i, j)) ok = .false.
+   ! sub-intervals of the edges counter-clockwise: bottom (+u), right (+v), top (-u), left (-v)
+   ns = 0 ; nxc = 0 ; ok = .true. ; flen = 0._R8P
+   state = f00
+   call edge_subs(1_I4P, [x0, y0], [x1, y0], xstart(eid(1)), xstart(eid(1) + 1) - 1_I4P, nxs, xord, xp, .true., f10, &
+                  state, ok, ns, s, sa, sb, sfl, sx, sed, nxc, nxm, xsub, flen)
+   call edge_subs(2_I4P, [x1, y0], [x1, y1], xstart(eid(2)), xstart(eid(2) + 1) - 1_I4P, nxs, xord, xp, .true., f11, &
+                  state, ok, ns, s, sa, sb, sfl, sx, sed, nxc, nxm, xsub, flen)
+   call edge_subs(3_I4P, [x1, y1], [x0, y1], xstart(eid(3)), xstart(eid(3) + 1) - 1_I4P, nxs, xord, xp, .true., f01, &
+                  state, ok, ns, s, sa, sb, sfl, sx, sed, nxc, nxm, xsub, flen)
+   call edge_subs(4_I4P, [x0, y1], [x0, y0], xstart(eid(4)), xstart(eid(4) + 1) - 1_I4P, nxs, xord, xp, .false., f00, &
+                  state, ok, ns, s, sa, sb, sfl, sx, sed, nxc, nxm, xsub, flen)
+   if (state .neqv. f00) ok = .false.
    nsb = ns
-   ! wall pieces of the cell
-   nb = cx%pstart(cid + 1) - cx%pstart(cid)
-   if (.not. ok .or. ns > MAXS - 4) then
-      call mark_open
-      return
+   if (.not. ok) then
+      call open_cell(x0, x1, y0, y1, closed, alpha, aperture, centroid, npieces, wet_length, wet_normal) ; return
    endif
    if (nb == 0 .and. nxc == 0) then
-      if (cx%node_in(i, j)) then
-         cc%alpha(i, j) = 0._R8P ; cc%aperture(:, i, j) = 0._R8P
-         cc%centroid(:, i, j) = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
+      if (f00) then
+         alpha = 0._R8P ; aperture = 0._R8P
+         centroid = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
       else
-         cc%alpha(i, j) = 1._R8P ; cc%aperture(:, i, j) = 1._R8P
-         cc%centroid(:, i, j) = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
-         call add_piece(cx, i, j, area_c, 0.5_R8P * (x0 + x1) * area_c, 0.5_R8P * (y0 + y1) * area_c, 0._R8P, [0._R8P, 0._R8P])
-         cx%pap(:, cx%npb) = 1._R8P
-         if (cx%with_bnd) then ! counter-clockwise: bottom, right, top, left
-            call add_bd(cx, cx%npb, [x0, y0], [x1, y0], .false.) ; call add_bd(cx, cx%npb, [x1, y0], [x1, y1], .false.)
-            call add_bd(cx, cx%npb, [x1, y1], [x0, y1], .false.) ; call add_bd(cx, cx%npb, [x0, y1], [x0, y0], .false.)
-         endif
-         if (cx%nm > 0_I4P) then
-            cx%pmom(:, cx%npb) = cell_moments(cx%me, area_c) ; cx%pwm(:, cx%npb) = 0._R8P
-         endif
-         call add_iv(cx, cx%npb, eid(4), y0, y1) ; call add_iv(cx, cx%npb, eid(2), y0, y1)
-         call add_iv(cx, cx%npb, eid(1), x0, x1) ; call add_iv(cx, cx%npb, eid(3), x0, x1)
-         cc%pieces(i, j) = 1_I4P
+         alpha = 1._R8P ; aperture = 1._R8P
+         centroid = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
+         npieces = 1_I4P ; hdr(1) = 2_I4P
+         if (with_iv) nivc = 4_I4P
+         if (with_bnd) nbdc = 4_I4P
       endif
       return
    endif
-   ! union-find over the fluid sub-intervals; consecutive ones through corners join
+   ! union-find over the fluid sub-intervals; consecutive ones through corners join. The accumulators are cleared first
+   ! (the unions move zeros; before #100 they moved stale values that the clear after them overwrote: same state)
    do k = 1, ns
-      par(k) = k
+      par(k) = k ; acc(:, k) = 0._R8P ; wn(:, k) = 0._R8P ; accm(:, k) = 0._R8P ; wallm(:, k) = 0._R8P
    enddo
    do k = 1, nsb
       m = mod(k, nsb) + 1
-      if (sx(k) == 0 .and. sfl(k) .and. sfl(m)) call unite(k, m)
+      if (sx(k) == 0 .and. sfl(k) == 1 .and. sfl(m) == 1) call unite(k, m, s, par, nm, acc, wn, accm, wallm)
    enddo
    ! wall chains: from a piece starting at a crossing, follow the vertices to a crossing
-   allocate(pvis(nb)) ; pvis = .false.
-   ! only the columns in use are cleared (a full clear of the MAXS columns was half the swept cells' time, issue #94):
-   ! every index read below is a root of 1..ns, or a hole slot appended later and cleared there
-   acc(:, 1:ns) = 0._R8P ; wn(:, 1:ns) = 0._R8P ; accm(:, 1:ns) = 0._R8P ; wallm(:, 1:ns) = 0._R8P
-   ncs = 0_I4P ; if (cx%with_bnd) allocate(cs(4, 16), csl(16))
+   pvis = 0_I4P ; ncs = 0_I4P ; nt = 0_I4P
    do q = 1, nb
-      p0 = cx%pord(cx%pstart(cid) + q - 1)
-      if (cx%ps(p0)%ta <= 0) cycle
-      c0s = ncs + 1_I4P
-      call follow(q, p0, p1, lg, lw, lwn, ok)
+      if (lt(1, q) <= 0) cycle
+      call follow(q, nb, lp, lt, pvis, p1, lg, lw, lwn, ok, nm, me, sm, hm, area_c, cgm, cwm, ncs)
       if (.not. ok) then
-         call mark_open
-         return
+         call open_cell(x0, x1, y0, y1, closed, alpha, aperture, centroid, npieces, wet_length, wet_normal) ; return
       endif
       ! join the fluid sub-intervals next to both end crossings, charge the chain to that root
-      r = fluid_sub_at(cx%ps(p0)%ta) ; h = fluid_sub_at(cx%ps(p1)%tb)
+      r = fluid_sub_at(lt(1, q), nxc, nxm, xsub, nsb, s, sfl) ; h = fluid_sub_at(lt(2, p1), nxc, nxm, xsub, nsb, s, sfl)
       if (r == 0 .or. h == 0) then
-         call mark_open
-         return
+         call open_cell(x0, x1, y0, y1, closed, alpha, aperture, centroid, npieces, wet_length, wet_normal) ; return
       endif
-      call unite(r, h)
-      call charge_later(find(r), lg, lw, lwn, cgm, cwm)
-      if (cx%with_bnd) csl(c0s:ncs) = find(r)
+      call unite(r, h, s, par, nm, acc, wn, accm, wallm)
+      rr = find(r, s, par)
+      call charge(rr, lg, lw, lwn, cgm, cwm, s, nm, acc, wn, accm, wallm)
+      nt = nt + 1_I4P ; tkind(nt) = 1_I4P ; tstart(nt) = q ; tn(nt) = 0_I4P ; tslot(nt) = rr
    enddo
    ! remaining pieces: closed loops entirely inside the cell
    nh = 0 ; nisl = 0 ; nloopp = 0
    do q = 1, nb
-      if (pvis(q)) cycle
-      p0 = cx%pord(cx%pstart(cid) + q - 1)
-      s0 = nloopp + 1 ; c0s = ncs + 1_I4P
-      call follow_loop(q, lg, lw, lwn, ok)
+      if (pvis(q) == 1) cycle
+      s0 = nloopp + 1
+      call follow_loop(q, nb, lp, lt, pvis, nloopp, loopp, lg, lw, lwn, ok, nm, me, sm, hm, area_c, cgm, cwm, ncs)
       if (.not. ok) then
-         call mark_open
-         return
+         call open_cell(x0, x1, y0, y1, closed, alpha, aperture, centroid, npieces, wet_length, wet_normal) ; return
       endif
-      if (lg(1) < 0._R8P) then ! clockwise: a hole, a piece of its own
-         if (ns >= MAXS) then ! no slot left (issue #95): no measures, as for too many sub-intervals
-            call mark_open
-            return
-         endif
-         nh = nh + 1 ; hole_area(nh) = -lg(1) ; hole_first(nh) = s0 ; hole_n(nh) = nloopp - s0 + 1
-         ns = ns + 1 ; par(ns) = ns ; sfl(ns) = .false. ; hole_root(nh) = ns
+      nt = nt + 1_I4P ; tkind(nt) = 2_I4P ; tstart(nt) = s0 ; tn(nt) = nloopp - s0 + 1
+      if (lg(1) < 0._R8P) then ! clockwise: a hole, a piece of its own (a slot <= s: one loop per wall piece at most)
+         nh = nh + 1 ; harea(nh) = -lg(1) ; hfirst(nh) = s0 ; hn(nh) = nloopp - s0 + 1
+         ns = ns + 1 ; par(ns) = ns ; sfl(ns) = 0_I4P ; hroot(nh) = ns
          acc(:, ns) = 0._R8P ; wn(:, ns) = 0._R8P ; accm(:, ns) = 0._R8P ; wallm(:, ns) = 0._R8P
-         call charge_later(ns, lg, lw, lwn, cgm, cwm)
-         if (cx%with_bnd) csl(c0s:ncs) = ns
+         call charge(ns, lg, lw, lwn, cgm, cwm, s, nm, acc, wn, accm, wallm)
+         tslot(nt) = ns
       else
-         nisl = nisl + 1 ; isl_first(nisl) = s0 ; isl_n(nisl) = nloopp - s0 + 1
-         isl_g(:, nisl) = lg ; isl_w(:, nisl) = lw ; isl_wn(:, nisl) = lwn
-         isl_gm(:, nisl) = cgm ; isl_wm(:, nisl) = cwm ; isl_s0(nisl) = c0s ; isl_s1(nisl) = ncs
+         nisl = nisl + 1 ; ifirst(nisl) = s0 ; inn(nisl) = nloopp - s0 + 1 ; it(nisl) = nt
+         ig(:, nisl) = lg ; iwl(:, nisl) = lw(1:3) ; iwn(:, nisl) = lwn
+         igm(:, nisl) = cgm ; iwm(:, nisl) = cwm ; tslot(nt) = 0_I4P
       endif
    enddo
    ! islands: into the innermost containing hole, else the containing boundary piece
    do k = 1, nisl
-      r = 0
-      call island_host(k, r)
+      call island_host(k, nb, lp, lt, loopp, ifirst, nh, hfirst, hn, harea, hroot, nsb, s, sfl, par, sa, sb, nxc, nxm, &
+                       xsub, r)
       if (r == 0) then
-         call mark_open
-         return
+         call open_cell(x0, x1, y0, y1, closed, alpha, aperture, centroid, npieces, wet_length, wet_normal) ; return
       endif
-      call charge_later(find(r), isl_g(:, k), isl_w(:, k), isl_wn(:, k), isl_gm(:, k), isl_wm(:, k))
-      if (cx%with_bnd) csl(isl_s0(k):isl_s1(k)) = find(r)
+      rr = find(r, s, par)
+      call charge(rr, ig(:, k), iwl(:, k), iwn(:, k), igm(:, k), iwm(:, k), s, nm, acc, wn, accm, wallm)
+      tslot(it(k)) = rr
    enddo
    ! fluid sub-intervals: Green along them (counter-clockwise)
-   do k = 1, ns - nh
-      if (.not. sfl(k)) cycle
+   nfl = 0_I4P
+   do k = 1, nsb
+      if (sfl(k) == 0) cycle
+      nfl = nfl + 1_I4P
       call green(sa(:, k), sb(:, k), gs)
-      r = find(k)
+      r = find(k, s, par)
       acc(1:3, r) = acc(1:3, r) + gs
-      if (cx%nm > 0_I4P) call segment_green_moments((sa(:, k) - sm) / hm, (sb(:, k) - sm) / hm, cx%me, area_c, accm(:, r))
+      if (nm > 0_I4P) call segment_green_moments((sa(:, k) - sm) / hm, (sb(:, k) - sm) / hm, me, area_c, accm(:, r))
    enddo
-   ! collect the pieces (roots)
-   cc%alpha(i, j) = 0._R8P ; cc%centroid(:, i, j) = 0._R8P
+   ! the pieces (roots): cell sums in root order; every fluid sub-interval and every chain or loop piece lies in one
+   alpha = 0._R8P ; centroid = 0._R8P
    do k = 1, ns
-      if (k <= ns - nh) then
-         if (.not. sfl(k)) cycle
+      if (k <= nsb) then
+         if (sfl(k) == 0) cycle
       endif
-      if (find(k) /= k) cycle
-      call add_piece(cx, i, j, acc(1, k), acc(2, k), acc(3, k), acc(4, k), wn(:, k))
-      if (cx%nm > 0_I4P) then
-         cx%pmom(:, cx%npb) = accm(:, k) ; cx%pwm(:, cx%npb) = wallm(:, k)
+      if (find(k, s, par) /= k) cycle
+      npieces = npieces + 1_I4P
+      alpha = alpha + acc(1, k)
+      centroid = centroid + acc(2:3, k)
+      wet_length = wet_length + acc(4, k)
+      wet_normal = wet_normal + wn(:, k)
+   enddo
+   if (with_iv) nivc = nfl
+   if (with_bnd) nbdc = nfl + ncs
+   if (alpha > 0._R8P) then
+      centroid = centroid / alpha
+   else
+      centroid = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
+   endif
+   ! wetted centroid from the per-root moments (summed in root order from zero, as the masked sum it replaces)
+   if (wet_length > 0._R8P) then
+      sw5 = 0._R8P ; sw6 = 0._R8P
+      do k = 1, ns
+         if (find(k, s, par) == k .and. (k > nsb .or. sfl(k) == 1)) sw5 = sw5 + acc(5, k)
+      enddo
+      do k = 1, ns
+         if (find(k, s, par) == k .and. (k > nsb .or. sfl(k) == 1)) sw6 = sw6 + acc(6, k)
+      enddo
+      wet_centroid = [sw5, sw6] / wet_length
+   endif
+   alpha = alpha / area_c
+   aperture = [flen(4), flen(2), flen(1), flen(3)] / len ! counter-clockwise edges -> (-u, +u, -v, +v)
+   hdr(1) = 1_I4P ; hdr(2) = ns ; hdr(3) = nh ; hdr(4) = nsb ; hdr(5) = nt
+   endsubroutine count_core
+
+   subroutine fill_core(x0, x1, y0, y1, i, j, eid, nb, nm, with_iv, with_bnd, s, sa, sb, acc, wn, accm, wallm, lp, hdr, &
+                        sfl, sed, par, loopp, tkind, tstart, tn, tslot, lt, p0, iv0, bd0, np, pcell, parea, pcen, pwl, pwn, &
+                        pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+   !< The fill pass on the workspace parts left by `count_core`: per piece (root, in order) its measures, its fluid edge
+   !< intervals in the order (-u, +u, -v, +v) and its oriented boundary (fluid sub-intervals, then the chains and loops
+   !< charged to it, reversed so that the fluid is on the left, in the order they were followed).
+   !$acc routine seq
+   real(R8P),    intent(in)    :: x0, x1, y0, y1       !< Cell.
+   integer(I4P), intent(in)    :: i, j, eid(4)         !< Cell indexes, edge ids.
+   integer(I4P), intent(in)    :: nb, nm               !< Wall pieces of the cell, moments.
+   logical,      intent(in)    :: with_iv, with_bnd    !< Write intervals, boundary segments.
+   integer(I4P), intent(in)    :: s                    !< Sub-interval slots.
+   real(R8P),    intent(in)    :: sa(2, s), sb(2, s), acc(6, s), wn(2, s), accm(nm, s), wallm(nm, s) !< Sub-intervals, roots.
+   real(R8P),    intent(in)    :: lp(4, nb)            !< Wall pieces.
+   integer(I4P), intent(in)    :: hdr(NHDR)            !< Header.
+   integer(I4P), intent(in)    :: sfl(s), sed(s), par(s) !< Fluid, edge, parent.
+   integer(I4P), intent(in)    :: loopp(nb), tkind(nb), tstart(nb), tn(nb), tslot(nb) !< Loops, traversals.
+   integer(I4P), intent(in)    :: lt(2, nb)            !< Wall piece tags.
+   integer(I4P), intent(in)    :: p0, iv0, bd0         !< Offsets.
+   integer(I4P), intent(in)    :: np, niv, nbd         !< Sizes.
+   integer(I4P), intent(inout) :: pcell(2, np)         !< Cell of each piece.
+   real(R8P),    intent(inout) :: parea(np), pcen(2, np), pwl(np), pwn(2, np), pap(4, np) !< Piece measures.
+   real(R8P),    intent(inout) :: pmom(nm, np), pwmom(nm, np) !< Piece moments.
+   integer(I4P), intent(inout) :: ivs(np + 1), ive(niv) !< Intervals.
+   real(R8P),    intent(inout) :: ivl(niv), ivh(niv)   !< Interval ranges.
+   integer(I4P), intent(inout) :: bds(np + 1)          !< Boundary segments of the pieces.
+   real(R8P),    intent(inout) :: bseg(4, nbd)         !< Boundary segments.
+   logical,      intent(inout) :: bwall(nbd)           !< Wall flags.
+   real(R8P)    :: len(4)                              !< Edge lengths (-u, +u, -v, +v).
+   integer(I4P) :: ns, nsb, nt, k, e, m, q, t, p, iv, bd, cur, guard !< Work.
+
+   len = [y1 - y0, y1 - y0, x1 - x0, x1 - x0]
+   ns = hdr(2) ; nsb = hdr(4) ; nt = hdr(5)
+   p = p0 ; iv = iv0 ; bd = bd0
+   do k = 1, ns
+      if (k <= nsb) then
+         if (sfl(k) == 0) cycle
+      endif
+      if (find(k, s, par) /= k) cycle
+      p = p + 1_I4P
+      pcell(1, p) = i ; pcell(2, p) = j
+      parea(p) = acc(1, k) ; pwl(p) = acc(4, k) ; pwn(1, p) = wn(1, k) ; pwn(2, p) = wn(2, k)
+      if (acc(1, k) > 0._R8P) then
+         pcen(1, p) = acc(2, k) / acc(1, k) ; pcen(2, p) = acc(3, k) / acc(1, k)
+      else
+         pcen(1, p) = 0._R8P ; pcen(2, p) = 0._R8P
+      endif
+      if (nm > 0_I4P) then
+         pmom(:, p) = accm(:, k) ; pwmom(:, p) = wallm(:, k)
       endif
       ! its fluid edge intervals (issue #70), in the order (-u, +u, -v, +v) = edges (4, 2, 1, 3)
-      cx%pap(:, cx%npb) = 0._R8P
+      pap(:, p) = 0._R8P ; ivs(p) = iv + 1_I4P
       do e = 1, 4
-         m = ORDER(e)
+         m = edge_of_side(e)
          do q = 1, nsb
-            if (.not. sfl(q) .or. sed(q) /= m .or. find(q) /= k) cycle
-            cx%pap(e, cx%npb) = cx%pap(e, cx%npb) + norm2(sb(:, q) - sa(:, q)) / len(e)
+            if (sfl(q) == 0 .or. sed(q) /= m) cycle
+            if (find(q, s, par) /= k) cycle
+            pap(e, p) = pap(e, p) + norm2(sb(:, q) - sa(:, q)) / len(e)
+            if (.not. with_iv) cycle
+            iv = iv + 1_I4P ; ive(iv) = eid(m)
             if (m == 2 .or. m == 4) then
-               call add_iv(cx, cx%npb, eid(m), min(sa(2, q), sb(2, q)), max(sa(2, q), sb(2, q)))
+               ivl(iv) = min(sa(2, q), sb(2, q)) ; ivh(iv) = max(sa(2, q), sb(2, q))
             else
-               call add_iv(cx, cx%npb, eid(m), min(sa(1, q), sb(1, q)), max(sa(1, q), sb(1, q)))
+               ivl(iv) = min(sa(1, q), sb(1, q)) ; ivh(iv) = max(sa(1, q), sb(1, q))
             endif
          enddo
       enddo
-      if (cx%with_bnd) then ! its oriented boundary: fluid sub-intervals, then the chains (reversed)
-         do q = 1, ns - nh
-            if (.not. sfl(q) .or. find(q) /= k) cycle
-            call add_bd(cx, cx%npb, sa(:, q), sb(:, q), .false.)
-         enddo
-         do q = 1, ncs
-            if (csl(q) == 0_I4P) cycle
-            if (find(csl(q)) == k) call add_bd(cx, cx%npb, cs(1:2, q), cs(3:4, q), .true.)
-         enddo
-      endif
-      cc%pieces(i, j) = cc%pieces(i, j) + 1_I4P
-      cc%alpha(i, j) = cc%alpha(i, j) + acc(1, k)
-      cc%centroid(:, i, j) = cc%centroid(:, i, j) + acc(2:3, k)
-      cc%wet_length(i, j) = cc%wet_length(i, j) + acc(4, k)
-      cc%wet_normal(:, i, j) = cc%wet_normal(:, i, j) + wn(:, k)
+      bds(p) = bd + 1_I4P
+      if (.not. with_bnd) cycle
+      ! its oriented boundary: fluid sub-intervals, then the chains and loops charged to it (reversed)
+      do q = 1, nsb
+         if (sfl(q) == 0) cycle
+         if (find(q, s, par) /= k) cycle
+         bd = bd + 1_I4P ; bseg(1:2, bd) = sa(:, q) ; bseg(3:4, bd) = sb(:, q) ; bwall(bd) = .false.
+      enddo
+      do t = 1, nt
+         if (find(tslot(t), s, par) /= k) cycle
+         if (tkind(t) == 1_I4P) then ! the chain as `follow` walked it
+            cur = tstart(t) ; guard = 0_I4P
+            do
+               bd = bd + 1_I4P ; bseg(1:2, bd) = lp(3:4, cur) ; bseg(3:4, bd) = lp(1:2, cur) ; bwall(bd) = .true.
+               if (lt(2, cur) > 0) exit
+               cur = local_start(-lt(2, cur), nb, lt)
+               guard = guard + 1_I4P
+               if (cur == 0 .or. guard > nb) exit ! cannot happen: the count pass closed this chain
+            enddo
+         else
+            do q = tstart(t), tstart(t) + tn(t) - 1_I4P
+               cur = loopp(q)
+               bd = bd + 1_I4P ; bseg(1:2, bd) = lp(3:4, cur) ; bseg(3:4, bd) = lp(1:2, cur) ; bwall(bd) = .true.
+            enddo
+         endif
+      enddo
    enddo
-   if (cc%alpha(i, j) > 0._R8P) then
-      cc%centroid(:, i, j) = cc%centroid(:, i, j) / cc%alpha(i, j)
-   else
-      cc%centroid(:, i, j) = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
-   endif
-   ! wetted centroid from the per-root moments
-   if (cc%wet_length(i, j) > 0._R8P) then
-      cc%wet_centroid(:, i, j) = [sum(acc(5, 1:ns), mask=roots()), sum(acc(6, 1:ns), mask=roots())] / cc%wet_length(i, j)
-   endif
-   cc%alpha(i, j) = cc%alpha(i, j) / area_c
-   cc%aperture(:, i, j) = [flen(4), flen(2), flen(1), flen(3)] / len ! counter-clockwise edges -> (-u, +u, -v, +v)
-   contains
-      subroutine edge_subs(ed, id)
-      !< Sub-intervals of edge ed (1 bottom, 2 right, 3 top, 4 left) in counter-clockwise order.
-      integer(I4P), intent(in) :: ed, id !< Edge, edge id.
-      integer(I4P) :: kk, n0, n1, idx, st, en, dir !< Work.
-      real(R8P)    :: pa_(2), pb_(2), cs(2), ce(2) !< Work.
+   endsubroutine fill_core
 
-      select case (ed)
-      case (1) ; cs = [x0, y0] ; ce = [x1, y0]
-      case (2) ; cs = [x1, y0] ; ce = [x1, y1]
-      case (3) ; cs = [x1, y1] ; ce = [x0, y1]
-      case (4) ; cs = [x0, y1] ; ce = [x0, y0]
-      endselect
-      n0 = cx%xstart(id) ; n1 = cx%xstart(id + 1) - 1
-      if (ed <= 2) then
-         st = n0 ; en = n1 ; dir = 1
-      else
-         st = n1 ; en = n0 ; dir = -1
-      endif
-      pa_ = cs
-      if (n1 >= n0) then
-         do kk = st, en, dir
-            idx = cx%xord(kk)
-            pb_ = cx%xs(idx)%p
-            if (ed == 1 .or. ed == 3) pb_(2) = cs(2)
-            if (ed == 2 .or. ed == 4) pb_(1) = cs(1)
-            call push(ed, pa_, pb_, .not. state, idx)
-            state = .not. state
-            pa_ = pb_
-         enddo
-      endif
-      call push(ed, pa_, ce, .not. state, 0_I4P)
-      ! the state at the end corner must be the corner's flag
-      select case (ed)
-      case (1) ; if (state .neqv. cx%node_in(i + 1, j)) ok = .false.
-      case (2) ; if (state .neqv. cx%node_in(i + 1, j + 1)) ok = .false.
-      case (3) ; if (state .neqv. cx%node_in(i, j + 1)) ok = .false.
-      endselect
-      endsubroutine edge_subs
+   subroutine quiet_cell_2d_kernel(x0, x1, y0, y1, i, j, solid, eid, nm, me, with_iv, with_bnd, closed, alpha, aperture, &
+                                   centroid, wet_length, wet_centroid, wet_normal, npieces, p0, iv0, bd0, np, pcell, parea, &
+                                   pcen, pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+   !< Kernel of a quiet cell (no wall pieces or crossings): all solid, or all fluid as one piece written at p0 + 1.
+   !$acc routine seq
+   real(R8P),    intent(in)    :: x0, x1, y0, y1       !< Cell.
+   integer(I4P), intent(in)    :: i, j                 !< Cell indexes.
+   logical,      intent(in)    :: solid                !< The cell is inside the solid.
+   integer(I4P), intent(in)    :: eid(4)               !< Edge ids (bottom, right, top, left).
+   integer(I4P), intent(in)    :: nm                   !< Moments.
+   integer(I4P), intent(in)    :: me(2, nm)            !< Moment exponents.
+   logical,      intent(in)    :: with_iv, with_bnd    !< Write intervals, boundary segments.
+   logical,      intent(out)   :: closed               !< Closed.
+   real(R8P),    intent(out)   :: alpha, aperture(4), centroid(2), wet_length, wet_centroid(2), wet_normal(2) !< Measures.
+   integer(I4P), intent(out)   :: npieces              !< Pieces.
+   integer(I4P), intent(in)    :: p0, iv0, bd0         !< Offsets.
+   integer(I4P), intent(in)    :: np, niv, nbd         !< Sizes.
+   integer(I4P), intent(inout) :: pcell(2, np)         !< Cell of each piece.
+   real(R8P),    intent(inout) :: parea(np), pcen(2, np), pwl(np), pwn(2, np), pap(4, np) !< Piece measures.
+   real(R8P),    intent(inout) :: pmom(nm, np), pwmom(nm, np) !< Piece moments.
+   integer(I4P), intent(inout) :: ivs(np + 1), ive(niv) !< Intervals.
+   real(R8P),    intent(inout) :: ivl(niv), ivh(niv)   !< Interval ranges.
+   integer(I4P), intent(inout) :: bds(np + 1)          !< Boundary segments of the pieces.
+   real(R8P),    intent(inout) :: bseg(4, nbd)         !< Boundary segments.
+   logical,      intent(inout) :: bwall(nbd)           !< Wall flags.
 
-      subroutine push(ed, aa, bb, fluid, xid)
-      !< Append a sub-interval; record the crossing at its end.
-      integer(I4P), intent(in) :: ed           !< Edge.
-      real(R8P),    intent(in) :: aa(2), bb(2) !< End points.
-      logical,      intent(in) :: fluid        !< Fluid.
-      integer(I4P), intent(in) :: xid          !< Crossing at its end (0: corner).
-
-      if (ns >= MAXS - 4) then
-         ok = .false. ; return
-      endif
-      ns = ns + 1 ; sa(:, ns) = aa ; sb(:, ns) = bb ; sfl(ns) = fluid ; sx(ns) = xid ; sed(ns) = ed
-      if (fluid) flen(ed) = flen(ed) + norm2(bb - aa)
-      if (xid > 0) then
-         nxc = nxc + 1 ; xsub(:, nxc) = [xid, ns]
-      endif
-      endsubroutine push
-
-      integer(I4P) function fluid_sub_at(xid)
-      !< The fluid sub-interval next to crossing xid (before or after it, counter-clockwise).
-      integer(I4P), intent(in) :: xid !< Crossing id.
-      integer(I4P) :: kk, a_, b_      !< Work.
-
-      fluid_sub_at = 0
-      do kk = 1, nxc
-         if (xsub(1, kk) /= xid) cycle
-         a_ = xsub(2, kk) ; b_ = mod(a_, nsb) + 1
-         if (sfl(a_)) then
-            fluid_sub_at = a_
-         elseif (sfl(b_)) then
-            fluid_sub_at = b_
-         endif
-         return
-      enddo
-      endfunction fluid_sub_at
-
-      subroutine follow(qq, pfirst, plast, g, wl, wnn, good)
-      !< Follow the chain from the piece pfirst (local index qq) to a piece ending at a crossing.
-      integer(I4P), intent(in)  :: qq, pfirst !< Local index, piece id.
-      integer(I4P), intent(out) :: plast      !< Last piece.
-      real(R8P),    intent(out) :: g(3), wl(4), wnn(2) !< Curve Green, wet (len, mx, my, -), normal.
-      logical,      intent(out) :: good       !< The chain closed on a crossing.
-      integer(I4P) :: cur, lq, guard          !< Work.
-
-      g = 0._R8P ; wl = 0._R8P ; wnn = 0._R8P ; good = .true. ; cgm = 0._R8P ; cwm = 0._R8P
-      cur = pfirst ; lq = qq ; guard = 0
-      do
-         pvis(lq) = .true.
-         call add_curve(cur, g, wl, wnn)
-         if (cx%ps(cur)%tb > 0) exit
-         lq = local_start(-cx%ps(cur)%tb)
-         guard = guard + 1
-         if (lq == 0 .or. guard > nb) then
-            good = .false. ; exit
-         endif
-         cur = cx%pord(cx%pstart(cid) + lq - 1)
-      enddo
-      plast = cur
-      endsubroutine follow
-
-      subroutine follow_loop(qq, g, wl, wnn, good)
-      !< Follow a closed loop of pieces starting at local index qq.
-      integer(I4P), intent(in)  :: qq !< Local index.
-      real(R8P),    intent(out) :: g(3), wl(4), wnn(2) !< Accumulators.
-      logical,      intent(out) :: good !< The loop closed.
-      integer(I4P) :: cur, lq, guard !< Work.
-
-      g = 0._R8P ; wl = 0._R8P ; wnn = 0._R8P ; good = .true. ; cgm = 0._R8P ; cwm = 0._R8P
-      lq = qq ; guard = 0
-      do
-         if (pvis(lq)) exit
-         if (nloopp >= MAXS) then ! no slot left for the loop pieces (issue #95)
-            good = .false. ; exit
-         endif
-         pvis(lq) = .true.
-         cur = cx%pord(cx%pstart(cid) + lq - 1)
-         nloopp = nloopp + 1 ; loopp(nloopp) = cur
-         call add_curve(cur, g, wl, wnn)
-         if (cx%ps(cur)%tb >= 0) then
-            good = .false. ; exit
-         endif
-         lq = local_start(-cx%ps(cur)%tb)
-         guard = guard + 1
-         if (lq == 0 .or. guard > nb) then
-            good = .false. ; exit
-         endif
-      enddo
-      endsubroutine follow_loop
-
-      integer(I4P) function local_start(vtx)
-      !< Local index of the piece of the cell that starts at vertex vtx (0: none).
-      integer(I4P), intent(in) :: vtx !< Vertex.
-      integer(I4P) :: kk !< Counter.
-
-      local_start = 0
-      do kk = 1, nb
-         if (cx%ps(cx%pord(cx%pstart(cid) + kk - 1))%ta == -vtx) then
-            local_start = kk ; return
-         endif
-      enddo
-      endfunction local_start
-
-      subroutine add_curve(pid, g, wl, wnn)
-      !< Curve Green, wetted length, moments and normal of piece pid.
-      integer(I4P), intent(in)    :: pid !< Piece.
-      real(R8P),    intent(inout) :: g(3), wl(4), wnn(2) !< Accumulators.
-      real(R8P) :: gg(3), d(2), l !< Work.
-
-      call green(cx%ps(pid)%a, cx%ps(pid)%b, gg)
-      g = g + gg
-      d = cx%ps(pid)%b - cx%ps(pid)%a ; l = norm2(d)
-      wl(1) = wl(1) + l ; wl(2:3) = wl(2:3) + l * 0.5_R8P * (cx%ps(pid)%a + cx%ps(pid)%b)
-      wnn = wnn + [d(2), -d(1)]
-      if (cx%nm > 0_I4P) call curve_moments((cx%ps(pid)%a - sm) / hm, (cx%ps(pid)%b - sm) / hm, l)
-      if (cx%with_bnd) then ! reversed: the fluid on the left
-         if (ncs == size(csl)) then
-            cs = reshape([cs, cs], [4, 2 * size(csl)]) ; csl = [csl, csl]
-         endif
-         ncs = ncs + 1_I4P ; cs(1:2, ncs) = cx%ps(pid)%b ; cs(3:4, ncs) = cx%ps(pid)%a ; csl(ncs) = 0_I4P
-      endif
-      endsubroutine add_curve
-
-      subroutine curve_moments(pa, pb, ln)
-      !< Green moments and wall moments of the wall segment pa -> pb (scaled coordinates, physical length ln) into the
-      !< chain accumulators (issue #70): wall moments by 3-point Gauss on the segment (degree <= 4, exact).
-      real(R8P), intent(in) :: pa(2), pb(2), ln !< End points, length.
-      real(R8P), parameter  :: GX(3) = [0.5_R8P - sqrt(0.15_R8P), 0.5_R8P, 0.5_R8P + sqrt(0.15_R8P)] !< Gauss nodes.
-      real(R8P), parameter  :: GW(3) = [5._R8P / 18._R8P, 8._R8P / 18._R8P, 5._R8P / 18._R8P] !< Weights.
-      real(R8P)             :: pt(2) !< Point.
-      integer(I4P)          :: gg, kk !< Work.
-
-      call segment_green_moments(pa, pb, cx%me, area_c, cgm)
-      do gg = 1, 3
-         pt = pa + GX(gg) * (pb - pa)
-         do kk = 1, cx%nm
-            cwm(kk) = cwm(kk) + GW(gg) * ln * pt(1) ** cx%me(1, kk) * pt(2) ** cx%me(2, kk)
-         enddo
-      enddo
-      endsubroutine curve_moments
-
-      subroutine charge_later(rt, g, wl, wnn, gm, wm)
-      !< Charge a chain or loop to the root of rt: fluid Green is minus the curve's.
-      integer(I4P), intent(in) :: rt !< Sub-interval or hole slot.
-      real(R8P),    intent(in) :: g(3), wl(4), wnn(2) !< Curve Green, wet, normal.
-      real(R8P),    intent(in) :: gm(:), wm(:)        !< Curve Green moments, wall moments (issue #70).
-      integer(I4P) :: rr !< Root.
-
-      rr = rt
-      acc(1:3, rr) = acc(1:3, rr) - g
-      acc(4:6, rr) = acc(4:6, rr) + wl(1:3)
-      wn(:, rr) = wn(:, rr) + wnn
-      accm(:, rr) = accm(:, rr) - gm ; wallm(:, rr) = wallm(:, rr) + wm
-      endsubroutine charge_later
-
-      subroutine island_host(kk, host)
-      !< Slot that receives island kk: the smallest hole containing it, else the boundary piece.
-      integer(I4P), intent(in)  :: kk   !< Island.
-      integer(I4P), intent(out) :: host !< Slot (0: none found).
-      real(R8P)    :: pt(2), best !< Island vertex, smallest hole area.
-      integer(I4P) :: hh, kk2, cnt, nroots, rlast !< Work.
-
-      host = 0
-      pt = cx%ps(loopp(isl_first(kk)))%a
-      best = huge(1._R8P)
-      do hh = 1, nh
-         if (inside_pieces(pt, loopp(hole_first(hh):hole_first(hh) + hole_n(hh) - 1)) .and. hole_area(hh) < best) then
-            best = hole_area(hh) ; host = hole_root(hh)
-         endif
-      enddo
-      if (host /= 0) return
-      nroots = 0 ; rlast = 0
-      do kk2 = 1, ns - nh
-         if (.not. sfl(kk2)) cycle
-         if (find(kk2) /= kk2) cycle
-         nroots = nroots + 1 ; rlast = kk2
-      enddo
-      if (nroots == 1) then
-         host = rlast ; return
-      endif
-      ! several boundary pieces: parity of a ray along +u against each piece's boundary
-      do kk2 = 1, ns - nh
-         if (.not. sfl(kk2)) cycle
-         if (find(kk2) /= kk2) cycle
-         cnt = ray_count(pt, kk2)
-         if (mod(cnt, 2_I4P) == 1_I4P) then
-            host = kk2 ; return
-         endif
-      enddo
-      endsubroutine island_host
-
-      integer(I4P) function ray_count(pt, rt)
-      !< Crossings of the ray from pt along +u with the boundary of the piece of root rt (its fluid
-      !< sub-intervals and the wall pieces charged to it).
-      real(R8P),    intent(in) :: pt(2) !< Point.
-      integer(I4P), intent(in) :: rt    !< Root.
-      integer(I4P) :: kk, qq, pid, rr !< Work.
-
-      ray_count = 0
-      do kk = 1, ns - nh
-         if (.not. sfl(kk)) cycle
-         if (find(kk) /= rt) cycle
-         if (ray_hits(pt, sa(:, kk), sb(:, kk))) ray_count = ray_count + 1
-      enddo
-      do qq = 1, nb
-         pid = cx%pord(cx%pstart(cid) + qq - 1)
-         if (cx%ps(pid)%ta <= 0) cycle
-         rr = fluid_sub_at(cx%ps(pid)%ta)
-         if (rr == 0) cycle
-         if (find(rr) /= rt) cycle
-         call ray_chain(pt, pid, ray_count)
-      enddo
-      endfunction ray_count
-
-      subroutine ray_chain(pt, pfirst, cnt)
-      !< Add the ray crossings of the chain starting at pfirst.
-      real(R8P),    intent(in)    :: pt(2)  !< Point.
-      integer(I4P), intent(in)    :: pfirst !< First piece.
-      integer(I4P), intent(inout) :: cnt    !< Count.
-      integer(I4P) :: cur, lq, guard !< Work.
-
-      cur = pfirst ; guard = 0
-      do
-         if (ray_hits(pt, cx%ps(cur)%a, cx%ps(cur)%b)) cnt = cnt + 1
-         if (cx%ps(cur)%tb > 0) exit
-         lq = local_start(-cx%ps(cur)%tb)
-         guard = guard + 1
-         if (lq == 0 .or. guard > nb) exit
-         cur = cx%pord(cx%pstart(cid) + lq - 1)
-      enddo
-      endsubroutine ray_chain
-
-      logical function inside_pieces(pt, plist_)
-      !< Parity of the ray from pt along +u against a closed loop of pieces.
-      real(R8P),    intent(in) :: pt(2)     !< Point.
-      integer(I4P), intent(in) :: plist_(:) !< Pieces of the loop.
-      integer(I4P) :: kk, cnt !< Work.
-
-      cnt = 0
-      do kk = 1, size(plist_)
-         if (ray_hits(pt, cx%ps(plist_(kk))%a, cx%ps(plist_(kk))%b)) cnt = cnt + 1
-      enddo
-      inside_pieces = mod(cnt, 2_I4P) == 1_I4P
-      endfunction inside_pieces
-
-      subroutine mark_open
-      !< The cell boundary does not close: no measures.
-      cc%closed(i, j) = .false. ; cc%alpha(i, j) = -1._R8P ; cc%aperture(:, i, j) = -1._R8P
-      cc%centroid(:, i, j) = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)] ; cc%pieces(i, j) = 0_I4P
-      cc%wet_length(i, j) = 0._R8P ; cc%wet_normal(:, i, j) = 0._R8P
-      cx%npb = cc%first_piece(i, j) - 1_I4P
-      endsubroutine mark_open
-
-      recursive integer(I4P) function find(kk) result(rr)
-      !< Union-find root.
-      integer(I4P), intent(in) :: kk !< Element.
-
-      rr = kk
-      do while (par(rr) /= rr)
-         rr = par(rr)
-      enddo
-      endfunction find
-
-      subroutine unite(a_, b_)
-      !< Union (smaller root wins, deterministic). The loser's accumulators move to the winner, moments included (issue
-      !< #95: they were dropped, so a root charged with a chain before losing a later union lost its moments).
-      integer(I4P), intent(in) :: a_, b_ !< Elements.
-      integer(I4P) :: ra, rb !< Roots.
-
-      ra = find(a_) ; rb = find(b_)
-      if (ra == rb) return
-      if (ra < rb) then
-         par(rb) = ra ; acc(:, ra) = acc(:, ra) + acc(:, rb) ; acc(:, rb) = 0._R8P
-         wn(:, ra) = wn(:, ra) + wn(:, rb) ; wn(:, rb) = 0._R8P
-         accm(:, ra) = accm(:, ra) + accm(:, rb) ; accm(:, rb) = 0._R8P
-         wallm(:, ra) = wallm(:, ra) + wallm(:, rb) ; wallm(:, rb) = 0._R8P
-      else
-         par(ra) = rb ; acc(:, rb) = acc(:, rb) + acc(:, ra) ; acc(:, ra) = 0._R8P
-         wn(:, rb) = wn(:, rb) + wn(:, ra) ; wn(:, ra) = 0._R8P
-         accm(:, rb) = accm(:, rb) + accm(:, ra) ; accm(:, ra) = 0._R8P
-         wallm(:, rb) = wallm(:, rb) + wallm(:, ra) ; wallm(:, ra) = 0._R8P
-      endif
-      endsubroutine unite
-
-      function roots() result(mask)
-      !< Mask of the piece roots among 1..ns.
-      logical :: mask(ns) !< Mask.
-      integer(I4P) :: kk  !< Counter.
-
-      do kk = 1, ns
-         mask(kk) = find(kk) == kk .and. (kk > ns - nh .or. sfl(kk))
-      enddo
-      endfunction roots
-   endsubroutine one_cell
-
-
-   logical function quiet(cx, cid)
-   !< Cell cid has no wall piece, no crossing on its edges and four equal corner flags.
-   type(ctx_t),  intent(in) :: cx  !< Working data.
-   integer(I4P), intent(in) :: cid !< Cell.
-   integer(I4P)             :: i, j, e(4) !< Work.
-
-   i = mod(cid - 1_I4P, cx%nx) + 1_I4P ; j = (cid - 1_I4P) / cx%nx + 1_I4P
-   quiet = cx%pstart(cid + 1) == cx%pstart(cid)
-   if (.not. quiet) return
-   e = [hedge(cx, i, j), vedge(cx, i + 1_I4P, j), hedge(cx, i, j + 1_I4P), vedge(cx, i, j)]
-   quiet = all(cx%xstart(e + 1) == cx%xstart(e)) .and. (cx%node_in(i + 1, j) .eqv. cx%node_in(i, j)) .and. &
-           (cx%node_in(i, j + 1) .eqv. cx%node_in(i, j)) .and. (cx%node_in(i + 1, j + 1) .eqv. cx%node_in(i, j))
-   endfunction quiet
-
-   subroutine quiet_cell(cid, cx, cc)
-   !< A cell without wall pieces or crossings: all solid or all fluid (one piece), as one_cell's short branch.
-   integer(I4P),         intent(in)    :: cid !< Cell.
-   type(ctx_t),          intent(inout) :: cx  !< Working data.
-   type(cut_cells_2d_t), intent(inout) :: cc  !< Cut cells.
-   integer(I4P) :: i, j, eid(4)               !< Work.
-   real(R8P)    :: x0, x1, y0, y1, area_c     !< Work.
-
-   i = mod(cid - 1_I4P, cx%nx) + 1_I4P ; j = (cid - 1_I4P) / cx%nx + 1_I4P
-   x0 = cx%x(i) ; x1 = cx%x(i + 1) ; y0 = cx%y(j) ; y1 = cx%y(j + 1) ; area_c = (x1 - x0) * (y1 - y0)
-   eid = [hedge(cx, i, j), vedge(cx, i + 1_I4P, j), hedge(cx, i, j + 1_I4P), vedge(cx, i, j)]
-   cc%closed(i, j) = .true. ; cc%pieces(i, j) = 0_I4P ; cc%first_piece(i, j) = cx%npb + 1_I4P
-   cc%wet_length(i, j) = 0._R8P ; cc%wet_centroid(:, i, j) = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
-   cc%wet_normal(:, i, j) = 0._R8P
-   cc%centroid(:, i, j) = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
-   if (cx%node_in(i, j)) then
-      cc%alpha(i, j) = 0._R8P ; cc%aperture(:, i, j) = 0._R8P
+   closed = .true. ; npieces = 0_I4P
+   wet_length = 0._R8P ; wet_centroid = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
+   wet_normal = 0._R8P
+   centroid = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
+   if (solid) then
+      alpha = 0._R8P ; aperture = 0._R8P
       return
    endif
-   cc%alpha(i, j) = 1._R8P ; cc%aperture(:, i, j) = 1._R8P
-   call add_piece(cx, i, j, area_c, 0.5_R8P * (x0 + x1) * area_c, 0.5_R8P * (y0 + y1) * area_c, 0._R8P, [0._R8P, 0._R8P])
-   cx%pap(:, cx%npb) = 1._R8P
-   if (cx%with_bnd) then ! counter-clockwise: bottom, right, top, left
-      call add_bd(cx, cx%npb, [x0, y0], [x1, y0], .false.) ; call add_bd(cx, cx%npb, [x1, y0], [x1, y1], .false.)
-      call add_bd(cx, cx%npb, [x1, y1], [x0, y1], .false.) ; call add_bd(cx, cx%npb, [x0, y1], [x0, y0], .false.)
+   alpha = 1._R8P ; aperture = 1._R8P ; npieces = 1_I4P
+   call quiet_piece_2d(x0, x1, y0, y1, i, j, eid, nm, me, with_iv, with_bnd, p0, iv0, bd0, np, pcell, parea, pcen, pwl, &
+                       pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+   endsubroutine quiet_cell_2d_kernel
+
+   subroutine quiet_piece_2d(x0, x1, y0, y1, i, j, eid, nm, me, with_iv, with_bnd, p0, iv0, bd0, np, pcell, parea, pcen, &
+                             pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+   !< The piece of a fluid cell without walls, written at p0 + 1 (intervals at iv0 + 1.., boundary at bd0 + 1..).
+   !$acc routine seq
+   real(R8P),    intent(in)    :: x0, x1, y0, y1       !< Cell.
+   integer(I4P), intent(in)    :: i, j, eid(4)         !< Cell indexes, edge ids.
+   integer(I4P), intent(in)    :: nm                   !< Moments.
+   integer(I4P), intent(in)    :: me(2, nm)            !< Moment exponents.
+   logical,      intent(in)    :: with_iv, with_bnd    !< Write intervals, boundary segments.
+   integer(I4P), intent(in)    :: p0, iv0, bd0         !< Offsets.
+   integer(I4P), intent(in)    :: np, niv, nbd         !< Sizes.
+   integer(I4P), intent(inout) :: pcell(2, np)         !< Cell of each piece.
+   real(R8P),    intent(inout) :: parea(np), pcen(2, np), pwl(np), pwn(2, np), pap(4, np) !< Piece measures.
+   real(R8P),    intent(inout) :: pmom(nm, np), pwmom(nm, np) !< Piece moments.
+   integer(I4P), intent(inout) :: ivs(np + 1), ive(niv) !< Intervals.
+   real(R8P),    intent(inout) :: ivl(niv), ivh(niv)   !< Interval ranges.
+   integer(I4P), intent(inout) :: bds(np + 1)          !< Boundary segments of the pieces.
+   real(R8P),    intent(inout) :: bseg(4, nbd)         !< Boundary segments.
+   logical,      intent(inout) :: bwall(nbd)           !< Wall flags.
+   real(R8P)    :: area_c, mx, my                      !< Cell area, first moments.
+   integer(I4P) :: p, k                                !< Work.
+
+   area_c = (x1 - x0) * (y1 - y0)
+   mx = 0.5_R8P * (x0 + x1) * area_c ; my = 0.5_R8P * (y0 + y1) * area_c
+   p = p0 + 1_I4P
+   pcell(1, p) = i ; pcell(2, p) = j
+   parea(p) = area_c ; pwl(p) = 0._R8P ; pwn(1, p) = 0._R8P ; pwn(2, p) = 0._R8P
+   if (area_c > 0._R8P) then
+      pcen(1, p) = mx / area_c ; pcen(2, p) = my / area_c
+   else
+      pcen(1, p) = 0._R8P ; pcen(2, p) = 0._R8P
    endif
-   if (cx%nm > 0_I4P) then
-      cx%pmom(:, cx%npb) = cell_moments(cx%me, area_c) ; cx%pwm(:, cx%npb) = 0._R8P
+   pap(:, p) = 1._R8P
+   if (nm > 0_I4P) then
+      pmom(:, p) = cell_moments(me, area_c) ; pwmom(:, p) = 0._R8P
    endif
-   call add_iv(cx, cx%npb, eid(4), y0, y1) ; call add_iv(cx, cx%npb, eid(2), y0, y1)
-   call add_iv(cx, cx%npb, eid(1), x0, x1) ; call add_iv(cx, cx%npb, eid(3), x0, x1)
-   cc%pieces(i, j) = 1_I4P
-   endsubroutine quiet_cell
-
-   subroutine add_bd(cx, ip, a, b, wall)
-   !< Append the oriented boundary segment a -> b (fluid on the left) to piece ip.
-   type(ctx_t),  intent(inout) :: cx    !< Working data.
-   integer(I4P), intent(in)    :: ip    !< Piece.
-   real(R8P),    intent(in)    :: a(2), b(2) !< End points.
-   logical,      intent(in)    :: wall  !< A wall segment.
-
-   if (cx%nbd == size(cx%bdp)) then
-      cx%bd = reshape([cx%bd, cx%bd], [4, 2 * size(cx%bdp)]) ; cx%bdw = [cx%bdw, cx%bdw] ; cx%bdp = [cx%bdp, cx%bdp]
+   ivs(p) = iv0 + 1_I4P
+   if (with_iv) then ! (-u, +u, -v, +v)
+      k = iv0
+      ive(k + 1) = eid(4) ; ivl(k + 1) = y0 ; ivh(k + 1) = y1
+      ive(k + 2) = eid(2) ; ivl(k + 2) = y0 ; ivh(k + 2) = y1
+      ive(k + 3) = eid(1) ; ivl(k + 3) = x0 ; ivh(k + 3) = x1
+      ive(k + 4) = eid(3) ; ivl(k + 4) = x0 ; ivh(k + 4) = x1
    endif
-   cx%nbd = cx%nbd + 1_I4P
-   cx%bd(1:2, cx%nbd) = a ; cx%bd(3:4, cx%nbd) = b ; cx%bdw(cx%nbd) = wall ; cx%bdp(cx%nbd) = ip
-   endsubroutine add_bd
+   bds(p) = bd0 + 1_I4P
+   if (with_bnd) then ! counter-clockwise: bottom, right, top, left
+      k = bd0
+      bseg(:, k + 1) = [x0, y0, x1, y0] ; bseg(:, k + 2) = [x1, y0, x1, y1]
+      bseg(:, k + 3) = [x1, y1, x0, y1] ; bseg(:, k + 4) = [x0, y1, x0, y0]
+      bwall(k + 1:k + 4) = .false.
+   endif
+   endsubroutine quiet_piece_2d
 
-   subroutine boundaries_out(cx, cc)
-   !< The oriented boundaries of the pieces, CSR (appended piece by piece, so already grouped).
-   type(ctx_t),          intent(in)    :: cx !< Working data.
-   type(cut_cells_2d_t), intent(inout) :: cc !< Cut cells.
-   integer(I4P)                        :: k  !< Work.
+   pure subroutine open_cell(x0, x1, y0, y1, closed, alpha, aperture, centroid, npieces, wet_length, wet_normal)
+   !< The cell boundary does not close: no measures, no pieces (the wetted centroid keeps the cell centre).
+   !$acc routine seq
+   real(R8P),    intent(in)  :: x0, x1, y0, y1   !< Cell.
+   logical,      intent(out) :: closed           !< Closed.
+   real(R8P),    intent(out) :: alpha, aperture(4), centroid(2), wet_length, wet_normal(2) !< Measures.
+   integer(I4P), intent(out) :: npieces          !< Pieces.
 
-   allocate(cc%piece_seg_start(cc%np + 1)) ; cc%piece_seg_start = 0_I4P
-   do k = 1, cx%nbd
-      cc%piece_seg_start(cx%bdp(k) + 1) = cc%piece_seg_start(cx%bdp(k) + 1) + 1_I4P
+   closed = .false. ; alpha = -1._R8P ; aperture = -1._R8P
+   centroid = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)] ; npieces = 0_I4P
+   wet_length = 0._R8P ; wet_normal = 0._R8P
+   endsubroutine open_cell
+
+   pure integer(I4P) function edge_of_side(e)
+   !< Counter-clockwise edge (1 bottom, 2 right, 3 top, 4 left) of side e in the order (-u, +u, -v, +v).
+   !$acc routine seq
+   integer(I4P), intent(in) :: e !< Side.
+
+   select case (e)
+   case (1) ; edge_of_side = 4_I4P
+   case (2) ; edge_of_side = 2_I4P
+   case (3) ; edge_of_side = 1_I4P
+   case default ; edge_of_side = 3_I4P
+   endselect
+   endfunction edge_of_side
+
+   pure subroutine edge_subs(ed, cs, ce, n0, n1, nxs, xord, xp, check, fend, state, ok, ns, s, sa, sb, sfl, sx, sed, nxc, &
+                             nxm, xsub, flen)
+   !< Sub-intervals of edge ed (1 bottom, 2 right, 3 top, 4 left) from corner cs to corner ce, counter-clockwise, its
+   !< crossings xord(n0:n1); with check, the state at the end corner must be its flag fend.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: ed                 !< Edge.
+   real(R8P),    intent(in)    :: cs(2), ce(2)       !< Start, end corner.
+   integer(I4P), intent(in)    :: n0, n1, nxs        !< Crossings of the edge, crossings.
+   integer(I4P), intent(in)    :: xord(nxs)          !< Crossings along the edges.
+   real(R8P),    intent(in)    :: xp(2, nxs)         !< Crossing points.
+   logical,      intent(in)    :: check, fend        !< Check the end corner, its flag.
+   logical,      intent(inout) :: state, ok          !< Inside state, the states agree.
+   integer(I4P), intent(inout) :: ns                 !< Sub-intervals.
+   integer(I4P), intent(in)    :: s                  !< Slots.
+   real(R8P),    intent(inout) :: sa(2, s), sb(2, s) !< Sub-intervals.
+   integer(I4P), intent(inout) :: sfl(s), sx(s), sed(s) !< Fluid, end crossing, edge.
+   integer(I4P), intent(inout) :: nxc                !< Crossing slots.
+   integer(I4P), intent(in)    :: nxm                !< Crossing slot capacity.
+   integer(I4P), intent(inout) :: xsub(2, nxm)       !< Crossing slots.
+   real(R8P),    intent(inout) :: flen(4)            !< Fluid length per edge.
+   integer(I4P) :: kk, idx, st, en, dir              !< Work.
+   real(R8P)    :: pa_(2), pb_(2)                    !< Work.
+
+   if (ed <= 2) then
+      st = n0 ; en = n1 ; dir = 1
+   else
+      st = n1 ; en = n0 ; dir = -1
+   endif
+   pa_ = cs
+   if (n1 >= n0) then
+      do kk = st, en, dir
+         idx = xord(kk)
+         pb_ = xp(:, idx)
+         if (ed == 1 .or. ed == 3) pb_(2) = cs(2)
+         if (ed == 2 .or. ed == 4) pb_(1) = cs(1)
+         call push(ed, pa_, pb_, .not. state, idx, ns, s, sa, sb, sfl, sx, sed, nxc, nxm, xsub, flen)
+         state = .not. state
+         pa_ = pb_
+      enddo
+   endif
+   call push(ed, pa_, ce, .not. state, 0_I4P, ns, s, sa, sb, sfl, sx, sed, nxc, nxm, xsub, flen)
+   if (check .and. (state .neqv. fend)) ok = .false.
+   endsubroutine edge_subs
+
+   pure subroutine push(ed, aa, bb, fluid, xid, ns, s, sa, sb, sfl, sx, sed, nxc, nxm, xsub, flen)
+   !< Append a sub-interval (a slot is always free: the cell's crossings + 4 <= s); record the crossing at its end.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: ed                 !< Edge.
+   real(R8P),    intent(in)    :: aa(2), bb(2)       !< End points.
+   logical,      intent(in)    :: fluid              !< Fluid.
+   integer(I4P), intent(in)    :: xid                !< Crossing at its end (0: corner).
+   integer(I4P), intent(inout) :: ns                 !< Sub-intervals.
+   integer(I4P), intent(in)    :: s                  !< Slots.
+   real(R8P),    intent(inout) :: sa(2, s), sb(2, s) !< Sub-intervals.
+   integer(I4P), intent(inout) :: sfl(s), sx(s), sed(s) !< Fluid, end crossing, edge.
+   integer(I4P), intent(inout) :: nxc                !< Crossing slots.
+   integer(I4P), intent(in)    :: nxm                !< Crossing slot capacity.
+   integer(I4P), intent(inout) :: xsub(2, nxm)       !< Crossing slots.
+   real(R8P),    intent(inout) :: flen(4)            !< Fluid length per edge.
+
+   ns = ns + 1 ; sa(:, ns) = aa ; sb(:, ns) = bb ; sx(ns) = xid ; sed(ns) = ed
+   sfl(ns) = 0_I4P ; if (fluid) sfl(ns) = 1_I4P
+   if (fluid) flen(ed) = flen(ed) + norm2(bb - aa)
+   if (xid > 0) then
+      nxc = nxc + 1 ; xsub(1, nxc) = xid ; xsub(2, nxc) = ns
+   endif
+   endsubroutine push
+
+   pure integer(I4P) function fluid_sub_at(xid, nxc, nxm, xsub, nsb, s, sfl)
+   !< The fluid sub-interval next to crossing xid (before or after it, counter-clockwise; 0: none).
+   !$acc routine seq
+   integer(I4P), intent(in) :: xid, nxc, nxm  !< Crossing id, crossing slots, capacity.
+   integer(I4P), intent(in) :: xsub(2, nxm)   !< Crossing slots.
+   integer(I4P), intent(in) :: nsb, s         !< Boundary sub-intervals, slots.
+   integer(I4P), intent(in) :: sfl(s)         !< Fluid.
+   integer(I4P) :: kk, a_, b_                 !< Work.
+
+   fluid_sub_at = 0
+   do kk = 1, nxc
+      if (xsub(1, kk) /= xid) cycle
+      a_ = xsub(2, kk) ; b_ = mod(a_, nsb) + 1
+      if (sfl(a_) == 1) then
+         fluid_sub_at = a_
+      elseif (sfl(b_) == 1) then
+         fluid_sub_at = b_
+      endif
+      return
    enddo
-   cc%piece_seg_start(1) = 1_I4P
-   do k = 1, cc%np
-      cc%piece_seg_start(k + 1) = cc%piece_seg_start(k + 1) + cc%piece_seg_start(k)
+   endfunction fluid_sub_at
+
+   pure integer(I4P) function local_start(vtx, nb, lt)
+   !< The first wall piece of the cell that starts at vertex vtx (0: none).
+   !$acc routine seq
+   integer(I4P), intent(in) :: vtx, nb   !< Vertex, wall pieces.
+   integer(I4P), intent(in) :: lt(2, nb) !< Tags.
+   integer(I4P) :: kk                    !< Counter.
+
+   local_start = 0
+   do kk = 1, nb
+      if (lt(1, kk) == -vtx) then
+         local_start = kk ; return
+      endif
    enddo
-   cc%piece_seg = cx%bd(:, 1:cx%nbd) ; cc%piece_seg_wall = cx%bdw(1:cx%nbd)
-   endsubroutine boundaries_out
+   endfunction local_start
+
+   subroutine follow(qq, nb, lp, lt, pvis, plast, g, wl, wnn, good, nm, me, sm, hm, area_c, cgm, cwm, ncs)
+   !< Follow the chain from wall piece qq to a piece ending at a crossing.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: qq, nb            !< First piece, wall pieces.
+   real(R8P),    intent(in)    :: lp(4, nb)         !< Wall pieces.
+   integer(I4P), intent(in)    :: lt(2, nb)         !< Tags.
+   integer(I4P), intent(inout) :: pvis(nb)          !< Visited.
+   integer(I4P), intent(out)   :: plast             !< Last piece.
+   real(R8P),    intent(out)   :: g(3), wl(4), wnn(2) !< Curve Green, wet (len, mx, my, -), normal.
+   logical,      intent(out)   :: good              !< The chain closed on a crossing.
+   integer(I4P), intent(in)    :: nm                !< Moments.
+   integer(I4P), intent(in)    :: me(2, nm)         !< Exponents.
+   real(R8P),    intent(in)    :: sm(2), hm(2), area_c !< Cell centre, size, area.
+   real(R8P),    intent(inout) :: cgm(nm), cwm(nm)  !< Chain moments.
+   integer(I4P), intent(inout) :: ncs               !< Chain segments.
+   integer(I4P) :: cur, lq, guard                   !< Work.
+
+   g = 0._R8P ; wl = 0._R8P ; wnn = 0._R8P ; good = .true. ; cgm = 0._R8P ; cwm = 0._R8P
+   cur = qq ; guard = 0
+   do
+      pvis(cur) = 1_I4P
+      call add_curve(lp(:, cur), g, wl, wnn, nm, me, sm, hm, area_c, cgm, cwm)
+      ncs = ncs + 1_I4P
+      if (lt(2, cur) > 0) exit
+      lq = local_start(-lt(2, cur), nb, lt)
+      guard = guard + 1
+      if (lq == 0 .or. guard > nb) then
+         good = .false. ; exit
+      endif
+      cur = lq
+   enddo
+   plast = cur
+   endsubroutine follow
+
+   subroutine follow_loop(qq, nb, lp, lt, pvis, nloopp, loopp, g, wl, wnn, good, nm, me, sm, hm, area_c, cgm, cwm, ncs)
+   !< Follow a closed loop of wall pieces starting at qq (a loop slot is always free: each piece enters one loop).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: qq, nb            !< First piece, wall pieces.
+   real(R8P),    intent(in)    :: lp(4, nb)         !< Wall pieces.
+   integer(I4P), intent(in)    :: lt(2, nb)         !< Tags.
+   integer(I4P), intent(inout) :: pvis(nb)          !< Visited.
+   integer(I4P), intent(inout) :: nloopp            !< Loop pieces.
+   integer(I4P), intent(inout) :: loopp(nb)         !< Loop pieces.
+   real(R8P),    intent(out)   :: g(3), wl(4), wnn(2) !< Accumulators.
+   logical,      intent(out)   :: good              !< The loop closed.
+   integer(I4P), intent(in)    :: nm                !< Moments.
+   integer(I4P), intent(in)    :: me(2, nm)         !< Exponents.
+   real(R8P),    intent(in)    :: sm(2), hm(2), area_c !< Cell centre, size, area.
+   real(R8P),    intent(inout) :: cgm(nm), cwm(nm)  !< Loop moments.
+   integer(I4P), intent(inout) :: ncs               !< Chain segments.
+   integer(I4P) :: lq, guard                        !< Work.
+
+   g = 0._R8P ; wl = 0._R8P ; wnn = 0._R8P ; good = .true. ; cgm = 0._R8P ; cwm = 0._R8P
+   lq = qq ; guard = 0
+   do
+      if (pvis(lq) == 1) exit
+      pvis(lq) = 1_I4P
+      nloopp = nloopp + 1 ; loopp(nloopp) = lq
+      call add_curve(lp(:, lq), g, wl, wnn, nm, me, sm, hm, area_c, cgm, cwm)
+      ncs = ncs + 1_I4P
+      if (lt(2, lq) >= 0) then
+         good = .false. ; exit
+      endif
+      lq = local_start(-lt(2, lq), nb, lt)
+      guard = guard + 1
+      if (lq == 0 .or. guard > nb) then
+         good = .false. ; exit
+      endif
+   enddo
+   endsubroutine follow_loop
+
+   subroutine add_curve(pab, g, wl, wnn, nm, me, sm, hm, area_c, cgm, cwm)
+   !< Curve Green, wetted length, moments and normal of the wall piece pab = (a, b).
+   !$acc routine seq
+   real(R8P),    intent(in)    :: pab(4)            !< Wall piece.
+   real(R8P),    intent(inout) :: g(3), wl(4), wnn(2) !< Accumulators.
+   integer(I4P), intent(in)    :: nm                !< Moments.
+   integer(I4P), intent(in)    :: me(2, nm)         !< Exponents.
+   real(R8P),    intent(in)    :: sm(2), hm(2), area_c !< Cell centre, size, area.
+   real(R8P),    intent(inout) :: cgm(nm), cwm(nm)  !< Chain moments.
+   real(R8P) :: gg(3), d(2), l                      !< Work.
+
+   call green(pab(1:2), pab(3:4), gg)
+   g = g + gg
+   d = pab(3:4) - pab(1:2) ; l = norm2(d)
+   wl(1) = wl(1) + l ; wl(2:3) = wl(2:3) + l * 0.5_R8P * (pab(1:2) + pab(3:4))
+   wnn = wnn + [d(2), -d(1)]
+   if (nm > 0_I4P) call curve_moments((pab(1:2) - sm) / hm, (pab(3:4) - sm) / hm, l, nm, me, area_c, cgm, cwm)
+   endsubroutine add_curve
+
+   subroutine curve_moments(pa, pb, ln, nm, me, area_c, cgm, cwm)
+   !< Green moments and wall moments of the wall segment pa -> pb (scaled coordinates, physical length ln) into the
+   !< chain accumulators (issue #70): wall moments by 3-point Gauss on the segment (degree <= 4, exact).
+   !$acc routine seq
+   real(R8P),    intent(in)    :: pa(2), pb(2), ln  !< End points, length.
+   integer(I4P), intent(in)    :: nm                !< Moments.
+   integer(I4P), intent(in)    :: me(2, nm)         !< Exponents.
+   real(R8P),    intent(in)    :: area_c            !< Cell area.
+   real(R8P),    intent(inout) :: cgm(nm), cwm(nm)  !< Chain moments.
+   real(R8P), parameter  :: GX(3) = [0.5_R8P - sqrt(0.15_R8P), 0.5_R8P, 0.5_R8P + sqrt(0.15_R8P)] !< Gauss nodes.
+   real(R8P), parameter  :: GW(3) = [5._R8P / 18._R8P, 8._R8P / 18._R8P, 5._R8P / 18._R8P] !< Weights.
+   real(R8P)             :: pt(2) !< Point.
+   integer(I4P)          :: gg, kk !< Work.
+
+   call segment_green_moments(pa, pb, me, area_c, cgm)
+   do gg = 1, 3
+      pt = pa + GX(gg) * (pb - pa)
+      do kk = 1, nm
+         cwm(kk) = cwm(kk) + GW(gg) * ln * pt(1) ** me(1, kk) * pt(2) ** me(2, kk)
+      enddo
+   enddo
+   endsubroutine curve_moments
+
+   pure subroutine charge(rr, g, wl, wnn, gm, wm, s, nm, acc, wn, accm, wallm)
+   !< Charge a chain or loop to the slot rr: fluid Green is minus the curve's.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: rr                !< Root or hole slot.
+   real(R8P),    intent(in)    :: g(3), wl(3), wnn(2) !< Curve Green, wet (length, mx, my), normal.
+   integer(I4P), intent(in)    :: s, nm             !< Slots, moments.
+   real(R8P),    intent(in)    :: gm(nm), wm(nm)    !< Curve Green moments, wall moments (issue #70).
+   real(R8P),    intent(inout) :: acc(6, s), wn(2, s), accm(nm, s), wallm(nm, s) !< Root accumulators.
+
+   acc(1:3, rr) = acc(1:3, rr) - g
+   acc(4:6, rr) = acc(4:6, rr) + wl(1:3)
+   wn(:, rr) = wn(:, rr) + wnn
+   accm(:, rr) = accm(:, rr) - gm ; wallm(:, rr) = wallm(:, rr) + wm
+   endsubroutine charge
+
+   subroutine island_host(kk, nb, lp, lt, loopp, ifirst, nh, hfirst, hn, harea, hroot, nsb, s, sfl, par, sa, sb, nxc, &
+                          nxm, xsub, host)
+   !< Slot that receives island kk: the smallest hole containing it, else the boundary piece (0: none found).
+   !$acc routine seq
+   integer(I4P), intent(in)  :: kk, nb               !< Island, wall pieces.
+   real(R8P),    intent(in)  :: lp(4, nb)            !< Wall pieces.
+   integer(I4P), intent(in)  :: lt(2, nb)            !< Tags.
+   integer(I4P), intent(in)  :: loopp(nb), ifirst(nb) !< Loop pieces, island loops.
+   integer(I4P), intent(in)  :: nh                   !< Holes.
+   integer(I4P), intent(in)  :: hfirst(nb), hn(nb), hroot(nb) !< Hole loops, slots.
+   real(R8P),    intent(in)  :: harea(nb)            !< Hole areas.
+   integer(I4P), intent(in)  :: nsb, s               !< Boundary sub-intervals, slots.
+   integer(I4P), intent(in)  :: sfl(s), par(s)       !< Fluid, parents.
+   real(R8P),    intent(in)  :: sa(2, s), sb(2, s)   !< Sub-intervals.
+   integer(I4P), intent(in)  :: nxc, nxm             !< Crossing slots, capacity.
+   integer(I4P), intent(in)  :: xsub(2, nxm)         !< Crossing slots.
+   integer(I4P), intent(out) :: host                 !< Slot.
+   real(R8P)    :: pt(2), best                       !< Island vertex, smallest hole area.
+   integer(I4P) :: hh, kk2, cnt, nroots, rlast       !< Work.
+
+   host = 0
+   pt = lp(1:2, loopp(ifirst(kk)))
+   best = huge(1._R8P)
+   do hh = 1, nh
+      if (inside_loop(pt, hn(hh), loopp(hfirst(hh)), nb, lp) .and. harea(hh) < best) then
+         best = harea(hh) ; host = hroot(hh)
+      endif
+   enddo
+   if (host /= 0) return
+   nroots = 0 ; rlast = 0
+   do kk2 = 1, nsb
+      if (sfl(kk2) == 0) cycle
+      if (find(kk2, s, par) /= kk2) cycle
+      nroots = nroots + 1 ; rlast = kk2
+   enddo
+   if (nroots == 1) then
+      host = rlast ; return
+   endif
+   ! several boundary pieces: parity of a ray along +u against each piece's boundary
+   do kk2 = 1, nsb
+      if (sfl(kk2) == 0) cycle
+      if (find(kk2, s, par) /= kk2) cycle
+      cnt = ray_count(pt, kk2, nb, lp, lt, nsb, s, sfl, par, sa, sb, nxc, nxm, xsub)
+      if (mod(cnt, 2_I4P) == 1_I4P) then
+         host = kk2 ; return
+      endif
+   enddo
+   endsubroutine island_host
+
+   integer(I4P) function ray_count(pt, rt, nb, lp, lt, nsb, s, sfl, par, sa, sb, nxc, nxm, xsub)
+   !< Crossings of the ray from pt along +u with the boundary of the piece of root rt (its fluid sub-intervals and the
+   !< wall chains charged to it).
+   !$acc routine seq
+   real(R8P),    intent(in) :: pt(2)              !< Point.
+   integer(I4P), intent(in) :: rt, nb             !< Root, wall pieces.
+   real(R8P),    intent(in) :: lp(4, nb)          !< Wall pieces.
+   integer(I4P), intent(in) :: lt(2, nb)          !< Tags.
+   integer(I4P), intent(in) :: nsb, s             !< Boundary sub-intervals, slots.
+   integer(I4P), intent(in) :: sfl(s), par(s)     !< Fluid, parents.
+   real(R8P),    intent(in) :: sa(2, s), sb(2, s) !< Sub-intervals.
+   integer(I4P), intent(in) :: nxc, nxm           !< Crossing slots, capacity.
+   integer(I4P), intent(in) :: xsub(2, nxm)       !< Crossing slots.
+   integer(I4P) :: kk, qq, rr                     !< Work.
+
+   ray_count = 0
+   do kk = 1, nsb
+      if (sfl(kk) == 0) cycle
+      if (find(kk, s, par) /= rt) cycle
+      if (ray_hits(pt, sa(:, kk), sb(:, kk))) ray_count = ray_count + 1
+   enddo
+   do qq = 1, nb
+      if (lt(1, qq) <= 0) cycle
+      rr = fluid_sub_at(lt(1, qq), nxc, nxm, xsub, nsb, s, sfl)
+      if (rr == 0) cycle
+      if (find(rr, s, par) /= rt) cycle
+      call ray_chain(pt, qq, nb, lp, lt, ray_count)
+   enddo
+   endfunction ray_count
+
+   subroutine ray_chain(pt, pfirst, nb, lp, lt, cnt)
+   !< Add the ray crossings of the chain starting at wall piece pfirst.
+   !$acc routine seq
+   real(R8P),    intent(in)    :: pt(2)      !< Point.
+   integer(I4P), intent(in)    :: pfirst, nb !< First piece, wall pieces.
+   real(R8P),    intent(in)    :: lp(4, nb)  !< Wall pieces.
+   integer(I4P), intent(in)    :: lt(2, nb)  !< Tags.
+   integer(I4P), intent(inout) :: cnt        !< Count.
+   integer(I4P) :: cur, lq, guard            !< Work.
+
+   cur = pfirst ; guard = 0
+   do
+      if (ray_hits(pt, lp(1:2, cur), lp(3:4, cur))) cnt = cnt + 1
+      if (lt(2, cur) > 0) exit
+      lq = local_start(-lt(2, cur), nb, lt)
+      guard = guard + 1
+      if (lq == 0 .or. guard > nb) exit
+      cur = lq
+   enddo
+   endsubroutine ray_chain
+
+   logical function inside_loop(pt, n, list, nb, lp)
+   !< Parity of the ray from pt along +u against a closed loop of n wall pieces.
+   !$acc routine seq
+   real(R8P),    intent(in) :: pt(2)     !< Point.
+   integer(I4P), intent(in) :: n, nb     !< Loop pieces, wall pieces.
+   integer(I4P), intent(in) :: list(n)   !< Pieces of the loop.
+   real(R8P),    intent(in) :: lp(4, nb) !< Wall pieces.
+   integer(I4P) :: kk, cnt               !< Work.
+
+   cnt = 0
+   do kk = 1, n
+      if (ray_hits(pt, lp(1:2, list(kk)), lp(3:4, list(kk)))) cnt = cnt + 1
+   enddo
+   inside_loop = mod(cnt, 2_I4P) == 1_I4P
+   endfunction inside_loop
+
+   pure integer(I4P) function find(kk, s, par) result(rr)
+   !< Union-find root.
+   !$acc routine seq
+   integer(I4P), intent(in) :: kk, s  !< Element, slots.
+   integer(I4P), intent(in) :: par(s) !< Parents.
+
+   rr = kk
+   do while (par(rr) /= rr)
+      rr = par(rr)
+   enddo
+   endfunction find
+
+   pure subroutine unite(a_, b_, s, par, nm, acc, wn, accm, wallm)
+   !< Union (smaller root wins, deterministic). The loser's accumulators move to the winner, moments included (issue
+   !< #95: they were dropped, so a root charged with a chain before losing a later union lost its moments).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: a_, b_, s, nm     !< Elements, slots, moments.
+   integer(I4P), intent(inout) :: par(s)            !< Parents.
+   real(R8P),    intent(inout) :: acc(6, s), wn(2, s), accm(nm, s), wallm(nm, s) !< Root accumulators.
+   integer(I4P) :: ra, rb                           !< Roots.
+
+   ra = find(a_, s, par) ; rb = find(b_, s, par)
+   if (ra == rb) return
+   if (ra < rb) then
+      par(rb) = ra ; acc(:, ra) = acc(:, ra) + acc(:, rb) ; acc(:, rb) = 0._R8P
+      wn(:, ra) = wn(:, ra) + wn(:, rb) ; wn(:, rb) = 0._R8P
+      accm(:, ra) = accm(:, ra) + accm(:, rb) ; accm(:, rb) = 0._R8P
+      wallm(:, ra) = wallm(:, ra) + wallm(:, rb) ; wallm(:, rb) = 0._R8P
+   else
+      par(ra) = rb ; acc(:, rb) = acc(:, rb) + acc(:, ra) ; acc(:, ra) = 0._R8P
+      wn(:, rb) = wn(:, rb) + wn(:, ra) ; wn(:, ra) = 0._R8P
+      accm(:, rb) = accm(:, rb) + accm(:, ra) ; accm(:, ra) = 0._R8P
+      wallm(:, rb) = wallm(:, rb) + wallm(:, ra) ; wallm(:, ra) = 0._R8P
+   endif
+   endsubroutine unite
 
    subroutine quadrature_out(cc, x, y)
    !< Quadrature rules of the pieces from their oriented boundaries (issue #70): area, signed triangles from the cell
@@ -865,63 +1267,10 @@ contains
    enddo
    endsubroutine quadrature_out
 
-   subroutine add_iv(cx, ip, ed, lo, hi)
-   !< Append the fluid interval [lo, hi] of edge ed to piece ip.
-   type(ctx_t),  intent(inout) :: cx     !< Working data.
-   integer(I4P), intent(in)    :: ip, ed !< Piece, edge id.
-   real(R8P),    intent(in)    :: lo, hi !< Range.
-
-   if (.not. cx%with_iv) return
-   if (cx%niv == size(cx%ivp)) then
-      cx%ivp = [cx%ivp, cx%ivp] ; cx%ive = [cx%ive, cx%ive] ; cx%ivl = [cx%ivl, cx%ivl] ; cx%ivh = [cx%ivh, cx%ivh]
-   endif
-   cx%niv = cx%niv + 1_I4P
-   cx%ivp(cx%niv) = ip ; cx%ive(cx%niv) = ed ; cx%ivl(cx%niv) = lo ; cx%ivh(cx%niv) = hi
-   endsubroutine add_iv
-
-   subroutine add_piece(cx, ii, jj, ar, mx, my, wl, wnn)
-   !< Append a piece (area, first moments, wetted length, normal).
-   type(ctx_t),  intent(inout) :: cx      !< Working data.
-   integer(I4P), intent(in) :: ii, jj  !< Cell.
-   real(R8P),    intent(in) :: ar, mx, my, wl, wnn(2) !< Measures.
-
-   if (cx%npb == size(cx%pa)) then
-      cx%pa = [cx%pa, cx%pa] ; cx%pcx = [cx%pcx, cx%pcx] ; cx%pcy = [cx%pcy, cx%pcy] ; cx%pwl = [cx%pwl, cx%pwl]
-      cx%pwx = [cx%pwx, cx%pwx] ; cx%pwy = [cx%pwy, cx%pwy] ; cx%pci = [cx%pci, cx%pci] ; cx%pcj = [cx%pcj, cx%pcj]
-      cx%pap = reshape([cx%pap, cx%pap], [4, 2 * size(cx%pap, 2)])
-      cx%pmom = reshape([cx%pmom, cx%pmom], [cx%nm, 2 * size(cx%pmom, 2)])
-      cx%pwm = reshape([cx%pwm, cx%pwm], [cx%nm, 2 * size(cx%pwm, 2)])
-   endif
-   cx%pap(:, cx%npb + 1) = 0._R8P
-   cx%npb = cx%npb + 1_I4P
-   cx%pa(cx%npb) = ar ; cx%pwl(cx%npb) = wl ; cx%pwx(cx%npb) = wnn(1) ; cx%pwy(cx%npb) = wnn(2)
-   cx%pci(cx%npb) = ii ; cx%pcj(cx%npb) = jj
-   if (ar > 0._R8P) then
-      cx%pcx(cx%npb) = mx / ar ; cx%pcy(cx%npb) = my / ar
-   else
-      cx%pcx(cx%npb) = 0._R8P ; cx%pcy(cx%npb) = 0._R8P
-   endif
-   endsubroutine add_piece
-
-   integer(I4P) function vedge(cx, ll, kk)
-   !< Id of the vertical edge on line ll (1..nx+1), row kk (1..ny).
-   type(ctx_t),  intent(in) :: cx     !< Working data.
-   integer(I4P), intent(in) :: ll, kk !< Line, row.
-
-   vedge = ll + (kk - 1_I4P) * (cx%nx + 1_I4P)
-   endfunction vedge
-
-   integer(I4P) function hedge(cx, kk, ll)
-   !< Id of the horizontal edge in column kk (1..nx), on line ll (1..ny+1).
-   type(ctx_t),  intent(in) :: cx     !< Working data.
-   integer(I4P), intent(in) :: kk, ll !< Column, line.
-
-   hedge = (cx%nx + 1_I4P) * cx%ny + kk + (ll - 1_I4P) * cx%nx
-   endfunction hedge
-
    pure subroutine green(a, b, g)
    !< Green integrals along the straight path a -> b: g(1) = 1/2 (u dv - v du) (area), g(2) = 1/2 u^2 dv
    !< (moment in u), g(3) = -1/2 v^2 du (moment in v).
+   !$acc routine seq
    real(R8P), intent(in)  :: a(2), b(2) !< End points.
    real(R8P), intent(out) :: g(3)       !< Integrals.
 
@@ -932,6 +1281,7 @@ contains
 
    pure logical function ray_hits(pt, a, b)
    !< The ray from pt along +u crosses the segment ab (v = pt(2) + eps rule; exact side test).
+   !$acc routine seq
    real(R8P), intent(in) :: pt(2), a(2), b(2) !< Point, segment.
    real(R8P)             :: o                 !< Orientation.
 
