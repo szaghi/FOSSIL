@@ -7,6 +7,8 @@ module fossil_tritri_exact
 !< #33, still used by `fossil_alpha_wrap`) snap and return rounded points, as described below.
 !< `pair_cut` needs two exactly non-degenerate triangles (`facet_drop` /= 0); `degenerate_pair_meet` (issue #96, moved
 !< here from `fossil_body_distance` by issue #99) decides, exactly, whether a pair with a degenerate triangle meets.
+!< `degenerate_pair_contact` (issue #98) classifies such a contact exactly (crossing, touching) with a contact point,
+!< optionally beyond the common vertices (`find_self_intersections`).
 !<
 !< `pair_classify` decides how two triangles meet from the exact signs of Shewchuk's `orient3d`
 !< (each triangle's vertices against the other's plane), never from floating-point distances:
@@ -45,7 +47,7 @@ public :: coplanar_portion
 public :: edge_plane_point, edge_edge_point
 public :: lex_less
 public :: pair_cut, coplanar_cut, facet_drop
-public :: degenerate_pair_meet
+public :: degenerate_pair_meet, degenerate_pair_contact
 
 integer(I4P), parameter :: PAIR_SEPARATED = 0_I4P !< No common point.
 integer(I4P), parameter :: PAIR_CROSSING  = 1_I4P !< Common segment of positive length.
@@ -330,9 +332,9 @@ contains
    !< coincident vertices) has no plane: every orient3d against it is 0, so it is classified COPLANAR (as `ta`) or its
    !< vertices all lie "on" the other's plane (as `tb`), and the result is meaningless (issue #96: a segment 0.5 from
    !< a triangle came out PAIR_TOUCHING, and the reverse order PAIR_COPLANAR). `degenerate_pair_meet` decides such pairs
-   !< by exact segment / point predicates instead. The boolean arrangement (`collect_pair`) and `find_self_intersections`
-   !< pass unsanitised facets here (an open defect found by #96's audit: a boolean with a zero-area sliver as A fails
-   !< with CDT_FAILED against a body it does not touch); `sanitize` removes degenerate facets.
+   !< by exact segment / point predicates instead. Every caller filters degenerate pairs before calling here (issue #98):
+   !< `tri_tri_distance` and the boolean arrangement (`collect_pair`) with `degenerate_pair_meet`,
+   !< `find_self_intersections` with `degenerate_pair_contact`.
    type(vector_R8P),       intent(in)  :: ta(3) !< First triangle.
    type(vector_R8P),       intent(in)  :: tb(3) !< Second triangle.
    integer(I4P),           intent(out) :: kind  !< PAIR_* code.
@@ -584,6 +586,235 @@ contains
       meet = .false.
    endif
    endfunction degenerate_pair_meet
+
+   pure subroutine degenerate_pair_contact(a, b, kind, x, beyond_shared)
+   !< Exact class of the contact of triangles a and b (vertices as columns) when at least one is exactly degenerate
+   !< (`facet_drop` = 0), with one exact contact point x (issue #98, plan #99 step 3; `find_self_intersections` uses it).
+   !< A degenerate triangle is the segment between its lexicographic extreme vertices (its ends), a point if they
+   !< coincide; its interior is the open segment (empty for a point; a middle vertex is interior). The interior of a
+   !< regular triangle is the open triangle in its plane. Classes:
+   !<  - PAIR_SEPARATED: no common point (`degenerate_pair_meet` false, whose operations decide it);
+   !<  - PAIR_CROSSING: a common point interior to both: a segment through the interior of the regular triangle
+   !<    (across its plane or in it), two segments crossing at a point interior to both, or collinear and overlapping
+   !<    with positive length;
+   !<  - PAIR_TOUCHING: they meet, only at points on the boundary of one of them: an end of a segment, a point triangle,
+   !<    an edge or a vertex of the regular triangle (a segment along an edge included).
+   !< Decisions, exact: strictly across the regular triangle's plane, orient3d of the segment against its three edges
+   !< (all nonzero: crossing, a zero: touching); in the plane, orient2d in the projection dropping its `facet_drop`:
+   !< touching iff an edge line has both ends in its closed outer half-plane or the segment's line has the three vertices
+   !< in one closed half-plane (weak separation of the open sets); two segments: a proper crossing (four nonzero
+   !< orient2d) or a collinear overlap of positive length (lexicographic order) is crossing.
+   !< x, symmetric in a and b: a point, itself; one end of the segment on the plane, that end; strictly across, the
+   !< vertex of the triangle on the segment's line, else the edge-line point (one zero orient3d), else the line-plane
+   !< point; in the plane, the first of: an end in the closed triangle, a vertex of the triangle on the segment, the
+   !< crossing with the first edge crossed properly; two segments: collinear, the larger lower end, else an end on the
+   !< other segment, else their crossing.
+   !< `beyond_shared` (default false): count only the contact outside the convex hull of the vertices common to a and b
+   !< (exact coordinate equality: the adjacency of `find_self_intersections`): a point triangle or a common edge
+   !< contributes nothing; two segments are crossing iff collinear with the overlap reaching beyond the common points; a
+   !< segment and a regular triangle with one common vertex s meet beyond s only in the plane, crossing iff an end of
+   !< the segment lies strictly inside the triangle's angle at s, touching iff along one of its edges from s (orient2d
+   !< and the lexicographic side of s); x is then the lexicographically smallest common vertex.
+   !< If neither triangle is degenerate the result is PAIR_SEPARATED (use `pair_cut`); x is undefined when separated.
+   real(R8P),              intent(in)           :: a(3, 3), b(3, 3) !< Triangles (at least one exactly degenerate).
+   integer(I4P),           intent(out)          :: kind             !< PAIR_SEPARATED, PAIR_CROSSING, PAIR_TOUCHING.
+   type(implicit_point_t), intent(out)          :: x                !< A contact point (see above).
+   logical,                intent(in), optional :: beyond_shared    !< Ignore the contact at the common vertices.
+   real(R8P)                                    :: a0(3), a1(3), b0(3), b1(3), s(3, 3)
+   integer(I4P)                                 :: da, db, i, j, ns
+   type(vector_R8P)                             :: v(3)
+   logical                                      :: beyond
+
+   kind = PAIR_SEPARATED ; x = ip_explicit(a(:, 1))
+   beyond = .false. ; if (present(beyond_shared)) beyond = beyond_shared
+   do i = 1, 3 ; v(i) = vector_R8P(a(1, i), a(2, i), a(3, i)) ; enddo
+   da = facet_drop(v)
+   do i = 1, 3 ; v(i) = vector_R8P(b(1, i), b(2, i), b(3, i)) ; enddo
+   db = facet_drop(v)
+   if (da /= 0_I4P .and. db /= 0_I4P) return
+   ns = 0_I4P
+   if (beyond) then ! the distinct common vertices
+      do i = 1, 3
+         if (.not. any(a(1, i) == b(1, :) .and. a(2, i) == b(2, :) .and. a(3, i) == b(3, :))) cycle
+         if (any([(all(s(:, j) == a(:, i)), j = 1, ns)])) cycle
+         ns = ns + 1_I4P ; s(:, ns) = a(:, i)
+      enddo
+   endif
+   if (ns > 0_I4P) then
+      call contact_beyond_shared(a, b, da, db, s(:, 1:ns), kind)
+      if (kind /= PAIR_SEPARATED) then
+         a0 = s(:, 1)
+         do i = 2, ns
+            if (lex_lt(s(:, i), a0)) a0 = s(:, i)
+         enddo
+         x = ip_explicit(a0)
+      endif
+      return
+   endif
+   if (.not. degenerate_pair_meet(a, b, da, db)) return
+   if (da == 0_I4P .and. db == 0_I4P) then
+      call hull_ends(a, a0, a1) ; call hull_ends(b, b0, b1)
+      call segment_segment_contact(a0, a1, b0, b1, kind, x)
+   elseif (da == 0_I4P) then
+      call hull_ends(a, a0, a1)
+      call segment_triangle_contact(a0, a1, b, db, kind, x)
+   else
+      call hull_ends(b, b0, b1)
+      call segment_triangle_contact(b0, b1, a, da, kind, x)
+   endif
+   endsubroutine degenerate_pair_contact
+
+   pure subroutine segment_triangle_contact(p, q, t, drop, kind, x)
+   !< Class and point of the contact of the closed segment (p, q) (ends in lexicographic order, a point if p = q) and
+   !< the regular triangle t (`facet_drop(t)` = drop /= 0), known to meet (see `degenerate_pair_contact`).
+   real(R8P),              intent(in)  :: p(3), q(3), t(3, 3) !< Segment, triangle.
+   integer(I4P),           intent(in)  :: drop                !< `facet_drop(t)`.
+   integer(I4P),           intent(out) :: kind                !< PAIR_CROSSING or PAIR_TOUCHING.
+   type(implicit_point_t), intent(out) :: x                   !< Contact point.
+   integer(I4P)                        :: sp, sq, s(3), w(3), ori, k, l, nz
+   logical                             :: sep
+
+   kind = PAIR_TOUCHING ; x = ip_explicit(p)
+   if (all(p == q)) return
+   sp = isgn(orient3d_xyz(t(:, 1), t(:, 2), t(:, 3), p)) ; sq = isgn(orient3d_xyz(t(:, 1), t(:, 2), t(:, 3), q))
+   if (sp /= 0_I4P .and. sq == 0_I4P) x = ip_explicit(q)
+   if (sp == 0_I4P .neqv. sq == 0_I4P) return ! one end on the plane: the contact is that end
+   if (sp /= 0_I4P) then ! strictly across the plane (they meet): the contact point is interior to the segment
+      do k = 1, 3
+         s(k) = isgn(orient3d_xyz(p, q, t(:, k), t(:, mod(k, 3) + 1)))
+      enddo
+      nz = count(s == 0_I4P)
+      if (nz == 0_I4P) then
+         kind = PAIR_CROSSING ; x = ip_lpi(p, q, t(:, 1), t(:, 2), t(:, 3))
+      elseif (nz == 1_I4P) then
+         k = findloc(s, 0_I4P, dim=1)
+         x = ip_eei(p, q, t(:, k), t(:, mod(k, 3) + 1))
+      else
+         l = findloc(s /= 0_I4P, .true., dim=1)
+         x = ip_explicit(t(:, mod(l + 1_I4P, 3_I4P) + 1_I4P)) ! the vertex opposite the nonzero edge l
+      endif
+      return
+   endif
+   ! in the plane: weak separation of the open segment and the open triangle by an edge line or the segment's line
+   ori = o2p(t(:, 1), t(:, 2), t(:, 3), drop)
+   sep = .false.
+   do k = 1, 3
+      l = mod(k, 3) + 1
+      if (ori * o2p(t(:, k), t(:, l), p, drop) <= 0_I4P .and. ori * o2p(t(:, k), t(:, l), q, drop) <= 0_I4P) sep = .true.
+      w(k) = o2p(p, q, t(:, k), drop)
+   enddo
+   if (all(w >= 0_I4P) .or. all(w <= 0_I4P)) sep = .true.
+   if (.not. sep) kind = PAIR_CROSSING
+   if (in_triangle_2d(p, t, drop)) then
+      x = ip_explicit(p) ; return
+   elseif (in_triangle_2d(q, t, drop)) then
+      x = ip_explicit(q) ; return
+   endif
+   do k = 1, 3
+      if (w(k) == 0_I4P .and. in_box_2d(t(:, k), p, q, drop)) then
+         x = ip_explicit(t(:, k)) ; return
+      endif
+   enddo
+   do k = 1, 3
+      l = mod(k, 3) + 1
+      if (w(k) * w(l) < 0_I4P .and. o2p(t(:, k), t(:, l), p, drop) * o2p(t(:, k), t(:, l), q, drop) < 0_I4P) then
+         x = ip_eei(p, q, t(:, k), t(:, l)) ; return
+      endif
+   enddo
+   endsubroutine segment_triangle_contact
+
+   pure subroutine segment_segment_contact(a0, a1, b0, b1, kind, x)
+   !< Class and point of the contact of the closed segments (a0, a1) and (b0, b1) (ends in lexicographic order, a point
+   !< if they coincide), known to meet (see `degenerate_pair_contact`).
+   real(R8P),              intent(in)  :: a0(3), a1(3), b0(3), b1(3) !< Segments.
+   integer(I4P),           intent(out) :: kind                       !< PAIR_CROSSING or PAIR_TOUCHING.
+   type(implicit_point_t), intent(out) :: x                          !< Contact point.
+   real(R8P)                           :: lo(3), hi(3)
+   integer(I4P)                        :: drop, d1, d2, d3, d4
+
+   kind = PAIR_TOUCHING
+   if (all(a0 == a1)) then
+      x = ip_explicit(a0) ; return
+   elseif (all(b0 == b1)) then
+      x = ip_explicit(b0) ; return
+   endif
+   if (collinear_3d(a0, a1, b0) .and. collinear_3d(a0, a1, b1)) then
+      lo = a0 ; if (lex_lt(a0, b0)) lo = b0
+      hi = a1 ; if (lex_lt(b1, a1)) hi = b1
+      if (lex_lt(lo, hi)) kind = PAIR_CROSSING
+      x = ip_explicit(lo)
+      return
+   endif
+   if (.not. collinear_3d(a0, a1, b0)) then
+      drop = nonzero_drop(a0, a1, b0)
+   else
+      drop = nonzero_drop(a0, a1, b1)
+   endif
+   d1 = o2p(b0, b1, a0, drop) ; d2 = o2p(b0, b1, a1, drop) ; d3 = o2p(a0, a1, b0, drop) ; d4 = o2p(a0, a1, b1, drop)
+   if (d1 * d2 < 0_I4P .and. d3 * d4 < 0_I4P) then
+      kind = PAIR_CROSSING ; x = ip_eei(a0, a1, b0, b1)
+   elseif (d1 == 0_I4P .and. in_box_2d(a0, b0, b1, drop)) then ! one contact point: an end on the other segment
+      x = ip_explicit(a0)
+   elseif (d2 == 0_I4P .and. in_box_2d(a1, b0, b1, drop)) then
+      x = ip_explicit(a1)
+   elseif (d3 == 0_I4P .and. in_box_2d(b0, a0, a1, drop)) then
+      x = ip_explicit(b0)
+   else
+      x = ip_explicit(b1)
+   endif
+   endsubroutine segment_segment_contact
+
+   pure subroutine contact_beyond_shared(a, b, da, db, s, kind)
+   !< Class of the contact of a and b (one at least degenerate) outside the convex hull of their common vertices s
+   !< (see `degenerate_pair_contact`, `beyond_shared`).
+   real(R8P),    intent(in)  :: a(3, 3), b(3, 3) !< Triangles.
+   integer(I4P), intent(in)  :: da, db           !< Their `facet_drop`.
+   real(R8P),    intent(in)  :: s(:, :)          !< Distinct common vertices (columns).
+   integer(I4P), intent(out) :: kind             !< PAIR_SEPARATED, PAIR_CROSSING, PAIR_TOUCHING.
+   real(R8P)                 :: a0(3), a1(3), b0(3), b1(3), lo(3), hi(3), smin(3), smax(3), t(3, 3), e(3, 2), c(3)
+   integer(I4P)              :: i, k, drop, r, o1, o2
+
+   kind = PAIR_SEPARATED
+   call hull_ends(a, a0, a1) ; call hull_ends(b, b0, b1)
+   if (all(a0 == a1) .or. all(b0 == b1)) return ! a point triangle is the common vertex
+   if (da == 0_I4P .and. db == 0_I4P) then
+      ! two segments through a common point: beyond it only if collinear, with the overlap past the common points
+      if (.not. (collinear_3d(a0, a1, b0) .and. collinear_3d(a0, a1, b1))) return
+      lo = a0 ; if (lex_lt(a0, b0)) lo = b0
+      hi = a1 ; if (lex_lt(b1, a1)) hi = b1
+      smin = s(:, 1) ; smax = s(:, 1)
+      do i = 2, size(s, dim=2)
+         if (lex_lt(s(:, i), smin)) smin = s(:, i)
+         if (lex_lt(smax, s(:, i))) smax = s(:, i)
+      enddo
+      if (lex_lt(lo, smin) .or. lex_lt(smax, hi)) kind = PAIR_CROSSING
+      return
+   endif
+   ! a segment and a regular triangle t: two common vertices make the segment lie on t's edge line (contact = the edge)
+   if (size(s, dim=2) > 1) return
+   if (da == 0_I4P) then
+      t = b ; drop = db ; e(:, 1) = a0 ; e(:, 2) = a1
+   else
+      t = a ; drop = da ; e(:, 1) = b0 ; e(:, 2) = b1
+   endif
+   c = s(:, 1)
+   if (orient3d_xyz(t(:, 1), t(:, 2), t(:, 3), e(:, 1)) /= 0._R8P) return ! the line through c leaves t's plane
+   if (orient3d_xyz(t(:, 1), t(:, 2), t(:, 3), e(:, 2)) /= 0._R8P) return
+   do i = 1, 3
+      if (all(t(:, i) == c)) exit
+   enddo
+   a0 = t(:, mod(i, 3) + 1) ; a1 = t(:, mod(i + 1, 3) + 1) ! the other two vertices of t
+   r = o2p(c, a0, a1, drop)
+   do k = 1, 2
+      if (all(e(:, k) == c)) cycle
+      o1 = o2p(c, a0, e(:, k), drop) ; o2 = o2p(c, a1, e(:, k), drop)
+      if (o1 == r .and. o2 == -r) then ! strictly inside the angle at c: through the interior
+         kind = PAIR_CROSSING ; return
+      endif
+      if ((o1 == 0_I4P .and. (lex_lt(c, e(:, k)) .eqv. lex_lt(c, a0))) .or. &
+          (o2 == 0_I4P .and. (lex_lt(c, e(:, k)) .eqv. lex_lt(c, a1)))) kind = PAIR_TOUCHING ! along an edge from c
+   enddo
+   endsubroutine contact_beyond_shared
 
    pure subroutine hull_ends(t, e0, e1)
    !< The lexicographically smallest and largest vertices of t.

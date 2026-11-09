@@ -41,6 +41,20 @@ module fossil_self_intersection
 !<      rad before) are decided in the projection: overlapping interiors are
 !<      reported (SELFINT_COPLANAR), a common edge segment from the vertex is a
 !<      touch (include_touching); the vertex alone is adjacency.
+!<      Exactly degenerate facets (`facet_drop` = 0, zero area: collinear or
+!<      coincident vertices; issue #98), any number of shared vertices: no
+!<      plane, so neither pair_cut nor the wedge test applies (pair_cut called
+!<      one at 0.5 from a triangle TOUCHING). The facet is the segment between
+!<      its extreme vertices (a point if they coincide) and the pair is decided
+!<      by `degenerate_pair_contact` (exact segment / point predicates), only
+!<      the contact beyond the shared vertices counting: a common point
+!<      interior to the segment and to the other facet (the segment through
+!<      the triangle's interior, two segments crossing or overlapping) is
+!<      reported SELFINT_CROSSING; a contact only at an end of the segment, a
+!<      point facet, or the triangle's boundary (along an edge included) is a
+!<      touch (include_touching); p = q = an exact contact point, rounded once
+!<      (the lexicographically smallest shared vertex when they share one).
+!<      `edge_fans` skips a fan with a degenerate facet (it has no half-plane).
 !<
 !< Resolution (retriangulation along intersection segments and interior pruning
 !< via the generalized winding number) is left to the §1.1 booleans PR, which
@@ -52,7 +66,8 @@ use fossil_facet_object,     only : facet_object
 use fossil_list_id_object,   only : list_id_object
 use fossil_implicit_points,  only : implicit_point_t, ip_approx
 use fossil_predicates,       only : orient2d_xy, orient3d
-use fossil_tritri_exact,     only : pair_cut, facet_drop, PAIR_CROSSING, PAIR_TOUCHING, PAIR_COPLANAR
+use fossil_tritri_exact,     only : pair_cut, facet_drop, degenerate_pair_contact, PAIR_CROSSING, PAIR_TOUCHING, &
+                                    PAIR_COPLANAR
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
 
@@ -101,8 +116,9 @@ contains
    logical,                                       intent(in),  optional    :: include_touching !< Also report pairs
                                                                                     !< meeting at one point (default no).
    type(intersection_pair_t), allocatable                                  :: buf(:)
-   integer(I4P)                                                            :: nfound
+   integer(I4P)                                                            :: nfound, i
    logical                                                                 :: touching
+   logical,                   allocatable                                  :: flat(:)
 
    if (present(status)) status = 0_I4P
    touching = .false. ; if (present(include_touching)) touching = include_touching
@@ -111,11 +127,16 @@ contains
    ! meshes finish with zero pairs, so the initial size is intentionally small.
    allocate(buf(16))
    nfound = 0_I4P
+   ! exactly degenerate facets (zero area, issue #98): pair_cut cannot classify them
+   allocate(flat(size(facet, dim=1)))
+   do i = 1, size(facet, dim=1)
+      flat(i) = facet_drop(facet(i)%vertex) == 0_I4P
+   enddo
 
    if (tree%get_nodes_number() <= 0) then
-      call brute_force_pairs(facet=facet, touching=touching, buf=buf, nfound=nfound)
+      call brute_force_pairs(facet=facet, flat=flat, touching=touching, buf=buf, nfound=nfound)
    else
-      call traverse_node_pair(facet=facet, tree=tree, na=0_I4P, nb=0_I4P, touching=touching, &
+      call traverse_node_pair(facet=facet, flat=flat, tree=tree, na=0_I4P, nb=0_I4P, touching=touching, &
                               buf=buf, nfound=nfound)
    endif
 
@@ -128,10 +149,11 @@ contains
    deallocate(buf)
    endsubroutine find_self_intersections
 
-   subroutine brute_force_pairs(facet, touching, buf, nfound)
+   subroutine brute_force_pairs(facet, flat, touching, buf, nfound)
    !< O(N^2) fallback used when no AABB tree is available. Same adjacency
    !< filter and narrow-phase as the BVH path.
    type(facet_object),                     intent(in)     :: facet(:)
+   logical,                                intent(in)     :: flat(:)  !< Facets exactly degenerate.
    logical,                                intent(in)     :: touching
    type(intersection_pair_t), allocatable, intent(inout)  :: buf(:)
    integer(I4P),                           intent(inout)  :: nfound
@@ -143,13 +165,14 @@ contains
    do i = 1, n - 1
       do j = i + 1, n
          if (.not. bboxes_overlap(facet(i), facet(j))) cycle
-         call test_pair(fa=facet(i), fb=facet(j), touching=touching, hit=hit, kind=kind, p=p, q=q)
+         call test_pair(fa=facet(i), fb=facet(j), flat_a=flat(i), flat_b=flat(j), touching=touching, hit=hit, &
+                        kind=kind, p=p, q=q)
          if (hit) call push_pair(buf=buf, nfound=nfound, a=i, b=j, kind=kind, p=p, q=q)
       enddo
    enddo
    endsubroutine brute_force_pairs
 
-   recursive subroutine traverse_node_pair(facet, tree, na, nb, touching, buf, nfound)
+   recursive subroutine traverse_node_pair(facet, flat, tree, na, nb, touching, buf, nfound)
    !< Tree-vs-tree traversal. Visits node-pairs `(na, nb)` with `na <= nb` to
    !< avoid double-counting. Prunes when the two AABBs don't overlap; recurses
    !< by descending the *larger* of the two nodes (volume-based heuristic).
@@ -157,6 +180,7 @@ contains
    !< When `na == nb` we additionally enumerate the single-node "self" case to
    !< pick up intra-node facet pairs that don't reach a leaf-leaf descent.
    type(facet_object),                     intent(in)    :: facet(:)
+   logical,                                intent(in)    :: flat(:)  !< Facets exactly degenerate.
    type(aabb_tree_object),                 intent(in)    :: tree
    integer(I4P),                           intent(in)    :: na, nb
    logical,                                intent(in)    :: touching
@@ -185,7 +209,7 @@ contains
 
    if (nca == 0 .and. ncb == 0) then
       ! Leaf-leaf: enumerate candidate facet pairs.
-      call enumerate_leaf_pair(facet=facet, tree=tree, na=na, nb=nb, touching=touching, &
+      call enumerate_leaf_pair(facet=facet, flat=flat, tree=tree, na=na, nb=nb, touching=touching, &
                                buf=buf, nfound=nfound)
       return
    endif
@@ -194,14 +218,14 @@ contains
    if (nca == 0) then
       ! a is leaf; recurse into b's children paired with a.
       do j = 1, ncb
-         call traverse_node_pair(facet=facet, tree=tree, na=na, nb=cb(j), &
+         call traverse_node_pair(facet=facet, flat=flat, tree=tree, na=na, nb=cb(j), &
                                  touching=touching, buf=buf, nfound=nfound)
       enddo
       return
    endif
    if (ncb == 0) then
       do i = 1, nca
-         call traverse_node_pair(facet=facet, tree=tree, na=ca(i), nb=nb, &
+         call traverse_node_pair(facet=facet, flat=flat, tree=tree, na=ca(i), nb=nb, &
                                  touching=touching, buf=buf, nfound=nfound)
       enddo
       return
@@ -213,18 +237,18 @@ contains
    vb = (bmax%x - bmin%x) * (bmax%y - bmin%y) * (bmax%z - bmin%z)
    if (va >= vb) then
       do i = 1, nca
-         call traverse_node_pair(facet=facet, tree=tree, na=ca(i), nb=nb, &
+         call traverse_node_pair(facet=facet, flat=flat, tree=tree, na=ca(i), nb=nb, &
                                  touching=touching, buf=buf, nfound=nfound)
       enddo
    else
       do j = 1, ncb
-         call traverse_node_pair(facet=facet, tree=tree, na=na, nb=cb(j), &
+         call traverse_node_pair(facet=facet, flat=flat, tree=tree, na=na, nb=cb(j), &
                                  touching=touching, buf=buf, nfound=nfound)
       enddo
    endif
    endsubroutine traverse_node_pair
 
-   subroutine enumerate_leaf_pair(facet, tree, na, nb, touching, buf, nfound)
+   subroutine enumerate_leaf_pair(facet, flat, tree, na, nb, touching, buf, nfound)
    !< Enumerate candidate facet pairs at the leaf-pair (na, nb).
    !<
    !< When `na == nb` (the same leaf), enumerate i < j over its facet ids.
@@ -234,6 +258,7 @@ contains
    !< The recursion convention is na <= nb at the root, but during descent both
    !< orderings can arise — the canonicalization here is the safety net.
    type(facet_object),                     intent(in)    :: facet(:)
+   logical,                                intent(in)    :: flat(:)  !< Facets exactly degenerate.
    type(aabb_tree_object),                 intent(in)    :: tree
    integer(I4P),                           intent(in)    :: na, nb
    logical,                                intent(in)    :: touching
@@ -265,7 +290,8 @@ contains
          if (na == nb .and. fi >= fj) cycle  ! intra-leaf: i < j only
          if (na /= nb .and. fi /= lo) cycle  ! inter-leaf: only the (lo, hi) direction
          if (.not. bboxes_overlap(facet(lo), facet(hi))) cycle
-         call test_pair(fa=facet(lo), fb=facet(hi), touching=touching, hit=hit, kind=kind, p=p, q=q)
+         call test_pair(fa=facet(lo), fb=facet(hi), flat_a=flat(lo), flat_b=flat(hi), touching=touching, hit=hit, &
+                        kind=kind, p=p, q=q)
          if (hit) call push_pair(buf=buf, nfound=nfound, a=lo, b=hi, kind=kind, p=p, q=q)
       enddo
    enddo
@@ -282,17 +308,37 @@ contains
                 fa%bb(2)%z < fb%bb(1)%z .or. fb%bb(2)%z < fa%bb(1)%z)
    endfunction bboxes_overlap
 
-   subroutine test_pair(fa, fb, touching, hit, kind, p, q)
+   subroutine test_pair(fa, fb, flat_a, flat_b, touching, hit, kind, p, q)
    !< Narrow phase of one candidate pair (see the module header, steps 2 and 3).
    type(facet_object), intent(in)  :: fa, fb   !< The pair.
+   logical,            intent(in)  :: flat_a   !< fa is exactly degenerate (`facet_drop` = 0).
+   logical,            intent(in)  :: flat_b   !< fb is exactly degenerate.
    logical,            intent(in)  :: touching !< Report pairs meeting at one point.
    logical,            intent(out) :: hit      !< True if the pair is reported.
    integer(I4P),       intent(out) :: kind     !< SELFINT_* code, if hit.
    type(vector_R8P),   intent(out) :: p, q     !< Intersection segment (see intersection_pair_t), if hit.
    logical                         :: coplanar
+   real(R8P)                       :: a(3, 3), b(3, 3)
+   type(implicit_point_t)          :: ip
+   integer(I4P)                    :: pk, i
 
    hit = .false. ; kind = SELFINT_CROSSING
    p = fa%vertex(1) ; q = p
+   if (flat_a .or. flat_b) then
+      ! a degenerate facet (issue #98): no plane, pair_cut cannot classify it; the exact contact beyond the common
+      ! vertices (adjacency) instead, p = q = an exact contact point rounded (see the module header)
+      do i = 1, 3
+         a(:, i) = [fa%vertex(i)%x, fa%vertex(i)%y, fa%vertex(i)%z]
+         b(:, i) = [fb%vertex(i)%x, fb%vertex(i)%y, fb%vertex(i)%z]
+      enddo
+      call degenerate_pair_contact(a, b, pk, ip, beyond_shared=.true.)
+      if (pk == PAIR_CROSSING .or. (pk == PAIR_TOUCHING .and. touching)) then
+         hit = .true.
+         if (pk == PAIR_TOUCHING) kind = SELFINT_TOUCHING
+         p = to_vector(ip_approx(ip)) ; q = p
+      endif
+      return
+   endif
    select case (shared_vertices_number(fa, fb))
    case (0_I4P)
       call disjoint_pair(ta=fa%vertex, tb=fb%vertex, touching=touching, hit=hit, kind=kind, p=p, q=q)
@@ -471,6 +517,8 @@ contains
          half(t) = 2_I4P
       elseif (o3(p0, p1, aux, w(:, t)) == o3(p0, p1, aux, w(:, 1))) then
          return ! the same half-plane as facet 1: a tie
+      elseif (o3(p0, p1, aux, w(:, t)) == 0._R8P) then
+         return ! w on the edge's line: a degenerate facet, no half-plane (issue #98)
       else
          half(t) = 3_I4P
       endif

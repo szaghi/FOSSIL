@@ -3755,6 +3755,9 @@ contains
    !<   - Every decision is exact (issue #69). Adjacent facets meeting only at
    !<     the shared feature are not reported; touching pairs only with
    !<     `include_touching`.
+   !<   - A zero-area facet (issue #98) is a segment or a point: reported
+   !<     crossing if a point interior to it is interior to the other facet,
+   !<     touching if they meet only at its ends or on the other's boundary.
    !<
    !< Performance:
    !<   - Broad phase via tree-vs-tree traversal on the existing AABB tree

@@ -82,6 +82,24 @@ face. It is watertight and one shell; `find_self_intersections` reports
    input a reported pair can be an orientation defect rather than a
    crossing (`sanitize` orients the normals first).
 
+5. **Degenerate facets** (issue #98). A facet of zero area (collinear or
+   coincident vertices: an exporter's T-junction sliver, or a sliver
+   rounded flat) has no plane, so neither `pair_cut` nor the wedge test
+   applies; before the fix such a facet 0.5 away from a triangle could be
+   reported as touching it, and one through a triangle went unseen. The
+   facet is taken as the segment between its extreme vertices (a point
+   if they coincide) and the pair is decided by exact segment and point
+   predicates (`degenerate_pair_contact`), whatever the shared vertices:
+   only the contact beyond them counts. A common point interior to the
+   segment and to the other facet (the segment through a triangle's
+   interior, two segments crossing or overlapping) is a crossing
+   (`SELFINT_CROSSING`, `p = q` an exact contact point, rounded); a
+   contact only at an end of the segment, a point facet or the triangle's
+   boundary is a touch (`include_touching`); no contact, no report. A
+   sliver closing a T-junction in a watertight mesh meets its neighbours
+   only along their common edges and is not reported. An edge fan with a
+   degenerate facet is skipped by step 4. `sanitize` removes such facets.
+
 Not reported: duplicate facets (three shared vertices), which
 `remove_duplicate_facets` handles.
 
