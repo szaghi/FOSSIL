@@ -120,6 +120,10 @@ batches.
 
 - A `curve_object` has its own `enter_device`, `exit_device`, `distance_many_device` (points as `(2, n)` arrays,
   signed by default, negative inside), `query_many_device` and `box_classify_many_device`, with the same rules.
+- `curve%cut_cells_device(x, y, cut)` computes the 2-D cut cells of a block on the device, bit for bit those of
+  `cut_cells` (moments, boundaries and quadrature stay on the host). On an RTX 4070 it gains up to 1.7x at 1024² cells
+  and nothing at 256²: the walk on the host and the copy of the outputs back bound it (the measured table is in the
+  [cut cells reference](/guide/advanced/cut-cells#on-the-device)).
 
 <<< @/examples/output/tut16c.ansi{ansi}
 

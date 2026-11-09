@@ -36,12 +36,37 @@ closures and sub-cell masks.
 | Crossings of many parallel lines, fixed buffers | `surface%line_crossings_many(_device)` | `curve%line_crossings_many(_device)` |
 | Wall fractions along the grid lines of a block | `surface%cell_wall_fractions` | `curve%cell_wall_fractions` |
 | Cut cells of a block | `cut_cells_3d(surface, x, y, z, cut)` | `curve%cut_cells(x, y, cut)` |
+| Cut cells of a block on the device | | `curve%cut_cells_device(x, y, cut)` |
 
 ![a solid ellipse, turned by 0.4 rad, on 8 by 6 cells of 0.125 seen from above: the cells shaded by fluid fraction, cream in the solid to sepia in the fluid; the 16 crossings of the grid lines with the ellipse as gold dots; on every edge the ellipse crosses, the fluid part of the edge in red, ending at the crossing; and from the wetted centroid of every cut cell a teal stroke along its wetted normal integral, pointing out of the ellipse](../../examples/images/ref-cut-cells-outputs.svg){.fossil-figure}
 
 The 2-D outputs on one picture: 16 of the 48 cells are cut and the grid lines cross the ellipse 16 times. The solid
 area of the cells is 0.22610, the polygon's area; the wetted lengths add up to 1.79520, and the aperture differences
 equal the wetted normal integral in every cell, residual 0.00e+00 (`fig_ref_cut_cells_outputs.f90`).
+
+### On the device
+
+`curve%cut_cells_device(x, y, cut, status, intervals)` (issue #100) returns the `cut` of `curve%cut_cells` bit for bit:
+fractions, apertures, centroids, wetted lengths, centroids and normals, pieces and their measures, `node_in` and the
+fluid edge intervals. Moments, boundaries and quadrature are host only, and the twin has no arguments for them. The
+host walks the segments through the grid, indexes the crossings and classifies the cells; the device computes the node
+flags (the exact tests of the host, one thread per node) and runs the same per-cell kernels as `cut_cells` (count, a
+prefix sum on the host, fill), so the two agree by construction. The curve needs no `enter_device`.
+
+Measured on an RTX 4070 (nvfortran 26.9, `-gpu=nofma`), best of 5 calls with the fluid intervals, copies to and from
+the device included:
+
+| curve | cells | host [s] | device [s] |
+|---|---|---|---|
+| ellipse, 1024 segments | 1024² | 0.048 | 0.038 |
+| NACA 0012, 1022 segments | 1024² | 0.042 | 0.038 |
+| 50 circles, 3200 segments | 1024² | 0.066 | 0.038 |
+| any of the three | 256² | 0.003-0.005 | 0.005 |
+
+The kernels are a small part of the device time: the walk and the indexes on the host and the copy of the outputs back
+(about 235 MB at 1024² with intervals) bound it, so a single block gains up to 1.7x at 1024² and nothing at 256². A
+solver that keeps the outputs on the device, and batches small blocks, is where the device pays (issue #100, later
+steps).
 
 ## Example
 
@@ -216,6 +241,7 @@ within 7.98·10⁻¹⁷ of the plate's area in every frame.
 | 3-D piece measures: thin plate; hollow box; inclusion in the void, above a plate, beside a wall | exact volumes (0.5 and 0.499 of the cell; 98 and 1; 0.992; 0.782; 0.792) |
 | `orient3d`: near-coplanar grid (6144 points), coplanar dyadic points | exact signs and zeros (the naive determinant is wrong on 2022) |
 | line crossings, device path vs CPU | 0 mismatches (device path run on the host) |
+| 2-D cut cells, `cut_cells_device` vs `cut_cells`: the sections of 9 benchmark bodies and 4 curves up to 1024², with and without intervals (RTX 4070) | 0 mismatches, every output bitwise (`fossil_test_curve_bench 256`) |
 | 3-D pieces: cube-01, an octahedron and 40 lattice tetrahedra on grids of step 1/8, 1/4, 1/16 (1.57 million cells) | 19 cells untrusted (947 before issue #70), none outside [0, 1]; per-piece closure 3.5·10⁻¹⁴, piece sums 1.4·10⁻¹⁴, block volume 1.6·10⁻¹⁵ |
 | node parities along x, y, z on a grid-aligned cube, an octahedron, 20 lattice tetrahedra (2-D: square, diamond, 20 triangles) | 0 of 108 086 and 0 of 6358 disagree (108 and 45 before issue #69) |
 | centre inside flags within 3 ulp of a tilted face: tetrahedron (3-D), triangle (2-D), quadruple-precision reference | 0 of 3168 and 0 of 3200 wrong (249 and 295 before issue #69) |
