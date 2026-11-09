@@ -4,6 +4,167 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.0.0] — 2026-11-09
+### Added
+- **selfint**: Exact narrow phase for facets with no shared vertex
+
+- **selfint**: Exact coplanar pairs sharing a vertex
+
+- **selfint**: Folds over a shared edge and crossing sheets at non-manifold edges
+
+- **pose**: Exact 2-D swept geometry under rotation
+
+- **pose**: Exact 3-D swept geometry under rotation
+
+- **cut**: Links between the cut-cell pieces
+
+- **cut**: Fluid fractions of the cell edges and exact node flags
+
+- **cut**: Redistribution neighbourhoods and merge targets of the pieces
+
+- **cut**: Moments, quadrature rules and coarsening of the cut cells
+
+- **block**: Curvilinear structured blocks and their topology records
+
+- **block**: Exact cell geometry of the curvilinear blocks
+
+- **block**: Certified validity of the curvilinear cells
+
+- **block**: Robust and walking point location in curvilinear blocks
+
+- **block**: Point location in curvilinear blocks on the device
+
+- **block**: Lagrange interpolation stencils on curvilinear blocks
+
+- **block**: Quality metrics of the curvilinear cells
+
+- **overset**: Wall cutters of curvilinear blocks
+
+- **overset**: Exact hole flags of block vertices
+
+- **overset**: Cartesian hole map and object X-rays
+
+- **overset**: Donor candidates over block sets and the pair matrix
+
+- **overset**: Classification of the vertices of an overset assembly
+
+- **overset**: Fringe levels, orphan causes and overlap width
+
+- **overset**: Wall projection for the donor search on viscous walls
+
+- **overset**: Assembly of moving blocks and exposed points
+
+- **overset**: Connectivity output, cell-centre blocks, docs and validation
+
+- **ccd**: Motion bounds of the interpolated rigid motion
+
+- **ccd**: Conservative advancement over an abstract distance
+
+- **ccd**: Time of first contact of moving surfaces and curves
+
+- **ccd**: Directional safe step of C2A per facet and segment pair
+
+- **ccd**: Earliest contact among several moving bodies
+
+- **projection**: Targets of the constrained projection
+
+- **projection**: Constrained projection of points and block faces
+
+- **report**: Wall-spacing and quality report of curvilinear blocks
+
+- **hyperbolic**: 2-D hyperbolic extrusion from a curve
+
+- **ccd**: Adaptive default between the plain and the directional bound
+
+- **arrangement**: The three-plane implicit point resolves triple crossings
+
+- **decimate**: Patch rims coarsen along themselves; optional error ceiling
+
+
+### Documentation
+- **pose**: Design of the exact swept geometry under rotation
+
+- **cut**: Design of the cut-cell solver support
+
+- **cut**: Cookbook recipe and validation of the solver support
+
+- **block**: Design note for the curvilinear structured blocks
+
+- **block**: Cookbook recipe and validation of the curvilinear blocks
+
+- **overset**: Design note for the overset assembly kernels
+
+- **ccd**: Design note for continuous collision detection
+
+- **ccd**: Cookbook recipe, feature map and validation of the time of impact
+
+- **projection**: Design note for body-fitted grid support
+
+- **projection**: Recipes, feature map and validation of body-fitted grid support
+
+- Check that every feature is shown with figures and run examples
+
+- **examples**: Animations of overset, extrusion, collision, walking and cut cells
+
+- Tutorial chapters on processing, blocks, contact and body-fitted grids
+
+- Figures, animations and run examples on the roadmap #68 pages
+
+- Figures and run examples on the query, cut-cell and motion pages
+
+- Run examples on the processing pages and a generated usage page
+
+- **cookbook**: Figures for every geometric recipe and 21 new recipes
+
+- Feature map links every capability to a chapter or a recipe
+
+- Coverage rules for a figure per section, animations and recipes
+
+- A figure for every section of the grid and solver reference pages
+
+- A figure for every section of the query and analysis reference pages
+
+- A figure for every section of the processing reference pages
+
+- **tutorial**: Sixteen chapters as lessons, each with figures and an animation
+
+- **cookbook**: A recipe for every entry point of the feature map
+
+- The coverage check is strict again, with the #85 rules
+
+- CLAUDE.md notes for the library fixes of #90
+
+- CLAUDE.md notes for the fixes of #91
+
+- Upgrading to 3.0, the changes in behaviour since 2.2
+
+
+### Fixed
+- **cut**: Exact inside flags of cell centres near the wall
+
+- **cut**: One global symbolic perturbation for the exact line queries
+
+- **distance**: Stable closest-point kernels for the body distance
+
+- **cut**: Exact edge states for the 3-D pieces of lattice bodies
+
+- **surface**: File saves replace, clean patch names, boundary vs non-manifold edges
+
+- **pose**: Swept cells under rotation report exact when the residual is round-off
+
+- **boolean**: Resolve_self_intersections selects the self-union
+
+- **rays**: One hit per crossing by exact tests; read the acceleration tree
+
+- **remesh, decimate, marching-cubes**: Coarsening, link condition, nodes on the level
+
+- **overset**: Wall trimming drops a coarse element only where it is covered
+
+- **curvature, holes**: Jet fit on near-coincident rings; manifold-only hole loops
+
+- **remesh**: Tangential relaxation and an error bound on every operation
+
+
 ## [2.2.0] — 2026-11-06
 ### Added
 - **surface**: Mass properties of a closed body
