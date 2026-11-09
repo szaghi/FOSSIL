@@ -239,7 +239,7 @@ contains
    !< segment pairs, 0 with `intersecting` when two segments cross or touch (exact orient2d), else the minimum of the
    !< four endpoint-segment distances; the closest segments (ties: the smallest pair) and the witness points. Every pair
    !< is evaluated in order behind a box pre-filter (curves are small: no tree descent). Poses (`rigid_pose_2d_t`) place
-   !< the curves as `move` would (to_world of each vertex).
+   !< the curves as `move` would (to_world of each vertex, once per call: issue #94).
    class(curve_object),   intent(in)            :: self, other    !< Curves.
    real(R8P),             intent(out)           :: distance       !< Distance.
    real(R8P),             intent(out), optional :: point_self(2), point_other(2) !< Witness points.
@@ -248,6 +248,7 @@ contains
    integer(I4P),          intent(out), optional :: status         !< STATUS_OK, STATUS_INVALID_INPUT (empty curve).
    type(rigid_pose_2d_t), intent(in),  optional :: pose_self, pose_other !< Poses.
    real(R8P)                                    :: d2, best, a0(2), a1(2), b0(2), b1(2), pa(2), pb(2), qa(2), qb(2)
+   real(R8P), allocatable                       :: xs(:, :), xo(:, :) !< Placed vertices of self and other.
    integer(I4P)                                 :: i, j, ia, ib
    logical                                      :: meet, hit
 
@@ -257,13 +258,14 @@ contains
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
+   call place_vertices(self, pose_self, xs) ; call place_vertices(other, pose_other, xo)
    best = huge(1._R8P) ; ia = 0 ; ib = 0 ; meet = .false. ; pa = 0._R8P ; pb = 0._R8P
    do i = 1, self%nv
       if (self%next(i) == 0) cycle
-      a0 = place(self, i, pose_self) ; a1 = place(self, self%next(i), pose_self)
+      a0 = xs(:, i) ; a1 = xs(:, self%next(i))
       do j = 1, other%nv
          if (other%next(j) == 0) cycle
-         b0 = place(other, j, pose_other) ; b1 = place(other, other%next(j), pose_other)
+         b0 = xo(:, j) ; b1 = xo(:, other%next(j))
          if (max(0._R8P, min(b0(1), b1(1)) - max(a0(1), a1(1)), min(a0(1), a1(1)) - max(b0(1), b1(1)))**2 + &
              max(0._R8P, min(b0(2), b1(2)) - max(a0(2), a1(2)), min(a0(2), a1(2)) - max(b0(2), b1(2)))**2 > &
              best * (1._R8P + 1.e-10_R8P)) cycle
@@ -279,17 +281,21 @@ contains
    if (present(segment_self)) segment_self = ia
    if (present(segment_other)) segment_other = ib
    if (present(intersecting)) intersecting = meet
-   contains
-      function place(c, k, pose) result(x)
-      class(curve_object),             intent(in) :: c
-      integer(I4P),                    intent(in) :: k
-      type(rigid_pose_2d_t), optional, intent(in) :: pose
-      real(R8P)                                   :: x(2)
-
-      x = [c%u(k), c%v(k)]
-      if (present(pose)) x = to_world(pose, x)
-      endfunction place
    endsubroutine distance_to
+
+   subroutine place_vertices(c, pose, x)
+   !< The vertices of c placed by the pose as `move` would (to_world of each), or as they are: x(:, k) = vertex k.
+   class(curve_object),    intent(in)            :: c      !< Curve.
+   type(rigid_pose_2d_t),  intent(in), optional  :: pose   !< Pose.
+   real(R8P), allocatable, intent(out)           :: x(:, :) !< Placed vertices (2, nv).
+   integer(I4P)                                  :: k
+
+   allocate(x(2, c%nv))
+   do k = 1, c%nv
+      x(:, k) = [c%u(k), c%v(k)]
+      if (present(pose)) x(:, k) = to_world(pose, x(:, k))
+   enddo
+   endsubroutine place_vertices
 
    subroutine time_of_impact(self, other, pose_self0, pose_self1, pose_other0, pose_other1, toi, status, tolerance, &
                              distance, point_self, point_other, segment_self, segment_other, iterations, max_iterations, &
