@@ -18,7 +18,8 @@ use penf, only : I4P, R8P
 
 implicit none
 private
-public :: MOMENTS_MAX, mono_count, mono_exponents, segment_green_moments, triangle_moments, cell_moments
+public :: MOMENTS_MAX, mono_count, mono_exponents, segment_green_moments, triangle_moments, cell_moments, &
+          cell_moments_into
 public :: tet_rule, triangle_rule, tensor_rule
 
 integer(I4P), parameter :: MOMENTS_MAX = 4_I4P !< Highest moment order.
@@ -198,11 +199,22 @@ contains
    integer(I4P), intent(in) :: e(:,:) !< Exponents [d, n].
    real(R8P),    intent(in) :: vc     !< Cell volume (area).
    real(R8P)                :: m(size(e, 2)) !< Moments.
-   integer(I4P)             :: k, i   !< Work.
 
-   do k = 1, size(e, 2)
+   call cell_moments_into(size(e, 1, kind=I4P), size(e, 2, kind=I4P), e, vc, m)
+   endfunction cell_moments
+
+   pure subroutine cell_moments_into(d, n, e, vc, m)
+   !< `cell_moments` into an explicit-shape array (no function result temporary: the device kernels' form, issue #100).
+   !$acc routine seq
+   integer(I4P), intent(in)  :: d, n   !< Dimension, moments.
+   integer(I4P), intent(in)  :: e(d, n) !< Exponents.
+   real(R8P),    intent(in)  :: vc     !< Cell volume (area).
+   real(R8P),    intent(out) :: m(n)   !< Moments.
+   integer(I4P)              :: k, i   !< Work.
+
+   do k = 1, n
       m(k) = vc
-      do i = 1, size(e, 1)
+      do i = 1, d
          if (mod(e(i, k), 2_I4P) == 1_I4P) then
             m(k) = 0._R8P
          else
@@ -210,5 +222,5 @@ contains
          endif
       enddo
    enddo
-   endfunction cell_moments
+   endsubroutine cell_moments_into
 endmodule fossil_cut_moments

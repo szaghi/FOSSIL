@@ -29,7 +29,7 @@ module fossil_curve_object
 use fossil_box_query,          only : curve_box_contact_oac, curve_box_thin_oac, cell_bands, cell_components, BOX_NONE, &
                                      BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
 use fossil_line_query,         only : curve_line_crossings_oac, line_crossing_before_2d
-use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d
+use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device
 use fossil_cut_moments,        only : MOMENTS_MAX
 use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate, pose_interpolate, pose_angle_2d
 use fossil_projection,         only : projection_target_t, build_target_2d
@@ -120,6 +120,7 @@ type :: curve_object
       procedure, pass(self) :: line_crossings_many  !< Crossings of many parallel lines, fixed buffers (issue #40).
       procedure, pass(self) :: line_crossings_many_device !< line_crossings_many on the device (issue #40).
       procedure, pass(self) :: cut_cells            !< Exact cut cells of a block (issue #40).
+      procedure, pass(self) :: cut_cells_device     !< cut_cells on the device (issue #100).
       procedure, pass(self) :: move                 !< Move rigidly by an in-plane pose, refit the tree (issue #41).
       procedure, pass(self) :: state_changes        !< Fresh and dead points between two poses (issue #41).
       procedure, pass(self) :: wall_distance_many   !< Wall distance, body id, cutoff (issue #42).
@@ -1550,6 +1551,36 @@ contains
    endif
    if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
    endsubroutine cut_cells
+
+   subroutine cut_cells_device(self, x, y, cut, status, intervals)
+   !< `cut_cells` on the device (OpenACC, issue #100 step 2): the same `cut` bit for bit for the outputs of moments
+   !< order 0 without boundaries or quadrature (cell fractions, apertures, centroids, wet length, centroid and normal,
+   !< pieces and their measures, `node_in`, the fluid edge intervals), which is all this twin computes.
+   !<
+   !< The walk, the indexes, the classification and the prefix sums run on the host, the node flags and the per-cell
+   !< kernels on the device (`compute_cut_cells_2d_device`); the curve needs no `enter_device` (the kernels take flat
+   !< copies). Built without OpenACC it runs on the host. `status = STATUS_INVALID_INPUT` on bad edges.
+   class(curve_object),  intent(in)            :: self      !< Curve.
+   real(R8P),            intent(in)            :: x(:), y(:) !< Cell edges (u, v), strictly increasing.
+   type(cut_cells_2d_t), intent(out)           :: cut       !< Cut cells.
+   integer(I4P),         intent(out), optional :: status    !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,              intent(in),  optional :: intervals !< Record the fluid edge intervals (default .true.).
+   integer(I4P)                                :: st        !< Module status.
+   logical                                     :: wi        !< With the intervals.
+
+   if (present(status)) status = STATUS_OK
+   wi = .true. ; if (present(intervals)) wi = intervals
+   if (self%nv > 0_I4P) then
+      call compute_cut_cells_2d_device(self%u, self%v, self%next, x, y, cut, st, wi)
+   else
+      block
+         real(R8P)    :: uu(0), vv(0)
+         integer(I4P) :: nn(0)
+         call compute_cut_cells_2d_device(uu, vv, nn, x, y, cut, st, wi)
+      end block
+   endif
+   if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
+   endsubroutine cut_cells_device
 
    subroutine line_crossings_many(self, axis, a, t0, t1, t, segments, entering, counts, overflow, status)
    !< Crossings of the lines along `axis` (1: u, 2: v) at a(i), i = 1..n, with parameter in [t0, t1]

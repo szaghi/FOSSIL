@@ -28,13 +28,13 @@ module fossil_cut_cells_2d
 !< counter-clockwise loop (an island) entirely inside the cell is subtracted from the piece that
 !< contains it (exact parity tests). A cell where a chain ends inside it (an open curve) or where
 !< the boundary states do not close is flagged not closed and gets no measures.
-use fossil_cut_moments, only : mono_count, mono_exponents, segment_green_moments, cell_moments, triangle_rule, tensor_rule
+use fossil_cut_moments, only : mono_count, mono_exponents, segment_green_moments, cell_moments_into, triangle_rule, tensor_rule
 use fossil_predicates, only : orient2d_xy
 use penf,              only : I4P, R8P
 
 implicit none
 private
-public :: cut_cells_2d_t, compute_cut_cells_2d
+public :: cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device
 
 type :: cut_cells_2d_t
    !< Cut-cell geometry of a block (fluid = outside the solid).
@@ -112,7 +112,9 @@ contains
    !< 4. `quiet_cell_2d_kernel` and `cut_cell_2d_fill` write each cell's pieces into its slices of the outputs.
    !< The kernels take plain arrays and scalars only (the `!$acc routine seq` form of #20), so the same code can run per
    !< cell on the device; the outputs are those of the cell-by-cell loop with growing buffers that they replace, bit for
-   !< bit and in the same order.
+   !< bit and in the same order. The preparation (`cut_cells_2d_grid`, `node_flags`, `cut_cells_2d_prepare`,
+   !< `cut_cells_2d_classify`) and the prefix sums (`cut_cells_2d_scan`) are shared with the device twin
+   !< `compute_cut_cells_2d_device`, which runs the same kernels in OpenACC loops.
    real(R8P),            intent(in)  :: u(:), v(:) !< Vertices.
    integer(I4P),         intent(in)  :: next(:)    !< Next vertex (0: none).
    real(R8P),            intent(in)  :: x(:), y(:) !< Cell edges (strictly increasing).
@@ -123,8 +125,6 @@ contains
    logical,              intent(in)  :: with_bnd   !< Record the oriented boundaries of the pieces (issue #70).
    logical,              intent(in)  :: with_quad  !< Quadrature rules of the pieces (issue #70; implies with_bnd).
    logical,       allocatable :: node_in(:,:)            !< Node inside flags.
-   type(xing_t),  allocatable :: xs(:)                   !< Crossings.
-   type(piece_t), allocatable :: ps(:)                   !< Wall pieces.
    integer(I4P),  allocatable :: xstart(:), xord(:)      !< Crossings by edge.
    integer(I4P),  allocatable :: pstart(:), pord(:)      !< Wall pieces by cell.
    real(R8P),     allocatable :: xp(:,:)                 !< Crossing points [2, nxs].
@@ -134,7 +134,7 @@ contains
    integer(I4P),  allocatable :: ckind(:)                !< Per cell: -1 quiet solid, 0 quiet fluid, k > 0 cut cell k.
    integer(I4P),  allocatable :: cutc(:)                 !< Cell of cut cell k.
    integer(I4P),  allocatable :: rwo(:), iwo(:)          !< Workspace slices of the cut cells [ncut + 1].
-   integer(I4P),  allocatable :: cnt(:,:)                !< Intervals, boundary segments of each cut cell [2, ncut].
+   integer(I4P),  allocatable :: cnt(:,:)                !< Intervals, boundary segments, pieces of each cut cell [3, ncut].
    integer(I4P),  allocatable :: ivo(:), bdo(:)          !< Intervals, boundary segments before each cell [ncell].
    real(R8P),     allocatable :: rw(:)                   !< Real workspace.
    integer(I4P),  allocatable :: iw(:)                   !< Integer workspace.
@@ -142,34 +142,18 @@ contains
    integer(I4P),  allocatable :: bstart(:)               !< Boundary segments of the pieces [np + 1].
    real(R8P),     allocatable :: bseg(:,:)               !< Boundary segments [4, nbd].
    logical,       allocatable :: bwall(:)                !< Wall flags [nbd].
-   integer(I4P) :: nx, ny, nxs, nps, ne, ncell, c, i, j, k, ncut, nm, np, niv, nbd, nxc, nrw, niw, eid(4) !< Work.
+   integer(I4P) :: nx, ny, nxs, nps, ne, ncell, c, i, j, k, ncut, nm, np, niv, nbd, eid(4) !< Work.
    logical      :: wbnd                                  !< Record the boundaries.
 
-   status = 0_I4P
-   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
-   if (nx < 1 .or. ny < 1) then
-      status = 1_I4P ; return
-   endif
-   if (any(x(2:) <= x(:nx)) .or. any(y(2:) <= y(:ny))) then
-      status = 1_I4P ; return
-   endif
+   call cut_cells_2d_grid(x, y, nx, ny, status)
+   if (status /= 0_I4P) return
    cc%nx = nx ; cc%ny = ny
    allocate(cc%alpha(nx, ny), cc%aperture(4, nx, ny), cc%centroid(2, nx, ny), cc%wet_length(nx, ny), &
             cc%wet_centroid(2, nx, ny), cc%wet_normal(2, nx, ny), cc%pieces(nx, ny), cc%first_piece(nx, ny), &
             cc%closed(nx, ny))
    call node_flags(u, v, next, x, y, node_in)
    cc%node_in = node_in
-   call walk_all(u, v, next, x, y, xs, nxs, ps, nps)
-   ne = (nx + 1_I4P) * ny + nx * (ny + 1_I4P) ; ncell = nx * ny
-   call index_crossings(xs, nxs, ne, xstart, xord)
-   call index_pieces(ps, nps, ncell, pstart, pord)
-   allocate(xp(2, nxs), pab(4, nps), ptg(2, nps))
-   do k = 1_I4P, nxs
-      xp(:, k) = xs(k)%p
-   enddo
-   do k = 1_I4P, nps
-      pab(1:2, k) = ps(k)%a ; pab(3:4, k) = ps(k)%b ; ptg(1, k) = ps(k)%ta ; ptg(2, k) = ps(k)%tb
-   enddo
+   call cut_cells_2d_prepare(u, v, next, x, y, nx, ny, ne, ncell, nxs, nps, xstart, xord, pstart, pord, xp, pab, ptg)
    nm = 0_I4P ; if (order > 0_I4P) nm = mono_count(2_I4P, order)
    cc%moments_order = max(0_I4P, order)
    if (order > 0_I4P) then
@@ -179,29 +163,8 @@ contains
    endif
    wbnd = with_bnd .or. with_quad
    ! 1. classify the cells; workspace slices of the cut cells
-   allocate(ckind(ncell)) ; ncut = 0_I4P
-   do c = 1_I4P, ncell ! a cell without wall pieces or crossings takes the short path (issue #70)
-      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
-      call cell_edge_ids(nx, ny, i, j, eid)
-      if (cell_is_quiet(pstart(c + 1) - pstart(c), eid, ne, xstart, node_in(i, j), node_in(i + 1, j), &
-                        node_in(i + 1, j + 1), node_in(i, j + 1))) then
-         ckind(c) = 0_I4P ; if (node_in(i, j)) ckind(c) = -1_I4P
-      else
-         ncut = ncut + 1_I4P ; ckind(c) = ncut
-      endif
-   enddo
-   allocate(cutc(ncut), rwo(ncut + 1), iwo(ncut + 1), cnt(2, ncut))
-   rwo(1) = 1_I4P ; iwo(1) = 1_I4P
-   do c = 1_I4P, ncell
-      k = ckind(c)
-      if (k <= 0_I4P) cycle
-      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
-      call cell_edge_ids(nx, ny, i, j, eid)
-      nxc = sum(xstart(eid + 1) - xstart(eid))
-      call cut_cell_2d_sizes(nxc, pstart(c + 1) - pstart(c), nm, nrw, niw)
-      cutc(k) = c ; rwo(k + 1) = rwo(k) + nrw ; iwo(k + 1) = iwo(k) + niw
-   enddo
-   allocate(rw(rwo(ncut + 1) - 1), iw(iwo(ncut + 1) - 1))
+   call cut_cells_2d_classify(nx, ny, ne, ncell, xstart, pstart, node_in, nm, ckind, ncut, cutc, rwo, iwo)
+   allocate(cnt(3, ncut), rw(rwo(ncut + 1) - 1), iw(iwo(ncut + 1) - 1))
    ! 2. count: the cut cells' measures and output counts
    do k = 1_I4P, ncut
       c = cutc(k) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
@@ -211,22 +174,12 @@ contains
                              nps, pord, pab, ptg, nm, me, with_iv, wbnd, rwo(k + 1) - rwo(k), rw(rwo(k)), &
                              iwo(k + 1) - iwo(k), iw(iwo(k)), cc%closed(i, j), cc%alpha(i, j), cc%aperture(1, i, j), &
                              cc%centroid(1, i, j), cc%wet_length(i, j), cc%wet_centroid(1, i, j), cc%wet_normal(1, i, j), &
-                             cc%pieces(i, j), cnt(1, k), cnt(2, k))
+                             cnt(3, k), cnt(1, k), cnt(2, k))
+      cc%pieces(i, j) = cnt(3, k)
    enddo
    ! 3. prefix sums over the cells in order
-   allocate(ivo(ncell), bdo(ncell)) ; np = 0_I4P ; niv = 0_I4P ; nbd = 0_I4P
-   do c = 1_I4P, ncell
-      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
-      cc%first_piece(i, j) = np + 1_I4P ; ivo(c) = niv ; bdo(c) = nbd
-      k = ckind(c)
-      if (k == 0_I4P) then
-         np = np + 1_I4P
-         if (with_iv) niv = niv + 4_I4P
-         if (wbnd) nbd = nbd + 4_I4P
-      elseif (k > 0_I4P) then
-         np = np + cc%pieces(i, j) ; niv = niv + cnt(1, k) ; nbd = nbd + cnt(2, k)
-      endif
-   enddo
+   allocate(ivo(ncell), bdo(ncell))
+   call cut_cells_2d_scan(nx, ny, ncell, ckind, ncut, cnt, with_iv, wbnd, cc%first_piece, ivo, bdo, np, niv, nbd)
    ! 4. fill
    cc%np = np
    allocate(cc%piece_cell(2, np), cc%piece_area(np), cc%piece_centroid(2, np), cc%piece_wet_length(np), &
@@ -261,6 +214,256 @@ contains
    endif
    if (with_quad) call quadrature_out(cc, x, y)
    endsubroutine compute_cut_cells_2d
+
+   subroutine compute_cut_cells_2d_device(u, v, next, x, y, cc, status, with_iv)
+   !< `compute_cut_cells_2d` on the device (OpenACC, issue #100 step 2), moments order 0, no boundaries, no quadrature:
+   !< the same outputs bit for bit.
+   !<
+   !< The host does what `compute_cut_cells_2d` does before the kernels, through the same routines: the grid check, the
+   !< walk and the indexes (`cut_cells_2d_prepare`), the per-row segment lists of the node flags (`node_rows`), the cell
+   !< classification and the workspace sizing (`cut_cells_2d_classify`), and the prefix sums (`cut_cells_2d_scan`, on
+   !< the ncut counts copied back). The device runs the kernels of the host path, one thread per node or per cell:
+   !< 1. `node_parity` per node (today's exact per-pair tests over the row's segments), copied back for the
+   !<    classification;
+   !< 2. `cut_cell_2d_count` over the cut cells, into a workspace pool created on the device; the counts come back;
+   !< 3. `quiet_cell_2d_kernel` over all cells (quiet ones act) and `cut_cell_2d_fill` over the cut cells;
+   !< 4. the outputs are copied back.
+   !< The same kernels, the same operations in the same order, `-gpu=nofma` (#20): the same bits. Built without OpenACC
+   !< the directives are comments and the loops run on the host in order.
+   real(R8P),            intent(in)  :: u(:), v(:) !< Vertices.
+   integer(I4P),         intent(in)  :: next(:)    !< Next vertex (0: none).
+   real(R8P),            intent(in)  :: x(:), y(:) !< Cell edges (strictly increasing).
+   type(cut_cells_2d_t), intent(out) :: cc         !< Cut cells.
+   integer(I4P),         intent(out) :: status     !< 0 ok, 1 bad edges.
+   logical,              intent(in)  :: with_iv    !< Record the fluid edge intervals of the pieces (issue #70).
+   logical,       allocatable :: node_in(:,:)            !< Node inside flags [nx+1, ny+1].
+   integer(I4P),  allocatable :: rstart(:), rseg(:)      !< Segments crossing each node row.
+   integer(I4P),  allocatable :: xstart(:), xord(:)      !< Crossings by edge.
+   integer(I4P),  allocatable :: pstart(:), pord(:)      !< Wall pieces by cell.
+   real(R8P),     allocatable :: xp(:,:)                 !< Crossing points [2, nxs].
+   real(R8P),     allocatable :: pab(:,:)                !< Wall piece end points (a, b) [4, nps].
+   integer(I4P),  allocatable :: ptg(:,:)                !< Wall piece end tags (ta, tb) [2, nps].
+   integer(I4P),  allocatable :: ckind(:)                !< Per cell: -1 quiet solid, 0 quiet fluid, k > 0 cut cell k.
+   integer(I4P),  allocatable :: cutc(:)                 !< Cell of cut cell k.
+   integer(I4P),  allocatable :: rwo(:), iwo(:)          !< Workspace slices of the cut cells [ncut + 1].
+   integer(I4P),  allocatable :: cnt(:,:)                !< Intervals, boundary segments, pieces of each cut cell [3, ncut].
+   integer(I4P),  allocatable :: ivo(:), bdo(:)          !< Intervals, boundary segments before each cell [ncell].
+   real(R8P),     allocatable :: rw(:)                   !< Real workspace pool.
+   integer(I4P),  allocatable :: iw(:)                   !< Integer workspace pool.
+   logical,       allocatable :: closed(:,:)             !< Cell outputs.
+   real(R8P),     allocatable :: alpha(:,:), aperture(:,:,:), centroid(:,:,:), wet_length(:,:) !< Cell outputs.
+   real(R8P),     allocatable :: wet_centroid(:,:,:), wet_normal(:,:,:) !< Cell outputs.
+   integer(I4P),  allocatable :: pieces(:,:), first_piece(:,:) !< Cell outputs.
+   integer(I4P),  allocatable :: pcell(:,:), ivs(:), ive(:), bds(:) !< Piece outputs (bds: discarded).
+   real(R8P),     allocatable :: parea(:), pcen(:,:), pwl(:), pwn(:,:), pap(:,:), ivl(:), ivh(:) !< Piece outputs.
+   integer(I4P) :: zme(2, 1)                             !< No moment exponents (nm = 0).
+   real(R8P)    :: zmom(1, 1), zwmom(1, 1), zbseg(4, 1)  !< No moments, no wall moments, no boundary segments.
+   logical      :: zbwall(1)                             !< No wall flags.
+   integer(I4P) :: nx, ny, nxs, nps, ne, ncell, nu, nr, c, i, j, k, ncut, np, niv, nbd, eid(4) !< Work.
+
+   call cut_cells_2d_grid(x, y, nx, ny, status)
+   if (status /= 0_I4P) return
+   cc%nx = nx ; cc%ny = ny ; cc%moments_order = 0_I4P
+   nu = size(u, kind=I4P)
+   call node_rows(u, v, next, y, rstart, rseg)
+   nr = size(rseg, kind=I4P)
+   call cut_cells_2d_prepare(u, v, next, x, y, nx, ny, ne, ncell, nxs, nps, xstart, xord, pstart, pord, xp, pab, ptg)
+   zme = 0_I4P ; zmom = 0._R8P ; zwmom = 0._R8P ; zbseg = 0._R8P ; zbwall = .false.
+   allocate(node_in(nx + 1, ny + 1))
+   !$acc data copyin(x, y, zme, zmom, zwmom, zbseg, zbwall)
+   ! 1. node flags, one thread per node
+   !$acc data copyin(u, v, next, rstart, rseg) copyout(node_in)
+   !$acc parallel loop gang vector collapse(2) default(present)
+   do j = 1_I4P, ny + 1_I4P
+      do i = 1_I4P, nx + 1_I4P
+         node_in(i, j) = node_parity(x(i), y(j), rstart(j), rstart(j + 1) - 1_I4P, nr, rseg, nu, u, v, next)
+      enddo
+   enddo
+   !$acc end data
+   ! classification and workspace sizing on the host
+   call cut_cells_2d_classify(nx, ny, ne, ncell, xstart, pstart, node_in, 0_I4P, ckind, ncut, cutc, rwo, iwo)
+   allocate(cnt(3, max(1_I4P, ncut)), rw(max(1_I4P, rwo(ncut + 1) - 1_I4P)), iw(max(1_I4P, iwo(ncut + 1) - 1_I4P)))
+   allocate(closed(nx, ny), alpha(nx, ny), aperture(4, nx, ny), centroid(2, nx, ny), wet_length(nx, ny), &
+            wet_centroid(2, nx, ny), wet_normal(2, nx, ny), pieces(nx, ny), first_piece(nx, ny), ivo(ncell), bdo(ncell))
+   !$acc data copyin(node_in, xstart, xord, xp, pstart, pord, pab, ptg, ckind, cutc, rwo, iwo) &
+   !$acc&     create(rw, iw, cnt, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
+   ! 2. count over the cut cells
+   !$acc parallel loop gang vector default(present) private(eid)
+   do k = 1_I4P, ncut
+      c = cutc(k) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      call cell_edge_ids(nx, ny, i, j, eid)
+      call cut_cell_2d_count(x(i), x(i + 1), y(j), y(j + 1), node_in(i, j), node_in(i + 1, j), node_in(i + 1, j + 1), &
+                             node_in(i, j + 1), eid, ne, nxs, xstart, xord, xp, pstart(c + 1) - pstart(c), pstart(c) - 1_I4P, &
+                             nps, pord, pab, ptg, 0_I4P, zme, with_iv, .false., rwo(k + 1) - rwo(k), rw(rwo(k)), &
+                             iwo(k + 1) - iwo(k), iw(iwo(k)), closed(i, j), alpha(i, j), aperture(1, i, j), &
+                             centroid(1, i, j), wet_length(i, j), wet_centroid(1, i, j), wet_normal(1, i, j), &
+                             cnt(3, k), cnt(1, k), cnt(2, k))
+   enddo
+   !$acc update host(cnt)
+   ! 3. prefix sums on the host
+   call cut_cells_2d_scan(nx, ny, ncell, ckind, ncut, cnt, with_iv, .false., first_piece, ivo, bdo, np, niv, nbd)
+   allocate(pcell(2, np), parea(np), pcen(2, np), pwl(np), pwn(2, np), pap(4, np), ivs(np + 1), bds(np + 1), &
+            ive(max(1_I4P, niv)), ivl(max(1_I4P, niv)), ivh(max(1_I4P, niv)))
+   !$acc data copyin(first_piece, ivo, bdo) create(pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh, bds)
+   ! 4. fill: the quiet cells, then the cut cells
+   !$acc parallel loop gang vector default(present) private(eid)
+   do c = 1_I4P, ncell
+      if (ckind(c) > 0_I4P) cycle
+      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      call cell_edge_ids(nx, ny, i, j, eid)
+      call quiet_cell_2d_kernel(x(i), x(i + 1), y(j), y(j + 1), i, j, ckind(c) < 0_I4P, eid, 0_I4P, zme, with_iv, .false., &
+                                closed(i, j), alpha(i, j), aperture(1, i, j), centroid(1, i, j), wet_length(i, j), &
+                                wet_centroid(1, i, j), wet_normal(1, i, j), pieces(i, j), first_piece(i, j) - 1_I4P, ivo(c), &
+                                bdo(c), np, pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, ive, ivl, ivh, bds, &
+                                0_I4P, zbseg, zbwall)
+   enddo
+   !$acc parallel loop gang vector default(present) private(eid)
+   do k = 1_I4P, ncut
+      c = cutc(k) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      call cell_edge_ids(nx, ny, i, j, eid)
+      pieces(i, j) = cnt(3, k)
+      call cut_cell_2d_fill(x(i), x(i + 1), y(j), y(j + 1), i, j, eid, 0_I4P, zme, with_iv, .false., rwo(k + 1) - rwo(k), &
+                            rw(rwo(k)), iwo(k + 1) - iwo(k), iw(iwo(k)), first_piece(i, j) - 1_I4P, ivo(c), bdo(c), np, &
+                            pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, ive, ivl, ivh, bds, 0_I4P, zbseg, zbwall)
+   enddo
+   !$acc update host(closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces, pcell, parea, pcen, &
+   !$acc&            pwl, pwn, pap, ivs, ive, ivl, ivh)
+   !$acc end data
+   !$acc end data
+   !$acc end data
+   ivs(np + 1) = niv + 1_I4P
+   call move_alloc(node_in, cc%node_in)
+   call move_alloc(closed, cc%closed) ; call move_alloc(alpha, cc%alpha) ; call move_alloc(aperture, cc%aperture)
+   call move_alloc(centroid, cc%centroid) ; call move_alloc(wet_length, cc%wet_length)
+   call move_alloc(wet_centroid, cc%wet_centroid) ; call move_alloc(wet_normal, cc%wet_normal)
+   call move_alloc(pieces, cc%pieces) ; call move_alloc(first_piece, cc%first_piece)
+   cc%np = np
+   call move_alloc(pcell, cc%piece_cell) ; call move_alloc(parea, cc%piece_area) ; call move_alloc(pcen, cc%piece_centroid)
+   call move_alloc(pwl, cc%piece_wet_length) ; call move_alloc(pwn, cc%piece_wet_normal)
+   call move_alloc(pap, cc%piece_aperture) ; call move_alloc(ivs, cc%piece_iv_start)
+   if (niv > 0_I4P) then
+      call move_alloc(ive, cc%piece_iv_edge) ; call move_alloc(ivl, cc%piece_iv_lo) ; call move_alloc(ivh, cc%piece_iv_hi)
+   else
+      allocate(cc%piece_iv_edge(0), cc%piece_iv_lo(0), cc%piece_iv_hi(0))
+   endif
+   endsubroutine compute_cut_cells_2d_device
+
+   subroutine cut_cells_2d_grid(x, y, nx, ny, status)
+   !< Cells of the block of edges x(nx+1), y(ny+1); status 1 if there is no cell or the edges do not increase strictly.
+   real(R8P),    intent(in)  :: x(:), y(:) !< Cell edges.
+   integer(I4P), intent(out) :: nx, ny     !< Cells.
+   integer(I4P), intent(out) :: status     !< 0 ok, 1 bad edges.
+
+   status = 0_I4P
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
+   if (nx < 1 .or. ny < 1) then
+      status = 1_I4P ; return
+   endif
+   if (any(x(2:) <= x(:nx)) .or. any(y(2:) <= y(:ny))) then
+      status = 1_I4P ; return
+   endif
+   endsubroutine cut_cells_2d_grid
+
+   subroutine cut_cells_2d_prepare(u, v, next, x, y, nx, ny, ne, ncell, nxs, nps, xstart, xord, pstart, pord, xp, pab, ptg)
+   !< Host preparation of the kernels: the segments walked through the grid (`walk_all`), the crossings by edge and the
+   !< wall pieces by cell (`index_crossings`, `index_pieces`), as flat arrays.
+   real(R8P),                 intent(in)  :: u(:), v(:)         !< Vertices.
+   integer(I4P),              intent(in)  :: next(:)            !< Next vertex.
+   real(R8P),                 intent(in)  :: x(:), y(:)         !< Cell edges.
+   integer(I4P),              intent(in)  :: nx, ny             !< Cells.
+   integer(I4P),              intent(out) :: ne, ncell          !< Edges, cells.
+   integer(I4P),              intent(out) :: nxs, nps           !< Crossings, wall pieces.
+   integer(I4P), allocatable, intent(out) :: xstart(:), xord(:) !< Crossings by edge.
+   integer(I4P), allocatable, intent(out) :: pstart(:), pord(:) !< Wall pieces by cell.
+   real(R8P),    allocatable, intent(out) :: xp(:,:)            !< Crossing points [2, nxs].
+   real(R8P),    allocatable, intent(out) :: pab(:,:)           !< Wall piece end points (a, b) [4, nps].
+   integer(I4P), allocatable, intent(out) :: ptg(:,:)           !< Wall piece end tags (ta, tb) [2, nps].
+   type(xing_t),  allocatable :: xs(:)                          !< Crossings.
+   type(piece_t), allocatable :: ps(:)                          !< Wall pieces.
+   integer(I4P) :: k                                            !< Counter.
+
+   call walk_all(u, v, next, x, y, xs, nxs, ps, nps)
+   ne = (nx + 1_I4P) * ny + nx * (ny + 1_I4P) ; ncell = nx * ny
+   call index_crossings(xs, nxs, ne, xstart, xord)
+   call index_pieces(ps, nps, ncell, pstart, pord)
+   allocate(xp(2, nxs), pab(4, nps), ptg(2, nps))
+   do k = 1_I4P, nxs
+      xp(:, k) = xs(k)%p
+   enddo
+   do k = 1_I4P, nps
+      pab(1:2, k) = ps(k)%a ; pab(3:4, k) = ps(k)%b ; ptg(1, k) = ps(k)%ta ; ptg(2, k) = ps(k)%tb
+   enddo
+   endsubroutine cut_cells_2d_prepare
+
+   subroutine cut_cells_2d_classify(nx, ny, ne, ncell, xstart, pstart, node_in, nm, ckind, ncut, cutc, rwo, iwo)
+   !< Classify the cells (quiet: `cell_is_quiet`; -1 solid, 0 fluid, k > 0 the k-th cut cell) and give each cut cell its
+   !< workspace slices rwo(k):rwo(k+1)-1, iwo(k):iwo(k+1)-1 (`cut_cell_2d_sizes`).
+   integer(I4P),              intent(in)  :: nx, ny, ne, ncell  !< Cells, edges.
+   integer(I4P),              intent(in)  :: xstart(ne + 1)     !< Crossings by edge.
+   integer(I4P),              intent(in)  :: pstart(ncell + 1)  !< Wall pieces by cell.
+   logical,                   intent(in)  :: node_in(nx + 1, ny + 1) !< Node inside flags.
+   integer(I4P),              intent(in)  :: nm                 !< Moments.
+   integer(I4P), allocatable, intent(out) :: ckind(:)           !< Cell kinds [ncell].
+   integer(I4P),              intent(out) :: ncut               !< Cut cells.
+   integer(I4P), allocatable, intent(out) :: cutc(:)            !< Cell of each cut cell [ncut].
+   integer(I4P), allocatable, intent(out) :: rwo(:), iwo(:)     !< Workspace slices [ncut + 1].
+   integer(I4P) :: c, i, j, k, e, nxc, nrw, niw, eid(4)         !< Work.
+
+   allocate(ckind(ncell)) ; ncut = 0_I4P
+   do c = 1_I4P, ncell ! a cell without wall pieces or crossings takes the short path (issue #70)
+      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      call cell_edge_ids(nx, ny, i, j, eid)
+      if (cell_is_quiet(pstart(c + 1) - pstart(c), eid, ne, xstart, node_in(i, j), node_in(i + 1, j), &
+                        node_in(i + 1, j + 1), node_in(i, j + 1))) then
+         ckind(c) = 0_I4P ; if (node_in(i, j)) ckind(c) = -1_I4P
+      else
+         ncut = ncut + 1_I4P ; ckind(c) = ncut
+      endif
+   enddo
+   allocate(cutc(ncut), rwo(ncut + 1), iwo(ncut + 1))
+   rwo(1) = 1_I4P ; iwo(1) = 1_I4P
+   do c = 1_I4P, ncell
+      k = ckind(c)
+      if (k <= 0_I4P) cycle
+      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      call cell_edge_ids(nx, ny, i, j, eid)
+      nxc = 0_I4P
+      do e = 1_I4P, 4_I4P
+         nxc = nxc + xstart(eid(e) + 1) - xstart(eid(e))
+      enddo
+      call cut_cell_2d_sizes(nxc, pstart(c + 1) - pstart(c), nm, nrw, niw)
+      cutc(k) = c ; rwo(k + 1) = rwo(k) + nrw ; iwo(k + 1) = iwo(k) + niw
+   enddo
+   endsubroutine cut_cells_2d_classify
+
+   subroutine cut_cells_2d_scan(nx, ny, ncell, ckind, ncut, cnt, with_iv, with_bnd, first_piece, ivo, bdo, np, niv, nbd)
+   !< Prefix sums over the cells in order (issue #100): first piece, intervals and boundary segments before each cell,
+   !< and the totals. A quiet fluid cell has one piece, 4 intervals and 4 boundary segments; cut cell k has cnt(3, k)
+   !< pieces, cnt(1, k) intervals and cnt(2, k) boundary segments.
+   integer(I4P), intent(in)  :: nx, ny, ncell             !< Cells.
+   integer(I4P), intent(in)  :: ckind(ncell)              !< Cell kinds.
+   integer(I4P), intent(in)  :: ncut                      !< Cut cells.
+   integer(I4P), intent(in)  :: cnt(:,:)                  !< Counts of the cut cells [3, >= ncut].
+   logical,      intent(in)  :: with_iv, with_bnd         !< Intervals, boundary segments recorded.
+   integer(I4P), intent(out) :: first_piece(nx, ny)       !< First piece of each cell.
+   integer(I4P), intent(out) :: ivo(ncell), bdo(ncell)    !< Intervals, boundary segments before each cell.
+   integer(I4P), intent(out) :: np, niv, nbd              !< Pieces, intervals, boundary segments.
+   integer(I4P) :: c, i, j, k                             !< Work.
+
+   np = 0_I4P ; niv = 0_I4P ; nbd = 0_I4P
+   do c = 1_I4P, ncell
+      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      first_piece(i, j) = np + 1_I4P ; ivo(c) = niv ; bdo(c) = nbd
+      k = ckind(c)
+      if (k == 0_I4P) then
+         np = np + 1_I4P
+         if (with_iv) niv = niv + 4_I4P
+         if (with_bnd) nbd = nbd + 4_I4P
+      elseif (k > 0_I4P) then
+         np = np + cnt(3, k) ; niv = niv + cnt(1, k) ; nbd = nbd + cnt(2, k)
+      endif
+   enddo
+   endsubroutine cut_cells_2d_scan
 
    pure subroutine cell_edge_ids(nx, ny, i, j, eid)
    !< Edge ids of cell (i, j) counter-clockwise: bottom, right, top, left. Vertical edge (l, k) = l + (k - 1) (nx + 1),
@@ -431,6 +634,10 @@ contains
                   pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
    endsubroutine cut_cell_2d_fill
 
+   ! nvfortran 26.9 miscompiles this routine's device code at -O2 (issue #100 step 2: the loop `do k = 1, ns` ran once,
+   ! the corner constructors passed to edge_subs lost their second element); opt=1 for this routine only, host and
+   ! device alike (the two stay bit-identical). A comment to every other compiler.
+!pgi$r opt=1
    subroutine count_core(x0, x1, y0, y1, f00, f10, f11, f01, eid, ne, nxs, xstart, xord, xp, nb, pofs, nps, pord, pab, &
                          ptg, nm, me, with_iv, with_bnd, s, nxm, sa, sb, acc, wn, accm, wallm, harea, ig, iwl, iwn, igm, &
                          iwm, lp, cgm, cwm, hdr, sfl, sx, sed, par, xsub, pvis, loopp, hroot, hfirst, hn, ifirst, inn, it, &
@@ -681,7 +888,7 @@ contains
          do q = 1, nsb
             if (sfl(q) == 0 .or. sed(q) /= m) cycle
             if (find(q, s, par) /= k) cycle
-            pap(e, p) = pap(e, p) + norm2(sb(:, q) - sa(:, q)) / len(e)
+            pap(e, p) = pap(e, p) + norm2_xy(sb(1, q) - sa(1, q), sb(2, q) - sa(2, q)) / len(e)
             if (.not. with_iv) cycle
             iv = iv + 1_I4P ; ive(iv) = eid(m)
             if (m == 2 .or. m == 4) then
@@ -793,7 +1000,7 @@ contains
    endif
    pap(:, p) = 1._R8P
    if (nm > 0_I4P) then
-      pmom(:, p) = cell_moments(me, area_c) ; pwmom(:, p) = 0._R8P
+      call cell_moments_into(2_I4P, nm, me, area_c, pmom(1, p)) ; pwmom(:, p) = 0._R8P
    endif
    ivs(p) = iv0 + 1_I4P
    if (with_iv) then ! (-u, +u, -v, +v)
@@ -900,7 +1107,7 @@ contains
 
    ns = ns + 1 ; sa(:, ns) = aa ; sb(:, ns) = bb ; sx(ns) = xid ; sed(ns) = ed
    sfl(ns) = 0_I4P ; if (fluid) sfl(ns) = 1_I4P
-   if (fluid) flen(ed) = flen(ed) + norm2(bb - aa)
+   if (fluid) flen(ed) = flen(ed) + norm2_xy(bb(1) - aa(1), bb(2) - aa(2))
    if (xid > 0) then
       nxc = nxc + 1 ; xsub(1, nxc) = xid ; xsub(2, nxc) = ns
    endif
@@ -1027,7 +1234,7 @@ contains
 
    call green(pab(1:2), pab(3:4), gg)
    g = g + gg
-   d = pab(3:4) - pab(1:2) ; l = norm2(d)
+   d = pab(3:4) - pab(1:2) ; l = norm2_xy(d(1), d(2))
    wl(1) = wl(1) + l ; wl(2:3) = wl(2:3) + l * 0.5_R8P * (pab(1:2) + pab(3:4))
    wnn = wnn + [d(2), -d(1)]
    if (nm > 0_I4P) call curve_moments((pab(1:2) - sm) / hm, (pab(3:4) - sm) / hm, l, nm, me, area_c, cgm, cwm)
@@ -1267,6 +1474,35 @@ contains
    enddo
    endsubroutine quadrature_out
 
+   pure function norm2_xy(x, y) result(r)
+   !< norm2([x, y]) by the scaled algorithm of gfortran's norm2, written out (issue #100 step 2): nvfortran's device norm2
+   !< is sqrt(x*x + y*y) and its host norm2 another formula, 1 ulp apart from each other; this one gives the bits of
+   !< gfortran's intrinsic (checked on 4 million pairs from 1e-160 to 1e300, zeros included) on the host and the device.
+   !$acc routine seq
+   real(R8P), intent(in) :: x, y                !< Components.
+   real(R8P)             :: r                   !< Norm.
+   real(R8P)             :: scale, res, a, val  !< Work.
+
+   scale = 1._R8P ; res = 0._R8P
+   if (x /= 0._R8P) then
+      a = abs(x)
+      if (a > scale) then
+         val = scale / a ; res = (val * val) * res + 1._R8P ; scale = a
+      else
+         val = a / scale ; res = val * val + res
+      endif
+   endif
+   if (y /= 0._R8P) then
+      a = abs(y)
+      if (a > scale) then
+         val = scale / a ; res = (val * val) * res + 1._R8P ; scale = a
+      else
+         val = a / scale ; res = val * val + res
+      endif
+   endif
+   r = sqrt(res) * scale
+   endfunction norm2_xy
+
    pure subroutine green(a, b, g)
    !< Green integrals along the straight path a -> b: g(1) = 1/2 (u dv - v du) (area), g(2) = 1/2 u^2 dv
    !< (moment in u), g(3) = -1/2 v^2 du (moment in v).
@@ -1294,6 +1530,7 @@ contains
 
    pure integer(I4P) function corner_side(pu, pv, qu, qv, cu, cv)
    !< Exact side (+1 left, -1 right) of the corner (cu + eps, cv + eps^2) of the directed segment pq.
+   !$acc routine seq
    real(R8P), intent(in) :: pu, pv, qu, qv, cu, cv !< Segment, corner.
    real(R8P)             :: o                      !< Orientation.
 
@@ -1338,34 +1575,79 @@ contains
    endfunction col_of
 
    subroutine node_flags(u, v, next, x, y, node_in)
-   !< Inside flags of the grid nodes: parity of the crossings of their horizontal line left of them.
+   !< Inside flags of the grid nodes: parity of the crossings of their horizontal line left of them (`node_parity` over
+   !< the segments of the node's row, `node_rows`; the device twin runs the same kernel per node).
    real(R8P),            intent(in)  :: u(:), v(:) !< Vertices.
    integer(I4P),         intent(in)  :: next(:)    !< Next vertex.
    real(R8P),            intent(in)  :: x(:), y(:) !< Edges.
    logical, allocatable, intent(out) :: node_in(:,:) !< Flags [nx+1, ny+1].
-   integer(I4P), allocatable :: segs(:) !< Segments crossing the line.
-   integer(I4P)              :: j, i, s, n, k, cnt, sd !< Work.
+   integer(I4P), allocatable :: rstart(:), rseg(:) !< Segments crossing each row.
+   integer(I4P)              :: i, j, nu, nr       !< Work.
 
-   allocate(node_in(size(x), size(y)), segs(size(u)))
+   call node_rows(u, v, next, y, rstart, rseg)
+   nu = size(u, kind=I4P) ; nr = size(rseg, kind=I4P)
+   allocate(node_in(size(x), size(y)))
    do j = 1, size(y)
-      n = 0
-      do s = 1, size(u)
-         if (next(s) == 0) cycle
-         if ((v(s) > y(j)) .eqv. (v(next(s)) > y(j))) cycle
-         n = n + 1 ; segs(n) = s
-      enddo
       do i = 1, size(x)
-         cnt = 0
-         do k = 1, n
-            s = segs(k)
-            sd = corner_side(u(s), v(s), u(next(s)), v(next(s)), x(i), y(j))
-            ! the crossing is left of the node when the node is right of an upward segment, left of a downward one
-            if ((v(next(s)) > v(s) .and. sd < 0) .or. (v(next(s)) < v(s) .and. sd > 0)) cnt = cnt + 1
-         enddo
-         node_in(i, j) = mod(cnt, 2_I4P) == 1_I4P
+         node_in(i, j) = node_parity(x(i), y(j), rstart(j), rstart(j + 1) - 1_I4P, nr, rseg, nu, u, v, next)
       enddo
    enddo
    endsubroutine node_flags
+
+   subroutine node_rows(u, v, next, y, rstart, rseg)
+   !< The segments whose end points lie on both sides of the row line v = y(j) (one strictly above), in segment order:
+   !< rseg(rstart(j) .. rstart(j+1)-1) (rseg has at least one element).
+   real(R8P),                 intent(in)  :: u(:), v(:) !< Vertices.
+   integer(I4P),              intent(in)  :: next(:)    !< Next vertex.
+   real(R8P),                 intent(in)  :: y(:)       !< Row lines.
+   integer(I4P), allocatable, intent(out) :: rstart(:)  !< [size(y) + 1].
+   integer(I4P), allocatable, intent(out) :: rseg(:)    !< Segments.
+   integer(I4P) :: j, s, n                              !< Work.
+
+   allocate(rstart(size(y) + 1))
+   n = 0_I4P
+   do j = 1, size(y)
+      rstart(j) = n + 1_I4P
+      do s = 1, size(u)
+         if (next(s) == 0) cycle
+         if ((v(s) > y(j)) .eqv. (v(next(s)) > y(j))) cycle
+         n = n + 1_I4P
+      enddo
+   enddo
+   rstart(size(y) + 1) = n + 1_I4P
+   allocate(rseg(max(1_I4P, n))) ; rseg = 0_I4P
+   n = 0_I4P
+   do j = 1, size(y)
+      do s = 1, size(u)
+         if (next(s) == 0) cycle
+         if ((v(s) > y(j)) .eqv. (v(next(s)) > y(j))) cycle
+         n = n + 1_I4P ; rseg(n) = s
+      enddo
+   enddo
+   endsubroutine node_rows
+
+   pure logical function node_parity(xn, yn, k0, k1, nr, rseg, nu, u, v, next)
+   !< Inside flag of the node (xn, yn): parity of the crossings of its row segments rseg(k0:k1) left of it, each by the
+   !< exact corner test `corner_side` (a crossing is left of the node when the node is right of an upward segment, left
+   !< of a downward one).
+   !$acc routine seq
+   real(R8P),    intent(in) :: xn, yn             !< Node.
+   integer(I4P), intent(in) :: k0, k1             !< Row segments.
+   integer(I4P), intent(in) :: nr                 !< Size of rseg.
+   integer(I4P), intent(in) :: rseg(nr)           !< Segments by row.
+   integer(I4P), intent(in) :: nu                 !< Vertices.
+   real(R8P),    intent(in) :: u(nu), v(nu)       !< Vertices.
+   integer(I4P), intent(in) :: next(nu)           !< Next vertex.
+   integer(I4P)             :: k, s, w, cnt, sd   !< Work.
+
+   cnt = 0_I4P
+   do k = k0, k1
+      s = rseg(k) ; w = next(s)
+      sd = corner_side(u(s), v(s), u(w), v(w), xn, yn)
+      if ((v(w) > v(s) .and. sd < 0) .or. (v(w) < v(s) .and. sd > 0)) cnt = cnt + 1_I4P
+   enddo
+   node_parity = mod(cnt, 2_I4P) == 1_I4P
+   endfunction node_parity
 
    subroutine walk_all(u, v, next, x, y, xs, nxs, ps, nps)
    !< Walk every segment through the grid: crossings with block edges, pieces in block cells.
