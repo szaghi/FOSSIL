@@ -109,6 +109,7 @@ const docs = [
     text: 'Project',
     items: [
       { text: 'Changelog', link: '/guide/changelog' },
+      { text: 'Upgrading to 3.0', link: '/guide/upgrading-3' },
       { text: 'Contributing', link: '/guide/contributing' },
     ],
   },
@@ -145,6 +146,7 @@ export default withMermaid({
         text: 'Project',
         items: [
           { text: 'Changelog', link: '/guide/changelog' },
+          { text: 'Upgrading to 3.0', link: '/guide/upgrading-3' },
           { text: 'Contributing', link: '/guide/contributing' },
         ],
       },

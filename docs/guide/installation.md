@@ -4,6 +4,11 @@ title: Installation
 
 # Installation
 
+::: tip Upgrading from 2.x
+FOSSIL 3.0 changes the behaviour of some routines (remesh, decimate, ray queries, self-intersection resolution, ...):
+see [Upgrading to 3.0](./upgrading-3).
+:::
+
 ## Prerequisites
 
 A Fortran 2003+ compliant compiler is required. The following compilers are known to work:

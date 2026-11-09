@@ -130,6 +130,8 @@ For interactive use without writing Fortran, the companion **`fossilizer`** CLI 
 
 ## Install
 
+Upgrading from 2.x: see [Upgrading to 3.0](https://szaghi.github.io/FOSSIL/guide/upgrading-3) for the changes in behaviour.
+
 ### FoBiS
 
 **Standalone** — clone, fetch the dependencies into `src/third_party/`, and build:
