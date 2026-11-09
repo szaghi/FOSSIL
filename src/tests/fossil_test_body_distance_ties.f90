@@ -9,8 +9,11 @@
 !<   (0.5, 0.25);
 !< - the grids coplanar and overlapping, and coplanar sharing an edge line (boxes touching);
 !< - a tetrahedron with its apex exactly on a cube face, and 2^-40 off it;
-!< - an exactly degenerate (collinear) facet above the cube, boxes apart along z only: `pair_cut` is not exact on it
-!<   (it reports a contact), so the skip must not apply there.
+!< - an exactly degenerate (collinear) facet above the cube, boxes apart along z only: the skip must not apply there
+!<   (the facet is not regular). Its true distance is 0.25 (the triangle at z = 1.25 is the closest facet; the needle is
+!<   0.5 above the cube): before issue #96 `pair_cut`, not exact on a degenerate facet, reported a contact (0, pinned
+!<   here then); both `distance_to` and `body_distance_brute` call the same pair function, so they changed together.
+!<   Now apart, it is a fourth tied geometry: the triangle at z = 1.25 is 0.25 from both facets of the cube's top.
 !< Breaking any of the three skip conditions (row skip with >=, disjointness with >=, no regularity guard) fails it.
 program fossil_test_body_distance_ties
 
@@ -45,8 +48,8 @@ call compare(a, b, 0._R8P, .true.) ; call compare_posed(a, b)
 call tetra(b, [1._R8P + 2._R8P**(-40), 0.5_R8P, 0.5_R8P])                         ! 2^-40 off the face
 call compare(a, b, 2._R8P**(-40), .false.) ; call compare_posed(a, b)
 call needle(b)                                                                     ! a degenerate facet
-call compare(a, b, -1._R8P, .false.) ; call compare_posed(a, b)
-ok = nbad == 0 .and. ncase == 42 .and. nties == 3
+call compare(a, b, 0.25_R8P, .false.) ; call compare_posed(a, b)
+ok = nbad == 0 .and. ncase == 42 .and. nties == 4
 print '(A,L1,A,I0,A,I0,A,I0)', 'skip edges vs brute force: ', ok, '  cases ', ncase, '  mismatches ', nbad, &
                                 '  tied geometries ', nties
 print '(A,L1)', 'Are all tests passed? ', ok

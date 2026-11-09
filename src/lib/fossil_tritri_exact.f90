@@ -322,6 +322,14 @@ contains
    !< an edge of the other triangle, else a line-plane point), the order along the planes' line is the exact
    !< lexicographic order, and of two coincident candidates the more specific construction is kept (`ip_rank`), so
    !< every pair that produces a point produces the same identity.
+   !<
+   !< Precondition: both triangles exactly non-degenerate (`facet_drop` /= 0). A degenerate triangle (collinear or
+   !< coincident vertices) has no plane: every orient3d against it is 0, so it is classified COPLANAR (as `ta`) or its
+   !< vertices all lie "on" the other's plane (as `tb`), and the result is meaningless (issue #96: a segment 0.5 from
+   !< a triangle came out PAIR_TOUCHING, and the reverse order PAIR_COPLANAR). `fossil_body_distance` decides such pairs
+   !< by exact segment / point predicates instead. The boolean arrangement (`collect_pair`) and `find_self_intersections`
+   !< pass unsanitised facets here (an open defect found by #96's audit: a boolean with a zero-area sliver as A fails
+   !< with CDT_FAILED against a body it does not touch); `sanitize` removes degenerate facets.
    type(vector_R8P),       intent(in)  :: ta(3) !< First triangle.
    type(vector_R8P),       intent(in)  :: tb(3) !< Second triangle.
    integer(I4P),           intent(out) :: kind  !< PAIR_* code.

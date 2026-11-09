@@ -22,7 +22,12 @@ facets that realize it, 583 on the dragon and 45 on the cube (ember). The figure
 - **Pair distance** (`fossil_body_distance%tri_tri_distance`): 0 when the exact classification of `fossil_tritri_exact`
   says the two triangles meet (crossing, touching, or overlapping in a common plane, decided by exact `orient2d`);
   otherwise the minimum of the 6 vertex–triangle and 9 edge–edge distances (the closest pair of two disjoint
-  triangles is one of these), each the norm of a residual.
+  triangles is one of these), each the norm of a residual. A **degenerate facet** (exactly collinear or coincident
+  vertices, as raw exporter output can carry; `sanitize` removes them) has no plane, so the classification cannot
+  apply to it (issue #96: a needle 0.5 from a face was reported in contact). Its contact is decided by exact segment
+  and point predicates instead: the facet is the segment between its extreme vertices, or a point, tested by
+  `orient3d` against the other triangle's plane and edges, and by `orient2d` in a common plane. The distance is the
+  same minimum of 15.
 - **Best-first descent** of the two AABB trees: a heap of node pairs ordered by the distance between their boxes; a pair
   is dropped when its box distance exceeds the best found; leaf pairs are evaluated in a fixed order. Facet pairs at
   equal distance are tie-broken by the smaller (facet_self, facet_other), so the result, facets and points included,
@@ -124,7 +129,10 @@ to 1e-8, peaks at 1.3e7 ε L at 1e-8, and falls back below it at most of the sma
 
 `src/tests/fossil_test_body_distance.f90`: cubes apart (exact distance), touching at a vertex, an edge, a face, and
 overlapping (0, intersecting), faces 1e-12 apart, and a sphere against a torus at six rigid motions, bit-identical to
-brute force. `src/tests/validation/fossil_val_body_distance.f90`: the bunny (20 000 facets) against the dragon (5 000)
+brute force. `src/tests/fossil_test_body_distance_degenerate.f90`: segment and point facets against a face (apart,
+crossing, touching at an end, in its plane) and against each other, both orders, through `tri_tri_distance` and
+`distance_to`, each against an exact contact reference and the minimum of the 15 sub-distances; and zero-length curve
+segments through `curve%distance_to`. `src/tests/validation/fossil_val_body_distance.f90`: the bunny (20 000 facets) against the dragon (5 000)
 under 20 motions, bit-identical to brute force. `src/tests/fossil_test_curve_distance_to.f90`: squares apart (exact
 distance), touching at a corner, along a side, and crossing, and a circle against a square at six poses, equal to the
 result after `move`.
