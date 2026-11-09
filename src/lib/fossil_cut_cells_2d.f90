@@ -287,7 +287,9 @@ contains
    enddo
    ! wall chains: from a piece starting at a crossing, follow the vertices to a crossing
    allocate(pvis(nb)) ; pvis = .false.
-   acc = 0._R8P ; wn = 0._R8P ; accm = 0._R8P ; wallm = 0._R8P
+   ! only the columns in use are cleared (a full clear of the MAXS columns was half the swept cells' time, issue #94):
+   ! every index read below is a root of 1..ns, or a hole slot appended later and cleared there
+   acc(:, 1:ns) = 0._R8P ; wn(:, 1:ns) = 0._R8P ; accm(:, 1:ns) = 0._R8P ; wallm(:, 1:ns) = 0._R8P
    ncs = 0_I4P ; if (cx%with_bnd) allocate(cs(4, 16), csl(16))
    do q = 1, nb
       p0 = cx%pord(cx%pstart(cid) + q - 1)
@@ -322,6 +324,7 @@ contains
       if (lg(1) < 0._R8P) then ! clockwise: a hole, a piece of its own
          nh = nh + 1 ; hole_area(nh) = -lg(1) ; hole_first(nh) = s0 ; hole_n(nh) = nloopp - s0 + 1
          ns = ns + 1 ; par(ns) = ns ; sfl(ns) = .false. ; hole_root(nh) = ns
+         acc(:, ns) = 0._R8P ; wn(:, ns) = 0._R8P ; accm(:, ns) = 0._R8P ; wallm(:, ns) = 0._R8P
          call charge_later(ns, lg, lw, lwn, cgm, cwm)
          if (cx%with_bnd) csl(c0s:ncs) = ns
       else
