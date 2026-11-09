@@ -19,7 +19,9 @@ program fossil_test_curve_bench
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
-use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d, device_line_mismatches_2d
+use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d, device_line_mismatches_2d, to_surface
+use fossil, only : surface_stl_object, slice_surface, cut_cells_2d_t
+use fossil_cut_cells_compare, only : cut_cells_twin_mismatches
 use fossil, only : rigid_pose_2d_t, pose_2d, to_world
 use fossil, only : curvilinear_block_2d_t, detect_topology_2d, topo_record_t, TOPO_BOUNDARY, wall_cutter_2d
 use fossil_overset, only : hole_flags_2d, block_logical_t, donor_set_t, donor_candidates_2d
@@ -60,6 +62,7 @@ call deviation_case(c)
 call feature_case(c)
 call thin_case(c)
 call block_case
+call cut_cells_case
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
@@ -359,6 +362,107 @@ contains
    print '(A,A,A,I0)', '   ', nm, 'box device vs serial mismatches: ', bad
    ok = ok .and. bad == 0
    endsubroutine box
+
+   subroutine cut_cells_case
+   !< The 2-D cut cells on the device (issue #100 step 2): `cut_cells_device` against `cut_cells`, every output element
+   !< bitwise, with the fluid edge intervals and without (`cut_cells_twin_mismatches`), on the mid-height sections of
+   !< the benchmark bodies (n^2, n the bench size) and on four curves (n^2; with n >= 256 also (4n)^2, at most 1024^2, and
+   !< a timing table: best of 5 calls, transfers included, intervals on). The regression run (n = 64) stays within its
+   !< budget; the device validation runs `fossil_test_curve_bench 256`. `cut cells 2-D device vs serial mismatches` = 0.
+   type(body_t), allocatable :: bb(:)                  !< Bodies.
+   type(surface_stl_object)  :: s                      !< Surface.
+   type(curve_object)        :: cc(4)                  !< Ellipse, NACA 0012, disc with a hole, 50 circles.
+   type(cut_cells_2d_t)      :: cut_h, cut_d           !< Cut cells (host, device: each call refills its own).
+   character(16)             :: cname(4)               !< Curve names.
+   real(R8P),    allocatable :: uu(:), vv(:), x(:), y(:) !< Work.
+   real(R8P)                 :: lo(2), hi(2), zmin, zmax, th, t(2) !< Work.
+   integer(I4P)              :: bad, st, sts, i, k, m, g, nn, r, ngrid(3), nl(50) !< Work.
+   integer(I8P)              :: c0, c1, rate       !< Clock.
+
+   ngrid = [n, min(4_I4P * n, 1024_I4P), 0_I4P]
+   bad = 0_I4P ; sts = 0_I4P
+   call bench_bodies(bb)
+   do i = 1, size(bb)
+      call to_surface(bb(i)%soup, s)
+      zmin = minval(bb(i)%soup%v(3, :, :)) ; zmax = maxval(bb(i)%soup%v(3, :, :))
+      call slice_surface(surface=s, normal_axis=3_I4P, level=0.5_R8P * (zmin + zmax), curve=cc(1))
+      if (cc(1)%get_vertices_number() == 0) cycle
+      lo = cc(1)%get_bmin() ; hi = cc(1)%get_bmax()
+      call grid_edges(lo, hi, ngrid(1), x, y)
+      bad = bad + cut_cells_twin_mismatches(cc(1), x, y, st) ; sts = sts + st
+   enddo
+   cname = [character(16) :: 'ellipse', 'NACA 0012', 'disc with a hole', '50 circles']
+   allocate(uu(1024), vv(1024))
+   do k = 1, 1024
+      th = 2._R8P * PI * (k - 1) / 1024
+      uu(k) = 0.5_R8P + 0.4_R8P * cos(th) ; vv(k) = 0.5_R8P + 0.25_R8P * sin(th)
+   enddo
+   call cc(1)%adopt_loops(u=uu, v=vv, loop_sizes=[1024_I4P])
+   deallocate(uu, vv) ; allocate(uu(1022), vv(1022))
+   call naca0012(511_I4P, uu, vv)
+   uu = 0.15_R8P + 0.7_R8P * uu ; vv = 0.5_R8P + 0.7_R8P * vv
+   call cc(2)%adopt_loops(u=uu, v=vv, loop_sizes=[1022_I4P])
+   deallocate(uu, vv) ; allocate(uu(1100), vv(1100))
+   do k = 1, 1000
+      uu(k) = 0.5_R8P + 0.4_R8P * cos(2._R8P * PI * (k - 1) / 1000) ; vv(k) = 0.5_R8P + 0.4_R8P * sin(2._R8P * PI * (k - 1) / 1000)
+   enddo
+   do k = 1, 100
+      uu(1000 + k) = 0.5_R8P + 0.12_R8P * cos(-2._R8P * PI * (k - 1) / 100)
+      vv(1000 + k) = 0.5_R8P + 0.12_R8P * sin(-2._R8P * PI * (k - 1) / 100)
+   enddo
+   call cc(3)%adopt_loops(u=uu, v=vv, loop_sizes=[1000_I4P, 100_I4P])
+   deallocate(uu, vv) ; allocate(uu(3200), vv(3200))
+   do m = 1, 50
+      do k = 1, 64
+         uu(64 * (m - 1) + k) = 0.1_R8P + 0.8_R8P * mod(m - 1, 10) / 9._R8P + 0.03_R8P * cos(2._R8P * PI * (k - 1) / 64)
+         vv(64 * (m - 1) + k) = 0.1_R8P + 0.8_R8P * ((m - 1) / 10) / 4._R8P + 0.03_R8P * sin(2._R8P * PI * (k - 1) / 64)
+      enddo
+   enddo
+   nl = 64_I4P
+   call cc(4)%adopt_loops(u=uu, v=vv, loop_sizes=nl)
+   lo = [0.0031_R8P, 0.0031_R8P] ; hi = [0.9969_R8P, 0.9969_R8P]
+   do i = 1, 4
+      do g = 1, merge(2, 1, n >= 256_I4P)
+         call grid_edges(lo, hi, ngrid(g), x, y)
+         bad = bad + cut_cells_twin_mismatches(cc(i), x, y, st) ; sts = sts + st
+      enddo
+   enddo
+   print '(A,I0)', 'cut cells 2-D device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0 .and. sts == 0
+   if (n < 256_I4P) return
+   print '(A)', 'cut cells 2-D timing (best of 5, intervals on, transfers included) [s]: curve, cells, host, device'
+   call system_clock(count_rate=rate)
+   do i = 1, 4
+      if (i == 3) cycle
+      do g = 1, 2
+         call grid_edges(lo, hi, ngrid(g), x, y)
+         t = huge(1._R8P)
+         do r = 1, 5
+            call system_clock(c0) ; call cc(i)%cut_cells(x=x, y=y, cut=cut_h, status=st) ; call system_clock(c1)
+            t(1) = min(t(1), real(c1 - c0, R8P) / rate)
+            call system_clock(c0) ; call cc(i)%cut_cells_device(x=x, y=y, cut=cut_d, status=st) ; call system_clock(c1)
+            t(2) = min(t(2), real(c1 - c0, R8P) / rate)
+         enddo
+         nn = ngrid(g)
+         print '(3X,A16,1X,I4,A,2(1X,ES10.3),A,F6.2,A)', cname(i), nn, '^2', t(1), t(2), '  (', t(1) / t(2), 'x)'
+      enddo
+   enddo
+   endsubroutine cut_cells_case
+
+   subroutine grid_edges(lo, hi, n, x, y)
+   !< n x n cells over the box [lo, hi] grown by 2 % (cell edges x(n+1), y(n+1)).
+   real(R8P),              intent(in)  :: lo(2), hi(2) !< Box.
+   integer(I4P),           intent(in)  :: n            !< Cells per axis.
+   real(R8P), allocatable, intent(out) :: x(:), y(:)   !< Cell edges.
+   real(R8P)                           :: a(2), b(2)   !< Grown box.
+   integer(I4P)                        :: k            !< Counter.
+
+   a = lo - 0.02_R8P * (hi - lo) ; b = hi + 0.02_R8P * (hi - lo)
+   allocate(x(n + 1), y(n + 1))
+   do k = 1, n + 1
+      x(k) = a(1) + (b(1) - a(1)) * (k - 1) / real(n, R8P) ; y(k) = a(2) + (b(2) - a(2)) * (k - 1) / real(n, R8P)
+   enddo
+   endsubroutine grid_edges
 
    subroutine naca0012(m, x, y)
    !< NACA 0012 with a closed trailing edge, 2m vertices, cosine spacing, counter-clockwise.
