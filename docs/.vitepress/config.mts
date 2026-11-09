@@ -119,7 +119,15 @@ export default withMermaid({
   title: 'FOSSIL',
   description: 'FOrtran Surfaces, Solids, Immersed boundaries and Level sets: the geometry of complex bodies for simulation codes, in pure Fortran.',
   base: '/FOSSIL/',
-  head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/FOSSIL/favicon.svg' }]],
+  head: [
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/FOSSIL/favicon.svg' }],
+    ['link', { rel: 'icon', type: 'image/png', sizes: '32x32', href: '/FOSSIL/favicon-32.png' }],
+    ['link', { rel: 'icon', type: 'image/png', sizes: '16x16', href: '/FOSSIL/favicon-16.png' }],
+    ['link', { rel: 'apple-touch-icon', sizes: '180x180', href: '/FOSSIL/apple-touch-icon.png' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
+    ['link', { rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@800&family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap' }],
+  ],
   markdown: {
     math: true,
     languages: ['fortran-free-form', 'fortran-fixed-form'],
@@ -133,7 +141,7 @@ export default withMermaid({
     },
   },
   themeConfig: {
-    logo: { light: '/logo.svg', dark: '/logo-dark.svg', alt: 'FOSSIL logo' },
+    logo: { light: '/favicon.svg', dark: '/favicon-dark.svg', alt: 'FOSSIL logo' },
     socialLinks: [{ icon: 'github', link: 'https://github.com/szaghi/FOSSIL' }],
     nav: [
       { text: 'Home', link: '/' },

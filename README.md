@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/public/logo.svg" alt="FOSSIL logo: an ammonite meshed in triangles, carved by light" width="128">
+<img src="docs/public/logo.svg" alt="the FOSSIL logo, an ammonite in one brush stroke with its septa, on an AMR ground" width="128">
 
 # FOSSIL
 #### FOrtran Surfaces, Solids, Immersed boundaries and Level sets

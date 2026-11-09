@@ -8,7 +8,7 @@ hero:
   image:
     light: /logo.svg
     dark: /logo-dark.svg
-    alt: the FOSSIL logo, an ammonite meshed in triangles and carved by light
+    alt: the FOSSIL logo, an ammonite in one brush stroke with its septa, on an AMR ground
   actions:
     - theme: brand
       text: Tutorial
