@@ -15,6 +15,8 @@ if [ $# -gt 0 ]; then names=("$@"); else
     grep -qiE '^ *program ' "$src" && names+=("$(sed -n 's/^ *[Pp][Rr][Oo][Gg][Rr][Aa][Mm] \+\([A-Za-z0-9_]*\).*/\1/p' "$src" | head -n 1)")
   done
 fi
+# fossil_val_perf (issue #94): one timed repetition here (baselines: scripts/run_perf.sh NAME, 5 repetitions).
+export FOSSIL_PERF_REPS=${FOSSIL_PERF_REPS:-1}
 pass=0 ; fail=0
 for name in "${names[@]}"; do
   exe=exe-validation/$name
