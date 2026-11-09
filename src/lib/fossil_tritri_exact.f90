@@ -5,6 +5,8 @@ module fossil_tritri_exact
 !< Two families. `pair_cut` / `coplanar_cut` (issue #65, used by the boolean arrangement) are exact with no snap and
 !< return implicit points (`fossil_implicit_points`): see their comments. `pair_classify` / `coplanar_portion` (issue
 !< #33, still used by `fossil_alpha_wrap`) snap and return rounded points, as described below.
+!< `pair_cut` needs two exactly non-degenerate triangles (`facet_drop` /= 0); `degenerate_pair_meet` (issue #96, moved
+!< here from `fossil_body_distance` by issue #99) decides, exactly, whether a pair with a degenerate triangle meets.
 !<
 !< `pair_classify` decides how two triangles meet from the exact signs of Shewchuk's `orient3d`
 !< (each triangle's vertices against the other's plane), never from floating-point distances:
@@ -31,7 +33,7 @@ module fossil_tritri_exact
 !< the same geometric point produces the same bits: the facets of both surfaces that share a cut
 !< endpoint get identical vertices, which an exact-equality vertex weld then joins.
 use fossil_implicit_points, only : implicit_point_t, ip_explicit, ip_lpi, ip_eei, ip_lex_compare, ip_rank
-use fossil_predicates,      only : orient3d, orient2d_xy
+use fossil_predicates,      only : orient3d, orient3d_xyz, orient2d_xy
 use penf,                   only : I4P, R8P
 use vecfor,                 only : vector_R8P
 
@@ -43,6 +45,7 @@ public :: coplanar_portion
 public :: edge_plane_point, edge_edge_point
 public :: lex_less
 public :: pair_cut, coplanar_cut, facet_drop
+public :: degenerate_pair_meet
 
 integer(I4P), parameter :: PAIR_SEPARATED = 0_I4P !< No common point.
 integer(I4P), parameter :: PAIR_CROSSING  = 1_I4P !< Common segment of positive length.
@@ -326,7 +329,7 @@ contains
    !< Precondition: both triangles exactly non-degenerate (`facet_drop` /= 0). A degenerate triangle (collinear or
    !< coincident vertices) has no plane: every orient3d against it is 0, so it is classified COPLANAR (as `ta`) or its
    !< vertices all lie "on" the other's plane (as `tb`), and the result is meaningless (issue #96: a segment 0.5 from
-   !< a triangle came out PAIR_TOUCHING, and the reverse order PAIR_COPLANAR). `fossil_body_distance` decides such pairs
+   !< a triangle came out PAIR_TOUCHING, and the reverse order PAIR_COPLANAR). `degenerate_pair_meet` decides such pairs
    !< by exact segment / point predicates instead. The boolean arrangement (`collect_pair`) and `find_self_intersections`
    !< pass unsanitised facets here (an open defect found by #96's audit: a boolean with a zero-area sliver as A fails
    !< with CDT_FAILED against a body it does not touch); `sanitize` removes degenerate facets.
@@ -504,7 +507,7 @@ contains
       endsubroutine add
    endsubroutine coplanar_cut
 
-   function facet_drop(t) result(drop)
+   pure function facet_drop(t) result(drop)
    !< An axis whose dropping keeps triangle t non-degenerate, exactly: the axes by decreasing |normal component|, the
    !< first with a nonzero exact orient2d of the projection (0 if t is degenerate).
    type(vector_R8P), intent(in) :: t(3) !< Triangle.
@@ -526,7 +529,7 @@ contains
    drop = 0_I4P
    endfunction facet_drop
 
-   function o2p(a, b, c, drop) result(s)
+   pure function o2p(a, b, c, drop) result(s)
    !< Exact sign of the orientation of a, b, c in the kept axes (drop + 1, drop + 2) mod 3.
    real(R8P),    intent(in) :: a(3), b(3), c(3)
    integer(I4P), intent(in) :: drop
@@ -536,6 +539,204 @@ contains
    i = mod(drop, 3_I4P) + 1_I4P ; j = mod(drop + 1_I4P, 3_I4P) + 1_I4P
    s = isgn(orient2d_xy(a(i), a(j), b(i), b(j), c(i), c(j)))
    endfunction o2p
+
+   pure function degenerate_pair_meet(a, b, drop_a, drop_b) result(meet)
+   !< Exact contact of triangles a and b (vertices as columns) when at least one is exactly degenerate (`facet_drop` = 0:
+   !< collinear or coincident vertices; issue #96, shared since issue #99). It complements `pair_cut`, whose
+   !< precondition is two non-degenerate triangles (a degenerate one has no plane: every orient3d against it is 0).
+   !< A degenerate triangle is the segment between its lexicographic extreme vertices (exactly collinear vertices: the
+   !< lexicographic order is their order along the line), a point if they coincide; the contact is then decided by
+   !< exact predicates only, no tolerance: segment / point against a regular triangle by orient3d against its plane and
+   !< edges (orient2d in the projection dropping its `facet_drop` when in the plane), segment / point against segment /
+   !< point by equality, orient3d coplanarity, lexicographic intervals when collinear, orient2d in a projection injective
+   !< on their plane otherwise. Closed sets: touching at a single point counts as contact. If neither triangle is
+   !< degenerate the result is meaningless (use `pair_cut`).
+   real(R8P),    intent(in)           :: a(3, 3), b(3, 3) !< Triangles (at least one exactly degenerate).
+   integer(I4P), intent(in), optional :: drop_a           !< `facet_drop` of a, if already known (computed if absent).
+   integer(I4P), intent(in), optional :: drop_b           !< `facet_drop` of b, if already known (computed if absent).
+   logical                            :: meet             !< They share a point.
+   real(R8P)                          :: a0(3), a1(3), b0(3), b1(3)
+   integer(I4P)                       :: da, db, k
+   type(vector_R8P)                   :: v(3)
+
+   if (present(drop_a)) then
+      da = drop_a
+   else
+      do k = 1, 3 ; v(k) = vector_R8P(a(1, k), a(2, k), a(3, k)) ; enddo
+      da = facet_drop(v)
+   endif
+   if (present(drop_b)) then
+      db = drop_b
+   else
+      do k = 1, 3 ; v(k) = vector_R8P(b(1, k), b(2, k), b(3, k)) ; enddo
+      db = facet_drop(v)
+   endif
+   if (da == 0_I4P .and. db == 0_I4P) then
+      call hull_ends(a, a0, a1) ; call hull_ends(b, b0, b1)
+      meet = segment_segment_meet(a0, a1, b0, b1)
+   elseif (da == 0_I4P) then
+      call hull_ends(a, a0, a1)
+      meet = segment_triangle_meet(a0, a1, b, db)
+   elseif (db == 0_I4P) then
+      call hull_ends(b, b0, b1)
+      meet = segment_triangle_meet(b0, b1, a, da)
+   else
+      meet = .false.
+   endif
+   endfunction degenerate_pair_meet
+
+   pure subroutine hull_ends(t, e0, e1)
+   !< The lexicographically smallest and largest vertices of t.
+   real(R8P), intent(in)  :: t(3, 3) !< Triangle.
+   real(R8P), intent(out) :: e0(3)   !< Smallest vertex.
+   real(R8P), intent(out) :: e1(3)   !< Largest vertex.
+   integer(I4P)           :: k
+
+   e0 = t(:, 1) ; e1 = t(:, 1)
+   do k = 2, 3
+      if (lex_lt(t(:, k), e0)) e0 = t(:, k)
+      if (lex_lt(e1, t(:, k))) e1 = t(:, k)
+   enddo
+   endsubroutine hull_ends
+
+   pure function lex_lt(p, q) result(less)
+   !< p < q in lexicographic order (x, then y, then z).
+   real(R8P), intent(in) :: p(3), q(3) !< Points.
+   logical                :: less      !< p < q.
+
+   if (p(1) /= q(1)) then
+      less = p(1) < q(1)
+   elseif (p(2) /= q(2)) then
+      less = p(2) < q(2)
+   else
+      less = p(3) < q(3)
+   endif
+   endfunction lex_lt
+
+   pure function segment_triangle_meet(p, q, t, drop) result(meet)
+   !< The closed segment (p, q) (a point if p = q) and the regular triangle t (`facet_drop(t)` = drop /= 0) share a
+   !< point (exact): an end on the plane inside t; the segment strictly across the plane and its line through the closed
+   !< t (orient3d against the three edges, all of one sign or zero); the segment in the plane meeting t (orient2d in the
+   !< projection dropping `drop`, injective on the plane).
+   real(R8P),    intent(in) :: p(3), q(3), t(3, 3) !< Segment, triangle.
+   integer(I4P), intent(in) :: drop                !< `facet_drop(t)`.
+   logical                  :: meet                !< They share a point.
+   integer(I4P)             :: sp, sq, s(3), k
+
+   sp = isgn(orient3d_xyz(t(:, 1), t(:, 2), t(:, 3), p)) ; sq = isgn(orient3d_xyz(t(:, 1), t(:, 2), t(:, 3), q))
+   if (sp * sq > 0_I4P) then
+      meet = .false.
+   elseif (sp == 0_I4P .and. sq == 0_I4P) then
+      meet = in_triangle_2d(p, t, drop) .or. in_triangle_2d(q, t, drop)
+      do k = 1, 3
+         if (meet) exit
+         meet = segments_meet_2d(p, q, t(:, k), t(:, mod(k, 3) + 1), drop)
+      enddo
+   elseif (sp == 0_I4P) then
+      meet = in_triangle_2d(p, t, drop)
+   elseif (sq == 0_I4P) then
+      meet = in_triangle_2d(q, t, drop)
+   else
+      do k = 1, 3
+         s(k) = isgn(orient3d_xyz(p, q, t(:, k), t(:, mod(k, 3) + 1)))
+      enddo
+      meet = all(s >= 0_I4P) .or. all(s <= 0_I4P)
+   endif
+   endfunction segment_triangle_meet
+
+   pure function segment_segment_meet(a0, a1, b0, b1) result(meet)
+   !< The closed segments (a0, a1) and (b0, b1), each with its ends in lexicographic order (a point if they coincide),
+   !< share a point (exact): points by equality or collinearity; segments not coplanar (orient3d) never; collinear by
+   !< their lexicographic intervals; otherwise in a projection injective on their plane (orient2d).
+   real(R8P), intent(in) :: a0(3), a1(3), b0(3), b1(3) !< Segments.
+   logical               :: meet                       !< They share a point.
+   logical               :: c0, c1
+
+   if (all(a0 == a1) .and. all(b0 == b1)) then
+      meet = all(a0 == b0)
+   elseif (all(a0 == a1)) then
+      meet = on_segment_3d(a0, b0, b1)
+   elseif (all(b0 == b1)) then
+      meet = on_segment_3d(b0, a0, a1)
+   elseif (orient3d_xyz(a0, a1, b0, b1) /= 0._R8P) then
+      meet = .false.
+   else
+      c0 = collinear_3d(a0, a1, b0) ; c1 = collinear_3d(a0, a1, b1)
+      if (c0 .and. c1) then
+         meet = .not. (lex_lt(a1, b0) .or. lex_lt(b1, a0))
+      elseif (.not. c0) then
+         meet = segments_meet_2d(a0, a1, b0, b1, nonzero_drop(a0, a1, b0))
+      else
+         meet = segments_meet_2d(a0, a1, b0, b1, nonzero_drop(a0, a1, b1))
+      endif
+   endif
+   endfunction segment_segment_meet
+
+   pure function collinear_3d(p, q, r) result(yes)
+   !< p, q, r exactly collinear: the three coordinate projections of their cross product vanish.
+   real(R8P), intent(in) :: p(3), q(3), r(3) !< Points.
+   logical               :: yes              !< Collinear.
+
+   yes = o2p(p, q, r, 1_I4P) == 0_I4P .and. o2p(p, q, r, 2_I4P) == 0_I4P .and. o2p(p, q, r, 3_I4P) == 0_I4P
+   endfunction collinear_3d
+
+   pure function nonzero_drop(p, q, r) result(drop)
+   !< The first axis whose dropping keeps p, q, r (not collinear) a triangle (exact orient2d).
+   real(R8P), intent(in) :: p(3), q(3), r(3) !< Points.
+   integer(I4P)          :: drop             !< Axis.
+
+   do drop = 1_I4P, 2_I4P
+      if (o2p(p, q, r, drop) /= 0_I4P) return
+   enddo
+   drop = 3_I4P
+   endfunction nonzero_drop
+
+   pure function on_segment_3d(x, p, q) result(yes)
+   !< x on the closed segment (p, q), p /= q (exact): collinear, inside the box of the segment.
+   real(R8P), intent(in) :: x(3), p(3), q(3) !< Point, segment.
+   logical               :: yes              !< On it.
+
+   yes = collinear_3d(p, q, x)
+   if (yes) yes = all(x >= min(p, q)) .and. all(x <= max(p, q))
+   endfunction on_segment_3d
+
+   pure function in_triangle_2d(x, t, drop) result(yes)
+   !< x (on the plane of t) in the closed t, in the projection dropping `drop` (t not degenerate there).
+   real(R8P),    intent(in) :: x(3), t(3, 3) !< Point, triangle.
+   integer(I4P), intent(in) :: drop          !< Projection.
+   logical                  :: yes           !< Inside or on the boundary.
+   integer(I4P)             :: s1, s2, s3
+
+   s1 = o2p(t(:, 1), t(:, 2), x, drop) ; s2 = o2p(t(:, 2), t(:, 3), x, drop) ; s3 = o2p(t(:, 3), t(:, 1), x, drop)
+   yes = (s1 >= 0_I4P .and. s2 >= 0_I4P .and. s3 >= 0_I4P) .or. (s1 <= 0_I4P .and. s2 <= 0_I4P .and. s3 <= 0_I4P)
+   endfunction in_triangle_2d
+
+   pure function segments_meet_2d(p1, q1, p2, q2, drop) result(yes)
+   !< The closed segments (p1, q1) and (p2, q2), coplanar, meet in the projection dropping `drop` (injective on their
+   !< plane): a proper crossing, or an end on the other segment (collinear and inside its box).
+   real(R8P),    intent(in) :: p1(3), q1(3), p2(3), q2(3) !< Segments.
+   integer(I4P), intent(in) :: drop                       !< Projection.
+   logical                  :: yes                        !< They meet.
+   integer(I4P)             :: d1, d2, d3, d4
+
+   d1 = o2p(p2, q2, p1, drop) ; d2 = o2p(p2, q2, q1, drop) ; d3 = o2p(p1, q1, p2, drop) ; d4 = o2p(p1, q1, q2, drop)
+   yes = d1 * d2 < 0_I4P .and. d3 * d4 < 0_I4P
+   if (yes) return
+   yes = (d1 == 0_I4P .and. in_box_2d(p1, p2, q2, drop)) .or. (d2 == 0_I4P .and. in_box_2d(q1, p2, q2, drop)) .or. &
+         (d3 == 0_I4P .and. in_box_2d(p2, p1, q1, drop)) .or. (d4 == 0_I4P .and. in_box_2d(q2, p1, q1, drop))
+   endfunction segments_meet_2d
+
+   pure function in_box_2d(x, p, q, drop) result(yes)
+   !< x inside the box of (p, q) in the kept coordinates of the projection dropping `drop`.
+   real(R8P),    intent(in) :: x(3), p(3), q(3) !< Point, segment.
+   integer(I4P), intent(in) :: drop             !< Projection.
+   logical                  :: yes              !< Inside.
+   integer(I4P)             :: u, v
+
+   u = mod(drop, 3_I4P) + 1_I4P ; v = mod(drop + 1_I4P, 3_I4P) + 1_I4P
+   yes = x(u) >= min(p(u), q(u)) .and. x(u) <= max(p(u), q(u)) .and. x(v) >= min(p(v), q(v)) .and. &
+         x(v) <= max(p(v), q(v))
+   endfunction in_box_2d
 
    pure function preferred(a, b) result(c)
    !< Of two coincident constructions, the more specific (`ip_rank`), else a.

@@ -360,8 +360,9 @@ fobis fetch            # --update to re-fetch
   independent reference. Keep the strict comparisons: an equal-distance pair may still win the tie rule. Degenerate
   facets (issue #96): `pair_cut` requires non-degenerate triangles (its header says so; a degenerate one has no plane, so
   its answer depended on the argument order); `tri_tri_distance_core` decides contact for an exactly degenerate pair
-  (`facet_drop == 0`) with `degenerate_meet` (segment/point vs triangle by orient3d sides and edges, orient2d in the
-  plane; segment vs segment by exact coplanarity, lexicographic intervals when collinear), then the 15 sub-distances.
+  (`facet_drop == 0`) with `degenerate_pair_meet` (public in `fossil_tritri_exact` since issue #99; segment/point vs
+  triangle by orient3d sides and edges, orient2d in the plane; segment vs segment by exact coplanarity, lexicographic
+  intervals when collinear), then the 15 sub-distances.
   The boolean and `find_self_intersections` still call `pair_cut` unguarded (CDT_FAILED / false TOUCHING on a
   degenerate facet: issue #98).
 - `fossil_ccd.f90` — continuous collision detection (issue #73, roadmap #68 WP4; design in
