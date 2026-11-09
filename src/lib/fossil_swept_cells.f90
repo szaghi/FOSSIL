@@ -43,7 +43,7 @@ module fossil_swept_cells
 !< not round-off (a dragon section crossing itself once: 5.3e-6, the knot removed: 7.8e-18). Pass
 !< `check_input=.true.` to have the input checked first (`sw%self_intersecting`, a warning on stderr;
 !< issue #44), or call `self_intersections` / `check_validity(check_self_intersections=.true.)`.
-use fossil_curve_object,       only : curve_object, cut_cells_2d_t
+use fossil_curve_object,       only : curve_object, cut_cells_2d_t, place_for_crossings
 use fossil_curve_slice,        only : slice_surface
 use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d
 use fossil_facet_object,       only : facet_object
@@ -108,6 +108,31 @@ type :: slist_t
    !< A list of breakpoints.
    real(R8P), allocatable :: s(:) !< Breakpoints.
 endtype slist_t
+
+type :: events_2d_t
+   !< Events of one grid line (wall vertices crossing it) or of one grid node (it crossing wall segments) in the exact
+   !< 2-D rotation (issue #94): they do not depend on the face, so every face on the line, or ending at the node, reuses
+   !< them (the same operations, done once).
+   logical                :: done = .false. !< Computed.
+   logical                :: cert = .true.  !< Every `isolate_zeros` certified.
+   integer(I4P)           :: n = 0_I4P      !< Events.
+   real(R8P), allocatable :: z(:)           !< Instants [n] (a node: those inside a wall segment).
+   real(R8P), allocatable :: w(:)           !< Line events: the coordinate along the line at the instant [n].
+endtype events_2d_t
+
+type :: rotation_2d_t
+   !< State of `faces_rotation_2d` shared by its module-level helpers (issue #94).
+   integer(I4P)                   :: nv = 0_I4P    !< Vertices.
+   real(R8P),         allocatable :: vu(:), vv(:)  !< Vertices (body frame).
+   integer(I4P),      allocatable :: nxt(:)        !< Next vertex (0: none).
+   real(R8P)                      :: th0 = 0._R8P  !< Angle at pose0.
+   real(R8P)                      :: dth = 0._R8P  !< Rotation over the step.
+   real(R8P)                      :: t0(2) = 0._R8P, dt(2) = 0._R8P !< Translation at pose0, its change.
+   real(R8P)                      :: xm = 0._R8P   !< Coordinate magnitude (round-off scale of a crossing).
+   type(rigid_pose_2d_t)          :: pose0, pose1  !< End poses.
+   type(curve_object)             :: cq            !< Work copy, placed at each Gauss node (`place_for_crossings`).
+   logical                        :: exact = .true. !< Every breakpoint certified.
+endtype rotation_2d_t
 
 contains
    subroutine swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input)
@@ -230,7 +255,8 @@ contains
    !< on |g''| (`isolate_zeros`): a wall vertex crossing the face's line inside its span, an end node crossing a wall
    !< segment inside it. On every piece between breakpoints the fluid length and the outflow are analytic: Gauss-
    !< Legendre doubled from 2 nodes until two values agree to round-off (at 64, to that of one evaluation: FLOOR_H;
-   !< else exact = .false.).
+   !< else exact = .false.). Each Gauss node places one work copy (`place_for_crossings`: the vertices and boxes of
+   !< `move`, bit for bit) and the events of a grid line or node are computed once for all its faces (issue #94).
    type(curve_object),    intent(in)  :: curve        !< Curve (body frame).
    type(rigid_pose_2d_t), intent(in)  :: pose0, pose1 !< End poses.
    real(R8P),             intent(in)  :: x(:), y(:)   !< Cell edges.
@@ -238,23 +264,28 @@ contains
    real(R8P),             intent(out) :: flux(:,:)    !< Time integral of the rigid-field outflow per cell.
    integer(I4P),          intent(out) :: nev          !< Largest number of evaluations per face.
    logical,               intent(out) :: exact        !< Every piece converged.
-   real(R8P),    allocatable :: vu(:), vv(:), ou(:,:), ov(:,:), bp(:)
-   integer(I4P), allocatable :: nxt(:)
+   type(rotation_2d_t)            :: ctx
+   type(events_2d_t), allocatable :: line_u(:), line_v(:), node(:,:) !< Events of the lines u = x_i, v = y_j, the nodes.
+   real(R8P),    allocatable :: ou(:,:), ov(:,:), bp(:)
    real(R8P)                 :: th0, dth, t0(2), dt(2), cen(2), rho, cbox(2, 2), uv(2), ss, cc(2), cmax
    integer(I4P)              :: nx, ny, nv, i, j, k, nb, ne
    logical                   :: ok
 
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
    nv = curve%get_vertices_number()
-   allocate(vu(nv), vv(nv), nxt(nv), ou(nx + 1, ny), ov(nx, ny + 1))
+   allocate(ctx%vu(nv), ctx%vv(nv), ctx%nxt(nv), ou(nx + 1, ny), ov(nx, ny + 1))
    do k = 1_I4P, nv
-      uv = curve%get_vertex(k) ; vu(k) = uv(1) ; vv(k) = uv(2) ; nxt(k) = curve%get_next(k)
+      uv = curve%get_vertex(k) ; ctx%vu(k) = uv(1) ; ctx%vv(k) = uv(2) ; ctx%nxt(k) = curve%get_next(k)
    enddo
    th0 = pose_angle_2d(pose0) ; dth = pose_angle_2d(pose1) - th0 ; dth = atan2(sin(dth), cos(dth))
    t0 = pose0%t ; dt = pose1%t - pose0%t
+   ctx%nv = nv ; ctx%th0 = th0 ; ctx%dth = dth ; ctx%t0 = t0 ; ctx%dt = dt ; ctx%pose0 = pose0 ; ctx%pose1 = pose1
+   ctx%xm = maxval(abs([x, y])) + norm2(t0) + norm2(dt) ! coordinate magnitude: the round-off scale of a crossing
+   ctx%cq = curve ; ctx%exact = .true.
+   allocate(line_u(nx + 1), line_v(ny + 1), node(nx + 1, ny + 1))
    ! the box swept by the body's bounding circle: centre path C(s) = R(th(s)) cen + t(s), |C''| <= dth^2 |cen|
-   cen = 0.5_R8P * ([minval(vu), minval(vv)] + [maxval(vu), maxval(vv)])
-   rho = sqrt(maxval((vu - cen(1))**2 + (vv - cen(2))**2))
+   cen = 0.5_R8P * ([minval(ctx%vu), minval(ctx%vv)] + [maxval(ctx%vu), maxval(ctx%vv)])
+   rho = sqrt(maxval((ctx%vu - cen(1))**2 + (ctx%vv - cen(2))**2))
    cbox(:, 1) = huge(1._R8P) ; cbox(:, 2) = -huge(1._R8P)
    do k = 0_I4P, 64_I4P
       ss = real(k, R8P) / 64._R8P
@@ -272,8 +303,8 @@ contains
             ou(i, j) = closed_outflow(2_I4P, y(j), y(j + 1))
             cycle
          endif
-         call face_events(1_I4P, x(i), y(j), y(j + 1), bp, nb)
-         call integrate_face(1_I4P, x(i), y(j), y(j + 1), bp, nb, fu(i, j), ou(i, j), ne, ok)
+         call face_events_2d(ctx, 1_I4P, x(i), y(j), y(j + 1), line_u(i), node(i, j), node(i, j + 1), bp, nb)
+         call integrate_face_2d(ctx, curve, 1_I4P, x(i), y(j), y(j + 1), bp, nb, fu(i, j), ou(i, j), ne, ok)
          nev = max(nev, ne) ; exact = exact .and. ok
       enddo
    enddo
@@ -285,8 +316,8 @@ contains
             ov(i, j) = closed_outflow(1_I4P, x(i), x(i + 1))
             cycle
          endif
-         call face_events(2_I4P, y(j), x(i), x(i + 1), bp, nb)
-         call integrate_face(2_I4P, y(j), x(i), x(i + 1), bp, nb, fv(i, j), ov(i, j), ne, ok)
+         call face_events_2d(ctx, 2_I4P, y(j), x(i), x(i + 1), line_v(j), node(i, j), node(i + 1, j), bp, nb)
+         call integrate_face_2d(ctx, curve, 2_I4P, y(j), x(i), x(i + 1), bp, nb, fv(i, j), ov(i, j), ne, ok)
          nev = max(nev, ne) ; exact = exact .and. ok
       enddo
    enddo
@@ -295,6 +326,7 @@ contains
          flux(i, j) = ou(i + 1, j) - ou(i, j) + ov(i, j + 1) - ov(i, j)
       enddo
    enddo
+   exact = exact .and. ctx%exact
    contains
       function closed_outflow(lax, lo, hi) result(o)
       !< Time integral of the rigid-field outflow through a face fluid throughout: the face along `lax` from lo to hi.
@@ -311,127 +343,191 @@ contains
          o = dth * (m - (t0(1) + 0.5_R8P * dt(1)) * l) + dt(2) * l
       endif
       endfunction closed_outflow
-
-      subroutine face_events(nax, a, lo, hi, b, m)
-      !< Breakpoints in (0, 1) of the face on the line normal to `nax` (1: u = a, 2: v = a), span [lo, hi].
-      integer(I4P),           intent(in)  :: nax
-      real(R8P),              intent(in)  :: a, lo, hi
-      real(R8P), allocatable, intent(out) :: b(:)
-      integer(I4P),           intent(out) :: m
-      real(R8P), allocatable              :: tmp(:), z(:)
-      real(R8P)                           :: co(6), w0(2), w1(2), d(2), xs(2), r(2), lam, node(2)
-      integer(I4P)                        :: q, nz, kk, e
-      logical                             :: cert
-
-      allocate(tmp(0)) ; m = 0_I4P
-      ! wall vertices crossing the line: X_nax(s) = a, the other coordinate inside [lo, hi]
-      do q = 1_I4P, nv
-         if (nax == 1_I4P) then
-            co = [vu(q), 0._R8P, -vv(q), 0._R8P, t0(1) - a, dt(1)]
-         else
-            co = [vv(q), 0._R8P, vu(q), 0._R8P, t0(2) - a, dt(2)]
-         endif
-         call isolate_zeros(co, th0, dth, abs(vu(q)) + abs(vv(q)) + norm2(t0) + abs(a) + norm2(dt), z, nz, cert)
-         if (.not. cert) exact = .false.
-         do kk = 1_I4P, nz
-            xs = rot2(th0 + z(kk) * dth, [vu(q), vv(q)]) + t0 + z(kk) * dt
-            if (xs(3 - nax) >= lo .and. xs(3 - nax) <= hi) tmp = [tmp, z(kk)]
-         enddo
-      enddo
-      ! the end nodes crossing wall segments: orient2d(X_q, X_q', N) = (R d) x (N - t(s)) - d x q
-      do e = 1_I4P, 2_I4P
-         if (nax == 1_I4P) then
-            node = [a, merge(lo, hi, e == 1_I4P)]
-         else
-            node = [merge(lo, hi, e == 1_I4P), a]
-         endif
-         w0 = node - t0 ; w1 = -dt
-         do q = 1_I4P, nv
-            if (nxt(q) == 0_I4P) cycle
-            d = [vu(nxt(q)) - vu(q), vv(nxt(q)) - vv(q)]
-            co = [d(1) * w0(2) - d(2) * w0(1), d(1) * w1(2) - d(2) * w1(1), &
-                  -(d(1) * w0(1) + d(2) * w0(2)), -(d(1) * w1(1) + d(2) * w1(2)), &
-                  -(d(1) * vv(q) - d(2) * vu(q)), 0._R8P]
-            call isolate_zeros(co, th0, dth, norm2(d) * (norm2(w0) + norm2(w1) + abs(vu(q)) + abs(vv(q))), z, nz, cert)
-            if (.not. cert) exact = .false.
-            do kk = 1_I4P, nz
-               xs = rot2(th0 + z(kk) * dth, [vu(q), vv(q)]) + t0 + z(kk) * dt
-               r = rot2(th0 + z(kk) * dth, d)
-               lam = dot_product(node - xs, r) / dot_product(r, r)
-               if (lam >= 0._R8P .and. lam <= 1._R8P) tmp = [tmp, z(kk)]
-            enddo
-         enddo
-      enddo
-      m = size(tmp, kind=I4P)
-      call sort_unique(tmp, m)
-      call merge_close(tmp, m)
-      b = tmp(1:m)
-      endsubroutine face_events
-
-      subroutine integrate_face(nax, a, lo, hi, b, m, avg, out, ne, conv)
-      !< Time averages over [0, 1] of the fluid length and of the rigid-field outflow of one face, piece by piece.
-      integer(I4P), intent(in)  :: nax
-      real(R8P),    intent(in)  :: a, lo, hi
-      real(R8P),    intent(in)  :: b(:)
-      integer(I4P), intent(in)  :: m
-      real(R8P),    intent(out) :: avg, out
-      integer(I4P), intent(out) :: ne
-      logical,      intent(out) :: conv
-      real(R8P)                 :: sa, sb, l1, o1, l2, o2, scl, sco, xm, sno
-      integer(I4P)              :: q, ng
-
-      avg = 0._R8P ; out = 0._R8P ; ne = 0_I4P ; conv = .true.
-      xm = maxval(abs([x, y])) + norm2(t0) + norm2(dt) ! coordinate magnitude: the round-off scale of a crossing
-      scl = hi - lo ; sco = scl * (abs(dth) * xm + norm2(dt))
-      sno = xm * (abs(dth) * xm + norm2(dt))
-      do q = 0_I4P, m
-         sa = 0._R8P ; if (q > 0_I4P) sa = b(q)
-         sb = 1._R8P ; if (q < m) sb = b(q + 1)
-         if (sb <= sa) cycle
-         ng = 2_I4P
-         call piece(nax, a, lo, hi, sa, sb, ng, l1, o1) ; ne = ne + ng
-         do
-            ng = 2_I4P * ng
-            call piece(nax, a, lo, hi, sa, sb, ng, l2, o2) ; ne = ne + ng
-            if (abs(l2 - l1) <= 64._R8P * epsilon(1._R8P) * scl * max(sb - sa, FLOOR_H) .and. &
-                abs(o2 - o1) <= 64._R8P * epsilon(1._R8P) * sco * max(sb - sa, FLOOR_H)) exit
-            ! at 64 nodes: the change against the round-off of one evaluation (length: xm; issue #86, see FLOOR_H)
-            if (ng >= 64_I4P) then
-               conv = max(abs(l2 - l1) / xm, abs(o2 - o1) / sno) <= 64._R8P * epsilon(1._R8P) ; exit
-            endif
-            l1 = l2 ; o1 = o2
-         enddo
-         avg = avg + l2 ; out = out + o2
-      enddo
-      endsubroutine integrate_face
-
-      subroutine piece(nax, a, lo, hi, sa, sb, ng, l, o)
-      !< ng-point Gauss-Legendre over [sa, sb] of the fluid length and the outflow of one face (moved copies).
-      integer(I4P), intent(in)  :: nax, ng
-      real(R8P),    intent(in)  :: a, lo, hi, sa, sb
-      real(R8P),    intent(out) :: l, o
-      type(curve_object)        :: cq
-      real(R8P), allocatable    :: sq(:), wq(:)
-      real(R8P)                 :: ll, mm, sn, tq(2)
-      integer(I4P)              :: q
-
-      call gauss_legendre_01(ng, sq, wq)
-      l = 0._R8P ; o = 0._R8P
-      do q = 1_I4P, ng
-         sn = sa + (sb - sa) * sq(q)
-         cq = curve ; call cq%move(pose_interpolate(pose0, pose1, sn))
-         tq = t0 + sn * dt
-         if (nax == 1_I4P) then ! face u = a along v
-            call face_measure(cq, 2_I4P, a, lo, hi, ll, mm)
-            o = o + (sb - sa) * wq(q) * (-dth * (mm - tq(2) * ll) + dt(1) * ll)
-         else                   ! face v = a along u
-            call face_measure(cq, 1_I4P, a, lo, hi, ll, mm)
-            o = o + (sb - sa) * wq(q) * (dth * (mm - tq(1) * ll) + dt(2) * ll)
-         endif
-         l = l + (sb - sa) * wq(q) * ll
-      enddo
-      endsubroutine piece
    endsubroutine faces_rotation_2d
+
+   subroutine face_events_2d(ctx, nax, a, lo, hi, line, n1, n2, b, m)
+   !< Breakpoints in (0, 1) of the face on the line normal to `nax` (1: u = a, 2: v = a), span [lo, hi], from the events
+   !< of its line (filtered to the span) and of its two end nodes (lo, then hi), each computed at its first use.
+   type(rotation_2d_t),    intent(inout) :: ctx      !< State.
+   integer(I4P),           intent(in)    :: nax      !< Normal axis of the face.
+   real(R8P),              intent(in)    :: a, lo, hi !< Line, span.
+   type(events_2d_t),      intent(inout) :: line     !< Events of the line.
+   type(events_2d_t),      intent(inout) :: n1, n2   !< Events of the end nodes at lo and at hi.
+   real(R8P), allocatable, intent(out)   :: b(:)     !< Breakpoints.
+   integer(I4P),           intent(out)   :: m        !< Their number.
+   real(R8P), allocatable                :: tmp(:)   !< Work.
+   integer(I4P)                          :: k        !< Counter.
+
+   if (.not. line%done) call line_events_2d(ctx, nax, a, line)
+   if (nax == 1_I4P) then
+      if (.not. n1%done) call node_events_2d(ctx, [a, lo], n1)
+      if (.not. n2%done) call node_events_2d(ctx, [a, hi], n2)
+   else
+      if (.not. n1%done) call node_events_2d(ctx, [lo, a], n1)
+      if (.not. n2%done) call node_events_2d(ctx, [hi, a], n2)
+   endif
+   if (.not. (line%cert .and. n1%cert .and. n2%cert)) ctx%exact = .false.
+   allocate(tmp(line%n + n1%n + n2%n))
+   m = 0_I4P
+   do k = 1_I4P, line%n
+      if (line%w(k) >= lo .and. line%w(k) <= hi) then
+         m = m + 1_I4P ; tmp(m) = line%z(k)
+      endif
+   enddo
+   do k = 1_I4P, n1%n
+      m = m + 1_I4P ; tmp(m) = n1%z(k)
+   enddo
+   do k = 1_I4P, n2%n
+      m = m + 1_I4P ; tmp(m) = n2%z(k)
+   enddo
+   call sort_unique(tmp, m)
+   call merge_close(tmp, m)
+   b = tmp(1:m)
+   endsubroutine face_events_2d
+
+   subroutine line_events_2d(ctx, nax, a, ev)
+   !< Wall vertices crossing the line normal to `nax` at a: X_nax(s) = a, with the other coordinate at the instant.
+   type(rotation_2d_t), intent(in)    :: ctx  !< State.
+   integer(I4P),        intent(in)    :: nax  !< Normal axis of the line.
+   real(R8P),           intent(in)    :: a    !< Line position.
+   type(events_2d_t),   intent(inout) :: ev   !< Events.
+   real(R8P), allocatable             :: z(:) !< Zeros.
+   real(R8P)                          :: co(6), xs(2) !< Coefficients, position.
+   integer(I4P)                       :: q, nz, kk !< Counters.
+   logical                            :: cert !< Certified.
+
+   ev%done = .true. ; ev%cert = .true. ; ev%n = 0_I4P
+   allocate(ev%z(4), ev%w(4))
+   do q = 1_I4P, ctx%nv
+      if (nax == 1_I4P) then
+         co = [ctx%vu(q), 0._R8P, -ctx%vv(q), 0._R8P, ctx%t0(1) - a, ctx%dt(1)]
+      else
+         co = [ctx%vv(q), 0._R8P, ctx%vu(q), 0._R8P, ctx%t0(2) - a, ctx%dt(2)]
+      endif
+      call isolate_zeros(co, ctx%th0, ctx%dth, abs(ctx%vu(q)) + abs(ctx%vv(q)) + norm2(ctx%t0) + abs(a) + norm2(ctx%dt), &
+                         z, nz, cert)
+      if (.not. cert) ev%cert = .false.
+      do kk = 1_I4P, nz
+         xs = rot2(ctx%th0 + z(kk) * ctx%dth, [ctx%vu(q), ctx%vv(q)]) + ctx%t0 + z(kk) * ctx%dt
+         call push_event(ev, z(kk), xs(3 - nax))
+      enddo
+   enddo
+   endsubroutine line_events_2d
+
+   subroutine node_events_2d(ctx, node, ev)
+   !< The grid node crossing wall segments: orient2d(X_q, X_q', N) = (R d) x (N - t(s)) - d x q, the instants at which
+   !< the node lies inside the segment.
+   type(rotation_2d_t), intent(in)    :: ctx     !< State.
+   real(R8P),           intent(in)    :: node(2) !< Node.
+   type(events_2d_t),   intent(inout) :: ev      !< Events.
+   real(R8P), allocatable             :: z(:)    !< Zeros.
+   real(R8P)                          :: co(6), w0(2), w1(2), d(2), xs(2), r(2), lam !< Work.
+   integer(I4P)                       :: q, nz, kk !< Counters.
+   logical                            :: cert    !< Certified.
+
+   ev%done = .true. ; ev%cert = .true. ; ev%n = 0_I4P
+   allocate(ev%z(4), ev%w(4))
+   w0 = node - ctx%t0 ; w1 = -ctx%dt
+   do q = 1_I4P, ctx%nv
+      if (ctx%nxt(q) == 0_I4P) cycle
+      d = [ctx%vu(ctx%nxt(q)) - ctx%vu(q), ctx%vv(ctx%nxt(q)) - ctx%vv(q)]
+      co = [d(1) * w0(2) - d(2) * w0(1), d(1) * w1(2) - d(2) * w1(1), &
+            -(d(1) * w0(1) + d(2) * w0(2)), -(d(1) * w1(1) + d(2) * w1(2)), &
+            -(d(1) * ctx%vv(q) - d(2) * ctx%vu(q)), 0._R8P]
+      call isolate_zeros(co, ctx%th0, ctx%dth, norm2(d) * (norm2(w0) + norm2(w1) + abs(ctx%vu(q)) + abs(ctx%vv(q))), z, &
+                         nz, cert)
+      if (.not. cert) ev%cert = .false.
+      do kk = 1_I4P, nz
+         xs = rot2(ctx%th0 + z(kk) * ctx%dth, [ctx%vu(q), ctx%vv(q)]) + ctx%t0 + z(kk) * ctx%dt
+         r = rot2(ctx%th0 + z(kk) * ctx%dth, d)
+         lam = dot_product(node - xs, r) / dot_product(r, r)
+         if (lam >= 0._R8P .and. lam <= 1._R8P) call push_event(ev, z(kk), 0._R8P)
+      enddo
+   enddo
+   endsubroutine node_events_2d
+
+   pure subroutine push_event(ev, z, w)
+   !< Append one event (geometric growth, no self-referencing constructor).
+   type(events_2d_t), intent(inout) :: ev        !< Events.
+   real(R8P),         intent(in)    :: z, w      !< Instant, coordinate along the line.
+   real(R8P), allocatable           :: tz(:), tw(:) !< Grown buffers.
+
+   if (ev%n == size(ev%z, kind=I4P)) then
+      allocate(tz(2 * ev%n), tw(2 * ev%n))
+      tz(1:ev%n) = ev%z(1:ev%n) ; tw(1:ev%n) = ev%w(1:ev%n)
+      call move_alloc(tz, ev%z) ; call move_alloc(tw, ev%w)
+   endif
+   ev%n = ev%n + 1_I4P ; ev%z(ev%n) = z ; ev%w(ev%n) = w
+   endsubroutine push_event
+
+   subroutine integrate_face_2d(ctx, curve, nax, a, lo, hi, b, m, avg, out, ne, conv)
+   !< Time averages over [0, 1] of the fluid length and of the rigid-field outflow of one face, piece by piece.
+   type(rotation_2d_t), intent(inout) :: ctx      !< State.
+   type(curve_object),  intent(in)    :: curve    !< Curve (body frame).
+   integer(I4P),        intent(in)    :: nax      !< Normal axis of the face.
+   real(R8P),           intent(in)    :: a, lo, hi !< Line, span.
+   real(R8P),           intent(in)    :: b(:)     !< Breakpoints.
+   integer(I4P),        intent(in)    :: m        !< Their number.
+   real(R8P),           intent(out)   :: avg, out !< Time averages.
+   integer(I4P),        intent(out)   :: ne       !< Evaluations.
+   logical,             intent(out)   :: conv     !< Every piece converged.
+   real(R8P)                          :: sa, sb, l1, o1, l2, o2, scl, sco, xm, sno !< Work.
+   integer(I4P)                       :: q, ng    !< Work.
+
+   avg = 0._R8P ; out = 0._R8P ; ne = 0_I4P ; conv = .true.
+   xm = ctx%xm
+   scl = hi - lo ; sco = scl * (abs(ctx%dth) * xm + norm2(ctx%dt))
+   sno = xm * (abs(ctx%dth) * xm + norm2(ctx%dt))
+   do q = 0_I4P, m
+      sa = 0._R8P ; if (q > 0_I4P) sa = b(q)
+      sb = 1._R8P ; if (q < m) sb = b(q + 1)
+      if (sb <= sa) cycle
+      ng = 2_I4P
+      call piece_2d(ctx, curve, nax, a, lo, hi, sa, sb, ng, l1, o1) ; ne = ne + ng
+      do
+         ng = 2_I4P * ng
+         call piece_2d(ctx, curve, nax, a, lo, hi, sa, sb, ng, l2, o2) ; ne = ne + ng
+         if (abs(l2 - l1) <= 64._R8P * epsilon(1._R8P) * scl * max(sb - sa, FLOOR_H) .and. &
+             abs(o2 - o1) <= 64._R8P * epsilon(1._R8P) * sco * max(sb - sa, FLOOR_H)) exit
+         ! at 64 nodes: the change against the round-off of one evaluation (length: xm; issue #86, see FLOOR_H)
+         if (ng >= 64_I4P) then
+            conv = max(abs(l2 - l1) / xm, abs(o2 - o1) / sno) <= 64._R8P * epsilon(1._R8P) ; exit
+         endif
+         l1 = l2 ; o1 = o2
+      enddo
+      avg = avg + l2 ; out = out + o2
+   enddo
+   endsubroutine integrate_face_2d
+
+   subroutine piece_2d(ctx, curve, nax, a, lo, hi, sa, sb, ng, l, o)
+   !< ng-point Gauss-Legendre over [sa, sb] of the fluid length and the outflow of one face: at each node the work copy
+   !< takes the vertices and tree boxes of `curve` moved to the node pose (`place_for_crossings`, as `move`).
+   type(rotation_2d_t), intent(inout) :: ctx      !< State.
+   type(curve_object),  intent(in)    :: curve    !< Curve (body frame).
+   integer(I4P),        intent(in)    :: nax, ng  !< Normal axis of the face, nodes.
+   real(R8P),           intent(in)    :: a, lo, hi, sa, sb !< Line, span, piece.
+   real(R8P),           intent(out)   :: l, o     !< Fluid length and outflow integrated over the piece.
+   real(R8P), allocatable             :: sq(:), wq(:) !< Gauss nodes, weights.
+   real(R8P)                          :: ll, mm, sn, tq(2), dth, dt(2) !< Work.
+   integer(I4P)                       :: q        !< Node.
+
+   dth = ctx%dth ; dt = ctx%dt
+   call gauss_legendre_01(ng, sq, wq)
+   l = 0._R8P ; o = 0._R8P
+   do q = 1_I4P, ng
+      sn = sa + (sb - sa) * sq(q)
+      call place_for_crossings(ctx%cq, curve, pose_interpolate(ctx%pose0, ctx%pose1, sn))
+      tq = ctx%t0 + sn * dt
+      if (nax == 1_I4P) then ! face u = a along v
+         call face_measure(ctx%cq, 2_I4P, a, lo, hi, ll, mm)
+         o = o + (sb - sa) * wq(q) * (-dth * (mm - tq(2) * ll) + dt(1) * ll)
+      else                   ! face v = a along u
+         call face_measure(ctx%cq, 1_I4P, a, lo, hi, ll, mm)
+         o = o + (sb - sa) * wq(q) * (dth * (mm - tq(1) * ll) + dt(2) * ll)
+      endif
+      l = l + (sb - sa) * wq(q) * ll
+   enddo
+   endsubroutine piece_2d
 
    pure subroutine merge_close(a, m)
    !< Drop sorted breakpoints within 1e-10 of the previous kept one, of 0 or of 1 (see `isolate_zeros`).
@@ -1039,10 +1135,10 @@ contains
          sb = 1._R8P ; if (m < nb) sb = bp(m + 1)
          if (sb <= sa) cycle
          ng = 2_I4P
-         call plane_piece(na, lev, gu, gv, iu, iv, sa, sb, ng, a1, o1) ; ne = ne + ng
+         call plane_piece(surface, pose0, pose1, t0, dt, om, na, lev, gu, gv, iu, iv, sa, sb, ng, a1, o1) ; ne = ne + ng
          do
             ng = 2_I4P * ng
-            call plane_piece(na, lev, gu, gv, iu, iv, sa, sb, ng, a2, o2) ; ne = ne + ng
+            call plane_piece(surface, pose0, pose1, t0, dt, om, na, lev, gu, gv, iu, iv, sa, sb, ng, a2, o2) ; ne = ne + ng
             if (maxval(abs(a2 - a1)) <= 64._R8P * epsilon(1._R8P) * sca * max(sb - sa, FLOOR_H) .and. &
                 maxval(abs(o2 - o1)) <= 64._R8P * epsilon(1._R8P) * sco * max(sb - sa, FLOOR_H)) exit
             ! at 64 nodes: the change against the round-off of one evaluation (area: sna; issue #84, see FLOOR_H)
@@ -1057,37 +1153,6 @@ contains
       enddo
       nev = max(nev, ne)
       endsubroutine one_plane
-
-      subroutine plane_piece(na, lev, gu, gv, iu, iv, sa, sb, ng, ar, ou)
-      !< ng-point Gauss-Legendre over [sa, sb] of the fluid areas and outflows of one plane (moved copies).
-      integer(I4P),           intent(in)  :: na, iu, iv, ng
-      real(R8P),              intent(in)  :: lev, gu(:), gv(:), sa, sb
-      real(R8P), allocatable, intent(out) :: ar(:,:), ou(:,:)
-      type(surface_stl_object)            :: sq_
-      type(curve_object)                  :: sec
-      type(cut_cells_2d_t)                :: c2
-      real(R8P), allocatable              :: sq(:), wq(:)
-      real(R8P)                           :: sn, tq(3), a, cw(3)
-      integer(I4P)                        :: q, ju, jv, st
-
-      allocate(ar(size(gu) - 1, size(gv) - 1), ou(size(gu) - 1, size(gv) - 1)) ; ar = 0._R8P ; ou = 0._R8P
-      call gauss_legendre_01(ng, sq, wq)
-      do q = 1_I4P, ng
-         sn = sa + (sb - sa) * sq(q)
-         sq_ = surface ; call sq_%move(pose_interpolate(pose0, pose1, sn))
-         tq = t0 + sn * dt
-         call slice_surface(surface=sq_, normal_axis=na, level=lev, curve=sec, on_plane_low=.true.)
-         call sec%cut_cells(x=gu, y=gv, cut=c2, status=st)
-         do jv = 1_I4P, size(gv, kind=I4P) - 1_I4P
-            do ju = 1_I4P, size(gu, kind=I4P) - 1_I4P
-               a = c2%alpha(ju, jv) * (gu(ju + 1) - gu(ju)) * (gv(jv + 1) - gv(jv))
-               cw(na) = lev ; cw(iu) = c2%centroid(1, ju, jv) ; cw(iv) = c2%centroid(2, ju, jv)
-               ar(ju, jv) = ar(ju, jv) + (sb - sa) * wq(q) * a
-               ou(ju, jv) = ou(ju, jv) + (sb - sa) * wq(q) * a * (cross_k(om, cw - tq, na) + dt(na))
-            enddo
-         enddo
-      enddo
-      endsubroutine plane_piece
 
       subroutine plane_events(na, lev, gu, gv, iu, iv, b, m)
       !< Breakpoints in (0, 1) of the plane normal to na at lev with grid gu x gv.
@@ -1199,6 +1264,46 @@ contains
       b = tmp(1:m)
       endsubroutine plane_events
    endsubroutine faces_rotation_3d
+
+   subroutine plane_piece(surface, pose0, pose1, t0, dt, om, na, lev, gu, gv, iu, iv, sa, sb, ng, ar, ou)
+   !< ng-point Gauss-Legendre over [sa, sb] of the fluid areas and outflows of one plane (`faces_rotation_3d`). Each node
+   !< slices the body-frame surface at the node pose (`slice_surface(pose=)`, issue #94): the section of the copy moved
+   !< there, bit for bit, without copying and moving the surface (vertex pool, tree, pseudo-normals) per node.
+   type(surface_stl_object), intent(in)  :: surface      !< Surface (body frame).
+   type(rigid_pose_t),       intent(in)  :: pose0, pose1 !< End poses.
+   real(R8P),                intent(in)  :: t0(3), dt(3) !< Translation at s = 0, its change over the step.
+   real(R8P),                intent(in)  :: om(3)        !< Rotation vector of the step (angle times unit axis).
+   integer(I4P),             intent(in)  :: na, iu, iv   !< Plane normal axis, in-plane axes (cyclic).
+   integer(I4P),             intent(in)  :: ng           !< Gauss nodes.
+   real(R8P),                intent(in)  :: lev          !< Plane position.
+   real(R8P),                intent(in)  :: gu(:), gv(:) !< In-plane cell edges.
+   real(R8P),                intent(in)  :: sa, sb       !< Piece.
+   real(R8P), allocatable,   intent(out) :: ar(:,:)      !< Fluid areas integrated over the piece.
+   real(R8P), allocatable,   intent(out) :: ou(:,:)      !< Outflows integrated over the piece.
+   type(curve_object)                    :: sec          !< Section.
+   type(cut_cells_2d_t)                  :: c2           !< Its cut cells.
+   real(R8P), allocatable                :: sq(:), wq(:) !< Gauss nodes, weights.
+   real(R8P)                             :: sn, tq(3), a, cw(3) !< Work.
+   integer(I4P)                          :: q, ju, jv, st !< Work.
+
+   allocate(ar(size(gu) - 1, size(gv) - 1), ou(size(gu) - 1, size(gv) - 1)) ; ar = 0._R8P ; ou = 0._R8P
+   call gauss_legendre_01(ng, sq, wq)
+   do q = 1_I4P, ng
+      sn = sa + (sb - sa) * sq(q)
+      tq = t0 + sn * dt
+      call slice_surface(surface=surface, normal_axis=na, level=lev, curve=sec, on_plane_low=.true., &
+                         pose=pose_interpolate(pose0, pose1, sn))
+      call sec%cut_cells(x=gu, y=gv, cut=c2, status=st)
+      do jv = 1_I4P, size(gv, kind=I4P) - 1_I4P
+         do ju = 1_I4P, size(gu, kind=I4P) - 1_I4P
+            a = c2%alpha(ju, jv) * (gu(ju + 1) - gu(ju)) * (gv(jv + 1) - gv(jv))
+            cw(na) = lev ; cw(iu) = c2%centroid(1, ju, jv) ; cw(iv) = c2%centroid(2, ju, jv)
+            ar(ju, jv) = ar(ju, jv) + (sb - sa) * wq(q) * a
+            ou(ju, jv) = ou(ju, jv) + (sb - sa) * wq(q) * a * (cross_k(om, cw - tq, na) + dt(na))
+         enddo
+      enddo
+   enddo
+   endsubroutine plane_piece
 
    pure function cross_k(a, b, k) result(c)
    !< Component k of a x b.

@@ -51,6 +51,7 @@ use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 implicit none
 private
 public :: curve_object, first_impact_2d
+public :: place_for_crossings
 public :: cut_cells_2d_t
 public :: CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, CURVE_ZERO_AREA_LOOP, CURVE_WRONG_ORIENTATION
 public :: CURVE_OPEN_LOOP, CURVE_SELF_INTERSECTING
@@ -3323,6 +3324,28 @@ contains
    call self%bvh%refit_vertices(self%u, self%v, self%next)
    if (was_on_device) call self%enter_device
    endsubroutine move
+
+   subroutine place_for_crossings(self, source, pose)
+   !< `self`, a copy of `source` (same loops, same tree), takes the vertices of `source` moved by `pose` for the line
+   !< crossings only (issue #94; the swept-cell kernels evaluate one face per call): the vertices (`to_world`, as
+   !< `move`), the bounding box (as `curve_metrics`) and the segment-tree node boxes (`refit_boxes`, as `refit_vertices`)
+   !< are those `move` gives, bit for bit, so `line_crossings`, `get_bmin` and `get_bmax` answer as on `source` moved.
+   !< Every other derived datum (segment metrics, pseudo-normals, areas, the tree payload and winding cache) is left
+   !< stale: call `move` for a curve every query can use. Not exported by `fossil`. Host only.
+   type(curve_object),    intent(inout) :: self   !< Copy of `source`, placed.
+   type(curve_object),    intent(in)    :: source !< Curve (body frame).
+   type(rigid_pose_2d_t), intent(in)    :: pose   !< Pose.
+   integer(I4P)                         :: i      !< Counter.
+   real(R8P)                            :: w(2)   !< Moved vertex.
+
+   if (source%nv == 0_I4P) return
+   do i = 1_I4P, source%nv
+      w = to_world(pose, [source%u(i), source%v(i)]) ; self%u(i) = w(1) ; self%v(i) = w(2)
+   enddo
+   self%bmin = [minval(self%u), minval(self%v)]
+   self%bmax = [maxval(self%u), maxval(self%v)]
+   call self%bvh%refit_boxes(self%u, self%v, self%next)
+   endsubroutine place_for_crossings
 
    pure subroutine curve_metrics(self)
    !< Coordinate-derived data of `analyze`: segment lengths and normals, vertex pseudo-normals,

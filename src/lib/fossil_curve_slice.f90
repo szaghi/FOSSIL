@@ -29,6 +29,7 @@ module fossil_curve_slice
 use fossil_curve_object,       only : curve_object
 use fossil_facet_object,       only : facet_object
 use fossil_predicates,         only : orient2d_xy
+use fossil_rigid_pose,         only : rigid_pose_t, to_world
 use fossil_surface_stl_object, only : surface_stl_object, STATUS_OK, STATUS_INVALID_INPUT
 use penf,                      only : I4P, R8P
 use vecfor,                    only : vector_R8P
@@ -38,12 +39,17 @@ private
 public :: slice_surface
 
 contains
-   subroutine slice_surface(surface, normal_axis, level, curve, merge_collinear, open_loops, on_plane_low, status)
+   subroutine slice_surface(surface, normal_axis, level, curve, merge_collinear, open_loops, on_plane_low, status, pose)
    !< Section of `surface` by the plane x(normal_axis) = level, as a curve in that plane.
    !<
    !< `open_loops` returns the number of chains that did not close (0 for a watertight surface).
    !< `status = STATUS_INVALID_INPUT` (curve empty) if normal_axis is not 1-3 or level is not
    !< finite. An empty section is not an error: the curve has no loops.
+   !<
+   !< With `pose` (issue #94) the section is that of the surface moved by `pose`, without moving it: every
+   !< vertex is placed by `to_world(pose, vertex)` as it is read, the operation `surface%move(pose)` applies,
+   !< so the curve equals the section of a moved copy bit for bit (the slice reads nothing else that `move`
+   !< changes: the facet vertices only, besides the patches).
    type(surface_stl_object), intent(in)            :: surface         !< Surface.
    integer(I4P),             intent(in)            :: normal_axis     !< Plane normal axis (1, 2, 3).
    real(R8P),                intent(in)            :: level           !< Plane position.
@@ -52,6 +58,7 @@ contains
    integer(I4P),             intent(out), optional :: open_loops      !< Chains that did not close.
    logical,                  intent(in),  optional :: on_plane_low    !< A vertex on the plane counts as below (default .false.).
    integer(I4P),             intent(out), optional :: status          !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_t),       intent(in),  optional :: pose            !< Pose the surface is sliced at (default: as is).
    type(facet_object), pointer                     :: f               !< Facet cursor.
    real(R8P),    allocatable                       :: s(:,:)          !< Segments [su, sv, eu, ev; n].
    integer(I4P), allocatable                       :: sp(:), lp(:)    !< Patch of each segment, of each loop vertex (#66).
@@ -78,6 +85,9 @@ contains
       x(:, 1) = [f%vertex(1)%x, f%vertex(1)%y, f%vertex(1)%z]
       x(:, 2) = [f%vertex(2)%x, f%vertex(2)%y, f%vertex(2)%z]
       x(:, 3) = [f%vertex(3)%x, f%vertex(3)%y, f%vertex(3)%z]
+      if (present(pose)) then ! as `move` places them (issue #94)
+         x(:, 1) = to_world(pose, x(:, 1)) ; x(:, 2) = to_world(pose, x(:, 2)) ; x(:, 3) = to_world(pose, x(:, 3))
+      endif
       if (low_) then
          above = x(normal_axis, :) > level  ! plane at level + eps (the cut-cell rule, issue #40)
       else

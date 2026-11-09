@@ -70,6 +70,7 @@ type :: segment_bvh
       procedure, pass(self) :: destroy           !< Reset.
       procedure, pass(self) :: segments_in_box   !< Segments whose box overlaps a box.
       procedure, pass(self) :: refit_vertices    !< Refit to moved vertices, same topology (issue #41).
+      procedure, pass(self) :: refit_boxes       !< Node boxes of refit_vertices only (issue #94).
       procedure, pass(self) :: winding_number    !< Fast (hierarchical) winding number.
       procedure, pass(self) :: winding_number_brute !< Exact sum of the subtended angles.
 endtype segment_bvh
@@ -243,7 +244,7 @@ contains
    class(segment_bvh), intent(inout) :: self       !< Tree.
    real(R8P),          intent(in)    :: u(:), v(:) !< Moved vertices.
    integer(I4P),       intent(in)    :: next(:)    !< Next vertex.
-   integer(I4P)                      :: k, s, node, c1, c2 !< Work.
+   integer(I4P)                      :: k, s       !< Work.
 
    if (self%nodes_number == 0_I4P) return
    do k = 1, self%segments_number
@@ -252,6 +253,21 @@ contains
       self%d_u(k) = u(next(s)) - u(s) ; self%d_v(k) = v(next(s)) - v(s)
       self%len2(k) = self%d_u(k)**2 + self%d_v(k)**2
    enddo
+   call self%refit_boxes(u, v, next)
+   deallocate(self%wn_cu, self%wn_cv, self%wn_du, self%wn_dv, self%wn_c, self%wn_diag2)
+   call build_winding_cache(self)
+   endsubroutine refit_vertices
+
+   pure subroutine refit_boxes(self, u, v, next)
+   !< The node boxes of `refit_vertices` only (issue #94): bottom-up, the builder's min/max over the leaf ranges. The
+   !< payload and the winding cache are left as they are: after it only the box traversals that read the vertices
+   !< themselves (the line crossings) are valid; `refit_vertices` for the rest.
+   class(segment_bvh), intent(inout) :: self       !< Tree.
+   real(R8P),          intent(in)    :: u(:), v(:) !< Moved vertices.
+   integer(I4P),       intent(in)    :: next(:)    !< Next vertex.
+   integer(I4P)                      :: k, s, node, c1, c2 !< Work.
+
+   if (self%nodes_number == 0_I4P) return
    do node = self%nodes_number, 1, -1
       if (self%left(node) == 0_I4P) then
          self%lo_u(node) = huge(1._R8P) ; self%lo_v(node) = huge(1._R8P)
@@ -267,9 +283,7 @@ contains
          self%lo_v(node) = min(self%lo_v(c1), self%lo_v(c2)) ; self%hi_v(node) = max(self%hi_v(c1), self%hi_v(c2))
       endif
    enddo
-   deallocate(self%wn_cu, self%wn_cv, self%wn_du, self%wn_dv, self%wn_c, self%wn_diag2)
-   call build_winding_cache(self)
-   endsubroutine refit_vertices
+   endsubroutine refit_boxes
 
    pure subroutine segments_in_box(self, lo_u, lo_v, hi_u, hi_v, ids, n)
    !< Payload indices of the segments whose bounding box overlaps the box [lo, hi] (closed).
