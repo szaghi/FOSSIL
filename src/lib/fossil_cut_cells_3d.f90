@@ -70,7 +70,7 @@ module fossil_cut_cells_3d
 use fossil_box_predicates,     only : box_triangle_overlap
 use fossil_box_query,          only : box_tolerance
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t, cut_cells_2d_blocks_t, cut_cells_device_many
-use fossil_curve_slice,        only : slice_surface
+use fossil_curve_slice,        only : slice_planes_t, slice_planes_prepare, slice_surface_plane, slice_surface_planes
 use fossil_cut_graph,          only : cut_links_t, build_csr
 use fossil_cut_moments,        only : MOMENTS_MAX, mono_count, mono_exponents, triangle_moments, segment_green_moments, &
                                       cell_moments, tet_rule, triangle_rule, tensor_rule
@@ -2490,7 +2490,8 @@ contains
    endfunction col_of
 
    subroutine sections_host(surface, x, y, z, cut, wlinks, mo, qd, nm2, px, py, pz)
-   !< The plane sections of `cut_cells_3d` on the host: every grid plane sliced (`slice_surface` with `on_plane_low`)
+   !< The plane sections of `cut_cells_3d` on the host: every grid plane sliced (`slice_surface` with `on_plane_low`,
+   !< through one plane sweep index per axis, `slice_surface_plane`: the same curves bit for bit, issue #100 step 3c)
    !< and cut by `curve%cut_cells`, its cells copied into the face arrays of `cut` (allocated by the caller); with
    !< links or quadrature the sections are kept in px, py, pz (allocated by the caller).
    type(surface_stl_object),          intent(in)    :: surface    !< Surface.
@@ -2502,12 +2503,14 @@ contains
    type(cut_cells_2d_t), allocatable, intent(inout) :: px(:), py(:), pz(:) !< Plane sections kept.
    type(curve_object)   :: sec    !< Section.
    type(cut_cells_2d_t) :: c2     !< Its cut cells.
+   type(slice_planes_t) :: sw     !< Plane sweep index of the axis.
    integer(I4P)         :: nx, ny, nz, i, j, k, st !< Work.
 
    nx = cut%nx ; ny = cut%ny ; nz = cut%nz
    ! planes x = x_i: (u, v) = (y, z)
+   call slice_planes_prepare(surface=surface, normal_axis=1_I4P, levels=x, planes=sw, on_plane_low=.true.)
    do i = 1, nx + 1
-      call slice_surface(surface=surface, normal_axis=1_I4P, level=x(i), curve=sec, on_plane_low=.true.)
+      call slice_surface_plane(surface=surface, planes=sw, b=i, curve=sec)
       call sec%cut_cells(x=y, y=z, cut=c2, status=st, intervals=wlinks, moments_order=mo, boundaries=qd)
       if (wlinks .or. qd) px(i) = c2
       do k = 1, nz
@@ -2520,8 +2523,9 @@ contains
       enddo
    enddo
    ! planes y = y_j: (u, v) = (z, x)
+   call slice_planes_prepare(surface=surface, normal_axis=2_I4P, levels=y, planes=sw, on_plane_low=.true.)
    do j = 1, ny + 1
-      call slice_surface(surface=surface, normal_axis=2_I4P, level=y(j), curve=sec, on_plane_low=.true.)
+      call slice_surface_plane(surface=surface, planes=sw, b=j, curve=sec)
       call sec%cut_cells(x=z, y=x, cut=c2, status=st, intervals=wlinks, moments_order=mo, boundaries=qd)
       if (wlinks .or. qd) py(j) = c2
       do k = 1, nz
@@ -2534,8 +2538,9 @@ contains
       enddo
    enddo
    ! planes z = z_k: (u, v) = (x, y)
+   call slice_planes_prepare(surface=surface, normal_axis=3_I4P, levels=z, planes=sw, on_plane_low=.true.)
    do k = 1, nz + 1
-      call slice_surface(surface=surface, normal_axis=3_I4P, level=z(k), curve=sec, on_plane_low=.true.)
+      call slice_surface_plane(surface=surface, planes=sw, b=k, curve=sec)
       call sec%cut_cells(x=x, y=y, cut=c2, status=st, intervals=wlinks, moments_order=mo, boundaries=qd)
       if (wlinks .or. qd) pz(k) = c2
       do j = 1, ny
@@ -2624,13 +2629,10 @@ contains
    real(R8P),    allocatable :: fa(:,:,:), fc(:,:,:,:)    !< Face arrays (built here).
    integer(I4P), allocatable :: fp(:,:,:)                 !< Face pieces (built here).
    logical,      allocatable :: fl(:,:,:)                 !< Face closed flags (built here).
-   integer(I4P)              :: nb, b, st                 !< Work.
+   integer(I4P)              :: nb, st                    !< Work.
 
    nb = size(lv, kind=I4P)
-   allocate(secs(nb))
-   do b = 1_I4P, nb
-      call slice_surface(surface=surface, normal_axis=axis, level=lv(b), curve=secs(b), on_plane_low=.true.)
-   enddo
+   call slice_surface_planes(surface=surface, normal_axis=axis, levels=lv, curves=secs, on_plane_low=.true.) ! one sweep
    call cut_cells_device_many(secs, ga, gb, cb, st, intervals=.false., pieces=.false., resident=.true.)
    deallocate(secs)
    allocate(fa(n1, n2, n3), fc(3, n1, n2, n3), fp(n1, n2, n3), fl(n1, n2, n3))
