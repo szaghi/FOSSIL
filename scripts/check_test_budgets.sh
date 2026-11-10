@@ -17,7 +17,7 @@
 # Always prints the five slowest tests, so a drift shows before a test breaks its budget.
 
 set -u
-cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$0"/..)" || exit 2
+cd "$(git rev-parse --show-toplevel 2>/dev/null || echo "$(dirname "$0")/..")" || exit 2
 
 DEFAULT_BUDGET=2
 FACTOR="${FOSSIL_BUDGET_FACTOR:-}"
