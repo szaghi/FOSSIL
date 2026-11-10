@@ -41,6 +41,8 @@ public :: cut_cells_2d_blocks_t, compute_cut_cells_2d_blocks_device, cut_cells_2
 ! the stages of the two paths, public for the twin test (issue #100 step 6a; not re-exported by `fossil`)
 public :: node_flags, cut_cells_2d_prepare, cut_cells_2d_classify, cut_cells_2d_scan, cut_cells_2d_classify_dev, &
           cut_cells_2d_scan_dev
+! the device chunk scan, shared with the 3-D device path (issue #100 step 3c)
+public :: chunk_offsets_dev
 
 type :: cut_cells_2d_t
    !< Cut-cell geometry of a block (fluid = outside the solid).

@@ -40,7 +40,8 @@ use penf,                    only : I4P, R8P
 implicit none
 private
 public :: line_crossing_before, line_crossing_before_2d
-public :: tri_line_hit_oac, seg_line_hit_oac, bvh_line_crossings_oac, curve_line_crossings_oac, sort_crossings_oac
+public :: tri_line_hit_oac, seg_line_hit_oac, bvh_line_crossings_oac, bvh_line_count_oac, curve_line_crossings_oac, &
+          sort_crossings_oac
 
 integer(I4P), parameter :: STACK = 256_I4P !< Traversal stack (> BVH depth cap + 2).
 
@@ -181,6 +182,46 @@ contains
    enddo
    call sort_crossings_oac(ts, ids, es, n)
    endsubroutine bvh_line_crossings_oac
+
+   pure function bvh_line_count_oac(node, payload, tv, axis, a, b, t0, t1) result(n)
+   !< Number of crossings with parameter in [t0, t1] of the line along `axis` at (a, b) with the triangles of a SAH BVH:
+   !< the `n` of `bvh_line_crossings_oac` with an unbounded buffer (the same traversal and tests; issue #100 step 3c,
+   !< to size the crossing buffers of the device grid lines).
+   !$acc routine seq
+   type(aabb_node_object),       intent(in) :: node(0:)   !< Tree nodes.
+   type(facet_distance_payload), intent(in) :: payload(:) !< Payload (facet ids).
+   real(R8P),                    intent(in) :: tv(:,:)    !< Exact vertices [9, facets].
+   integer(I4P),                 intent(in) :: axis       !< Line axis.
+   real(R8P),                    intent(in) :: a, b       !< Line position.
+   real(R8P),                    intent(in) :: t0, t1     !< Parameter range.
+   integer(I4P)                             :: n          !< Crossings.
+   integer(I4P)                             :: stk(STACK), sp, cur, lc, rc, k, f, i1, i2 !< Work.
+   real(R8P)                                :: lo(3), hi(3), t !< Node box, crossing.
+   logical                                  :: hit, enter      !< Crossing.
+
+   n = 0_I4P
+   i1 = mod(axis, 3_I4P) + 1_I4P ; i2 = mod(axis + 1_I4P, 3_I4P) + 1_I4P
+   sp = 1_I4P ; stk(1) = 0_I4P
+   do while (sp > 0_I4P)
+      cur = stk(sp) ; sp = sp - 1_I4P
+      lo = [bvh_bmin_x_oac(node(cur)), bvh_bmin_y_oac(node(cur)), bvh_bmin_z_oac(node(cur))]
+      hi = [bvh_bmax_x_oac(node(cur)), bvh_bmax_y_oac(node(cur)), bvh_bmax_z_oac(node(cur))]
+      if (a < lo(i1) .or. a > hi(i1) .or. b < lo(i2) .or. b > hi(i2) .or. hi(axis) < t0 .or. lo(axis) > t1) cycle
+      do k = 0_I4P, bvh_payload_count_oac(node(cur)) - 1_I4P
+         f = payload(bvh_payload_first_oac(node(cur)) + k)%facet_id
+         call tri_line_hit_oac(tv(:, f), axis, a, b, hit, t, enter)
+         if (.not. hit .or. t < t0 .or. t > t1) cycle
+         n = n + 1_I4P
+      enddo
+      lc = bvh_left_child_oac(node(cur)) ; rc = bvh_right_child_oac(node(cur))
+      if (rc > 0_I4P) then
+         sp = sp + 1_I4P ; stk(sp) = rc
+      endif
+      if (lc > 0_I4P) then
+         sp = sp + 1_I4P ; stk(sp) = lc
+      endif
+   enddo
+   endfunction bvh_line_count_oac
 
    pure subroutine curve_line_crossings_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, seg_id, next, u, v, axis, a, &
                                             t0, t1, ts, ids, es, n, overflow)

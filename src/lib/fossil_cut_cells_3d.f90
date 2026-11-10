@@ -67,15 +67,19 @@ module fossil_cut_cells_3d
 !< cell's candidates and edge piercings), `single_piece_3d`. The candidates are binned by bounding box, then kept only if
 !< the box-triangle test says they touch the cell (`cell_candidates_3d`); the exact edge piercings come from the host
 !< (`cell_piercings`: exact orient3d). Moments, quadrature and the links' intervals take the same kernels.
+use, intrinsic :: iso_fortran_env, only : stderr => error_unit
+use fossil_aabb_node_object,   only : aabb_node_object
+use fossil_aabb_tree_object,   only : facet_distance_payload, AABB_TREE_SAH_BVH
 use fossil_box_predicates,     only : box_triangle_overlap
 use fossil_box_query,          only : box_tolerance
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t, cut_cells_2d_blocks_t, cut_cells_device_many
 use fossil_curve_slice,        only : slice_planes_t, slice_planes_prepare, slice_surface_plane, slice_surface_planes
+use fossil_cut_cells_2d,       only : chunk_offsets_dev
 use fossil_cut_graph,          only : cut_links_t, build_csr
 use fossil_cut_moments,        only : MOMENTS_MAX, mono_count, mono_exponents, triangle_moments, segment_green_moments, &
                                       cell_moments, tet_rule, triangle_rule, tensor_rule
 use fossil_facet_object,       only : facet_object
-use fossil_line_query,         only : line_crossing_before, tri_line_hit_oac
+use fossil_line_query,         only : line_crossing_before, tri_line_hit_oac, bvh_line_crossings_oac, bvh_line_count_oac
 use fossil_predicates,         only : orient2d_xy
 use fossil_surface_stl_object, only : surface_stl_object, STATUS_OK, STATUS_INVALID_INPUT
 use penf,                      only : I4P, R8P
@@ -83,9 +87,12 @@ use penf,                      only : I4P, R8P
 implicit none
 private
 public :: cut_cells_3d_t, cut_cells_3d, cut_cells_3d_sections
+! the device stages (issue #100 step 3c), public for the benches and the twin test (not re-exported by `fossil`)
+public :: cut_cells_3d_nodes_device
 
 integer(I4P), parameter :: MONO2_MAX = 15_I4P !< mono_count(2, MOMENTS_MAX): moments per face, at most.
 integer(I4P), parameter :: MONO3_MAX = 35_I4P !< mono_count(3, MOMENTS_MAX): moments per piece, at most.
+integer(I4P), parameter :: SCAN_CHUNK = 64_I4P !< Entries per chunk of the device prefix sums (`scan_dev`, #100).
 
 type :: cut_cells_3d_t
    !< Cut-cell geometry of a 3-D block (fluid = outside the solid).
@@ -2278,8 +2285,285 @@ contains
    enddo
    endsubroutine line_fractions
 
+   subroutine cut_cells_3d_nodes_device(surface, x, y, z, node_in, edge_x, edge_y, edge_z, edges, status)
+   !< The grid-node states and, with `edges`, the cell-edge fluid fractions of `cut_cells_3d` on the device (issue #100
+   !< step 3c, for the benches and the twin test): `node_in` [nx+1, ny+1, nz+1] and `edge_x/_y/_z`, bit for bit
+   !< `cut_cells_3d(..., edges=)`'s. Copied back. The surface needs its SAH BVH (`edge_fractions_dev`); it may be mapped
+   !< by `surface%enter_device` or not (then its tree and vertices are copied in for the call).
+   !< `status = STATUS_INVALID_INPUT` on bad edges or a surface without a SAH BVH.
+   type(surface_stl_object), intent(in), target       :: surface          !< Surface.
+   real(R8P),                intent(in)               :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
+   logical,      allocatable, intent(out)             :: node_in(:,:,:)   !< Node inside flags [nx+1, ny+1, nz+1].
+   real(R8P),    allocatable, intent(out)             :: edge_x(:,:,:)    !< Edge fluid fractions along x [nx, ny+1, nz+1].
+   real(R8P),    allocatable, intent(out)             :: edge_y(:,:,:)    !< Along y [nx+1, ny, nz+1].
+   real(R8P),    allocatable, intent(out)             :: edge_z(:,:,:)    !< Along z [nx+1, ny+1, nz].
+   logical,                  intent(in),  optional    :: edges            !< The edge fractions too (default .false.).
+   integer(I4P),             intent(out), optional    :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(aabb_node_object),       pointer :: node_p(:)    !< Alias of surface%aabb%node.
+   type(facet_distance_payload), pointer :: payload_p(:) !< Alias of surface%aabb%payload.
+   real(R8P),                    pointer :: tv_p(:,:)    !< Alias of surface%tri_vertices.
+   logical, allocatable :: nd(:,:,:)                     !< Node flags (built here).
+   real(R8P), allocatable :: ex(:,:,:), ey(:,:,:), ez(:,:,:) !< Edge fractions (built here).
+   integer(I4P) :: nx, ny, nz, st                        !< Work.
+   logical      :: all_edges                             !< Edges asked.
+
+   call device_grid_check(surface, x, y, z, nx, ny, nz, st)
+   if (present(status)) status = st
+   if (st /= STATUS_OK) return
+   all_edges = .false. ; if (present(edges)) all_edges = edges
+   node_p => surface%aabb%node ; payload_p => surface%aabb%payload ; tv_p => surface%tri_vertices
+   allocate(nd(nx + 1, ny + 1, nz + 1))
+   if (all_edges) then
+      allocate(ex(nx, ny + 1, nz + 1), ey(nx + 1, ny, nz + 1), ez(nx + 1, ny + 1, nz))
+   else
+      allocate(ex(1, 1, 1), ey(1, 1, 1), ez(1, 1, 1))
+   endif
+   !$acc data copyin(node_p, payload_p, tv_p, x, y, z) copyout(nd) create(ex, ey, ez)
+   call edge_fractions_dev(node_p, payload_p, tv_p, x, y, z, nx, ny, nz, all_edges, nd, ex, ey, ez)
+   if (all_edges) then
+      !$acc update host(ex, ey, ez)
+   endif
+   !$acc end data
+   call move_alloc(nd, node_in)
+   if (all_edges) then
+      call move_alloc(ex, edge_x) ; call move_alloc(ey, edge_y) ; call move_alloc(ez, edge_z)
+   endif
+   endsubroutine cut_cells_3d_nodes_device
+
+   subroutine device_grid_check(surface, x, y, z, nx, ny, nz, status)
+   !< The checks of the device paths (issue #100 step 3c): the edges (as `cut_cells_3d`) and a SAH BVH with facets
+   !< (the device line crossings traverse it; stderr message if missing).
+   type(surface_stl_object), intent(in)  :: surface          !< Surface.
+   real(R8P),                intent(in)  :: x(:), y(:), z(:) !< Cell edges.
+   integer(I4P),             intent(out) :: nx, ny, nz       !< Cells.
+   integer(I4P),             intent(out) :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+
+   status = STATUS_OK
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   if (nx < 1 .or. ny < 1 .or. nz < 1) then
+      status = STATUS_INVALID_INPUT ; return
+   endif
+   if (any(x(2:) <= x(:nx)) .or. any(y(2:) <= y(:ny)) .or. any(z(2:) <= z(:nz))) then
+      status = STATUS_INVALID_INPUT ; return
+   endif
+   if (surface%get_facets_number() < 1_I4P .or. surface%aabb%get_tree_kind() /= AABB_TREE_SAH_BVH .or. &
+       .not. allocated(surface%aabb%node) .or. .not. allocated(surface%aabb%payload) .or. &
+       .not. allocated(surface%tri_vertices)) then
+      write(stderr, '(A)') 'fossil cut_cells_3d device path: refused -- the surface needs facets and a SAH BVH'
+      status = STATUS_INVALID_INPUT
+   endif
+   endsubroutine device_grid_check
+
+   subroutine edge_fractions_dev(node, payload, tv, x, y, z, nx, ny, nz, all_edges, node_in, edge_x, edge_y, edge_z)
+   !< `edge_fractions` on the device (issue #100 step 3c): the z lines give node_in (and edge_z), with all_edges the x
+   !< and y lines give edge_x and edge_y (`lines_dev`, one thread per grid line). Every array must be present on the
+   !< device; the outputs are written there only. The values are `line_fractions`', bit for bit.
+   type(aabb_node_object),       intent(in)    :: node(0:)   !< Tree nodes.
+   type(facet_distance_payload), intent(in)    :: payload(:) !< Payload.
+   real(R8P),                    intent(in)    :: tv(:,:)    !< Exact vertices [9, facets].
+   real(R8P),                    intent(in)    :: x(:), y(:), z(:) !< Cell edges.
+   integer(I4P),                 intent(in)    :: nx, ny, nz !< Cells.
+   logical,                      intent(in)    :: all_edges  !< The x and y lines too.
+   logical,                      intent(inout) :: node_in(nx + 1, ny + 1, nz + 1) !< Node flags.
+   real(R8P),                    intent(inout) :: edge_x(:,:,:), edge_y(:,:,:), edge_z(:,:,:) !< Edge fractions
+                                                             !< (written with all_edges only).
+   real(R8P),    allocatable :: lfr(:,:) !< Fractions per line [ns, lines].
+   logical,      allocatable :: lin(:,:) !< Node flags per line [ns + 1, lines].
+   integer(I4P)              :: i, j, k, s, l !< Counters.
+
+   ! z lines at (x(i), y(j)), line l = i + (nx + 1) (j - 1)
+   allocate(lfr(nz, (nx + 1) * (ny + 1)), lin(nz + 1, (nx + 1) * (ny + 1)))
+   !$acc data create(lfr, lin)
+   call lines_dev(node, payload, tv, 3_I4P, x, y, z, nx + 1_I4P, ny + 1_I4P, nz, lfr, lin)
+   !$acc parallel loop gang vector collapse(3) default(present) present(lin, node_in)
+   do s = 1, nz + 1
+      do j = 1, ny + 1
+         do i = 1, nx + 1
+            node_in(i, j, s) = lin(s, i + (nx + 1_I4P) * (j - 1_I4P))
+         enddo
+      enddo
+   enddo
+   if (all_edges) then
+      !$acc parallel loop gang vector collapse(3) default(present) present(lfr, edge_z)
+      do s = 1, nz
+         do j = 1, ny + 1
+            do i = 1, nx + 1
+               edge_z(i, j, s) = lfr(s, i + (nx + 1_I4P) * (j - 1_I4P))
+            enddo
+         enddo
+      enddo
+   endif
+   !$acc end data
+   deallocate(lfr, lin)
+   if (.not. all_edges) return
+   ! x lines at (y(j), z(k)), l = j + (ny + 1) (k - 1)
+   allocate(lfr(nx, (ny + 1) * (nz + 1)), lin(nx + 1, (ny + 1) * (nz + 1)))
+   !$acc data create(lfr, lin)
+   call lines_dev(node, payload, tv, 1_I4P, y, z, x, ny + 1_I4P, nz + 1_I4P, nx, lfr, lin)
+   !$acc parallel loop gang vector collapse(3) default(present) present(lfr, edge_x)
+   do k = 1, nz + 1
+      do j = 1, ny + 1
+         do s = 1, nx
+            edge_x(s, j, k) = lfr(s, j + (ny + 1_I4P) * (k - 1_I4P))
+         enddo
+      enddo
+   enddo
+   !$acc end data
+   deallocate(lfr, lin)
+   ! y lines at (z(k), x(i)), l = k + (nz + 1) (i - 1)
+   allocate(lfr(ny, (nz + 1) * (nx + 1)), lin(ny + 1, (nz + 1) * (nx + 1)))
+   !$acc data create(lfr, lin)
+   call lines_dev(node, payload, tv, 2_I4P, z, x, y, nz + 1_I4P, nx + 1_I4P, ny, lfr, lin)
+   !$acc parallel loop gang vector collapse(3) default(present) present(lfr, edge_y)
+   do k = 1, nz + 1
+      do s = 1, ny
+         do i = 1, nx + 1
+            edge_y(i, s, k) = lfr(s, k + (nz + 1_I4P) * (i - 1_I4P))
+         enddo
+      enddo
+   enddo
+   !$acc end data
+   endsubroutine edge_fractions_dev
+
+   subroutine lines_dev(node, payload, tv, axis, ga, gb, e, na, nb, ns, lfr, lin)
+   !< The grid lines along `axis` at (ga(ia), gb(ib)), line l = ia + na (ib - 1), with nodes e(1:ns+1), on the device
+   !< (issue #100 step 3c): their crossing counts (`bvh_line_count_oac`), the buffer offsets (exclusive prefix sums,
+   !< `scan_dev`), then one thread per line `line_fractions_oac` on its slice of the buffers. Every array must be
+   !< present; lfr, lin are written on the device.
+   type(aabb_node_object),       intent(in)    :: node(0:)   !< Tree nodes.
+   type(facet_distance_payload), intent(in)    :: payload(:) !< Payload.
+   real(R8P),                    intent(in)    :: tv(:,:)    !< Exact vertices [9, facets].
+   integer(I4P),                 intent(in)    :: axis       !< Line axis.
+   real(R8P),                    intent(in)    :: ga(:), gb(:), e(:) !< Line positions, nodes along the lines.
+   integer(I4P),                 intent(in)    :: na, nb, ns !< Positions per coordinate, segments per line.
+   real(R8P),                    intent(inout) :: lfr(ns, na * nb)     !< Fluid fractions per line.
+   logical,                      intent(inout) :: lin(ns + 1, na * nb) !< Node flags per line.
+   integer(I4P), allocatable :: cnt(:), off(:), ids(:), seg(:) !< Crossings per line, offsets; buffers.
+   real(R8P),    allocatable :: ts(:)                          !< Buffer: parameters.
+   logical,      allocatable :: es(:)                          !< Buffer: entering flags.
+   integer(I4P)              :: l, ia, ib, nl, ntot            !< Work.
+
+   nl = na * nb
+   allocate(cnt(nl), off(nl))
+   !$acc data create(cnt, off)
+   !$acc parallel loop gang vector default(present) present(node, payload, tv, ga, gb, cnt)
+   do l = 1, nl
+      ia = mod(l - 1_I4P, na) + 1_I4P ; ib = (l - 1_I4P) / na + 1_I4P
+      cnt(l) = bvh_line_count_oac(node, payload, tv, axis, ga(ia), gb(ib), -huge(1._R8P), huge(1._R8P))
+   enddo
+   call scan_dev(nl, cnt, off, ntot)
+   allocate(ts(ntot + 1), ids(ntot + 1), seg(ntot + 1), es(ntot + 1))
+   !$acc data create(ts, ids, seg, es)
+   !$acc parallel loop gang vector default(present) present(node, payload, tv, ga, gb, e, cnt, off, ts, ids, seg, es, lfr, lin)
+   do l = 1, nl
+      ia = mod(l - 1_I4P, na) + 1_I4P ; ib = (l - 1_I4P) / na + 1_I4P
+      call line_fractions_oac(node, payload, tv, axis, ga(ia), gb(ib), ns, e, cnt(l), ts(off(l) + 1), ids(off(l) + 1), &
+                              es(off(l) + 1), seg(off(l) + 1), lfr(1, l), lin(1, l))
+   enddo
+   !$acc end data
+   !$acc end data
+   endsubroutine lines_dev
+
+   subroutine scan_dev(n, cnt, off, total)
+   !< Exclusive prefix sums off(l) = cnt(1) + ... + cnt(l - 1) on the device (issue #100 step 3c), total = their sum on
+   !< the host: chunks of SCAN_CHUNK entries (one thread each), the chunk offsets by `chunk_offsets_dev`, then one thread
+   !< per chunk writes its entries. Integer sums: the integers of a sequential scan. cnt and off must be present.
+   integer(I4P), intent(in)    :: n        !< Entries.
+   integer(I4P), intent(in)    :: cnt(n)   !< Counts.
+   integer(I4P), intent(inout) :: off(n)   !< Offsets (written on the device).
+   integer(I4P), intent(out)   :: total    !< Sum.
+   integer(I4P), allocatable   :: tot(:,:) !< Chunk totals, then offsets [3, nch].
+   integer(I4P)                :: nch, ch, l, a1, sums(3) !< Work.
+
+   nch = max(1_I4P, (n + SCAN_CHUNK - 1_I4P) / SCAN_CHUNK)
+   allocate(tot(3, nch))
+   !$acc data create(tot)
+   !$acc parallel loop gang vector default(present) present(cnt, tot)
+   do ch = 1_I4P, nch
+      a1 = 0_I4P
+      !$acc loop seq
+      do l = (ch - 1_I4P) * SCAN_CHUNK + 1_I4P, min(ch * SCAN_CHUNK, n)
+         a1 = a1 + cnt(l)
+      enddo
+      tot(1, ch) = a1 ; tot(2, ch) = 0_I4P ; tot(3, ch) = 0_I4P
+   enddo
+   call chunk_offsets_dev(nch, [0_I4P, 0_I4P, 0_I4P], tot, sums)
+   total = sums(1)
+   !$acc parallel loop gang vector default(present) present(cnt, off, tot)
+   do ch = 1_I4P, nch
+      a1 = tot(1, ch)
+      !$acc loop seq
+      do l = (ch - 1_I4P) * SCAN_CHUNK + 1_I4P, min(ch * SCAN_CHUNK, n)
+         off(l) = a1 ; a1 = a1 + cnt(l)
+      enddo
+   enddo
+   !$acc end data
+   endsubroutine scan_dev
+
+   subroutine line_fractions_oac(node, payload, tv, axis, a, b, ns, e, nc, ts, ids, es, seg, frac, inside)
+   !< Kernel (issue #100 step 3c): `line_fractions` of one grid line on its buffers of nc entries (nc = the line's
+   !< crossings, `bvh_line_count_oac`): the sorted crossings (`bvh_line_crossings_oac`, the traversal and the sort of
+   !< `surface%line_crossings`: the same crossings in the same order), each placed between the perturbed nodes by the
+   !< exact `line_crossing_before`, then the parity of the first node, the flips and the clamped lengths, the same
+   !< operations in the same order: the bits of `line_fractions`.
+   !$acc routine seq
+   type(aabb_node_object),       intent(in)    :: node(0:)   !< Tree nodes.
+   type(facet_distance_payload), intent(in)    :: payload(:) !< Payload.
+   real(R8P),                    intent(in)    :: tv(:,:)    !< Exact vertices [9, facets].
+   integer(I4P),                 intent(in)    :: axis       !< Line axis.
+   real(R8P),                    intent(in)    :: a, b       !< Line position.
+   integer(I4P),                 intent(in)    :: ns         !< Segments.
+   real(R8P),                    intent(in)    :: e(ns + 1)  !< Nodes along the line.
+   integer(I4P),                 intent(in)    :: nc         !< Crossings of the line (buffer size).
+   real(R8P),                    intent(inout) :: ts(nc)     !< Buffer: parameters.
+   integer(I4P),                 intent(inout) :: ids(nc)    !< Buffer: facets.
+   logical,                      intent(inout) :: es(nc)     !< Buffer: entering flags.
+   integer(I4P),                 intent(inout) :: seg(nc)    !< Buffer: segment of each crossing.
+   real(R8P),                    intent(out)   :: frac(ns)   !< Fluid fractions.
+   logical,                      intent(out)   :: inside(ns + 1) !< Node inside flags.
+   real(R8P)    :: tri(3, 3), pos, tc, fl !< Work.
+   integer(I4P) :: n, c, sg, m, v, w      !< Work.
+   logical      :: st, ovf                !< Inside state, overflow (never: nc is the count).
+
+   call bvh_line_crossings_oac(node, payload, tv, axis, a, b, -huge(1._R8P), huge(1._R8P), ts, ids, es, n, ovf)
+   m = 0_I4P
+   do c = 1, nc
+      do v = 1, 3
+         do w = 1, 3
+            tri(w, v) = tv(3 * (v - 1) + w, ids(c))
+         enddo
+      enddo
+      sg = max(0_I4P, min(ns + 1_I4P, col_index(ts(c), e)))
+      do while (sg >= 1_I4P)
+         if (.not. line_crossing_before(tri, axis, a, b, e(sg), es(c))) exit
+         sg = sg - 1_I4P
+      enddo
+      do while (sg <= ns)
+         if (line_crossing_before(tri, axis, a, b, e(sg + 1), es(c))) exit
+         sg = sg + 1_I4P
+      enddo
+      seg(c) = sg
+      if (sg == 0_I4P) m = m + 1_I4P
+   enddo
+   st = mod(m, 2_I4P) == 1_I4P
+   inside(1) = st
+   do sg = 1, ns
+      pos = e(sg) ; fl = 0._R8P
+      do c = 1, nc
+         if (seg(c) /= sg) cycle
+         tc = min(max(ts(c), e(sg)), e(sg + 1))
+         if (.not. st) fl = fl + (tc - pos)
+         pos = tc ; st = .not. st
+      enddo
+      if (.not. st) fl = fl + (e(sg + 1) - pos)
+      frac(sg) = fl / (e(sg + 1) - e(sg))
+      inside(sg + 1) = st
+   enddo
+   endsubroutine line_fractions_oac
+
    pure integer(I4P) function col_index(w, e) result(k)
    !< Segment of w: 0 if w <= e(1), s if e(s) < w <= e(s+1), size(e) beyond.
+   !$acc routine seq
    real(R8P), intent(in) :: w    !< Coordinate.
    real(R8P), intent(in) :: e(:) !< Nodes.
    integer(I4P)          :: lo, hi, mid !< Bisection.

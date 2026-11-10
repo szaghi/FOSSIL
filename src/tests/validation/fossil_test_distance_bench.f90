@@ -48,7 +48,7 @@ use fossil,              only : rigid_pose_t, pose_from_axis_angle, to_world
 use fossil,              only : curvilinear_block_t, detect_topology, topo_record_t, TOPO_BOUNDARY, wall_cutter
 use fossil_overset,      only : hole_flags, block_logical_t, donor_set_t, donor_candidates
 use fossil,              only : curve_object, slice_surface, cut_cells_3d_t, cut_cells_3d
-use fossil_cut_cells_3d, only : cut_cells_3d_sections
+use fossil_cut_cells_3d, only : cut_cells_3d_sections, cut_cells_3d_nodes_device
 use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_face_mismatches
 use fossil_orient3d_cases, only : orient3d_quadruples, lcb_cases, orient3d_many, lcb_many
 use fossil_predicates,   only : orient3d_xyz
@@ -92,6 +92,7 @@ integer                       :: hole_mismatch             !< Hole flags: device
 integer                       :: donor_mismatch            !< Donor candidates: device vs CPU mismatches (issue #72).
 integer                       :: sections_mismatch         !< 3-D cut-cell sections: device vs CPU mismatches (issue #100).
 integer                       :: orient3d_mismatch         !< orient3d, line_crossing_before: device vs CPU (#100 step 3c).
+integer                       :: nodes_mismatch            !< 3-D cut-cell node states, edge fractions: device vs CPU (3c).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -263,6 +264,8 @@ call sections_case(mismatch=sections_mismatch)
 rich_ok = rich_ok .and. sections_mismatch == 0
 call orient3d_case(mismatch=orient3d_mismatch)
 rich_ok = rich_ok .and. orient3d_mismatch == 0
+call nodes_case(mismatch=nodes_mismatch)
+rich_ok = rich_ok .and. nodes_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -360,6 +363,7 @@ print '(A,I0)',      '   hole flags device vs serial mismatches: ', hole_mismatc
 print '(A,I0)',      '   donor candidates device vs serial mismatches: ', donor_mismatch
 print '(A,I0)',      '   cut cells 3-D sections device vs serial mismatches: ', sections_mismatch
 print '(A,I0)',      '   orient3d device vs serial mismatches: ', orient3d_mismatch
+print '(A,I0)',      '   cut cells 3-D nodes device vs serial mismatches: ', nodes_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -628,6 +632,43 @@ contains
          mismatch = mismatch + 1
    enddo
    endsubroutine orient3d_case
+
+   subroutine nodes_case(mismatch)
+   !< The node states and cell-edge fractions of the 3-D cut cells on the device (issue #100 step 3c) against
+   !< `cut_cells_3d(..., edges=.true.)`, bitwise: the bench body in its probe box cut into grid_n^3 cells, and into
+   !< (grid_n + 3)^3 cells of a box with corners at the body's bounding box (grid lines through its extreme vertices);
+   !< node_in and edge_x/_y/_z, and node_in alone without the edges.
+   integer, intent(out)      :: mismatch               !< Mismatches.
+   type(cut_cells_3d_t)      :: ch                     !< Host cut cells.
+   logical,   allocatable    :: nd(:,:,:)              !< Device node flags.
+   real(R8P), allocatable    :: gx(:), gy(:), gz(:), ex(:,:,:), ey(:,:,:), ez(:,:,:) !< Cell edges, device fractions.
+   type(vector_R8P)          :: b0, b1                 !< Bounding box.
+   integer(I4P)              :: g, q, st, st2, nc      !< Work.
+
+   mismatch = 0
+   do g = 1, 2
+      if (g == 1) then
+         call section_grid(grid_n, gx, gy, gz)
+      else
+         b0 = surface%get_bmin() ; b1 = surface%get_bmax() ; nc = grid_n + 3_I4P
+         allocate(gx(nc + 1), gy(nc + 1), gz(nc + 1))
+         do q = 1, nc + 1
+            gx(q) = b0%x + (b1%x - b0%x) * real(q - 1, R8P) / real(nc, R8P)
+            gy(q) = b0%y + (b1%y - b0%y) * real(q - 1, R8P) / real(nc, R8P)
+            gz(q) = b0%z + (b1%z - b0%z) * real(q - 1, R8P) / real(nc, R8P)
+         enddo
+      endif
+      call cut_cells_3d(surface, gx, gy, gz, ch, status=st, edges=.true.)
+      call cut_cells_3d_nodes_device(surface, gx, gy, gz, nd, ex, ey, ez, edges=.true., status=st2)
+      mismatch = mismatch + abs(st - st2) + count(ch%node_in .neqv. nd)
+      mismatch = mismatch + count(transfer(ch%edge_x, 0_I8P, size(ch%edge_x)) /= transfer(ex, 0_I8P, size(ex)))
+      mismatch = mismatch + count(transfer(ch%edge_y, 0_I8P, size(ch%edge_y)) /= transfer(ey, 0_I8P, size(ey)))
+      mismatch = mismatch + count(transfer(ch%edge_z, 0_I8P, size(ch%edge_z)) /= transfer(ez, 0_I8P, size(ez)))
+      call cut_cells_3d_nodes_device(surface, gx, gy, gz, nd, ex, ey, ez, status=st2)
+      mismatch = mismatch + abs(st - st2) + count(ch%node_in .neqv. nd)
+      deallocate(gx, gy, gz)
+   enddo
+   endsubroutine nodes_case
 
    subroutine sections_case(mismatch)
    !< The plane sections of `cut_cells_3d` on the device (issue #100 step 3b) against the host path, bitwise, on the
