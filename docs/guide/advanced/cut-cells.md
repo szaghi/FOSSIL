@@ -36,7 +36,7 @@ closures and sub-cell masks.
 | Crossings of many parallel lines, fixed buffers | `surface%line_crossings_many(_device)` | `curve%line_crossings_many(_device)` |
 | Wall fractions along the grid lines of a block | `surface%cell_wall_fractions` | `curve%cell_wall_fractions` |
 | Cut cells of a block | `cut_cells_3d(surface, x, y, z, cut)` | `curve%cut_cells(x, y, cut)` |
-| Cut cells of a block on the device | | `curve%cut_cells_device(x, y, cut)` |
+| Cut cells of a block on the device, copied back or resident | | `curve%cut_cells_device(x, y, cut, resident=)` |
 
 ![a solid ellipse, turned by 0.4 rad, on 8 by 6 cells of 0.125 seen from above: the cells shaded by fluid fraction, cream in the solid to sepia in the fluid; the 16 crossings of the grid lines with the ellipse as gold dots; on every edge the ellipse crosses, the fluid part of the edge in red, ending at the crossing; and from the wetted centroid of every cut cell a teal stroke along its wetted normal integral, pointing out of the ellipse](../../examples/images/ref-cut-cells-outputs.svg){.fossil-figure}
 
@@ -46,27 +46,97 @@ equal the wetted normal integral in every cell, residual 0.00e+00 (`fig_ref_cut_
 
 ### On the device
 
-`curve%cut_cells_device(x, y, cut, status, intervals)` (issue #100) returns the `cut` of `curve%cut_cells` bit for bit:
-fractions, apertures, centroids, wetted lengths, centroids and normals, pieces and their measures, `node_in` and the
-fluid edge intervals. Moments, boundaries and quadrature are host only, and the twin has no arguments for them. The
-host walks the segments through the grid, indexes the crossings and classifies the cells; the device computes the node
-flags (the exact tests of the host, one thread per node) and runs the same per-cell kernels as `cut_cells` (count, a
-prefix sum on the host, fill), so the two agree by construction. The curve needs no `enter_device`.
+`curve%cut_cells_device(x, y, cut, status, intervals, resident)` (issue #100) returns the `cut` of `curve%cut_cells`
+bit for bit:
+- fractions, apertures, centroids;
+- wetted lengths, centroids and normals;
+- pieces and their measures;
+- `node_in` and the fluid edge intervals.
 
-Measured on an RTX 4070 (nvfortran 26.9, `-gpu=nofma`), best of 5 calls with the fluid intervals, copies to and from
-the device included:
+Moments, boundaries and quadrature are host only, and the twin has no arguments for them.
 
-| curve | cells | host [s] | device [s] |
-|---|---|---|---|
-| ellipse, 1024 segments | 1024² | 0.048 | 0.038 |
-| NACA 0012, 1022 segments | 1024² | 0.042 | 0.038 |
-| 50 circles, 3200 segments | 1024² | 0.066 | 0.038 |
-| any of the three | 256² | 0.003-0.005 | 0.005 |
+How the work is split:
+- **Host:** walks the segments through the grid and indexes the crossings.
+- **Device:** computes the node flags (the exact tests of the host, one thread per node), classifies the cells, runs
+  the integer prefix sums and the same per-cell kernels as `cut_cells` (count, then fill).
 
-The kernels are a small part of the device time: the walk and the indexes on the host and the copy of the outputs back
-(about 235 MB at 1024² with intervals) bound it, so a single block gains up to 1.7x at 1024² and nothing at 256². A
-solver that keeps the outputs on the device, and batches small blocks, is where the device pays (issue #100, later
-steps).
+The two agree by construction: same kernels, and integer sums are exact in any order. The curve needs no
+`enter_device`.
+
+**Resident outputs.** With `resident=.true.` the outputs stay on the device:
+- the host arrays of `cut` are allocated but hold garbage until `cut%update_host`;
+- `cut%on_device` says so;
+- `cut%exit_device` releases them, and must be called before the cut goes out of scope or is deallocated.
+
+`cut_cells`, `cut_cells_device` and `cut_coarsen_2d` release a resident cut they are given before overwriting it. A
+routine that reads a cut on the host (`cut_links_2d`, `cut_coarsen_2d`) needs `update_host` first. A copy `b = a` of
+a resident cut is not resident. Device code reads the outputs through pointer aliases, the rule of the other device
+routines:
+
+```fortran
+program resident_cut
+use fossil, only : curve_object, cut_cells_2d_t
+use penf,   only : I4P, R8P
+implicit none
+type(curve_object)           :: curve
+type(cut_cells_2d_t), target :: cut
+real(R8P),    allocatable    :: u(:), v(:), x(:), y(:)
+real(R8P),    pointer        :: alpha(:,:)
+real(R8P)                    :: fluid
+integer(I4P)                 :: i, j, k, status
+
+allocate(u(256), v(256), x(129), y(129))
+do k = 1, 256
+   u(k) = 0.5_R8P + 0.3_R8P * cos(0.0245436926_R8P * (k - 1)) ; v(k) = 0.5_R8P + 0.3_R8P * sin(0.0245436926_R8P * (k - 1))
+enddo
+call curve%adopt_loops(u=u, v=v, loop_sizes=[256_I4P])
+do k = 1, 129
+   x(k) = (k - 1) / 128._R8P ; y(k) = x(k)
+enddo
+call curve%cut_cells_device(x=x, y=y, cut=cut, status=status, resident=.true.)
+alpha => cut%alpha                       ! a device consumer: the fluid area, summed on the device
+fluid = 0._R8P
+!$acc parallel loop collapse(2) reduction(+:fluid) present(alpha)
+do j = 1, 128
+   do i = 1, 128
+      fluid = fluid + max(alpha(i, j), 0._R8P) / 128._R8P**2
+   enddo
+enddo
+call cut%update_host                     ! only if the host needs the outputs
+call cut%exit_device                     ! before cut goes away
+print '(A,F8.5)', 'fluid area: ', fluid
+endprogram resident_cut
+```
+
+Measured on an RTX 4070 (nvfortran 26.9, `-gpu=nofma`), best of 5 calls with the fluid intervals:
+
+| curve | cells | CPU [ms] | device, copied back [ms] | device, resident [ms] |
+|---|---|---|---|---|
+| ellipse, 1024 segments | 1024² | 41 | 27 | 6.4 |
+| NACA 0012, 1022 segments | 1024² | 42 | 30 | 6.6 |
+| 50 circles, 3200 segments | 1024² | 68 | 32 | 9.3 |
+| any of the three | 256² | 2.8-5.8 | 3.4-4.4 | 1.2-2.0 |
+
+What bounds each path at 1024²:
+- **Copied back:** the copy of about 250 MB of outputs to pageable host memory (12-14 GB/s into pages already written,
+  3-4 GB/s into new ones: the twin reuses the host arrays of the cut it overwrites when the shape is unchanged).
+- **Resident:** about 3 ms on the device (kernels 1.3 ms, 13 MB of indexes copied in) and about 3.6 ms on the host
+  (walk, indexes, allocations).
+
+**Per time step.** `fossil_test_curve_bench 256` also times a moving body: each step moves the curve
+(`move`, 2 degrees about the block centre), tags the cells (`box_classify_many`, one box per cell) and computes the
+cut cells, 20 steps, per-step best of 5:
+
+| curve | cells | CPU [ms] | device, copied back [ms] | device, resident [ms] |
+|---|---|---|---|---|
+| ellipse | 1024² | 138 | 60 | 32 |
+| NACA 0012 | 1024² | 111 | 63 | 31 |
+| ellipse | 256² | 9.7 | 6.7 | 4.5 |
+| NACA 0012 | 256² | 7.6 | 7.0 | 4.5 |
+
+The resident step is bound by the tags, about 25 of its 32 ms at 1024², because `box_classify_many_device` uploads the
+one million cell boxes and returns the codes at every step. The swept geometry and the piece links are not on the
+device yet (issue #100, steps 4 and 5), so a whole solver step still goes back to the host.
 
 ## Example
 
@@ -242,6 +312,8 @@ within 7.98·10⁻¹⁷ of the plate's area in every frame.
 | `orient3d`: near-coplanar grid (6144 points), coplanar dyadic points | exact signs and zeros (the naive determinant is wrong on 2022) |
 | line crossings, device path vs CPU | 0 mismatches (device path run on the host) |
 | 2-D cut cells, `cut_cells_device` vs `cut_cells`: the sections of 9 benchmark bodies and 4 curves up to 1024², with and without intervals (RTX 4070) | 0 mismatches, every output bitwise (`fossil_test_curve_bench 256`) |
+| 2-D cut cells resident (`resident=.true.`, then `update_host`) vs `cut_cells`, same cases; the classification and prefix sums of the device path vs the host's, integer for integer | 0 mismatches (`fossil_test_curve_bench 256`, `fossil_test_cut_cells_device_twin`) |
+| a moving ellipse and NACA 0012, 3 steps of move + tag + cut, device tags and resident cut vs the CPU at every step | 0 mismatches (`cut cells 2-D chain device vs serial mismatches`) |
 | 3-D pieces: cube-01, an octahedron and 40 lattice tetrahedra on grids of step 1/8, 1/4, 1/16 (1.57 million cells) | 19 cells untrusted (947 before issue #70), none outside [0, 1]; per-piece closure 3.5·10⁻¹⁴, piece sums 1.4·10⁻¹⁴, block volume 1.6·10⁻¹⁵ |
 | node parities along x, y, z on a grid-aligned cube, an octahedron, 20 lattice tetrahedra (2-D: square, diamond, 20 triangles) | 0 of 108 086 and 0 of 6358 disagree (108 and 45 before issue #69) |
 | centre inside flags within 3 ulp of a tilted face: tetrahedron (3-D), triangle (2-D), quadruple-precision reference | 0 of 3168 and 0 of 3200 wrong (249 and 295 before issue #69) |
@@ -299,5 +371,5 @@ within 7.98·10⁻¹⁷ of the plate's area in every frame.
   face that does not close; it is flagged, never silently wrong.
 - **Watertight input.** Cells whose boundary does not close (open curves or
   surfaces) are flagged in `closed` and get no measures.
-- **CPU only for cut cells.** The line crossings have a device path; the GPU
-  gate has not run yet.
+- **On the device: the 2-D cut cells only.** `curve%cut_cells_device` and the line crossings have device paths; the
+  3-D cut cells, the swept geometry and the piece links are CPU only (issue #100 plans them).
