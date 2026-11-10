@@ -325,6 +325,13 @@ contains
       sign_area = det
       return
    endif
+   ! two coincident points (issue #100 step 3a): the determinant is exactly zero, and the exact stage below returns
+   ! +0 for it, so returning +0 here gives the same bits without the 54 products (step 0: 97-99 % of the exact-stage
+   ! calls of the 3-D cut cells on sphere-like and axis-aligned bodies)
+   if ((ax == bx .and. ay == by) .or. (ax == cx .and. ay == cy) .or. (bx == cx .and. by == cy)) then
+      sign_area = 0._R8P
+      return
+   endif
 
    n = 0_I4P
    call add_product(ax, by, 1._R8P, e, n)

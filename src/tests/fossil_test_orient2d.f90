@@ -11,16 +11,18 @@ program fossil_test_orient2d
 !< 2. Exactly collinear points (t, 3t) with 3t exact: orient2d is exactly 0.
 !< 3. Well-separated random triples: same sign as the naive formula.
 !< 4. orient2d (vector_R8P) and orient2d_xy (reals) agree bit for bit.
+!< 5. Coincident points (issue #100 step 3a early exit): +0 exactly (the bits of +0, as the exact stage gives), in every
+!<    position and at magnitudes 2^-40 .. 2^40; one ulp apart, the exact nonzero sign (u > 0 by construction).
 
 use fossil_predicates, only : orient2d, orient2d_xy
-use penf,              only : I4P, R8P
+use penf,              only : I4P, I8P, R8P
 use vecfor,            only : vector_R8P
 
 implicit none
 
 real(R8P)    :: t, u, ax, ay, o, onaive, ref, r(6)
 integer(I4P) :: m, i, j, k, wrong, naive_wrong, perm_wrong
-logical      :: ok(4)
+logical      :: ok(5)
 type(vector_R8P) :: va, vb, vc
 
 ! 1. near-collinear grid
@@ -73,6 +75,20 @@ vb%x = 12._R8P ; vb%y = 12._R8P ; vb%z = -1._R8P
 vc%x = 24._R8P ; vc%y = 24._R8P ; vc%z = 3._R8P
 ok(4) = orient2d(va, vb, vc) == orient2d_xy(va%x, va%y, vb%x, vb%y, vc%x, vc%y) .and. orient2d(va, vb, vc) > 0._R8P
 print '(A,L1)', 'vector and real interfaces agree: ', ok(4)
+
+! 5. coincident and one-ulp-apart points
+wrong = 0
+do m = -40, 40, 8
+   t = 0.75_R8P * 2._R8P**m ; u = spacing(t)
+   if (transfer(orient2d_xy(t, t, t, t, t, 2._R8P * t), 0_I8P) /= 0_I8P) wrong = wrong + 1 ! a == b
+   if (transfer(orient2d_xy(t, t, 3._R8P * t, -t, t, t), 0_I8P) /= 0_I8P) wrong = wrong + 1 ! a == c
+   if (transfer(orient2d_xy(-t, 5._R8P * t, t, t, t, t), 0_I8P) /= 0_I8P) wrong = wrong + 1 ! b == c
+   if (transfer(orient2d_xy(t, t, t, t, t, t), 0_I8P) /= 0_I8P) wrong = wrong + 1          ! all three
+   if (.not. same_sign(orient2d_xy(t, t, t + u, t, t, t + 1._R8P), 1._R8P)) wrong = wrong + 1 ! (a-c) x (b-c) = u
+   if (.not. same_sign(orient2d_xy(t + u, t, t, t, t, t + 1._R8P), -1._R8P)) wrong = wrong + 1
+enddo
+ok(5) = wrong == 0
+print '(A,I0)', 'coincident / one-ulp-apart points, wrong: ', wrong
 
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
