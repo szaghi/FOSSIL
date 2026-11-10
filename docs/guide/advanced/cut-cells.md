@@ -36,7 +36,7 @@ closures and sub-cell masks.
 | Crossings of many parallel lines, fixed buffers | `surface%line_crossings_many(_device)` | `curve%line_crossings_many(_device)` |
 | Wall fractions along the grid lines of a block | `surface%cell_wall_fractions` | `curve%cell_wall_fractions` |
 | Cut cells of a block | `cut_cells_3d(surface, x, y, z, cut)` | `curve%cut_cells(x, y, cut)` |
-| Cut cells of a block on the device, copied back or resident | | `curve%cut_cells_device(x, y, cut, resident=)` |
+| Cut cells of a block on the device, copied back or resident | `cut_cells_3d_device(surface, x, y, z, cut, resident=)` | `curve%cut_cells_device(x, y, cut, resident=)` |
 
 ![a solid ellipse, turned by 0.4 rad, on 8 by 6 cells of 0.125 seen from above: the cells shaded by fluid fraction, cream in the solid to sepia in the fluid; the 16 crossings of the grid lines with the ellipse as gold dots; on every edge the ellipse crosses, the fluid part of the edge in red, ending at the crossing; and from the wetted centroid of every cut cell a teal stroke along its wetted normal integral, pointing out of the ellipse](../../examples/images/ref-cut-cells-outputs.svg){.fossil-figure}
 
@@ -141,16 +141,52 @@ device yet (issue #100, steps 4 and 5), so a whole solver step still goes back t
 **The 3-D plane sections.** `cut_cells_3d(..., device_sections=.true.)` cuts its 3(N+1) plane sections on the device,
 with the same bits, when no `links`, `moments_order` > 0 or `quadrature` is asked; the default stays the host path.
 The sections of one axis are the blocks of one multi-block launch (`cut_cells_device_many`), and a device kernel writes
-the face arrays, which alone come back. Measured by `fossil_test_distance_bench` (faces copied back, best of 5):
+the face arrays, which alone come back. Every plane is sliced through a plane sweep (the facets spanning each plane, in
+facet order: the same curves as `slice_surface` bit for bit). Measured by `fossil_test_distance_bench` (faces copied
+back, best of 5):
 
 | body | 32³ host / device [ms] | 64³ | 128³ |
 |---|---|---|---|
-| bunny | 99 / 115 | 242 / 240 | 849 / 700 |
+| bunny | 47 / 50 | 119 / 106 | 462 / 375 |
+| dragon-fine | 36 / 38 | 102 / 82 | 464 / 302 |
 | cube-01 | 6.3 / 4.2 | 43 / 12 | 308 / 106 |
-| dragon-fine | 48 / 55 | 130 / 115 | 531 / 359 |
 
-The 2-D work drops about 3x; slicing every plane on the host (`slice_surface` scans every facet per plane) is now about
-60 % of the device path.
+**The 3-D cut cells.** `cut_cells_3d_device(surface, x, y, z, cut, status, edges, resident)` returns the `cut` of
+`cut_cells_3d` (without links) bit for bit:
+- cell fractions, centroids, wetted areas, centroids and normals;
+- face fractions, centroids, pieces and closed flags;
+- pieces and their measures;
+- `node_in`, and with `edges=.true.` the edge fractions.
+
+Moments, quadrature and link intervals stay on the host.
+
+How the work is split:
+- **Host:** the grid check, the candidate facets of each cell (bounding-box binning and the box-triangle filter), the
+  open cells, the slicing.
+- **Device:** the sections, the node states (one thread per grid line: the line's crossings in the host's order, each
+  placed by the exact `orient3d`), the cell totals, the classification and the prefix sums, the exact edge piercings,
+  and `cell_pieces` (count, then fill), one thread per cell.
+
+The surface needs its SAH BVH. `resident=.true.` follows the 2-D contract: the outputs stay mapped, the host arrays
+hold garbage until `cut%update_host`, `cut%exit_device` releases them, and every routine that writes a cut releases a
+resident one first.
+
+Measured on an RTX 4070, best of 5 after a warm-up, the CPU path being `cut_cells_3d` without links:
+
+| body | cells | CPU [s] | device, copied back [s] | device, resident [s] |
+|---|---|---|---|---|
+| sphere (marching cubes) | 64³ | 0.137 | 0.061 | 0.058 |
+| sphere | 128³ | 0.680 | 0.248 | 0.207 |
+| cone | 128³ | 0.648 | 0.305 | 0.243 |
+| cube-02 | 128³ | 0.537 | 0.182 | 0.142 |
+| cube-01 | 32³ | 0.014 | 0.011 | 0.009 |
+
+That is 2.1-3.0x copied back and 2.7-3.8x resident at 128³. One resident sphere call at 128³ (0.21 s):
+- kernels about 41 ms (the piercings and the count pass 16 ms);
+- copies about 87 ms: the sections copy the faces back and the cells map them again;
+- host work about 100 ms: the candidates, the open cells and the slicing.
+
+The face round trip and the host candidates are what remain to move.
 
 ## Example
 
@@ -329,6 +365,9 @@ within 7.98·10⁻¹⁷ of the plate's area in every frame.
 | 2-D cut cells resident (`resident=.true.`, then `update_host`) vs `cut_cells`, same cases; the classification and prefix sums of the device path vs the host's, integer for integer | 0 mismatches (`fossil_test_curve_bench 256`, `fossil_test_cut_cells_device_twin`) |
 | a moving ellipse and NACA 0012, 3 steps of move + tag + cut, device tags and resident cut vs the CPU at every step | 0 mismatches (`cut cells 2-D chain device vs serial mismatches`) |
 | 3-D faces with the plane sections on the device (`device_sections=.true.`) vs the host path: bunny, cube-01, dragon-fine at 32³; stress curves as blocks of one multi-block call | 0 mismatches (`cut cells 3-D sections device vs serial mismatches`, `fossil_test_cut_cells_blocks_twin`) |
+| exact `orient3d` and `line_crossing_before` on the device vs the host: 31,576 quadruples (near-coplanar grids at 2^0 and 2^40, shared coordinate planes, coincident points, random) and 9,036 placements | 0 mismatches (`orient3d device vs serial mismatches`, `fossil_test_orient3d`) |
+| 3-D node states and edge fractions on the device vs `cut_cells_3d(..., edges=.true.)` | 0 mismatches (`cut cells 3-D nodes device vs serial mismatches`, `fossil_test_cut_cells_3d_device_twin`) |
+| `cut_cells_3d_device` vs `cut_cells_3d`, every output, with and without edges, copied back and resident: bunny, cube-01, dragon-fine at 32³; sphere, cone, cube-02 at 64³ and 128³ | 0 mismatches (`cut cells 3-D device vs serial mismatches`, `fossil_test_cut_cells_3d_device_twin`) |
 | 3-D pieces: cube-01, an octahedron and 40 lattice tetrahedra on grids of step 1/8, 1/4, 1/16 (1.57 million cells) | 19 cells untrusted (947 before issue #70), none outside [0, 1]; per-piece closure 3.5·10⁻¹⁴, piece sums 1.4·10⁻¹⁴, block volume 1.6·10⁻¹⁵ |
 | node parities along x, y, z on a grid-aligned cube, an octahedron, 20 lattice tetrahedra (2-D: square, diamond, 20 triangles) | 0 of 108 086 and 0 of 6358 disagree (108 and 45 before issue #69) |
 | centre inside flags within 3 ulp of a tilted face: tetrahedron (3-D), triangle (2-D), quadruple-precision reference | 0 of 3168 and 0 of 3200 wrong (249 and 295 before issue #69) |
@@ -386,6 +425,6 @@ within 7.98·10⁻¹⁷ of the plate's area in every frame.
   face that does not close; it is flagged, never silently wrong.
 - **Watertight input.** Cells whose boundary does not close (open curves or
   surfaces) are flagged in `closed` and get no measures.
-- **On the device: the 2-D cut cells and the 3-D plane sections.** `curve%cut_cells_device`,
-  `cut_cells_3d(..., device_sections=.true.)` and the line crossings have device paths; the 3-D cells themselves, the
-  swept geometry and the piece links are CPU only (issue #100 plans them).
+- **On the device: the 2-D and 3-D cut cells, without links.** `curve%cut_cells_device`, `cut_cells_3d_device`,
+  `cut_cells_3d(..., device_sections=.true.)` and the line crossings have device paths; moments, quadrature, the
+  swept geometry and the piece links are CPU only (issue #100 plans the last two).
