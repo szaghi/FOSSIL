@@ -45,13 +45,14 @@ public :: tri_line_hit_oac, seg_line_hit_oac, bvh_line_crossings_oac, curve_line
 integer(I4P), parameter :: STACK = 256_I4P !< Traversal stack (> BVH depth cap + 2).
 
 contains
-   function line_crossing_before(tri, axis, a, b, c, entering) result(before)
+   pure function line_crossing_before(tri, axis, a, b, c, entering) result(before)
    !< The crossing of triangle tri with the line along `axis` at (a, b) lies before the point of the line at coordinate
-   !< c, exactly (issue #69): host only. With n = (B - A) x (C - A) and P the point, orient3d(A, B, C, P) =
+   !< c, exactly (issue #69); a device routine since issue #100 step 3c (the device `orient3d_xyz`). With n = (B - A) x (C - A) and P the point, orient3d(A, B, C, P) =
    !< -n_axis (c - t), t the exact crossing parameter, and the crossing enters (n_axis < 0) or leaves (n_axis > 0):
    !< the sign of c - t is one exact orient3d. A point on the triangle's plane takes the global perturbation P +
    !< (eps1, eps2, eps3) (issue #69, as the line kernel): orient3d(A, B, C, P + delta) = -n . delta, the sign of
    !< minus the first nonzero component of n in the order x, y, z.
+   !$acc routine seq
    real(R8P),    intent(in) :: tri(3, 3) !< Triangle vertices (columns), as the crossing kernel saw them.
    integer(I4P), intent(in) :: axis     !< Line axis.
    real(R8P),    intent(in) :: a, b     !< Line position (cyclic order, see the module header).

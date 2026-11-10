@@ -13,16 +13,26 @@ program fossil_test_orient3d
 !< 3. Well-separated random quadruples: same sign as the naive determinant; the filter's double is
 !<    returned unchanged.
 !< 4. orient3d (vector_R8P) and orient3d_xyz (arrays) agree bit for bit.
+!< 5. The device cases of `fossil_orient3d_cases` (issue #100 step 3c; the distance bench runs them on the device) through
+!<    their batched loops as host code: the loop equals the scalar calls bit for bit, the known signs and exact zeros
+!<    hold, the sign flips under the swap of a and b, and `line_crossing_before` gives the exact answer on every
+!<    perturbation case (on the plane, an ulp and a unit off, entering and leaving, degenerate triangles).
 
-use fossil_predicates, only : orient3d, orient3d_xyz
-use penf,              only : I4P, R8P
+use fossil_line_query,     only : line_crossing_before
+use fossil_orient3d_cases, only : orient3d_quadruples, lcb_cases, orient3d_many, lcb_many
+use fossil_predicates,     only : orient3d, orient3d_xyz
+use penf,              only : I4P, I8P, R8P
 use vecfor,            only : vector_R8P
 
 implicit none
 
 real(R8P)    :: t, u, a(3), b(3), c(3), d(3), o, ref, s0, r(12)
 integer(I4P) :: m, i, j, k, n, wrong, naive_wrong, perm_wrong, zero_wrong, kk
-logical      :: ok(4)
+logical      :: ok(5)
+real(R8P),    allocatable :: q(:,:), oq(:), ltri(:,:), lab(:,:), lc(:) !< Device cases (5).
+integer(I4P), allocatable :: expect(:), lax(:)                         !< Their expected signs, line axes.
+logical,      allocatable :: len_(:), lexp(:), lbef(:)                 !< Entering flags, answers.
+integer(I4P)              :: loop_bad, sign_bad, swap_bad, lcb_bad      !< Failures (5).
 
 ! 1. near-coplanar grid
 wrong = 0 ; naive_wrong = 0 ; perm_wrong = 0 ; zero_wrong = 0
@@ -85,6 +95,31 @@ b = [12._R8P, 3._R8P, 9._R8P] ; c = [24._R8P, 7._R8P, 17._R8P] ; d = [5._R8P, 30
 ok(4) = orient3d(vector_R8P(a(1), a(2), a(3)), vector_R8P(b(1), b(2), b(3)), vector_R8P(c(1), c(2), c(3)), &
                  vector_R8P(d(1), d(2), d(3))) == orient3d_xyz(a, b, c, d) .and. orient3d_xyz(a, b, c, d) /= 0._R8P
 print '(A,L1)', 'vector and array interfaces agree: ', ok(4)
+
+! 5. the device cases as host code
+call orient3d_quadruples(q, expect)
+allocate(oq(size(expect)))
+call orient3d_many(size(expect, kind=I4P), q, oq)
+loop_bad = 0 ; sign_bad = 0 ; swap_bad = 0
+do kk = 1, size(expect)
+   o = orient3d_xyz(q(1:3, kk), q(4:6, kk), q(7:9, kk), q(10:12, kk))
+   if (transfer(o, 0_I8P) /= transfer(oq(kk), 0_I8P)) loop_bad = loop_bad + 1
+   if (expect(kk) /= 2 .and. .not. same_sign(o, real(expect(kk), R8P))) sign_bad = sign_bad + 1
+   if (.not. same_sign(orient3d_xyz(q(4:6, kk), q(1:3, kk), q(7:9, kk), q(10:12, kk)), -o)) swap_bad = swap_bad + 1
+enddo
+call lcb_cases(ltri, lax, lab, lc, len_, lexp)
+allocate(lbef(size(lexp)))
+call lcb_many(size(lexp, kind=I4P), ltri, lax, lab, lc, len_, lbef)
+lcb_bad = 0
+do kk = 1, size(lexp)
+   if ((lbef(kk) .neqv. lexp(kk)) .or. (lbef(kk) .neqv. line_crossing_before(reshape(ltri(:, kk), [3, 3]), lax(kk), &
+                                                                            lab(1, kk), lab(2, kk), lc(kk), len_(kk)))) &
+      lcb_bad = lcb_bad + 1
+enddo
+ok(5) = loop_bad == 0 .and. sign_bad == 0 .and. swap_bad == 0 .and. lcb_bad == 0
+print '(A,I0,A,I0,A,I0,A,I0,A,I0,A,I0)', 'device cases on the host: ', size(expect), ' quadruples, loop vs scalar ', &
+      loop_bad, ', known signs wrong ', sign_bad, ', swap not flipped ', swap_bad, '; ', size(lexp), &
+      ' line_crossing_before cases wrong ', lcb_bad
 
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1

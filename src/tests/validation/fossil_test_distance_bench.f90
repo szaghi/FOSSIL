@@ -24,7 +24,8 @@
 !<   5. Device lines (issues #20, #37, #38): `device`, `rich` and `box device vs serial mismatches`
 !<      (box_classify_many_device on a box of half-size diagonal/64 around every probe) and
 !<      `sign bench device vs serial mismatches` (the issue #39 benchmark points) and
-!<      `line crossings device vs serial mismatches` (issue #40) must be 0.
+!<      `line crossings device vs serial mismatches` (issue #40) must be 0, and so must every later device line
+!<      (`orient3d device vs serial mismatches`, issue #100 step 3c, among them).
 !<
 !< Usage: fossil_test_distance_bench [<stl_path> [<grid_n>]]
 !<        default <stl_path> = src/tests/dragon-fine.stl
@@ -49,6 +50,9 @@ use fossil_overset,      only : hole_flags, block_logical_t, donor_set_t, donor_
 use fossil,              only : curve_object, slice_surface, cut_cells_3d_t, cut_cells_3d
 use fossil_cut_cells_3d, only : cut_cells_3d_sections
 use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_face_mismatches
+use fossil_orient3d_cases, only : orient3d_quadruples, lcb_cases, orient3d_many, lcb_many
+use fossil_predicates,   only : orient3d_xyz
+use fossil_line_query,   only : line_crossing_before
 
 implicit none
 
@@ -87,6 +91,7 @@ integer                       :: block_mismatch            !< Block location: de
 integer                       :: hole_mismatch             !< Hole flags: device vs CPU mismatches (issue #72).
 integer                       :: donor_mismatch            !< Donor candidates: device vs CPU mismatches (issue #72).
 integer                       :: sections_mismatch         !< 3-D cut-cell sections: device vs CPU mismatches (issue #100).
+integer                       :: orient3d_mismatch         !< orient3d, line_crossing_before: device vs CPU (#100 step 3c).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -256,6 +261,8 @@ call block_case(mismatch=block_mismatch, hole_mismatch=hole_mismatch, donor_mism
 rich_ok = rich_ok .and. block_mismatch == 0 .and. hole_mismatch == 0 .and. donor_mismatch == 0
 call sections_case(mismatch=sections_mismatch)
 rich_ok = rich_ok .and. sections_mismatch == 0
+call orient3d_case(mismatch=orient3d_mismatch)
+rich_ok = rich_ok .and. orient3d_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -352,6 +359,7 @@ print '(A,I0)',      '   block location device vs serial mismatches: ', block_mi
 print '(A,I0)',      '   hole flags device vs serial mismatches: ', hole_mismatch
 print '(A,I0)',      '   donor candidates device vs serial mismatches: ', donor_mismatch
 print '(A,I0)',      '   cut cells 3-D sections device vs serial mismatches: ', sections_mismatch
+print '(A,I0)',      '   orient3d device vs serial mismatches: ', orient3d_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -591,6 +599,35 @@ contains
    print '(A,I0)', 'donor candidates: ', size(d1(1)%block) + size(d1(2)%block)
    if (size(d1(2)%block) < 1000) donor_mismatch = donor_mismatch + 1
    endsubroutine block_case
+
+   subroutine orient3d_case(mismatch)
+   !< The exact orient3d and line_crossing_before on the device (issue #100 step 3c) against the host, bit for bit: the
+   !< cases of `fossil_orient3d_cases` (near-coplanar grids at 2^0 and 2^40, exact zeros on shared coordinate planes,
+   !< coincident points, inexact near-coplanar points far from the origin, random quadruples; the perturbation cases of
+   !< line_crossing_before) in one device loop each against the scalar host calls.
+   integer, intent(out)      :: mismatch               !< Mismatches.
+   real(R8P),    allocatable :: q(:,:), od(:), ltri(:,:), lab(:,:), lc(:) !< Cases, device results.
+   integer(I4P), allocatable :: expect(:), lax(:)      !< Expected signs, line axes.
+   logical,      allocatable :: len_(:), lexp(:), lbd(:) !< Entering flags, exact answers, device results.
+   real(R8P)                 :: o                      !< Host result.
+   integer(I4P)              :: c                      !< Counter.
+
+   mismatch = 0
+   call orient3d_quadruples(q, expect)
+   allocate(od(size(expect)))
+   call orient3d_many(size(expect, kind=I4P), q, od)
+   do c = 1, size(expect, kind=I4P)
+      o = orient3d_xyz(q(1:3, c), q(4:6, c), q(7:9, c), q(10:12, c))
+      if (transfer(o, 0_I8P) /= transfer(od(c), 0_I8P)) mismatch = mismatch + 1
+   enddo
+   call lcb_cases(ltri, lax, lab, lc, len_, lexp)
+   allocate(lbd(size(lexp)))
+   call lcb_many(size(lexp, kind=I4P), ltri, lax, lab, lc, len_, lbd)
+   do c = 1, size(lexp, kind=I4P)
+      if (lbd(c) .neqv. line_crossing_before(reshape(ltri(:, c), [3, 3]), lax(c), lab(1, c), lab(2, c), lc(c), len_(c))) &
+         mismatch = mismatch + 1
+   enddo
+   endsubroutine orient3d_case
 
    subroutine sections_case(mismatch)
    !< The plane sections of `cut_cells_3d` on the device (issue #100 step 3b) against the host path, bitwise, on the

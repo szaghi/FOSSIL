@@ -71,9 +71,10 @@ contains
    endif
    endsubroutine psign
 
-   function first_normal_sign(tri) result(sg)
+   pure function first_normal_sign(tri) result(sg)
    !< Sign (-1, 0, +1) of the first nonzero component of n = (B - A) x (C - A) in the order x, y, z, exactly (the
-   !< components are the orientations of the projections on (y, z), (z, x), (x, y)).
+   !< components are the orientations of the projections on (y, z), (z, x), (x, y)). A device routine (issue #100).
+   !$acc routine seq
    real(R8P), intent(in) :: tri(3, 3) !< Triangle vertices (columns).
    real(R8P)             :: sg
    integer(I4P)          :: k, i1, i2

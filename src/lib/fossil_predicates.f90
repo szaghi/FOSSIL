@@ -128,6 +128,7 @@ contains
    endfunction orient3d
 
    pure function orient3d_xyz(a, b, c, d) result(sign_volume)
+   !$acc routine seq
    !< Exact sign of det[a - d; b - d; c - d] (rows) for the points a, b, c, d (issue #40).
    !<
    !< The sign is exact for any finite inputs (barring underflow of products of three
@@ -147,7 +148,10 @@ contains
    !< bit-mask pieces per product before), summed into a nonoverlapping expansion with
    !< error-free sums (`grow_expansion`), whose largest component carries the exact sign. FMA
    !< contraction cannot change the result: every step of the error terms is exact.
-   !< Host only (not a device routine).
+   !<
+   !< A device routine (issue #100 step 3c): the former internal procedures are the module procedures `o3d_diff_exact`,
+   !< `o3d_add_triple`, `o3d_add_product3` (the same operations in the same order), and the expansion holds 96
+   !< components (at most 24 products of four doubles each, one component per `grow_expansion`; it was 512).
    real(R8P), intent(in) :: a(3), b(3), c(3), d(3) !< Points (x, y, z).
    real(R8P)             :: sign_volume            !< Its sign is exact.
    real(R8P), parameter  :: EPS_HALF = epsilon(1._R8P) / 2._R8P                !< Unit roundoff.
@@ -155,7 +159,7 @@ contains
    real(R8P)             :: adx, bdx, cdx, ady, bdy, cdy, adz, bdz, cdz !< Differences.
    real(R8P)             :: bdxcdy, cdxbdy, cdxady, adxcdy, adxbdy, bdxady !< Products.
    real(R8P)             :: det, permanent         !< Filter terms.
-   real(R8P)             :: e(512)                 !< Exact expansion of the determinant.
+   real(R8P)             :: e(96)                  !< Exact expansion of the determinant.
    integer(I4P)          :: n, i                   !< Expansion length, counter.
 
    adx = a(1) - d(1) ; bdx = b(1) - d(1) ; cdx = c(1) - d(1)
@@ -181,20 +185,20 @@ contains
    n = 0_I4P
    ! stage 2a: when the nine differences are exact (error-free subtraction, no multiplication), the determinant is
    ! the sum of 6 products of three of them (64 pieces each instead of 24 products of input coordinates)
-   if (diff_exact(a(1), d(1), adx) .and. diff_exact(b(1), d(1), bdx) .and. diff_exact(c(1), d(1), cdx) .and. &
-       diff_exact(a(2), d(2), ady) .and. diff_exact(b(2), d(2), bdy) .and. diff_exact(c(2), d(2), cdy) .and. &
-       diff_exact(a(3), d(3), adz) .and. diff_exact(b(3), d(3), bdz) .and. diff_exact(c(3), d(3), cdz)) then
-      call add_product3(adz, bdx, cdy, 1._R8P, e, n)
-      call add_product3(adz, cdx, bdy, -1._R8P, e, n)
-      call add_product3(bdz, cdx, ady, 1._R8P, e, n)
-      call add_product3(bdz, adx, cdy, -1._R8P, e, n)
-      call add_product3(cdz, adx, bdy, 1._R8P, e, n)
-      call add_product3(cdz, bdx, ady, -1._R8P, e, n)
+   if (o3d_diff_exact(a(1), d(1), adx) .and. o3d_diff_exact(b(1), d(1), bdx) .and. o3d_diff_exact(c(1), d(1), cdx) .and. &
+       o3d_diff_exact(a(2), d(2), ady) .and. o3d_diff_exact(b(2), d(2), bdy) .and. o3d_diff_exact(c(2), d(2), cdy) .and. &
+       o3d_diff_exact(a(3), d(3), adz) .and. o3d_diff_exact(b(3), d(3), bdz) .and. o3d_diff_exact(c(3), d(3), cdz)) then
+      call o3d_add_product3(adz, bdx, cdy, 1._R8P, e, n)
+      call o3d_add_product3(adz, cdx, bdy, -1._R8P, e, n)
+      call o3d_add_product3(bdz, cdx, ady, 1._R8P, e, n)
+      call o3d_add_product3(bdz, adx, cdy, -1._R8P, e, n)
+      call o3d_add_product3(cdz, adx, bdy, 1._R8P, e, n)
+      call o3d_add_product3(cdz, bdx, ady, -1._R8P, e, n)
    else
-   call add_triple(a, b, c, 1._R8P, e, n)
-   call add_triple(d, b, c, -1._R8P, e, n)
-   call add_triple(a, d, c, -1._R8P, e, n)
-   call add_triple(a, b, d, -1._R8P, e, n)
+      call o3d_add_triple(a, b, c, 1._R8P, e, n)
+      call o3d_add_triple(d, b, c, -1._R8P, e, n)
+      call o3d_add_triple(a, d, c, -1._R8P, e, n)
+      call o3d_add_triple(a, b, d, -1._R8P, e, n)
    endif
    sign_volume = 0._R8P
    do i = n, 1_I4P, -1_I4P ! components in increasing magnitude: the last nonzero one is the largest
@@ -203,50 +207,54 @@ contains
          exit
       endif
    enddo
-   contains
-      pure function diff_exact(x, y, dxy) result(exact)
-      !< The double dxy = x - y is exact (Knuth's two-difference error term is zero; additions only).
-      real(R8P), intent(in) :: x, y, dxy
-      logical               :: exact
-      real(R8P)             :: bvirt, avirt, bround, around
-
-      bvirt = x - dxy ; avirt = dxy + bvirt ; bround = bvirt - y ; around = x - avirt
-      exact = around + bround == 0._R8P
-      endfunction diff_exact
-
-      pure subroutine add_triple(p, q, r, s, e, n)
-      !< Add s [p, q, r] = s p . (q x r) (s = +-1) to the expansion e(1:n), exactly.
-      real(R8P),    intent(in)    :: p(3), q(3), r(3), s !< Rows and sign.
-      real(R8P),    intent(inout) :: e(:)    !< Expansion.
-      integer(I4P), intent(inout) :: n       !< Its length.
-
-      call add_product3(p(1), q(2), r(3), s, e, n)
-      call add_product3(p(1), q(3), r(2), -s, e, n)
-      call add_product3(p(2), q(1), r(3), -s, e, n)
-      call add_product3(p(2), q(3), r(1), s, e, n)
-      call add_product3(p(3), q(1), r(2), s, e, n)
-      call add_product3(p(3), q(2), r(1), -s, e, n)
-      endsubroutine add_triple
-
-      pure subroutine add_product3(x, y, z, s, e, n)
-      !< Add s * x * y * z (s = +-1) to the expansion e(1:n), exactly.
-      real(R8P),    intent(in)    :: x, y, z, s !< Factors and sign.
-      real(R8P),    intent(inout) :: e(:)       !< Expansion.
-      integer(I4P), intent(inout) :: n          !< Its length.
-      real(R8P)                   :: p, pe, q, qe, r, re !< x y = p + pe, p z = q + qe, pe z = r + re (exact).
-
-      if (x == 0._R8P .or. y == 0._R8P .or. z == 0._R8P) return
-      call two_product(x, y, p, pe)
-      call two_product(p, z, q, qe)
-      call two_product(pe, z, r, re)
-      if (re /= 0._R8P) call grow_expansion(e, n, s * re)
-      if (r /= 0._R8P) call grow_expansion(e, n, s * r)
-      if (qe /= 0._R8P) call grow_expansion(e, n, s * qe)
-      call grow_expansion(e, n, s * q)
-      endsubroutine add_product3
    endfunction orient3d_xyz
 
+   pure function o3d_diff_exact(x, y, dxy) result(exact)
+   !$acc routine seq
+   !< The double dxy = x - y is exact (Knuth's two-difference error term is zero; additions only).
+   real(R8P), intent(in) :: x, y, dxy
+   logical               :: exact
+   real(R8P)             :: bvirt, avirt, bround, around
+
+   bvirt = x - dxy ; avirt = dxy + bvirt ; bround = bvirt - y ; around = x - avirt
+   exact = around + bround == 0._R8P
+   endfunction o3d_diff_exact
+
+   pure subroutine o3d_add_triple(p, q, r, s, e, n)
+   !$acc routine seq
+   !< Add s [p, q, r] = s p . (q x r) (s = +-1) to the expansion e(1:n), exactly.
+   real(R8P),    intent(in)    :: p(3), q(3), r(3), s !< Rows and sign.
+   real(R8P),    intent(inout) :: e(:)    !< Expansion.
+   integer(I4P), intent(inout) :: n       !< Its length.
+
+   call o3d_add_product3(p(1), q(2), r(3), s, e, n)
+   call o3d_add_product3(p(1), q(3), r(2), -s, e, n)
+   call o3d_add_product3(p(2), q(1), r(3), -s, e, n)
+   call o3d_add_product3(p(2), q(3), r(1), s, e, n)
+   call o3d_add_product3(p(3), q(1), r(2), s, e, n)
+   call o3d_add_product3(p(3), q(2), r(1), -s, e, n)
+   endsubroutine o3d_add_triple
+
+   pure subroutine o3d_add_product3(x, y, z, s, e, n)
+   !$acc routine seq
+   !< Add s * x * y * z (s = +-1) to the expansion e(1:n), exactly.
+   real(R8P),    intent(in)    :: x, y, z, s !< Factors and sign.
+   real(R8P),    intent(inout) :: e(:)       !< Expansion.
+   integer(I4P), intent(inout) :: n          !< Its length.
+   real(R8P)                   :: p, pe, q, qe, r, re !< x y = p + pe, p z = q + qe, pe z = r + re (exact).
+
+   if (x == 0._R8P .or. y == 0._R8P .or. z == 0._R8P) return
+   call two_product(x, y, p, pe)
+   call two_product(p, z, q, qe)
+   call two_product(pe, z, r, re)
+   if (re /= 0._R8P) call grow_expansion(e, n, s * re)
+   if (r /= 0._R8P) call grow_expansion(e, n, s * r)
+   if (qe /= 0._R8P) call grow_expansion(e, n, s * qe)
+   call grow_expansion(e, n, s * q)
+   endsubroutine o3d_add_product3
+
    pure subroutine two_product(a, b, p, e)
+   !$acc routine seq
    !< a b = p + e exactly, p = fl(a b) (Dekker 1971). The factors are split into two halves of at most 26 significant
    !< bits by rounding the bit pattern (`round26`, no multiplication), so every partial product is exact and every
    !< step of the error term is exact: FMA contraction cannot change the result, and no `ieee_fma` is needed
@@ -262,6 +270,7 @@ contains
    endsubroutine two_product
 
    pure function round26(x) result(t)
+   !$acc routine seq
    !< x rounded to 26 significant bits on its bit pattern (add half of the dropped 27-bit field, clear it): x - t has
    !< at most 26 significant bits. Zero and subnormal inputs are returned as they are.
    real(R8P), intent(in)   :: x
