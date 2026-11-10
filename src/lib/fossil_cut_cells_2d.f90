@@ -37,6 +37,7 @@ use penf,              only : I4P, R8P
 implicit none
 private
 public :: cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device, cut_cells_2d_reset
+public :: cut_cells_2d_blocks_t, compute_cut_cells_2d_blocks_device, cut_cells_2d_blocks_reset
 ! the stages of the two paths, public for the twin test (issue #100 step 6a; not re-exported by `fossil`)
 public :: node_flags, cut_cells_2d_prepare, cut_cells_2d_classify, cut_cells_2d_scan, cut_cells_2d_classify_dev, &
           cut_cells_2d_scan_dev
@@ -100,6 +101,58 @@ type :: cut_cells_2d_t
       procedure, pass(self) :: update_host  !< Copy the mapped outputs back to the host.
       procedure, pass(self) :: exit_device  !< Release the device copies.
 endtype cut_cells_2d_t
+
+type :: cut_cells_2d_blocks_t
+   !< Cut cells of nb blocks that share one grid x(nx+1), y(ny+1), each with its own curve (issue #100 step 3b: the plane
+   !< sections of one axis of `cut_cells_3d`), from `compute_cut_cells_2d_blocks_device`. Block b of every cell array
+   !< is the cut of its curve, bit for bit (moments order 0, no boundaries, no quadrature): `cell(..., b)` is the
+   !< `cut_cells_2d_t` array of the same name. With pieces (`with_pieces`), the pieces of all blocks are concatenated
+   !< in block order: block b owns pieces block_piece(b) + 1 .. block_piece(b + 1) and fluid edge intervals
+   !< block_iv(b) + 1 .. block_iv(b + 1); first_piece and piece_iv_start index the concatenated arrays (minus
+   !< block_piece(b), block_iv(b): the block's own numbering); piece_cell holds the cell (i, j) in its block.
+   !< Resident (`on_device`): every allocated array is mapped (OpenACC unstructured data) and its host copy is garbage
+   !< until `update_host`; `exit_device` releases them (before the result goes out of scope). Do not copy a resident
+   !< result (the copy's arrays are not mapped).
+   integer(I4P)              :: nx = 0_I4P, ny = 0_I4P, nb = 0_I4P !< Cells per block, blocks.
+   logical,      allocatable :: closed(:,:,:)        !< The cell boundary closed [nx, ny, nb].
+   real(R8P),    allocatable :: alpha(:,:,:)         !< Fluid area fraction [nx, ny, nb].
+   real(R8P),    allocatable :: aperture(:,:,:,:)    !< Edge fluid fractions [4, nx, ny, nb].
+   real(R8P),    allocatable :: centroid(:,:,:,:)    !< Fluid centroid [2, nx, ny, nb].
+   real(R8P),    allocatable :: wet_length(:,:,:)    !< Wetted length [nx, ny, nb].
+   real(R8P),    allocatable :: wet_centroid(:,:,:,:) !< Wetted centroid [2, nx, ny, nb].
+   real(R8P),    allocatable :: wet_normal(:,:,:,:)  !< Outward-normal integral over the wall [2, nx, ny, nb].
+   integer(I4P), allocatable :: pieces(:,:,:)        !< Fluid pieces per cell [nx, ny, nb].
+   logical,      allocatable :: node_in(:,:,:)       !< Grid node inside the solid [nx+1, ny+1, nb].
+   logical                   :: with_pieces = .false. !< The piece arrays below were computed.
+   integer(I4P), allocatable :: first_piece(:,:,:)   !< First piece of the cell in the concatenated arrays [nx, ny, nb].
+   integer(I4P), allocatable :: block_piece(:)       !< Pieces before block b [nb + 1].
+   integer(I4P), allocatable :: block_iv(:)          !< Fluid edge intervals before block b [nb + 1].
+   integer(I4P)              :: np = 0_I4P           !< Pieces of all blocks.
+   integer(I4P), allocatable :: piece_cell(:,:)      !< Cell (i, j) of each piece in its block [2, np].
+   real(R8P),    allocatable :: piece_area(:)        !< Fluid area of each piece [np].
+   real(R8P),    allocatable :: piece_centroid(:,:)  !< Fluid centroid of each piece [2, np].
+   real(R8P),    allocatable :: piece_wet_length(:)  !< Wetted length of each piece [np].
+   real(R8P),    allocatable :: piece_wet_normal(:,:) !< Outward-normal integral of each piece [2, np].
+   real(R8P),    allocatable :: piece_aperture(:,:)  !< Edge fluid fractions per piece [4, np].
+   integer(I4P), allocatable :: piece_iv_start(:)    !< First interval of each piece [np + 1] (concatenated).
+   integer(I4P), allocatable :: piece_iv_edge(:)     !< Interval edges (numbering of `cut_cells_2d_t`).
+   real(R8P),    allocatable :: piece_iv_lo(:)       !< Interval starts.
+   real(R8P),    allocatable :: piece_iv_hi(:)       !< Interval ends.
+   logical                   :: on_device = .false.  !< The arrays are mapped on the device.
+   contains
+      procedure, pass(self) :: update_host => blocks_update_host !< Copy the mapped arrays back to the host.
+      procedure, pass(self) :: exit_device => blocks_exit_device !< Release the device copies.
+endtype cut_cells_2d_blocks_t
+
+type :: block_prep_t
+   !< Host preparation of one block of `compute_cut_cells_2d_blocks_device` (`node_rows`, `cut_cells_2d_prepare`).
+   integer(I4P)              :: nxs, nps                    !< Crossings, wall pieces.
+   integer(I4P), allocatable :: rstart(:), rseg(:)          !< Segments crossing each node row.
+   integer(I4P), allocatable :: xstart(:), xord(:)          !< Crossings by edge.
+   integer(I4P), allocatable :: pstart(:), pord(:)          !< Wall pieces by cell.
+   real(R8P),    allocatable :: xp(:,:), pab(:,:)           !< Crossing points, wall piece end points.
+   integer(I4P), allocatable :: ptg(:,:)                    !< Wall piece end tags.
+endtype block_prep_t
 
 type :: xing_t
    !< A crossing of a segment with a block edge.
@@ -425,6 +478,352 @@ contains
    endif
    if (res) call mark_resident(cc)
    endsubroutine compute_cut_cells_2d_device
+
+   subroutine compute_cut_cells_2d_blocks_device(nbk, vstart, u, v, next, x, y, cb, status, with_iv, with_pieces, resident)
+   !< The cut cells of nbk blocks that share the grid x(nx+1), y(ny+1), each with its own curve, in one set of launches
+   !< (issue #100 step 3b; the plane sections of one axis of `cut_cells_3d`): block b is `compute_cut_cells_2d` of its
+   !< curve bit for bit, for the outputs of `compute_cut_cells_2d_device` (moments order 0, no boundaries).
+   !<
+   !< Curve b is u, v, next(vstart(b) : vstart(b + 1) - 1), next numbered within the block (1.., 0: no segment).
+   !< Per block the host runs what the one-block twin runs (`node_rows`, `cut_cells_2d_prepare`: the walk and the
+   !< indexes); their arrays are concatenated (offsets per block), and each kernel reads its block's part through the
+   !< start element of the part (explicit-shape dummies), in block-local numbering, so the kernels see exactly the
+   !< arrays of the one-block path. The cells of all blocks are numbered g = (b - 1) nx ny + c; then, as in
+   !< `compute_cut_cells_2d_device`:
+   !< 1. `node_parity` per node of every block;
+   !< 2. the classification and the workspace sizing over all cells (`cut_cells_2d_classify_blocks_dev`, the chunked
+   !<    integer scan of `cut_cells_2d_classify_dev`): every cut cell of every block gets its workspace slice;
+   !< 3. `cut_cell_2d_count` over all cut cells;
+   !< 4. with_pieces: the prefix sums over all cells (`cut_cells_2d_scan_dev` on the stacked grid nx x (ny nbk)), the
+   !<    block offsets, then `quiet_cell_2d_kernel` and `cut_cell_2d_fill`; without, only the quiet cells' measures
+   !<    (`quiet_cell_2d_measures`): no piece arrays.
+   !< Integer offsets and counts only between the stages (exact in any order); the same kernels in the same order per
+   !< cell, `-gpu=nofma`: the same bits. Built without OpenACC the loops run on the host in order. `resident` leaves
+   !< the outputs mapped (see `cut_cells_2d_blocks_t`). status: 0, or 1 on bad edges or nbk < 1.
+   integer(I4P),                intent(in)           :: nbk         !< Blocks.
+   integer(I4P),                intent(in)           :: vstart(nbk + 1) !< First vertex of each curve (vstart(1) = 1).
+   real(R8P),                   intent(in)           :: u(:), v(:)  !< Vertices of all curves.
+   integer(I4P),                intent(in)           :: next(:)     !< Next vertex within the block (0: none).
+   real(R8P),                   intent(in)           :: x(:), y(:)  !< Cell edges (strictly increasing).
+   type(cut_cells_2d_blocks_t), intent(inout)        :: cb          !< Cut cells (released from the device, reset first).
+   integer(I4P),                intent(out)          :: status      !< 0 ok, 1 bad edges or no block.
+   logical,                     intent(in)           :: with_iv     !< Record the fluid edge intervals (with_pieces).
+   logical,                     intent(in)           :: with_pieces !< Compute the pieces.
+   logical,                     intent(in), optional :: resident    !< Leave the outputs on the device (default .false.).
+   type(block_prep_t), allocatable :: pp(:)              !< Host preparation per block.
+   real(R8P),     allocatable :: ua(:), va(:)            !< Vertices (one padding element).
+   integer(I4P),  allocatable :: na(:)                   !< Next vertex (one padding element).
+   integer(I4P),  allocatable :: rsa(:,:), rso(:), rsg(:) !< Node rows: starts [ny + 2, nbk], offsets, segments.
+   integer(I4P),  allocatable :: xsa(:,:), xo(:), xoa(:) !< Crossings by edge [ne + 1, nbk], offsets, order.
+   real(R8P),     allocatable :: xpa(:,:)                !< Crossing points.
+   integer(I4P),  allocatable :: psa(:,:), po(:), poa(:) !< Wall pieces by cell [ncell + 1, nbk], offsets, order.
+   real(R8P),     allocatable :: paba(:,:)               !< Wall piece end points.
+   integer(I4P),  allocatable :: ptga(:,:)               !< Wall piece end tags.
+   integer(I4P),  allocatable :: ckind(:), cutc(:), rwo(:), iwo(:) !< Cell kinds, cut cells, workspace slices.
+   integer(I4P),  allocatable :: cnt(:,:), ivo(:), bdo(:) !< Counts of the cut cells, offsets per cell.
+   real(R8P),     allocatable :: rw(:)                   !< Real workspace pool.
+   integer(I4P),  allocatable :: iw(:)                   !< Integer workspace pool.
+   logical,       allocatable :: node_in(:,:,:), closed(:,:,:) !< Cell outputs.
+   real(R8P),     allocatable :: alpha(:,:,:), aperture(:,:,:,:), centroid(:,:,:,:), wet_length(:,:,:) !< Cell outputs.
+   real(R8P),     allocatable :: wet_centroid(:,:,:,:), wet_normal(:,:,:,:) !< Cell outputs.
+   integer(I4P),  allocatable :: pieces(:,:,:), first_piece(:,:,:), bpc(:), biv(:) !< Cell outputs, block offsets.
+   integer(I4P),  allocatable :: pcell(:,:), ivs(:), ive(:), bds(:) !< Piece outputs (bds: discarded).
+   real(R8P),     allocatable :: parea(:), pcen(:,:), pwl(:), pwn(:,:), pap(:,:), ivl(:), ivh(:) !< Piece outputs.
+   integer(I4P) :: zme(2, 1)                             !< No moment exponents (nm = 0).
+   real(R8P)    :: zmom(1, 1), zwmom(1, 1), zbseg(4, 1)  !< No moments, no wall moments, no boundary segments.
+   logical      :: zbwall(1)                             !< No wall flags.
+   logical      :: res                                   !< Leave the outputs on the device.
+   integer(I4P) :: nx, ny, ne, ne1, ncell, nc1, ntot, nvt, b, v0, v1, g, c, i, j, k, ncut, nrw, niw, np, niv, nbd !< Work.
+   integer(I4P) :: eid(4)                                !< Edge ids.
+
+   call cut_cells_2d_blocks_reset(cb)
+   res = .false. ; if (present(resident)) res = resident
+   status = 1_I4P
+   if (nbk < 1_I4P) return
+   call cut_cells_2d_grid(x, y, nx, ny, status)
+   if (status /= 0_I4P) return
+   ne = (nx + 1_I4P) * ny + nx * (ny + 1_I4P) ; ncell = nx * ny ; ntot = ncell * nbk
+   ! host: node rows, walk and indexes per block, then concatenated (one padding element: a start element in bounds)
+   allocate(pp(nbk), rso(nbk + 1), xo(nbk + 1), po(nbk + 1))
+   rso(1) = 0_I4P ; xo(1) = 0_I4P ; po(1) = 0_I4P
+   do b = 1_I4P, nbk
+      v0 = vstart(b) ; v1 = vstart(b + 1) - 1_I4P
+      call node_rows(u(v0:v1), v(v0:v1), next(v0:v1), y, pp(b)%rstart, pp(b)%rseg)
+      call cut_cells_2d_prepare(u(v0:v1), v(v0:v1), next(v0:v1), x, y, nx, ny, ne1, nc1, pp(b)%nxs, pp(b)%nps, &
+                                pp(b)%xstart, pp(b)%xord, pp(b)%pstart, pp(b)%pord, pp(b)%xp, pp(b)%pab, pp(b)%ptg)
+      rso(b + 1) = rso(b) + size(pp(b)%rseg, kind=I4P) ; xo(b + 1) = xo(b) + pp(b)%nxs ; po(b + 1) = po(b) + pp(b)%nps
+   enddo
+   nvt = vstart(nbk + 1) - 1_I4P
+   allocate(ua(nvt + 1), va(nvt + 1), na(nvt + 1), rsa(ny + 2, nbk), rsg(rso(nbk + 1) + 1), xsa(ne + 1, nbk), &
+            xoa(xo(nbk + 1) + 1), xpa(2, xo(nbk + 1) + 1), psa(ncell + 1, nbk), poa(po(nbk + 1) + 1), &
+            paba(4, po(nbk + 1) + 1), ptga(2, po(nbk + 1) + 1))
+   ua(1:nvt) = u(1:nvt) ; va(1:nvt) = v(1:nvt) ; na(1:nvt) = next(1:nvt)
+   ua(nvt + 1) = 0._R8P ; va(nvt + 1) = 0._R8P ; na(nvt + 1) = 0_I4P
+   rsg(rso(nbk + 1) + 1) = 0_I4P ; xoa(xo(nbk + 1) + 1) = 0_I4P ; xpa(:, xo(nbk + 1) + 1) = 0._R8P
+   poa(po(nbk + 1) + 1) = 0_I4P ; paba(:, po(nbk + 1) + 1) = 0._R8P ; ptga(:, po(nbk + 1) + 1) = 0_I4P
+   do b = 1_I4P, nbk
+      rsa(:, b) = pp(b)%rstart ; rsg(rso(b) + 1:rso(b + 1)) = pp(b)%rseg
+      xsa(:, b) = pp(b)%xstart ; psa(:, b) = pp(b)%pstart
+      do k = 1_I4P, pp(b)%nxs
+         xoa(xo(b) + k) = pp(b)%xord(k) ; xpa(:, xo(b) + k) = pp(b)%xp(:, k)
+      enddo
+      do k = 1_I4P, pp(b)%nps
+         poa(po(b) + k) = pp(b)%pord(k) ; paba(:, po(b) + k) = pp(b)%pab(:, k) ; ptga(:, po(b) + k) = pp(b)%ptg(:, k)
+      enddo
+   enddo
+   deallocate(pp)
+   zme = 0_I4P ; zmom = 0._R8P ; zwmom = 0._R8P ; zbseg = 0._R8P ; zbwall = .false.
+   allocate(node_in(nx + 1, ny + 1, nbk), closed(nx, ny, nbk), alpha(nx, ny, nbk), aperture(4, nx, ny, nbk), &
+            centroid(2, nx, ny, nbk), wet_length(nx, ny, nbk), wet_centroid(2, nx, ny, nbk), wet_normal(2, nx, ny, nbk), &
+            pieces(nx, ny, nbk))
+   !$acc data copyin(x, y, vstart, ua, va, na, rsa, rso, rsg, xsa, xo, xoa, xpa, psa, po, poa, paba, ptga, zme, zmom, &
+   !$acc&            zwmom, zbseg, zbwall)
+   !$acc enter data create(node_in, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
+   ! 1. node flags, one thread per node of every block
+   !$acc parallel loop gang vector collapse(3) default(present) present(node_in)
+   do b = 1_I4P, nbk
+      do j = 1_I4P, ny + 1_I4P
+         do i = 1_I4P, nx + 1_I4P
+            node_in(i, j, b) = node_parity(x(i), y(j), rsa(j, b), rsa(j + 1, b) - 1_I4P, rso(b + 1) - rso(b), &
+                                           rsg(rso(b) + 1), vstart(b + 1) - vstart(b), ua(vstart(b)), va(vstart(b)), &
+                                           na(vstart(b)))
+         enddo
+      enddo
+   enddo
+   ! 2. classification and workspace sizing over the cells of all blocks
+   call cut_cells_2d_classify_blocks_dev(nx, ny, ne, ncell, nbk, xsa, psa, node_in, ckind, ncut, cutc, rwo, iwo, nrw, niw)
+   allocate(cnt(3, max(1_I4P, ncut)), rw(max(1_I4P, nrw)), iw(max(1_I4P, niw)))
+   !$acc data create(rw, iw, cnt)
+   ! 3. count over the cut cells of all blocks (each reads its block's part of the concatenated arrays)
+   !$acc parallel loop gang vector default(present) private(eid) &
+   !$acc& present(node_in, cutc, rwo, iwo, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
+   do k = 1_I4P, ncut
+      g = cutc(k) ; b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell
+      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      call cell_edge_ids(nx, ny, i, j, eid)
+      call cut_cell_2d_count(x(i), x(i + 1), y(j), y(j + 1), node_in(i, j, b), node_in(i + 1, j, b), &
+                             node_in(i + 1, j + 1, b), node_in(i, j + 1, b), eid, ne, xo(b + 1) - xo(b), xsa(1, b), &
+                             xoa(xo(b) + 1), xpa(1, xo(b) + 1), psa(c + 1, b) - psa(c, b), psa(c, b) - 1_I4P, &
+                             po(b + 1) - po(b), poa(po(b) + 1), paba(1, po(b) + 1), ptga(1, po(b) + 1), 0_I4P, zme, with_iv, &
+                             .false., rwo(k + 1) - rwo(k), rw(rwo(k)), iwo(k + 1) - iwo(k), iw(iwo(k)), closed(i, j, b), &
+                             alpha(i, j, b), aperture(1, i, j, b), centroid(1, i, j, b), wet_length(i, j, b), &
+                             wet_centroid(1, i, j, b), wet_normal(1, i, j, b), cnt(3, k), cnt(1, k), cnt(2, k))
+      pieces(i, j, b) = cnt(3, k)
+   enddo
+   if (.not. with_pieces) then
+      ! 4. the quiet cells' measures only
+      !$acc parallel loop gang vector default(present) &
+      !$acc& present(ckind, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
+      do g = 1_I4P, ntot
+         if (ckind(g) > 0_I4P) cycle
+         b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell
+         i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+         call quiet_cell_2d_measures(x(i), x(i + 1), y(j), y(j + 1), ckind(g) < 0_I4P, closed(i, j, b), alpha(i, j, b), &
+                                     aperture(1, i, j, b), centroid(1, i, j, b), wet_length(i, j, b), &
+                                     wet_centroid(1, i, j, b), wet_normal(1, i, j, b), pieces(i, j, b))
+      enddo
+      np = 0_I4P ; niv = 0_I4P
+   else
+      ! 4. prefix sums over the cells of all blocks (the stacked grid nx x (ny nbk): cell g of block b is its cell g),
+      !    then the offsets of the blocks
+      allocate(first_piece(nx, ny, nbk), ivo(ntot), bdo(ntot), bpc(nbk + 1), biv(nbk + 1))
+      !$acc enter data create(first_piece)
+      !$acc data create(ivo, bdo, bpc, biv)
+      call cut_cells_2d_scan_dev(nx, ny * nbk, ntot, ckind, ncut, cnt, with_iv, .false., first_piece, ivo, bdo, np, niv, &
+                                 nbd)
+      !$acc parallel loop gang vector default(present) present(first_piece, ivo, bpc, biv)
+      do b = 1_I4P, nbk
+         bpc(b) = first_piece(1, 1, b) - 1_I4P ; biv(b) = ivo((b - 1_I4P) * ncell + 1_I4P)
+      enddo
+      !$acc update host(bpc, biv)
+      bpc(nbk + 1) = np ; biv(nbk + 1) = niv
+      allocate(pcell(2, np), parea(np), pcen(2, np), pwl(np), pwn(2, np), pap(4, np), ivs(np + 1), &
+               ive(max(1_I4P, niv)), ivl(max(1_I4P, niv)), ivh(max(1_I4P, niv)), bds(np + 1))
+      !$acc enter data create(pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
+      !$acc data create(bds)
+      ! 5. fill: the quiet cells, then the cut cells
+      !$acc parallel loop gang vector default(present) private(eid) &
+      !$acc& present(ckind, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces, first_piece, &
+      !$acc&         ivo, bdo, pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh, bds)
+      do g = 1_I4P, ntot
+         if (ckind(g) > 0_I4P) cycle
+         b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell
+         i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+         call cell_edge_ids(nx, ny, i, j, eid)
+         call quiet_cell_2d_kernel(x(i), x(i + 1), y(j), y(j + 1), i, j, ckind(g) < 0_I4P, eid, 0_I4P, zme, with_iv, &
+                                   .false., closed(i, j, b), alpha(i, j, b), aperture(1, i, j, b), centroid(1, i, j, b), &
+                                   wet_length(i, j, b), wet_centroid(1, i, j, b), wet_normal(1, i, j, b), pieces(i, j, b), &
+                                   first_piece(i, j, b) - 1_I4P, ivo(g), bdo(g), np, pcell, parea, pcen, pwl, pwn, pap, &
+                                   zmom, zwmom, ivs, niv, ive, ivl, ivh, bds, 0_I4P, zbseg, zbwall)
+      enddo
+      !$acc parallel loop gang vector default(present) private(eid) &
+      !$acc& present(cutc, rwo, iwo, first_piece, ivo, bdo, pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh, bds)
+      do k = 1_I4P, ncut
+         g = cutc(k) ; b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell
+         i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+         call cell_edge_ids(nx, ny, i, j, eid)
+         call cut_cell_2d_fill(x(i), x(i + 1), y(j), y(j + 1), i, j, eid, 0_I4P, zme, with_iv, .false., &
+                               rwo(k + 1) - rwo(k), rw(rwo(k)), iwo(k + 1) - iwo(k), iw(iwo(k)), first_piece(i, j, b) - 1_I4P, &
+                               ivo(g), bdo(g), np, pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, &
+                               ive, ivl, ivh, bds, 0_I4P, zbseg, zbwall)
+      enddo
+      !$acc serial default(present) present(ivs)
+      ivs(np + 1) = niv + 1_I4P
+      !$acc end serial
+      !$acc end data
+      !$acc end data
+   endif
+   !$acc end data
+   !$acc exit data delete(ckind, cutc, rwo, iwo)
+   !$acc end data
+   if (.not. res) then ! copy back the outputs
+      !$acc exit data copyout(node_in, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
+      if (with_pieces) then
+         !$acc exit data copyout(first_piece, pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
+      endif
+   endif
+   cb%nx = nx ; cb%ny = ny ; cb%nb = nbk ; cb%with_pieces = with_pieces
+   call move_alloc(node_in, cb%node_in) ; call move_alloc(closed, cb%closed) ; call move_alloc(alpha, cb%alpha)
+   call move_alloc(aperture, cb%aperture) ; call move_alloc(centroid, cb%centroid) ; call move_alloc(wet_length, cb%wet_length)
+   call move_alloc(wet_centroid, cb%wet_centroid) ; call move_alloc(wet_normal, cb%wet_normal)
+   call move_alloc(pieces, cb%pieces)
+   if (with_pieces) then
+      cb%np = np
+      call move_alloc(first_piece, cb%first_piece) ; call move_alloc(bpc, cb%block_piece) ; call move_alloc(biv, cb%block_iv)
+      call move_alloc(pcell, cb%piece_cell) ; call move_alloc(parea, cb%piece_area) ; call move_alloc(pcen, cb%piece_centroid)
+      call move_alloc(pwl, cb%piece_wet_length) ; call move_alloc(pwn, cb%piece_wet_normal)
+      call move_alloc(pap, cb%piece_aperture) ; call move_alloc(ivs, cb%piece_iv_start)
+      if (niv > 0_I4P) then
+         call move_alloc(ive, cb%piece_iv_edge) ; call move_alloc(ivl, cb%piece_iv_lo) ; call move_alloc(ivh, cb%piece_iv_hi)
+      else ! the one-element placeholders go; the empty outputs are mapped too, so every output is present when resident
+         if (res) then
+            !$acc exit data delete(ive, ivl, ivh)
+         endif
+         allocate(cb%piece_iv_edge(0), cb%piece_iv_lo(0), cb%piece_iv_hi(0))
+         if (res) then
+            !$acc enter data create(cb%piece_iv_edge, cb%piece_iv_lo, cb%piece_iv_hi)
+         endif
+      endif
+      if (res) then
+         !$acc enter data copyin(cb%block_piece, cb%block_iv)
+      endif
+   endif
+   cb%on_device = res
+   endsubroutine compute_cut_cells_2d_blocks_device
+
+   subroutine cut_cells_2d_classify_blocks_dev(nx, ny, ne, ncell, nbk, xstart, pstart, node_in, ckind, ncut, cutc, rwo, iwo, &
+                                               nrw_tot, niw_tot)
+   !< `cut_cells_2d_classify_dev` over the cells g = (b - 1) ncell + c of nbk blocks of one grid (issue #100 step 3b),
+   !< moments order 0: cut cells numbered in the order of g, workspace slices in that order. xstart, pstart and node_in
+   !< must be present on the device; ckind, cutc, rwo and iwo are left mapped (filled on the device only): the caller
+   !< deletes them. Only ncut and the two workspace totals come back. Built in locals moved into the dummies (#100 6a).
+   integer(I4P),              intent(in)  :: nx, ny, ne, ncell, nbk          !< Cells, edges per block, blocks.
+   integer(I4P),              intent(in)  :: xstart(ne + 1, nbk)             !< Crossings by edge of each block.
+   integer(I4P),              intent(in)  :: pstart(ncell + 1, nbk)          !< Wall pieces by cell of each block.
+   logical,                   intent(in)  :: node_in(nx + 1, ny + 1, nbk)    !< Node inside flags.
+   integer(I4P), allocatable, intent(out) :: ckind(:)                        !< Cell kinds [ncell nbk].
+   integer(I4P),              intent(out) :: ncut                            !< Cut cells.
+   integer(I4P), allocatable, intent(out) :: cutc(:)                         !< Cell g of each cut cell [ncut].
+   integer(I4P), allocatable, intent(out) :: rwo(:), iwo(:)                  !< Workspace slices [ncut + 1].
+   integer(I4P),              intent(out) :: nrw_tot, niw_tot                !< Workspace pool sizes.
+   integer(I4P), allocatable :: tot(:,:)                                     !< Chunk totals, then offsets [3, nch].
+   integer(I4P), allocatable :: ck(:), cu(:), ro(:), io(:)                   !< Kinds, cut cells, offsets (built here).
+   integer(I4P) :: ntot, nch, ch, g, b, c, i, j, k, e, nxc, nrw, niw, a1, a2, a3, eid(4), sums(3) !< Work.
+
+   ntot = ncell * nbk
+   nch = (ntot + SCAN_SEG - 1_I4P) / SCAN_SEG
+   allocate(ck(ntot), tot(3, nch))
+   !$acc enter data create(ck)
+   !$acc data create(tot)
+   !$acc parallel loop gang vector default(present) private(eid) present(xstart, pstart, node_in, ck, tot)
+   do ch = 1_I4P, nch
+      a1 = 0_I4P ; a2 = 0_I4P ; a3 = 0_I4P
+      !$acc loop seq
+      do g = (ch - 1_I4P) * SCAN_SEG + 1_I4P, min(ch * SCAN_SEG, ntot)
+         b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell
+         i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+         call cell_edge_ids(nx, ny, i, j, eid)
+         if (cell_is_quiet(pstart(c + 1, b) - pstart(c, b), eid, ne, xstart(1, b), node_in(i, j, b), &
+                           node_in(i + 1, j, b), node_in(i + 1, j + 1, b), node_in(i, j + 1, b))) then
+            ck(g) = 0_I4P ; if (node_in(i, j, b)) ck(g) = -1_I4P
+         else
+            nxc = 0_I4P
+            do e = 1_I4P, 4_I4P
+               nxc = nxc + xstart(eid(e) + 1, b) - xstart(eid(e), b)
+            enddo
+            call cut_cell_2d_sizes(nxc, pstart(c + 1, b) - pstart(c, b), 0_I4P, nrw, niw)
+            ck(g) = 1_I4P ; a1 = a1 + 1_I4P ; a2 = a2 + nrw ; a3 = a3 + niw
+         endif
+      enddo
+      tot(1, ch) = a1 ; tot(2, ch) = a2 ; tot(3, ch) = a3
+   enddo
+   call chunk_offsets_dev(nch, [0_I4P, 1_I4P, 1_I4P], tot, sums)
+   ncut = sums(1) ; nrw_tot = sums(2) - 1_I4P ; niw_tot = sums(3) - 1_I4P
+   allocate(cu(ncut), ro(ncut + 1), io(ncut + 1))
+   !$acc enter data create(cu, ro, io)
+   !$acc parallel loop gang vector default(present) private(eid) present(xstart, pstart, ck, cu, ro, io, tot)
+   do ch = 1_I4P, nch
+      k = tot(1, ch) ; a2 = tot(2, ch) ; a3 = tot(3, ch)
+      !$acc loop seq
+      do g = (ch - 1_I4P) * SCAN_SEG + 1_I4P, min(ch * SCAN_SEG, ntot)
+         if (ck(g) <= 0_I4P) cycle
+         b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell
+         i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+         call cell_edge_ids(nx, ny, i, j, eid)
+         nxc = 0_I4P
+         do e = 1_I4P, 4_I4P
+            nxc = nxc + xstart(eid(e) + 1, b) - xstart(eid(e), b)
+         enddo
+         call cut_cell_2d_sizes(nxc, pstart(c + 1, b) - pstart(c, b), 0_I4P, nrw, niw)
+         k = k + 1_I4P ; ck(g) = k ; cu(k) = g ; ro(k) = a2 ; io(k) = a3
+         a2 = a2 + nrw ; a3 = a3 + niw
+      enddo
+   enddo
+   a2 = sums(2) ; a3 = sums(3)
+   !$acc serial default(present) present(ro, io)
+   ro(ncut + 1) = a2 ; io(ncut + 1) = a3
+   !$acc end serial
+   !$acc end data
+   call move_alloc(ck, ckind) ; call move_alloc(cu, cutc) ; call move_alloc(ro, rwo) ; call move_alloc(io, iwo)
+   endsubroutine cut_cells_2d_classify_blocks_dev
+
+   subroutine cut_cells_2d_blocks_reset(cb)
+   !< Release a resident multi-block result from the device, then reset it to the default (issue #100 step 3b).
+   type(cut_cells_2d_blocks_t), intent(inout) :: cb    !< Cut cells.
+   type(cut_cells_2d_blocks_t)                :: fresh !< Default.
+
+   if (cb%on_device) call cb%exit_device
+   cb = fresh
+   endsubroutine cut_cells_2d_blocks_reset
+
+   subroutine blocks_update_host(self)
+   !< Copy the mapped arrays of a resident multi-block result back to the host (they stay mapped). No-op if not mapped.
+   class(cut_cells_2d_blocks_t), intent(inout) :: self !< Cut cells.
+
+   if (.not. self%on_device) return
+   !$acc update host(self%node_in, self%closed, self%alpha, self%aperture, self%centroid, self%wet_length, &
+   !$acc&            self%wet_centroid, self%wet_normal, self%pieces)
+   if (self%with_pieces) then
+      !$acc update host(self%first_piece, self%piece_cell, self%piece_area, self%piece_centroid, self%piece_wet_length, &
+      !$acc&            self%piece_wet_normal, self%piece_aperture, self%piece_iv_start, self%piece_iv_edge, &
+      !$acc&            self%piece_iv_lo, self%piece_iv_hi)
+   endif
+   endsubroutine blocks_update_host
+
+   subroutine blocks_exit_device(self)
+   !< Release the device copies of a resident multi-block result (the host arrays are kept as they are).
+   class(cut_cells_2d_blocks_t), intent(inout) :: self !< Cut cells.
+
+   if (.not. self%on_device) return
+   !$acc exit data delete(self%node_in, self%closed, self%alpha, self%aperture, self%centroid, self%wet_length, &
+   !$acc&                 self%wet_centroid, self%wet_normal, self%pieces)
+   if (self%with_pieces) then
+      !$acc exit data delete(self%first_piece, self%block_piece, self%block_iv, self%piece_cell, self%piece_area, &
+      !$acc&                 self%piece_centroid, self%piece_wet_length, self%piece_wet_normal, self%piece_aperture, &
+      !$acc&                 self%piece_iv_start, self%piece_iv_edge, self%piece_iv_lo, self%piece_iv_hi)
+   endif
+   self%on_device = .false.
+   endsubroutine blocks_exit_device
 
    subroutine cut_cells_2d_reset(cc)
    !< Release a resident cut from the device (`exit_device`), then reset it to the default (issue #100 step 6a): what
@@ -1390,6 +1789,23 @@ contains
    real(R8P),    intent(inout) :: bseg(4, nbd)         !< Boundary segments.
    logical,      intent(inout) :: bwall(nbd)           !< Wall flags.
 
+   call quiet_cell_2d_measures(x0, x1, y0, y1, solid, closed, alpha, aperture, centroid, wet_length, wet_centroid, &
+                               wet_normal, npieces)
+   if (solid) return
+   call quiet_piece_2d(x0, x1, y0, y1, i, j, eid, nm, me, with_iv, with_bnd, p0, iv0, bd0, np, pcell, parea, pcen, pwl, &
+                       pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+   endsubroutine quiet_cell_2d_kernel
+
+   pure subroutine quiet_cell_2d_measures(x0, x1, y0, y1, solid, closed, alpha, aperture, centroid, wet_length, &
+                                          wet_centroid, wet_normal, npieces)
+   !< Cell measures of a quiet cell (no wall pieces or crossings): all solid, or all fluid (one piece).
+   !$acc routine seq
+   real(R8P),    intent(in)  :: x0, x1, y0, y1       !< Cell.
+   logical,      intent(in)  :: solid                !< The cell is inside the solid.
+   logical,      intent(out) :: closed               !< Closed.
+   real(R8P),    intent(out) :: alpha, aperture(4), centroid(2), wet_length, wet_centroid(2), wet_normal(2) !< Measures.
+   integer(I4P), intent(out) :: npieces              !< Pieces.
+
    closed = .true. ; npieces = 0_I4P
    wet_length = 0._R8P ; wet_centroid = [0.5_R8P * (x0 + x1), 0.5_R8P * (y0 + y1)]
    wet_normal = 0._R8P
@@ -1399,9 +1815,7 @@ contains
       return
    endif
    alpha = 1._R8P ; aperture = 1._R8P ; npieces = 1_I4P
-   call quiet_piece_2d(x0, x1, y0, y1, i, j, eid, nm, me, with_iv, with_bnd, p0, iv0, bd0, np, pcell, parea, pcen, pwl, &
-                       pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
-   endsubroutine quiet_cell_2d_kernel
+   endsubroutine quiet_cell_2d_measures
 
    subroutine quiet_piece_2d(x0, x1, y0, y1, i, j, eid, nm, me, with_iv, with_bnd, p0, iv0, bd0, np, pcell, parea, pcen, &
                              pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)

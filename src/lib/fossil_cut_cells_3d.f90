@@ -69,7 +69,7 @@ module fossil_cut_cells_3d
 !< (`cell_piercings`: exact orient3d). Moments, quadrature and the links' intervals take the same kernels.
 use fossil_box_predicates,     only : box_triangle_overlap
 use fossil_box_query,          only : box_tolerance
-use fossil_curve_object,       only : curve_object, cut_cells_2d_t
+use fossil_curve_object,       only : curve_object, cut_cells_2d_t, cut_cells_2d_blocks_t, cut_cells_device_many
 use fossil_curve_slice,        only : slice_surface
 use fossil_cut_graph,          only : cut_links_t, build_csr
 use fossil_cut_moments,        only : MOMENTS_MAX, mono_count, mono_exponents, triangle_moments, segment_green_moments, &
@@ -82,7 +82,7 @@ use penf,                      only : I4P, R8P
 
 implicit none
 private
-public :: cut_cells_3d_t, cut_cells_3d
+public :: cut_cells_3d_t, cut_cells_3d, cut_cells_3d_sections
 
 integer(I4P), parameter :: MONO2_MAX = 15_I4P !< mono_count(2, MOMENTS_MAX): moments per face, at most.
 integer(I4P), parameter :: MONO3_MAX = 35_I4P !< mono_count(3, MOMENTS_MAX): moments per piece, at most.
@@ -141,11 +141,15 @@ type :: cut_cells_3d_t
 endtype cut_cells_3d_t
 
 contains
-   subroutine cut_cells_3d(surface, x, y, z, cut, status, links, edges, moments_order, quadrature)
+   subroutine cut_cells_3d(surface, x, y, z, cut, status, links, edges, moments_order, quadrature, device_sections)
    !< Cut cells of `surface` on the block with cell edges x(nx+1), y(ny+1), z(nz+1) (issue #40).
    !<
    !< Step 4: the face fluid fractions, centroids and pieces of every grid face (see the module
    !< notes). `status = STATUS_INVALID_INPUT` on bad edges.
+   !<
+   !< `device_sections = .true.` (issue #100 step 3b; default .false.) cuts the plane sections on the device, batched
+   !< per axis (`sections_device`), with the same bits; it applies only without `links`, `moments_order` > 0 and
+   !< `quadrature` (else the sections stay on the host).
    type(surface_stl_object), intent(in)            :: surface    !< Surface.
    real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
    type(cut_cells_3d_t),     intent(out)           :: cut        !< Cut cells.
@@ -154,6 +158,7 @@ contains
    logical,                  intent(in),  optional :: edges      !< Also the fluid fractions of the cell edges (issue #70).
    integer(I4P),             intent(in),  optional :: moments_order !< Moments of the pieces up to this order (0-4, #70).
    logical,                  intent(in),  optional :: quadrature !< Quadrature rules on the pieces and their walls (#70).
+   logical,                  intent(in),  optional :: device_sections !< The plane sections on the device (#100 step 3b).
    type(cut_cells_2d_t), allocatable :: px(:), py(:), pz(:) !< Plane sections kept for the links.
    logical              :: all_edges !< Edge fractions asked.
    integer(I4P)         :: mo, nm2   !< Moment order, 2-D moments per face.
@@ -164,8 +169,7 @@ contains
    real(R8P),    allocatable :: tri(:,:,:), nrm(:,:) !< Triangles [3, 3, nf], normals [3, nf].
    integer(I4P), allocatable :: cnt(:), kstart(:), klst(:) !< Candidates of the cells (see `cell_candidates_3d`).
    type(facet_object), pointer :: fp      !< Facet.
-   type(curve_object)   :: sec    !< Section.
-   type(cut_cells_2d_t) :: c2     !< Its cut cells.
+   logical              :: dsec   !< The sections on the device.
 
    if (present(status)) status = STATUS_OK
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
@@ -189,48 +193,13 @@ contains
    cut%moments_order = mo ; nm2 = 0_I4P ; if (mo > 0_I4P) nm2 = mono_count(2_I4P, mo)
    allocate(cut%face_x_moments(nm2, nx + 1, ny, nz), cut%face_y_moments(nm2, nx, ny + 1, nz), &
             cut%face_z_moments(nm2, nx, ny, nz + 1))
-   ! planes x = x_i: (u, v) = (y, z)
-   do i = 1, nx + 1
-      call slice_surface(surface=surface, normal_axis=1_I4P, level=x(i), curve=sec, on_plane_low=.true.)
-      call sec%cut_cells(x=y, y=z, cut=c2, status=st, intervals=present(links), moments_order=mo, boundaries=qd)
-      if (present(links) .or. qd) px(i) = c2
-      do k = 1, nz
-         do j = 1, ny
-            cut%face_x(i, j, k) = c2%alpha(j, k) ; cut%face_x_pieces(i, j, k) = c2%pieces(j, k)
-            cut%face_x_closed(i, j, k) = c2%closed(j, k)
-            cut%face_x_centroid(:, i, j, k) = [x(i), c2%centroid(1, j, k), c2%centroid(2, j, k)]
-            if (nm2 > 0_I4P) cut%face_x_moments(:, i, j, k) = section_moments(c2, j, k, nm2)
-         enddo
-      enddo
-   enddo
-   ! planes y = y_j: (u, v) = (z, x)
-   do j = 1, ny + 1
-      call slice_surface(surface=surface, normal_axis=2_I4P, level=y(j), curve=sec, on_plane_low=.true.)
-      call sec%cut_cells(x=z, y=x, cut=c2, status=st, intervals=present(links), moments_order=mo, boundaries=qd)
-      if (present(links) .or. qd) py(j) = c2
-      do k = 1, nz
-         do i = 1, nx
-            cut%face_y(i, j, k) = c2%alpha(k, i) ; cut%face_y_pieces(i, j, k) = c2%pieces(k, i)
-            cut%face_y_closed(i, j, k) = c2%closed(k, i)
-            cut%face_y_centroid(:, i, j, k) = [c2%centroid(2, k, i), y(j), c2%centroid(1, k, i)]
-            if (nm2 > 0_I4P) cut%face_y_moments(:, i, j, k) = section_moments(c2, k, i, nm2)
-         enddo
-      enddo
-   enddo
-   ! planes z = z_k: (u, v) = (x, y)
-   do k = 1, nz + 1
-      call slice_surface(surface=surface, normal_axis=3_I4P, level=z(k), curve=sec, on_plane_low=.true.)
-      call sec%cut_cells(x=x, y=y, cut=c2, status=st, intervals=present(links), moments_order=mo, boundaries=qd)
-      if (present(links) .or. qd) pz(k) = c2
-      do j = 1, ny
-         do i = 1, nx
-            cut%face_z(i, j, k) = c2%alpha(i, j) ; cut%face_z_pieces(i, j, k) = c2%pieces(i, j)
-            cut%face_z_closed(i, j, k) = c2%closed(i, j)
-            cut%face_z_centroid(:, i, j, k) = [c2%centroid(1, i, j), c2%centroid(2, i, j), z(k)]
-            if (nm2 > 0_I4P) cut%face_z_moments(:, i, j, k) = section_moments(c2, i, j, nm2)
-         enddo
-      enddo
-   enddo
+   ! the plane sections: faces of every grid plane
+   dsec = .false. ; if (present(device_sections)) dsec = device_sections
+   if (dsec .and. .not. (present(links) .or. qd .or. mo > 0_I4P)) then
+      call sections_device(surface, x, y, z, cut)
+   else
+      call sections_host(surface, x, y, z, cut, present(links), mo, qd, nm2, px, py, pz)
+   endif
    ! grid nodes (issue #70), and the cell edges if asked: exact crossings along the grid lines
    all_edges = .false. ; if (present(edges)) all_edges = edges ! no short-circuit in Fortran: never edges if absent
    call edge_fractions(surface, x, y, z, cut, all_edges)
@@ -2519,4 +2488,208 @@ contains
    enddo
    col_of = lo
    endfunction col_of
+
+   subroutine sections_host(surface, x, y, z, cut, wlinks, mo, qd, nm2, px, py, pz)
+   !< The plane sections of `cut_cells_3d` on the host: every grid plane sliced (`slice_surface` with `on_plane_low`)
+   !< and cut by `curve%cut_cells`, its cells copied into the face arrays of `cut` (allocated by the caller); with
+   !< links or quadrature the sections are kept in px, py, pz (allocated by the caller).
+   type(surface_stl_object),          intent(in)    :: surface    !< Surface.
+   real(R8P),                         intent(in)    :: x(:), y(:), z(:) !< Cell edges.
+   type(cut_cells_3d_t),              intent(inout) :: cut        !< Cut cells (face arrays allocated).
+   logical,                           intent(in)    :: wlinks     !< Links asked: fluid edge intervals, sections kept.
+   integer(I4P),                      intent(in)    :: mo, nm2    !< Moment order, 2-D moments per face.
+   logical,                           intent(in)    :: qd         !< Quadrature asked: boundaries, sections kept.
+   type(cut_cells_2d_t), allocatable, intent(inout) :: px(:), py(:), pz(:) !< Plane sections kept.
+   type(curve_object)   :: sec    !< Section.
+   type(cut_cells_2d_t) :: c2     !< Its cut cells.
+   integer(I4P)         :: nx, ny, nz, i, j, k, st !< Work.
+
+   nx = cut%nx ; ny = cut%ny ; nz = cut%nz
+   ! planes x = x_i: (u, v) = (y, z)
+   do i = 1, nx + 1
+      call slice_surface(surface=surface, normal_axis=1_I4P, level=x(i), curve=sec, on_plane_low=.true.)
+      call sec%cut_cells(x=y, y=z, cut=c2, status=st, intervals=wlinks, moments_order=mo, boundaries=qd)
+      if (wlinks .or. qd) px(i) = c2
+      do k = 1, nz
+         do j = 1, ny
+            cut%face_x(i, j, k) = c2%alpha(j, k) ; cut%face_x_pieces(i, j, k) = c2%pieces(j, k)
+            cut%face_x_closed(i, j, k) = c2%closed(j, k)
+            cut%face_x_centroid(:, i, j, k) = [x(i), c2%centroid(1, j, k), c2%centroid(2, j, k)]
+            if (nm2 > 0_I4P) cut%face_x_moments(:, i, j, k) = section_moments(c2, j, k, nm2)
+         enddo
+      enddo
+   enddo
+   ! planes y = y_j: (u, v) = (z, x)
+   do j = 1, ny + 1
+      call slice_surface(surface=surface, normal_axis=2_I4P, level=y(j), curve=sec, on_plane_low=.true.)
+      call sec%cut_cells(x=z, y=x, cut=c2, status=st, intervals=wlinks, moments_order=mo, boundaries=qd)
+      if (wlinks .or. qd) py(j) = c2
+      do k = 1, nz
+         do i = 1, nx
+            cut%face_y(i, j, k) = c2%alpha(k, i) ; cut%face_y_pieces(i, j, k) = c2%pieces(k, i)
+            cut%face_y_closed(i, j, k) = c2%closed(k, i)
+            cut%face_y_centroid(:, i, j, k) = [c2%centroid(2, k, i), y(j), c2%centroid(1, k, i)]
+            if (nm2 > 0_I4P) cut%face_y_moments(:, i, j, k) = section_moments(c2, k, i, nm2)
+         enddo
+      enddo
+   enddo
+   ! planes z = z_k: (u, v) = (x, y)
+   do k = 1, nz + 1
+      call slice_surface(surface=surface, normal_axis=3_I4P, level=z(k), curve=sec, on_plane_low=.true.)
+      call sec%cut_cells(x=x, y=y, cut=c2, status=st, intervals=wlinks, moments_order=mo, boundaries=qd)
+      if (wlinks .or. qd) pz(k) = c2
+      do j = 1, ny
+         do i = 1, nx
+            cut%face_z(i, j, k) = c2%alpha(i, j) ; cut%face_z_pieces(i, j, k) = c2%pieces(i, j)
+            cut%face_z_closed(i, j, k) = c2%closed(i, j)
+            cut%face_z_centroid(:, i, j, k) = [c2%centroid(1, i, j), c2%centroid(2, i, j), z(k)]
+            if (nm2 > 0_I4P) cut%face_z_moments(:, i, j, k) = section_moments(c2, i, j, nm2)
+         enddo
+      enddo
+   enddo
+   endsubroutine sections_host
+
+   subroutine cut_cells_3d_sections(surface, x, y, z, cut, device, status)
+   !< The faces of `cut_cells_3d` only (issue #100 step 3b, for the benches): nx, ny, nz and the face fractions,
+   !< centroids, pieces and closed flags of every grid face, moments order 0, by the host sections (`sections_host`,
+   !< the path of `cut_cells_3d`) or with `device = .true.` by the batched device sections (`sections_device`): the
+   !< same bits. `status = STATUS_INVALID_INPUT` on bad edges.
+   type(surface_stl_object), intent(in)            :: surface    !< Surface.
+   real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
+   type(cut_cells_3d_t),     intent(out)           :: cut        !< Faces (the other outputs unallocated).
+   logical,                  intent(in),  optional :: device     !< The sections on the device (default .false.).
+   integer(I4P),             intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(cut_cells_2d_t), allocatable :: px(:), py(:), pz(:) !< Not kept.
+   integer(I4P)                      :: nx, ny, nz            !< Cells.
+   logical                           :: dev                   !< On the device.
+
+   if (present(status)) status = STATUS_OK
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   if (nx < 1 .or. ny < 1 .or. nz < 1) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (any(x(2:) <= x(:nx)) .or. any(y(2:) <= y(:ny)) .or. any(z(2:) <= z(:nz))) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   dev = .false. ; if (present(device)) dev = device
+   cut%nx = nx ; cut%ny = ny ; cut%nz = nz
+   if (dev) then
+      call sections_device(surface, x, y, z, cut)
+   else
+      allocate(cut%face_x(nx + 1, ny, nz), cut%face_y(nx, ny + 1, nz), cut%face_z(nx, ny, nz + 1))
+      allocate(cut%face_x_centroid(3, nx + 1, ny, nz), cut%face_y_centroid(3, nx, ny + 1, nz), &
+               cut%face_z_centroid(3, nx, ny, nz + 1))
+      allocate(cut%face_x_pieces(nx + 1, ny, nz), cut%face_y_pieces(nx, ny + 1, nz), cut%face_z_pieces(nx, ny, nz + 1))
+      allocate(cut%face_x_closed(nx + 1, ny, nz), cut%face_y_closed(nx, ny + 1, nz), cut%face_z_closed(nx, ny, nz + 1))
+      call sections_host(surface, x, y, z, cut, .false., 0_I4P, .false., 0_I4P, px, py, pz)
+   endif
+   endsubroutine cut_cells_3d_sections
+
+   subroutine sections_device(surface, x, y, z, cut)
+   !< The plane sections of `cut_cells_3d` on the device (issue #100 step 3b), moments order 0, no intervals, no
+   !< boundaries: per axis, the N + 1 planes are sliced on the host (`slice_surface` with `on_plane_low`, as
+   !< `sections_host`) and cut as the blocks of one batched launch set (`cut_cells_device_many`, resident, cell arrays
+   !< only); a device kernel (`scatter_sections`) writes their cells into the face arrays, which alone come back. The
+   !< face arrays of `cut` are replaced (built in locals, moved in). Every value is a copy of the 2-D cut cell's, which
+   !< equals `curve%cut_cells` bit for bit: the faces of `sections_host`.
+   type(surface_stl_object), intent(in)    :: surface    !< Surface.
+   real(R8P),                intent(in)    :: x(:), y(:), z(:) !< Cell edges.
+   type(cut_cells_3d_t),     intent(inout) :: cut        !< Cut cells (nx, ny, nz set).
+
+   call sections_axis_device(surface, 1_I4P, x, y, z, cut%nx + 1_I4P, cut%ny, cut%nz, cut%face_x, cut%face_x_centroid, &
+                             cut%face_x_pieces, cut%face_x_closed)
+   call sections_axis_device(surface, 2_I4P, y, z, x, cut%nx, cut%ny + 1_I4P, cut%nz, cut%face_y, cut%face_y_centroid, &
+                             cut%face_y_pieces, cut%face_y_closed)
+   call sections_axis_device(surface, 3_I4P, z, x, y, cut%nx, cut%ny, cut%nz + 1_I4P, cut%face_z, cut%face_z_centroid, &
+                             cut%face_z_pieces, cut%face_z_closed)
+   endsubroutine sections_device
+
+   subroutine sections_axis_device(surface, axis, lv, ga, gb, n1, n2, n3, face, fcen, fpcs, fcls)
+   !< The faces of the planes x(axis) = lv(b) (in-plane grid ga, gb in the cyclic order of `slice_surface`) on the
+   !< device: the sections as the blocks of `cut_cells_device_many` (resident), scattered by `scatter_sections` into
+   !< the face arrays [n1, n2, n3] (the 3-D shape of the axis), copied back.
+   type(surface_stl_object),  intent(in)  :: surface      !< Surface.
+   integer(I4P),              intent(in)  :: axis         !< Plane normal axis.
+   real(R8P),                 intent(in)  :: lv(:)        !< Plane levels.
+   real(R8P),                 intent(in)  :: ga(:), gb(:) !< In-plane cell edges (u, v).
+   integer(I4P),              intent(in)  :: n1, n2, n3   !< Face array shape.
+   real(R8P),    allocatable, intent(out) :: face(:,:,:)  !< Fluid fractions.
+   real(R8P),    allocatable, intent(out) :: fcen(:,:,:,:) !< Fluid centroids [3, n1, n2, n3].
+   integer(I4P), allocatable, intent(out) :: fpcs(:,:,:)  !< Fluid pieces.
+   logical,      allocatable, intent(out) :: fcls(:,:,:)  !< Closed flags.
+   type(curve_object),   allocatable :: secs(:)           !< Sections.
+   type(cut_cells_2d_blocks_t)       :: cb                !< Their cut cells.
+   real(R8P),    allocatable :: fa(:,:,:), fc(:,:,:,:)    !< Face arrays (built here).
+   integer(I4P), allocatable :: fp(:,:,:)                 !< Face pieces (built here).
+   logical,      allocatable :: fl(:,:,:)                 !< Face closed flags (built here).
+   integer(I4P)              :: nb, b, st                 !< Work.
+
+   nb = size(lv, kind=I4P)
+   allocate(secs(nb))
+   do b = 1_I4P, nb
+      call slice_surface(surface=surface, normal_axis=axis, level=lv(b), curve=secs(b), on_plane_low=.true.)
+   enddo
+   call cut_cells_device_many(secs, ga, gb, cb, st, intervals=.false., pieces=.false., resident=.true.)
+   deallocate(secs)
+   allocate(fa(n1, n2, n3), fc(3, n1, n2, n3), fp(n1, n2, n3), fl(n1, n2, n3))
+   !$acc data copyout(fa, fc, fp, fl) copyin(lv)
+   call scatter_sections(axis, cb%nx, cb%ny, nb, lv, cb%alpha, cb%centroid, cb%pieces, cb%closed, n1, n2, n3, fa, fc, &
+                         fp, fl)
+   !$acc end data
+   call cb%exit_device
+   call move_alloc(fa, face) ; call move_alloc(fc, fcen) ; call move_alloc(fp, fpcs) ; call move_alloc(fl, fcls)
+   endsubroutine sections_axis_device
+
+   subroutine scatter_sections(axis, nu, nv, nb, lv, alpha, cen, pcs, cls, n1, n2, n3, fa, fc, fp, fl)
+   !< Device kernel (issue #100 step 3b): cell (iu, iv) of the section of plane b into the face arrays of the axis, the
+   !< copy of `sections_host` (x planes: face (b, iu, iv), centroid (lv, c1, c2); y planes: (iv, b, iu), (c2, lv, c1);
+   !< z planes: (iu, iv, b), (c1, c2, lv)). Every array must be present on the device.
+   integer(I4P), intent(in)  :: axis, nu, nv, nb       !< Axis, section cells, planes.
+   real(R8P),    intent(in)  :: lv(nb)                 !< Plane levels.
+   real(R8P),    intent(in)  :: alpha(nu, nv, nb)      !< Section fluid fractions.
+   real(R8P),    intent(in)  :: cen(2, nu, nv, nb)     !< Section fluid centroids.
+   integer(I4P), intent(in)  :: pcs(nu, nv, nb)        !< Section pieces.
+   logical,      intent(in)  :: cls(nu, nv, nb)        !< Section closed flags.
+   integer(I4P), intent(in)  :: n1, n2, n3             !< Face array shape.
+   real(R8P),    intent(out) :: fa(n1, n2, n3)         !< Face fractions.
+   real(R8P),    intent(out) :: fc(3, n1, n2, n3)      !< Face centroids.
+   integer(I4P), intent(out) :: fp(n1, n2, n3)         !< Face pieces.
+   logical,      intent(out) :: fl(n1, n2, n3)         !< Face closed flags.
+   integer(I4P)              :: b, iu, iv              !< Counters.
+
+   select case (axis)
+   case (1)
+      !$acc parallel loop gang vector collapse(3) default(present) present(lv, alpha, cen, pcs, cls, fa, fc, fp, fl)
+      do iv = 1_I4P, nv
+         do iu = 1_I4P, nu
+            do b = 1_I4P, nb
+               fa(b, iu, iv) = alpha(iu, iv, b) ; fp(b, iu, iv) = pcs(iu, iv, b) ; fl(b, iu, iv) = cls(iu, iv, b)
+               fc(1, b, iu, iv) = lv(b) ; fc(2, b, iu, iv) = cen(1, iu, iv, b) ; fc(3, b, iu, iv) = cen(2, iu, iv, b)
+            enddo
+         enddo
+      enddo
+   case (2)
+      !$acc parallel loop gang vector collapse(3) default(present) present(lv, alpha, cen, pcs, cls, fa, fc, fp, fl)
+      do iu = 1_I4P, nu
+         do b = 1_I4P, nb
+            do iv = 1_I4P, nv
+               fa(iv, b, iu) = alpha(iu, iv, b) ; fp(iv, b, iu) = pcs(iu, iv, b) ; fl(iv, b, iu) = cls(iu, iv, b)
+               fc(1, iv, b, iu) = cen(2, iu, iv, b) ; fc(2, iv, b, iu) = lv(b) ; fc(3, iv, b, iu) = cen(1, iu, iv, b)
+            enddo
+         enddo
+      enddo
+   case default
+      !$acc parallel loop gang vector collapse(3) default(present) present(lv, alpha, cen, pcs, cls, fa, fc, fp, fl)
+      do b = 1_I4P, nb
+         do iv = 1_I4P, nv
+            do iu = 1_I4P, nu
+               fa(iu, iv, b) = alpha(iu, iv, b) ; fp(iu, iv, b) = pcs(iu, iv, b) ; fl(iu, iv, b) = cls(iu, iv, b)
+               fc(1, iu, iv, b) = cen(1, iu, iv, b) ; fc(2, iu, iv, b) = cen(2, iu, iv, b) ; fc(3, iu, iv, b) = lv(b)
+            enddo
+         enddo
+      enddo
+   endselect
+   endsubroutine scatter_sections
 endmodule fossil_cut_cells_3d

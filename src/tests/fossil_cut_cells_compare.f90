@@ -11,12 +11,13 @@ module fossil_cut_cells_compare
 !< the host-only outputs (moments, boundaries, quadrature) must be unallocated in both. `cut_cells_twin_mismatches(c,
 !< x, y)` runs `c%cut_cells` and `c%cut_cells_device` on the block x, y, with and without the intervals, and sums
 !< them. Used by `fossil_test_cut_cells_device_twin` (CI, host) and by the curve bench (device vs serial).
-use fossil, only : curve_object, cut_cells_2d_t
-use penf,   only : I4P, I8P, R8P
+use fossil,              only : curve_object, cut_cells_2d_t, cut_cells_3d_t
+use fossil_curve_object, only : cut_cells_2d_blocks_t, cut_cells_device_many
+use penf,                only : I4P, I8P, R8P
 
 implicit none
 private
-public :: cut_cells_2d_mismatches, cut_cells_twin_mismatches
+public :: cut_cells_2d_mismatches, cut_cells_twin_mismatches, cut_cells_many_mismatches, cut_cells_3d_face_mismatches
 
 contains
    function cut_cells_twin_mismatches(c, x, y, status) result(n)
@@ -74,33 +75,12 @@ contains
    type(cut_cells_2d_t), intent(in) :: a, b !< Results.
    integer(I4P)                     :: n    !< Mismatches.
 
-   n = 0_I4P
-   if (a%nx /= b%nx) n = n + 1_I4P
-   if (a%ny /= b%ny) n = n + 1_I4P
+   n = cell_mismatches(a, b)
    if (a%np /= b%np) n = n + 1_I4P
    if (a%moments_order /= b%moments_order) n = n + 1_I4P
-   ! cell arrays
-   n = n + real_mismatches(allocated(a%alpha), allocated(b%alpha), shape_of(a%alpha), shape_of(b%alpha), &
-                           flat_r2(a%alpha), flat_r2(b%alpha))
-   n = n + real_mismatches(allocated(a%aperture), allocated(b%aperture), shape_of3(a%aperture), shape_of3(b%aperture), &
-                           flat_r3(a%aperture), flat_r3(b%aperture))
-   n = n + real_mismatches(allocated(a%centroid), allocated(b%centroid), shape_of3(a%centroid), shape_of3(b%centroid), &
-                           flat_r3(a%centroid), flat_r3(b%centroid))
-   n = n + real_mismatches(allocated(a%wet_length), allocated(b%wet_length), shape_of(a%wet_length), &
-                           shape_of(b%wet_length), flat_r2(a%wet_length), flat_r2(b%wet_length))
-   n = n + real_mismatches(allocated(a%wet_centroid), allocated(b%wet_centroid), shape_of3(a%wet_centroid), &
-                           shape_of3(b%wet_centroid), flat_r3(a%wet_centroid), flat_r3(b%wet_centroid))
-   n = n + real_mismatches(allocated(a%wet_normal), allocated(b%wet_normal), shape_of3(a%wet_normal), &
-                           shape_of3(b%wet_normal), flat_r3(a%wet_normal), flat_r3(b%wet_normal))
-   n = n + int_mismatches(allocated(a%pieces), allocated(b%pieces), shape_of_i(a%pieces), shape_of_i(b%pieces), &
-                          flat_i2(a%pieces), flat_i2(b%pieces))
+   ! piece arrays
    n = n + int_mismatches(allocated(a%first_piece), allocated(b%first_piece), shape_of_i(a%first_piece), &
                           shape_of_i(b%first_piece), flat_i2(a%first_piece), flat_i2(b%first_piece))
-   n = n + log_mismatches(allocated(a%closed), allocated(b%closed), shape_of_l(a%closed), shape_of_l(b%closed), &
-                          flat_l2(a%closed), flat_l2(b%closed))
-   n = n + log_mismatches(allocated(a%node_in), allocated(b%node_in), shape_of_l(a%node_in), shape_of_l(b%node_in), &
-                          flat_l2(a%node_in), flat_l2(b%node_in))
-   ! piece arrays
    n = n + int_mismatches(allocated(a%piece_cell), allocated(b%piece_cell), shape_of_i(a%piece_cell), &
                           shape_of_i(b%piece_cell), flat_i2(a%piece_cell), flat_i2(b%piece_cell))
    n = n + real_mismatches(allocated(a%piece_area), allocated(b%piece_area), shape_of1(a%piece_area), &
@@ -130,6 +110,174 @@ contains
    if (allocated(a%quad_start) .or. allocated(b%quad_start)) n = n + 1_I4P
    if (allocated(a%wall_quad_start) .or. allocated(b%wall_quad_start)) n = n + 1_I4P
    endfunction cut_cells_2d_mismatches
+
+   function cell_mismatches(a, b) result(n)
+   !< Differing elements of the cell outputs of a and b (nx, ny, the cell arrays but first_piece, node_in).
+   type(cut_cells_2d_t), intent(in) :: a, b !< Results.
+   integer(I4P)                     :: n    !< Mismatches.
+
+   n = 0_I4P
+   if (a%nx /= b%nx) n = n + 1_I4P
+   if (a%ny /= b%ny) n = n + 1_I4P
+   n = n + real_mismatches(allocated(a%alpha), allocated(b%alpha), shape_of(a%alpha), shape_of(b%alpha), &
+                           flat_r2(a%alpha), flat_r2(b%alpha))
+   n = n + real_mismatches(allocated(a%aperture), allocated(b%aperture), shape_of3(a%aperture), shape_of3(b%aperture), &
+                           flat_r3(a%aperture), flat_r3(b%aperture))
+   n = n + real_mismatches(allocated(a%centroid), allocated(b%centroid), shape_of3(a%centroid), shape_of3(b%centroid), &
+                           flat_r3(a%centroid), flat_r3(b%centroid))
+   n = n + real_mismatches(allocated(a%wet_length), allocated(b%wet_length), shape_of(a%wet_length), &
+                           shape_of(b%wet_length), flat_r2(a%wet_length), flat_r2(b%wet_length))
+   n = n + real_mismatches(allocated(a%wet_centroid), allocated(b%wet_centroid), shape_of3(a%wet_centroid), &
+                           shape_of3(b%wet_centroid), flat_r3(a%wet_centroid), flat_r3(b%wet_centroid))
+   n = n + real_mismatches(allocated(a%wet_normal), allocated(b%wet_normal), shape_of3(a%wet_normal), &
+                           shape_of3(b%wet_normal), flat_r3(a%wet_normal), flat_r3(b%wet_normal))
+   n = n + int_mismatches(allocated(a%pieces), allocated(b%pieces), shape_of_i(a%pieces), shape_of_i(b%pieces), &
+                          flat_i2(a%pieces), flat_i2(b%pieces))
+   n = n + log_mismatches(allocated(a%closed), allocated(b%closed), shape_of_l(a%closed), shape_of_l(b%closed), &
+                          flat_l2(a%closed), flat_l2(b%closed))
+   n = n + log_mismatches(allocated(a%node_in), allocated(b%node_in), shape_of_l(a%node_in), shape_of_l(b%node_in), &
+                          flat_l2(a%node_in), flat_l2(b%node_in))
+   endfunction cell_mismatches
+
+   function cut_cells_many_mismatches(curves, x, y, status) result(n)
+   !< Mismatches of `cut_cells_device_many(curves, x, y)` (issue #100 step 3b) against `curves(b)%cut_cells(x, y)` for
+   !< every block b, bitwise: with the pieces and the intervals, with the pieces only, the cell arrays only; each copied
+   !< back and resident (`update_host`, then `exit_device`). With the pieces every output of `cut_cells_device` is
+   !< compared (block b taken out of the concatenated arrays by `block_as_cut`), without them the cell outputs.
+   type(curve_object), intent(in)            :: curves(:)  !< Curves (blocks).
+   real(R8P),          intent(in)            :: x(:), y(:) !< Cell edges.
+   integer(I4P),       intent(out), optional :: status     !< Sum of the statuses.
+   integer(I4P)                              :: n          !< Mismatches.
+   type(cut_cells_2d_blocks_t)               :: cb         !< Multi-block result.
+   type(cut_cells_2d_t)                      :: h, d       !< Host block, extracted block.
+   integer(I4P)                              :: b, k, r, st, sts !< Work.
+   logical                                   :: wi, wp     !< Intervals, pieces.
+
+   n = 0_I4P ; sts = 0_I4P
+   do k = 1, 3
+      wi = k == 1 ; wp = k <= 2
+      do r = 1, 2
+         call cut_cells_device_many(curves, x, y, cb, st, intervals=wi, pieces=wp, resident=r == 2)
+         sts = sts + st
+         if (st /= 0_I4P) cycle
+         if (r == 2) then
+            if (.not. cb%on_device) n = n + 1_I4P
+            call cb%update_host
+         endif
+         if (cb%nb /= size(curves, kind=I4P)) n = n + 1_I4P
+         do b = 1, size(curves)
+            call curves(b)%cut_cells(x=x, y=y, cut=h, status=st, intervals=wi)
+            sts = sts + st
+            call block_as_cut(cb, b, d)
+            if (wp) then
+               n = n + cut_cells_2d_mismatches(h, d)
+            else
+               n = n + cell_mismatches(h, d)
+            endif
+         enddo
+         call cb%exit_device
+         if (cb%on_device) n = n + 1_I4P
+      enddo
+   enddo
+   if (present(status)) status = sts
+   endfunction cut_cells_many_mismatches
+
+   subroutine block_as_cut(cb, b, d)
+   !< Block b of a multi-block result as a one-block cut (its own piece and interval numbering).
+   type(cut_cells_2d_blocks_t), intent(in)  :: cb !< Multi-block result.
+   integer(I4P),                intent(in)  :: b  !< Block.
+   type(cut_cells_2d_t),        intent(out) :: d  !< Block b.
+   integer(I4P)                             :: p0, p1, i0, i1 !< Piece, interval ranges.
+
+   d%nx = cb%nx ; d%ny = cb%ny
+   d%closed = cb%closed(:, :, b) ; d%alpha = cb%alpha(:, :, b) ; d%aperture = cb%aperture(:, :, :, b)
+   d%centroid = cb%centroid(:, :, :, b) ; d%wet_length = cb%wet_length(:, :, b)
+   d%wet_centroid = cb%wet_centroid(:, :, :, b) ; d%wet_normal = cb%wet_normal(:, :, :, b)
+   d%pieces = cb%pieces(:, :, b) ; d%node_in = cb%node_in(:, :, b)
+   if (.not. cb%with_pieces) return
+   p0 = cb%block_piece(b) + 1_I4P ; p1 = cb%block_piece(b + 1)
+   i0 = cb%block_iv(b) + 1_I4P ; i1 = cb%block_iv(b + 1)
+   d%np = p1 - p0 + 1_I4P
+   d%first_piece = cb%first_piece(:, :, b) - cb%block_piece(b)
+   d%piece_cell = cb%piece_cell(:, p0:p1) ; d%piece_area = cb%piece_area(p0:p1)
+   d%piece_centroid = cb%piece_centroid(:, p0:p1) ; d%piece_wet_length = cb%piece_wet_length(p0:p1)
+   d%piece_wet_normal = cb%piece_wet_normal(:, p0:p1) ; d%piece_aperture = cb%piece_aperture(:, p0:p1)
+   d%piece_iv_start = cb%piece_iv_start(p0:p1 + 1) - cb%block_iv(b)
+   d%piece_iv_edge = cb%piece_iv_edge(i0:i1) ; d%piece_iv_lo = cb%piece_iv_lo(i0:i1)
+   d%piece_iv_hi = cb%piece_iv_hi(i0:i1)
+   endsubroutine block_as_cut
+
+   function cut_cells_3d_face_mismatches(a, b) result(n)
+   !< Differing elements of the face outputs of two 3-D cuts (issue #100 step 3b): nx, ny, nz, face_x/_y/_z, their
+   !< centroids, pieces and closed flags; reals by their bits.
+   type(cut_cells_3d_t), intent(in) :: a, b !< Results.
+   integer(I4P)                     :: n    !< Mismatches.
+
+   n = 0_I4P
+   if (a%nx /= b%nx .or. a%ny /= b%ny .or. a%nz /= b%nz) then
+      n = 1_I4P ; return
+   endif
+   n = n + face_r(a%face_x, b%face_x) + face_r(a%face_y, b%face_y) + face_r(a%face_z, b%face_z)
+   n = n + face_r4(a%face_x_centroid, b%face_x_centroid) + face_r4(a%face_y_centroid, b%face_y_centroid) + &
+       face_r4(a%face_z_centroid, b%face_z_centroid)
+   n = n + face_i(a%face_x_pieces, b%face_x_pieces) + face_i(a%face_y_pieces, b%face_y_pieces) + &
+       face_i(a%face_z_pieces, b%face_z_pieces)
+   n = n + face_l(a%face_x_closed, b%face_x_closed) + face_l(a%face_y_closed, b%face_y_closed) + &
+       face_l(a%face_z_closed, b%face_z_closed)
+   endfunction cut_cells_3d_face_mismatches
+
+   function face_r(a, b) result(n)
+   !< Bitwise mismatches of two rank-3 real arrays (both allocated, same shape, else their size).
+   real(R8P), allocatable, intent(in) :: a(:,:,:), b(:,:,:) !< Arrays.
+   integer(I4P)                       :: n                  !< Mismatches.
+
+   n = real_mismatches(allocated(a), allocated(b), shape_of3(a), shape_of3(b), flat_r3(a), flat_r3(b))
+   if (.not. (allocated(a) .and. allocated(b))) n = max(1_I4P, n)
+   endfunction face_r
+
+   function face_r4(a, b) result(n)
+   !< Bitwise mismatches of two rank-4 real arrays.
+   real(R8P), allocatable, intent(in) :: a(:,:,:,:), b(:,:,:,:) !< Arrays.
+   integer(I4P)                       :: n                      !< Mismatches.
+   integer(I4P)                       :: sa(3), sb(3)           !< Shapes but the first extent.
+
+   if (.not. (allocated(a) .and. allocated(b))) then
+      n = 1_I4P ; return
+   endif
+   if (any(shape(a) /= shape(b))) then
+      n = max(1_I4P, size(a, kind=I4P)) ; return
+   endif
+   sa = 1_I4P ; sb = 1_I4P
+   n = real_mismatches(.true., .true., sa, sb, reshape(a, [size(a)]), reshape(b, [size(b)]))
+   endfunction face_r4
+
+   function face_i(a, b) result(n)
+   !< Mismatches of two rank-3 integer arrays.
+   integer(I4P), allocatable, intent(in) :: a(:,:,:), b(:,:,:) !< Arrays.
+   integer(I4P)                          :: n                  !< Mismatches.
+
+   if (.not. (allocated(a) .and. allocated(b))) then
+      n = 1_I4P ; return
+   endif
+   if (any(shape(a) /= shape(b))) then
+      n = max(1_I4P, size(a, kind=I4P)) ; return
+   endif
+   n = count(a /= b, kind=I4P)
+   endfunction face_i
+
+   function face_l(a, b) result(n)
+   !< Mismatches of two rank-3 logical arrays.
+   logical, allocatable, intent(in) :: a(:,:,:), b(:,:,:) !< Arrays.
+   integer(I4P)                     :: n                  !< Mismatches.
+
+   if (.not. (allocated(a) .and. allocated(b))) then
+      n = 1_I4P ; return
+   endif
+   if (any(shape(a) /= shape(b))) then
+      n = max(1_I4P, size(a, kind=I4P)) ; return
+   endif
+   n = count(a .neqv. b, kind=I4P)
+   endfunction face_l
 
    function real_mismatches(la, lb, sa, sb, fa, fb) result(n)
    !< Bitwise mismatches of two flattened real arrays.

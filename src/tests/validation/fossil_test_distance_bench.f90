@@ -46,6 +46,9 @@ use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatche
 use fossil,              only : rigid_pose_t, pose_from_axis_angle, to_world
 use fossil,              only : curvilinear_block_t, detect_topology, topo_record_t, TOPO_BOUNDARY, wall_cutter
 use fossil_overset,      only : hole_flags, block_logical_t, donor_set_t, donor_candidates
+use fossil,              only : curve_object, slice_surface, cut_cells_3d_t, cut_cells_3d
+use fossil_cut_cells_3d, only : cut_cells_3d_sections
+use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_face_mismatches
 
 implicit none
 
@@ -83,6 +86,7 @@ integer                       :: thin_mismatch             !< Thin-facet boxes: 
 integer                       :: block_mismatch            !< Block location: device vs CPU mismatches (issue #71).
 integer                       :: hole_mismatch             !< Hole flags: device vs CPU mismatches (issue #72).
 integer                       :: donor_mismatch            !< Donor candidates: device vs CPU mismatches (issue #72).
+integer                       :: sections_mismatch         !< 3-D cut-cell sections: device vs CPU mismatches (issue #100).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -250,6 +254,8 @@ call thin_case(mismatch=thin_mismatch)
 rich_ok = rich_ok .and. thin_mismatch == 0
 call block_case(mismatch=block_mismatch, hole_mismatch=hole_mismatch, donor_mismatch=donor_mismatch)
 rich_ok = rich_ok .and. block_mismatch == 0 .and. hole_mismatch == 0 .and. donor_mismatch == 0
+call sections_case(mismatch=sections_mismatch)
+rich_ok = rich_ok .and. sections_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -345,6 +351,7 @@ print '(A,I0)',      '   thin device vs serial mismatches: ', thin_mismatch
 print '(A,I0)',      '   block location device vs serial mismatches: ', block_mismatch
 print '(A,I0)',      '   hole flags device vs serial mismatches: ', hole_mismatch
 print '(A,I0)',      '   donor candidates device vs serial mismatches: ', donor_mismatch
+print '(A,I0)',      '   cut cells 3-D sections device vs serial mismatches: ', sections_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -584,6 +591,97 @@ contains
    print '(A,I0)', 'donor candidates: ', size(d1(1)%block) + size(d1(2)%block)
    if (size(d1(2)%block) < 1000) donor_mismatch = donor_mismatch + 1
    endsubroutine block_case
+
+   subroutine sections_case(mismatch)
+   !< The plane sections of `cut_cells_3d` on the device (issue #100 step 3b) against the host path, bitwise, on the
+   !< bench body and its probe box cut into grid_n^3 cells: `cut_cells_3d(..., device_sections=.true.)` against
+   !< `cut_cells_3d` (face arrays, cell fractions, pieces), and the z sections as the blocks of `cut_cells_device_many`
+   !< with pieces and intervals against `curve%cut_cells` per section (`cut_cells_many_mismatches`, copied back and
+   !< resident). With grid_n >= 32 also the faces alone (`cut_cells_3d_sections`) at 64^3 and 128^3, and a timing table
+   !< of the sections: best and median of 5 calls after a warm-up, host vs device (copies included).
+   integer, intent(out)      :: mismatch               !< Mismatches.
+   type(cut_cells_3d_t)      :: ch, cd                 !< Host, device sections.
+   type(curve_object), allocatable :: secs(:)          !< z sections.
+   real(R8P),    allocatable :: gx(:), gy(:), gz(:)    !< Cell edges.
+   real(R8P)                 :: t(2, 5)                !< Times.
+   integer(I4P)              :: ng(3), g, m, r, st, st2 !< Work.
+   integer(I8P)              :: c0, c1, rate           !< Clock.
+
+   mismatch = 0
+   call section_grid(grid_n, gx, gy, gz)
+   call cut_cells_3d(surface, gx, gy, gz, ch, status=st)
+   call cut_cells_3d(surface, gx, gy, gz, cd, status=st2, device_sections=.true.)
+   mismatch = mismatch + cut_cells_3d_face_mismatches(ch, cd) + abs(st - st2)
+   mismatch = mismatch + count(transfer(ch%alpha, 0_I8P, size(ch%alpha)) /= transfer(cd%alpha, 0_I8P, size(cd%alpha)))
+   mismatch = mismatch + count(ch%pieces /= cd%pieces)
+   if (ch%np /= cd%np) mismatch = mismatch + 1
+   allocate(secs(size(gz)))
+   do g = 1, size(gz)
+      call slice_surface(surface=surface, normal_axis=3_I4P, level=gz(g), curve=secs(g), on_plane_low=.true.)
+   enddo
+   mismatch = mismatch + cut_cells_many_mismatches(secs, gx, gy, st) + abs(st)
+   deallocate(secs)
+   if (grid_n < 32_I4P) return
+   ng = [grid_n, 64_I4P, 128_I4P]
+   do g = 2, 3
+      call section_grid(ng(g), gx, gy, gz)
+      call cut_cells_3d_sections(surface, gx, gy, gz, ch, status=st)
+      call cut_cells_3d_sections(surface, gx, gy, gz, cd, device=.true., status=st2)
+      mismatch = mismatch + cut_cells_3d_face_mismatches(ch, cd) + abs(st - st2)
+   enddo
+   print '(A)', 'cut cells 3-D sections timing (3(N+1) planes, faces copied back; best / median of 5) [s]: cells, host, '// &
+                'device, speed-up of the best'
+   call system_clock(count_rate=rate)
+   do r = 1, 5 ! warm-up (issue #100 step 6a: slow pageable copies after a host-heavy phase)
+      call cut_cells_3d_sections(surface, gx, gy, gz, cd, device=.true.)
+   enddo
+   do g = 1, 3
+      if (g > 1 .and. ng(g) == ng(1)) cycle
+      call section_grid(ng(g), gx, gy, gz)
+      do r = 1, 5
+         call system_clock(c0) ; call cut_cells_3d_sections(surface, gx, gy, gz, ch) ; call system_clock(c1)
+         t(1, r) = real(c1 - c0, R8P) / rate
+         call system_clock(c0) ; call cut_cells_3d_sections(surface, gx, gy, gz, cd, device=.true.) ; call system_clock(c1)
+         t(2, r) = real(c1 - c0, R8P) / rate
+      enddo
+      m = ng(g)
+      print '(3X,I4,A,2(2X,ES9.2,A,ES9.2),A,F6.2,A)', m, '^3', minval(t(1, :)), ' /', median_of5(t(1, :)), &
+            minval(t(2, :)), ' /', median_of5(t(2, :)), '  (', minval(t(1, :)) / minval(t(2, :)), 'x)'
+   enddo
+   endsubroutine sections_case
+
+   subroutine section_grid(nc, gx, gy, gz)
+   !< The probe box [lo, hi] cut into nc^3 uniform cells.
+   integer(I4P),           intent(in)  :: nc             !< Cells per axis.
+   real(R8P), allocatable, intent(out) :: gx(:), gy(:), gz(:) !< Cell edges.
+   integer(I4P)                        :: q              !< Counter.
+
+   allocate(gx(nc + 1), gy(nc + 1), gz(nc + 1))
+   do q = 1, nc + 1
+      gx(q) = lo(1) + (hi(1) - lo(1)) * real(q - 1, R8P) / real(nc, R8P)
+      gy(q) = lo(2) + (hi(2) - lo(2)) * real(q - 1, R8P) / real(nc, R8P)
+      gz(q) = lo(3) + (hi(3) - lo(3)) * real(q - 1, R8P) / real(nc, R8P)
+   enddo
+   endsubroutine section_grid
+
+   pure function median_of5(a) result(m)
+   !< Median of five values.
+   real(R8P), intent(in) :: a(5) !< Values.
+   real(R8P)             :: m    !< Median.
+   real(R8P)             :: b(5), w !< Sorted copy, swap.
+   integer               :: i, j !< Counters.
+
+   b = a
+   do i = 2, 5
+      w = b(i) ; j = i - 1
+      do while (j >= 1)
+         if (b(j) <= w) exit
+         b(j + 1) = b(j) ; j = j - 1
+      enddo
+      b(j + 1) = w
+   enddo
+   m = b(3)
+   endfunction median_of5
 
    subroutine box_device_case(mismatch)
    !< box_classify_many_device against box_classify_many (issue #38): a box of half-size 1/64 of the

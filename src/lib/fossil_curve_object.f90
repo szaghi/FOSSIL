@@ -29,7 +29,8 @@ module fossil_curve_object
 use fossil_box_query,          only : curve_box_contact_oac, curve_box_thin_oac, cell_bands, cell_components, BOX_NONE, &
                                      BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
 use fossil_line_query,         only : curve_line_crossings_oac, line_crossing_before_2d
-use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device
+use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device, &
+                                     cut_cells_2d_blocks_t, compute_cut_cells_2d_blocks_device
 use fossil_cut_moments,        only : MOMENTS_MAX
 use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate, pose_interpolate, pose_angle_2d
 use fossil_projection,         only : projection_target_t, build_target_2d
@@ -52,7 +53,7 @@ implicit none
 private
 public :: curve_object, first_impact_2d
 public :: place_for_crossings
-public :: cut_cells_2d_t
+public :: cut_cells_2d_t, cut_cells_2d_blocks_t, cut_cells_device_many
 public :: CURVE_VALID, CURVE_TOO_FEW_VERTICES, CURVE_ZERO_LENGTH_SEGMENT, CURVE_ZERO_AREA_LOOP, CURVE_WRONG_ORIENTATION
 public :: CURVE_OPEN_LOOP, CURVE_SELF_INTERSECTING
 
@@ -1588,6 +1589,45 @@ contains
    endif
    if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
    endsubroutine cut_cells_device
+
+   subroutine cut_cells_device_many(curves, x, y, cut, status, intervals, pieces, resident)
+   !< The cut cells of many curves on one block x(nx+1), y(ny+1) (u, v), in one set of device launches (issue #100 step
+   !< 3b: the plane sections of one axis of `cut_cells_3d`): block b of `cut` equals `curves(b)%cut_cells(x, y, ...)` bit
+   !< for bit for the outputs of `cut_cells_device` (see `cut_cells_2d_blocks_t` for the layout). The vertices are
+   !< concatenated and handed to `compute_cut_cells_2d_blocks_device`. `pieces = .false.` (default .true.) computes the
+   !< cell arrays only; `intervals` (default .true.) as in `cut_cells`; `resident = .true.` leaves `cut` on the device.
+   !< `status = STATUS_INVALID_INPUT` on bad edges or no curve. Built without OpenACC it runs on the host.
+   type(curve_object),          intent(in)            :: curves(:) !< Curves (one per block).
+   real(R8P),                   intent(in)            :: x(:), y(:) !< Cell edges (u, v), strictly increasing.
+   type(cut_cells_2d_blocks_t), intent(inout)         :: cut       !< Cut cells (released from the device, reset first).
+   integer(I4P),                intent(out), optional :: status    !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,                     intent(in),  optional :: intervals !< Record the fluid edge intervals (default .true.).
+   logical,                     intent(in),  optional :: pieces    !< Compute the pieces (default .true.).
+   logical,                     intent(in),  optional :: resident  !< Leave the outputs on the device (default .false.).
+   real(R8P),    allocatable :: uu(:), vv(:)                       !< Concatenated vertices.
+   integer(I4P), allocatable :: nn(:), vs(:)                       !< Next vertex, first vertex of each curve.
+   integer(I4P)              :: nb, b, m, st                       !< Work.
+   logical                   :: wi, wp, res                        !< Options.
+
+   if (present(status)) status = STATUS_OK
+   wi = .true. ; if (present(intervals)) wi = intervals
+   wp = .true. ; if (present(pieces)) wp = pieces
+   res = .false. ; if (present(resident)) res = resident
+   nb = size(curves, kind=I4P)
+   allocate(vs(nb + 1)) ; vs(1) = 1_I4P
+   do b = 1_I4P, nb ! the arrays `cut_cells` hands to the kernels: all of u, v, next if there are vertices, else none
+      m = 0_I4P ; if (curves(b)%nv > 0_I4P) m = size(curves(b)%u, kind=I4P)
+      vs(b + 1) = vs(b) + m
+   enddo
+   allocate(uu(vs(nb + 1) - 1_I4P), vv(vs(nb + 1) - 1_I4P), nn(vs(nb + 1) - 1_I4P))
+   do b = 1_I4P, nb
+      if (vs(b + 1) == vs(b)) cycle
+      uu(vs(b):vs(b + 1) - 1_I4P) = curves(b)%u ; vv(vs(b):vs(b + 1) - 1_I4P) = curves(b)%v
+      nn(vs(b):vs(b + 1) - 1_I4P) = curves(b)%next
+   enddo
+   call compute_cut_cells_2d_blocks_device(nb, vs, uu, vv, nn, x, y, cut, st, wi, wp, res)
+   if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
+   endsubroutine cut_cells_device_many
 
    subroutine line_crossings_many(self, axis, a, t0, t1, t, segments, entering, counts, overflow, status)
    !< Crossings of the lines along `axis` (1: u, 2: v) at a(i), i = 1..n, with parameter in [t0, t1]
