@@ -68,6 +68,10 @@ Device-code rules (issue #20; see the comments in the named files):
   `bvh_winding_number_oac` with `FOUR_PI` / `DEFAULT_BETA` exported by
   `fossil_winding_number`, so the CPU and device paths share routine and
   constants: keep it that way, or bit-exactness breaks.
+- No `norm2` intrinsic in device code, and above all none of an array constructor: nvfortran 26.9's device
+  `norm2([x, y])` returns 0 (`-O0` and `-O2`; `sum`/`maxval` of the same constructor are right), and the device
+  `norm2` of an array is 1 ulp off the host's. Use an explicit replica (`norm2_xy` in `fossil_cut_cells_2d`).
+  Reproducers: issue #101, items 12 and 9a.
 
 The `local_nvf` varset supplies `$NVF_CC` (GPU compute capability, default
 `cc89`); override for a different GPU (`cc80` for A100/V100). The default
@@ -88,6 +92,11 @@ the device). Same clean-build rule (shared `exe/`), pass criterion
 The NVIDIA modes compile with `-gpu=nofma -Mnofma` (`$CSTATIC_NV`): with FMA contraction the
 device lost host bit-exactness (1-ulp distances, sign and facet-id flips at near-ties); the device
 kernels are 15-30 % slower for it. Do not remove it unless the gates stay at 0.
+
+Subnormals: the nvfortran host code flushes subnormal results to zero (FTZ) and treats subnormal operands as zero
+(DAZ); the device does neither, so a result below ~2.2e-308 can differ host vs device. Host/device (and gfortran)
+agreement there needs both `-Mnoflushz -Mnodaz` on the host: `-Mnoflushz` alone is not enough. Neither is in
+`$CSTATIC_NV` today (an open owner decision; issue #101, item 9b).
 
 The device build scope is **BVH-only** (the octree stays CPU-only). The 2-D cut cells also run on the device (`curve%cut_cells_device`, WP2 #100).
 
