@@ -85,6 +85,7 @@ contains
    !< vol(k) += vc int X^(a+1) / (a+1) Y^b Z^c N_X dA (scaled vector area: vc times it is the physical divergence term)
    !< and wall(k) += int X^a Y^b Z^c dA_phys (ap the physical area), exact for degree <= 5 (the symmetric 7-point rule,
    !< coordinates (6 -+ sqrt 15) / 21, (9 +- 2 sqrt 15) / 21 and weights (155 +- sqrt 15) / 1200, in closed form).
+   !$acc routine seq
    real(R8P),    intent(in)    :: t1(3), t2(3), t3(3) !< Vertices.
    integer(I4P), intent(in)    :: e(:,:)              !< Exponents [3, n].
    real(R8P),    intent(in)    :: vc                  !< Scale: the cell volume.
@@ -119,6 +120,7 @@ contains
    !< Duffy map x = a + r (t1 - a + s (t2 - t1) + s t (t3 - t2)), Jacobian r^2 s det, Gauss-Legendre with 4 nodes in r
    !< (r^(2+p), degree 7) and 3 in s (s^(1+p), degree 5) and t (36 points). Weights carry the sign of det: the cones
    !< of a closed oriented boundary sum to the region.
+   !$acc routine seq
    real(R8P), intent(in)  :: a(3), t1(3), t2(3), t3(3) !< Apex and base.
    real(R8P), intent(out) :: pt(3, 36), w(36)        !< Points, weights.
    real(R8P), parameter   :: R4(4) = [0.0694318442029737_R8P, 0.3300094782075719_R8P, 0.6699905217924281_R8P, &
@@ -146,6 +148,7 @@ contains
    pure subroutine triangle_rule(t1, t2, t3, pt, w, signed)
    !< The symmetric 7-point rule (degree 5) on the triangle t1 t2 t3 in 2-D (signed: weight sign = orientation) or 3-D
    !< (weights = area fractions, positive).
+   !$acc routine seq
    real(R8P), intent(in)  :: t1(:), t2(:), t3(:)  !< Vertices (2 or 3 coordinates).
    real(R8P), intent(out) :: pt(:,:), w(7)         !< Points [size(t1), 7], weights.
    logical,   intent(in)  :: signed                !< 2-D signed area (else the 3-D area).

@@ -60,6 +60,13 @@ module fossil_cut_cells_3d
 !< face sums equal the plane sections, volumes add up, every piece closes per axis), else -1: on 1.57
 !< million cells of lattice bodies 19 remain (947 before #70), where a facet touches the cell along a
 !< segment of a cell edge only, so its trace on the face is missing.
+!<
+!< Kernels (issue #100). The cells are per-cell kernels on plain arrays (the `!$acc routine seq` form of #20, for the
+!< device in WP2 step 3c): `cell_totals_3d` (clipped triangles and totals, a gather over the cell's candidates),
+!< `cell_pieces_3d` (pieces and measures, count then fill, on a workspace slice sized by `cell_pieces_sizes` from the
+!< cell's candidates and edge piercings), `single_piece_3d`. The candidates are binned by bounding box, then kept only if
+!< the box-triangle test says they touch the cell (`cell_candidates_3d`); the exact edge piercings come from the host
+!< (`cell_piercings`: exact orient3d). Moments, quadrature and the links' intervals take the same kernels.
 use fossil_box_predicates,     only : box_triangle_overlap
 use fossil_box_query,          only : box_tolerance
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t
@@ -76,6 +83,9 @@ use penf,                      only : I4P, R8P
 implicit none
 private
 public :: cut_cells_3d_t, cut_cells_3d
+
+integer(I4P), parameter :: MONO2_MAX = 15_I4P !< mono_count(2, MOMENTS_MAX): moments per face, at most.
+integer(I4P), parameter :: MONO3_MAX = 35_I4P !< mono_count(3, MOMENTS_MAX): moments per piece, at most.
 
 type :: cut_cells_3d_t
    !< Cut-cell geometry of a 3-D block (fluid = outside the solid).
@@ -130,14 +140,6 @@ type :: cut_cells_3d_t
    real(R8P),    allocatable :: wall_quad_weight(:) !< Its weights.
 endtype cut_cells_3d_t
 
-type :: pierce_t
-   !< A wall polygon vertex on a cell edge.
-   integer(I4P) :: edge = 0_I4P     !< Cell edge (1-12).
-   real(R8P)    :: t = 0._R8P       !< Position along the edge.
-   logical      :: enter = .false.  !< The edge, going in +axis, enters the solid there.
-   integer(I4P) :: poly = 0_I4P     !< Polygon.
-endtype pierce_t
-
 contains
    subroutine cut_cells_3d(surface, x, y, z, cut, status, links, edges, moments_order, quadrature)
    !< Cut cells of `surface` on the block with cell edges x(nx+1), y(ny+1), z(nz+1) (issue #40).
@@ -158,10 +160,9 @@ contains
    logical              :: qd        !< Quadrature asked.
    integer(I4P),         allocatable :: piv_piece(:), piv_edge(:) !< Fluid edge intervals of the pieces of multi-piece
    real(R8P),            allocatable :: piv_lo(:), piv_hi(:)      !< cells: piece, cell edge (1-12), range.
-   integer(I4P)         :: nx, ny, nz, i, j, k, st, f !< Work.
-   integer(I4P)         :: il, ih, jl, jh, kl, kh, m, np !< Work.
-   real(R8P)            :: tri(3, 3), poly(3, 16), c0(3), h(3), sq(3), vc, vs, ms(3) !< Work.
-   real(R8P), allocatable :: acc(:,:,:,:)  !< Per cell: solid volume, moments (3), wet area, moments (3), normal (3).
+   integer(I4P)         :: nx, ny, nz, i, j, k, st, f, m, c, nf !< Work.
+   real(R8P),    allocatable :: tri(:,:,:), nrm(:,:) !< Triangles [3, 3, nf], normals [3, nf].
+   integer(I4P), allocatable :: cnt(:), kstart(:), klst(:) !< Candidates of the cells (see `cell_candidates_3d`).
    type(facet_object), pointer :: fp      !< Facet.
    type(curve_object)   :: sec    !< Section.
    type(cut_cells_2d_t) :: c2     !< Its cut cells.
@@ -233,132 +234,13 @@ contains
    ! grid nodes (issue #70), and the cell edges if asked: exact crossings along the grid lines
    all_edges = .false. ; if (present(edges)) all_edges = edges ! no short-circuit in Fortran: never edges if absent
    call edge_fractions(surface, x, y, z, cut, all_edges)
-   ! cells: clipped triangles
-   allocate(acc(11, nx, ny, nz)) ; acc = 0._R8P
-   do f = 1, surface%get_facets_number()
-      fp => surface%facet_at(f)
-      do m = 1, 3
-         tri(:, m) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
-      enddo
-      il = max(1_I4P, col_of(minval(tri(1, :)), x)) ; ih = min(nx, col_of(maxval(tri(1, :)), x))
-      jl = max(1_I4P, col_of(minval(tri(2, :)), y)) ; jh = min(ny, col_of(maxval(tri(2, :)), y))
-      kl = max(1_I4P, col_of(minval(tri(3, :)), z)) ; kh = min(nz, col_of(maxval(tri(3, :)), z))
-      do k = kl, kh
-         do j = jl, jh
-            do i = il, ih
-               poly(:, 1:3) = tri ; np = 3
-               call clip_plane(poly, np, 1, x(i), .true.) ; call clip_plane(poly, np, 1, x(i + 1), .false.)
-               call clip_plane(poly, np, 2, y(j), .true.) ; call clip_plane(poly, np, 2, y(j + 1), .false.)
-               call clip_plane(poly, np, 3, z(k), .true.) ; call clip_plane(poly, np, 3, z(k + 1), .false.)
-               if (np < 3) cycle
-               c0 = [x(i), y(j), z(k)]
-               do m = 2, np - 1 ! fan, local coordinates
-                  call tri_terms(poly(:, 1) - c0, poly(:, m) - c0, poly(:, m + 1) - c0, acc(:, i, j, k))
-               enddo
-            enddo
-         enddo
-      enddo
-   enddo
-   ! cells: faces and totals
-   allocate(cut%alpha(nx, ny, nz), cut%centroid(3, nx, ny, nz), cut%wet_area(nx, ny, nz), cut%wet_centroid(3, nx, ny, nz), &
-            cut%wet_normal(3, nx, ny, nz), cut%closed(nx, ny, nz))
-   do k = 1, nz
-      do j = 1, ny
-         do i = 1, nx
-            c0 = [x(i), y(j), z(k)] ; h = [x(i + 1) - x(i), y(j + 1) - y(j), z(k + 1) - z(k)]
-            vc = h(1) * h(2) * h(3)
-            cut%closed(i, j, k) = cut%face_x_closed(i, j, k) .and. cut%face_x_closed(i + 1, j, k) .and. &
-                                  cut%face_y_closed(i, j, k) .and. cut%face_y_closed(i, j + 1, k) .and. &
-                                  cut%face_z_closed(i, j, k) .and. cut%face_z_closed(i, j, k + 1)
-            ! +x, +y, +z faces (local coordinate h); the -x, -y, -z faces are at local 0 and add nothing
-            sq = [(1._R8P - cut%face_x(i + 1, j, k)) * h(2) * h(3), (1._R8P - cut%face_y(i, j + 1, k)) * h(3) * h(1), &
-                  (1._R8P - cut%face_z(i, j, k + 1)) * h(1) * h(2)]
-            vs = acc(1, i, j, k) + sum(h * sq) / 3._R8P
-            ms = acc(2:4, i, j, k) + 0.5_R8P * h * h * sq
-            cut%wet_area(i, j, k) = acc(5, i, j, k)
-            cut%wet_normal(:, i, j, k) = acc(9:11, i, j, k)
-            cut%wet_centroid(:, i, j, k) = c0 + 0.5_R8P * h
-            if (acc(5, i, j, k) > 0._R8P) cut%wet_centroid(:, i, j, k) = c0 + acc(6:8, i, j, k) / acc(5, i, j, k)
-            if (.not. cut%closed(i, j, k)) then
-               cut%alpha(i, j, k) = -1._R8P ; cut%centroid(:, i, j, k) = c0 + 0.5_R8P * h
-               cycle
-            endif
-            cut%alpha(i, j, k) = (vc - vs) / vc
-            cut%centroid(:, i, j, k) = c0 + 0.5_R8P * h
-            if (vc - vs > 0._R8P) cut%centroid(:, i, j, k) = c0 + (vc * 0.5_R8P * h - ms) / (vc - vs)
-         enddo
-      enddo
-   enddo
-   if (present(links)) then
-      call cut_pieces_3d(surface, x, y, z, cut, mo, qd, piv_piece, piv_edge, piv_lo, piv_hi, px, py, pz)
-      call links_3d(cut, x, y, z, px, py, pz, piv_piece, piv_edge, piv_lo, piv_hi, links)
-   else
-      if (qd) then
-         call cut_pieces_3d(surface, x, y, z, cut, mo, qd, px=px, py=py, pz=pz)
-      else
-         call cut_pieces_3d(surface, x, y, z, cut, mo, qd)
-      endif
-   endif
-   endsubroutine cut_cells_3d
-
-   subroutine cut_pieces_3d(surface, x, y, z, cut, mo, qd, piv_piece, piv_edge, piv_lo, piv_hi, px, py, pz)
-   !< Fluid pieces of every cell (see the module notes); with piv_*, the fluid edge intervals of the pieces of every
-   !< multi-piece cell (issue #70, for the links).
-   type(surface_stl_object), intent(in)    :: surface    !< Surface.
-   real(R8P),                intent(in)    :: x(:), y(:), z(:) !< Cell edges.
-   type(cut_cells_3d_t),     intent(inout) :: cut        !< Cut cells (alpha, closed set).
-   integer(I4P),             intent(in)    :: mo         !< Moment order (0: none).
-   logical,                  intent(in)    :: qd         !< Quadrature rules.
-   real(R8P),    allocatable   :: qpt(:,:), qw(:), wpt(:,:), wwt(:) !< Rules of the pieces of one cell (see cell_pieces).
-   integer(I4P), allocatable   :: qst(:), wst(:), qwn(:)  !< Their starts, wall-cone points per piece.
-   real(R8P),    allocatable   :: spt(:,:), sw(:)         !< Cones over the section faces of a one-piece cell.
-   integer(I4P)                :: nsc                     !< Their count.
-   real(R8P),    allocatable   :: qbp(:,:), qbw(:), wbp(:,:), wbw(:) !< Rules of all pieces.
-   integer(I4P), allocatable   :: qcnt(:), wcnt(:)        !< Points per piece.
-   integer(I4P)                :: nqb, nwb, m3            !< Points so far, work.
-   real(R8P)                   :: tpt(3, 27), tw(27)      !< Tensor rule of a fluid cell.
-   integer(I4P), allocatable, intent(out), optional :: piv_piece(:), piv_edge(:) !< Intervals: piece, cell edge.
-   real(R8P),    allocatable, intent(out), optional :: piv_lo(:), piv_hi(:)      !< Intervals: range.
-   type(cut_cells_2d_t),     intent(in),  optional :: px(:), py(:), pz(:) !< Plane sections (with boundaries, for qd).
-   integer(I4P), allocatable   :: cpp(:), cpe(:)          !< Intervals of one cell: local piece, edge.
-   real(R8P),    allocatable   :: cpl(:), cph(:)          !< Intervals of one cell: range.
-   integer(I4P)                :: nivb, m2                !< Intervals so far, work.
-   integer(I4P)                :: nm2, nm3                !< Moments per face, per piece.
-   integer(I4P), allocatable   :: e2(:,:), e3(:,:)        !< Their exponents.
-   real(R8P),    allocatable   :: pvw(:,:), pwm(:,:), pfm(:,:,:) !< Moments of the pieces of one cell (see cell_pieces).
-   real(R8P),    allocatable   :: mbuf(:,:), wbuf(:,:), fbuf(:,:,:) !< Moments of all pieces: volume, wall, faces.
-   real(R8P),    allocatable   :: cm(:,:), cw(:,:), cf(:,:,:) !< Moments of the pieces of the cell being added.
-   type(facet_object), pointer :: fp                      !< Facet.
-   real(R8P),    allocatable   :: tri(:,:,:), nrm(:,:)    !< Triangles [3, 3, nf], normals [3, nf].
-   integer(I4P), allocatable   :: cnt(:), start(:), lst(:) !< Cell -> triangles (CSR).
-   integer(I4P)                :: nx, ny, nz, nf, f, m, i, j, k, il, ih, jl, jh, kl, kh, c, np !< Work.
-   logical,      allocatable   :: open_cell(:,:,:)        !< Cells a mesh boundary edge overlaps.
-   real(R8P),    allocatable   :: ek(:,:)                 !< Edge keys [6, 3 nf] (end points, lexicographic order).
-   integer(I4P), allocatable   :: idx(:)                  !< Sorted edges.
-   real(R8P)                   :: pa(3), pb(3)            !< Edge ends.
-   real(R8P),    allocatable   :: pm(:,:)                 !< Measures of the pieces of a cell [17, np].
-   real(R8P),    allocatable   :: pbuf(:,:)               !< Measures of all pieces [17, capacity].
-   integer(I4P), allocatable   :: pcel(:,:)               !< Cells of all pieces [3, capacity].
-   integer(I4P)                :: npb                     !< Pieces so far.
-   real(R8P)                   :: tot(17), h(3)           !< Cell totals, cell size.
-   integer(I4P)                :: cs(8), q                !< Corner states, corner.
-   integer(I4P), allocatable   :: kept(:)                 !< Candidates of a cell that touch it.
-   logical,      allocatable   :: thin(:)                 !< Facets kept without the box test (near-degenerate).
-   real(R8P)                   :: tol, emax2              !< Box test inflation, longest squared edge.
-   integer(I4P)                :: nk, m4                  !< Kept candidates, work.
-
-   nx = cut%nx ; ny = cut%ny ; nz = cut%nz
+   ! cells (issue #100): the candidate facets of every cell (`cell_candidates_3d`: bounding-box binning, then the box
+   ! test), then per cell the clipped triangles, the faces and the totals (`cell_totals_3d`). Before #100 a facet loop
+   ! scattered the clipped triangles into the cells; the gather adds the same terms to each cell in the same order (its
+   ! facets in increasing order, the fan of each in order), so the bits are the same; a candidate the box test drops has
+   ! no clipped polygon in the cell (see `cell_candidates_3d`).
    nf = surface%get_facets_number()
-   allocate(tri(3, 3, nf), nrm(3, nf), cnt(nx * ny * nz + 1), cut%pieces(nx, ny, nz), cut%first_piece(nx, ny, nz))
-   allocate(pbuf(17, 64), pcel(3, 64)) ; npb = 0_I4P ; nivb = 0_I4P
-   nm2 = 0_I4P ; nm3 = 0_I4P
-   if (mo > 0_I4P) then
-      nm2 = mono_count(2_I4P, mo) ; nm3 = mono_count(3_I4P, mo) ; e2 = mono_exponents(2_I4P, mo) ; e3 = mono_exponents(3_I4P, mo)
-   endif
-   allocate(mbuf(nm3, 64), wbuf(nm3, 64), fbuf(nm2, 6, 64))
-   allocate(qbp(3, 64), qbw(64), wbp(3, 64), wbw(64), qcnt(64), wcnt(64)) ; nqb = 0_I4P ; nwb = 0_I4P
-   if (present(piv_piece)) allocate(piv_piece(64), piv_edge(64), piv_lo(64), piv_hi(64))
-   cnt = 0_I4P
+   allocate(tri(3, 3, nf), nrm(3, nf))
    do f = 1, nf
       fp => surface%facet_at(f)
       do m = 1, 3
@@ -366,18 +248,60 @@ contains
       enddo
       nrm(:, f) = cross3(tri(:, 2, f) - tri(:, 1, f), tri(:, 3, f) - tri(:, 1, f))
    enddo
-   ! the box test of the candidates (see the comment at the cell_pieces call): its inflation covers the round-off of
-   ! the projections over the grid and the surface; a facet whose computed normal is small next to its edges (|n|_1 <
-   ! 1e-2 e_max^2: the spread of its vertices along that axis could exceed the inflation) is kept without the test
-   allocate(thin(nf))
-   tol = box_tolerance([min(x(1), minval(tri(1, :, :))), min(y(1), minval(tri(2, :, :))), min(z(1), minval(tri(3, :, :)))], &
-                       [max(x(nx + 1), maxval(tri(1, :, :))), max(y(ny + 1), maxval(tri(2, :, :))), &
-                        max(z(nz + 1), maxval(tri(3, :, :)))])
-   do f = 1, nf
-      emax2 = max(sum((tri(:, 2, f) - tri(:, 1, f)) ** 2), sum((tri(:, 3, f) - tri(:, 2, f)) ** 2), &
-                  sum((tri(:, 1, f) - tri(:, 3, f)) ** 2))
-      thin(f) = sum(abs(nrm(:, f))) < 1.e-2_R8P * emax2
+   call cell_candidates_3d(x, y, z, nf, tri, nrm, cnt, kstart, klst)
+   allocate(cut%alpha(nx, ny, nz), cut%centroid(3, nx, ny, nz), cut%wet_area(nx, ny, nz), cut%wet_centroid(3, nx, ny, nz), &
+            cut%wet_normal(3, nx, ny, nz), cut%closed(nx, ny, nz))
+   do k = 1, nz
+      do j = 1, ny
+         do i = 1, nx
+            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+            call cell_totals_3d(nf, tri, kstart(c + 1) - kstart(c), klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), &
+                                z(k), z(k + 1), cut%face_x(i + 1, j, k), cut%face_y(i, j + 1, k), cut%face_z(i, j, k + 1), &
+                                cut%face_x_closed(i, j, k), cut%face_x_closed(i + 1, j, k), cut%face_y_closed(i, j, k), &
+                                cut%face_y_closed(i, j + 1, k), cut%face_z_closed(i, j, k), cut%face_z_closed(i, j, k + 1), &
+                                cut%alpha(i, j, k), cut%centroid(1, i, j, k), cut%wet_area(i, j, k), &
+                                cut%wet_centroid(1, i, j, k), cut%wet_normal(1, i, j, k), cut%closed(i, j, k))
+         enddo
+      enddo
    enddo
+   if (present(links)) then
+      call cut_pieces_3d(x, y, z, cut, nf, tri, nrm, cnt, kstart, klst, mo, qd, piv_piece, piv_edge, piv_lo, piv_hi, px, py, pz)
+      call links_3d(cut, x, y, z, px, py, pz, piv_piece, piv_edge, piv_lo, piv_hi, links)
+   else
+      if (qd) then
+         call cut_pieces_3d(x, y, z, cut, nf, tri, nrm, cnt, kstart, klst, mo, qd, px=px, py=py, pz=pz)
+      else
+         call cut_pieces_3d(x, y, z, cut, nf, tri, nrm, cnt, kstart, klst, mo, qd)
+      endif
+   endif
+   endsubroutine cut_cells_3d
+
+   subroutine cell_candidates_3d(x, y, z, nf, tri, nrm, cnt, kstart, klst)
+   !< Candidate facets of every cell (issue #100): `cnt(c)` facets whose bounding box overlaps cell c (the binning of
+   !< #40, kept for the cells' classification), and among them, in increasing order, the ones that touch the closed cell
+   !< box (`klst(kstart(c) : kstart(c + 1) - 1)`). The test is `box_triangle_overlap`, conservative: inflated by `tol`
+   !< it never misses a contact. A dropped facet has no clipped polygon in the cell (the clip keeps points of the closed
+   !< box only, up to round-off far below tol), no piercing of a cell edge (a crossing between the perturbed corners lies
+   !< on the closed edge) and no edge shared with a trace (`across_crosses`: the facet would contain the trace). Its atom
+   !< in `cell_pieces_core` would be a singleton never counted, and the root of every set is its least atom, so the
+   !< pieces, their order and every sum (over the kept polygons in list order) are those of the full list. The
+   !< inflation covers the round-off of the projections over the grid and the surface; a facet whose computed normal is
+   !< small next to its edges (|n|_1 < 1e-2 e_max^2: the spread of its vertices along that axis could exceed the
+   !< inflation) is kept without the test.
+   real(R8P),                 intent(in)  :: x(:), y(:), z(:) !< Cell edges.
+   integer(I4P),              intent(in)  :: nf               !< Facets.
+   real(R8P),                 intent(in)  :: tri(3, 3, nf)    !< Triangles.
+   real(R8P),                 intent(in)  :: nrm(3, nf)       !< Their normals (not unit).
+   integer(I4P), allocatable, intent(out) :: cnt(:)           !< Bounding-box candidates per cell [ncell + 1].
+   integer(I4P), allocatable, intent(out) :: kstart(:)        !< Kept candidates of cell c: kstart(c) .. kstart(c + 1) - 1.
+   integer(I4P), allocatable, intent(out) :: klst(:)          !< Kept candidates [their number + 1].
+   integer(I4P), allocatable :: start(:), lst(:)              !< Bounding-box candidates (CSR).
+   logical,      allocatable :: thin(:)                       !< Facets kept without the box test.
+   real(R8P)                 :: tol, emax2                    !< Box test inflation, longest squared edge.
+   integer(I4P)              :: nx, ny, nz, f, m, i, j, k, il, ih, jl, jh, kl, kh, c, w !< Work.
+
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   allocate(cnt(nx * ny * nz + 1)) ; cnt = 0_I4P
    do m = 1, 2 ! count, then fill
       if (m == 2) then
          allocate(start(nx * ny * nz + 1), lst(sum(cnt)))
@@ -402,347 +326,617 @@ contains
          enddo
       enddo
    enddo
-   allocate(kept(max(1_I4P, maxval(cnt))))
+   allocate(thin(nf))
+   tol = box_tolerance([min(x(1), minval(tri(1, :, :))), min(y(1), minval(tri(2, :, :))), min(z(1), minval(tri(3, :, :)))], &
+                       [max(x(nx + 1), maxval(tri(1, :, :))), max(y(ny + 1), maxval(tri(2, :, :))), &
+                        max(z(nz + 1), maxval(tri(3, :, :)))])
+   do f = 1, nf
+      emax2 = max(sum((tri(:, 2, f) - tri(:, 1, f)) ** 2), sum((tri(:, 3, f) - tri(:, 2, f)) ** 2), &
+                  sum((tri(:, 1, f) - tri(:, 3, f)) ** 2))
+      thin(f) = sum(abs(nrm(:, f))) < 1.e-2_R8P * emax2
+   enddo
+   allocate(kstart(nx * ny * nz + 1), klst(size(lst) + 1)) ; klst = 0_I4P
+   w = 0_I4P
+   do k = 1, nz
+      do j = 1, ny
+         do i = 1, nx
+            c = i + nx * ((j - 1) + ny * (k - 1))
+            kstart(c) = w + 1_I4P
+            do m = start(c), start(c + 1) - 1_I4P
+               f = lst(m)
+               if (thin(f) .or. box_triangle_overlap([x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], tri(:, 1, f), &
+                                                     tri(:, 2, f), tri(:, 3, f), tol)) then
+                  w = w + 1_I4P ; klst(w) = f
+               endif
+            enddo
+         enddo
+      enddo
+   enddo
+   kstart(nx * ny * nz + 1) = w + 1_I4P
+   endsubroutine cell_candidates_3d
+
+   subroutine cell_totals_3d(nf, tri, nt, lst, x0, x1, y0, y1, z0, z1, fx1, fy1, fz1, cx0, cx1, cy0, cy1, cz0, cz1, alpha, &
+                             centroid, wet_area, wet_centroid, wet_normal, closed)
+   !< Kernel (issue #100): the cell [x0, x1] x [y0, y1] x [z0, z1] from its facets lst (increasing): the clipped
+   !< triangles (Sutherland-Hodgman, a point on a plane belongs to the cell below it), their divergence-theorem terms in
+   !< coordinates local to the low corner, then with the solid parts of the +x, +y, +z faces (the low faces are at local
+   !< 0) the solid volume and moments; the fluid fraction and centroid, the wetted area, centroid and normal integral.
+   !< A cell with a face not closed gets alpha = -1 (see the module notes).
+   !$acc routine seq
+   integer(I4P), intent(in)  :: nf                     !< Facets.
+   real(R8P),    intent(in)  :: tri(3, 3, nf)          !< Triangles.
+   integer(I4P), intent(in)  :: nt                     !< Facets of the cell.
+   integer(I4P), intent(in)  :: lst(nt)                !< Their indexes (increasing).
+   real(R8P),    intent(in)  :: x0, x1, y0, y1, z0, z1 !< Cell.
+   real(R8P),    intent(in)  :: fx1, fy1, fz1          !< Fluid fractions of the faces +x, +y, +z.
+   logical,      intent(in)  :: cx0, cx1, cy0, cy1, cz0, cz1 !< The faces closed.
+   real(R8P),    intent(out) :: alpha                  !< Fluid fraction (-1 if not closed).
+   real(R8P),    intent(out) :: centroid(3)            !< Fluid centroid.
+   real(R8P),    intent(out) :: wet_area               !< Wetted area.
+   real(R8P),    intent(out) :: wet_centroid(3)        !< Wetted centroid.
+   real(R8P),    intent(out) :: wet_normal(3)          !< Wall normal integral.
+   logical,      intent(out) :: closed                 !< All six faces closed.
+   real(R8P)                 :: acc(11), poly(3, 16), c0(3), h(3), sq(3), vc, vs, ms(3), d1(3), d2(3), d3(3), s !< Work.
+   integer(I4P)              :: q, np, m, a            !< Work.
+
+   acc = 0._R8P
+   c0(1) = x0 ; c0(2) = y0 ; c0(3) = z0
+   do q = 1, nt
+      poly(:, 1:3) = tri(:, :, lst(q)) ; np = 3_I4P
+      call clip_poly(poly, np, 1_I4P, x0, .true.) ; call clip_poly(poly, np, 1_I4P, x1, .false.)
+      call clip_poly(poly, np, 2_I4P, y0, .true.) ; call clip_poly(poly, np, 2_I4P, y1, .false.)
+      call clip_poly(poly, np, 3_I4P, z0, .true.) ; call clip_poly(poly, np, 3_I4P, z1, .false.)
+      if (np < 3_I4P) cycle
+      do m = 2, np - 1 ! fan, local coordinates
+         d1 = poly(:, 1) - c0 ; d2 = poly(:, m) - c0 ; d3 = poly(:, m + 1) - c0
+         call tri_terms(d1, d2, d3, acc)
+      enddo
+   enddo
+   h(1) = x1 - x0 ; h(2) = y1 - y0 ; h(3) = z1 - z0
+   vc = h(1) * h(2) * h(3)
+   closed = cx0 .and. cx1 .and. cy0 .and. cy1 .and. cz0 .and. cz1
+   ! +x, +y, +z faces (local coordinate h); the -x, -y, -z faces are at local 0 and add nothing
+   sq(1) = (1._R8P - fx1) * h(2) * h(3) ; sq(2) = (1._R8P - fy1) * h(3) * h(1) ; sq(3) = (1._R8P - fz1) * h(1) * h(2)
+   s = 0._R8P
+   do a = 1, 3 ! sum(h * sq), in its order
+      s = s + h(a) * sq(a)
+   enddo
+   vs = acc(1) + s / 3._R8P
+   do a = 1, 3
+      ms(a) = acc(1 + a) + 0.5_R8P * h(a) * h(a) * sq(a)
+   enddo
+   wet_area = acc(5)
+   do a = 1, 3
+      wet_normal(a) = acc(8 + a)
+      wet_centroid(a) = c0(a) + 0.5_R8P * h(a)
+      if (acc(5) > 0._R8P) wet_centroid(a) = c0(a) + acc(5 + a) / acc(5)
+      centroid(a) = c0(a) + 0.5_R8P * h(a)
+   enddo
+   if (.not. closed) then
+      alpha = -1._R8P
+      return
+   endif
+   alpha = (vc - vs) / vc
+   if (vc - vs > 0._R8P) then
+      do a = 1, 3
+         centroid(a) = c0(a) + (vc * 0.5_R8P * h(a) - ms(a)) / (vc - vs)
+      enddo
+   endif
+   endsubroutine cell_totals_3d
+
+   subroutine cut_pieces_3d(x, y, z, cut, nf, tri, nrm, cnt, kstart, klst, mo, qd, piv_piece, piv_edge, piv_lo, piv_hi, &
+                            px, py, pz)
+   !< Fluid pieces of every cell (see the module notes); with piv_*, the fluid edge intervals of the pieces of every
+   !< multi-piece cell (issue #70, for the links).
+   !<
+   !< Count, then fill (issue #100). Every cell is classified: no count (-1), a cell without candidates (fluid or solid
+   !< by its fraction), a cell whose candidates all miss it (the box test) with equal corner states (one piece or none,
+   !< what `cell_pieces_core` gives on an empty list), or a cut cell. A cut cell gets its exact edge piercings
+   !< (`cell_piercings`, host: exact orient3d), a workspace sized from its candidates and piercings
+   !< (`cell_pieces_sizes`) and the count pass of `cell_pieces_3d`: its pieces and the numbers of its intervals and rule
+   !< points. Prefix sums over the cells in order give every cell its first piece, interval and rule points; the fill
+   !< writes the outputs in place: the cell totals for a single piece, the fill pass of `cell_pieces_3d` (the same
+   !< kernel on the same inputs, the same bits) where the kernel's pieces are needed (several pieces, or one with moments
+   !< or quadrature), and the plane-section cones of the quadrature. No buffer grows; the outputs are those of the
+   !< cell-by-cell loop with growing buffers that this replaces, bit for bit and in the same order.
+   real(R8P),                intent(in)    :: x(:), y(:), z(:) !< Cell edges.
+   type(cut_cells_3d_t),     intent(inout) :: cut        !< Cut cells (alpha, closed set).
+   integer(I4P),             intent(in)    :: nf         !< Facets.
+   real(R8P),                intent(in)    :: tri(3, 3, nf), nrm(3, nf) !< Triangles, normals.
+   integer(I4P),             intent(in)    :: cnt(*), kstart(*), klst(*) !< Candidates (see `cell_candidates_3d`).
+   integer(I4P),             intent(in)    :: mo         !< Moment order (0: none).
+   logical,                  intent(in)    :: qd         !< Quadrature rules.
+   integer(I4P), allocatable, intent(out), optional :: piv_piece(:), piv_edge(:) !< Intervals: piece, cell edge.
+   real(R8P),    allocatable, intent(out), optional :: piv_lo(:), piv_hi(:)      !< Intervals: range.
+   type(cut_cells_2d_t),     intent(in),  optional :: px(:), py(:), pz(:) !< Plane sections (with boundaries, for qd).
+   integer(I4P), parameter     :: K_NONE = 0_I4P, K_EMPTY = 1_I4P, K_QUIET = 2_I4P, K_CUT = 3_I4P !< Cell kinds.
+   integer(I4P), allocatable   :: kind_(:)                !< Kind of each cell.
+   integer(I4P), allocatable   :: civ(:), cq(:), cw(:), cq1(:), cns(:) !< Per cell: intervals, rule points, wall rule
+                                                          !< points, wall cones of a single piece, section cones.
+   integer(I4P), allocatable   :: ivo(:), qo(:), wo(:)    !< Intervals, rule points, wall rule points before each cell.
+   integer(I4P)                :: nm2, nm3                !< Moments per face, per piece.
+   integer(I4P), allocatable   :: e2(:,:), e3(:,:)        !< Their exponents.
+   real(R8P),    allocatable   :: secm(:,:)               !< Section moments of the six faces of a cell [nm2, 6].
+   real(R8P),    allocatable   :: pmom(:,:), pwmom(:,:), pfmom(:,:,:) !< Piece moments: volume, wall, faces.
+   integer(I4P), allocatable   :: ivp(:), ive(:)          !< Intervals of the multi-piece cells: piece, cell edge.
+   real(R8P),    allocatable   :: ivl(:), ivh(:)          !< Their ranges.
+   real(R8P),    allocatable   :: qpt(:,:), qwt(:), wpt(:,:), wwt(:) !< Rules: volume points, weights; wall.
+   integer(I4P), allocatable   :: qcnt(:), wcnt(:)        !< Rule points per piece.
+   integer(I4P), allocatable   :: pce(:), pcq(:), pcen(:) !< Piercings of a cell: edge, candidate, entering (1).
+   real(R8P),    allocatable   :: pct(:)                  !< Their positions.
+   real(R8P),    allocatable   :: rw(:)                   !< Real workspace of a cell.
+   integer(I4P), allocatable   :: iw(:)                   !< Integer workspace of a cell.
+   integer(I4P)                :: nx, ny, nz, m, i, j, k, il, ih, jl, jh, kl, kh, c, np, nt, npc, nrw, niw, q, kd !< Work.
+   integer(I4P)                :: ncell, npt, nivt, nqt, nwt, nivc, nqc, nwc, qwn1, p0, m3, ns, f_, ntmax !< Work.
+   real(R8P)                   :: c0(3), c1(3)            !< Cell corners.
+   logical,      allocatable   :: open_cell(:,:,:)        !< Cells a mesh boundary edge overlaps.
+   real(R8P),    allocatable   :: ek(:,:)                 !< Edge keys [6, 3 nf] (end points, lexicographic order).
+   integer(I4P), allocatable   :: idx(:)                  !< Sorted edges.
+   real(R8P)                   :: pa(3), pb(3)            !< Edge ends.
+   real(R8P)                   :: h(3), tpt(3, 27), tw(27), faces(6), zero(MONO3_MAX) !< Work.
+   integer(I4P)                :: cs(8)                   !< Corner states.
+   logical                     :: want_iv                 !< Intervals asked.
+
+   nx = cut%nx ; ny = cut%ny ; nz = cut%nz ; ncell = nx * ny * nz
+   want_iv = present(piv_piece)
+   allocate(cut%pieces(nx, ny, nz), cut%first_piece(nx, ny, nz))
+   nm2 = 0_I4P ; nm3 = 0_I4P
+   if (mo > 0_I4P) then
+      nm2 = mono_count(2_I4P, mo) ; nm3 = mono_count(3_I4P, mo) ; e2 = mono_exponents(2_I4P, mo) ; e3 = mono_exponents(3_I4P, mo)
+   else
+      allocate(e2(2, 0), e3(3, 0))
+   endif
+   allocate(secm(nm2, 6)) ; zero = 0._R8P
    ! mesh boundary edges (one facet): the cells they overlap get no count
    allocate(open_cell(nx, ny, nz), ek(6, 3 * nf), idx(3 * nf)) ; open_cell = .false.
-   do f = 1, nf
+   do f_ = 1, nf
       do m = 1, 3
-         pa = tri(:, m, f) ; pb = tri(:, mod(m, 3) + 1, f)
+         pa = tri(:, m, f_) ; pb = tri(:, mod(m, 3) + 1, f_)
          if (lexless(pb, pa)) then
-            ek(:, 3 * (f - 1) + m) = [pb, pa]
+            ek(:, 3 * (f_ - 1) + m) = [pb, pa]
          else
-            ek(:, 3 * (f - 1) + m) = [pa, pb]
+            ek(:, 3 * (f_ - 1) + m) = [pa, pb]
          endif
       enddo
    enddo
-   call sort_points(ek, idx)
+   call sort_keys(6_I4P, 3_I4P * nf, ek, idx)
    m = 1
    do while (m <= 3 * nf)
-      f = m
-      do while (f < 3 * nf)
-         if (any(ek(:, idx(f + 1)) /= ek(:, idx(m)))) exit
-         f = f + 1
+      f_ = m
+      do while (f_ < 3 * nf)
+         if (any(ek(:, idx(f_ + 1)) /= ek(:, idx(m)))) exit
+         f_ = f_ + 1
       enddo
-      if (f == m) then ! an edge of one facet
+      if (f_ == m) then ! an edge of one facet
          pa = ek(1:3, idx(m)) ; pb = ek(4:6, idx(m))
          il = max(1_I4P, col_of(min(pa(1), pb(1)), x)) ; ih = min(nx, col_of(max(pa(1), pb(1)), x))
          jl = max(1_I4P, col_of(min(pa(2), pb(2)), y)) ; jh = min(ny, col_of(max(pa(2), pb(2)), y))
          kl = max(1_I4P, col_of(min(pa(3), pb(3)), z)) ; kh = min(nz, col_of(max(pa(3), pb(3)), z))
          if (il <= ih .and. jl <= jh .and. kl <= kh) open_cell(il:ih, jl:jh, kl:kh) = .true.
       endif
-      m = f + 1
+      m = f_ + 1
    enddo
-   ! corner states: the exact inside flags of the perturbed nodes (issue #70, `edge_fractions`)
+   ! 1. classify and count; corner states: the exact inside flags of the perturbed nodes (issue #70, `edge_fractions`)
+   allocate(kind_(ncell), civ(ncell), cq(ncell), cw(ncell), cq1(ncell), cns(ncell))
+   kind_ = K_NONE ; civ = 0_I4P ; cq = 0_I4P ; cw = 0_I4P ; cq1 = 0_I4P ; cns = 0_I4P
+   ntmax = 1_I4P
+   do c = 1, ncell
+      ntmax = max(ntmax, kstart(c + 1) - kstart(c))
+   enddo
+   allocate(pce(12 * ntmax), pcq(12 * ntmax), pcen(12 * ntmax), pct(12 * ntmax)) ! at most 12 nt piercings
+   ! zero-size outputs for the count pass (it writes none)
+   allocate(rw(1), iw(1), pmom(nm3, 0), pwmom(nm3, 0), pfmom(nm2, 6, 0), ivp(0), ive(0), ivl(0), ivh(0), qpt(3, 0), qwt(0), &
+            wpt(3, 0), wwt(0), qcnt(0), wcnt(0))
+   allocate(cut%piece_volume(0), cut%piece_centroid(3, 0), cut%piece_wet_area(0), cut%piece_wet_centroid(3, 0), &
+            cut%piece_wet_normal(3, 0), cut%piece_face(6, 0))
    do k = 1, nz
       do j = 1, ny
          do i = 1, nx
             c = i + nx * ((j - 1) + ny * (k - 1))
-            cut%first_piece(i, j, k) = npb + 1_I4P
             if (.not. cut%closed(i, j, k) .or. open_cell(i, j, k) .or. cut%alpha(i, j, k) < -1.e-12_R8P .or. &
                 cut%alpha(i, j, k) > 1._R8P + 1.e-12_R8P) then
                cut%pieces(i, j, k) = -1_I4P
             elseif (cnt(c) == 0_I4P .and. abs(cut%alpha(i, j, k) - anint(cut%alpha(i, j, k))) > 1.e-12_R8P) then
                cut%pieces(i, j, k) = -1_I4P
             elseif (cnt(c) == 0_I4P) then
-               cut%pieces(i, j, k) = merge(1_I4P, 0_I4P, cut%alpha(i, j, k) > 0.5_R8P)
+               cut%pieces(i, j, k) = merge(1_I4P, 0_I4P, cut%alpha(i, j, k) > 0.5_R8P) ; kind_(c) = K_EMPTY
             else
                do q = 1, 8
                   cs(q) = merge(0_I4P, 1_I4P, cut%node_in(i + mod(q - 1, 2), j + mod((q - 1) / 2, 2), k + (q - 1) / 4))
                enddo
-               ! the candidates that touch the closed cell box (`box_triangle_overlap`, conservative: inflated by tol it
-               ! never misses a contact), in the order of the list. A dropped facet has no clipped polygon in the cell
-               ! (the clip keeps points of the closed box only, up to round-off far below tol), no piercing of a cell
-               ! edge (a crossing between the perturbed corners lies on the closed edge) and no edge shared with a
-               ! trace (`across_crosses`: the facet would contain the trace). Its atom in cell_pieces is a singleton
-               ! never counted, and the root of every set is its least atom, so the pieces, their order and every sum
-               ! (taken over the kept polygons in list order) are those of the full list. A cell left without a
-               ! candidate still takes this path (cnt(c) > 0), with an empty list: the same result.
-               nk = 0_I4P
-               do m4 = start(c), start(c + 1) - 1_I4P
-                  f = lst(m4)
-                  if (thin(f) .or. box_triangle_overlap([x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], tri(:, 1, f), &
-                                                        tri(:, 2, f), tri(:, 3, f), tol)) then
-                     nk = nk + 1_I4P ; kept(nk) = f
+               nt = kstart(c + 1) - kstart(c)
+               if (nt == 0_I4P .and. all(cs == cs(1))) then ! what the kernel gives on an empty list
+                  cut%pieces(i, j, k) = cs(1) ; kind_(c) = K_QUIET
+               else
+                  kind_(c) = K_CUT ; c0 = [x(i), y(j), z(k)] ; c1 = [x(i + 1), y(j + 1), z(k + 1)]
+                  call cell_piercings(nf, tri, nt, klst(kstart(c):kstart(c + 1) - 1), c0, c1, npc, pce, pcq, pct, pcen)
+                  call cell_pieces_sizes(nt, npc, nm2, nm3, qd, nrw, niw)
+                  if (nrw > size(rw)) then
+                     deallocate(rw) ; allocate(rw(nrw))
                   endif
-               enddo
-               call cell_pieces(tri, nrm, kept(1:nk), &
-                                [x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], cs, np, pm, present(piv_piece), &
-                                cpp, cpe, cpl, cph, &
-                                mo, pvw, pwm, pfm, qd, qpt, qw, qst, wpt, wwt, wst, qwn)
-               if (np > 1_I4P) then ! (issue #70) trust the split only if it closes
-                  h = [x(i + 1) - x(i), y(j + 1) - y(j), z(k + 1) - z(k)]
-                  if (.not. split_closes(pm(:, 1:np), h, cut%alpha(i, j, k), [cut%face_x(i, j, k), cut%face_x(i + 1, j, k), &
-                      cut%face_y(i, j, k), cut%face_y(i, j + 1, k), cut%face_z(i, j, k), cut%face_z(i, j, k + 1)])) np = -1_I4P
-               endif
-               cut%pieces(i, j, k) = np
-               if (present(piv_piece) .and. np > 1_I4P) then ! the intervals of the pieces, global piece ids
-                  do m2 = 1, size(cpp)
-                     if (cpp(m2) < 1_I4P) cycle
-                     if (nivb == size(piv_piece)) then
-                        piv_piece = [piv_piece, piv_piece] ; piv_edge = [piv_edge, piv_edge]
-                        piv_lo = [piv_lo, piv_lo] ; piv_hi = [piv_hi, piv_hi]
-                     endif
-                     nivb = nivb + 1_I4P
-                     piv_piece(nivb) = npb + cpp(m2) ; piv_edge(nivb) = cpe(m2)
-                     piv_lo(nivb) = cpl(m2) ; piv_hi(nivb) = cph(m2)
-                  enddo
+                  if (niw > size(iw)) then
+                     deallocate(iw) ; allocate(iw(niw))
+                  endif
+                  faces = [cut%face_x(i, j, k), cut%face_x(i + 1, j, k), cut%face_y(i, j, k), cut%face_y(i, j + 1, k), &
+                           cut%face_z(i, j, k), cut%face_z(i, j, k + 1)]
+                  call cell_pieces_3d(.false., nf, tri, nrm, nt, klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), z(k), &
+                                      z(k + 1), cs, cut%alpha(i, j, k), faces, npc, pce, pcq, pct, pcen, nm2, nm3, e2, e3, &
+                                      qd, want_iv, secm, nrw, rw, niw, iw, np, nivc, nqc, nwc, qwn1, &
+                                      0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, cut%piece_volume, &
+                                      cut%piece_centroid, cut%piece_wet_area, cut%piece_wet_centroid, cut%piece_wet_normal, &
+                                      cut%piece_face, pmom, pwmom, pfmom, ivp, ive, ivl, ivh, qpt, qwt, wpt, wwt, qcnt, wcnt)
+                  cut%pieces(i, j, k) = np
+                  if (np > 1_I4P) then
+                     if (want_iv) civ(c) = nivc
+                     cq(c) = nqc ; cw(c) = nwc
+                  elseif (np == 1_I4P) then
+                     cq1(c) = qwn1 ; cw(c) = nwc
+                  endif
                endif
             endif
-            if (cut%pieces(i, j, k) < 1_I4P) cycle
+            np = cut%pieces(i, j, k)
+            if (np < 1_I4P .or. .not. qd) cycle
+            ! section cones of a single piece; the rule points of the cell
+            if (np == 1_I4P .and. kind_(c) /= K_EMPTY) cns(c) = section_cones_count(px, py, pz, i, j, k)
+            select case (kind_(c))
+            case (K_EMPTY) ; cq(c) = 27_I4P
+            case (K_QUIET) ; cq(c) = cns(c)
+            case default
+               if (np == 1_I4P) cq(c) = cq1(c) + cns(c)
+            endselect
+         enddo
+      enddo
+   enddo
+   ! 2. prefix sums over the cells in order
+   allocate(ivo(ncell), qo(ncell), wo(ncell))
+   npt = 0_I4P ; nivt = 0_I4P ; nqt = 0_I4P ; nwt = 0_I4P
+   do k = 1, nz
+      do j = 1, ny
+         do i = 1, nx
+            c = i + nx * ((j - 1) + ny * (k - 1))
+            cut%first_piece(i, j, k) = npt + 1_I4P ; ivo(c) = nivt ; qo(c) = nqt ; wo(c) = nwt
+            npt = npt + max(0_I4P, cut%pieces(i, j, k))
+            nivt = nivt + civ(c) ; nqt = nqt + cq(c) ; nwt = nwt + cw(c)
+         enddo
+      enddo
+   enddo
+   ! 3. fill
+   cut%np = npt
+   deallocate(cut%piece_volume, cut%piece_centroid, cut%piece_wet_area, cut%piece_wet_centroid, cut%piece_wet_normal, &
+              cut%piece_face)
+   allocate(cut%piece_cell(3, npt), cut%piece_volume(npt), cut%piece_centroid(3, npt), cut%piece_wet_area(npt), &
+            cut%piece_wet_centroid(3, npt), cut%piece_wet_normal(3, npt), cut%piece_face(6, npt))
+   deallocate(pmom, pwmom, pfmom, ivp, ive, ivl, ivh, qpt, qwt, wpt, wwt, qcnt, wcnt)
+   allocate(pmom(nm3, npt), pwmom(nm3, npt), pfmom(nm2, 6, npt), ivp(nivt), ive(nivt), ivl(nivt), ivh(nivt))
+   if (qd) then
+      allocate(qpt(3, nqt), qwt(nqt), wpt(3, nwt), wwt(nwt), qcnt(npt), wcnt(npt))
+   else
+      allocate(qpt(3, 0), qwt(0), wpt(3, 0), wwt(0), qcnt(0), wcnt(0))
+   endif
+   do k = 1, nz
+      do j = 1, ny
+         do i = 1, nx
+            c = i + nx * ((j - 1) + ny * (k - 1))
+            np = cut%pieces(i, j, k)
+            if (np < 1_I4P) cycle
+            p0 = cut%first_piece(i, j, k) - 1_I4P ; kd = kind_(c)
+            do m = 1, np
+               cut%piece_cell(1, p0 + m) = i ; cut%piece_cell(2, p0 + m) = j ; cut%piece_cell(3, p0 + m) = k
+            enddo
+            h = [x(i + 1) - x(i), y(j + 1) - y(j), z(k + 1) - z(k)]
+            if (np == 1_I4P) & ! measures: the cell totals for a single piece (exact), else the per-piece ones (kernel)
+               call single_piece_3d(h(1), h(2), h(3), cut%alpha(i, j, k), cut%centroid(1, i, j, k), cut%wet_area(i, j, k), &
+                                    cut%wet_centroid(1, i, j, k), cut%wet_normal(1, i, j, k), cut%face_x(i, j, k), &
+                                    cut%face_x(i + 1, j, k), cut%face_y(i, j, k), cut%face_y(i, j + 1, k), &
+                                    cut%face_z(i, j, k), cut%face_z(i, j, k + 1), cut%piece_volume(p0 + 1), &
+                                    cut%piece_centroid(1, p0 + 1), cut%piece_wet_area(p0 + 1), &
+                                    cut%piece_wet_centroid(1, p0 + 1), cut%piece_wet_normal(1, p0 + 1), &
+                                    cut%piece_face(1, p0 + 1))
             ! moments (issue #70): faces from the plane sections for a single piece, else per piece; volumes by the
             ! divergence theorem along x from the wall terms and the two x faces
             if (nm3 > 0_I4P) then
-               h = [x(i + 1) - x(i), y(j + 1) - y(j), z(k + 1) - z(k)]
-               if (allocated(cm)) deallocate(cm, cw, cf)
-               allocate(cm(nm3, cut%pieces(i, j, k)), cw(nm3, cut%pieces(i, j, k)), cf(nm2, 6, cut%pieces(i, j, k)))
-               if (cnt(c) == 0_I4P) then ! a fluid cell
-                  cm(:, 1) = cell_moments(e3, product(h)) ; cw(:, 1) = 0._R8P
-                  cf(:, 1, 1) = cell_moments(e2, h(2) * h(3)) ; cf(:, 2, 1) = cf(:, 1, 1)
-                  cf(:, 3, 1) = cell_moments(e2, h(3) * h(1)) ; cf(:, 4, 1) = cf(:, 3, 1)
-                  cf(:, 5, 1) = cell_moments(e2, h(1) * h(2)) ; cf(:, 6, 1) = cf(:, 5, 1)
-               else
-                  cw = pwm ; cf = pfm
-                  if (cut%pieces(i, j, k) == 1_I4P) then
-                     cf(:, 1, 1) = cut%face_x_moments(:, i, j, k) ; cf(:, 2, 1) = cut%face_x_moments(:, i + 1, j, k)
-                     cf(:, 3, 1) = cut%face_y_moments(:, i, j, k) ; cf(:, 4, 1) = cut%face_y_moments(:, i, j + 1, k)
-                     cf(:, 5, 1) = cut%face_z_moments(:, i, j, k) ; cf(:, 6, 1) = cut%face_z_moments(:, i, j, k + 1)
+               if (kd == K_EMPTY) then ! a fluid cell
+                  pmom(:, p0 + 1) = cell_moments(e3, product(h)) ; pwmom(:, p0 + 1) = 0._R8P
+                  pfmom(:, 1, p0 + 1) = cell_moments(e2, h(2) * h(3)) ; pfmom(:, 2, p0 + 1) = pfmom(:, 1, p0 + 1)
+                  pfmom(:, 3, p0 + 1) = cell_moments(e2, h(3) * h(1)) ; pfmom(:, 4, p0 + 1) = pfmom(:, 3, p0 + 1)
+                  pfmom(:, 5, p0 + 1) = cell_moments(e2, h(1) * h(2)) ; pfmom(:, 6, p0 + 1) = pfmom(:, 5, p0 + 1)
+               elseif (np == 1_I4P) then
+                  call section_face_moments(cut, i, j, k, nm2, secm)
+                  pfmom(:, :, p0 + 1) = secm
+                  if (kd == K_QUIET) then ! no wall
+                     pwmom(:, p0 + 1) = 0._R8P
+                     call volume_moments_k(nm3, nm2, zero, secm(:, 1), secm(:, 2), h(1), e2, e3, pmom(:, p0 + 1))
                   endif
-                  do m2 = 1, cut%pieces(i, j, k)
-                     cm(:, m2) = volume_moments(pvw(:, m2), cf(:, 1, m2), cf(:, 2, m2), h(1), e2, e3)
-                  enddo
                endif
             endif
             ! quadrature (issue #70): a fluid cell takes the tensor rule, a cut cell its cones
             if (qd) then
-               if (cnt(c) == 0_I4P) then
+               if (kd == K_EMPTY) then
                   call tensor_rule([x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], tpt, tw)
-                  call push_rule(tpt, tw, .true.) ; call grow_counts ; qcnt(npb + 1) = 27_I4P ; wcnt(npb + 1) = 0_I4P
-               else
-                  call grow_counts
-                  if (cut%pieces(i, j, k) == 1_I4P) then ! the wall cones, then cones over the exact section faces
-                     nsc = 0_I4P ; if (.not. allocated(spt)) allocate(spt(3, 256), sw(256))
-                     do m3 = 1, 6
-                        select case ((m3 + 1) / 2)
-                        case (1) ; call face_cones(px(i + mod(m3 + 1, 2)), [i, j, k], m3, spt, sw, nsc)
-                        case (2) ; call face_cones(py(j + mod(m3 + 1, 2)), [i, j, k], m3, spt, sw, nsc)
-                        case default ; call face_cones(pz(k + mod(m3 + 1, 2)), [i, j, k], m3, spt, sw, nsc)
-                        endselect
-                     enddo
-                     call push_rule(qpt(:, qst(1):qst(1) + qwn(1) - 1), qw(qst(1):qst(1) + qwn(1) - 1), .true.)
-                     call push_rule(spt(:, 1:nsc), sw(1:nsc), .true.)
-                     call push_rule(wpt(:, wst(1):wst(2) - 1), wwt(wst(1):wst(2) - 1), .false.)
-                     qcnt(npb + 1) = qwn(1) + nsc ; wcnt(npb + 1) = wst(2) - wst(1)
-                  else
-                     do m3 = 1, cut%pieces(i, j, k)
-                        call push_rule(qpt(:, qst(m3):qst(m3 + 1) - 1), qw(qst(m3):qst(m3 + 1) - 1), .true.)
-                        call push_rule(wpt(:, wst(m3):wst(m3 + 1) - 1), wwt(wst(m3):wst(m3 + 1) - 1), .false.)
-                        qcnt(npb + m3) = qst(m3 + 1) - qst(m3) ; wcnt(npb + m3) = wst(m3 + 1) - wst(m3)
-                     enddo
-                  endif
+                  qpt(:, qo(c) + 1:qo(c) + 27) = tpt ; qwt(qo(c) + 1:qo(c) + 27) = tw
+                  qcnt(p0 + 1) = 27_I4P ; wcnt(p0 + 1) = 0_I4P
+               elseif (np == 1_I4P) then ! the wall cones (kernel), then cones over the exact section faces
+                  ns = qo(c) + cq1(c)
+                  do m3 = 1, 6
+                     select case ((m3 + 1) / 2)
+                     case (1) ; call face_cones(px(i + mod(m3 + 1, 2)), x, y, z, [i, j, k], m3, qpt, qwt, ns)
+                     case (2) ; call face_cones(py(j + mod(m3 + 1, 2)), x, y, z, [i, j, k], m3, qpt, qwt, ns)
+                     case default ; call face_cones(pz(k + mod(m3 + 1, 2)), x, y, z, [i, j, k], m3, qpt, qwt, ns)
+                     endselect
+                  enddo
+                  qcnt(p0 + 1) = cq1(c) + cns(c) ; wcnt(p0 + 1) = cw(c)
                endif
             endif
-            ! measures: the cell totals for a single piece (exact), else the per-piece ones
-            if (cut%pieces(i, j, k) == 1_I4P) then
-               h = [x(i + 1) - x(i), y(j + 1) - y(j), z(k + 1) - z(k)]
-               tot = [cut%alpha(i, j, k) * product(h), cut%centroid(:, i, j, k), cut%wet_area(i, j, k), &
-                      cut%wet_centroid(:, i, j, k), cut%wet_normal(:, i, j, k), cut%face_x(i, j, k), cut%face_x(i + 1, j, k), &
-                      cut%face_y(i, j, k), cut%face_y(i, j + 1, k), cut%face_z(i, j, k), cut%face_z(i, j, k + 1)]
-               call add_pieces(reshape(tot, [17, 1]))
-            else
-               call add_pieces(pm)
+            ! the kernel's pieces: several pieces, or one with moments or quadrature
+            if (kd == K_CUT .and. (np > 1_I4P .or. nm3 > 0_I4P .or. qd)) then
+               do q = 1, 8
+                  cs(q) = merge(0_I4P, 1_I4P, cut%node_in(i + mod(q - 1, 2), j + mod((q - 1) / 2, 2), k + (q - 1) / 4))
+               enddo
+               nt = kstart(c + 1) - kstart(c) ; c0 = [x(i), y(j), z(k)] ; c1 = [x(i + 1), y(j + 1), z(k + 1)]
+               call cell_piercings(nf, tri, nt, klst(kstart(c):kstart(c + 1) - 1), c0, c1, npc, pce, pcq, pct, pcen)
+               call cell_pieces_sizes(nt, npc, nm2, nm3, qd, nrw, niw)
+               if (nrw > size(rw)) then
+                  deallocate(rw) ; allocate(rw(nrw))
+               endif
+               if (niw > size(iw)) then
+                  deallocate(iw) ; allocate(iw(niw))
+               endif
+               faces = [cut%face_x(i, j, k), cut%face_x(i + 1, j, k), cut%face_y(i, j, k), cut%face_y(i, j + 1, k), &
+                        cut%face_z(i, j, k), cut%face_z(i, j, k + 1)]
+               call cell_pieces_3d(.true., nf, tri, nrm, nt, klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), z(k), &
+                                   z(k + 1), cs, cut%alpha(i, j, k), faces, npc, pce, pcq, pct, pcen, nm2, nm3, e2, e3, &
+                                   qd, want_iv, secm, nrw, rw, niw, iw, np, nivc, nqc, nwc, qwn1, &
+                                   p0, ivo(c), qo(c), wo(c), npt, nivt, nqt, nwt, size(qcnt, kind=I4P), cut%piece_volume, &
+                                   cut%piece_centroid, cut%piece_wet_area, cut%piece_wet_centroid, cut%piece_wet_normal, &
+                                   cut%piece_face, pmom, pwmom, pfmom, ivp, ive, ivl, ivh, qpt, qwt, wpt, wwt, qcnt, wcnt)
             endif
          enddo
       enddo
    enddo
-   cut%np = npb
-   allocate(cut%piece_cell(3, npb), cut%piece_volume(npb), cut%piece_centroid(3, npb), cut%piece_wet_area(npb), &
-            cut%piece_wet_centroid(3, npb), cut%piece_wet_normal(3, npb), cut%piece_face(6, npb))
-   cut%piece_cell = pcel(:, 1:npb)
-   cut%piece_volume = pbuf(1, 1:npb) ; cut%piece_centroid = pbuf(2:4, 1:npb) ; cut%piece_wet_area = pbuf(5, 1:npb)
-   cut%piece_wet_centroid = pbuf(6:8, 1:npb) ; cut%piece_wet_normal = pbuf(9:11, 1:npb) ; cut%piece_face = pbuf(12:17, 1:npb)
    if (nm3 > 0_I4P) then
-      cut%piece_moments = mbuf(:, 1:npb) ; cut%piece_wall_moments = wbuf(:, 1:npb) ; cut%piece_face_moments = fbuf(:, :, 1:npb)
+      call move_alloc(pmom, cut%piece_moments) ; call move_alloc(pwmom, cut%piece_wall_moments)
+      call move_alloc(pfmom, cut%piece_face_moments)
    endif
    if (qd) then
-      allocate(cut%quad_start(npb + 1), cut%wall_quad_start(npb + 1), cut%quad_status(npb))
+      allocate(cut%quad_start(npt + 1), cut%wall_quad_start(npt + 1), cut%quad_status(npt))
       cut%quad_start(1) = 1_I4P ; cut%wall_quad_start(1) = 1_I4P
-      do m3 = 1, npb
+      do m3 = 1, npt
          cut%quad_start(m3 + 1) = cut%quad_start(m3) + qcnt(m3) ; cut%wall_quad_start(m3 + 1) = cut%wall_quad_start(m3) + wcnt(m3)
       enddo
-      cut%quad_point = qbp(:, 1:nqb) ; cut%quad_weight = qbw(1:nqb)
-      cut%wall_quad_point = wbp(:, 1:nwb) ; cut%wall_quad_weight = wbw(1:nwb)
-      do m3 = 1, npb
+      call move_alloc(qpt, cut%quad_point) ; call move_alloc(qwt, cut%quad_weight)
+      call move_alloc(wpt, cut%wall_quad_point) ; call move_alloc(wwt, cut%wall_quad_weight)
+      do m3 = 1, npt
          h = [x(cut%piece_cell(1, m3) + 1) - x(cut%piece_cell(1, m3)), y(cut%piece_cell(2, m3) + 1) - y(cut%piece_cell(2, m3)), &
               z(cut%piece_cell(3, m3) + 1) - z(cut%piece_cell(3, m3))]
          cut%quad_status(m3) = merge(0_I4P, 1_I4P, abs(sum(cut%quad_weight(cut%quad_start(m3):cut%quad_start(m3 + 1) - 1)) - &
                                                      cut%piece_volume(m3)) <= 1.e-12_R8P * product(h))
       enddo
    endif
-   if (present(piv_piece)) then
-      piv_piece = piv_piece(1:nivb) ; piv_edge = piv_edge(1:nivb) ; piv_lo = piv_lo(1:nivb) ; piv_hi = piv_hi(1:nivb)
+   if (want_iv) then
+      call move_alloc(ivp, piv_piece) ; call move_alloc(ive, piv_edge) ; call move_alloc(ivl, piv_lo)
+      call move_alloc(ivh, piv_hi)
    endif
-   contains
-      subroutine add_pieces(pp)
-      !< Append the pieces pp [17, n] of the cell (i, j, k).
-      real(R8P), intent(in)     :: pp(:,:) !< Measures.
-      real(R8P),    allocatable :: tb(:,:) !< Growth.
-      integer(I4P), allocatable :: tc(:,:) !< Growth.
-      integer(I4P)              :: n, cap  !< Work.
-
-      n = size(pp, 2, kind=I4P)
-      if (npb + n > size(pbuf, 2)) then
-         cap = max(2_I4P * size(pbuf, 2, kind=I4P), npb + n)
-         allocate(tb(17, cap), tc(3, cap)) ; tb(:, 1:npb) = pbuf(:, 1:npb) ; tc(:, 1:npb) = pcel(:, 1:npb)
-         call move_alloc(tb, pbuf) ; call move_alloc(tc, pcel)
-      endif
-      pbuf(:, npb + 1:npb + n) = pp
-      pcel(1, npb + 1:npb + n) = i ; pcel(2, npb + 1:npb + n) = j ; pcel(3, npb + 1:npb + n) = k
-      if (nm3 > 0_I4P) then
-         if (npb + n > size(mbuf, 2)) call grow_moments(max(2_I4P * size(mbuf, 2, kind=I4P), npb + n))
-         mbuf(:, npb + 1:npb + n) = cm ; wbuf(:, npb + 1:npb + n) = cw ; fbuf(:, :, npb + 1:npb + n) = cf
-      endif
-      npb = npb + n
-      endsubroutine add_pieces
-
-      subroutine face_cones(sec_, ic, f_, pts, ws, n_)
-      !< Cones from the centre of cell ic over the fluid region of its face f_, from the oriented boundary of the plane
-      !< section sec_ (exact, as the face fractions): triangles from the face centre (issue #70).
-      type(cut_cells_2d_t), intent(in)    :: sec_          !< Plane section.
-      integer(I4P),         intent(in)    :: ic(3), f_     !< Cell, face (1-6).
-      real(R8P), allocatable, intent(inout) :: pts(:,:), ws(:) !< Points, weights.
-      integer(I4P),         intent(inout) :: n_            !< Points so far.
-      real(R8P)    :: c0_(3), c1_(3), cc_(3), pf_(3), a3(3), b3(3), rp_(3, 36), rw_(36) !< Work.
-      real(R8P),    allocatable :: tp(:,:), tw(:)          !< Growth.
-      integer(I4P) :: ax_, sd_, ip, kk_, iu, iv, b1_, b2_  !< Work.
-
-      ax_ = (f_ + 1_I4P) / 2_I4P ; sd_ = mod(f_ + 1_I4P, 2_I4P)
-      b1_ = mod(ax_, 3_I4P) + 1_I4P ; b2_ = mod(ax_ + 1_I4P, 3_I4P) + 1_I4P ; iu = ic(b1_) ; iv = ic(b2_)
-      c0_ = [x(ic(1)), y(ic(2)), z(ic(3))] ; c1_ = [x(ic(1) + 1), y(ic(2) + 1), z(ic(3) + 1)] ; cc_ = 0.5_R8P * (c0_ + c1_)
-      pf_ = cc_ ; pf_(ax_) = merge(c1_(ax_), c0_(ax_), sd_ == 1_I4P)
-      if (sec_%pieces(iu, iv) < 1_I4P) return
-      do ip = sec_%first_piece(iu, iv), sec_%first_piece(iu, iv) + sec_%pieces(iu, iv) - 1_I4P
-         do kk_ = sec_%piece_seg_start(ip), sec_%piece_seg_start(ip + 1) - 1_I4P
-            a3(ax_) = pf_(ax_) ; a3(b1_) = sec_%piece_seg(1, kk_) ; a3(b2_) = sec_%piece_seg(2, kk_)
-            b3(ax_) = pf_(ax_) ; b3(b1_) = sec_%piece_seg(3, kk_) ; b3(b2_) = sec_%piece_seg(4, kk_)
-            if (sd_ == 1_I4P) then ! high face: outward +e_ax, counter-clockwise in (u, v)
-               call tet_rule(cc_, pf_, a3, b3, rp_, rw_)
-            else
-               call tet_rule(cc_, pf_, b3, a3, rp_, rw_)
-            endif
-            if (n_ + 36_I4P > size(ws)) then
-               allocate(tp(3, 2 * size(ws)), tw(2 * size(ws))) ; tp(:, 1:n_) = pts(:, 1:n_) ; tw(1:n_) = ws(1:n_)
-               call move_alloc(tp, pts) ; call move_alloc(tw, ws)
-            endif
-            pts(:, n_ + 1:n_ + 36) = rp_ ; ws(n_ + 1:n_ + 36) = rw_ ; n_ = n_ + 36_I4P
-         enddo
-      enddo
-      endsubroutine face_cones
-
-      subroutine push_rule(pp, ww, vol)
-      !< Append points and weights to the volume (vol) or wall rule buffers.
-      real(R8P), intent(in)     :: pp(:,:), ww(:) !< Points, weights.
-      logical,   intent(in)     :: vol            !< Volume rule.
-      real(R8P), allocatable    :: t2(:,:), t1(:) !< Growth.
-      integer(I4P)              :: nn, cap        !< Work.
-
-      nn = size(ww, kind=I4P)
-      if (vol) then
-         if (nqb + nn > size(qbw)) then
-            cap = max(2_I4P * size(qbw, kind=I4P), nqb + nn)
-            allocate(t2(3, cap), t1(cap)) ; t2(:, 1:nqb) = qbp(:, 1:nqb) ; t1(1:nqb) = qbw(1:nqb)
-            call move_alloc(t2, qbp) ; call move_alloc(t1, qbw)
-         endif
-         qbp(:, nqb + 1:nqb + nn) = pp ; qbw(nqb + 1:nqb + nn) = ww ; nqb = nqb + nn
-      else
-         if (nwb + nn > size(wbw)) then
-            cap = max(2_I4P * size(wbw, kind=I4P), nwb + nn)
-            allocate(t2(3, cap), t1(cap)) ; t2(:, 1:nwb) = wbp(:, 1:nwb) ; t1(1:nwb) = wbw(1:nwb)
-            call move_alloc(t2, wbp) ; call move_alloc(t1, wbw)
-         endif
-         wbp(:, nwb + 1:nwb + nn) = pp ; wbw(nwb + 1:nwb + nn) = ww ; nwb = nwb + nn
-      endif
-      endsubroutine push_rule
-
-      subroutine grow_counts
-      !< Room for the point counts of the pieces of the cell being added.
-      integer(I4P), allocatable :: t1(:) !< Growth.
-      integer(I4P)              :: cap   !< Capacity.
-
-      if (npb + cut%pieces(i, j, k) <= size(qcnt)) return
-      cap = max(2_I4P * size(qcnt, kind=I4P), npb + cut%pieces(i, j, k))
-      allocate(t1(cap)) ; t1(1:npb) = qcnt(1:npb) ; call move_alloc(t1, qcnt)
-      allocate(t1(cap)) ; t1(1:npb) = wcnt(1:npb) ; call move_alloc(t1, wcnt)
-      endsubroutine grow_counts
-
-      subroutine grow_moments(cap)
-      !< Grow the moment buffers to cap pieces.
-      integer(I4P), intent(in)  :: cap !< Capacity.
-      real(R8P),    allocatable :: t2(:,:), t3(:,:,:) !< Work.
-
-      allocate(t2(nm3, cap)) ; t2(:, 1:npb) = mbuf(:, 1:npb) ; call move_alloc(t2, mbuf)
-      allocate(t2(nm3, cap)) ; t2(:, 1:npb) = wbuf(:, 1:npb) ; call move_alloc(t2, wbuf)
-      allocate(t3(nm2, 6, cap)) ; t3(:, :, 1:npb) = fbuf(:, :, 1:npb) ; call move_alloc(t3, fbuf)
-      endsubroutine grow_moments
    endsubroutine cut_pieces_3d
 
-   subroutine cell_pieces(tri, nrm, lst, c0, c1, cs, npieces, pm, want_iv, ivp_o, ive_o, ivl_o, ivh_o, mo, pvw, pwm, pfm, &
-                          qd, qpt, qw, qst, wpt, wwt, wst, qwn)
-   !< Fluid pieces of the cell [c0, c1] cut by the triangles lst (see the module notes); -1 if the
-   !< boundary states do not close. pm: the measures of the pieces (see `piece_measures`).
-   !<
-   !< The corner states cs and the crossings of the 12 cell edges are exact under the global perturbation
-   !< (issue #70): a crossing belongs to the edge when it lies after the perturbed low corner and before the
-   !< perturbed high one (`line_crossing_before`), so the corner states and the crossings of every edge agree.
-   !< Before #70 the piercings were the clipped polygon vertices on two planes, and a mesh edge or vertex on a
-   !< cell edge (lattice bodies) gave one piercing per incident facet: the states did not alternate.
-   real(R8P),                intent(in)  :: tri(:,:,:), nrm(:,:) !< Triangles, normals.
-   integer(I4P),             intent(in)  :: lst(:)    !< Triangles of the cell.
-   real(R8P),                intent(in)  :: c0(3), c1(3) !< Cell corners.
-   integer(I4P),             intent(in)  :: cs(8)     !< Corner states (0 solid, 1 fluid), exact.
-   integer(I4P),             intent(out) :: npieces   !< Pieces.
-   real(R8P), allocatable,   intent(out) :: pm(:,:)   !< Measures [17, npieces] (allocated if npieces >= 0).
-   logical,                  intent(in)  :: want_iv   !< Return the fluid edge intervals (for the links).
-   integer(I4P), allocatable, intent(out) :: ivp_o(:)   !< Fluid edge intervals: local piece (0: none; issue #70).
-   integer(I4P), allocatable, intent(out) :: ive_o(:)   !< Fluid edge intervals: cell edge (1-12).
-   real(R8P),    allocatable, intent(out) :: ivl_o(:), ivh_o(:) !< Fluid edge intervals: range.
-   integer(I4P),             intent(in)  :: mo        !< Moment order (0: none; issue #70).
-   real(R8P), allocatable,   intent(out) :: pvw(:,:)  !< Wall divergence terms of the moments (solid normal) [nm3, npieces].
-   real(R8P), allocatable,   intent(out) :: pwm(:,:)  !< Wall moments [nm3, npieces].
-   real(R8P), allocatable,   intent(out) :: pfm(:,:,:) !< Face moments [nm2, 6, npieces].
-   logical,                  intent(in)  :: qd        !< Quadrature rules (issue #70).
-   real(R8P), allocatable,   intent(out) :: qpt(:,:), qw(:) !< Volume rules of the pieces (points, weights).
-   integer(I4P), allocatable, intent(out) :: qst(:)   !< Their starts [npieces + 1].
-   real(R8P), allocatable,   intent(out) :: wpt(:,:), wwt(:) !< Wall rules.
-   integer(I4P), allocatable, intent(out) :: wst(:)   !< Their starts [npieces + 1].
-   integer(I4P), allocatable, intent(out) :: qwn(:)   !< Wall-cone points of each piece (they come first in its rule).
-   integer(I4P), parameter     :: NCORN = 8_I4P       !< Corner atoms follow the polygons.
-   real(R8P),    allocatable   :: pv(:,:,:)           !< Polygons [3, 16, nt].
-   integer(I4P), allocatable   :: pfl(:,:), pn(:)     !< Vertex flags, vertex counts.
-   type(pierce_t), allocatable :: pc(:)               !< Piercings.
-   integer(I4P), allocatable   :: parent(:)           !< Union-find.
-   integer(I4P), allocatable   :: iv_edge(:), iv_atom(:) !< Fluid intervals: edge, atom.
-   real(R8P),    allocatable   :: iv_lo(:), iv_hi(:)  !< Fluid intervals: range.
-   logical,      allocatable   :: touch(:)            !< Atom touches the cell boundary.
-   real(R8P),    allocatable   :: vol(:)              !< Solid volume of closed wall sets.
-   integer(I4P)                :: cstate(8)           !< Corner states: -1 unknown, 0 solid, 1 fluid.
-   integer(I4P)                :: nt, np, q, v, w, e, a, natom, niv, npc, nc, kk !< Work.
-   logical                     :: ok                  !< Consistency.
-   real(R8P),    allocatable   :: fsg(:,:), wtp(:,:), wtw(:) !< Quadrature: oriented face segments [6, m]; wall points, weights.
-   integer(I4P), allocatable   :: fsf(:), fsr(:), wtr(:) !< Segment face and set; wall point set.
-   integer(I4P)                :: nfs, nwt            !< Counts.
-   real(R8P)                   :: rp(3, 36), rw(36), tp7(3, 7), tw7(7), pf(3), sa(3), sb(3) !< Rule work.
-   real(R8P)                   :: tt, la, lb, tc      !< Crossing position, edge line, kernel parameter.
-   logical                     :: hit, en             !< Crossing, entering.
+   subroutine cell_piercings(nf, tri, nt, lst, c0, c1, npc, pce, pcq, pct, pcen)
+   !< Exact crossings of the 12 edges of the cell [c0, c1] by its candidates lst (issue #70), host only (exact orient3d):
+   !< a crossing belongs to the edge when it lies after the perturbed low corner and before the perturbed high one
+   !< (`line_crossing_before`), so the corner states and the crossings of every edge agree. Raw, in the order edge, then
+   !< candidate: edge, candidate (position in lst), the kernel's position along the edge, entering (1) or leaving (0);
+   !< `cell_pieces_core` clamps the position to the edge or takes the clipped polygon's vertex on it (issue #100: the
+   !< exact tests before the kernel, which does the rest).
+   integer(I4P), intent(in)    :: nf            !< Facets.
+   real(R8P),    intent(in)    :: tri(3, 3, nf) !< Triangles.
+   integer(I4P), intent(in)    :: nt            !< Candidates of the cell.
+   integer(I4P), intent(in)    :: lst(nt)       !< Their indexes.
+   real(R8P),    intent(in)    :: c0(3), c1(3)  !< Cell corners.
+   integer(I4P), intent(out)   :: npc           !< Piercings (at most 12 nt).
+   integer(I4P), intent(inout) :: pce(:), pcq(:), pcen(:) !< Edge, candidate, entering.
+   real(R8P),    intent(inout) :: pct(:)        !< Position.
+   integer(I4P)                :: e, a, kk, q   !< Work.
+   real(R8P)                   :: la, lb, tc    !< Edge line, kernel parameter.
+   logical                     :: hit, en       !< Crossing, entering.
 
-   nt = size(lst, kind=I4P)
-   allocate(pv(3, 16, nt), pfl(16, nt), pn(nt))
-   do q = 1, nt
-      pv(:, 1:3, q) = tri(:, :, lst(q)) ; pfl(1:3, q) = 0_I4P ; np = 3_I4P
-      do a = 1, 3
-         call clip_flags(pv(:, :, q), pfl(:, q), np, a, c0(a), .true., 2_I4P * (a - 1_I4P))
-         call clip_flags(pv(:, :, q), pfl(:, q), np, a, c1(a), .false., 2_I4P * (a - 1_I4P) + 1_I4P)
+   npc = 0_I4P
+   do e = 1, 12
+      a = (e - 1_I4P) / 4_I4P + 1_I4P ; kk = mod(e - 1_I4P, 4_I4P) ! edge axis, sides
+      la = merge(c1(mod(a, 3_I4P) + 1_I4P), c0(mod(a, 3_I4P) + 1_I4P), mod(kk, 2_I4P) == 1_I4P)
+      lb = merge(c1(mod(a + 1_I4P, 3_I4P) + 1_I4P), c0(mod(a + 1_I4P, 3_I4P) + 1_I4P), kk / 2_I4P == 1_I4P)
+      do q = 1, nt
+         call tri_line_hit_oac(reshape(tri(:, :, lst(q)), [9]), a, la, lb, hit, tc, en)
+         if (.not. hit) cycle
+         if (line_crossing_before(tri(:, :, lst(q)), a, la, lb, c0(a), en)) cycle
+         if (.not. line_crossing_before(tri(:, :, lst(q)), a, la, lb, c1(a), en)) cycle
+         npc = npc + 1_I4P
+         pce(npc) = e ; pcq(npc) = q ; pct(npc) = tc ; pcen(npc) = merge(1_I4P, 0_I4P, en)
       enddo
-      pn(q) = np ; if (np < 3_I4P) pn(q) = 0_I4P
+   enddo
+   endsubroutine cell_piercings
+
+   pure subroutine cell_pieces_sizes(nt, npc, nm2, nm3, qd, nrw, niw)
+   !< Workspace of `cell_pieces_3d` for a cell with nt candidates, npc piercings, nm2 / nm3 moments per face / piece and
+   !< the quadrature flag qd (issue #100). With the atoms NA = nt + 8 + npc + 12 (polygons, corners, at most npc + 12
+   !< fluid edge intervals NI), the polygon vertices MM = 16 nt and, with qd, the face segments NS = 48 nt + 2 NI (a
+   !< polygon edge lies on at most three faces, an interval on two):
+   !<    nrw = 48 nt + npc + 2 NI + NA (35 + 2 nm3 + 6 nm2) + 4 MM + 6 NS + 1 reals,
+   !<    niw = 17 nt + 3 npc + 2 NI + 4 NA + 3 MM + 2 NS + 2 + (qd: 5 NA) + 1 integers
+   !< (layout in `cell_pieces_layout`; the + 1 keeps every slice start inside the slice when the last parts are empty).
+   !< Every count of the cell is bounded by its part, so nothing can overflow.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: nt, npc, nm2, nm3 !< Candidates, piercings, moments per face, per piece.
+   logical,      intent(in)  :: qd                !< Quadrature.
+   integer(I4P), intent(out) :: nrw, niw          !< Reals, integers.
+   integer(I4P)              :: ro(14), io(20)    !< Layout.
+
+   call cell_pieces_layout(nt, npc, nm2, nm3, qd, ro, io)
+   nrw = ro(14) ; niw = io(20)
+   endsubroutine cell_pieces_sizes
+
+   pure subroutine cell_pieces_layout(nt, npc, nm2, nm3, qd, ro, io)
+   !< Start of each part of a cell's workspace (sizes in `cell_pieces_sizes`; ro(14), io(20): the sizes).
+   !< Reals: polygons pv(3, 16, nt), piercing positions(npc), interval ranges lo(NI), hi(NI), solid volumes(NA), sort
+   !< keys and face segments (4, MM), wall terms(11, NA), face areas(6, NA), measures(17, NA), wall divergence moments
+   !< (nm3, NA), wall moments(nm3, NA), face moments(nm2, 6, NA), oriented face segments(6, NS).
+   !< Integers: vertex flags(16, nt), vertex counts(nt), piercing edge, polygon, entering(npc), union-find parents(NA),
+   !< interval edge(NI), atom(NI), touch flags(NA), inclusion targets(NA), piece ids(NA), sort and segment work(3, MM),
+   !< segment face(NS), set(NS), rule starts(NA + 1), wall rule starts(NA + 1), wall cones(NA), fill pointers(NA, NA).
+   !$acc routine seq
+   integer(I4P), intent(in)  :: nt, npc, nm2, nm3 !< Candidates, piercings, moments per face, per piece.
+   logical,      intent(in)  :: qd                !< Quadrature.
+   integer(I4P), intent(out) :: ro(14), io(20)    !< Starts (the last: total size).
+   integer(I4P)              :: na, ni, mm, ns, nr !< Atoms, intervals, vertices, segments, rule parts.
+
+   na = nt + 20_I4P + npc ; ni = npc + 12_I4P ; mm = 16_I4P * nt
+   ns = 0_I4P ; nr = 0_I4P
+   if (qd) then
+      ns = 48_I4P * nt + 2_I4P * ni ; nr = na
+   endif
+   ro(1) = 1_I4P
+   ro(2) = ro(1) + 48_I4P * nt ; ro(3) = ro(2) + npc ; ro(4) = ro(3) + ni ; ro(5) = ro(4) + ni ; ro(6) = ro(5) + na
+   ro(7) = ro(6) + 4_I4P * mm ; ro(8) = ro(7) + 11_I4P * na ; ro(9) = ro(8) + 6_I4P * na ; ro(10) = ro(9) + 17_I4P * na
+   ro(11) = ro(10) + nm3 * na ; ro(12) = ro(11) + nm3 * na ; ro(13) = ro(12) + 6_I4P * nm2 * na
+   ro(14) = ro(13) + 6_I4P * ns + 1_I4P
+   io(1) = 1_I4P
+   io(2) = io(1) + 16_I4P * nt ; io(3) = io(2) + nt ; io(4) = io(3) + npc ; io(5) = io(4) + npc ; io(6) = io(5) + npc
+   io(7) = io(6) + na ; io(8) = io(7) + ni ; io(9) = io(8) + ni ; io(10) = io(9) + na ; io(11) = io(10) + na
+   io(12) = io(11) + na ; io(13) = io(12) + 3_I4P * mm ; io(14) = io(13) + ns ; io(15) = io(14) + ns
+   io(16) = io(15) + nr + 1_I4P ; io(17) = io(16) + nr + 1_I4P
+   io(18) = io(17) + nr ; io(19) = io(18) + nr ; io(20) = io(19) + nr + 1_I4P
+   endsubroutine cell_pieces_layout
+
+   subroutine cell_pieces_3d(fill, nf, tri, nrm, nt, lst, x0, x1, y0, y1, z0, z1, cs, alpha, faces, npc, pce, pcq, pct, &
+                             pcen, nm2, nm3, e2, e3, qd, want_iv, secm, nrw, rw, niw, iw, npieces, nivc, nqc, nwc, qwn1, &
+                             p0, iv0, q0, w0, npo, nivo, nqo, nwo, nqcd, pvol, pcen_, pwa, pwc, pwn, pfc, pmom, pwmom, pfmom, &
+                             ivp, ive, ivl, ivh, qpt, qwt, wpt, wwt, qcnt, wcnt)
+   !< Kernel (issue #100): the fluid pieces of the cut cell [x0, x1] x [y0, y1] x [z0, z1] with candidates lst and
+   !< piercings (pce, pcq, pct, pcen) from `cell_piercings`, on its workspace (rw, iw; `cell_pieces_sizes`). Count pass
+   !< (fill false): npieces (-1 if the boundary states do not close or a multi-piece split does not close, see
+   !< `split_closes`), the cell's fluid edge intervals for the links (nivc, several pieces), its rule points nqc and wall
+   !< rule points nwc, and the wall cones of a single piece qwn1. Fill pass: the same, and the outputs written at the
+   !< cell's offsets (pieces p0 + 1.., intervals iv0 + 1.., rule points q0 + 1.., wall rule points w0 + 1..): with
+   !< several pieces their measures, moments, intervals and rules; with one (its measures are the cell totals, its faces
+   !< the plane sections) its volume and wall moments, its wall cones and wall rule.
+   !$acc routine seq
+   logical,      intent(in)    :: fill                   !< Fill pass.
+   integer(I4P), intent(in)    :: nf                     !< Facets.
+   real(R8P),    intent(in)    :: tri(3, 3, nf), nrm(3, nf) !< Triangles, normals.
+   integer(I4P), intent(in)    :: nt                     !< Candidates of the cell.
+   integer(I4P), intent(in)    :: lst(nt)                !< Their indexes.
+   real(R8P),    intent(in)    :: x0, x1, y0, y1, z0, z1 !< Cell.
+   integer(I4P), intent(in)    :: cs(8)                  !< Corner states (0 solid, 1 fluid), exact.
+   real(R8P),    intent(in)    :: alpha, faces(6)        !< Cell fraction, face fractions (-x, +x, -y, +y, -z, +z).
+   integer(I4P), intent(in)    :: npc                    !< Piercings.
+   integer(I4P), intent(in)    :: pce(npc), pcq(npc), pcen(npc) !< Their edges, candidates, entering flags.
+   real(R8P),    intent(in)    :: pct(npc)               !< Their positions.
+   integer(I4P), intent(in)    :: nm2, nm3               !< Moments per face, per piece (0: none).
+   integer(I4P), intent(in)    :: e2(2, nm2), e3(3, nm3) !< Their exponents.
+   logical,      intent(in)    :: qd, want_iv            !< Quadrature, intervals.
+   real(R8P),    intent(in)    :: secm(nm2, 6)           !< Section moments of the six faces (a single piece).
+   integer(I4P), intent(in)    :: nrw, niw               !< Workspace sizes.
+   real(R8P),    intent(inout) :: rw(nrw)                !< Real workspace.
+   integer(I4P), intent(inout) :: iw(niw)                !< Integer workspace.
+   integer(I4P), intent(out)   :: npieces, nivc, nqc, nwc, qwn1 !< Pieces, intervals, rule points, wall rule points, wall cones.
+   integer(I4P), intent(in)    :: p0, iv0, q0, w0        !< Pieces, intervals, rule points, wall rule points before the cell's.
+   integer(I4P), intent(in)    :: npo, nivo, nqo, nwo, nqcd !< Sizes of the outputs.
+   real(R8P),    intent(inout) :: pvol(npo), pcen_(3, npo), pwa(npo), pwc(3, npo), pwn(3, npo), pfc(6, npo) !< Measures.
+   real(R8P),    intent(inout) :: pmom(nm3, npo), pwmom(nm3, npo), pfmom(nm2, 6, npo) !< Moments.
+   integer(I4P), intent(inout) :: ivp(nivo), ive(nivo)   !< Intervals: piece, cell edge.
+   real(R8P),    intent(inout) :: ivl(nivo), ivh(nivo)   !< Intervals: range.
+   real(R8P),    intent(inout) :: qpt(3, nqo), qwt(nqo), wpt(3, nwo), wwt(nwo) !< Rules.
+   integer(I4P), intent(inout) :: qcnt(nqcd), wcnt(nqcd) !< Rule points per piece.
+   integer(I4P)                :: ro(14), io(20), na, ni, mm, ns, nr !< Layout.
+
+   call cell_pieces_layout(nt, npc, nm2, nm3, qd, ro, io)
+   na = nt + 20_I4P + npc ; ni = npc + 12_I4P ; mm = 16_I4P * nt
+   ns = 0_I4P ; nr = 0_I4P
+   if (qd) then
+      ns = 48_I4P * nt + 2_I4P * ni ; nr = na
+   endif
+   call cell_pieces_core(fill, nf, tri, nrm, nt, lst, x0, x1, y0, y1, z0, z1, cs, alpha, faces, npc, pce, pcq, pct, pcen, &
+                         nm2, nm3, e2, e3, qd, want_iv, secm, na, ni, mm, ns, nr, &
+                         rw(ro(1)), rw(ro(2)), rw(ro(3)), rw(ro(4)), rw(ro(5)), rw(ro(6)), rw(ro(7)), rw(ro(8)), rw(ro(9)), &
+                         rw(ro(10)), rw(ro(11)), rw(ro(12)), rw(ro(13)), &
+                         iw(io(1)), iw(io(2)), iw(io(3)), iw(io(4)), iw(io(5)), iw(io(6)), iw(io(7)), iw(io(8)), iw(io(9)), &
+                         iw(io(10)), iw(io(11)), iw(io(12)), iw(io(13)), iw(io(14)), iw(io(15)), iw(io(16)), iw(io(17)), &
+                         iw(io(18)), iw(io(19)), &
+                         npieces, nivc, nqc, nwc, qwn1, p0, iv0, q0, w0, npo, nivo, nqo, nwo, nqcd, pvol, pcen_, pwa, pwc, &
+                         pwn, pfc, pmom, pwmom, pfmom, ivp, ive, ivl, ivh, qpt, qwt, wpt, wwt, qcnt, wcnt)
+   endsubroutine cell_pieces_3d
+
+   subroutine cell_pieces_core(fill, nf, tri, nrm, nt, lst, x0, x1, y0, y1, z0, z1, cs, alpha, faces, npc, pce, pcq, pct, &
+                               pcen, nm2, nm3, e2, e3, qd, want_iv, secm, na, ni, mm, ns, nr, &
+                               pv, pt, ivl_, ivh_, vol, keyw, wt, fa, pm, wvm, wwm, fmm, fsg, &
+                               pfl, pn, pe, pp, pen, parent, ive_, iva, touch, tgt, pid, iwk, fsf, fsr, qst, wst, qwn, fq, fw, &
+                               npieces, nivc, nqc, nwc, qwn1, p0, iv0, q0, w0, npo, nivo, nqo, nwo, nqcd, pvol, pcen_, pwa, &
+                               pwc, pwn, pfc, pmom, pwmom, pfmom, ivp, ive, ivl, ivh, qpt, qwt, wpt, wwt, qcnt, wcnt)
+   !< `cell_pieces_3d` on the workspace parts (see `cell_pieces_layout`). Fluid pieces of the cell cut by the candidates
+   !< lst (see the module notes): atoms are the clipped polygons 1..nt, the corners nt+1..nt+8 and the fluid edge
+   !< intervals after them, joined by a union-find whose roots are the least atoms of their sets.
+   !<
+   !< The corner states cs and the crossings of the 12 cell edges are exact under the global perturbation (issue #70):
+   !< a crossing belongs to the edge when it lies after the perturbed low corner and before the perturbed high one
+   !< (`cell_piercings`), so the corner states and the crossings of every edge agree. Before #70 the piercings were the
+   !< clipped polygon vertices on two planes, and a mesh edge or vertex on a cell edge (lattice bodies) gave one
+   !< piercing per incident facet: the states did not alternate.
+   !$acc routine seq
+   logical,      intent(in)    :: fill                   !< Fill pass.
+   integer(I4P), intent(in)    :: nf                     !< Facets.
+   real(R8P),    intent(in)    :: tri(3, 3, nf), nrm(3, nf) !< Triangles, normals.
+   integer(I4P), intent(in)    :: nt                     !< Candidates.
+   integer(I4P), intent(in)    :: lst(nt)                !< Their indexes.
+   real(R8P),    intent(in)    :: x0, x1, y0, y1, z0, z1 !< Cell.
+   integer(I4P), intent(in)    :: cs(8)                  !< Corner states.
+   real(R8P),    intent(in)    :: alpha, faces(6)        !< Cell and face fractions.
+   integer(I4P), intent(in)    :: npc                    !< Piercings.
+   integer(I4P), intent(in)    :: pce(npc), pcq(npc), pcen(npc) !< Edges, candidates, entering.
+   real(R8P),    intent(in)    :: pct(npc)               !< Positions.
+   integer(I4P), intent(in)    :: nm2, nm3               !< Moments per face, per piece.
+   integer(I4P), intent(in)    :: e2(2, nm2), e3(3, nm3) !< Exponents.
+   logical,      intent(in)    :: qd, want_iv            !< Quadrature, intervals.
+   real(R8P),    intent(in)    :: secm(nm2, 6)           !< Section moments of the faces.
+   integer(I4P), intent(in)    :: na, ni, mm, ns, nr     !< Atoms, intervals, polygon vertices, face segments, rule pieces.
+   real(R8P),    intent(inout) :: pv(3, 16, nt)          !< Polygons.
+   real(R8P),    intent(inout) :: pt(npc)                !< Piercing positions.
+   real(R8P),    intent(inout) :: ivl_(ni), ivh_(ni)     !< Fluid intervals: range.
+   real(R8P),    intent(inout) :: vol(na)                !< Solid volume of closed wall sets.
+   real(R8P),    intent(inout) :: keyw(4 * mm)           !< Sort keys, face segment end points.
+   real(R8P),    intent(inout) :: wt(11, na), fa(6, na)  !< Wall terms, face fluid areas (per root).
+   real(R8P),    intent(inout) :: pm(17, na)             !< Measures (per piece).
+   real(R8P),    intent(inout) :: wvm(nm3, na), wwm(nm3, na), fmm(nm2, 6, na) !< Moments: wall divergence, wall, faces.
+   real(R8P),    intent(inout) :: fsg(6, ns)             !< Quadrature: oriented face segments.
+   integer(I4P), intent(inout) :: pfl(16, nt), pn(nt)    !< Vertex flags, vertex counts.
+   integer(I4P), intent(inout) :: pe(npc), pp(npc), pen(npc) !< Piercings: edge, polygon (0: none in the cell), entering.
+   integer(I4P), intent(inout) :: parent(na)             !< Union-find.
+   integer(I4P), intent(inout) :: ive_(ni), iva(ni)      !< Fluid intervals: edge, atom.
+   integer(I4P), intent(inout) :: touch(na), tgt(na), pid(na) !< Touch flags, inclusion targets, piece ids.
+   integer(I4P), intent(inout) :: iwk(3 * mm)            !< Sort and face segment work.
+   integer(I4P), intent(inout) :: fsf(ns), fsr(ns)       !< Segment face and set.
+   integer(I4P), intent(inout) :: qst(nr + 1), wst(nr + 1) !< Rule starts (per piece).
+   integer(I4P), intent(inout) :: qwn(nr), fq(nr), fw(nr) !< Wall cones per piece, fill pointers.
+   integer(I4P), intent(out)   :: npieces, nivc, nqc, nwc, qwn1 !< Counts.
+   integer(I4P), intent(in)    :: p0, iv0, q0, w0, npo, nivo, nqo, nwo, nqcd !< Offsets, output sizes.
+   real(R8P),    intent(inout) :: pvol(npo), pcen_(3, npo), pwa(npo), pwc(3, npo), pwn(3, npo), pfc(6, npo) !< Measures.
+   real(R8P),    intent(inout) :: pmom(nm3, npo), pwmom(nm3, npo), pfmom(nm2, 6, npo) !< Moments.
+   integer(I4P), intent(inout) :: ivp(nivo), ive(nivo)   !< Intervals: piece, edge.
+   real(R8P),    intent(inout) :: ivl(nivo), ivh(nivo)   !< Intervals: range.
+   real(R8P),    intent(inout) :: qpt(3, nqo), qwt(nqo), wpt(3, nwo), wwt(nwo) !< Rules.
+   integer(I4P), intent(inout) :: qcnt(nqcd), wcnt(nqcd) !< Rule points per piece.
+   integer(I4P), parameter     :: NCORN = 8_I4P          !< Corner atoms follow the polygons.
+   real(R8P)                   :: c0(3), c1(3), d0(3), e1(3), e2v(3), cr(3), h3(3) !< Cell corners, work.
+   integer(I4P)                :: cstate(8)              !< Corner states: -1 unknown, 0 solid, 1 fluid.
+   integer(I4P)                :: q, v, w, e, a, natom, niv, nc, npv, cpp, nn, nfs !< Work.
+   real(R8P)                   :: tt                     !< Crossing position.
+   logical                     :: ok, any_fl, measures   !< Consistency, work, measures needed.
+
+   c0(1) = x0 ; c0(2) = y0 ; c0(3) = z0 ; c1(1) = x1 ; c1(2) = y1 ; c1(3) = z1
+   nivc = 0_I4P ; nqc = 0_I4P ; nwc = 0_I4P ; qwn1 = 0_I4P
+   do q = 1, nt
+      pv(:, 1:3, q) = tri(:, :, lst(q)) ; pfl(1:3, q) = 0_I4P ; npv = 3_I4P
+      do a = 1, 3
+         call clip_flags(pv(:, :, q), pfl(:, q), npv, a, c0(a), .true., 2_I4P * (a - 1_I4P))
+         call clip_flags(pv(:, :, q), pfl(:, q), npv, a, c1(a), .false., 2_I4P * (a - 1_I4P) + 1_I4P)
+      enddo
+      pn(q) = npv ; if (npv < 3_I4P) pn(q) = 0_I4P
       ! on-plane flags from the coordinates (issue #70): a vertex made by one clip can lie exactly on a plane
       ! clipped before or after it (lattice bodies), and the traces and edge piercings need that flag too
       do v = 1, pn(q)
@@ -753,650 +947,1089 @@ contains
          enddo
       enddo
    enddo
-   ! piercings: the exact crossings of the cell edges (issue #70)
-   allocate(pc(12 * nt)) ; npc = 0_I4P
-   do e = 1, 12
-      a = (e - 1_I4P) / 4_I4P + 1_I4P ; kk = mod(e - 1_I4P, 4_I4P) ! edge axis, sides
-      la = merge(c1(mod(a, 3_I4P) + 1_I4P), c0(mod(a, 3_I4P) + 1_I4P), mod(kk, 2_I4P) == 1_I4P)
-      lb = merge(c1(mod(a + 1_I4P, 3_I4P) + 1_I4P), c0(mod(a + 1_I4P, 3_I4P) + 1_I4P), kk / 2_I4P == 1_I4P)
-      do q = 1, nt
-         call tri_line_hit_oac(reshape(tri(:, :, lst(q)), [9]), a, la, lb, hit, tc, en)
-         if (.not. hit) cycle
-         if (line_crossing_before(tri(:, :, lst(q)), a, la, lb, c0(a), en)) cycle
-         if (.not. line_crossing_before(tri(:, :, lst(q)), a, la, lb, c1(a), en)) cycle
-         tt = min(max(tc, c0(a)), c1(a)) ! the clipped polygon's vertex on the edge if it has one (same rounding)
-         do v = 1, pn(q)
-            if (edge_of(pfl(v, q)) == e) then
-               tt = pv(a, v, q) ; exit
-            endif
-         enddo
-         npc = npc + 1_I4P
-         pc(npc) = pierce_t(e, tt, en, merge(q, 0_I4P, pn(q) > 0_I4P))
+   ! piercings (issue #70): the exact crossings of `cell_piercings`, at the clipped polygon's vertex on the edge if it
+   ! has one (same rounding), else at the kernel's position clamped to the edge
+   do w = 1, npc
+      e = pce(w) ; q = pcq(w) ; a = (e - 1_I4P) / 4_I4P + 1_I4P
+      tt = min(max(pct(w), c0(a)), c1(a))
+      do v = 1, pn(q)
+         if (edge_of(pfl(v, q)) == e) then
+            tt = pv(a, v, q) ; exit
+         endif
       enddo
+      pe(w) = e ; pt(w) = tt ; pen(w) = pcen(w) ; pp(w) = merge(q, 0_I4P, pn(q) > 0_I4P)
    enddo
-   call sort_pierce(pc, npc)
+   call sort_pierce(npc, pe, pt, pen, pp)
    ! corner states from the pierced edges, then propagation along the others
-   ok = .true. ; cstate = cs
+   ok = .true. ; cstate = cs ; natom = nt + NCORN ; niv = 0_I4P
    do e = 1, 12 ! check: the crossings alternate from the low corner's state to the high one's
-      call walk_edge(e, .false.)
+      call walk_edge(e, .false., c0, c1, nt, npc, pe, pt, pen, pp, cstate, ok, na, parent, natom, ni, niv, ive_, iva, &
+                     ivl_, ivh_)
+      if (.not. ok) exit
    enddo
-   if (any(cstate == -1_I4P)) ok = .false.
+   do a = 1, 8
+      if (cstate(a) == -1_I4P) ok = .false.
+   enddo
    if (.not. ok) then
       npieces = -1_I4P ; return
    endif
    ! atoms: polygons 1..nt, corners nt+1..nt+8, intervals after
-   allocate(parent(nt + NCORN + npc + 12), iv_edge(npc + 12), iv_atom(npc + 12), iv_lo(npc + 12), iv_hi(npc + 12))
-   parent = [(a, a = 1, size(parent))]
-   niv = 0_I4P ; natom = nt + NCORN
+   do a = 1, na
+      parent(a) = a
+   enddo
    do e = 1, 12
-      call walk_edge(e, .true.)
+      call walk_edge(e, .true., c0, c1, nt, npc, pe, pt, pen, pp, cstate, ok, na, parent, natom, ni, niv, ive_, iva, &
+                     ivl_, ivh_)
+      if (.not. ok) exit
    enddo
    if (.not. ok) then
       npieces = -1_I4P ; return
    endif
-   call join_shared_vertices
-   do a = 1, 3
-      call faces_islands(a, 0_I4P)
-      call faces_islands(a, 1_I4P)
+   if (nt > 0_I4P) call join_shared_vertices(nt, pv, pn, mm, keyw, iwk(1), iwk(mm + 1), na, parent)
+   do a = 1, merge(3_I4P, 0_I4P, nt > 0_I4P) ! (no polygon: no trace)
+      call faces_islands(a, 0_I4P, nf, nrm, nt, lst, pv, pfl, pn, mm, keyw(1), keyw(2 * mm + 1), iwk(1), iwk(mm + 1), &
+                         iwk(2 * mm + 1), na, parent, ni, niv, ive_, iva, ivl_, ivh_, ok)
+      if (.not. ok) exit
+      call faces_islands(a, 1_I4P, nf, nrm, nt, lst, pv, pfl, pn, mm, keyw(1), keyw(2 * mm + 1), iwk(1), iwk(mm + 1), &
+                         iwk(2 * mm + 1), na, parent, ni, niv, ive_, iva, ivl_, ivh_, ok)
+      if (.not. ok) exit
    enddo
    if (.not. ok) then
       npieces = -1_I4P ; return
    endif
    ! count: sets touching the boundary, plus closed wall sets that bound a void
-   allocate(touch(natom), vol(natom)) ; touch = .false. ; vol = 0._R8P
+   do a = 1, natom
+      touch(a) = 0_I4P ; vol(a) = 0._R8P
+   enddo
    do q = 1, nt
       if (pn(q) == 0_I4P) cycle
-      w = find(q)
-      if (any(pfl(1:pn(q), q) /= 0_I4P)) touch(w) = .true.
+      w = uf_find(na, parent, q)
+      any_fl = .false.
+      do v = 1, pn(q)
+         if (pfl(v, q) /= 0_I4P) any_fl = .true.
+      enddo
+      if (any_fl) touch(w) = 1_I4P
       do v = 2, pn(q) - 1
-         vol(w) = vol(w) + dot_product(pv(:, 1, q) - c0, &
-                  cross3(pv(:, v, q) - pv(:, 1, q), pv(:, v + 1, q) - pv(:, 1, q))) / 6._R8P
+         d0 = pv(:, 1, q) - c0 ; e1 = pv(:, v, q) - pv(:, 1, q) ; e2v = pv(:, v + 1, q) - pv(:, 1, q)
+         call cross3_into(e1, e2v, cr)
+         vol(w) = vol(w) + dot_product(d0, cr) / 6._R8P
       enddo
    enddo
    do a = 1, NCORN
-      if (cstate(a) == 1_I4P) touch(find(nt + a)) = .true.
+      if (cstate(a) == 1_I4P) touch(uf_find(na, parent, nt + a)) = 1_I4P
    enddo
    do a = 1, niv
-      touch(find(iv_atom(a))) = .true.
+      touch(uf_find(na, parent, iva(a))) = 1_I4P
    enddo
    nc = 0_I4P
    do a = 1, natom
-      if (find(a) /= a) cycle
-      if (touch(a)) then
+      if (uf_find(na, parent, a) /= a) cycle
+      if (touch(a) == 1_I4P) then
          nc = nc + 1_I4P
       elseif (a <= nt) then
          if (pn(a) > 0_I4P .and. vol(a) < 0._R8P) nc = nc + 1_I4P
       endif
    enddo
    npieces = nc
-   call piece_measures
-   contains
-      integer(I4P) function find(i) result(r)
-      !< Root of i (path halving).
-      integer(I4P), intent(in) :: i !< Atom.
-      integer(I4P)             :: j !< Work.
-
-      j = i
-      do while (parent(j) /= j)
-         parent(j) = parent(parent(j)) ; j = parent(j)
-      enddo
-      r = j
-      endfunction find
-
-      subroutine unite(i, j)
-      !< Join the sets of i and j.
-      integer(I4P), intent(in) :: i, j !< Atoms.
-      integer(I4P)             :: ri, rj !< Roots.
-
-      ri = find(i) ; rj = find(j)
-      if (ri /= rj) parent(max(ri, rj)) = min(ri, rj)
-      endsubroutine unite
-
-
-      subroutine set_corner(cc, st)
-      !< Set (or check) a corner state.
-      integer(I4P), intent(in) :: cc, st !< Corner, state.
-
-      if (cstate(cc) == -1_I4P) then
-         cstate(cc) = st
-      elseif (cstate(cc) /= st) then
-         ok = .false.
+   ! inclusions, piece ids (always: a missing target is no count); the measures where the pass needs them
+   call piece_ids(nf, tri, nrm, nt, lst, c1, pv, pfl, pn, na, natom, parent, touch, vol, ni, niv, ive_, iva, ivl_, ivh_, &
+                  tgt, pid, nn)
+   if (nn < 0_I4P) then
+      npieces = -1_I4P ; return
+   endif
+   measures = fill .or. npieces > 1_I4P .or. qd
+   if (.not. measures) return
+   call piece_measures(fill, nf, tri, nrm, nt, lst, c0, c1, nm2, nm3, e2, e3, qd, pv, pfl, pn, na, natom, parent, tgt, &
+                       pid, ni, niv, ive_, iva, ivl_, ivh_, wt, fa, pm, wvm, wwm, fmm, ns, nfs, fsg, fsf, fsr, nn, qst, wst, &
+                       qwn, fw, w0, nwo, wpt, wwt)
+   if (npieces > 1_I4P) then ! (issue #70) trust the split only if it closes
+      h3 = c1 - c0
+      if (.not. split_closes(npieces, pm, h3, alpha, faces)) then
+         npieces = -1_I4P ; return
       endif
-      endsubroutine set_corner
-
-      subroutine walk_edge(ed, build)
-      !< Walk the piercings of edge ed from its low corner's exact state. Without `build`: check that they
-      !< alternate and end at the high corner's state, reordering crossings at one rounded position (a mesh
-      !< edge or vertex on the cell edge: their exact order is the alternation). With `build`: the fluid
-      !< interval atoms and their joins.
-      integer(I4P), intent(in) :: ed    !< Edge.
-      logical,      intent(in) :: build !< Build the intervals.
-      integer(I4P)             :: st, ii, i1, i2, prev, ax, jt, kt !< State, piercings, previous endpoint atom.
-      real(R8P)                :: tprev, lo, hi !< Previous position, edge range.
-      type(pierce_t)           :: tmp   !< Swap.
-
-      ax = (ed - 1_I4P) / 4_I4P + 1_I4P
-      lo = c0(ax) ; hi = c1(ax)
-      i1 = 0_I4P ; i2 = -1_I4P
-      do ii = 1, npc
-         if (pc(ii)%edge /= ed) cycle
-         if (i1 == 0_I4P) i1 = ii
-         i2 = ii
+   endif
+   ! counts
+   if (want_iv .and. npieces > 1_I4P) then
+      do a = 1, niv
+         if (pid(uf_find(na, parent, iva(a))) >= 1_I4P) nivc = nivc + 1_I4P
       enddo
-      if (i1 == 0_I4P) then ! no piercing
-         if (build .and. cstate(corner_of(ed, 0_I4P)) == 1_I4P) then
-            call new_interval(ed, lo, hi)
-            call unite(natom, nt + corner_of(ed, 0_I4P)) ; call unite(natom, nt + corner_of(ed, 1_I4P))
-         endif
-         return
+   endif
+   if (qd) then
+      nqc = qst(nn + 1) - 1_I4P ; nwc = wst(nn + 1) - 1_I4P
+      if (nn >= 1_I4P) qwn1 = qwn(1)
+   endif
+   if (.not. fill) return
+   ! fill: several pieces, their measures, moments and intervals; one, its volume and wall moments; the rules
+   if (npieces > 1_I4P) then
+      do a = 1, nn
+         pvol(p0 + a) = pm(1, a)
+         pcen_(:, p0 + a) = pm(2:4, a) ; pwa(p0 + a) = pm(5, a) ; pwc(:, p0 + a) = pm(6:8, a)
+         pwn(:, p0 + a) = pm(9:11, a) ; pfc(:, p0 + a) = pm(12:17, a)
+      enddo
+      if (want_iv) then
+         w = iv0
+         do a = 1, niv
+            cpp = pid(uf_find(na, parent, iva(a)))
+            if (cpp < 1_I4P) cycle
+            w = w + 1_I4P
+            ivp(w) = p0 + cpp ; ive(w) = ive_(a) ; ivl(w) = ivl_(a) ; ivh(w) = ivh_(a)
+         enddo
       endif
-      st = cstate(corner_of(ed, 0_I4P)) ! exact (issue #70); crossings at one rounded position are reordered below
-      prev = nt + corner_of(ed, 0_I4P) ; tprev = lo
-      do ii = i1, i2
-         if (pc(ii)%enter .neqv. (st == 1_I4P)) then ! alternation broken: repair a tie, else not closed
-            jt = 0_I4P
-            do kt = ii + 1_I4P, i2
-               if (abs(pc(kt)%t - pc(ii)%t) > 64._R8P * spacing(max(abs(lo), abs(hi)))) exit
-               if (pc(kt)%enter .eqv. (st == 1_I4P)) then
-                  jt = kt ; exit
-               endif
-            enddo
-            if (jt == 0_I4P) then
-               ok = .false. ; return
-            endif
-            tmp = pc(ii) ; pc(ii) = pc(jt) ; pc(jt) = tmp
+   endif
+   if (nm3 > 0_I4P) then
+      do q = 1, natom
+         if (pid(q) == 0_I4P) cycle
+         a = pid(q)
+         pwmom(:, p0 + a) = wwm(:, q)
+         if (npieces > 1_I4P) then
+            pfmom(:, :, p0 + a) = fmm(:, :, q)
+            call volume_moments_k(nm3, nm2, wvm(:, q), fmm(:, 1, q), fmm(:, 2, q), x1 - x0, e2, e3, pmom(:, p0 + a))
+         else
+            call volume_moments_k(nm3, nm2, wvm(:, q), secm(:, 1), secm(:, 2), x1 - x0, e2, e3, pmom(:, p0 + a))
          endif
-         if (build .and. st == 1_I4P) then
-            call new_interval(ed, tprev, pc(ii)%t)
-            if (prev > 0_I4P) call unite(natom, prev) ! 0: a crossing without a polygon in the cell
-            if (pc(ii)%poly > 0_I4P) call unite(natom, pc(ii)%poly)
-         endif
-         st = 1_I4P - st ; prev = pc(ii)%poly ; tprev = pc(ii)%t
       enddo
-      if (.not. build) call set_corner(corner_of(ed, 1_I4P), st)
-      if (build .and. st == 1_I4P) then
-         call new_interval(ed, tprev, hi)
-         if (prev > 0_I4P) call unite(natom, prev)
-         call unite(natom, nt + corner_of(ed, 1_I4P))
+   endif
+   if (qd) call piece_rules(npieces > 1_I4P, nt, c0, c1, pv, pn, na, parent, tgt, pid, nn, ns, nfs, fsg, fsf, fsr, qst, &
+                            wst, fq, p0, q0, nqo, qpt, qwt, nqcd, qcnt, wcnt)
+   endsubroutine cell_pieces_core
+
+   pure integer(I4P) function uf_find(na, parent, i) result(r)
+   !< Root of atom i (the least atom of its set; no path compression: the sets are small).
+   !$acc routine seq
+   integer(I4P), intent(in) :: na         !< Atoms.
+   integer(I4P), intent(in) :: parent(na) !< Union-find.
+   integer(I4P), intent(in) :: i          !< Atom.
+
+   r = i
+   do while (parent(r) /= r)
+      r = parent(r)
+   enddo
+   endfunction uf_find
+
+   pure subroutine uf_unite(na, parent, i, j)
+   !< Join the sets of i and j: the larger root points to the smaller.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: na         !< Atoms.
+   integer(I4P), intent(inout) :: parent(na) !< Union-find.
+   integer(I4P), intent(in)    :: i, j       !< Atoms.
+   integer(I4P)                :: ri, rj     !< Roots.
+
+   ri = uf_find(na, parent, i) ; rj = uf_find(na, parent, j)
+   if (ri /= rj) parent(max(ri, rj)) = min(ri, rj)
+   endsubroutine uf_unite
+
+   pure subroutine walk_edge(ed, build, c0, c1, nt, npc, pe, pt, pen, pp, cstate, ok, na, parent, natom, ni, niv, ive, iva, &
+                             ivl, ivh)
+   !< Walk the piercings of edge ed from its low corner's exact state. Without `build`: check that they alternate and
+   !< end at the high corner's state, reordering crossings at one rounded position (a mesh edge or vertex on the cell
+   !< edge: their exact order is the alternation). With `build`: the fluid interval atoms and their joins.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: ed                   !< Edge.
+   logical,      intent(in)    :: build                !< Build the intervals.
+   real(R8P),    intent(in)    :: c0(3), c1(3)         !< Cell corners.
+   integer(I4P), intent(in)    :: nt, npc              !< Polygons, piercings.
+   integer(I4P), intent(inout) :: pe(npc), pen(npc), pp(npc) !< Piercings: edge, entering, polygon.
+   real(R8P),    intent(inout) :: pt(npc)              !< Piercings: position.
+   integer(I4P), intent(inout) :: cstate(8)            !< Corner states.
+   logical,      intent(inout) :: ok                   !< Consistency.
+   integer(I4P), intent(in)    :: na                   !< Atoms (bound).
+   integer(I4P), intent(inout) :: parent(na)           !< Union-find.
+   integer(I4P), intent(inout) :: natom                !< Atoms so far.
+   integer(I4P), intent(in)    :: ni                   !< Intervals (bound).
+   integer(I4P), intent(inout) :: niv                  !< Intervals so far.
+   integer(I4P), intent(inout) :: ive(ni), iva(ni)     !< Intervals: edge, atom.
+   real(R8P),    intent(inout) :: ivl(ni), ivh(ni)     !< Intervals: range.
+   integer(I4P)                :: st, ii, i1, i2, prev, ax, jt, kt, cl, ch, ti !< Work.
+   real(R8P)                   :: tprev, lo, hi, tr   !< Previous position, edge range, swap.
+
+   ax = (ed - 1_I4P) / 4_I4P + 1_I4P
+   lo = c0(ax) ; hi = c1(ax)
+   cl = corner_of(ed, 0_I4P) ; ch = corner_of(ed, 1_I4P)
+   i1 = 0_I4P ; i2 = -1_I4P
+   do ii = 1, npc
+      if (pe(ii) /= ed) cycle
+      if (i1 == 0_I4P) i1 = ii
+      i2 = ii
+   enddo
+   if (i1 == 0_I4P) then ! no piercing
+      if (build .and. cstate(cl) == 1_I4P) then
+         natom = natom + 1_I4P ; niv = niv + 1_I4P
+         ive(niv) = ed ; ivl(niv) = lo ; ivh(niv) = hi ; iva(niv) = natom
+         call uf_unite(na, parent, natom, nt + cl) ; call uf_unite(na, parent, natom, nt + ch)
       endif
-      endsubroutine walk_edge
-
-      subroutine new_interval(ed, tlo, thi)
-      !< A new fluid interval atom (natom).
-      integer(I4P), intent(in) :: ed       !< Edge.
-      real(R8P),    intent(in) :: tlo, thi !< Range.
-
-      natom = natom + 1_I4P ; niv = niv + 1_I4P
-      iv_edge(niv) = ed ; iv_lo(niv) = tlo ; iv_hi(niv) = thi ; iv_atom(niv) = natom
-      endsubroutine new_interval
-
-      subroutine join_shared_vertices
-      !< Join the polygons that share a vertex (bit-identical points).
-      real(R8P),    allocatable :: key(:,:) !< Vertices [3, m].
-      integer(I4P), allocatable :: own(:), idx(:) !< Owner polygon, sorted order.
-      integer(I4P)              :: mm, ii, qq, vv !< Work.
-
-      mm = sum(pn)
-      allocate(key(3, mm), own(mm), idx(mm))
-      mm = 0_I4P
-      do qq = 1, nt
-         do vv = 1, pn(qq)
-            mm = mm + 1_I4P ; key(:, mm) = pv(:, vv, qq) ; own(mm) = qq
-         enddo
-      enddo
-      call sort_points(key, idx)
-      do ii = 2, mm
-         if (all(key(:, idx(ii)) == key(:, idx(ii - 1)))) call unite(own(idx(ii)), own(idx(ii - 1)))
-      enddo
-      endsubroutine join_shared_vertices
-
-      subroutine faces_islands(ax, sd)
-      !< Join every solid island traced on the face (axis ax, side sd) to the fluid around it.
-      integer(I4P), intent(in) :: ax, sd !< Face.
-      integer(I4P)             :: bt, a1, a2, ns, ii, jj, qq, vv, best, comp, sides(3), ed !< Work.
-      real(R8P),    allocatable :: su(:,:), sv(:,:)  !< Segment end points in face coordinates [2, ns].
-      integer(I4P), allocatable :: sp(:), sc(:)      !< Segment polygon, component.
-      logical,      allocatable :: stouch(:)         !< Segment component touches a cell edge.
-      real(R8P)                 :: uv(2), vv0, uc, ubest, nbest !< Work.
-      integer(I4P)              :: iv                 !< Vertex of the rightmost point.
-
-      bt = 2_I4P * (ax - 1_I4P) + sd
-      a1 = mod(ax, 3_I4P) + 1_I4P ; a2 = mod(ax + 1_I4P, 3_I4P) + 1_I4P
-      ns = 0_I4P
-      do qq = 1, nt
-         do vv = 1, pn(qq)
-            if (btest(pfl(vv, qq), bt) .and. btest(pfl(mod(vv, pn(qq)) + 1, qq), bt)) ns = ns + 1_I4P
-         enddo
-      enddo
-      if (ns == 0_I4P) return
-      allocate(su(2, ns), sv(2, ns), sp(ns), sc(ns), stouch(ns))
-      ns = 0_I4P
-      do qq = 1, nt
-         do vv = 1, pn(qq)
-            jj = mod(vv, pn(qq)) + 1
-            if (.not. (btest(pfl(vv, qq), bt) .and. btest(pfl(jj, qq), bt))) cycle
-            ns = ns + 1_I4P
-            su(:, ns) = [pv(a1, vv, qq), pv(a1, jj, qq)] ; sv(:, ns) = [pv(a2, vv, qq), pv(a2, jj, qq)]
-            sp(ns) = qq
-            stouch(ns) = edge_of(pfl(vv, qq)) /= 0_I4P .or. edge_of(pfl(jj, qq)) /= 0_I4P .or. &
-                         popcnt(pfl(vv, qq)) > 2 .or. popcnt(pfl(jj, qq)) > 2
-         enddo
-      enddo
-      ! segment components by shared end points (small sets: quadratic)
-      sc = [(ii, ii = 1, ns)]
-      do ii = 1, ns
-         do jj = ii + 1, ns
-            if (sc(ii) == sc(jj)) cycle
-            if ((su(1, ii) == su(1, jj) .and. sv(1, ii) == sv(1, jj)) .or. (su(1, ii) == su(2, jj) .and. sv(1, ii) == sv(2, jj)) &
-                .or. (su(2, ii) == su(1, jj) .and. sv(2, ii) == sv(1, jj)) .or. &
-                (su(2, ii) == su(2, jj) .and. sv(2, ii) == sv(2, jj))) then
-               iv = max(sc(ii), sc(jj)) ; best = min(sc(ii), sc(jj))
-               where (sc == iv) sc = best
+      return
+   endif
+   st = cstate(cl) ! exact (issue #70); crossings at one rounded position are reordered below
+   prev = nt + cl ; tprev = lo
+   do ii = i1, i2
+      if ((pen(ii) == 1_I4P) .neqv. (st == 1_I4P)) then ! alternation broken: repair a tie, else not closed
+         jt = 0_I4P
+         do kt = ii + 1_I4P, i2
+            if (abs(pt(kt) - pt(ii)) > 64._R8P * spacing(max(abs(lo), abs(hi)))) exit
+            if ((pen(kt) == 1_I4P) .eqv. (st == 1_I4P)) then
+               jt = kt ; exit
             endif
          enddo
-      enddo
-      do ii = 1, ns
-         if (any(stouch .and. sc == sc(ii))) stouch(ii) = .true.
-      enddo
-      do comp = 1, ns
-         if (.not. any(sc == comp)) cycle
-         ii = findloc(sc, comp, 1)
-         if (stouch(ii)) cycle
-         ! rightmost point of the loop and the incident segment with the largest |n_u|
-         uv = [-huge(1._R8P), -huge(1._R8P)]
-         do jj = 1, ns
-            if (sc(jj) /= comp) cycle
-            do iv = 1, 2
-               if (su(iv, jj) > uv(1) .or. (su(iv, jj) == uv(1) .and. sv(iv, jj) > uv(2))) uv = [su(iv, jj), sv(iv, jj)]
-            enddo
-         enddo
-         best = 0_I4P ; nbest = 0._R8P
-         do jj = 1, ns
-            if (sc(jj) /= comp) cycle
-            if (.not. ((su(1, jj) == uv(1) .and. sv(1, jj) == uv(2)) .or. (su(2, jj) == uv(1) .and. sv(2, jj) == uv(2)))) cycle
-            if (abs(nrm(a1, lst(sp(jj)))) > abs(nbest)) then
-               best = jj ; nbest = nrm(a1, lst(sp(jj)))
-            endif
-         enddo
-         if (best == 0_I4P .or. nbest <= 0._R8P) cycle ! a hole (fluid inside the loop): nothing to join
-         ! ray in +u from the rightmost point: the nearest trace of another set, else the face edge
-         vv0 = uv(2) ; ubest = huge(1._R8P) ; qq = 0_I4P
-         do jj = 1, ns
-            if (sc(jj) == comp) cycle
-            if ((sv(1, jj) > vv0) .eqv. (sv(2, jj) > vv0)) cycle
-            uc = su(1, jj) + (vv0 - sv(1, jj)) / (sv(2, jj) - sv(1, jj)) * (su(2, jj) - su(1, jj))
-            if (uc > uv(1) .and. uc < ubest) then
-               ubest = uc ; qq = sp(jj)
-            endif
-         enddo
-         if (qq /= 0_I4P) then
-            call unite(sp(best), qq)
-            cycle
-         endif
-         sides = 0_I4P ; sides(ax) = sd ; sides(a1) = 1_I4P
-         ed = edge_index(a2, sides)
-         qq = 0_I4P
-         do jj = 1, niv
-            if (iv_edge(jj) == ed .and. iv_lo(jj) <= vv0 .and. vv0 <= iv_hi(jj)) qq = iv_atom(jj)
-         enddo
-         if (qq == 0_I4P) then
+         if (jt == 0_I4P) then
             ok = .false. ; return
          endif
-         call unite(sp(best), qq)
+         ti = pe(ii) ; pe(ii) = pe(jt) ; pe(jt) = ti
+         tr = pt(ii) ; pt(ii) = pt(jt) ; pt(jt) = tr
+         ti = pen(ii) ; pen(ii) = pen(jt) ; pen(jt) = ti
+         ti = pp(ii) ; pp(ii) = pp(jt) ; pp(jt) = ti
+      endif
+      if (build .and. st == 1_I4P) then
+         natom = natom + 1_I4P ; niv = niv + 1_I4P
+         ive(niv) = ed ; ivl(niv) = tprev ; ivh(niv) = pt(ii) ; iva(niv) = natom
+         if (prev > 0_I4P) call uf_unite(na, parent, natom, prev) ! 0: a crossing without a polygon in the cell
+         if (pp(ii) > 0_I4P) call uf_unite(na, parent, natom, pp(ii))
+      endif
+      st = 1_I4P - st ; prev = pp(ii) ; tprev = pt(ii)
+   enddo
+   if (.not. build) then ! set (or check) the high corner's state
+      if (cstate(ch) == -1_I4P) then
+         cstate(ch) = st
+      elseif (cstate(ch) /= st) then
+         ok = .false.
+      endif
+   endif
+   if (build .and. st == 1_I4P) then
+      natom = natom + 1_I4P ; niv = niv + 1_I4P
+      ive(niv) = ed ; ivl(niv) = tprev ; ivh(niv) = hi ; iva(niv) = natom
+      if (prev > 0_I4P) call uf_unite(na, parent, natom, prev)
+      call uf_unite(na, parent, natom, nt + ch)
+   endif
+   endsubroutine walk_edge
+
+   pure subroutine join_shared_vertices(nt, pv, pn, mm, key, own, idx, na, parent)
+   !< Join the polygons that share a vertex (bit-identical points).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: nt            !< Polygons.
+   real(R8P),    intent(in)    :: pv(3, 16, nt) !< Polygons.
+   integer(I4P), intent(in)    :: pn(nt)        !< Vertex counts.
+   integer(I4P), intent(in)    :: mm            !< Vertices (bound).
+   real(R8P),    intent(inout) :: key(3, mm)    !< Vertices.
+   integer(I4P), intent(inout) :: own(mm), idx(mm) !< Owner polygon, sorted order.
+   integer(I4P), intent(in)    :: na            !< Atoms.
+   integer(I4P), intent(inout) :: parent(na)    !< Union-find.
+   integer(I4P)                :: m, ii, qq, vv !< Work.
+
+   m = 0_I4P
+   do qq = 1, nt
+      do vv = 1, pn(qq)
+         m = m + 1_I4P ; key(:, m) = pv(:, vv, qq) ; own(m) = qq
       enddo
-      endsubroutine faces_islands
+   enddo
+   call sort_keys(3_I4P, m, key, idx)
+   do ii = 2, m
+      if (key(1, idx(ii)) == key(1, idx(ii - 1)) .and. key(2, idx(ii)) == key(2, idx(ii - 1)) .and. &
+          key(3, idx(ii)) == key(3, idx(ii - 1))) call uf_unite(na, parent, own(idx(ii)), own(idx(ii - 1)))
+   enddo
+   endsubroutine join_shared_vertices
 
-      subroutine piece_measures
-      !< Measures of the counted sets, in the order of their roots: pm(1) fluid volume, pm(2:4) centroid,
-      !< pm(5) wetted area, pm(6:8) wetted centroid, pm(9:11) outward normal integral, pm(12:17) fluid
-      !< fraction of the faces -x, +x, -y, +y, -z, +z.
-      !<
-      !< Walls: the divergence-theorem terms of every polygon go to its set (the outward normal of the
-      !< fluid is minus the triangle's). Faces: the fluid area of each face by Green's theorem in face
-      !< coordinates local to c0, A = oint u dv counter-clockwise seen from +e_a, over the boundary arcs
-      !< of the fluid region of the face: the fluid edge intervals (an arc on a low edge, u = 0 or v = 0,
-      !< adds nothing) and the trace segments. A clipped polygon lies inside the cell, so the fluid is on
-      !< the left of its trace as wound on a high face and on the right on a low face: the orientation
-      !< comes from the winding, no sign test. Volume and moments need the high faces only (local
-      !< coordinates). An inclusion (closed set, positive solid volume) goes to the set around it: the
-      !< nearest wall a ray in +x from its rightmost vertex hits (exact inclusive test on the projected
-      !< triangle), else the fluid region where the ray leaves the cell through the +x face (the ray of
-      !< `faces_islands` on that face); -1 if neither is found.
-      real(R8P),    allocatable :: wt(:,:), fa(:,:) !< Wall terms [11, natom], face fluid areas [6, natom].
-      real(R8P),    allocatable :: wvm(:,:), wwm(:,:), fmm(:,:,:) !< Moments: wall divergence, wall, faces (per root).
-      integer(I4P), allocatable :: me2(:,:), me3(:,:) !< Exponents.
-      real(R8P)                 :: cc(3), ts(3, 3), tp(3), mtmp(mono_count(2_I4P, max(1_I4P, mo))) !< Moment work.
-      integer(I4P)              :: nmo2, nmo3, gv  !< Moments per face, per piece; work.
-      integer(I4P)              :: rr, kq, m, ft, ax_, sd_ !< Rule work.
-      integer(I4P), allocatable :: tgt(:), pid(:)   !< Inclusion target, piece of a root.
-      real(R8P)                 :: h(3), pl(3), ql(3), sg, vp, mp(3), hf(3) !< Work.
-      integer(I4P)              :: qq, vv, jj, r, ax, sd, bt, b1, b2, kk, ee, k1, k2, s1, s2, guard, npc_ !< Work.
-      logical                   :: inplane, outside !< Polygon in the face plane, its outward normal leaves the cell.
+   pure subroutine faces_islands(ax, sd, nf, nrm, nt, lst, pv, pfl, pn, mm, su, sv, sp, sc, stouch, na, parent, ni, niv, &
+                                 ive, iva, ivl, ivh, ok)
+   !< Join every solid island traced on the face (axis ax, side sd) to the fluid around it: a loop of wall polygon edges
+   !< on the face that touches no cell edge, the fluid outside it, joins the nearest trace, or the fluid interval of the
+   !< face edge, a ray in +u from its rightmost point reaches.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: ax, sd           !< Face.
+   integer(I4P), intent(in)    :: nf               !< Facets.
+   real(R8P),    intent(in)    :: nrm(3, nf)       !< Normals.
+   integer(I4P), intent(in)    :: nt               !< Polygons.
+   integer(I4P), intent(in)    :: lst(nt)          !< Their facets.
+   real(R8P),    intent(in)    :: pv(3, 16, nt)    !< Polygons.
+   integer(I4P), intent(in)    :: pfl(16, nt), pn(nt) !< Vertex flags, counts.
+   integer(I4P), intent(in)    :: mm               !< Segments (bound).
+   real(R8P),    intent(inout) :: su(2, mm), sv(2, mm) !< Segment end points in face coordinates.
+   integer(I4P), intent(inout) :: sp(mm), sc(mm), stouch(mm) !< Segment polygon, component, touch flag.
+   integer(I4P), intent(in)    :: na               !< Atoms.
+   integer(I4P), intent(inout) :: parent(na)       !< Union-find.
+   integer(I4P), intent(in)    :: ni, niv          !< Intervals: bound, number.
+   integer(I4P), intent(in)    :: ive(ni), iva(ni) !< Intervals: edge, atom.
+   real(R8P),    intent(in)    :: ivl(ni), ivh(ni) !< Intervals: range.
+   logical,      intent(inout) :: ok               !< Consistency.
+   integer(I4P)                :: bt, a1, a2, ns, ii, jj, qq, vv, best, comp, sides(3), ed, iv, l !< Work.
+   real(R8P)                   :: uv(2), vv0, uc, ubest, nbest !< Work.
+   logical                     :: found            !< Work.
 
-      h = c1 - c0
-      allocate(wt(11, natom), fa(6, natom), tgt(natom), pid(natom))
-      wt = 0._R8P ; fa = 0._R8P ; tgt = 0_I4P ; pid = 0_I4P
-      nmo2 = 0_I4P ; nmo3 = 0_I4P
-      if (mo > 0_I4P) then
-         nmo2 = mono_count(2_I4P, mo) ; nmo3 = mono_count(3_I4P, mo)
-         me2 = mono_exponents(2_I4P, mo) ; me3 = mono_exponents(3_I4P, mo)
-      endif
-      if (mo > 0_I4P) then
-         allocate(wvm(nmo3, natom), wwm(nmo3, natom), fmm(nmo2, 6, natom)) ; wvm = 0._R8P ; wwm = 0._R8P ; fmm = 0._R8P
-      endif
-      cc = c0 + 0.5_R8P * h
-      nfs = 0_I4P ; nwt = 0_I4P
-      if (qd) allocate(fsg(6, 64), fsf(64), fsr(64), wtp(3, 64), wtw(64), wtr(64))
-      do r = 1, nt
-         if (find(r) /= r .or. touch(r) .or. pn(r) == 0_I4P .or. vol(r) < 0._R8P) cycle
-         tgt(r) = inclusion_target(r)
-         if (tgt(r) == 0_I4P) then
-            npieces = -1_I4P ; return
+   bt = 2_I4P * (ax - 1_I4P) + sd
+   a1 = mod(ax, 3_I4P) + 1_I4P ; a2 = mod(ax + 1_I4P, 3_I4P) + 1_I4P
+   ns = 0_I4P
+   do qq = 1, nt
+      do vv = 1, pn(qq)
+         jj = mod(vv, pn(qq)) + 1
+         if (.not. (btest(pfl(vv, qq), bt) .and. btest(pfl(jj, qq), bt))) cycle
+         ns = ns + 1_I4P
+         su(1, ns) = pv(a1, vv, qq) ; su(2, ns) = pv(a1, jj, qq) ; sv(1, ns) = pv(a2, vv, qq) ; sv(2, ns) = pv(a2, jj, qq)
+         sp(ns) = qq
+         stouch(ns) = 0_I4P
+         if (edge_of(pfl(vv, qq)) /= 0_I4P .or. edge_of(pfl(jj, qq)) /= 0_I4P .or. &
+             popcnt(pfl(vv, qq)) > 2 .or. popcnt(pfl(jj, qq)) > 2) stouch(ns) = 1_I4P
+      enddo
+   enddo
+   if (ns == 0_I4P) return
+   ! segment components by shared end points (small sets: quadratic)
+   do ii = 1, ns
+      sc(ii) = ii
+   enddo
+   do ii = 1, ns
+      do jj = ii + 1, ns
+         if (sc(ii) == sc(jj)) cycle
+         if ((su(1, ii) == su(1, jj) .and. sv(1, ii) == sv(1, jj)) .or. (su(1, ii) == su(2, jj) .and. sv(1, ii) == sv(2, jj)) &
+             .or. (su(2, ii) == su(1, jj) .and. sv(2, ii) == sv(1, jj)) .or. &
+             (su(2, ii) == su(2, jj) .and. sv(2, ii) == sv(2, jj))) then
+            iv = max(sc(ii), sc(jj)) ; best = min(sc(ii), sc(jj))
+            do l = 1, ns
+               if (sc(l) == iv) sc(l) = best
+            enddo
          endif
       enddo
-      do r = 1, nt
-         if (tgt(r) == 0_I4P) cycle
-         kk = tgt(r) ; guard = 0_I4P
-         do while (tgt(kk) /= 0_I4P .and. guard < natom)
-            kk = tgt(kk) ; guard = guard + 1_I4P
+   enddo
+   do ii = 1, ns
+      found = .false.
+      do l = 1, ns
+         if (stouch(l) == 1_I4P .and. sc(l) == sc(ii)) found = .true.
+      enddo
+      if (found) stouch(ii) = 1_I4P
+   enddo
+   do comp = 1, ns
+      ii = 0_I4P
+      do l = 1, ns
+         if (sc(l) == comp) then
+            ii = l ; exit
+         endif
+      enddo
+      if (ii == 0_I4P) cycle
+      if (stouch(ii) == 1_I4P) cycle
+      ! rightmost point of the loop and the incident segment with the largest |n_u|
+      uv(1) = -huge(1._R8P) ; uv(2) = -huge(1._R8P)
+      do jj = 1, ns
+         if (sc(jj) /= comp) cycle
+         do iv = 1, 2
+            if (su(iv, jj) > uv(1) .or. (su(iv, jj) == uv(1) .and. sv(iv, jj) > uv(2))) then
+               uv(1) = su(iv, jj) ; uv(2) = sv(iv, jj)
+            endif
          enddo
-         tgt(r) = kk
       enddo
-      npc_ = 0_I4P
-      do r = 1, natom
-         if (find(r) /= r) cycle
-         if (touch(r) .or. (r <= nt .and. tgt(r) == 0_I4P .and. vol(r) < 0._R8P)) then
-            npc_ = npc_ + 1_I4P ; pid(r) = npc_
+      best = 0_I4P ; nbest = 0._R8P
+      do jj = 1, ns
+         if (sc(jj) /= comp) cycle
+         if (.not. ((su(1, jj) == uv(1) .and. sv(1, jj) == uv(2)) .or. (su(2, jj) == uv(1) .and. sv(2, jj) == uv(2)))) cycle
+         if (abs(nrm(a1, lst(sp(jj)))) > abs(nbest)) then
+            best = jj ; nbest = nrm(a1, lst(sp(jj)))
          endif
       enddo
-      ! walls and traces
+      if (best == 0_I4P .or. nbest <= 0._R8P) cycle ! a hole (fluid inside the loop): nothing to join
+      ! ray in +u from the rightmost point: the nearest trace of another set, else the face edge
+      vv0 = uv(2) ; ubest = huge(1._R8P) ; qq = 0_I4P
+      do jj = 1, ns
+         if (sc(jj) == comp) cycle
+         if ((sv(1, jj) > vv0) .eqv. (sv(2, jj) > vv0)) cycle
+         uc = su(1, jj) + (vv0 - sv(1, jj)) / (sv(2, jj) - sv(1, jj)) * (su(2, jj) - su(1, jj))
+         if (uc > uv(1) .and. uc < ubest) then
+            ubest = uc ; qq = sp(jj)
+         endif
+      enddo
+      if (qq /= 0_I4P) then
+         call uf_unite(na, parent, sp(best), qq)
+         cycle
+      endif
+      sides = 0_I4P ; sides(ax) = sd ; sides(a1) = 1_I4P
+      ed = edge_index(a2, sides)
+      qq = 0_I4P
+      do jj = 1, niv
+         if (ive(jj) == ed .and. ivl(jj) <= vv0 .and. vv0 <= ivh(jj)) qq = iva(jj)
+      enddo
+      if (qq == 0_I4P) then
+         ok = .false. ; return
+      endif
+      call uf_unite(na, parent, sp(best), qq)
+   enddo
+   endsubroutine faces_islands
+
+   pure subroutine piece_ids(nf, tri, nrm, nt, lst, c1, pv, pfl, pn, na, natom, parent, touch, vol, ni, niv, ive, iva, &
+                             ivl, ivh, tgt, pid, nn)
+   !< Inclusion targets and piece ids. An inclusion (a closed set of positive solid volume) goes to the set around it
+   !< (`inclusion_target`; nn = -1 if one is not found); the counted sets (touching the boundary, or closed voids) get
+   !< ids 1..nn in the order of their roots.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: nf               !< Facets.
+   real(R8P),    intent(in)    :: tri(3, 3, nf), nrm(3, nf) !< Triangles, normals.
+   integer(I4P), intent(in)    :: nt               !< Polygons.
+   integer(I4P), intent(in)    :: lst(nt)          !< Their facets.
+   real(R8P),    intent(in)    :: c1(3)            !< Cell high corner.
+   real(R8P),    intent(in)    :: pv(3, 16, nt)    !< Polygons.
+   integer(I4P), intent(in)    :: pfl(16, nt), pn(nt) !< Vertex flags, counts.
+   integer(I4P), intent(in)    :: na, natom        !< Atoms: bound, number.
+   integer(I4P), intent(in)    :: parent(na)       !< Union-find.
+   integer(I4P), intent(in)    :: touch(na)        !< Touch flags.
+   real(R8P),    intent(in)    :: vol(na)          !< Solid volumes.
+   integer(I4P), intent(in)    :: ni, niv          !< Intervals: bound, number.
+   integer(I4P), intent(in)    :: ive(ni), iva(ni) !< Intervals: edge, atom.
+   real(R8P),    intent(in)    :: ivl(ni), ivh(ni) !< Intervals: range.
+   integer(I4P), intent(inout) :: tgt(na), pid(na) !< Inclusion targets, piece ids.
+   integer(I4P), intent(out)   :: nn               !< Pieces (-1: an inclusion without a target).
+   integer(I4P)                :: r, kk, guard     !< Work.
+
+   do r = 1, natom
+      tgt(r) = 0_I4P ; pid(r) = 0_I4P
+   enddo
+   nn = -1_I4P
+   do r = 1, nt
+      if (uf_find(na, parent, r) /= r .or. touch(r) == 1_I4P .or. pn(r) == 0_I4P .or. vol(r) < 0._R8P) cycle
+      tgt(r) = inclusion_target(r, nf, tri, nrm, nt, lst, c1, pv, pfl, pn, na, parent, ni, niv, ive, iva, ivl, ivh)
+      if (tgt(r) == 0_I4P) return
+   enddo
+   do r = 1, nt
+      if (tgt(r) == 0_I4P) cycle
+      kk = tgt(r) ; guard = 0_I4P
+      do while (tgt(kk) /= 0_I4P .and. guard < natom)
+         kk = tgt(kk) ; guard = guard + 1_I4P
+      enddo
+      tgt(r) = kk
+   enddo
+   nn = 0_I4P
+   do r = 1, natom
+      if (uf_find(na, parent, r) /= r) cycle
+      if (touch(r) == 1_I4P .or. (r <= nt .and. tgt(r) == 0_I4P .and. vol(r) < 0._R8P)) then
+         nn = nn + 1_I4P ; pid(r) = nn
+      endif
+   enddo
+   endsubroutine piece_ids
+
+   pure integer(I4P) function inclusion_target(ri, nf, tri, nrm, nt, lst, c1, pv, pfl, pn, na, parent, ni, niv, ive, iva, &
+                                               ivl, ivh) result(tr)
+   !< Root of the set around the inclusion ri: the nearest wall a ray in +x from its rightmost vertex hits (exact
+   !< inclusive test on the projected triangle), else the fluid region where the ray leaves the cell through the +x face
+   !< (the ray of `faces_islands` on that face); 0 if not found.
+   !$acc routine seq
+   integer(I4P), intent(in) :: ri               !< Root of the inclusion.
+   integer(I4P), intent(in) :: nf               !< Facets.
+   real(R8P),    intent(in) :: tri(3, 3, nf), nrm(3, nf) !< Triangles, normals.
+   integer(I4P), intent(in) :: nt               !< Polygons.
+   integer(I4P), intent(in) :: lst(nt)          !< Their facets.
+   real(R8P),    intent(in) :: c1(3)            !< Cell high corner.
+   real(R8P),    intent(in) :: pv(3, 16, nt)    !< Polygons.
+   integer(I4P), intent(in) :: pfl(16, nt), pn(nt) !< Vertex flags, counts.
+   integer(I4P), intent(in) :: na               !< Atoms.
+   integer(I4P), intent(in) :: parent(na)       !< Union-find.
+   integer(I4P), intent(in) :: ni, niv          !< Intervals: bound, number.
+   integer(I4P), intent(in) :: ive(ni), iva(ni) !< Intervals: edge, atom.
+   real(R8P),    intent(in) :: ivl(ni), ivh(ni) !< Intervals: range.
+   real(R8P)                :: pr(3), t(3, 3), nn(3), xh, xb, o(3), ub, uc !< Work.
+   integer(I4P)             :: q2, v2, j2, qb, ed, sides(3) !< Work.
+
+   pr = -huge(1._R8P)
+   do q2 = 1, nt
+      if (pn(q2) == 0_I4P) cycle
+      if (uf_find(na, parent, q2) /= ri) cycle
+      do v2 = 1, pn(q2)
+         if (pv(1, v2, q2) > pr(1)) pr = pv(:, v2, q2)
+      enddo
+   enddo
+   xb = huge(1._R8P) ; qb = 0_I4P
+   do q2 = 1, nt
+      if (pn(q2) == 0_I4P) cycle
+      if (uf_find(na, parent, q2) == ri) cycle
+      t = tri(:, :, lst(q2)) ; nn = nrm(:, lst(q2))
+      if (nn(1) == 0._R8P) cycle
+      if (orient2d_xy(t(2, 1), t(3, 1), t(2, 2), t(3, 2), t(2, 3), t(3, 3)) == 0._R8P) cycle
+      o(1) = orient2d_xy(t(2, 1), t(3, 1), t(2, 2), t(3, 2), pr(2), pr(3))
+      o(2) = orient2d_xy(t(2, 2), t(3, 2), t(2, 3), t(3, 3), pr(2), pr(3))
+      o(3) = orient2d_xy(t(2, 3), t(3, 3), t(2, 1), t(3, 1), pr(2), pr(3))
+      if (.not. ((o(1) >= 0._R8P .and. o(2) >= 0._R8P .and. o(3) >= 0._R8P) .or. &
+                 (o(1) <= 0._R8P .and. o(2) <= 0._R8P .and. o(3) <= 0._R8P))) cycle
+      xh = t(1, 1) - (nn(2) * (pr(2) - t(2, 1)) + nn(3) * (pr(3) - t(3, 1))) / nn(1)
+      if (xh > pr(1) .and. xh <= c1(1) .and. xh < xb) then
+         xb = xh ; qb = q2
+      endif
+   enddo
+   if (qb /= 0_I4P) then
+      tr = uf_find(na, parent, qb) ; return
+   endif
+   ! the +x face, (u, v) = (y, z): the nearest trace in +u, else the fluid interval of the edge u = high
+   ub = huge(1._R8P) ; qb = 0_I4P
+   do q2 = 1, nt
+      do v2 = 1, pn(q2)
+         j2 = mod(v2, pn(q2)) + 1_I4P
+         if (.not. (btest(pfl(v2, q2), 1) .and. btest(pfl(j2, q2), 1))) cycle
+         if ((pv(3, v2, q2) > pr(3)) .eqv. (pv(3, j2, q2) > pr(3))) cycle
+         uc = pv(2, v2, q2) + (pr(3) - pv(3, v2, q2)) / (pv(3, j2, q2) - pv(3, v2, q2)) * (pv(2, j2, q2) - pv(2, v2, q2))
+         if (uc > pr(2) .and. uc < ub) then
+            ub = uc ; qb = q2
+         endif
+      enddo
+   enddo
+   if (qb /= 0_I4P) then
+      tr = uf_find(na, parent, qb) ; return
+   endif
+   sides(1) = 1_I4P ; sides(2) = 1_I4P ; sides(3) = 0_I4P ; ed = edge_index(3_I4P, sides)
+   tr = 0_I4P
+   do j2 = 1, niv
+      if (ive(j2) == ed .and. ivl(j2) <= pr(3) .and. pr(3) <= ivh(j2)) tr = uf_find(na, parent, iva(j2))
+   enddo
+   endfunction inclusion_target
+
+   pure logical function across_crosses(fi, ax, lev, nf, tri, nt, lst) result(yes)
+   !< The facet of the cell across the edge of facet fi that lies on the plane x(ax) = lev has a vertex beyond the
+   !< plane (x(ax) > lev); .false. if fi has no edge on the plane or no facet of the cell shares it.
+   !$acc routine seq
+   integer(I4P), intent(in) :: fi            !< Facet.
+   integer(I4P), intent(in) :: ax            !< Plane axis.
+   real(R8P),    intent(in) :: lev           !< Plane level.
+   integer(I4P), intent(in) :: nf            !< Facets.
+   real(R8P),    intent(in) :: tri(3, 3, nf) !< Triangles.
+   integer(I4P), intent(in) :: nt            !< Candidates.
+   integer(I4P), intent(in) :: lst(nt)       !< Their facets.
+   integer(I4P)             :: m1, m2, g, mm, nshare, fg !< Work.
+
+   yes = .false.
+   do m1 = 1, 3
+      m2 = mod(m1, 3_I4P) + 1_I4P
+      if (tri(ax, m1, fi) /= lev .or. tri(ax, m2, fi) /= lev) cycle
+      do g = 1, nt
+         fg = lst(g)
+         if (fg == fi) cycle
+         nshare = 0_I4P
+         do mm = 1, 3
+            if ((tri(1, mm, fg) == tri(1, m1, fi) .and. tri(2, mm, fg) == tri(2, m1, fi) .and. &
+                 tri(3, mm, fg) == tri(3, m1, fi)) .or. (tri(1, mm, fg) == tri(1, m2, fi) .and. &
+                 tri(2, mm, fg) == tri(2, m2, fi) .and. tri(3, mm, fg) == tri(3, m2, fi))) nshare = nshare + 1_I4P
+         enddo
+         if (nshare == 2_I4P .and. max(tri(ax, 1, fg), tri(ax, 2, fg), tri(ax, 3, fg)) > lev) then
+            yes = .true. ; return
+         endif
+      enddo
+   enddo
+   endfunction across_crosses
+
+   subroutine piece_measures(fill, nf, tri, nrm, nt, lst, c0, c1, nm2, nm3, e2, e3, qd, pv, pfl, pn, na, natom, parent, &
+                             tgt, pid, ni, niv, ive, iva, ivl, ivh, wt, fa, pm, wvm, wwm, fmm, ns, nfs, fsg, fsf, fsr, nn, &
+                             qst, wst, qwn, fw, w0, nwo, wpt, wwt)
+   !< Measures of the counted sets (ids 1..nn): pm(1) fluid volume, pm(2:4) centroid, pm(5) wetted area, pm(6:8) wetted
+   !< centroid, pm(9:11) outward normal integral, pm(12:17) fluid fraction of the faces -x, +x, -y, +y, -z, +z.
+   !<
+   !< Walls: the divergence-theorem terms of every polygon go to its set (the outward normal of the fluid is minus the
+   !< triangle's). Faces: the fluid area of each face by Green's theorem in face coordinates local to c0,
+   !< A = oint u dv counter-clockwise seen from +e_a, over the boundary arcs of the fluid region of the face: the fluid
+   !< edge intervals (an arc on a low edge, u = 0 or v = 0, adds nothing) and the trace segments. A clipped polygon lies
+   !< inside the cell, so the fluid is on the left of its trace as wound on a high face and on the right on a low face:
+   !< the orientation comes from the winding, no sign test. Volume and moments need the high faces only (local
+   !< coordinates). With fill, the moments and the wall rule points (written at w0 + their place); with qd, the face
+   !< segments of the rules (fsg, nfs) and the rule starts per piece (qst: wall cones qwn, then the segment cones; wst).
+   !$acc routine seq
+   logical,      intent(in)    :: fill                   !< Fill pass.
+   integer(I4P), intent(in)    :: nf                     !< Facets.
+   real(R8P),    intent(in)    :: tri(3, 3, nf), nrm(3, nf) !< Triangles, normals.
+   integer(I4P), intent(in)    :: nt                     !< Polygons.
+   integer(I4P), intent(in)    :: lst(nt)                !< Their facets.
+   real(R8P),    intent(in)    :: c0(3), c1(3)           !< Cell corners.
+   integer(I4P), intent(in)    :: nm2, nm3               !< Moments per face, per piece.
+   integer(I4P), intent(in)    :: e2(2, nm2), e3(3, nm3) !< Exponents.
+   logical,      intent(in)    :: qd                     !< Quadrature.
+   real(R8P),    intent(in)    :: pv(3, 16, nt)          !< Polygons.
+   integer(I4P), intent(in)    :: pfl(16, nt), pn(nt)    !< Vertex flags, counts.
+   integer(I4P), intent(in)    :: na, natom              !< Atoms: bound, number.
+   integer(I4P), intent(in)    :: parent(na), tgt(na), pid(na) !< Union-find, inclusion targets, piece ids.
+   integer(I4P), intent(in)    :: ni, niv                !< Intervals: bound, number.
+   integer(I4P), intent(in)    :: ive(ni), iva(ni)       !< Intervals: edge, atom.
+   real(R8P),    intent(in)    :: ivl(ni), ivh(ni)       !< Intervals: range.
+   real(R8P),    intent(inout) :: wt(11, na), fa(6, na), pm(17, na) !< Wall terms, face areas (per root), measures.
+   real(R8P),    intent(inout) :: wvm(nm3, na), wwm(nm3, na), fmm(nm2, 6, na) !< Moments (per root).
+   integer(I4P), intent(in)    :: ns                     !< Face segments (bound).
+   integer(I4P), intent(out)   :: nfs                    !< Face segments.
+   real(R8P),    intent(inout) :: fsg(6, ns)             !< Face segments.
+   integer(I4P), intent(inout) :: fsf(ns), fsr(ns)       !< Their faces and sets.
+   integer(I4P), intent(in)    :: nn                     !< Pieces.
+   integer(I4P), intent(inout) :: qst(*), wst(*), qwn(*), fw(*) !< Rule starts, wall cones, wall fill pointers (qd).
+   integer(I4P), intent(in)    :: w0, nwo                !< Wall rule points before the cell's, size of the output.
+   real(R8P),    intent(inout) :: wpt(3, nwo), wwt(nwo)  !< Wall rule.
+   real(R8P)                   :: cc(3), ts(3, 3), tp(3), mtmp(MONO2_MAX), h(3), pl(3), ql(3), sg, vp, mp(3), hf(3) !< Work.
+   real(R8P)                   :: d1(3), d2(3), d3(3), e1(3), e2v(3), ga(2), gb(2), tp7(3, 7), tw7(7), sa(3), sb(3), s !< Work.
+   integer(I4P)                :: qq, vv, jj, r, rr, ax, sd, bt, b1, b2, kk, ee, k1, k2, s1, s2, gv, kq, l, a !< Work.
+   logical                     :: inplane, outside       !< Polygon in the face plane, its outward normal leaves the cell.
+
+   h = c1 - c0
+   do r = 1, natom
+      wt(:, r) = 0._R8P ; fa(:, r) = 0._R8P
+      if (nm3 > 0_I4P) then
+         wvm(:, r) = 0._R8P ; wwm(:, r) = 0._R8P ; fmm(:, :, r) = 0._R8P
+      endif
+   enddo
+   cc = c0 + 0.5_R8P * h
+   nfs = 0_I4P
+   if (qd) then ! wall cones (36 per fan triangle) and wall rule points (7) per piece, before the segments
+      do kq = 1, nn + 1
+         qst(kq) = 0_I4P ; wst(kq) = 0_I4P
+      enddo
+      do kq = 1, nn
+         qwn(kq) = 0_I4P
+      enddo
       do qq = 1, nt
          if (pn(qq) == 0_I4P) cycle
-         r = find(qq) ; if (tgt(r) /= 0_I4P) r = tgt(r)
-         do vv = 2, pn(qq) - 1
-            call tri_terms(pv(:, 1, qq) - c0, pv(:, vv, qq) - c0, pv(:, vv + 1, qq) - c0, wt(:, r))
-            if (qd) then ! wall rule on the fan triangle
-               call triangle_rule(pv(:, 1, qq), pv(:, vv, qq), pv(:, vv + 1, qq), tp7, tw7, .false.)
-               do gv = 1, 7
-                  call push_wall(tp7(:, gv), tw7(gv), r)
-               enddo
-            endif
-            if (nmo3 > 0_I4P) then
-               ts(:, 1) = (pv(:, 1, qq) - cc) / h ; ts(:, 2) = (pv(:, vv, qq) - cc) / h ; ts(:, 3) = (pv(:, vv + 1, qq) - cc) / h
-               tp = cross3(pv(:, vv, qq) - pv(:, 1, qq), pv(:, vv + 1, qq) - pv(:, 1, qq))
-               call triangle_moments(ts(:, 1), ts(:, 2), ts(:, 3), me3, product(h), 0.5_R8P * norm2(tp), wvm(:, r), wwm(:, r))
-            endif
-         enddo
-         do ax = 1, 3
-            b1 = mod(ax, 3_I4P) + 1_I4P ; b2 = mod(ax + 1_I4P, 3_I4P) + 1_I4P
-            do sd = 0, 1
-               bt = 2_I4P * (ax - 1_I4P) + sd ; sg = merge(1._R8P, -1._R8P, sd == 1_I4P)
-               inplane = all(btest(pfl(1:pn(qq), qq), bt))
-               outside = (sd == 1_I4P .and. nrm(ax, lst(qq)) > 0._R8P) .or. (sd == 0_I4P .and. nrm(ax, lst(qq)) < 0._R8P)
-               do vv = 1, pn(qq)
-                  jj = mod(vv, pn(qq)) + 1_I4P
-                  if (.not. (btest(pfl(vv, qq), bt) .and. btest(pfl(jj, qq), bt))) cycle
-                  ! traces on the perturbed face (issue #70): the face plane is taken at c + eps (#69)
-                  if (inplane) then ! the polygon lies in the face plane, just below the perturbed one
-                     if (outside) exit ! solid on the cell side: the perturbed face is fluid there, no boundary
-                     ! solid beyond the face: its outline bounds the fluid (it stands for the facets around it,
-                     ! which cross the perturbed plane), except along the cell edges, where the fluid edge
-                     ! intervals carry the boundary
-                     if (iand(iand(pfl(vv, qq), pfl(jj, qq)), not(ibset(0_I4P, bt))) /= 0_I4P) cycle
-                  elseif (maxval(tri(ax, :, lst(qq))) <= merge(c1(ax), c0(ax), sd == 1_I4P)) then
-                     ! the facet ends on the face plane, which the perturbed plane does not cut: its edge on the plane
-                     ! bounds the fluid only if the facet across that edge crosses the plane (that facet's polygon in
-                     ! the cell is the edge alone, so this one stands for it)
-                     if (.not. across_crosses(lst(qq), ax, merge(c1(ax), c0(ax), sd == 1_I4P))) cycle
-                  endif
-                  pl = pv(:, vv, qq) - c0 ; ql = pv(:, jj, qq) - c0
-                  fa(bt + 1, r) = fa(bt + 1, r) + sg * 0.5_R8P * (pl(b1) + ql(b1)) * (ql(b2) - pl(b2))
-                  if (qd) then ! the trace, counter-clockwise seen from +e_ax
-                     if (sg > 0._R8P) then
-                        call push_seg(pv(:, vv, qq), pv(:, jj, qq), bt + 1_I4P, r)
-                     else
-                        call push_seg(pv(:, jj, qq), pv(:, vv, qq), bt + 1_I4P, r)
-                     endif
-                  endif
-                  if (nmo2 > 0_I4P) then
-                     mtmp(1:nmo2) = 0._R8P
-                     call segment_green_moments([pl(b1) / h(b1) - 0.5_R8P, pl(b2) / h(b2) - 0.5_R8P], &
-                                                [ql(b1) / h(b1) - 0.5_R8P, ql(b2) / h(b2) - 0.5_R8P], me2, h(b1) * h(b2), &
-                                                mtmp(1:nmo2))
-                     fmm(:, bt + 1, r) = fmm(:, bt + 1, r) + sg * mtmp(1:nmo2)
-                  endif
-               enddo
-            enddo
-         enddo
+         rr = uf_find(na, parent, qq) ; if (tgt(rr) /= 0_I4P) rr = tgt(rr)
+         if (pid(rr) /= 0_I4P) then
+            qst(pid(rr) + 1) = qst(pid(rr) + 1) + 36_I4P * (pn(qq) - 2_I4P)
+            qwn(pid(rr)) = qwn(pid(rr)) + 36_I4P * (pn(qq) - 2_I4P)
+         endif
+         if (tgt(rr) /= 0_I4P) rr = tgt(rr) ! the wall points of an inclusion follow its target once more (as before #100)
+         if (pid(rr) /= 0_I4P) wst(pid(rr) + 1) = wst(pid(rr) + 1) + 7_I4P * (pn(qq) - 2_I4P)
       enddo
-      ! fluid edge intervals: edge along k at sides s1 (axis k1), s2 (axis k2); on the face (k1, s1) it
-      ! runs along v at u = s2 (counter-clockwise: +v at u = h); on the face (k2, s2) along u (no area)
-      do jj = 1, niv
-         ee = iv_edge(jj) ; kk = (ee - 1_I4P) / 4_I4P + 1_I4P
-         s1 = mod(mod(ee - 1_I4P, 4_I4P), 2_I4P) ; s2 = mod(ee - 1_I4P, 4_I4P) / 2_I4P
-         k1 = mod(kk, 3_I4P) + 1_I4P ; k2 = mod(kk + 1_I4P, 3_I4P) + 1_I4P
-         if (s2 == 1_I4P) then
-            r = find(iv_atom(jj))
-            fa(2 * (k1 - 1) + s1 + 1, r) = fa(2 * (k1 - 1) + s1 + 1, r) + h(k2) * (iv_hi(jj) - iv_lo(jj))
-         endif
-         if (nmo2 > 0_I4P) then ! moments: centred coordinates, so the edge at U = -1/2 counts too (going -V there)
-            r = find(iv_atom(jj)) ; mtmp(1:nmo2) = 0._R8P
-            if (s2 == 1_I4P) then
-               call segment_green_moments([0.5_R8P, (iv_lo(jj) - cc(kk)) / h(kk)], [0.5_R8P, (iv_hi(jj) - cc(kk)) / h(kk)], &
-                                          me2, h(k2) * h(kk), mtmp(1:nmo2))
-            else
-               call segment_green_moments([-0.5_R8P, (iv_hi(jj) - cc(kk)) / h(kk)], [-0.5_R8P, (iv_lo(jj) - cc(kk)) / h(kk)], &
-                                          me2, h(k2) * h(kk), mtmp(1:nmo2))
-            endif
-            fmm(:, 2 * (k1 - 1) + s1 + 1, r) = fmm(:, 2 * (k1 - 1) + s1 + 1, r) + mtmp(1:nmo2)
-         endif
-         if (qd) then ! the interval bounds two faces: (k1, s1) along V at U = s2, (k2, s2) along U at V = s1
-            r = find(iv_atom(jj))
-            sa = 0._R8P ; sa(kk) = iv_lo(jj) ; sa(k1) = merge(c1(k1), c0(k1), s1 == 1_I4P)
-            sa(k2) = merge(c1(k2), c0(k2), s2 == 1_I4P) ; sb = sa ; sb(kk) = iv_hi(jj)
-            if (s2 == 1_I4P) then
-               call push_seg(sa, sb, 2_I4P * (k1 - 1_I4P) + s1 + 1_I4P, r)
-            else
-               call push_seg(sb, sa, 2_I4P * (k1 - 1_I4P) + s1 + 1_I4P, r)
-            endif
-            if (s1 == 0_I4P) then
-               call push_seg(sa, sb, 2_I4P * (k2 - 1_I4P) + s2 + 1_I4P, r)
-            else
-               call push_seg(sb, sa, 2_I4P * (k2 - 1_I4P) + s2 + 1_I4P, r)
-            endif
-         endif
+      wst(1) = 1_I4P
+      do kq = 1, nn
+         wst(kq + 1) = wst(kq + 1) + wst(kq) ; fw(kq) = wst(kq)
       enddo
-      allocate(pm(17, npc_))
-      if (mo > 0_I4P) allocate(pvw(nmo3, npc_), pwm(nmo3, npc_), pfm(nmo2, 6, npc_))
-      if (want_iv) then
-         allocate(ivp_o(niv), ive_o(niv), ivl_o(niv), ivh_o(niv))
-         do jj = 1, niv
-            ivp_o(jj) = pid(find(iv_atom(jj))) ; ive_o(jj) = iv_edge(jj) ; ivl_o(jj) = iv_lo(jj) ; ivh_o(jj) = iv_hi(jj)
-         enddo
-      endif
-      hf = [h(2) * h(3), h(3) * h(1), h(1) * h(2)]
-      do r = 1, natom
-         if (pid(r) == 0_I4P) cycle
-         kk = pid(r)
-         vp = sum(h * fa([2, 4, 6], r)) / 3._R8P - wt(1, r)
-         mp = 0.5_R8P * h * h * fa([2, 4, 6], r) - wt(2:4, r)
-         pm(1, kk) = vp
-         pm(2:4, kk) = c0 + 0.5_R8P * h
-         if (vp > 0._R8P) pm(2:4, kk) = c0 + mp / vp
-         pm(5, kk) = wt(5, r)
-         pm(6:8, kk) = c0 + 0.5_R8P * h
-         if (wt(5, r) > 0._R8P) pm(6:8, kk) = c0 + wt(6:8, r) / wt(5, r)
-         pm(9:11, kk) = wt(9:11, r)
-         pm(12:17, kk) = fa(:, r) / [hf(1), hf(1), hf(2), hf(2), hf(3), hf(3)]
-         if (mo > 0_I4P) then
-            pvw(:, kk) = wvm(:, r) ; pwm(:, kk) = wwm(:, r) ; pfm(:, :, kk) = fmm(:, :, r)
-         endif
-      enddo
-      if (qd) then ! rules of the pieces: cones from the cell centre over the fluid boundary (the wall fans reversed:
-         ! their normal is the solid's; on every face the triangles from the face centre to the oriented segments),
-         ! 36 points per cone (`tet_rule`); wall rules from push_wall
-         allocate(qst(npc_ + 1), wst(npc_ + 1), qwn(npc_)) ; qst = 0_I4P ; wst = 0_I4P ; qwn = 0_I4P
-         ! count: cones per piece
-         do qq = 1, nt
-            if (pn(qq) == 0_I4P) cycle
-            rr = find(qq) ; if (tgt(rr) /= 0_I4P) rr = tgt(rr)
+   endif
+   ! walls and traces
+   do qq = 1, nt
+      if (pn(qq) == 0_I4P) cycle
+      r = uf_find(na, parent, qq) ; if (tgt(r) /= 0_I4P) r = tgt(r)
+      do vv = 2, pn(qq) - 1
+         d1 = pv(:, 1, qq) - c0 ; d2 = pv(:, vv, qq) - c0 ; d3 = pv(:, vv + 1, qq) - c0
+         call tri_terms(d1, d2, d3, wt(:, r))
+         if (qd .and. fill) then ! wall rule on the fan triangle
+            rr = r ; if (tgt(rr) /= 0_I4P) rr = tgt(rr)
             if (pid(rr) /= 0_I4P) then
-               qst(pid(rr) + 1) = qst(pid(rr) + 1) + 36_I4P * (pn(qq) - 2_I4P)
-               qwn(pid(rr)) = qwn(pid(rr)) + 36_I4P * (pn(qq) - 2_I4P)
-            endif
-         enddo
-         do m = 1, nfs
-            rr = find(fsr(m)) ; if (pid(rr) /= 0_I4P) qst(pid(rr) + 1) = qst(pid(rr) + 1) + 36_I4P
-         enddo
-         do m = 1, nwt
-            rr = find(wtr(m)) ; if (tgt(rr) /= 0_I4P) rr = tgt(rr)
-            if (pid(rr) /= 0_I4P) wst(pid(rr) + 1) = wst(pid(rr) + 1) + 1_I4P
-         enddo
-         qst(1) = 1_I4P ; wst(1) = 1_I4P
-         do kq = 1, npc_
-            qst(kq + 1) = qst(kq + 1) + qst(kq) ; wst(kq + 1) = wst(kq + 1) + wst(kq)
-         enddo
-         allocate(qpt(3, qst(npc_ + 1) - 1), qw(qst(npc_ + 1) - 1), wpt(3, wst(npc_ + 1) - 1), wwt(wst(npc_ + 1) - 1))
-         block
-            integer(I4P) :: fq(npc_), fw(npc_) !< Fill pointers.
-            fq = qst(1:npc_) ; fw = wst(1:npc_)
-            do qq = 1, nt
-               if (pn(qq) == 0_I4P) cycle
-               rr = find(qq) ; if (tgt(rr) /= 0_I4P) rr = tgt(rr)
-               if (pid(rr) == 0_I4P) cycle
+               call triangle_rule(pv(:, 1, qq), pv(:, vv, qq), pv(:, vv + 1, qq), tp7, tw7, .false.)
                kq = pid(rr)
-               do vv = 2, pn(qq) - 1 ! reversed: the fluid's outward normal
-                  call tet_rule(cc, pv(:, 1, qq), pv(:, vv + 1, qq), pv(:, vv, qq), rp, rw)
-                  qpt(:, fq(kq):fq(kq) + 35) = rp ; qw(fq(kq):fq(kq) + 35) = rw ; fq(kq) = fq(kq) + 36_I4P
+               do gv = 1, 7
+                  wpt(:, w0 + fw(kq)) = tp7(:, gv) ; wwt(w0 + fw(kq)) = tw7(gv) ; fw(kq) = fw(kq) + 1_I4P
                enddo
-            enddo
-            do m = 1, nfs
-               rr = find(fsr(m)) ; if (pid(rr) == 0_I4P) cycle
-               kq = pid(rr) ; ft = fsf(m) ; ax_ = (ft + 1_I4P) / 2_I4P ; sd_ = mod(ft + 1_I4P, 2_I4P)
-               pf = cc ; pf(ax_) = merge(c1(ax_), c0(ax_), sd_ == 1_I4P)
-               if (sd_ == 1_I4P) then ! high face: outward +e_ax, as the segments turn
-                  call tet_rule(cc, pf, fsg(1:3, m), fsg(4:6, m), rp, rw)
-               else
-                  call tet_rule(cc, pf, fsg(4:6, m), fsg(1:3, m), rp, rw)
-               endif
-               qpt(:, fq(kq):fq(kq) + 35) = rp ; qw(fq(kq):fq(kq) + 35) = rw ; fq(kq) = fq(kq) + 36_I4P
-            enddo
-            do m = 1, nwt
-               rr = find(wtr(m)) ; if (tgt(rr) /= 0_I4P) rr = tgt(rr)
-               if (pid(rr) == 0_I4P) cycle
-               kq = pid(rr) ; wpt(:, fw(kq)) = wtp(:, m) ; wwt(fw(kq)) = wtw(m) ; fw(kq) = fw(kq) + 1_I4P
-            enddo
-         endblock
-      endif
-      endsubroutine piece_measures
-
-      subroutine push_seg(pa_, pb_, fc_, r_)
-      !< Record the oriented face segment pa_ -> pb_ (counter-clockwise seen from +e_ax) of face fc_, set r_.
-      real(R8P),    intent(in) :: pa_(3), pb_(3) !< End points.
-      integer(I4P), intent(in) :: fc_, r_        !< Face, root.
-      real(R8P),    allocatable :: t2(:,:)       !< Growth.
-
-      if (nfs == size(fsf)) then
-         allocate(t2(6, 2 * nfs)) ; t2(:, 1:nfs) = fsg(:, 1:nfs) ; call move_alloc(t2, fsg)
-         fsf = [fsf, fsf] ; fsr = [fsr, fsr]
-      endif
-      nfs = nfs + 1_I4P ; fsg(1:3, nfs) = pa_ ; fsg(4:6, nfs) = pb_ ; fsf(nfs) = fc_ ; fsr(nfs) = r_
-      endsubroutine push_seg
-
-      subroutine push_wall(pt_, w_, r_)
-      !< Record a wall rule point of set r_.
-      real(R8P),    intent(in) :: pt_(3), w_ !< Point, weight.
-      integer(I4P), intent(in) :: r_         !< Root.
-      real(R8P),    allocatable :: t2(:,:)   !< Growth.
-
-      if (nwt == size(wtw)) then
-         allocate(t2(3, 2 * nwt)) ; t2(:, 1:nwt) = wtp(:, 1:nwt) ; call move_alloc(t2, wtp)
-         wtw = [wtw, wtw] ; wtr = [wtr, wtr]
-      endif
-      nwt = nwt + 1_I4P ; wtp(:, nwt) = pt_ ; wtw(nwt) = w_ ; wtr(nwt) = r_
-      endsubroutine push_wall
-
-
-      logical function across_crosses(fi, ax, lev) result(yes)
-      !< The facet of the cell across the edge of facet fi that lies on the plane x(ax) = lev has a vertex beyond the
-      !< plane (x(ax) > lev); .false. if fi has no edge on the plane or no facet of the cell shares it.
-      integer(I4P), intent(in) :: fi  !< Facet.
-      integer(I4P), intent(in) :: ax  !< Plane axis.
-      real(R8P),    intent(in) :: lev !< Plane level.
-      integer(I4P)             :: m1, m2, g, mm, nshare !< Work.
-
-      yes = .false.
-      do m1 = 1, 3
-         m2 = mod(m1, 3_I4P) + 1_I4P
-         if (tri(ax, m1, fi) /= lev .or. tri(ax, m2, fi) /= lev) cycle
-         do g = 1, nt
-            if (lst(g) == fi) cycle
-            nshare = 0_I4P
-            do mm = 1, 3
-               if (all(tri(:, mm, lst(g)) == tri(:, m1, fi)) .or. all(tri(:, mm, lst(g)) == tri(:, m2, fi))) &
-                  nshare = nshare + 1_I4P
-            enddo
-            if (nshare == 2_I4P .and. maxval(tri(ax, :, lst(g))) > lev) then
-               yes = .true. ; return
             endif
-         enddo
-      enddo
-      endfunction across_crosses
-
-      integer(I4P) function inclusion_target(ri) result(tr)
-      !< Root of the set around the inclusion ri (see `piece_measures`); 0 if not found.
-      integer(I4P), intent(in) :: ri !< Root of the inclusion.
-      real(R8P)                :: pr(3), t(3, 3), nn(3), xh, xb, o(3), ub, uc !< Work.
-      integer(I4P)             :: q2, v2, j2, qb, ed, sides(3) !< Work.
-
-      pr = -huge(1._R8P)
-      do q2 = 1, nt
-         if (pn(q2) == 0_I4P .or. find(q2) /= ri) cycle
-         do v2 = 1, pn(q2)
-            if (pv(1, v2, q2) > pr(1)) pr = pv(:, v2, q2)
-         enddo
-      enddo
-      xb = huge(1._R8P) ; qb = 0_I4P
-      do q2 = 1, nt
-         if (pn(q2) == 0_I4P .or. find(q2) == ri) cycle
-         t = tri(:, :, lst(q2)) ; nn = nrm(:, lst(q2))
-         if (nn(1) == 0._R8P) cycle
-         if (orient2d_xy(t(2, 1), t(3, 1), t(2, 2), t(3, 2), t(2, 3), t(3, 3)) == 0._R8P) cycle
-         o(1) = orient2d_xy(t(2, 1), t(3, 1), t(2, 2), t(3, 2), pr(2), pr(3))
-         o(2) = orient2d_xy(t(2, 2), t(3, 2), t(2, 3), t(3, 3), pr(2), pr(3))
-         o(3) = orient2d_xy(t(2, 3), t(3, 3), t(2, 1), t(3, 1), pr(2), pr(3))
-         if (.not. (all(o >= 0._R8P) .or. all(o <= 0._R8P))) cycle
-         xh = t(1, 1) - (nn(2) * (pr(2) - t(2, 1)) + nn(3) * (pr(3) - t(3, 1))) / nn(1)
-         if (xh > pr(1) .and. xh <= c1(1) .and. xh < xb) then
-            xb = xh ; qb = q2
+         endif
+         if (fill .and. nm3 > 0_I4P) then
+            ts(:, 1) = (pv(:, 1, qq) - cc) / h ; ts(:, 2) = (pv(:, vv, qq) - cc) / h ; ts(:, 3) = (pv(:, vv + 1, qq) - cc) / h
+            e1 = pv(:, vv, qq) - pv(:, 1, qq) ; e2v = pv(:, vv + 1, qq) - pv(:, 1, qq)
+            call cross3_into(e1, e2v, tp)
+            call triangle_moments(ts(:, 1), ts(:, 2), ts(:, 3), e3, h(1) * h(2) * h(3), 0.5_R8P * norm2_3(tp), wvm(:, r), &
+                                  wwm(:, r))
          endif
       enddo
-      if (qb /= 0_I4P) then
-         tr = find(qb) ; return
-      endif
-      ! the +x face, (u, v) = (y, z): the nearest trace in +u, else the fluid interval of the edge u = high
-      ub = huge(1._R8P) ; qb = 0_I4P
-      do q2 = 1, nt
-         do v2 = 1, pn(q2)
-            j2 = mod(v2, pn(q2)) + 1_I4P
-            if (.not. (btest(pfl(v2, q2), 1) .and. btest(pfl(j2, q2), 1))) cycle
-            if ((pv(3, v2, q2) > pr(3)) .eqv. (pv(3, j2, q2) > pr(3))) cycle
-            uc = pv(2, v2, q2) + (pr(3) - pv(3, v2, q2)) / (pv(3, j2, q2) - pv(3, v2, q2)) * (pv(2, j2, q2) - pv(2, v2, q2))
-            if (uc > pr(2) .and. uc < ub) then
-               ub = uc ; qb = q2
-            endif
+      do ax = 1, 3
+         b1 = mod(ax, 3_I4P) + 1_I4P ; b2 = mod(ax + 1_I4P, 3_I4P) + 1_I4P
+         do sd = 0, 1
+            bt = 2_I4P * (ax - 1_I4P) + sd ; sg = merge(1._R8P, -1._R8P, sd == 1_I4P)
+            inplane = .true.
+            do vv = 1, pn(qq)
+               if (.not. btest(pfl(vv, qq), bt)) inplane = .false.
+            enddo
+            outside = (sd == 1_I4P .and. nrm(ax, lst(qq)) > 0._R8P) .or. (sd == 0_I4P .and. nrm(ax, lst(qq)) < 0._R8P)
+            do vv = 1, pn(qq)
+               jj = mod(vv, pn(qq)) + 1_I4P
+               if (.not. (btest(pfl(vv, qq), bt) .and. btest(pfl(jj, qq), bt))) cycle
+               ! traces on the perturbed face (issue #70): the face plane is taken at c + eps (#69)
+               if (inplane) then ! the polygon lies in the face plane, just below the perturbed one
+                  if (outside) exit ! solid on the cell side: the perturbed face is fluid there, no boundary
+                  ! solid beyond the face: its outline bounds the fluid (it stands for the facets around it,
+                  ! which cross the perturbed plane), except along the cell edges, where the fluid edge
+                  ! intervals carry the boundary
+                  if (iand(iand(pfl(vv, qq), pfl(jj, qq)), not(ibset(0_I4P, bt))) /= 0_I4P) cycle
+               elseif (max(tri(ax, 1, lst(qq)), tri(ax, 2, lst(qq)), tri(ax, 3, lst(qq))) <= &
+                       merge(c1(ax), c0(ax), sd == 1_I4P)) then
+                  ! the facet ends on the face plane, which the perturbed plane does not cut: its edge on the plane
+                  ! bounds the fluid only if the facet across that edge crosses the plane (that facet's polygon in
+                  ! the cell is the edge alone, so this one stands for it)
+                  if (.not. across_crosses(lst(qq), ax, merge(c1(ax), c0(ax), sd == 1_I4P), nf, tri, nt, lst)) cycle
+               endif
+               pl = pv(:, vv, qq) - c0 ; ql = pv(:, jj, qq) - c0
+               fa(bt + 1, r) = fa(bt + 1, r) + sg * 0.5_R8P * (pl(b1) + ql(b1)) * (ql(b2) - pl(b2))
+               if (qd) then ! the trace, counter-clockwise seen from +e_ax
+                  nfs = nfs + 1_I4P ; fsf(nfs) = bt + 1_I4P ; fsr(nfs) = r
+                  if (sg > 0._R8P) then
+                     fsg(1:3, nfs) = pv(:, vv, qq) ; fsg(4:6, nfs) = pv(:, jj, qq)
+                  else
+                     fsg(1:3, nfs) = pv(:, jj, qq) ; fsg(4:6, nfs) = pv(:, vv, qq)
+                  endif
+               endif
+               if (fill .and. nm2 > 0_I4P) then
+                  mtmp(1:nm2) = 0._R8P
+                  ga(1) = pl(b1) / h(b1) - 0.5_R8P ; ga(2) = pl(b2) / h(b2) - 0.5_R8P
+                  gb(1) = ql(b1) / h(b1) - 0.5_R8P ; gb(2) = ql(b2) / h(b2) - 0.5_R8P
+                  call segment_green_moments(ga, gb, e2, h(b1) * h(b2), mtmp(1:nm2))
+                  fmm(:, bt + 1, r) = fmm(:, bt + 1, r) + sg * mtmp(1:nm2)
+               endif
+            enddo
          enddo
       enddo
-      if (qb /= 0_I4P) then
-         tr = find(qb) ; return
+   enddo
+   ! fluid edge intervals: edge along k at sides s1 (axis k1), s2 (axis k2); on the face (k1, s1) it
+   ! runs along v at u = s2 (counter-clockwise: +v at u = h); on the face (k2, s2) along u (no area)
+   do jj = 1, niv
+      ee = ive(jj) ; kk = (ee - 1_I4P) / 4_I4P + 1_I4P
+      s1 = mod(mod(ee - 1_I4P, 4_I4P), 2_I4P) ; s2 = mod(ee - 1_I4P, 4_I4P) / 2_I4P
+      k1 = mod(kk, 3_I4P) + 1_I4P ; k2 = mod(kk + 1_I4P, 3_I4P) + 1_I4P
+      r = uf_find(na, parent, iva(jj))
+      if (s2 == 1_I4P) fa(2 * (k1 - 1) + s1 + 1, r) = fa(2 * (k1 - 1) + s1 + 1, r) + h(k2) * (ivh(jj) - ivl(jj))
+      if (fill .and. nm2 > 0_I4P) then ! moments: centred coordinates, so the edge at U = -1/2 counts too (going -V there)
+         mtmp(1:nm2) = 0._R8P
+         if (s2 == 1_I4P) then
+            ga(1) = 0.5_R8P ; ga(2) = (ivl(jj) - cc(kk)) / h(kk) ; gb(1) = 0.5_R8P ; gb(2) = (ivh(jj) - cc(kk)) / h(kk)
+         else
+            ga(1) = -0.5_R8P ; ga(2) = (ivh(jj) - cc(kk)) / h(kk) ; gb(1) = -0.5_R8P ; gb(2) = (ivl(jj) - cc(kk)) / h(kk)
+         endif
+         call segment_green_moments(ga, gb, e2, h(k2) * h(kk), mtmp(1:nm2))
+         fmm(:, 2 * (k1 - 1) + s1 + 1, r) = fmm(:, 2 * (k1 - 1) + s1 + 1, r) + mtmp(1:nm2)
       endif
-      sides = [1_I4P, 1_I4P, 0_I4P] ; ed = edge_index(3_I4P, sides)
-      tr = 0_I4P
-      do j2 = 1, niv
-         if (iv_edge(j2) == ed .and. iv_lo(j2) <= pr(3) .and. pr(3) <= iv_hi(j2)) tr = find(iv_atom(j2))
+      if (qd) then ! the interval bounds two faces: (k1, s1) along V at U = s2, (k2, s2) along U at V = s1
+         sa = 0._R8P ; sa(kk) = ivl(jj) ; sa(k1) = merge(c1(k1), c0(k1), s1 == 1_I4P)
+         sa(k2) = merge(c1(k2), c0(k2), s2 == 1_I4P) ; sb = sa ; sb(kk) = ivh(jj)
+         nfs = nfs + 1_I4P ; fsf(nfs) = 2_I4P * (k1 - 1_I4P) + s1 + 1_I4P ; fsr(nfs) = r
+         if (s2 == 1_I4P) then
+            fsg(1:3, nfs) = sa ; fsg(4:6, nfs) = sb
+         else
+            fsg(1:3, nfs) = sb ; fsg(4:6, nfs) = sa
+         endif
+         nfs = nfs + 1_I4P ; fsf(nfs) = 2_I4P * (k2 - 1_I4P) + s2 + 1_I4P ; fsr(nfs) = r
+         if (s1 == 0_I4P) then
+            fsg(1:3, nfs) = sa ; fsg(4:6, nfs) = sb
+         else
+            fsg(1:3, nfs) = sb ; fsg(4:6, nfs) = sa
+         endif
+      endif
+   enddo
+   if (qd) then ! the segment cones per piece, then the starts
+      do l = 1, nfs
+         rr = uf_find(na, parent, fsr(l)) ; if (pid(rr) /= 0_I4P) qst(pid(rr) + 1) = qst(pid(rr) + 1) + 36_I4P
       enddo
-      endfunction inclusion_target
-   endsubroutine cell_pieces
+      qst(1) = 1_I4P
+      do kq = 1, nn
+         qst(kq + 1) = qst(kq + 1) + qst(kq)
+      enddo
+   endif
+   hf(1) = h(2) * h(3) ; hf(2) = h(3) * h(1) ; hf(3) = h(1) * h(2)
+   do r = 1, natom
+      if (pid(r) == 0_I4P) cycle
+      kk = pid(r)
+      s = 0._R8P
+      do a = 1, 3 ! sum(h * fa([2, 4, 6], r)), in its order
+         s = s + h(a) * fa(2 * a, r)
+      enddo
+      vp = s / 3._R8P - wt(1, r)
+      do a = 1, 3
+         mp(a) = 0.5_R8P * h(a) * h(a) * fa(2 * a, r) - wt(1 + a, r)
+      enddo
+      pm(1, kk) = vp
+      pm(2:4, kk) = c0 + 0.5_R8P * h
+      if (vp > 0._R8P) pm(2:4, kk) = c0 + mp / vp
+      pm(5, kk) = wt(5, r)
+      pm(6:8, kk) = c0 + 0.5_R8P * h
+      if (wt(5, r) > 0._R8P) pm(6:8, kk) = c0 + wt(6:8, r) / wt(5, r)
+      pm(9:11, kk) = wt(9:11, r)
+      do a = 1, 6
+         pm(11 + a, kk) = fa(a, r) / hf((a + 1) / 2)
+      enddo
+   enddo
+   endsubroutine piece_measures
+
+   pure subroutine piece_rules(multi, nt, c0, c1, pv, pn, na, parent, tgt, pid, nn, ns, nfs, fsg, fsf, fsr, qst, wst, fq, &
+                               p0, q0, nqo, qpt, qwt, nqcd, qcnt, wcnt)
+   !< Volume rules of the pieces (issue #70): cones from the cell centre over the fluid boundary (the wall fans reversed:
+   !< their normal is the solid's; on every face the triangles from the face centre to the oriented segments), 36 points
+   !< per cone (`tet_rule`), written at q0 + the piece's place (qst). A single piece takes its wall cones only (its faces:
+   !< the plane sections, by the caller), several their segment cones too and their point counts.
+   !$acc routine seq
+   logical,      intent(in)    :: multi                  !< Several pieces.
+   integer(I4P), intent(in)    :: nt                     !< Polygons.
+   real(R8P),    intent(in)    :: c0(3), c1(3)           !< Cell corners.
+   real(R8P),    intent(in)    :: pv(3, 16, nt)          !< Polygons.
+   integer(I4P), intent(in)    :: pn(nt)                 !< Vertex counts.
+   integer(I4P), intent(in)    :: na                     !< Atoms.
+   integer(I4P), intent(in)    :: parent(na), tgt(na), pid(na) !< Union-find, inclusion targets, piece ids.
+   integer(I4P), intent(in)    :: nn, ns, nfs            !< Pieces, segments: bound, number.
+   real(R8P),    intent(in)    :: fsg(6, ns)             !< Face segments.
+   integer(I4P), intent(in)    :: fsf(ns), fsr(ns)       !< Their faces and sets.
+   integer(I4P), intent(in)    :: qst(nn + 1), wst(nn + 1) !< Rule starts.
+   integer(I4P), intent(inout) :: fq(nn)                 !< Fill pointers.
+   integer(I4P), intent(in)    :: p0, q0, nqo, nqcd      !< Pieces, rule points before the cell's; output sizes.
+   real(R8P),    intent(inout) :: qpt(3, nqo), qwt(nqo)  !< Volume rules.
+   integer(I4P), intent(inout) :: qcnt(nqcd), wcnt(nqcd) !< Rule points per piece.
+   real(R8P)                   :: cc(3), pf(3), rp(3, 36), rw(36) !< Work.
+   integer(I4P)                :: qq, vv, rr, kq, m, ft, ax_, sd_ !< Work.
+
+   cc = c0 + 0.5_R8P * (c1 - c0)
+   do kq = 1, nn
+      fq(kq) = qst(kq)
+   enddo
+   do qq = 1, nt
+      if (pn(qq) == 0_I4P) cycle
+      rr = uf_find(na, parent, qq) ; if (tgt(rr) /= 0_I4P) rr = tgt(rr)
+      if (pid(rr) == 0_I4P) cycle
+      kq = pid(rr)
+      do vv = 2, pn(qq) - 1 ! reversed: the fluid's outward normal
+         call tet_rule(cc, pv(:, 1, qq), pv(:, vv + 1, qq), pv(:, vv, qq), rp, rw)
+         qpt(:, q0 + fq(kq):q0 + fq(kq) + 35) = rp ; qwt(q0 + fq(kq):q0 + fq(kq) + 35) = rw ; fq(kq) = fq(kq) + 36_I4P
+      enddo
+   enddo
+   if (.not. multi) return
+   do m = 1, nfs
+      rr = uf_find(na, parent, fsr(m)) ; if (pid(rr) == 0_I4P) cycle
+      kq = pid(rr) ; ft = fsf(m) ; ax_ = (ft + 1_I4P) / 2_I4P ; sd_ = mod(ft + 1_I4P, 2_I4P)
+      pf = cc ; pf(ax_) = merge(c1(ax_), c0(ax_), sd_ == 1_I4P)
+      if (sd_ == 1_I4P) then ! high face: outward +e_ax, as the segments turn
+         call tet_rule(cc, pf, fsg(1:3, m), fsg(4:6, m), rp, rw)
+      else
+         call tet_rule(cc, pf, fsg(4:6, m), fsg(1:3, m), rp, rw)
+      endif
+      qpt(:, q0 + fq(kq):q0 + fq(kq) + 35) = rp ; qwt(q0 + fq(kq):q0 + fq(kq) + 35) = rw ; fq(kq) = fq(kq) + 36_I4P
+   enddo
+   do kq = 1, nn
+      qcnt(p0 + kq) = qst(kq + 1) - qst(kq) ; wcnt(p0 + kq) = wst(kq + 1) - wst(kq)
+   enddo
+   endsubroutine piece_rules
+
+   pure subroutine sort_pierce(n, pe, pt, pen, pp)
+   !< Sort piercings by edge, then position (insertion, stable).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: n                  !< Piercings.
+   integer(I4P), intent(inout) :: pe(n), pen(n), pp(n) !< Edge, entering, polygon.
+   real(R8P),    intent(inout) :: pt(n)              !< Position.
+   integer(I4P)                :: i, j, ve, ven, vp  !< Work.
+   real(R8P)                   :: vt                 !< Work.
+
+   do i = 2, n
+      ve = pe(i) ; vt = pt(i) ; ven = pen(i) ; vp = pp(i) ; j = i - 1_I4P
+      do while (j >= 1_I4P)
+         if (pe(j) < ve .or. (pe(j) == ve .and. pt(j) <= vt)) exit
+         pe(j + 1) = pe(j) ; pt(j + 1) = pt(j) ; pen(j + 1) = pen(j) ; pp(j + 1) = pp(j) ; j = j - 1_I4P
+      enddo
+      pe(j + 1) = ve ; pt(j + 1) = vt ; pen(j + 1) = ven ; pp(j + 1) = vp
+   enddo
+   endsubroutine sort_pierce
+
+   pure subroutine sort_keys(nr, m, key, idx)
+   !< Index heapsort of the keys key(:, 1:m), lexicographic over the nr rows.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: nr, m       !< Rows, keys.
+   real(R8P),    intent(in)  :: key(nr, m)  !< Keys.
+   integer(I4P), intent(out) :: idx(m)      !< Sorted order.
+   integer(I4P)              :: i, t        !< Work.
+
+   do i = 1, m
+      idx(i) = i
+   enddo
+   do i = m / 2_I4P, 1_I4P, -1_I4P
+      call sift_keys(nr, m, key, idx, i, m)
+   enddo
+   do i = m, 2_I4P, -1_I4P
+      t = idx(1) ; idx(1) = idx(i) ; idx(i) = t
+      call sift_keys(nr, m, key, idx, 1_I4P, i - 1_I4P)
+   enddo
+   endsubroutine sort_keys
+
+   pure subroutine sift_keys(nr, m, key, idx, lo, hi)
+   !< Sift down idx(lo) in the heap idx(1:hi).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: nr, m      !< Rows, keys.
+   real(R8P),    intent(in)    :: key(nr, m) !< Keys.
+   integer(I4P), intent(inout) :: idx(m)     !< Heap.
+   integer(I4P), intent(in)    :: lo, hi     !< Root, heap end.
+   integer(I4P)                :: r, c, tt   !< Work.
+
+   r = lo
+   do while (2_I4P * r <= hi)
+      c = 2_I4P * r
+      if (c < hi) then
+         if (key_less(nr, m, key, idx(c), idx(c + 1))) c = c + 1_I4P
+      endif
+      if (.not. key_less(nr, m, key, idx(r), idx(c))) exit
+      tt = idx(r) ; idx(r) = idx(c) ; idx(c) = tt ; r = c
+   enddo
+   endsubroutine sift_keys
+
+   pure logical function key_less(nr, m, key, a, b) result(less)
+   !< Lexicographic order of the keys a, b.
+   !$acc routine seq
+   integer(I4P), intent(in) :: nr, m      !< Rows, keys.
+   real(R8P),    intent(in) :: key(nr, m) !< Keys.
+   integer(I4P), intent(in) :: a, b       !< Keys compared.
+   integer(I4P)             :: r          !< Row.
+
+   less = .false.
+   do r = 1, nr
+      if (key(r, a) /= key(r, b)) then
+         less = key(r, a) < key(r, b)
+         return
+      endif
+   enddo
+   endfunction key_less
+
+   pure subroutine cross3_into(a, b, c)
+   !< Cross product c = a x b (the formula of `cross3`).
+   !$acc routine seq
+   real(R8P), intent(in)  :: a(3), b(3) !< Vectors.
+   real(R8P), intent(out) :: c(3)       !< a x b.
+
+   c(1) = a(2) * b(3) - a(3) * b(2) ; c(2) = a(3) * b(1) - a(1) * b(3) ; c(3) = a(1) * b(2) - a(2) * b(1)
+   endsubroutine cross3_into
+
+   pure function norm2_3(v) result(r)
+   !< norm2(v) of a 3-vector by the scaled algorithm of gfortran's norm2, written out (issue #100; the 3-D twin of
+   !< `norm2_xy` in fossil_cut_cells_2d: nvfortran's device and host norm2 differ by 1 ulp; this one gives the bits of
+   !< gfortran's intrinsic, checked on 4 million vectors from 1e-180 to 1e170, zeros included).
+   !$acc routine seq
+   real(R8P), intent(in) :: v(3)               !< Vector.
+   real(R8P)             :: r                  !< Norm.
+   real(R8P)             :: scale, res, a, val !< Work.
+   integer(I4P)          :: i                  !< Work.
+
+   scale = 1._R8P ; res = 0._R8P
+   do i = 1, 3
+      if (v(i) /= 0._R8P) then
+         a = abs(v(i))
+         if (a > scale) then
+            val = scale / a ; res = (val * val) * res + 1._R8P ; scale = a
+         else
+            val = a / scale ; res = val * val + res
+         endif
+      endif
+   enddo
+   r = sqrt(res) * scale
+   endfunction norm2_3
+
+   pure subroutine volume_moments_k(nm3, nm2, wv, fm, fp, hx, e2, e3, m)
+   !< Volume moments of a piece (issue #70): int X^a Y^b Z^c dV = oint h_x X^(a+1) / (a+1) Y^b Z^c n_x dA over its
+   !< boundary: minus the wall terms wv (taken with the solid's normal) plus the faces x = -+ h_x / 2 (fluid moments fm,
+   !< fp in (Y, Z), the outward normal -+1).
+   !$acc routine seq
+   integer(I4P), intent(in)  :: nm3, nm2      !< Moments per piece, per face.
+   real(R8P),    intent(in)  :: wv(nm3)       !< Wall divergence terms (solid normal).
+   real(R8P),    intent(in)  :: fm(nm2), fp(nm2) !< Moments of the -x and +x faces.
+   real(R8P),    intent(in)  :: hx            !< Cell width along x.
+   integer(I4P), intent(in)  :: e2(2, nm2), e3(3, nm3) !< Exponents.
+   real(R8P),    intent(out) :: m(nm3)        !< Moments.
+   integer(I4P)              :: k, l          !< Work.
+
+   do k = 1, nm3
+      m(k) = -wv(k)
+      do l = 1, nm2
+         if (e2(1, l) /= e3(2, k) .or. e2(2, l) /= e3(3, k)) cycle
+         m(k) = m(k) + hx / (e3(1, k) + 1) * (0.5_R8P ** (e3(1, k) + 1) * fp(l) - (-0.5_R8P) ** (e3(1, k) + 1) * fm(l))
+      enddo
+   enddo
+   endsubroutine volume_moments_k
+
+   pure logical function split_closes(np, pm, h, alpha, faces) result(ok)
+   !< The pieces pm [17, np] of a cell of size h split it consistently (issue #70): their face fractions add up to the
+   !< exact face totals (the plane sections), their volumes to alpha |cell|, and every piece closes, (f+ - f-) A_a = the
+   !< a component of its wall normal integral, per axis. Tolerance 1e-12 of the face area or cell volume, as the other
+   !< trust tests. A face split by the traces of the clipped polygons can miss a boundary on the perturbed face plane
+   !< (a facet lying in it or ending on it next to one crossing it): such a cell is not trusted.
+   !$acc routine seq
+   integer(I4P), intent(in) :: np        !< Pieces.
+   real(R8P),    intent(in) :: pm(17, np) !< Piece measures (see `piece_measures`).
+   real(R8P),    intent(in) :: h(3)      !< Cell size.
+   real(R8P),    intent(in) :: alpha     !< Cell volume fraction.
+   real(R8P),    intent(in) :: faces(6)  !< Face fractions (-x, +x, -y, +y, -z, +z).
+   real(R8P)                :: af(3), vc, s !< Face areas, cell volume, sum.
+   integer(I4P)             :: a, p      !< Work.
+   real(R8P), parameter     :: TOL = 1.e-12_R8P !< Relative tolerance.
+
+   af(1) = h(2) * h(3) ; af(2) = h(3) * h(1) ; af(3) = h(1) * h(2) ; vc = h(1) * h(2) * h(3)
+   s = 0._R8P
+   do p = 1, np
+      s = s + pm(1, p)
+   enddo
+   ok = abs(s - alpha * vc) <= TOL * vc
+   do a = 1, 6
+      s = 0._R8P
+      do p = 1, np
+         s = s + pm(11 + a, p)
+      enddo
+      ok = ok .and. abs(s - faces(a)) <= TOL
+   enddo
+   do p = 1, np
+      do a = 1, 3
+         ok = ok .and. abs((pm(13 + 2 * (a - 1), p) - pm(12 + 2 * (a - 1), p)) * af(a) - pm(8 + a, p)) <= TOL * af(a)
+      enddo
+   enddo
+   endfunction split_closes
+
+   pure subroutine single_piece_3d(hx, hy, hz, alpha, centroid, wet_area, wet_centroid, wet_normal, fx0, fx1, fy0, fy1, &
+                                   fz0, fz1, pvol, pcen, pwa, pwc, pwn, pfc)
+   !< Kernel (issue #100): the measures of the single piece of a cell: the cell totals (exact).
+   !$acc routine seq
+   real(R8P), intent(in)  :: hx, hy, hz                   !< Cell size.
+   real(R8P), intent(in)  :: alpha, centroid(3), wet_area, wet_centroid(3), wet_normal(3) !< Cell totals.
+   real(R8P), intent(in)  :: fx0, fx1, fy0, fy1, fz0, fz1 !< Face fractions.
+   real(R8P), intent(out) :: pvol, pcen(3), pwa, pwc(3), pwn(3), pfc(6) !< Piece measures.
+
+   pvol = alpha * (hx * hy * hz)
+   pcen = centroid ; pwa = wet_area ; pwc = wet_centroid ; pwn = wet_normal
+   pfc(1) = fx0 ; pfc(2) = fx1 ; pfc(3) = fy0 ; pfc(4) = fy1 ; pfc(5) = fz0 ; pfc(6) = fz1
+   endsubroutine single_piece_3d
+
+   subroutine section_face_moments(cut, i, j, k, nm2, secm)
+   !< The fluid moments of the six faces of cell (i, j, k) from the plane sections (-x, +x, -y, +y, -z, +z).
+   type(cut_cells_3d_t), intent(in)  :: cut          !< Cut cells.
+   integer(I4P),         intent(in)  :: i, j, k, nm2 !< Cell, moments per face.
+   real(R8P),            intent(out) :: secm(nm2, 6) !< Moments.
+
+   secm(:, 1) = cut%face_x_moments(:, i, j, k) ; secm(:, 2) = cut%face_x_moments(:, i + 1, j, k)
+   secm(:, 3) = cut%face_y_moments(:, i, j, k) ; secm(:, 4) = cut%face_y_moments(:, i, j + 1, k)
+   secm(:, 5) = cut%face_z_moments(:, i, j, k) ; secm(:, 6) = cut%face_z_moments(:, i, j, k + 1)
+   endsubroutine section_face_moments
+
+   integer(I4P) function section_cones_count(px, py, pz, i, j, k) result(n)
+   !< Points of the cones over the exact section faces of cell (i, j, k) (see `face_cones`): 36 per boundary segment.
+   type(cut_cells_2d_t), intent(in) :: px(:), py(:), pz(:) !< Plane sections.
+   integer(I4P),         intent(in) :: i, j, k             !< Cell.
+   integer(I4P)                     :: f, ic(3), ax, b1, b2, iu, iv, ip, pl !< Work.
+
+   n = 0_I4P ; ic = [i, j, k]
+   do f = 1, 6
+      ax = (f + 1_I4P) / 2_I4P ; b1 = mod(ax, 3_I4P) + 1_I4P ; b2 = mod(ax + 1_I4P, 3_I4P) + 1_I4P
+      iu = ic(b1) ; iv = ic(b2) ; pl = ic(ax) + mod(f + 1_I4P, 2_I4P)
+      select case (ax)
+      case (1)
+         if (px(pl)%pieces(iu, iv) < 1_I4P) cycle
+         do ip = px(pl)%first_piece(iu, iv), px(pl)%first_piece(iu, iv) + px(pl)%pieces(iu, iv) - 1_I4P
+            n = n + 36_I4P * (px(pl)%piece_seg_start(ip + 1) - px(pl)%piece_seg_start(ip))
+         enddo
+      case (2)
+         if (py(pl)%pieces(iu, iv) < 1_I4P) cycle
+         do ip = py(pl)%first_piece(iu, iv), py(pl)%first_piece(iu, iv) + py(pl)%pieces(iu, iv) - 1_I4P
+            n = n + 36_I4P * (py(pl)%piece_seg_start(ip + 1) - py(pl)%piece_seg_start(ip))
+         enddo
+      case default
+         if (pz(pl)%pieces(iu, iv) < 1_I4P) cycle
+         do ip = pz(pl)%first_piece(iu, iv), pz(pl)%first_piece(iu, iv) + pz(pl)%pieces(iu, iv) - 1_I4P
+            n = n + 36_I4P * (pz(pl)%piece_seg_start(ip + 1) - pz(pl)%piece_seg_start(ip))
+         enddo
+      endselect
+   enddo
+   endfunction section_cones_count
+
+   subroutine face_cones(sec, x, y, z, ic, f, pts, ws, n)
+   !< Cones from the centre of cell ic over the fluid region of its face f, from the oriented boundary of the plane
+   !< section sec (exact, as the face fractions): triangles from the face centre (issue #70), written at n + 1.. (36
+   !< points per boundary segment; the caller sized the rule with `section_cones_count`).
+   type(cut_cells_2d_t), intent(in)    :: sec              !< Plane section.
+   real(R8P),            intent(in)    :: x(:), y(:), z(:) !< Cell edges.
+   integer(I4P),         intent(in)    :: ic(3), f         !< Cell, face (1-6).
+   real(R8P),            intent(inout) :: pts(:,:), ws(:)  !< Points, weights.
+   integer(I4P),         intent(inout) :: n                !< Points so far.
+   real(R8P)    :: c0(3), c1(3), cc(3), pf(3), a3(3), b3(3), rp(3, 36), rw(36) !< Work.
+   integer(I4P) :: ax, sd, ip, kk, iu, iv, b1, b2      !< Work.
+
+   ax = (f + 1_I4P) / 2_I4P ; sd = mod(f + 1_I4P, 2_I4P)
+   b1 = mod(ax, 3_I4P) + 1_I4P ; b2 = mod(ax + 1_I4P, 3_I4P) + 1_I4P ; iu = ic(b1) ; iv = ic(b2)
+   c0 = [x(ic(1)), y(ic(2)), z(ic(3))] ; c1 = [x(ic(1) + 1), y(ic(2) + 1), z(ic(3) + 1)] ; cc = 0.5_R8P * (c0 + c1)
+   pf = cc ; pf(ax) = merge(c1(ax), c0(ax), sd == 1_I4P)
+   if (sec%pieces(iu, iv) < 1_I4P) return
+   do ip = sec%first_piece(iu, iv), sec%first_piece(iu, iv) + sec%pieces(iu, iv) - 1_I4P
+      do kk = sec%piece_seg_start(ip), sec%piece_seg_start(ip + 1) - 1_I4P
+         a3(ax) = pf(ax) ; a3(b1) = sec%piece_seg(1, kk) ; a3(b2) = sec%piece_seg(2, kk)
+         b3(ax) = pf(ax) ; b3(b1) = sec%piece_seg(3, kk) ; b3(b2) = sec%piece_seg(4, kk)
+         if (sd == 1_I4P) then ! high face: outward +e_ax, counter-clockwise in (u, v)
+            call tet_rule(cc, pf, a3, b3, rp, rw)
+         else
+            call tet_rule(cc, pf, b3, a3, rp, rw)
+         endif
+         pts(:, n + 1:n + 36) = rp ; ws(n + 1:n + 36) = rw ; n = n + 36_I4P
+      enddo
+   enddo
+   endsubroutine face_cones
 
    subroutine links_3d(cut, x, y, z, px, py, pz, piv_piece, piv_edge, piv_lo, piv_hi, links)
    !< Links between the pieces of the block (issue #70; `fossil_cut_graph`). A connected fluid region of a face lies
@@ -1584,52 +2217,6 @@ contains
    enddo
    endfunction section_moments
 
-   pure function volume_moments(wv, fm, fp, hx, e2, e3) result(m)
-   !< Volume moments of a piece (issue #70): int X^a Y^b Z^c dV = oint h_x X^(a+1) / (a+1) Y^b Z^c n_x dA over its
-   !< boundary: minus the wall terms wv (taken with the solid's normal) plus the faces x = -+ h_x / 2 (fluid moments fm,
-   !< fp in (Y, Z), the outward normal -+1).
-   real(R8P),    intent(in) :: wv(:)          !< Wall divergence terms (solid normal).
-   real(R8P),    intent(in) :: fm(:), fp(:)   !< Moments of the -x and +x faces.
-   real(R8P),    intent(in) :: hx             !< Cell width along x.
-   integer(I4P), intent(in) :: e2(:,:), e3(:,:) !< Exponents.
-   real(R8P)                :: m(size(wv))    !< Moments.
-   integer(I4P)             :: k, l           !< Work.
-
-   do k = 1, size(wv)
-      m(k) = -wv(k)
-      do l = 1, size(e2, 2)
-         if (e2(1, l) /= e3(2, k) .or. e2(2, l) /= e3(3, k)) cycle
-         m(k) = m(k) + hx / (e3(1, k) + 1) * (0.5_R8P ** (e3(1, k) + 1) * fp(l) - (-0.5_R8P) ** (e3(1, k) + 1) * fm(l))
-      enddo
-   enddo
-   endfunction volume_moments
-
-   pure logical function split_closes(pm, h, alpha, faces) result(ok)
-   !< The pieces pm [17, n] of a cell of size h split it consistently (issue #70): their face fractions add up to the
-   !< exact face totals (the plane sections), their volumes to alpha |cell|, and every piece closes, (f+ - f-) A_a = the
-   !< a component of its wall normal integral, per axis. Tolerance 1e-12 of the face area or cell volume, as the other
-   !< trust tests. A face split by the traces of the clipped polygons can miss a boundary on the perturbed face plane
-   !< (a facet lying in it or ending on it next to one crossing it): such a cell is not trusted.
-   real(R8P), intent(in) :: pm(:,:)   !< Piece measures (see `piece_measures`).
-   real(R8P), intent(in) :: h(3)      !< Cell size.
-   real(R8P), intent(in) :: alpha     !< Cell volume fraction.
-   real(R8P), intent(in) :: faces(6)  !< Face fractions (-x, +x, -y, +y, -z, +z).
-   real(R8P)             :: af(3), vc  !< Face areas, cell volume.
-   integer(I4P)          :: a, p      !< Work.
-   real(R8P), parameter  :: TOL = 1.e-12_R8P !< Relative tolerance.
-
-   af = [h(2) * h(3), h(3) * h(1), h(1) * h(2)] ; vc = product(h)
-   ok = abs(sum(pm(1, :)) - alpha * vc) <= TOL * vc
-   do a = 1, 6
-      ok = ok .and. abs(sum(pm(11 + a, :)) - faces(a)) <= TOL
-   enddo
-   do p = 1, size(pm, 2)
-      do a = 1, 3
-         ok = ok .and. abs((pm(13 + 2 * (a - 1), p) - pm(12 + 2 * (a - 1), p)) * af(a) - pm(8 + a, p)) <= TOL * af(a)
-      enddo
-   enddo
-   endfunction split_closes
-
    subroutine edge_fractions(surface, x, y, z, cut, all_edges)
    !< Inside flags of the grid nodes and fluid fractions of the cell edges along z (issue #70), from the exact crossings
    !< of the z lines (`line_fractions`); with all_edges, the x and y lines too, for edge_x and edge_y.
@@ -1748,6 +2335,7 @@ contains
 
    pure integer(I4P) function edge_index(k, sides)
    !< Cell edge (1-12) along axis k at the sides (0 low, 1 high) of the two other axes.
+   !$acc routine seq
    integer(I4P), intent(in) :: k        !< Edge axis.
    integer(I4P), intent(in) :: sides(3) !< Sides per axis (sides(k) ignored).
 
@@ -1756,6 +2344,7 @@ contains
 
    pure integer(I4P) function corner_of(e, side)
    !< Corner (1-8, sides x + 2 y + 4 z + 1) at the low (side 0) or high (1) end of edge e.
+   !$acc routine seq
    integer(I4P), intent(in) :: e, side !< Edge, end.
    integer(I4P)             :: k, r, sides(3) !< Work.
 
@@ -1767,6 +2356,7 @@ contains
    pure integer(I4P) function edge_of(fl)
    !< Cell edge of a vertex with on-plane flags fl (bit 2 (a - 1) + side): exactly two axes flagged,
    !< else 0.
+   !$acc routine seq
    integer(I4P), intent(in) :: fl !< Flags.
    integer(I4P)             :: a, na, k, sides(3) !< Work.
 
@@ -1783,76 +2373,12 @@ contains
    if (na == 2_I4P) edge_of = edge_index(k, sides)
    endfunction edge_of
 
-   pure subroutine sort_pierce(pc, n)
-   !< Sort piercings by edge, then position (insertion).
-   type(pierce_t), intent(inout) :: pc(:) !< Piercings.
-   integer(I4P),   intent(in)    :: n     !< Their number.
-   type(pierce_t)                :: v     !< Work.
-   integer(I4P)                  :: i, j  !< Work.
-
-   do i = 2, n
-      v = pc(i) ; j = i - 1_I4P
-      do while (j >= 1_I4P)
-         if (pc(j)%edge < v%edge .or. (pc(j)%edge == v%edge .and. pc(j)%t <= v%t)) exit
-         pc(j + 1) = pc(j) ; j = j - 1_I4P
-      enddo
-      pc(j + 1) = v
-   enddo
-   endsubroutine sort_pierce
-
    pure logical function lexless(a, b)
    !< Lexicographic order of two points.
    real(R8P), intent(in) :: a(3), b(3) !< Points.
 
    lexless = a(1) < b(1) .or. (a(1) == b(1) .and. (a(2) < b(2) .or. (a(2) == b(2) .and. a(3) < b(3))))
    endfunction lexless
-
-   subroutine sort_points(key, idx)
-   !< Index heapsort of the keys key(:, m), lexicographic over the rows.
-   real(R8P),    intent(in)  :: key(:,:) !< Points [3, m].
-   integer(I4P), intent(out) :: idx(:)   !< Sorted order.
-   integer(I4P)              :: m, i, t  !< Work.
-
-   m = size(idx, kind=I4P)
-   idx = [(i, i = 1, m)]
-   do i = m / 2_I4P, 1_I4P, -1_I4P
-      call sift(i, m)
-   enddo
-   do i = m, 2_I4P, -1_I4P
-      t = idx(1) ; idx(1) = idx(i) ; idx(i) = t
-      call sift(1_I4P, i - 1_I4P)
-   enddo
-   contains
-      subroutine sift(lo, hi)
-      !< Sift down idx(lo) in the heap idx(1:hi).
-      integer(I4P), intent(in) :: lo, hi !< Root, heap end.
-      integer(I4P)             :: r, c, tt !< Work.
-
-      r = lo
-      do while (2_I4P * r <= hi)
-         c = 2_I4P * r
-         if (c < hi) then
-            if (less(idx(c), idx(c + 1))) c = c + 1_I4P
-         endif
-         if (.not. less(idx(r), idx(c))) exit
-         tt = idx(r) ; idx(r) = idx(c) ; idx(c) = tt ; r = c
-      enddo
-      endsubroutine sift
-
-      logical function less(a, b)
-      !< Lexicographic order of the keys a, b.
-      integer(I4P), intent(in) :: a, b !< Keys.
-      integer(I4P)             :: r    !< Row.
-
-      less = .false.
-      do r = 1, size(key, 1, kind=I4P)
-         if (key(r, a) /= key(r, b)) then
-            less = key(r, a) < key(r, b)
-            return
-         endif
-      enddo
-      endfunction less
-   endsubroutine sort_points
 
    pure function cross3(a, b) result(c)
    !< Cross product.
@@ -1863,8 +2389,9 @@ contains
    endfunction cross3
 
    pure subroutine clip_flags(p, fl, n, ax, level, keep_above, bit)
-   !< `clip_plane` (same kept points and crossings) carrying on-plane flags: a crossing gets the bit of
+   !< `clip_poly` (same kept points and crossings) carrying on-plane flags: a crossing gets the bit of
    !< the plane plus the flags its two end points share; kept points keep theirs.
+   !$acc routine seq
    real(R8P),    intent(inout) :: p(3, 16)   !< Polygon.
    integer(I4P), intent(inout) :: fl(16)     !< Vertex flags.
    integer(I4P), intent(inout) :: n          !< Vertices.
@@ -1882,7 +2409,11 @@ contains
    no = 0
    do k = 1, n
       kk = mod(k, n) + 1
-      ik = kept(p(:, k)) ; ikk = kept(p(:, kk))
+      if (keep_above) then ! kept side
+         ik = p(ax, k) > level ; ikk = p(ax, kk) > level
+      else
+         ik = p(ax, k) <= level ; ikk = p(ax, kk) <= level
+      endif
       if (ik) then
          no = no + 1 ; o(:, no) = p(:, k) ; of(no) = fl(k)
       endif
@@ -1900,23 +2431,13 @@ contains
       endif
    enddo
    n = no ; p(:, 1:n) = o(:, 1:n) ; fl(1:n) = of(1:n)
-   contains
-      pure logical function kept(q)
-      !< Kept side.
-      real(R8P), intent(in) :: q(3) !< Point.
-
-      if (keep_above) then
-         kept = q(ax) > level
-      else
-         kept = q(ax) <= level
-      endif
-      endfunction kept
    endsubroutine clip_flags
 
    pure subroutine tri_terms(p1, p2, p3, a)
    !< Divergence-theorem terms of the triangle p1 p2 p3 (local coordinates, outward orientation):
    !< a(1) += 1/3 p1 . A (volume), a(2:4) += 1/2 A_k int x_k^2 dA / area (moments), a(5) += area,
    !< a(6:8) += area * centroid, a(9:11) += A (vector area).
+   !$acc routine seq
    real(R8P), intent(in)    :: p1(3), p2(3), p3(3) !< Vertices.
    real(R8P), intent(inout) :: a(11)               !< Accumulators.
    real(R8P)                :: va(3), ar, q(3)     !< Vector area, area, quadratic sums.
@@ -1924,7 +2445,7 @@ contains
    va = 0.5_R8P * [(p2(2) - p1(2)) * (p3(3) - p1(3)) - (p2(3) - p1(3)) * (p3(2) - p1(2)), &
                    (p2(3) - p1(3)) * (p3(1) - p1(1)) - (p2(1) - p1(1)) * (p3(3) - p1(3)), &
                    (p2(1) - p1(1)) * (p3(2) - p1(2)) - (p2(2) - p1(2)) * (p3(1) - p1(1))]
-   ar = norm2(va)
+   ar = norm2_3(va) ! gfortran's norm2, bit for bit (issue #100)
    q = (p1 * p1 + p2 * p2 + p3 * p3 + p1 * p2 + p2 * p3 + p3 * p1) / 6._R8P ! int x_k^2 dA / area
    a(1) = a(1) + dot_product(p1, va) / 3._R8P
    a(2:4) = a(2:4) + 0.5_R8P * va * q
@@ -1933,59 +2454,47 @@ contains
    a(9:11) = a(9:11) + va
    endsubroutine tri_terms
 
-   pure subroutine clip_plane(p, n, ax, level, keep_above)
+   pure subroutine clip_poly(p, n, ax, level, keep_above)
    !< Clip the polygon p(:, 1:n) by the plane x(ax) = level: keep x > level (keep_above) or x <= level.
    !< Crossing points are canonical (from the edge end points in lexicographic order, the axis
    !< coordinate set to level), so neighbouring cells get the same points.
+   !$acc routine seq
    real(R8P),    intent(inout) :: p(3, 16)   !< Polygon.
    integer(I4P), intent(inout) :: n          !< Vertices.
-   integer,      intent(in)    :: ax         !< Axis.
+   integer(I4P), intent(in)    :: ax         !< Axis.
    real(R8P),    intent(in)    :: level      !< Plane.
    logical,      intent(in)    :: keep_above !< Side kept.
    real(R8P)                   :: o(3, 16)   !< Output.
    integer(I4P)                :: k, kk, no  !< Work.
    logical                     :: ik, ikk    !< Inside flags.
+   real(R8P)                   :: lo(3), hi(3) !< Ordered end points.
 
    if (n == 0) return
    no = 0
    do k = 1, n
       kk = mod(k, n) + 1
-      ik = inside(p(:, k)) ; ikk = inside(p(:, kk))
+      if (keep_above) then ! kept side
+         ik = p(ax, k) > level ; ikk = p(ax, kk) > level
+      else
+         ik = p(ax, k) <= level ; ikk = p(ax, kk) <= level
+      endif
       if (ik) then
          no = no + 1 ; o(:, no) = p(:, k)
       endif
-      if (ik .neqv. ikk) then
-         no = no + 1 ; o(:, no) = crossing(p(:, k), p(:, kk))
+      if (ik .neqv. ikk) then ! canonical crossing of the segment with the plane
+         if (p(1, k) < p(1, kk) .or. (p(1, k) == p(1, kk) .and. (p(2, k) < p(2, kk) .or. &
+             (p(2, k) == p(2, kk) .and. p(3, k) <= p(3, kk))))) then
+            lo = p(:, k) ; hi = p(:, kk)
+         else
+            lo = p(:, kk) ; hi = p(:, k)
+         endif
+         no = no + 1
+         o(:, no) = lo + (level - lo(ax)) / (hi(ax) - lo(ax)) * (hi - lo)
+         o(ax, no) = level
       endif
    enddo
    n = no ; p(:, 1:n) = o(:, 1:n)
-   contains
-      pure logical function inside(q)
-      !< Kept side.
-      real(R8P), intent(in) :: q(3) !< Point.
-
-      if (keep_above) then
-         inside = q(ax) > level
-      else
-         inside = q(ax) <= level
-      endif
-      endfunction inside
-
-      pure function crossing(a, b) result(c)
-      !< Canonical crossing of the segment ab with the plane.
-      real(R8P), intent(in) :: a(3), b(3) !< End points.
-      real(R8P)             :: c(3)       !< Crossing.
-      real(R8P)             :: lo(3), hi(3) !< Ordered end points.
-
-      if (a(1) < b(1) .or. (a(1) == b(1) .and. (a(2) < b(2) .or. (a(2) == b(2) .and. a(3) <= b(3))))) then
-         lo = a ; hi = b
-      else
-         lo = b ; hi = a
-      endif
-      c = lo + (level - lo(ax)) / (hi(ax) - lo(ax)) * (hi - lo)
-      c(ax) = level
-      endfunction crossing
-   endsubroutine clip_plane
+   endsubroutine clip_poly
 
    pure integer(I4P) function col_of(w, e)
    !< Cell column of w: 0 if w <= e(1), k if e(k) < w <= e(k+1), n+1 beyond.
