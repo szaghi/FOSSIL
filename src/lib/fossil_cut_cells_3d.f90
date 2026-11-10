@@ -60,6 +60,8 @@ module fossil_cut_cells_3d
 !< face sums equal the plane sections, volumes add up, every piece closes per axis), else -1: on 1.57
 !< million cells of lattice bodies 19 remain (947 before #70), where a facet touches the cell along a
 !< segment of a cell edge only, so its trace on the face is missing.
+use fossil_box_predicates,     only : box_triangle_overlap
+use fossil_box_query,          only : box_tolerance
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t
 use fossil_curve_slice,        only : slice_surface
 use fossil_cut_graph,          only : cut_links_t, build_csr
@@ -340,6 +342,10 @@ contains
    integer(I4P)                :: npb                     !< Pieces so far.
    real(R8P)                   :: tot(17), h(3)           !< Cell totals, cell size.
    integer(I4P)                :: cs(8), q                !< Corner states, corner.
+   integer(I4P), allocatable   :: kept(:)                 !< Candidates of a cell that touch it.
+   logical,      allocatable   :: thin(:)                 !< Facets kept without the box test (near-degenerate).
+   real(R8P)                   :: tol, emax2              !< Box test inflation, longest squared edge.
+   integer(I4P)                :: nk, m4                  !< Kept candidates, work.
 
    nx = cut%nx ; ny = cut%ny ; nz = cut%nz
    nf = surface%get_facets_number()
@@ -359,6 +365,18 @@ contains
          tri(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
       enddo
       nrm(:, f) = cross3(tri(:, 2, f) - tri(:, 1, f), tri(:, 3, f) - tri(:, 1, f))
+   enddo
+   ! the box test of the candidates (see the comment at the cell_pieces call): its inflation covers the round-off of
+   ! the projections over the grid and the surface; a facet whose computed normal is small next to its edges (|n|_1 <
+   ! 1e-2 e_max^2: the spread of its vertices along that axis could exceed the inflation) is kept without the test
+   allocate(thin(nf))
+   tol = box_tolerance([min(x(1), minval(tri(1, :, :))), min(y(1), minval(tri(2, :, :))), min(z(1), minval(tri(3, :, :)))], &
+                       [max(x(nx + 1), maxval(tri(1, :, :))), max(y(ny + 1), maxval(tri(2, :, :))), &
+                        max(z(nz + 1), maxval(tri(3, :, :)))])
+   do f = 1, nf
+      emax2 = max(sum((tri(:, 2, f) - tri(:, 1, f)) ** 2), sum((tri(:, 3, f) - tri(:, 2, f)) ** 2), &
+                  sum((tri(:, 1, f) - tri(:, 3, f)) ** 2))
+      thin(f) = sum(abs(nrm(:, f))) < 1.e-2_R8P * emax2
    enddo
    do m = 1, 2 ! count, then fill
       if (m == 2) then
@@ -384,6 +402,7 @@ contains
          enddo
       enddo
    enddo
+   allocate(kept(max(1_I4P, maxval(cnt))))
    ! mesh boundary edges (one facet): the cells they overlap get no count
    allocate(open_cell(nx, ny, nz), ek(6, 3 * nf), idx(3 * nf)) ; open_cell = .false.
    do f = 1, nf
@@ -430,7 +449,23 @@ contains
                do q = 1, 8
                   cs(q) = merge(0_I4P, 1_I4P, cut%node_in(i + mod(q - 1, 2), j + mod((q - 1) / 2, 2), k + (q - 1) / 4))
                enddo
-               call cell_pieces(tri, nrm, lst(start(c):start(c + 1) - 1), &
+               ! the candidates that touch the closed cell box (`box_triangle_overlap`, conservative: inflated by tol it
+               ! never misses a contact), in the order of the list. A dropped facet has no clipped polygon in the cell
+               ! (the clip keeps points of the closed box only, up to round-off far below tol), no piercing of a cell
+               ! edge (a crossing between the perturbed corners lies on the closed edge) and no edge shared with a
+               ! trace (`across_crosses`: the facet would contain the trace). Its atom in cell_pieces is a singleton
+               ! never counted, and the root of every set is its least atom, so the pieces, their order and every sum
+               ! (taken over the kept polygons in list order) are those of the full list. A cell left without a
+               ! candidate still takes this path (cnt(c) > 0), with an empty list: the same result.
+               nk = 0_I4P
+               do m4 = start(c), start(c + 1) - 1_I4P
+                  f = lst(m4)
+                  if (thin(f) .or. box_triangle_overlap([x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], tri(:, 1, f), &
+                                                        tri(:, 2, f), tri(:, 3, f), tol)) then
+                     nk = nk + 1_I4P ; kept(nk) = f
+                  endif
+               enddo
+               call cell_pieces(tri, nrm, kept(1:nk), &
                                 [x(i), y(j), z(k)], [x(i + 1), y(j + 1), z(k + 1)], cs, np, pm, present(piv_piece), &
                                 cpp, cpe, cpl, cph, &
                                 mo, pvw, pwm, pfm, qd, qpt, qw, qst, wpt, wwt, wst, qwn)
