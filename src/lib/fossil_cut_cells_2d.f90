@@ -30,14 +30,31 @@ module fossil_cut_cells_2d
 !< the boundary states do not close is flagged not closed and gets no measures.
 use fossil_cut_moments, only : mono_count, mono_exponents, segment_green_moments, cell_moments_into, triangle_rule, tensor_rule
 use fossil_predicates, only : orient2d_xy
+use iso_c_binding,     only : c_intptr_t, c_loc
+use iso_fortran_env,   only : stderr => error_unit
 use penf,              only : I4P, R8P
 
 implicit none
 private
-public :: cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device
+public :: cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device, cut_cells_2d_reset
 
 type :: cut_cells_2d_t
    !< Cut-cell geometry of a block (fluid = outside the solid).
+   !<
+   !< Resident on the device (issue #100 step 6a). `curve%cut_cells_device(..., resident=.true.)` leaves the outputs
+   !< mapped (OpenACC unstructured data) and never writes their host copies: until `update_host` the host arrays hold
+   !< garbage (only nx, ny, np, moments_order are set). `on_device` says so. The mapped outputs are closed, alpha,
+   !< aperture, centroid, wet_length, wet_centroid, wet_normal, pieces, first_piece, node_in, piece_cell, piece_area,
+   !< piece_centroid, piece_wet_length, piece_wet_normal, piece_aperture and piece_iv_* (moments, boundaries and
+   !< quadrature are host-only). A device consumer reads them through pointer aliases with `present` (the #20 rule:
+   !< member arrays, never the object). `enter_device` maps a host result, `update_host` brings the device values back,
+   !< `exit_device` releases the device copies (call it before a resident cut goes out of scope or is deallocated: the
+   !< runtime would keep the stale mapping). Every routine that writes a cut (`curve%cut_cells`, `cut_cells_device`,
+   !< `cut_coarsen_2d`) releases it first. A routine that reads one on the host (`cut_links_2d`, `cut_coarsen_2d`, ...)
+   !< needs `update_host` first. A copy `b = a` of a resident cut is not resident (its arrays are new host arrays, not
+   !< mapped, holding a's host values): the type-bound procedures recognise it (`device_key`, the host address of alpha
+   !< when mapped) and treat it as not mapped; `update_host` on it warns and does nothing. Built without OpenACC the
+   !< procedures only set the flag.
    integer(I4P)              :: nx = 0_I4P, ny = 0_I4P !< Cells.
    real(R8P),    allocatable :: alpha(:,:)          !< Fluid area fraction [nx, ny] (-1 if not closed).
    real(R8P),    allocatable :: aperture(:,:,:)     !< Edge fluid fractions [4 (-u, +u, -v, +v), nx, ny].
@@ -73,6 +90,12 @@ type :: cut_cells_2d_t
    integer(I4P), allocatable :: wall_quad_start(:)  !< Wall rule of piece p: 3-point Gauss on each wall segment.
    real(R8P),    allocatable :: wall_quad_point(:,:) !< Its points [2, nw].
    real(R8P),    allocatable :: wall_quad_weight(:) !< Its weights (lengths).
+   logical                   :: on_device = .false. !< The outputs are mapped on the device (issue #100 step 6a).
+   integer(c_intptr_t)       :: device_key = 0      !< Host address of alpha when mapped (a copy has another one).
+   contains
+      procedure, pass(self) :: enter_device !< Map the outputs to the device (copyin).
+      procedure, pass(self) :: update_host  !< Copy the mapped outputs back to the host.
+      procedure, pass(self) :: exit_device  !< Release the device copies.
 endtype cut_cells_2d_t
 
 type :: xing_t
@@ -117,9 +140,9 @@ contains
    !< `compute_cut_cells_2d_device`, which runs the same kernels in OpenACC loops.
    real(R8P),            intent(in)  :: u(:), v(:) !< Vertices.
    integer(I4P),         intent(in)  :: next(:)    !< Next vertex (0: none).
-   real(R8P),            intent(in)  :: x(:), y(:) !< Cell edges (strictly increasing).
-   type(cut_cells_2d_t), intent(out) :: cc         !< Cut cells.
-   integer(I4P),         intent(out) :: status     !< 0 ok, 1 bad edges.
+   real(R8P),            intent(in)    :: x(:), y(:) !< Cell edges (strictly increasing).
+   type(cut_cells_2d_t), intent(inout) :: cc         !< Cut cells (released from the device and reset first).
+   integer(I4P),         intent(out)   :: status     !< 0 ok, 1 bad edges.
    logical,              intent(in)  :: with_iv    !< Record the fluid edge intervals of the pieces (issue #70).
    integer(I4P),         intent(in)  :: order      !< Order of the moments (0: none; issue #70).
    logical,              intent(in)  :: with_bnd   !< Record the oriented boundaries of the pieces (issue #70).
@@ -145,6 +168,7 @@ contains
    integer(I4P) :: nx, ny, nxs, nps, ne, ncell, c, i, j, k, ncut, nm, np, niv, nbd, eid(4) !< Work.
    logical      :: wbnd                                  !< Record the boundaries.
 
+   call cut_cells_2d_reset(cc)
    call cut_cells_2d_grid(x, y, nx, ny, status)
    if (status /= 0_I4P) return
    cc%nx = nx ; cc%ny = ny
@@ -215,7 +239,7 @@ contains
    if (with_quad) call quadrature_out(cc, x, y)
    endsubroutine compute_cut_cells_2d
 
-   subroutine compute_cut_cells_2d_device(u, v, next, x, y, cc, status, with_iv)
+   subroutine compute_cut_cells_2d_device(u, v, next, x, y, cc, status, with_iv, resident)
    !< `compute_cut_cells_2d` on the device (OpenACC, issue #100 step 2), moments order 0, no boundaries, no quadrature:
    !< the same outputs bit for bit.
    !<
@@ -227,15 +251,18 @@ contains
    !<    classification;
    !< 2. `cut_cell_2d_count` over the cut cells, into a workspace pool created on the device; the counts come back;
    !< 3. `quiet_cell_2d_kernel` over all cells (quiet ones act) and `cut_cell_2d_fill` over the cut cells;
-   !< 4. the outputs are copied back.
+   !< 4. the outputs are copied back, or with `resident` left on the device (step 6a; see `cut_cells_2d_t`).
+   !< The outputs are built in local arrays mapped by unstructured data (`enter data`), then moved into `cc` by
+   !< `move_alloc`, which keeps their host addresses: the runtime's present table, keyed on them, stays valid.
    !< The same kernels, the same operations in the same order, `-gpu=nofma` (#20): the same bits. Built without OpenACC
    !< the directives are comments and the loops run on the host in order.
-   real(R8P),            intent(in)  :: u(:), v(:) !< Vertices.
-   integer(I4P),         intent(in)  :: next(:)    !< Next vertex (0: none).
-   real(R8P),            intent(in)  :: x(:), y(:) !< Cell edges (strictly increasing).
-   type(cut_cells_2d_t), intent(out) :: cc         !< Cut cells.
-   integer(I4P),         intent(out) :: status     !< 0 ok, 1 bad edges.
-   logical,              intent(in)  :: with_iv    !< Record the fluid edge intervals of the pieces (issue #70).
+   real(R8P),            intent(in)           :: u(:), v(:) !< Vertices.
+   integer(I4P),         intent(in)           :: next(:)    !< Next vertex (0: none).
+   real(R8P),            intent(in)           :: x(:), y(:) !< Cell edges (strictly increasing).
+   type(cut_cells_2d_t), intent(inout)        :: cc         !< Cut cells (released from the device and reset first).
+   integer(I4P),         intent(out)          :: status     !< 0 ok, 1 bad edges.
+   logical,              intent(in)           :: with_iv    !< Record the fluid edge intervals of the pieces (issue #70).
+   logical,              intent(in), optional :: resident   !< Leave the outputs on the device (default .false.).
    logical,       allocatable :: node_in(:,:)            !< Node inside flags [nx+1, ny+1].
    integer(I4P),  allocatable :: rstart(:), rseg(:)      !< Segments crossing each node row.
    integer(I4P),  allocatable :: xstart(:), xord(:)      !< Crossings by edge.
@@ -259,8 +286,11 @@ contains
    integer(I4P) :: zme(2, 1)                             !< No moment exponents (nm = 0).
    real(R8P)    :: zmom(1, 1), zwmom(1, 1), zbseg(4, 1)  !< No moments, no wall moments, no boundary segments.
    logical      :: zbwall(1)                             !< No wall flags.
+   logical      :: res                                   !< Leave the outputs on the device.
    integer(I4P) :: nx, ny, nxs, nps, ne, ncell, nu, nr, c, i, j, k, ncut, np, niv, nbd, eid(4) !< Work.
 
+   call cut_cells_2d_reset(cc)
+   res = .false. ; if (present(resident)) res = resident
    call cut_cells_2d_grid(x, y, nx, ny, status)
    if (status /= 0_I4P) return
    cc%nx = nx ; cc%ny = ny ; cc%moments_order = 0_I4P
@@ -271,24 +301,27 @@ contains
    zme = 0_I4P ; zmom = 0._R8P ; zwmom = 0._R8P ; zbseg = 0._R8P ; zbwall = .false.
    allocate(node_in(nx + 1, ny + 1))
    !$acc data copyin(x, y, zme, zmom, zwmom, zbseg, zbwall)
-   ! 1. node flags, one thread per node
-   !$acc data copyin(u, v, next, rstart, rseg) copyout(node_in)
-   !$acc parallel loop gang vector collapse(2) default(present)
+   ! 1. node flags, one thread per node; an output: it stays mapped, the host copy feeds the classification
+   !$acc enter data create(node_in)
+   !$acc data copyin(u, v, next, rstart, rseg)
+   !$acc parallel loop gang vector collapse(2) default(present) present(node_in)
    do j = 1_I4P, ny + 1_I4P
       do i = 1_I4P, nx + 1_I4P
          node_in(i, j) = node_parity(x(i), y(j), rstart(j), rstart(j + 1) - 1_I4P, nr, rseg, nu, u, v, next)
       enddo
    enddo
    !$acc end data
+   !$acc update host(node_in)
    ! classification and workspace sizing on the host
    call cut_cells_2d_classify(nx, ny, ne, ncell, xstart, pstart, node_in, 0_I4P, ckind, ncut, cutc, rwo, iwo)
    allocate(cnt(3, max(1_I4P, ncut)), rw(max(1_I4P, rwo(ncut + 1) - 1_I4P)), iw(max(1_I4P, iwo(ncut + 1) - 1_I4P)))
    allocate(closed(nx, ny), alpha(nx, ny), aperture(4, nx, ny), centroid(2, nx, ny), wet_length(nx, ny), &
             wet_centroid(2, nx, ny), wet_normal(2, nx, ny), pieces(nx, ny), first_piece(nx, ny), ivo(ncell), bdo(ncell))
-   !$acc data copyin(node_in, xstart, xord, xp, pstart, pord, pab, ptg, ckind, cutc, rwo, iwo) &
-   !$acc&     create(rw, iw, cnt, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
+   !$acc enter data create(closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
+   !$acc data copyin(xstart, xord, xp, pstart, pord, pab, ptg, ckind, cutc, rwo, iwo) create(rw, iw, cnt)
    ! 2. count over the cut cells
-   !$acc parallel loop gang vector default(present) private(eid)
+   !$acc parallel loop gang vector default(present) private(eid) &
+   !$acc& present(node_in, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal)
    do k = 1_I4P, ncut
       c = cutc(k) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
       call cell_edge_ids(nx, ny, i, j, eid)
@@ -304,9 +337,12 @@ contains
    call cut_cells_2d_scan(nx, ny, ncell, ckind, ncut, cnt, with_iv, .false., first_piece, ivo, bdo, np, niv, nbd)
    allocate(pcell(2, np), parea(np), pcen(2, np), pwl(np), pwn(2, np), pap(4, np), ivs(np + 1), bds(np + 1), &
             ive(max(1_I4P, niv)), ivl(max(1_I4P, niv)), ivh(max(1_I4P, niv)))
-   !$acc data copyin(first_piece, ivo, bdo) create(pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh, bds)
+   !$acc enter data copyin(first_piece) create(pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
+   !$acc data copyin(ivo, bdo) create(bds)
    ! 4. fill: the quiet cells, then the cut cells
-   !$acc parallel loop gang vector default(present) private(eid)
+   !$acc parallel loop gang vector default(present) private(eid) &
+   !$acc& present(closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces, first_piece, pcell, &
+   !$acc&         parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
    do c = 1_I4P, ncell
       if (ckind(c) > 0_I4P) cycle
       i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
@@ -317,7 +353,8 @@ contains
                                 bdo(c), np, pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, ive, ivl, ivh, bds, &
                                 0_I4P, zbseg, zbwall)
    enddo
-   !$acc parallel loop gang vector default(present) private(eid)
+   !$acc parallel loop gang vector default(present) private(eid) &
+   !$acc& present(pieces, first_piece, pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
    do k = 1_I4P, ncut
       c = cutc(k) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
       call cell_edge_ids(nx, ny, i, j, eid)
@@ -326,12 +363,16 @@ contains
                             rw(rwo(k)), iwo(k + 1) - iwo(k), iw(iwo(k)), first_piece(i, j) - 1_I4P, ivo(c), bdo(c), np, &
                             pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, ive, ivl, ivh, bds, 0_I4P, zbseg, zbwall)
    enddo
-   !$acc update host(closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces, pcell, parea, pcen, &
-   !$acc&            pwl, pwn, pap, ivs, ive, ivl, ivh)
-   !$acc end data
-   !$acc end data
-   !$acc end data
+   !$acc serial default(present) present(ivs)
    ivs(np + 1) = niv + 1_I4P
+   !$acc end serial
+   !$acc end data
+   !$acc end data
+   !$acc end data
+   if (.not. res) then ! copy back the device-written outputs; node_in and first_piece are already on the host
+      !$acc exit data copyout(closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces, pcell, &
+      !$acc&                  parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh) delete(node_in, first_piece)
+   endif
    call move_alloc(node_in, cc%node_in)
    call move_alloc(closed, cc%closed) ; call move_alloc(alpha, cc%alpha) ; call move_alloc(aperture, cc%aperture)
    call move_alloc(centroid, cc%centroid) ; call move_alloc(wet_length, cc%wet_length)
@@ -343,10 +384,102 @@ contains
    call move_alloc(pap, cc%piece_aperture) ; call move_alloc(ivs, cc%piece_iv_start)
    if (niv > 0_I4P) then
       call move_alloc(ive, cc%piece_iv_edge) ; call move_alloc(ivl, cc%piece_iv_lo) ; call move_alloc(ivh, cc%piece_iv_hi)
-   else
+   else ! the one-element placeholders go; the empty outputs are mapped too, so every output is present when resident
+      if (res) then
+         !$acc exit data delete(ive, ivl, ivh)
+      endif
       allocate(cc%piece_iv_edge(0), cc%piece_iv_lo(0), cc%piece_iv_hi(0))
+      if (res) then
+         !$acc enter data create(cc%piece_iv_edge, cc%piece_iv_lo, cc%piece_iv_hi)
+      endif
    endif
+   if (res) call mark_resident(cc)
    endsubroutine compute_cut_cells_2d_device
+
+   subroutine cut_cells_2d_reset(cc)
+   !< Release a resident cut from the device (`exit_device`), then reset it to the default (issue #100 step 6a): what
+   !< `intent(out)` did, without freeing arrays that are still mapped.
+   type(cut_cells_2d_t), intent(inout) :: cc    !< Cut cells.
+   type(cut_cells_2d_t)                :: fresh !< Default.
+
+   if (cc%on_device) call cc%exit_device
+   cc = fresh
+   endsubroutine cut_cells_2d_reset
+
+   function host_key(cc) result(key)
+   !< Host address of alpha (the key of a mapped cut; 0 if alpha is not allocated).
+   type(cut_cells_2d_t), intent(in), target :: cc  !< Cut cells.
+   integer(c_intptr_t)                      :: key !< Address.
+
+   key = 0
+   if (allocated(cc%alpha)) then
+      if (size(cc%alpha) > 0) key = transfer(c_loc(cc%alpha), key)
+   endif
+   endfunction host_key
+
+   subroutine mark_resident(cc)
+   !< Flag the outputs of `cc` as mapped, keyed by the host address of alpha.
+   type(cut_cells_2d_t), intent(inout) :: cc !< Cut cells.
+
+   cc%on_device = .true. ; cc%device_key = host_key(cc)
+   endsubroutine mark_resident
+
+   logical function is_mapped(self)
+   !< The flag is set and the arrays are the ones mapped (not a copy of a resident cut).
+   type(cut_cells_2d_t), intent(in) :: self !< Cut cells.
+
+   is_mapped = .false.
+   if (self%on_device) is_mapped = self%device_key == host_key(self)
+   endfunction is_mapped
+
+   subroutine enter_device(self)
+   !< Map the outputs of a host result to the device (copyin; issue #100 step 6a). Member arrays only, never `self`
+   !< (#20). No-op if already mapped or if there are no outputs (status error, default cut). A copy of a resident cut is
+   !< mapped as a new cut.
+   class(cut_cells_2d_t), intent(inout) :: self !< Cut cells.
+
+   if (is_mapped(self)) return
+   self%on_device = .false. ; self%device_key = 0
+   if (.not. allocated(self%alpha)) return
+   !$acc enter data copyin(self%closed, self%alpha, self%aperture, self%centroid, self%wet_length, self%wet_centroid, &
+   !$acc&                  self%wet_normal, self%pieces, self%first_piece, self%node_in, self%piece_cell, self%piece_area, &
+   !$acc&                  self%piece_centroid, self%piece_wet_length, self%piece_wet_normal, self%piece_aperture, &
+   !$acc&                  self%piece_iv_start, self%piece_iv_edge, self%piece_iv_lo, self%piece_iv_hi)
+   call mark_resident(self)
+   endsubroutine enter_device
+
+   subroutine update_host(self)
+   !< Copy the mapped outputs back to the host (issue #100 step 6a); they stay mapped. No-op if not mapped; on a copy of
+   !< a resident cut a warning on stderr (its arrays are not on the device: update the original before copying it).
+   class(cut_cells_2d_t), intent(inout) :: self !< Cut cells.
+
+   if (.not. self%on_device) return
+   if (.not. is_mapped(self)) then
+      write(stderr, '(A)') 'fossil cut_cells_2d_t%update_host: a copy of a resident cut is not on the device; '// &
+                           'call update_host on the original before copying it'
+      self%on_device = .false. ; self%device_key = 0
+      return
+   endif
+   !$acc update host(self%closed, self%alpha, self%aperture, self%centroid, self%wet_length, self%wet_centroid, &
+   !$acc&            self%wet_normal, self%pieces, self%first_piece, self%node_in, self%piece_cell, self%piece_area, &
+   !$acc&            self%piece_centroid, self%piece_wet_length, self%piece_wet_normal, self%piece_aperture, &
+   !$acc&            self%piece_iv_start, self%piece_iv_edge, self%piece_iv_lo, self%piece_iv_hi)
+   endsubroutine update_host
+
+   subroutine exit_device(self)
+   !< Release the device copies of the outputs (issue #100 step 6a); the host arrays are kept as they are (call
+   !< `update_host` first to keep the device values). No-op if not mapped; a copy of a resident cut only drops the flag.
+   class(cut_cells_2d_t), intent(inout) :: self !< Cut cells.
+
+   if (.not. self%on_device) return
+   if (is_mapped(self)) then
+      !$acc exit data delete(self%closed, self%alpha, self%aperture, self%centroid, self%wet_length, self%wet_centroid, &
+      !$acc&                 self%wet_normal, self%pieces, self%first_piece, self%node_in, self%piece_cell, self%piece_area, &
+      !$acc&                 self%piece_centroid, self%piece_wet_length, self%piece_wet_normal, self%piece_aperture, &
+      !$acc&                 self%piece_iv_start, self%piece_iv_edge, self%piece_iv_lo, self%piece_iv_hi)
+   endif
+   self%on_device = .false. ; self%device_key = 0
+   endsubroutine exit_device
 
    subroutine cut_cells_2d_grid(x, y, nx, ny, status)
    !< Cells of the block of edges x(nx+1), y(ny+1); status 1 if there is no cell or the edges do not increase strictly.

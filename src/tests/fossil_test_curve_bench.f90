@@ -372,10 +372,10 @@ contains
    type(body_t), allocatable :: bb(:)                  !< Bodies.
    type(surface_stl_object)  :: s                      !< Surface.
    type(curve_object)        :: cc(4)                  !< Ellipse, NACA 0012, disc with a hole, 50 circles.
-   type(cut_cells_2d_t)      :: cut_h, cut_d           !< Cut cells (host, device: each call refills its own).
+   type(cut_cells_2d_t)      :: cut_h, cut_d, cut_r    !< Cut cells (host, device, resident: each call refills its own).
    character(16)             :: cname(4)               !< Curve names.
    real(R8P),    allocatable :: uu(:), vv(:), x(:), y(:) !< Work.
-   real(R8P)                 :: lo(2), hi(2), zmin, zmax, th, t(2) !< Work.
+   real(R8P)                 :: lo(2), hi(2), zmin, zmax, th, t(3, 5) !< Work.
    integer(I4P)              :: bad, st, sts, i, k, m, g, nn, r, ngrid(3), nl(50) !< Work.
    integer(I8P)              :: c0, c1, rate       !< Clock.
 
@@ -430,24 +430,49 @@ contains
    print '(A,I0)', 'cut cells 2-D device vs serial mismatches: ', bad
    ok = ok .and. bad == 0 .and. sts == 0
    if (n < 256_I4P) return
-   print '(A)', 'cut cells 2-D timing (best of 5, intervals on, transfers included) [s]: curve, cells, host, device'
+   print '(A)', 'cut cells 2-D timing (5 calls, intervals on, transfers included) [s]: curve, cells, host, device, '// &
+                'device resident (best, median); speed-ups of the best'
    call system_clock(count_rate=rate)
    do i = 1, 4
       if (i == 3) cycle
       do g = 1, 2
          call grid_edges(lo, hi, ngrid(g), x, y)
-         t = huge(1._R8P)
          do r = 1, 5
             call system_clock(c0) ; call cc(i)%cut_cells(x=x, y=y, cut=cut_h, status=st) ; call system_clock(c1)
-            t(1) = min(t(1), real(c1 - c0, R8P) / rate)
+            t(1, r) = real(c1 - c0, R8P) / rate
             call system_clock(c0) ; call cc(i)%cut_cells_device(x=x, y=y, cut=cut_d, status=st) ; call system_clock(c1)
-            t(2) = min(t(2), real(c1 - c0, R8P) / rate)
+            t(2, r) = real(c1 - c0, R8P) / rate
+            call system_clock(c0) ; call cc(i)%cut_cells_device(x=x, y=y, cut=cut_r, status=st, resident=.true.)
+            call system_clock(c1)
+            t(3, r) = real(c1 - c0, R8P) / rate
          enddo
+         call cut_r%exit_device
          nn = ngrid(g)
-         print '(3X,A16,1X,I4,A,2(1X,ES10.3),A,F6.2,A)', cname(i), nn, '^2', t(1), t(2), '  (', t(1) / t(2), 'x)'
+         print '(3X,A16,1X,I4,A,3(2X,ES9.2,1X,ES9.2),2(A,F6.2),A)', cname(i), nn, '^2', &
+               (minval(t(k, :)), median5(t(k, :)), k = 1, 3), '  (', minval(t(1, :)) / minval(t(2, :)), 'x, ', &
+               minval(t(1, :)) / minval(t(3, :)), 'x)'
       enddo
    enddo
    endsubroutine cut_cells_case
+
+   pure function median5(t) result(m)
+   !< Median of five timings.
+   real(R8P), intent(in) :: t(5) !< Timings.
+   real(R8P)             :: m    !< Median.
+   real(R8P)             :: w(5), z !< Work.
+   integer(I4P)          :: a, b !< Counters.
+
+   w = t
+   do a = 2, 5
+      z = w(a) ; b = a - 1
+      do while (b >= 1)
+         if (w(b) <= z) exit
+         w(b + 1) = w(b) ; b = b - 1
+      enddo
+      w(b + 1) = z
+   enddo
+   m = w(3)
+   endfunction median5
 
    subroutine grid_edges(lo, hi, n, x, y)
    !< n x n cells over the box [lo, hi] grown by 2 % (cell edges x(n+1), y(n+1)).

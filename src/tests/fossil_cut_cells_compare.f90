@@ -21,21 +21,38 @@ public :: cut_cells_2d_mismatches, cut_cells_twin_mismatches
 contains
    function cut_cells_twin_mismatches(c, x, y, status) result(n)
    !< Mismatches of `c%cut_cells_device` against `c%cut_cells` on the block x, y, with the intervals and without (sum);
-   !< status: the sum of the four statuses (0: all ok).
+   !< status: the sum of the statuses (0: all ok). Each twin call is made twice (issue #100 step 6a): copied back, and
+   !< resident (`resident=.true.`, then `update_host`, compared, then the next call into the same `d`, which releases it;
+   !< `exit_device` at the end). A resident result must say `on_device` (unless the edges were refused); a copy of it
+   !< must not be (its `exit_device` leaves the original mapped: the following `update_host` would fail otherwise).
    type(curve_object), intent(in)            :: c          !< Curve.
    real(R8P),          intent(in)            :: x(:), y(:) !< Cell edges.
    integer(I4P),       intent(out), optional :: status     !< Sum of the statuses.
    integer(I4P)                              :: n          !< Mismatches.
-   type(cut_cells_2d_t)                      :: h, d       !< Host, twin.
-   integer(I4P)                              :: s1, s2, s3, s4 !< Statuses.
+   type(cut_cells_2d_t)                      :: h, d, b    !< Host, twin, copy of the twin.
+   integer(I4P)                              :: s(6)       !< Statuses.
+   logical                                   :: wi         !< With the intervals.
+   integer(I4P)                              :: k          !< Pass.
 
-   call c%cut_cells(x=x, y=y, cut=h, status=s1)
-   call c%cut_cells_device(x=x, y=y, cut=d, status=s2)
-   n = cut_cells_2d_mismatches(h, d)
-   call c%cut_cells(x=x, y=y, cut=h, status=s3, intervals=.false.)
-   call c%cut_cells_device(x=x, y=y, cut=d, status=s4, intervals=.false.)
-   n = n + cut_cells_2d_mismatches(h, d)
-   if (present(status)) status = s1 + s2 + s3 + s4
+   n = 0_I4P
+   do k = 1, 2
+      wi = k == 1
+      call c%cut_cells(x=x, y=y, cut=h, status=s(3 * k - 2), intervals=wi)
+      call c%cut_cells_device(x=x, y=y, cut=d, status=s(3 * k - 1), intervals=wi)
+      n = n + cut_cells_2d_mismatches(h, d)
+      call c%cut_cells_device(x=x, y=y, cut=d, status=s(3 * k), intervals=wi, resident=.true.)
+      if (d%on_device .neqv. allocated(d%alpha)) n = n + 1_I4P
+      if (k == 1) then ! a copy is not resident: releasing it leaves d mapped
+         b = d
+         call b%exit_device
+         if (b%on_device) n = n + 1_I4P
+      endif
+      call d%update_host
+      n = n + cut_cells_2d_mismatches(h, d)
+   enddo
+   call d%exit_device
+   if (d%on_device) n = n + 1_I4P
+   if (present(status)) status = sum(s)
    endfunction cut_cells_twin_mismatches
 
    function cut_cells_2d_mismatches(a, b) result(n)

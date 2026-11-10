@@ -1521,10 +1521,10 @@ contains
    !< topology with the symbolic tie-break of the line crossings; the measures are exact to round-off.
    !< Cells whose boundary does not close (open loops) are flagged in `cut%closed` with no measures.
    !< `status = STATUS_INVALID_INPUT` on bad edges. `intervals = .false.` skips the fluid edge intervals of the pieces
-   !< (`piece_iv_*`, needed by `cut_links_2d`; issue #70).
+   !< (`piece_iv_*`, needed by `cut_links_2d`; issue #70). A `cut` resident on the device is released first.
    class(curve_object),  intent(in)            :: self   !< Curve.
    real(R8P),            intent(in)            :: x(:), y(:) !< Cell edges (u, v), strictly increasing.
-   type(cut_cells_2d_t), intent(out)           :: cut    !< Cut cells.
+   type(cut_cells_2d_t), intent(inout)         :: cut    !< Cut cells (released from the device and reset first).
    integer(I4P),         intent(out), optional :: status !< STATUS_OK or STATUS_INVALID_INPUT.
    logical,              intent(in),  optional :: intervals !< Record the fluid edge intervals (default .true.).
    integer(I4P),         intent(in),  optional :: moments_order !< Moments of the pieces up to this order (0-4, issue #70).
@@ -1552,7 +1552,7 @@ contains
    if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
    endsubroutine cut_cells
 
-   subroutine cut_cells_device(self, x, y, cut, status, intervals)
+   subroutine cut_cells_device(self, x, y, cut, status, intervals, resident)
    !< `cut_cells` on the device (OpenACC, issue #100 step 2): the same `cut` bit for bit for the outputs of moments
    !< order 0 without boundaries or quadrature (cell fractions, apertures, centroids, wet length, centroid and normal,
    !< pieces and their measures, `node_in`, the fluid edge intervals), which is all this twin computes.
@@ -1560,23 +1560,30 @@ contains
    !< The walk, the indexes, the classification and the prefix sums run on the host, the node flags and the per-cell
    !< kernels on the device (`compute_cut_cells_2d_device`); the curve needs no `enter_device` (the kernels take flat
    !< copies). Built without OpenACC it runs on the host. `status = STATUS_INVALID_INPUT` on bad edges.
+   !<
+   !< `resident = .true.` (issue #100 step 6a) leaves the outputs on the device (`cut%on_device`): the host arrays are
+   !< allocated but not written until `cut%update_host`; `cut%exit_device` releases them (see `cut_cells_2d_t`). A
+   !< resident `cut` passed in is released first. Built without OpenACC `resident` changes nothing but the flag.
    class(curve_object),  intent(in)            :: self      !< Curve.
    real(R8P),            intent(in)            :: x(:), y(:) !< Cell edges (u, v), strictly increasing.
-   type(cut_cells_2d_t), intent(out)           :: cut       !< Cut cells.
+   type(cut_cells_2d_t), intent(inout)         :: cut       !< Cut cells (released from the device and reset first).
    integer(I4P),         intent(out), optional :: status    !< STATUS_OK or STATUS_INVALID_INPUT.
    logical,              intent(in),  optional :: intervals !< Record the fluid edge intervals (default .true.).
+   logical,              intent(in),  optional :: resident  !< Leave the outputs on the device (default .false.).
    integer(I4P)                                :: st        !< Module status.
    logical                                     :: wi        !< With the intervals.
+   logical                                     :: res       !< Resident.
 
    if (present(status)) status = STATUS_OK
    wi = .true. ; if (present(intervals)) wi = intervals
+   res = .false. ; if (present(resident)) res = resident
    if (self%nv > 0_I4P) then
-      call compute_cut_cells_2d_device(self%u, self%v, self%next, x, y, cut, st, wi)
+      call compute_cut_cells_2d_device(self%u, self%v, self%next, x, y, cut, st, wi, res)
    else
       block
          real(R8P)    :: uu(0), vv(0)
          integer(I4P) :: nn(0)
-         call compute_cut_cells_2d_device(uu, vv, nn, x, y, cut, st, wi)
+         call compute_cut_cells_2d_device(uu, vv, nn, x, y, cut, st, wi, res)
       end block
    endif
    if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
