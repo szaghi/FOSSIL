@@ -138,6 +138,20 @@ The resident step is bound by the tags, about 25 of its 32 ms at 1024², because
 one million cell boxes and returns the codes at every step. The swept geometry and the piece links are not on the
 device yet (issue #100, steps 4 and 5), so a whole solver step still goes back to the host.
 
+**The 3-D plane sections.** `cut_cells_3d(..., device_sections=.true.)` cuts its 3(N+1) plane sections on the device,
+with the same bits, when no `links`, `moments_order` > 0 or `quadrature` is asked; the default stays the host path.
+The sections of one axis are the blocks of one multi-block launch (`cut_cells_device_many`), and a device kernel writes
+the face arrays, which alone come back. Measured by `fossil_test_distance_bench` (faces copied back, best of 5):
+
+| body | 32³ host / device [ms] | 64³ | 128³ |
+|---|---|---|---|
+| bunny | 99 / 115 | 242 / 240 | 849 / 700 |
+| cube-01 | 6.3 / 4.2 | 43 / 12 | 308 / 106 |
+| dragon-fine | 48 / 55 | 130 / 115 | 531 / 359 |
+
+The 2-D work drops about 3x; slicing every plane on the host (`slice_surface` scans every facet per plane) is now about
+60 % of the device path.
+
 ## Example
 
 The basic calls, on the dragon section and the dragon, are in
@@ -314,6 +328,7 @@ within 7.98·10⁻¹⁷ of the plate's area in every frame.
 | 2-D cut cells, `cut_cells_device` vs `cut_cells`: the sections of 9 benchmark bodies and 4 curves up to 1024², with and without intervals (RTX 4070) | 0 mismatches, every output bitwise (`fossil_test_curve_bench 256`) |
 | 2-D cut cells resident (`resident=.true.`, then `update_host`) vs `cut_cells`, same cases; the classification and prefix sums of the device path vs the host's, integer for integer | 0 mismatches (`fossil_test_curve_bench 256`, `fossil_test_cut_cells_device_twin`) |
 | a moving ellipse and NACA 0012, 3 steps of move + tag + cut, device tags and resident cut vs the CPU at every step | 0 mismatches (`cut cells 2-D chain device vs serial mismatches`) |
+| 3-D faces with the plane sections on the device (`device_sections=.true.`) vs the host path: bunny, cube-01, dragon-fine at 32³; stress curves as blocks of one multi-block call | 0 mismatches (`cut cells 3-D sections device vs serial mismatches`, `fossil_test_cut_cells_blocks_twin`) |
 | 3-D pieces: cube-01, an octahedron and 40 lattice tetrahedra on grids of step 1/8, 1/4, 1/16 (1.57 million cells) | 19 cells untrusted (947 before issue #70), none outside [0, 1]; per-piece closure 3.5·10⁻¹⁴, piece sums 1.4·10⁻¹⁴, block volume 1.6·10⁻¹⁵ |
 | node parities along x, y, z on a grid-aligned cube, an octahedron, 20 lattice tetrahedra (2-D: square, diamond, 20 triangles) | 0 of 108 086 and 0 of 6358 disagree (108 and 45 before issue #69) |
 | centre inside flags within 3 ulp of a tilted face: tetrahedron (3-D), triangle (2-D), quadruple-precision reference | 0 of 3168 and 0 of 3200 wrong (249 and 295 before issue #69) |
@@ -371,5 +386,6 @@ within 7.98·10⁻¹⁷ of the plate's area in every frame.
   face that does not close; it is flagged, never silently wrong.
 - **Watertight input.** Cells whose boundary does not close (open curves or
   surfaces) are flagged in `closed` and get no measures.
-- **On the device: the 2-D cut cells only.** `curve%cut_cells_device` and the line crossings have device paths; the
-  3-D cut cells, the swept geometry and the piece links are CPU only (issue #100 plans them).
+- **On the device: the 2-D cut cells and the 3-D plane sections.** `curve%cut_cells_device`,
+  `cut_cells_3d(..., device_sections=.true.)` and the line crossings have device paths; the 3-D cells themselves, the
+  swept geometry and the piece links are CPU only (issue #100 plans them).
