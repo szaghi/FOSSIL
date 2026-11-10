@@ -37,6 +37,9 @@ use penf,              only : I4P, R8P
 implicit none
 private
 public :: cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device, cut_cells_2d_reset
+! the stages of the two paths, public for the twin test (issue #100 step 6a; not re-exported by `fossil`)
+public :: node_flags, cut_cells_2d_prepare, cut_cells_2d_classify, cut_cells_2d_scan, cut_cells_2d_classify_dev, &
+          cut_cells_2d_scan_dev
 
 type :: cut_cells_2d_t
    !< Cut-cell geometry of a block (fluid = outside the solid).
@@ -114,6 +117,13 @@ type :: piece_t
    integer(I4P) :: ta = 0_I4P, tb = 0_I4P !< End tags: crossing id (> 0) or -vertex (< 0).
 endtype piece_t
 
+interface take
+   !< Reuse an output array of the previous result when its shape is the new one (issue #100 step 6a).
+   module procedure take_l2, take_i1, take_i2, take_r1, take_r2, take_r3
+endinterface take
+
+integer(I4P), parameter :: SCAN_SEG = 64_I4P !< Cells per chunk of the device classification and prefix sums (#100).
+integer(I4P), parameter :: SCAN_SUP = 64_I4P !< Chunks per super-chunk of their offsets (`chunk_offsets_dev`).
 integer(I4P), parameter :: NHDR = 7_I4P !< Header of a cut cell's integer workspace (issue #100): status (0 nothing to
                                         !< write, 1 pieces, 2 the whole cell fluid), ns, nh, nsb, chains and loops, crossings,
                                         !< wall pieces.
@@ -244,16 +254,21 @@ contains
    !< the same outputs bit for bit.
    !<
    !< The host does what `compute_cut_cells_2d` does before the kernels, through the same routines: the grid check, the
-   !< walk and the indexes (`cut_cells_2d_prepare`), the per-row segment lists of the node flags (`node_rows`), the cell
-   !< classification and the workspace sizing (`cut_cells_2d_classify`), and the prefix sums (`cut_cells_2d_scan`, on
-   !< the ncut counts copied back). The device runs the kernels of the host path, one thread per node or per cell:
-   !< 1. `node_parity` per node (today's exact per-pair tests over the row's segments), copied back for the
-   !<    classification;
-   !< 2. `cut_cell_2d_count` over the cut cells, into a workspace pool created on the device; the counts come back;
-   !< 3. `quiet_cell_2d_kernel` over all cells (quiet ones act) and `cut_cell_2d_fill` over the cut cells;
-   !< 4. the outputs are copied back, or with `resident` left on the device (step 6a; see `cut_cells_2d_t`).
+   !< walk and the indexes (`cut_cells_2d_prepare`) and the per-row segment lists of the node flags (`node_rows`). The
+   !< device runs the kernels of the host path, one thread per node or per cell, and the integer stages (step 6a):
+   !< 1. `node_parity` per node (today's exact per-pair tests over the row's segments);
+   !< 2. the cell classification and the workspace sizing (`cut_cells_2d_classify_dev`, the integers of
+   !<    `cut_cells_2d_classify`; ncut and the pool sizes come back);
+   !< 3. `cut_cell_2d_count` over the cut cells, into a workspace pool created on the device;
+   !< 4. the prefix sums (`cut_cells_2d_scan_dev`, the integers of `cut_cells_2d_scan`; np, niv, nbd come back);
+   !< 5. `quiet_cell_2d_kernel` over all cells (quiet ones act) and `cut_cell_2d_fill` over the cut cells;
+   !< 6. the outputs are copied back, or with `resident` left on the device (step 6a; see `cut_cells_2d_t`).
+   !< Only scalars come back to the host before the outputs.
    !< The outputs are built in local arrays mapped by unstructured data (`enter data`), then moved into `cc` by
    !< `move_alloc`, which keeps their host addresses: the runtime's present table, keyed on them, stays valid.
+   !< The host arrays of `cc` are reused when their shape is the new one (`take`; a resident `cc` is released first): a
+   !< copy back into freshly allocated pageable memory pays the first-touch page faults (about 3.7 GB/s against 13 GB/s
+   !< into touched pages at 1024^2, 97 ms against 25 ms per call in a loop on the same `cc`).
    !< The same kernels, the same operations in the same order, `-gpu=nofma` (#20): the same bits. Built without OpenACC
    !< the directives are comments and the loops run on the host in order.
    real(R8P),            intent(in)           :: u(:), v(:) !< Vertices.
@@ -287,21 +302,22 @@ contains
    real(R8P)    :: zmom(1, 1), zwmom(1, 1), zbseg(4, 1)  !< No moments, no wall moments, no boundary segments.
    logical      :: zbwall(1)                             !< No wall flags.
    logical      :: res                                   !< Leave the outputs on the device.
-   integer(I4P) :: nx, ny, nxs, nps, ne, ncell, nu, nr, c, i, j, k, ncut, np, niv, nbd, eid(4) !< Work.
+   integer(I4P) :: nx, ny, nxs, nps, ne, ncell, nu, nr, c, i, j, k, ncut, np, niv, nbd, nrw, niw, eid(4) !< Work.
 
-   call cut_cells_2d_reset(cc)
+   if (cc%on_device) call cc%exit_device ! the host arrays of cc are kept for reuse (`take`), then cc is reset
    res = .false. ; if (present(resident)) res = resident
    call cut_cells_2d_grid(x, y, nx, ny, status)
-   if (status /= 0_I4P) return
-   cc%nx = nx ; cc%ny = ny ; cc%moments_order = 0_I4P
+   if (status /= 0_I4P) then
+      call cut_cells_2d_reset(cc) ; return
+   endif
    nu = size(u, kind=I4P)
    call node_rows(u, v, next, y, rstart, rseg)
    nr = size(rseg, kind=I4P)
    call cut_cells_2d_prepare(u, v, next, x, y, nx, ny, ne, ncell, nxs, nps, xstart, xord, pstart, pord, xp, pab, ptg)
    zme = 0_I4P ; zmom = 0._R8P ; zwmom = 0._R8P ; zbseg = 0._R8P ; zbwall = .false.
-   allocate(node_in(nx + 1, ny + 1))
+   call take(cc%node_in, node_in, nx + 1_I4P, ny + 1_I4P)
    !$acc data copyin(x, y, zme, zmom, zwmom, zbseg, zbwall)
-   ! 1. node flags, one thread per node; an output: it stays mapped, the host copy feeds the classification
+   ! 1. node flags, one thread per node (an output: it stays on the device)
    !$acc enter data create(node_in)
    !$acc data copyin(u, v, next, rstart, rseg)
    !$acc parallel loop gang vector collapse(2) default(present) present(node_in)
@@ -311,17 +327,20 @@ contains
       enddo
    enddo
    !$acc end data
-   !$acc update host(node_in)
-   ! classification and workspace sizing on the host
-   call cut_cells_2d_classify(nx, ny, ne, ncell, xstart, pstart, node_in, 0_I4P, ckind, ncut, cutc, rwo, iwo)
-   allocate(cnt(3, max(1_I4P, ncut)), rw(max(1_I4P, rwo(ncut + 1) - 1_I4P)), iw(max(1_I4P, iwo(ncut + 1) - 1_I4P)))
-   allocate(closed(nx, ny), alpha(nx, ny), aperture(4, nx, ny), centroid(2, nx, ny), wet_length(nx, ny), &
-            wet_centroid(2, nx, ny), wet_normal(2, nx, ny), pieces(nx, ny), first_piece(nx, ny), ivo(ncell), bdo(ncell))
-   !$acc enter data create(closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
-   !$acc data copyin(xstart, xord, xp, pstart, pord, pab, ptg, ckind, cutc, rwo, iwo) create(rw, iw, cnt)
-   ! 2. count over the cut cells
+   !$acc data copyin(xstart, xord, xp, pstart, pord, pab, ptg)
+   ! 2. classification and workspace sizing (ckind, cutc, rwo, iwo stay on the device; ncut and the totals come back)
+   call cut_cells_2d_classify_dev(nx, ny, ne, ncell, xstart, pstart, node_in, 0_I4P, ckind, ncut, cutc, rwo, iwo, nrw, niw)
+   allocate(cnt(3, max(1_I4P, ncut)), rw(max(1_I4P, nrw)), iw(max(1_I4P, niw)))
+   call take(cc%closed, closed, nx, ny) ; call take(cc%alpha, alpha, nx, ny) ; call take(cc%aperture, aperture, 4_I4P, nx, ny)
+   call take(cc%centroid, centroid, 2_I4P, nx, ny) ; call take(cc%wet_length, wet_length, nx, ny)
+   call take(cc%wet_centroid, wet_centroid, 2_I4P, nx, ny) ; call take(cc%wet_normal, wet_normal, 2_I4P, nx, ny)
+   call take(cc%pieces, pieces, nx, ny) ; call take(cc%first_piece, first_piece, nx, ny)
+   allocate(ivo(ncell), bdo(ncell))
+   !$acc enter data create(closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces, first_piece)
+   !$acc data create(rw, iw, cnt, ivo, bdo)
+   ! 3. count over the cut cells
    !$acc parallel loop gang vector default(present) private(eid) &
-   !$acc& present(node_in, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal)
+   !$acc& present(node_in, cutc, rwo, iwo, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal)
    do k = 1_I4P, ncut
       c = cutc(k) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
       call cell_edge_ids(nx, ny, i, j, eid)
@@ -332,17 +351,24 @@ contains
                              centroid(1, i, j), wet_length(i, j), wet_centroid(1, i, j), wet_normal(1, i, j), &
                              cnt(3, k), cnt(1, k), cnt(2, k))
    enddo
-   !$acc update host(cnt)
-   ! 3. prefix sums on the host
-   call cut_cells_2d_scan(nx, ny, ncell, ckind, ncut, cnt, with_iv, .false., first_piece, ivo, bdo, np, niv, nbd)
-   allocate(pcell(2, np), parea(np), pcen(2, np), pwl(np), pwn(2, np), pap(4, np), ivs(np + 1), bds(np + 1), &
-            ive(max(1_I4P, niv)), ivl(max(1_I4P, niv)), ivh(max(1_I4P, niv)))
-   !$acc enter data copyin(first_piece) create(pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
-   !$acc data copyin(ivo, bdo) create(bds)
-   ! 4. fill: the quiet cells, then the cut cells
+   ! 4. prefix sums (first_piece, ivo, bdo stay on the device; np, niv, nbd come back)
+   call cut_cells_2d_scan_dev(nx, ny, ncell, ckind, ncut, cnt, with_iv, .false., first_piece, ivo, bdo, np, niv, nbd)
+   call take(cc%piece_cell, pcell, 2_I4P, np) ; call take(cc%piece_area, parea, np)
+   call take(cc%piece_centroid, pcen, 2_I4P, np) ; call take(cc%piece_wet_length, pwl, np)
+   call take(cc%piece_wet_normal, pwn, 2_I4P, np) ; call take(cc%piece_aperture, pap, 4_I4P, np)
+   call take(cc%piece_iv_start, ivs, np + 1_I4P)
+   if (niv > 0_I4P) then
+      call take(cc%piece_iv_edge, ive, niv) ; call take(cc%piece_iv_lo, ivl, niv) ; call take(cc%piece_iv_hi, ivh, niv)
+   else
+      allocate(ive(1), ivl(1), ivh(1))
+   endif
+   allocate(bds(np + 1))
+   !$acc enter data create(pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
+   !$acc data create(bds)
+   ! 5. fill: the quiet cells, then the cut cells
    !$acc parallel loop gang vector default(present) private(eid) &
-   !$acc& present(closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces, first_piece, pcell, &
-   !$acc&         parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
+   !$acc& present(ckind, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces, first_piece, &
+   !$acc&         pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
    do c = 1_I4P, ncell
       if (ckind(c) > 0_I4P) cycle
       i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
@@ -354,7 +380,7 @@ contains
                                 0_I4P, zbseg, zbwall)
    enddo
    !$acc parallel loop gang vector default(present) private(eid) &
-   !$acc& present(pieces, first_piece, pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
+   !$acc& present(cutc, rwo, iwo, pieces, first_piece, pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
    do k = 1_I4P, ncut
       c = cutc(k) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
       call cell_edge_ids(nx, ny, i, j, eid)
@@ -368,11 +394,15 @@ contains
    !$acc end serial
    !$acc end data
    !$acc end data
+   !$acc exit data delete(ckind, cutc, rwo, iwo)
    !$acc end data
-   if (.not. res) then ! copy back the device-written outputs; node_in and first_piece are already on the host
-      !$acc exit data copyout(closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces, pcell, &
-      !$acc&                  parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh) delete(node_in, first_piece)
+   !$acc end data
+   if (.not. res) then ! copy back the outputs
+      !$acc exit data copyout(node_in, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces, &
+      !$acc&                  first_piece, pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
    endif
+   call cut_cells_2d_reset(cc) ! frees what was not reused
+   cc%nx = nx ; cc%ny = ny ; cc%moments_order = 0_I4P
    call move_alloc(node_in, cc%node_in)
    call move_alloc(closed, cc%closed) ; call move_alloc(alpha, cc%alpha) ; call move_alloc(aperture, cc%aperture)
    call move_alloc(centroid, cc%centroid) ; call move_alloc(wet_length, cc%wet_length)
@@ -405,6 +435,90 @@ contains
    if (cc%on_device) call cc%exit_device
    cc = fresh
    endsubroutine cut_cells_2d_reset
+
+   subroutine take_l2(src, dst, n1, n2)
+   !< dst = src (moved) if src has shape [n1, n2], else a new array of that shape (issue #100 step 6a).
+   logical, allocatable, intent(inout) :: src(:,:) !< Old array.
+   logical, allocatable, intent(out)   :: dst(:,:) !< New array.
+   integer(I4P),         intent(in)    :: n1, n2   !< Shape.
+
+   if (allocated(src)) then
+      if (size(src, 1) == n1 .and. size(src, 2) == n2) then
+         call move_alloc(src, dst) ; return
+      endif
+   endif
+   allocate(dst(n1, n2))
+   endsubroutine take_l2
+
+   subroutine take_i1(src, dst, n1)
+   !< dst = src (moved) if src has size n1, else a new array.
+   integer(I4P), allocatable, intent(inout) :: src(:) !< Old array.
+   integer(I4P), allocatable, intent(out)   :: dst(:) !< New array.
+   integer(I4P),              intent(in)    :: n1     !< Size.
+
+   if (allocated(src)) then
+      if (size(src, 1) == n1) then
+         call move_alloc(src, dst) ; return
+      endif
+   endif
+   allocate(dst(n1))
+   endsubroutine take_i1
+
+   subroutine take_i2(src, dst, n1, n2)
+   !< dst = src (moved) if src has shape [n1, n2], else a new array.
+   integer(I4P), allocatable, intent(inout) :: src(:,:) !< Old array.
+   integer(I4P), allocatable, intent(out)   :: dst(:,:) !< New array.
+   integer(I4P),              intent(in)    :: n1, n2   !< Shape.
+
+   if (allocated(src)) then
+      if (size(src, 1) == n1 .and. size(src, 2) == n2) then
+         call move_alloc(src, dst) ; return
+      endif
+   endif
+   allocate(dst(n1, n2))
+   endsubroutine take_i2
+
+   subroutine take_r1(src, dst, n1)
+   !< dst = src (moved) if src has size n1, else a new array.
+   real(R8P), allocatable, intent(inout) :: src(:) !< Old array.
+   real(R8P), allocatable, intent(out)   :: dst(:) !< New array.
+   integer(I4P),           intent(in)    :: n1     !< Size.
+
+   if (allocated(src)) then
+      if (size(src, 1) == n1) then
+         call move_alloc(src, dst) ; return
+      endif
+   endif
+   allocate(dst(n1))
+   endsubroutine take_r1
+
+   subroutine take_r2(src, dst, n1, n2)
+   !< dst = src (moved) if src has shape [n1, n2], else a new array.
+   real(R8P), allocatable, intent(inout) :: src(:,:) !< Old array.
+   real(R8P), allocatable, intent(out)   :: dst(:,:) !< New array.
+   integer(I4P),           intent(in)    :: n1, n2   !< Shape.
+
+   if (allocated(src)) then
+      if (size(src, 1) == n1 .and. size(src, 2) == n2) then
+         call move_alloc(src, dst) ; return
+      endif
+   endif
+   allocate(dst(n1, n2))
+   endsubroutine take_r2
+
+   subroutine take_r3(src, dst, n1, n2, n3)
+   !< dst = src (moved) if src has shape [n1, n2, n3], else a new array.
+   real(R8P), allocatable, intent(inout) :: src(:,:,:) !< Old array.
+   real(R8P), allocatable, intent(out)   :: dst(:,:,:) !< New array.
+   integer(I4P),           intent(in)    :: n1, n2, n3 !< Shape.
+
+   if (allocated(src)) then
+      if (size(src, 1) == n1 .and. size(src, 2) == n2 .and. size(src, 3) == n3) then
+         call move_alloc(src, dst) ; return
+      endif
+   endif
+   allocate(dst(n1, n2, n3))
+   endsubroutine take_r3
 
    function host_key(cc) result(key)
    !< Host address of alpha (the key of a mapped cut; 0 if alpha is not allocated).
@@ -597,6 +711,196 @@ contains
       endif
    enddo
    endsubroutine cut_cells_2d_scan
+
+   subroutine cut_cells_2d_classify_dev(nx, ny, ne, ncell, xstart, pstart, node_in, nm, ckind, ncut, cutc, rwo, iwo, nrw_tot, &
+                                        niw_tot, seg)
+   !< `cut_cells_2d_classify` on the device (issue #100 step 6a): the same ckind, ncut, cutc, rwo, iwo, integer for
+   !< integer. xstart, pstart and node_in must be present on the device; ckind, cutc, rwo and iwo are allocated here and
+   !< left mapped (filled on the device; their host copies are not written): the caller deletes them. They are built in
+   !< local arrays mapped by `enter data` and moved into the dummies (`move_alloc` keeps the host addresses): entering
+   !< data on an allocatable dummy leaks a mapping of its descriptor with nvfortran 26.9 (later calls fail with
+   !< 'partially present'). Only ncut and the two workspace totals come back (nrw_tot = rwo(ncut + 1) - 1, niw_tot =
+   !< iwo(ncut + 1) - 1).
+   !<
+   !< Scan over chunks of `seg` cells in cell order (default SCAN_SEG): each chunk counts its cut cells and their
+   !< workspace sizes (one thread per chunk), `chunk_offsets_dev` turns the chunk totals into exclusive offsets, and
+   !< each chunk then numbers its cut cells from its offset. Integer sums: any chunk size gives the same integers, the
+   !< numbering is the cell order of the host's. Built without OpenACC the loops run on the host in order.
+   integer(I4P),              intent(in)           :: nx, ny, ne, ncell      !< Cells, edges.
+   integer(I4P),              intent(in)           :: xstart(ne + 1)         !< Crossings by edge.
+   integer(I4P),              intent(in)           :: pstart(ncell + 1)      !< Wall pieces by cell.
+   logical,                   intent(in)           :: node_in(nx + 1, ny + 1) !< Node inside flags.
+   integer(I4P),              intent(in)           :: nm                     !< Moments.
+   integer(I4P), allocatable, intent(out)          :: ckind(:)               !< Cell kinds [ncell].
+   integer(I4P),              intent(out)          :: ncut                   !< Cut cells.
+   integer(I4P), allocatable, intent(out)          :: cutc(:)                !< Cell of each cut cell [ncut].
+   integer(I4P), allocatable, intent(out)          :: rwo(:), iwo(:)         !< Workspace slices [ncut + 1].
+   integer(I4P),              intent(out)          :: nrw_tot, niw_tot       !< Workspace pool sizes.
+   integer(I4P),              intent(in), optional :: seg                    !< Cells per chunk (tests).
+   integer(I4P), allocatable :: tot(:,:)                                     !< Chunk totals, then offsets [3, nch].
+   integer(I4P), allocatable :: ck(:), cu(:), ro(:), io(:)                   !< Kinds, cut cells, offsets (built here).
+   integer(I4P) :: sz, nch, ch, c, i, j, k, e, nxc, nrw, niw, a1, a2, a3, eid(4), sums(3) !< Work.
+
+   sz = SCAN_SEG ; if (present(seg)) sz = max(1_I4P, seg)
+   nch = (ncell + sz - 1_I4P) / sz
+   allocate(ck(ncell), tot(3, nch))
+   !$acc enter data create(ck)
+   !$acc data create(tot)
+   ! 1. per chunk: the quiet cells' kinds, the number of cut cells and their workspace sizes
+   !$acc parallel loop gang vector default(present) private(eid) present(xstart, pstart, node_in, ck, tot)
+   do ch = 1_I4P, nch
+      a1 = 0_I4P ; a2 = 0_I4P ; a3 = 0_I4P
+      !$acc loop seq
+      do c = (ch - 1_I4P) * sz + 1_I4P, min(ch * sz, ncell)
+         i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+         call cell_edge_ids(nx, ny, i, j, eid)
+         if (cell_is_quiet(pstart(c + 1) - pstart(c), eid, ne, xstart, node_in(i, j), node_in(i + 1, j), &
+                           node_in(i + 1, j + 1), node_in(i, j + 1))) then
+            ck(c) = 0_I4P ; if (node_in(i, j)) ck(c) = -1_I4P
+         else
+            nxc = 0_I4P
+            do e = 1_I4P, 4_I4P
+               nxc = nxc + xstart(eid(e) + 1) - xstart(eid(e))
+            enddo
+            call cut_cell_2d_sizes(nxc, pstart(c + 1) - pstart(c), nm, nrw, niw)
+            ck(c) = 1_I4P ; a1 = a1 + 1_I4P ; a2 = a2 + nrw ; a3 = a3 + niw
+         endif
+      enddo
+      tot(1, ch) = a1 ; tot(2, ch) = a2 ; tot(3, ch) = a3
+   enddo
+   ! 2. exclusive offsets of the chunks
+   call chunk_offsets_dev(nch, [0_I4P, 1_I4P, 1_I4P], tot, sums)
+   ncut = sums(1) ; nrw_tot = sums(2) - 1_I4P ; niw_tot = sums(3) - 1_I4P
+   allocate(cu(ncut), ro(ncut + 1), io(ncut + 1))
+   !$acc enter data create(cu, ro, io)
+   ! 3. per chunk: number the cut cells from the chunk's offsets
+   !$acc parallel loop gang vector default(present) private(eid) present(xstart, pstart, ck, cu, ro, io, tot)
+   do ch = 1_I4P, nch
+      k = tot(1, ch) ; a2 = tot(2, ch) ; a3 = tot(3, ch)
+      !$acc loop seq
+      do c = (ch - 1_I4P) * sz + 1_I4P, min(ch * sz, ncell)
+         if (ck(c) <= 0_I4P) cycle
+         i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+         call cell_edge_ids(nx, ny, i, j, eid)
+         nxc = 0_I4P
+         do e = 1_I4P, 4_I4P
+            nxc = nxc + xstart(eid(e) + 1) - xstart(eid(e))
+         enddo
+         call cut_cell_2d_sizes(nxc, pstart(c + 1) - pstart(c), nm, nrw, niw)
+         k = k + 1_I4P ; ck(c) = k ; cu(k) = c ; ro(k) = a2 ; io(k) = a3
+         a2 = a2 + nrw ; a3 = a3 + niw
+      enddo
+   enddo
+   a2 = sums(2) ; a3 = sums(3)
+   !$acc serial default(present) present(ro, io)
+   ro(ncut + 1) = a2 ; io(ncut + 1) = a3
+   !$acc end serial
+   !$acc end data
+   call move_alloc(ck, ckind) ; call move_alloc(cu, cutc) ; call move_alloc(ro, rwo) ; call move_alloc(io, iwo)
+   endsubroutine cut_cells_2d_classify_dev
+
+   subroutine cut_cells_2d_scan_dev(nx, ny, ncell, ckind, ncut, cnt, with_iv, with_bnd, first_piece, ivo, bdo, np, niv, &
+                                    nbd, seg)
+   !< `cut_cells_2d_scan` on the device (issue #100 step 6a): the same first_piece, ivo, bdo and totals, integer for
+   !< integer. Every array must be present on the device; the outputs are written there only (their host copies are not).
+   !< Only the totals come back. The two-level chunk scan of `cut_cells_2d_classify_dev`.
+   integer(I4P), intent(in)           :: nx, ny, ncell          !< Cells.
+   integer(I4P), intent(in)           :: ckind(ncell)           !< Cell kinds.
+   integer(I4P), intent(in)           :: ncut                   !< Cut cells.
+   integer(I4P), intent(in)           :: cnt(:,:)               !< Counts of the cut cells [3, >= ncut].
+   logical,      intent(in)           :: with_iv, with_bnd      !< Intervals, boundary segments recorded.
+   integer(I4P), intent(out)          :: first_piece(nx, ny)    !< First piece of each cell.
+   integer(I4P), intent(out)          :: ivo(ncell), bdo(ncell) !< Intervals, boundary segments before each cell.
+   integer(I4P), intent(out)          :: np, niv, nbd           !< Pieces, intervals, boundary segments.
+   integer(I4P), intent(in), optional :: seg                    !< Cells per chunk (tests).
+   integer(I4P), allocatable :: tot(:,:)                        !< Chunk totals, then offsets [3, nch].
+   integer(I4P) :: sz, nch, ch, c, i, j, k, a1, a2, a3, qi, qb, sums(3) !< Work.
+
+   sz = SCAN_SEG ; if (present(seg)) sz = max(1_I4P, seg)
+   nch = (ncell + sz - 1_I4P) / sz
+   qi = 0_I4P ; if (with_iv) qi = 4_I4P
+   qb = 0_I4P ; if (with_bnd) qb = 4_I4P
+   allocate(tot(3, nch))
+   !$acc data create(tot)
+   !$acc parallel loop gang vector default(present) present(ckind, cnt, tot)
+   do ch = 1_I4P, nch
+      a1 = 0_I4P ; a2 = 0_I4P ; a3 = 0_I4P
+      !$acc loop seq
+      do c = (ch - 1_I4P) * sz + 1_I4P, min(ch * sz, ncell)
+         k = ckind(c)
+         if (k == 0_I4P) then
+            a1 = a1 + 1_I4P ; a2 = a2 + qi ; a3 = a3 + qb
+         elseif (k > 0_I4P) then
+            a1 = a1 + cnt(3, k) ; a2 = a2 + cnt(1, k) ; a3 = a3 + cnt(2, k)
+         endif
+      enddo
+      tot(1, ch) = a1 ; tot(2, ch) = a2 ; tot(3, ch) = a3
+   enddo
+   call chunk_offsets_dev(nch, [0_I4P, 0_I4P, 0_I4P], tot, sums)
+   np = sums(1) ; niv = sums(2) ; nbd = sums(3)
+   !$acc parallel loop gang vector default(present) present(ckind, cnt, tot, first_piece, ivo, bdo)
+   do ch = 1_I4P, nch
+      a1 = tot(1, ch) ; a2 = tot(2, ch) ; a3 = tot(3, ch)
+      !$acc loop seq
+      do c = (ch - 1_I4P) * sz + 1_I4P, min(ch * sz, ncell)
+         i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+         first_piece(i, j) = a1 + 1_I4P ; ivo(c) = a2 ; bdo(c) = a3
+         k = ckind(c)
+         if (k == 0_I4P) then
+            a1 = a1 + 1_I4P ; a2 = a2 + qi ; a3 = a3 + qb
+         elseif (k > 0_I4P) then
+            a1 = a1 + cnt(3, k) ; a2 = a2 + cnt(1, k) ; a3 = a3 + cnt(2, k)
+         endif
+      enddo
+   enddo
+   !$acc end data
+   endsubroutine cut_cells_2d_scan_dev
+
+   subroutine chunk_offsets_dev(nch, base, tot, sums)
+   !< Exclusive prefix sums of the chunk totals tot(1:3, 1:nch) in place, from `base`, on the device (issue #100 step
+   !< 6a); sums = base + the totals, on the host. tot must be present. Two levels over super-chunks of SCAN_SUP chunks
+   !< (one thread each), one thread over the super-chunk totals, then one thread per chunk adds its super-chunk's
+   !< offset: integer sums, the integers of a sequential scan.
+   integer(I4P), intent(in)    :: nch          !< Chunks.
+   integer(I4P), intent(in)    :: base(3)      !< Start values.
+   integer(I4P), intent(inout) :: tot(3, nch)  !< Chunk totals in, exclusive offsets out.
+   integer(I4P), intent(out)   :: sums(3)      !< base + the totals.
+   integer(I4P), allocatable   :: sup(:,:)     !< Super-chunk totals, then offsets.
+   integer(I4P) :: nsu, q, ch, a1, a2, a3, b1, b2, b3, t1, t2, t3, sm(3) !< Work.
+
+   nsu = (nch + SCAN_SUP - 1_I4P) / SCAN_SUP
+   b1 = base(1) ; b2 = base(2) ; b3 = base(3)
+   allocate(sup(3, nsu))
+   !$acc data create(sup, sm)
+   !$acc parallel loop gang vector default(present) present(tot, sup)
+   do q = 1_I4P, nsu
+      a1 = 0_I4P ; a2 = 0_I4P ; a3 = 0_I4P
+      !$acc loop seq
+      do ch = (q - 1_I4P) * SCAN_SUP + 1_I4P, min(q * SCAN_SUP, nch)
+         t1 = tot(1, ch) ; t2 = tot(2, ch) ; t3 = tot(3, ch)
+         tot(1, ch) = a1 ; tot(2, ch) = a2 ; tot(3, ch) = a3
+         a1 = a1 + t1 ; a2 = a2 + t2 ; a3 = a3 + t3
+      enddo
+      sup(1, q) = a1 ; sup(2, q) = a2 ; sup(3, q) = a3
+   enddo
+   !$acc serial default(present) present(sup, sm)
+   a1 = b1 ; a2 = b2 ; a3 = b3
+   do q = 1_I4P, nsu
+      t1 = sup(1, q) ; t2 = sup(2, q) ; t3 = sup(3, q)
+      sup(1, q) = a1 ; sup(2, q) = a2 ; sup(3, q) = a3
+      a1 = a1 + t1 ; a2 = a2 + t2 ; a3 = a3 + t3
+   enddo
+   sm(1) = a1 ; sm(2) = a2 ; sm(3) = a3
+   !$acc end serial
+   !$acc parallel loop gang vector default(present) present(tot, sup)
+   do ch = 1_I4P, nch
+      q = (ch - 1_I4P) / SCAN_SUP + 1_I4P
+      tot(1, ch) = tot(1, ch) + sup(1, q) ; tot(2, ch) = tot(2, ch) + sup(2, q) ; tot(3, ch) = tot(3, ch) + sup(3, q)
+   enddo
+   !$acc update host(sm)
+   !$acc end data
+   sums = sm
+   endsubroutine chunk_offsets_dev
 
    pure subroutine cell_edge_ids(nx, ny, i, j, eid)
    !< Edge ids of cell (i, j) counter-clockwise: bottom, right, top, left. Vertical edge (l, k) = l + (k - 1) (nx + 1),

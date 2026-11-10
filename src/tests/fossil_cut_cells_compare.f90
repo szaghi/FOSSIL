@@ -40,6 +40,7 @@ contains
       call c%cut_cells(x=x, y=y, cut=h, status=s(3 * k - 2), intervals=wi)
       call c%cut_cells_device(x=x, y=y, cut=d, status=s(3 * k - 1), intervals=wi)
       n = n + cut_cells_2d_mismatches(h, d)
+      call poison(d) ! the next call reuses the host arrays of d (same shapes): every element must be rewritten
       call c%cut_cells_device(x=x, y=y, cut=d, status=s(3 * k), intervals=wi, resident=.true.)
       if (d%on_device .neqv. allocated(d%alpha)) n = n + 1_I4P
       if (k == 1) then ! a copy is not resident: releasing it leaves d mapped
@@ -54,6 +55,19 @@ contains
    if (d%on_device) n = n + 1_I4P
    if (present(status)) status = sum(s)
    endfunction cut_cells_twin_mismatches
+
+   subroutine poison(d)
+   !< Overwrite every output of d with values no result holds (issue #100 step 6a: the device path reuses them).
+   type(cut_cells_2d_t), intent(inout) :: d !< Result.
+   real(R8P), parameter :: R = -7.77e300_R8P !< Real poison.
+   integer(I4P), parameter :: I = -777777_I4P !< Integer poison.
+
+   if (.not. allocated(d%alpha)) return
+   d%alpha = R ; d%aperture = R ; d%centroid = R ; d%wet_length = R ; d%wet_centroid = R ; d%wet_normal = R
+   d%pieces = I ; d%first_piece = I ; d%closed = .not. d%closed ; d%node_in = .not. d%node_in
+   d%piece_cell = I ; d%piece_area = R ; d%piece_centroid = R ; d%piece_wet_length = R ; d%piece_wet_normal = R
+   d%piece_aperture = R ; d%piece_iv_start = I ; d%piece_iv_edge = I ; d%piece_iv_lo = R ; d%piece_iv_hi = R
+   endsubroutine poison
 
    function cut_cells_2d_mismatches(a, b) result(n)
    !< Differing elements of the device-twin outputs of a and b (0: bit-identical).

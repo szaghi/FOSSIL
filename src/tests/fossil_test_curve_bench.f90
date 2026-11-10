@@ -432,6 +432,12 @@ contains
    if (n < 256_I4P) return
    print '(A)', 'cut cells 2-D timing (5 calls, intervals on, transfers included) [s]: curve, cells, host, device, '// &
                 'device resident (best, median); speed-ups of the best'
+   ! warm-up (issue #100 step 6a): after the host-heavy twin checks the first device calls copied back at ~3.6 GB/s
+   ! instead of ~13.5 GB/s for about a second (RTX 4070, WSL), whatever the code path; ten untimed calls end that window
+   call grid_edges(lo, hi, ngrid(2), x, y)
+   do r = 1, 10
+      call cc(1)%cut_cells_device(x=x, y=y, cut=cut_d, status=st)
+   enddo
    call system_clock(count_rate=rate)
    do i = 1, 4
       if (i == 3) cycle
