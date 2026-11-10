@@ -433,27 +433,31 @@ contains
    !< e = e + b exactly (Shewchuk's Grow-Expansion with zero elimination).
    !<
    !< e(1:n) is a nonoverlapping expansion in increasing magnitude; so is the result.
+   !<
+   !< In place (issue #100 step 3a): the write index m never passes the read index i (m <= i once e(i) is read), so
+   !< the components are those of the former copy through an automatic work array, bit for bit, without the array
+   !< (a per-call allocation in device code). The final component needs size(e) >= n + 1, as before.
    real(R8P),    intent(inout) :: e(:) !< Expansion.
    integer(I4P), intent(inout) :: n    !< Its length.
    real(R8P),    intent(in)    :: b    !< Value to add.
-   real(R8P)                   :: q, qn, h, w(size(e)) !< Running sum (old, new), error, new components.
-   integer(I4P)                :: i, m                 !< Counters.
+   real(R8P)                   :: q, qn, h, ei !< Running sum (old, new), error, component read.
+   integer(I4P)                :: i, m         !< Counters.
 
    q = b
    m = 0_I4P
    do i = 1, n
-      call two_sum(q, e(i), qn, h) ! no aliasing of the in and out arguments
+      ei = e(i)
+      call two_sum(q, ei, qn, h) ! no aliasing of the in and out arguments
       q = qn
       if (h /= 0._R8P) then
          m = m + 1_I4P
-         w(m) = h
+         e(m) = h
       endif
    enddo
    if (q /= 0._R8P) then
       m = m + 1_I4P
-      w(m) = q
+      e(m) = q
    endif
-   e(1:m) = w(1:m)
    n = m
    endsubroutine grow_expansion
 
