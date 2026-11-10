@@ -9,8 +9,14 @@ program fossil_test_cut_cells_3d_device_twin
 !<    offsets, sorted crossings, exact placement) against `cut_cells_3d(..., edges=.true.)`, node_in and edge_x/_y/_z
 !<    bitwise, with and without the edges, on a tilted wedge, a cone, an L-prism on an aligned grid, lattice
 !<    tetrahedra (vertices and edges on grid lines and nodes), the unit cube `cube-01.stl` on a grid through its faces
-!<    and that cube without one facet (an open surface).
-use fossil,                   only : surface_stl_object, cut_cells_3d_t, cut_cells_3d, pose_from_axis_angle, facet_object
+!<    and that cube without one facet (an open surface); the open dragon `dragon.stl` on a coarse grid.
+!< 2. The cut cells: `cut_cells_3d_device` (sections, node states, cell totals, classification, piercings, the count
+!<    and fill passes of the pieces on workspace slices, prefix sums) against `cut_cells_3d` without links, every output
+!<    bitwise (`cut_cells_3d_mismatches`), with and without the edges, copied back and resident (then `update_host`),
+!<    the resident cut overwritten by the next call (the writers release it), on the same bodies.
+use fossil,                   only : surface_stl_object, cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, &
+                                     pose_from_axis_angle, facet_object
+use fossil_cut_cells_compare, only : cut_cells_3d_mismatches
 use fossil_cut_cells_3d,      only : cut_cells_3d_nodes_device
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, to_surface
 use penf,                     only : I4P, I8P, R8P
@@ -61,6 +67,9 @@ do k = 1, size(fc)
 enddo
 call s%adopt_facets(facets=fc)
 call body('cube-01 without one facet (open)')
+call s%load_from_file(file_name='src/tests/dragon.stl', guess_format=.true.)
+x = [(-11.3_R8P + 1.7_R8P * i, i = 0, 12)] ; y = [(-4.6_R8P + 1.0_R8P * i, i = 0, 10)] ; z = [(4.9_R8P + 1.3_R8P * i, i = 0, 12)]
+call body('dragon (open)')
 print '(A,I0)', 'total mismatches: ', total
 print '(A,L1)', 'Are all tests passed? ', ok
 
@@ -68,10 +77,10 @@ contains
    subroutine body(label)
    !< The device stages on s against `cut_cells_3d` on the grid x, y, z.
    character(*), intent(in) :: label !< Case.
-   type(cut_cells_3d_t)     :: ch    !< Host cut cells.
+   type(cut_cells_3d_t)     :: ch, ce, cd !< Host cut cells (with edges, without), device path.
    logical,   allocatable   :: nd(:,:,:)                     !< Device path: node flags.
    real(R8P), allocatable   :: ex(:,:,:), ey(:,:,:), ez(:,:,:) !< Device path: edge fractions.
-   integer(I4P)             :: m, st, st2                    !< Work.
+   integer(I4P)             :: m, st, st2, nm, nu            !< Work.
 
    m = 0_I4P
    call cut_cells_3d(s, x, y, z, ch, status=st, edges=.true.)
@@ -81,8 +90,23 @@ contains
    call cut_cells_3d_nodes_device(s, x, y, z, nd, ex, ey, ez, status=st2)
    m = m + abs(st - st2) + count(ch%node_in .neqv. nd, kind=I4P)
    if (allocated(ex)) m = m + 1_I4P ! no edges asked: none returned
+   ! the cut cells
+   call cut_cells_3d(s, x, y, z, ce, status=st)
+   call cut_cells_3d_device(s, x, y, z, cd, status=st2, edges=.true.)
+   m = m + abs(st - st2) + cut_cells_3d_mismatches(ch, cd)
+   call cut_cells_3d_device(s, x, y, z, cd, status=st2, resident=.true.)
+   call cd%update_host
+   m = m + abs(st - st2) + cut_cells_3d_mismatches(ce, cd)
+   call cut_cells_3d_device(s, x, y, z, cd, status=st2, edges=.true., resident=.true.) ! overwrites a resident cut
+   call cd%update_host
+   m = m + abs(st - st2) + cut_cells_3d_mismatches(ch, cd)
+   call cd%exit_device
+   call cut_cells_3d_device(s, x, y, z, cd, status=st2)
+   m = m + abs(st - st2) + cut_cells_3d_mismatches(ce, cd)
+   nm = count(ch%pieces > 1) ; nu = count(ch%pieces < 0)
    total = total + m ; ok = ok .and. m == 0_I4P .and. st == 0_I4P
-   print '(A,I0,A,I0)', label//': nodes ', size(nd), ', node states and edge fractions mismatches ', m
+   print '(A,I0,A,I0,A,I0,A,I0,A,I0)', label//': nodes ', size(nd), ', cells ', size(ch%alpha), ' (', nm, &
+         ' multi-piece, ', nu, ' untrusted), device path mismatches ', m
    endsubroutine body
 
    function rbits(a, b) result(n)

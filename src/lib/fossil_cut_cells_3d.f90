@@ -65,8 +65,12 @@ module fossil_cut_cells_3d
 !< device in WP2 step 3c): `cell_totals_3d` (clipped triangles and totals, a gather over the cell's candidates),
 !< `cell_pieces_3d` (pieces and measures, count then fill, on a workspace slice sized by `cell_pieces_sizes` from the
 !< cell's candidates and edge piercings), `single_piece_3d`. The candidates are binned by bounding box, then kept only if
-!< the box-triangle test says they touch the cell (`cell_candidates_3d`); the exact edge piercings come from the host
-!< (`cell_piercings`: exact orient3d). Moments, quadrature and the links' intervals take the same kernels.
+!< the box-triangle test says they touch the cell (`cell_candidates_3d`); the exact edge piercings come from
+!< `cell_piercings` (exact orient3d). Moments, quadrature and the links' intervals take the same kernels.
+!< `cut_cells_3d_device` (WP2 step 3c) runs them on the device, with `cell_piercings`, the node states and edge
+!< fractions (`edge_fractions_dev`: one thread per grid line, the crossings sorted as `surface%line_crossings`) and the
+!< prefix sums there; the candidates, the open cells and the slicing stay on the host; no links, moments, quadrature.
+use, intrinsic :: iso_c_binding,   only : c_intptr_t, c_loc
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use fossil_aabb_node_object,   only : aabb_node_object
 use fossil_aabb_tree_object,   only : facet_distance_payload, AABB_TREE_SAH_BVH
@@ -86,16 +90,32 @@ use penf,                      only : I4P, R8P
 
 implicit none
 private
-public :: cut_cells_3d_t, cut_cells_3d, cut_cells_3d_sections
+public :: cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_cells_3d_sections, cut_cells_3d_reset
 ! the device stages (issue #100 step 3c), public for the benches and the twin test (not re-exported by `fossil`)
 public :: cut_cells_3d_nodes_device
 
 integer(I4P), parameter :: MONO2_MAX = 15_I4P !< mono_count(2, MOMENTS_MAX): moments per face, at most.
 integer(I4P), parameter :: MONO3_MAX = 35_I4P !< mono_count(3, MOMENTS_MAX): moments per piece, at most.
 integer(I4P), parameter :: SCAN_CHUNK = 64_I4P !< Entries per chunk of the device prefix sums (`scan_dev`, #100).
+integer(I4P), parameter :: CK_NONE = 0_I4P, CK_EMPTY = 1_I4P, CK_QUIET = 2_I4P, CK_CUT = 3_I4P !< Cell kinds (the
+                                                     !< `K_*` of `cut_pieces_3d`), device path (#100 step 3c).
 
 type :: cut_cells_3d_t
    !< Cut-cell geometry of a 3-D block (fluid = outside the solid).
+   !<
+   !< Resident on the device (issue #100 step 3c). `cut_cells_3d_device(..., resident=.true.)` leaves the outputs
+   !< mapped (OpenACC unstructured data) and never writes their host copies but the faces': until `update_host` the
+   !< other host arrays hold garbage (nx, ny, nz, np, moments_order are set). `on_device` says so. The mapped outputs
+   !< are the face arrays (face_x/_y/_z, their centroids, pieces and closed flags), alpha, centroid, wet_area,
+   !< wet_centroid, wet_normal, closed, pieces, first_piece, the piece arrays piece_cell, piece_volume, piece_centroid,
+   !< piece_wet_area, piece_wet_centroid, piece_wet_normal, piece_face, node_in and, if computed, edge_x/_y/_z (moments,
+   !< quadrature and links are host-only). A device consumer reads them through pointer aliases with `present` (the #20
+   !< rule: member arrays, never the object). `enter_device` maps a host result, `update_host` brings the device values
+   !< back, `exit_device` releases the device copies (call it before a resident cut goes out of scope or is
+   !< deallocated). Every routine that writes a cut (`cut_cells_3d`, `cut_cells_3d_device`, `cut_cells_3d_sections`,
+   !< `cut_coarsen_3d`) releases it first (`cut_cells_3d_reset`). A routine that reads one on the host needs
+   !< `update_host` first. A copy `b = a` of a resident cut is not resident: the type-bound procedures recognise it
+   !< (`device_key`, the host address of alpha when mapped). Built without OpenACC the procedures only set the flag.
    integer(I4P)              :: nx = 0_I4P, ny = 0_I4P, nz = 0_I4P !< Cells.
    real(R8P),    allocatable :: face_x(:,:,:)      !< Fluid fraction of the faces x = x_i [nx+1, ny, nz].
    real(R8P),    allocatable :: face_y(:,:,:)      !< Fluid fraction of the faces y = y_j [nx, ny+1, nz].
@@ -145,6 +165,12 @@ type :: cut_cells_3d_t
    integer(I4P), allocatable :: wall_quad_start(:)  !< Wall rule of piece p (positive weights).
    real(R8P),    allocatable :: wall_quad_point(:,:) !< Its points [3, nw].
    real(R8P),    allocatable :: wall_quad_weight(:) !< Its weights.
+   logical                   :: on_device = .false. !< The outputs are mapped on the device (issue #100 step 3c).
+   integer(c_intptr_t)       :: device_key = 0      !< Host address of alpha when mapped (a copy has another one).
+   contains
+      procedure, pass(self) :: enter_device => cut3_enter_device !< Map the outputs to the device (copyin).
+      procedure, pass(self) :: update_host  => cut3_update_host  !< Copy the mapped outputs back to the host.
+      procedure, pass(self) :: exit_device  => cut3_exit_device  !< Release the device copies.
 endtype cut_cells_3d_t
 
 contains
@@ -159,7 +185,7 @@ contains
    !< `quadrature` (else the sections stay on the host).
    type(surface_stl_object), intent(in)            :: surface    !< Surface.
    real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
-   type(cut_cells_3d_t),     intent(out)           :: cut        !< Cut cells.
+   type(cut_cells_3d_t),     intent(inout)         :: cut        !< Cut cells (released from the device, reset).
    integer(I4P),             intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
    type(cut_links_t),        intent(out), optional :: links      !< Links between the pieces (issue #70).
    logical,                  intent(in),  optional :: edges      !< Also the fluid fractions of the cell edges (issue #70).
@@ -178,6 +204,7 @@ contains
    type(facet_object), pointer :: fp      !< Facet.
    logical              :: dsec   !< The sections on the device.
 
+   call cut_cells_3d_reset(cut)
    if (present(status)) status = STATUS_OK
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
    if (nx < 1 .or. ny < 1 .or. nz < 1) then
@@ -442,13 +469,10 @@ contains
    real(R8P),    allocatable   :: pct(:)                  !< Their positions.
    real(R8P),    allocatable   :: rw(:)                   !< Real workspace of a cell.
    integer(I4P), allocatable   :: iw(:)                   !< Integer workspace of a cell.
-   integer(I4P)                :: nx, ny, nz, m, i, j, k, il, ih, jl, jh, kl, kh, c, np, nt, npc, nrw, niw, q, kd !< Work.
-   integer(I4P)                :: ncell, npt, nivt, nqt, nwt, nivc, nqc, nwc, qwn1, p0, m3, ns, f_, ntmax !< Work.
+   integer(I4P)                :: nx, ny, nz, m, i, j, k, c, np, nt, npc, nrw, niw, q, kd !< Work.
+   integer(I4P)                :: ncell, npt, nivt, nqt, nwt, nivc, nqc, nwc, qwn1, p0, m3, ns, ntmax !< Work.
    real(R8P)                   :: c0(3), c1(3)            !< Cell corners.
    logical,      allocatable   :: open_cell(:,:,:)        !< Cells a mesh boundary edge overlaps.
-   real(R8P),    allocatable   :: ek(:,:)                 !< Edge keys [6, 3 nf] (end points, lexicographic order).
-   integer(I4P), allocatable   :: idx(:)                  !< Sorted edges.
-   real(R8P)                   :: pa(3), pb(3)            !< Edge ends.
    real(R8P)                   :: h(3), tpt(3, 27), tw(27), faces(6), zero(MONO3_MAX) !< Work.
    integer(I4P)                :: cs(8)                   !< Corner states.
    logical                     :: want_iv                 !< Intervals asked.
@@ -464,34 +488,7 @@ contains
    endif
    allocate(secm(nm2, 6)) ; zero = 0._R8P
    ! mesh boundary edges (one facet): the cells they overlap get no count
-   allocate(open_cell(nx, ny, nz), ek(6, 3 * nf), idx(3 * nf)) ; open_cell = .false.
-   do f_ = 1, nf
-      do m = 1, 3
-         pa = tri(:, m, f_) ; pb = tri(:, mod(m, 3) + 1, f_)
-         if (lexless(pb, pa)) then
-            ek(:, 3 * (f_ - 1) + m) = [pb, pa]
-         else
-            ek(:, 3 * (f_ - 1) + m) = [pa, pb]
-         endif
-      enddo
-   enddo
-   call sort_keys(6_I4P, 3_I4P * nf, ek, idx)
-   m = 1
-   do while (m <= 3 * nf)
-      f_ = m
-      do while (f_ < 3 * nf)
-         if (any(ek(:, idx(f_ + 1)) /= ek(:, idx(m)))) exit
-         f_ = f_ + 1
-      enddo
-      if (f_ == m) then ! an edge of one facet
-         pa = ek(1:3, idx(m)) ; pb = ek(4:6, idx(m))
-         il = max(1_I4P, col_of(min(pa(1), pb(1)), x)) ; ih = min(nx, col_of(max(pa(1), pb(1)), x))
-         jl = max(1_I4P, col_of(min(pa(2), pb(2)), y)) ; jh = min(ny, col_of(max(pa(2), pb(2)), y))
-         kl = max(1_I4P, col_of(min(pa(3), pb(3)), z)) ; kh = min(nz, col_of(max(pa(3), pb(3)), z))
-         if (il <= ih .and. jl <= jh .and. kl <= kh) open_cell(il:ih, jl:jh, kl:kh) = .true.
-      endif
-      m = f_ + 1
-   enddo
+   call open_cells_3d(x, y, z, nf, tri, open_cell)
    ! 1. classify and count; corner states: the exact inside flags of the perturbed nodes (issue #70, `edge_fractions`)
    allocate(kind_(ncell), civ(ncell), cq(ncell), cw(ncell), cq1(ncell), cns(ncell))
    kind_ = K_NONE ; civ = 0_I4P ; cq = 0_I4P ; cw = 0_I4P ; cq1 = 0_I4P ; cns = 0_I4P
@@ -525,7 +522,8 @@ contains
                   cut%pieces(i, j, k) = cs(1) ; kind_(c) = K_QUIET
                else
                   kind_(c) = K_CUT ; c0 = [x(i), y(j), z(k)] ; c1 = [x(i + 1), y(j + 1), z(k + 1)]
-                  call cell_piercings(nf, tri, nt, klst(kstart(c):kstart(c + 1) - 1), c0, c1, npc, pce, pcq, pct, pcen)
+                  call cell_piercings(.true., nf, tri, nt, klst(kstart(c):kstart(c + 1) - 1), c0, c1, size(pce, kind=I4P), npc, &
+                                     pce, pcq, pct, pcen)
                   call cell_pieces_sizes(nt, npc, nm2, nm3, qd, nrw, niw)
                   if (nrw > size(rw)) then
                      deallocate(rw) ; allocate(rw(nrw))
@@ -649,7 +647,8 @@ contains
                   cs(q) = merge(0_I4P, 1_I4P, cut%node_in(i + mod(q - 1, 2), j + mod((q - 1) / 2, 2), k + (q - 1) / 4))
                enddo
                nt = kstart(c + 1) - kstart(c) ; c0 = [x(i), y(j), z(k)] ; c1 = [x(i + 1), y(j + 1), z(k + 1)]
-               call cell_piercings(nf, tri, nt, klst(kstart(c):kstart(c + 1) - 1), c0, c1, npc, pce, pcq, pct, pcen)
+               call cell_piercings(.true., nf, tri, nt, klst(kstart(c):kstart(c + 1) - 1), c0, c1, size(pce, kind=I4P), npc, &
+                                     pce, pcq, pct, pcen)
                call cell_pieces_sizes(nt, npc, nm2, nm3, qd, nrw, niw)
                if (nrw > size(rw)) then
                   deallocate(rw) ; allocate(rw(nrw))
@@ -694,21 +693,25 @@ contains
    endif
    endsubroutine cut_pieces_3d
 
-   subroutine cell_piercings(nf, tri, nt, lst, c0, c1, npc, pce, pcq, pct, pcen)
-   !< Exact crossings of the 12 edges of the cell [c0, c1] by its candidates lst (issue #70), host only (exact orient3d):
-   !< a crossing belongs to the edge when it lies after the perturbed low corner and before the perturbed high one
-   !< (`line_crossing_before`), so the corner states and the crossings of every edge agree. Raw, in the order edge, then
-   !< candidate: edge, candidate (position in lst), the kernel's position along the edge, entering (1) or leaving (0);
-   !< `cell_pieces_core` clamps the position to the edge or takes the clipped polygon's vertex on it (issue #100: the
-   !< exact tests before the kernel, which does the rest).
+   subroutine cell_piercings(fill, nf, tri, nt, lst, c0, c1, ncap, npc, pce, pcq, pct, pcen)
+   !< Exact crossings of the 12 edges of the cell [c0, c1] by its candidates lst (issue #70): a crossing belongs to the
+   !< edge when it lies after the perturbed low corner and before the perturbed high one (`line_crossing_before`), so
+   !< the corner states and the crossings of every edge agree. Raw, in the order edge, then candidate: edge, candidate
+   !< (position in lst), the kernel's position along the edge, entering (1) or leaving (0); `cell_pieces_core` clamps
+   !< the position to the edge or takes the clipped polygon's vertex on it (issue #100: the exact tests before the
+   !< kernel, which does the rest). A device kernel since issue #100 step 3c (the device `orient3d`): without fill it
+   !< only counts (the arrays, of ncap entries, are not touched), with fill it writes the npc <= ncap piercings.
+   !$acc routine seq
+   logical,      intent(in)    :: fill          !< Write the piercings (else count them).
    integer(I4P), intent(in)    :: nf            !< Facets.
    real(R8P),    intent(in)    :: tri(3, 3, nf) !< Triangles.
    integer(I4P), intent(in)    :: nt            !< Candidates of the cell.
    integer(I4P), intent(in)    :: lst(nt)       !< Their indexes.
    real(R8P),    intent(in)    :: c0(3), c1(3)  !< Cell corners.
-   integer(I4P), intent(out)   :: npc           !< Piercings (at most 12 nt).
-   integer(I4P), intent(inout) :: pce(:), pcq(:), pcen(:) !< Edge, candidate, entering.
-   real(R8P),    intent(inout) :: pct(:)        !< Position.
+   integer(I4P), intent(in)    :: ncap          !< Capacity of the arrays (>= the piercings with fill; at most 12 nt).
+   integer(I4P), intent(out)   :: npc           !< Piercings.
+   integer(I4P), intent(inout) :: pce(ncap), pcq(ncap), pcen(ncap) !< Edge, candidate, entering.
+   real(R8P),    intent(inout) :: pct(ncap)     !< Position.
    integer(I4P)                :: e, a, kk, q   !< Work.
    real(R8P)                   :: la, lb, tc    !< Edge line, kernel parameter.
    logical                     :: hit, en       !< Crossing, entering.
@@ -719,12 +722,14 @@ contains
       la = merge(c1(mod(a, 3_I4P) + 1_I4P), c0(mod(a, 3_I4P) + 1_I4P), mod(kk, 2_I4P) == 1_I4P)
       lb = merge(c1(mod(a + 1_I4P, 3_I4P) + 1_I4P), c0(mod(a + 1_I4P, 3_I4P) + 1_I4P), kk / 2_I4P == 1_I4P)
       do q = 1, nt
-         call tri_line_hit_oac(reshape(tri(:, :, lst(q)), [9]), a, la, lb, hit, tc, en)
+         call tri_line_hit_oac(tri(1, 1, lst(q)), a, la, lb, hit, tc, en) ! the facet's 9 coordinates in sequence
          if (.not. hit) cycle
-         if (line_crossing_before(tri(:, :, lst(q)), a, la, lb, c0(a), en)) cycle
-         if (.not. line_crossing_before(tri(:, :, lst(q)), a, la, lb, c1(a), en)) cycle
+         if (line_crossing_before(tri(1, 1, lst(q)), a, la, lb, c0(a), en)) cycle
+         if (.not. line_crossing_before(tri(1, 1, lst(q)), a, la, lb, c1(a), en)) cycle
          npc = npc + 1_I4P
-         pce(npc) = e ; pcq(npc) = q ; pct(npc) = tc ; pcen(npc) = merge(1_I4P, 0_I4P, en)
+         if (fill) then
+            pce(npc) = e ; pcq(npc) = q ; pct(npc) = tc ; pcen(npc) = merge(1_I4P, 0_I4P, en)
+         endif
       enddo
    enddo
    endsubroutine cell_piercings
@@ -2285,6 +2290,471 @@ contains
    enddo
    endsubroutine line_fractions
 
+   subroutine cut_cells_3d_device(surface, x, y, z, cut, status, edges, resident)
+   !< `cut_cells_3d` on the device (OpenACC, issue #100 step 3c), without links, moments or quadrature: the same outputs
+   !< bit for bit (cell fractions, centroids, wetted areas, centroids and normals; face fractions, centroids, pieces and
+   !< closed flags; pieces and their measures; node_in; with `edges` the cell-edge fractions).
+   !<
+   !< The host does the grid check, the candidate facets of the cells (`cell_candidates_3d`: binning and the box test),
+   !< the cells a mesh boundary edge overlaps (`open_cells_3d`) and the slicing of the grid planes. The device runs:
+   !< 1. the plane sections (`sections_axis_device`, batched per axis; their faces come back and are mapped again);
+   !< 2. the node states and edge fractions (`edge_fractions_dev`, one thread per grid line);
+   !< 3. the cell totals (`cell_totals_3d`, one thread per cell);
+   !< 4. the classification of the cells, the piercing count and the workspace size of every cut cell (one thread per
+   !<    cell), and their prefix sums (`scan3_dev`; the three totals come back);
+   !< 5. the piercings (`cell_piercings`) and the count pass of `cell_pieces_3d` (one thread per cut cell, on its slice
+   !<    of one workspace sized by `cell_pieces_sizes`), the prefix sums of the pieces (the total comes back);
+   !< 6. the pieces: the cell totals for a single piece (`single_piece_3d`), the fill pass of `cell_pieces_3d` for
+   !<    several (the same kernel on the same inputs, the same bits).
+   !< Only scalars come back before the outputs. With `resident` the outputs stay mapped (see `cut_cells_3d_t`), else
+   !< they are copied back. The outputs are built in local arrays mapped by unstructured data, then moved into `cut`
+   !< (`move_alloc` keeps the host addresses the present table is keyed on). A resident `cut` is released first.
+   !< The surface needs facets and a SAH BVH; it may be mapped by `surface%enter_device` or not. The same kernels, the
+   !< same operations in the same order, `-gpu=nofma` (#20): the same bits. Built without OpenACC the directives are
+   !< comments and the loops run on the host in order (the CI twin test). `status = STATUS_INVALID_INPUT` on bad edges or
+   !< a surface without a SAH BVH (`cut` is then reset).
+   type(surface_stl_object), intent(in), target    :: surface    !< Surface.
+   real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
+   type(cut_cells_3d_t),     intent(inout)         :: cut        !< Cut cells (released from the device and reset first).
+   integer(I4P),             intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,                  intent(in),  optional :: edges      !< Also the fluid fractions of the cell edges.
+   logical,                  intent(in),  optional :: resident   !< Leave the outputs on the device (default .false.).
+   type(aabb_node_object),       pointer :: node_p(:)    !< Alias of surface%aabb%node.
+   type(facet_distance_payload), pointer :: payload_p(:) !< Alias of surface%aabb%payload.
+   real(R8P),                    pointer :: tv_p(:,:)    !< Alias of surface%tri_vertices.
+   real(R8P),    allocatable :: tri(:,:,:), nrm(:,:)     !< Triangles [3, 3, nf], normals [3, nf].
+   integer(I4P), allocatable :: cnt(:), kstart(:), klst(:) !< Candidates of the cells.
+   logical,      allocatable :: open_cell(:,:,:)         !< Cells a mesh boundary edge overlaps.
+   real(R8P),    allocatable :: fx(:,:,:), fy(:,:,:), fz(:,:,:) !< Face fractions.
+   real(R8P),    allocatable :: fxc(:,:,:,:), fyc(:,:,:,:), fzc(:,:,:,:) !< Face centroids.
+   integer(I4P), allocatable :: fxp(:,:,:), fyp(:,:,:), fzp(:,:,:) !< Face pieces.
+   logical,      allocatable :: fxl(:,:,:), fyl(:,:,:), fzl(:,:,:) !< Face closed flags.
+   logical,      allocatable :: nd(:,:,:)                !< Node flags.
+   real(R8P),    allocatable :: ex(:,:,:), ey(:,:,:), ez(:,:,:) !< Edge fractions.
+   real(R8P),    allocatable :: alpha(:,:,:), cen(:,:,:,:), wa(:,:,:), wc(:,:,:,:), wn(:,:,:,:) !< Cell outputs.
+   logical,      allocatable :: cls(:,:,:)               !< Cell outputs: closed.
+   integer(I4P), allocatable :: pcs(:,:,:), fpc(:,:,:)   !< Cell outputs: pieces, first piece.
+   integer(I4P), allocatable :: pcell(:,:)               !< Piece cells.
+   real(R8P),    allocatable :: pvol(:), pcen(:,:), pwa(:), pwc(:,:), pwn(:,:), pfc(:,:) !< Piece measures.
+   integer(I4P), allocatable :: kd(:), cct(:,:), off(:,:) !< Cell kinds; piercings, reals, integers per cell, offsets.
+   integer(I4P), allocatable :: pce(:), pcq(:), pcn(:)   !< Piercings: edge, candidate, entering.
+   real(R8P),    allocatable :: pct(:)                   !< Piercings: positions.
+   real(R8P),    allocatable :: rw(:)                    !< Real workspace pool.
+   integer(I4P), allocatable :: iw(:)                    !< Integer workspace pool.
+   real(R8P)    :: zr1(1), zr3(3, 1), zr6(6, 1), zsec(1, 6) !< Placeholders (count pass, no moments, intervals, rules).
+   integer(I4P) :: zi1(1), ze2(2, 1), ze3(3, 1)          !< Placeholders.
+   real(R8P)    :: c0(3), c1(3), faces(6), hx, hy, hz     !< Per-cell work.
+   integer(I4P) :: cs(8), tot(3)                          !< Per-cell work, totals.
+   type(facet_object), pointer :: fp                      !< Facet.
+   integer(I4P) :: nx, ny, nz, ncell, nf, i, j, k, c, f, m, q, nt, npc, nrw, niw, np, npt, nivc, nqc, nwc, qwn1, p0, st
+   logical      :: all_edges, res, same                   !< Options, work.
+
+   if (cut%on_device) call cut%exit_device
+   call device_grid_check(surface, x, y, z, nx, ny, nz, st)
+   if (present(status)) status = st
+   call cut_cells_3d_reset(cut)
+   if (st /= STATUS_OK) return
+   all_edges = .false. ; if (present(edges)) all_edges = edges
+   res = .false. ; if (present(resident)) res = resident
+   ncell = nx * ny * nz
+   ! host: triangles, candidates, open cells (as `cut_cells_3d`)
+   nf = surface%get_facets_number()
+   allocate(tri(3, 3, nf), nrm(3, nf))
+   do f = 1, nf
+      fp => surface%facet_at(f)
+      do m = 1, 3
+         tri(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
+      enddo
+      nrm(:, f) = cross3(tri(:, 2, f) - tri(:, 1, f), tri(:, 3, f) - tri(:, 1, f))
+   enddo
+   call cell_candidates_3d(x, y, z, nf, tri, nrm, cnt, kstart, klst)
+   call open_cells_3d(x, y, z, nf, tri, open_cell)
+   ! 1. the plane sections (host slicing, device cut; the faces come back)
+   call sections_axis_device(surface, 1_I4P, x, y, z, nx + 1_I4P, ny, nz, fx, fxc, fxp, fxl)
+   call sections_axis_device(surface, 2_I4P, y, z, x, nx, ny + 1_I4P, nz, fy, fyc, fyp, fyl)
+   call sections_axis_device(surface, 3_I4P, z, x, y, nx, ny, nz + 1_I4P, fz, fzc, fzp, fzl)
+   node_p => surface%aabb%node ; payload_p => surface%aabb%payload ; tv_p => surface%tri_vertices
+   zr1 = 0._R8P ; zr3 = 0._R8P ; zr6 = 0._R8P ; zsec = 0._R8P ; zi1 = 0_I4P ; ze2 = 0_I4P ; ze3 = 0_I4P
+   !$acc data copyin(node_p, payload_p, tv_p, x, y, z, tri, nrm, cnt, kstart, klst, open_cell, zr1, zr3, zr6, zsec, zi1, &
+   !$acc&            ze2, ze3)
+   !$acc enter data copyin(fx, fy, fz, fxc, fyc, fzc, fxp, fyp, fzp, fxl, fyl, fzl)
+   ! 2. node states and edge fractions
+   allocate(nd(nx + 1, ny + 1, nz + 1))
+   if (all_edges) then
+      allocate(ex(nx, ny + 1, nz + 1), ey(nx + 1, ny, nz + 1), ez(nx + 1, ny + 1, nz))
+   else
+      allocate(ex(1, 1, 1), ey(1, 1, 1), ez(1, 1, 1))
+   endif
+   !$acc enter data create(nd, ex, ey, ez)
+   call edge_fractions_dev(node_p, payload_p, tv_p, x, y, z, nx, ny, nz, all_edges, nd, ex, ey, ez)
+   ! 3. cell totals
+   allocate(alpha(nx, ny, nz), cen(3, nx, ny, nz), wa(nx, ny, nz), wc(3, nx, ny, nz), wn(3, nx, ny, nz), cls(nx, ny, nz))
+   allocate(pcs(nx, ny, nz), fpc(nx, ny, nz))
+   !$acc enter data create(alpha, cen, wa, wc, wn, cls, pcs, fpc)
+   !$acc parallel loop gang vector collapse(3) default(present) &
+   !$acc& present(x, y, z, tri, kstart, klst, fx, fy, fz, fxl, fyl, fzl, alpha, cen, wa, wc, wn, cls)
+   do k = 1, nz
+      do j = 1, ny
+         do i = 1, nx
+            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+            call cell_totals_3d(nf, tri, kstart(c + 1) - kstart(c), klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), &
+                                z(k), z(k + 1), fx(i + 1, j, k), fy(i, j + 1, k), fz(i, j, k + 1), fxl(i, j, k), &
+                                fxl(i + 1, j, k), fyl(i, j, k), fyl(i, j + 1, k), fzl(i, j, k), fzl(i, j, k + 1), &
+                                alpha(i, j, k), cen(1, i, j, k), wa(i, j, k), wc(1, i, j, k), wn(1, i, j, k), cls(i, j, k))
+         enddo
+      enddo
+   enddo
+   ! 4. classification, piercing counts, workspace sizes (cut_pieces_3d's first pass), prefix sums
+   allocate(kd(ncell), cct(3, ncell), off(3, ncell))
+   !$acc data create(kd, cct, off)
+   !$acc parallel loop gang vector collapse(3) default(present) private(cs, c0, c1) &
+   !$acc& present(x, y, z, tri, cnt, kstart, klst, open_cell, nd, alpha, cls, pcs, kd, cct, zi1, zr1)
+   do k = 1, nz
+      do j = 1, ny
+         do i = 1, nx
+            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+            kd(c) = CK_NONE ; cct(1, c) = 0_I4P ; cct(2, c) = 0_I4P ; cct(3, c) = 0_I4P
+            if (.not. cls(i, j, k) .or. open_cell(i, j, k) .or. alpha(i, j, k) < -1.e-12_R8P .or. &
+                alpha(i, j, k) > 1._R8P + 1.e-12_R8P) then
+               pcs(i, j, k) = -1_I4P
+            elseif (cnt(c) == 0_I4P .and. abs(alpha(i, j, k) - anint(alpha(i, j, k))) > 1.e-12_R8P) then
+               pcs(i, j, k) = -1_I4P
+            elseif (cnt(c) == 0_I4P) then
+               pcs(i, j, k) = merge(1_I4P, 0_I4P, alpha(i, j, k) > 0.5_R8P) ; kd(c) = CK_EMPTY
+            else
+               do q = 1, 8
+                  cs(q) = merge(0_I4P, 1_I4P, nd(i + mod(q - 1, 2), j + mod((q - 1) / 2, 2), k + (q - 1) / 4))
+               enddo
+               nt = kstart(c + 1) - kstart(c)
+               same = .true.
+               do q = 2, 8
+                  if (cs(q) /= cs(1)) same = .false.
+               enddo
+               if (nt == 0_I4P .and. same) then ! what the kernel gives on an empty list
+                  pcs(i, j, k) = cs(1) ; kd(c) = CK_QUIET
+               else
+                  kd(c) = CK_CUT
+                  c0(1) = x(i) ; c0(2) = y(j) ; c0(3) = z(k) ; c1(1) = x(i + 1) ; c1(2) = y(j + 1) ; c1(3) = z(k + 1)
+                  call cell_piercings(.false., nf, tri, nt, klst(kstart(c)), c0, c1, 1_I4P, npc, zi1, zi1, zr1, zi1)
+                  call cell_pieces_sizes(nt, npc, 0_I4P, 0_I4P, .false., nrw, niw)
+                  cct(1, c) = npc ; cct(2, c) = nrw ; cct(3, c) = niw
+               endif
+            endif
+         enddo
+      enddo
+   enddo
+   call scan3_dev(ncell, cct, off, tot)
+   allocate(pce(tot(1) + 1), pcq(tot(1) + 1), pcn(tot(1) + 1), pct(tot(1) + 1), rw(tot(2) + 1), iw(tot(3) + 1))
+   !$acc data create(pce, pcq, pcn, pct, rw, iw)
+   ! 5. piercings, then the count pass of the pieces
+   !$acc parallel loop gang vector collapse(3) default(present) private(cs, c0, c1, faces) &
+   !$acc& present(x, y, z, tri, nrm, kstart, klst, nd, alpha, fx, fy, fz, pcs, kd, cct, off, pce, pcq, pcn, pct, rw, iw, &
+   !$acc&         zr1, zr3, zr6, zsec, zi1, ze2, ze3)
+   do k = 1, nz
+      do j = 1, ny
+         do i = 1, nx
+            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+            if (kd(c) /= CK_CUT) cycle
+            nt = kstart(c + 1) - kstart(c)
+            c0(1) = x(i) ; c0(2) = y(j) ; c0(3) = z(k) ; c1(1) = x(i + 1) ; c1(2) = y(j + 1) ; c1(3) = z(k + 1)
+            call cell_piercings(.true., nf, tri, nt, klst(kstart(c)), c0, c1, max(1_I4P, cct(1, c)), npc, &
+                                pce(off(1, c) + 1), pcq(off(1, c) + 1), pct(off(1, c) + 1), pcn(off(1, c) + 1))
+            do q = 1, 8
+               cs(q) = merge(0_I4P, 1_I4P, nd(i + mod(q - 1, 2), j + mod((q - 1) / 2, 2), k + (q - 1) / 4))
+            enddo
+            faces(1) = fx(i, j, k) ; faces(2) = fx(i + 1, j, k) ; faces(3) = fy(i, j, k) ; faces(4) = fy(i, j + 1, k)
+            faces(5) = fz(i, j, k) ; faces(6) = fz(i, j, k + 1)
+            call cell_pieces_3d(.false., nf, tri, nrm, nt, klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), z(k), z(k + 1), &
+                                cs, alpha(i, j, k), faces, cct(1, c), pce(off(1, c) + 1), pcq(off(1, c) + 1), &
+                                pct(off(1, c) + 1), pcn(off(1, c) + 1), 0_I4P, 0_I4P, ze2, ze3, .false., .false., zsec, &
+                                cct(2, c), rw(off(2, c) + 1), cct(3, c), iw(off(3, c) + 1), np, nivc, nqc, nwc, qwn1, &
+                                0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, zr1, zr3, zr1, zr3, zr3, zr6, &
+                                zr1, zr1, zr1, zi1, zi1, zr1, zr1, zr3, zr1, zr3, zr1, zi1, zi1)
+            pcs(i, j, k) = np
+         enddo
+      enddo
+   enddo
+   call pieces_scan_dev(nx, ny, nz, pcs, fpc, npt)
+   allocate(pcell(3, npt), pvol(npt), pcen(3, npt), pwa(npt), pwc(3, npt), pwn(3, npt), pfc(6, npt))
+   !$acc enter data create(pcell, pvol, pcen, pwa, pwc, pwn, pfc)
+   ! 6. the pieces: the cell totals for one, the fill pass of the kernel for several
+   !$acc parallel loop gang vector collapse(3) default(present) private(cs, faces) &
+   !$acc& present(x, y, z, tri, nrm, kstart, klst, nd, alpha, cen, wa, wc, wn, fx, fy, fz, pcs, fpc, kd, cct, off, pce, &
+   !$acc&         pcq, pcn, pct, rw, iw, pcell, pvol, pcen, pwa, pwc, pwn, pfc, zr1, zr3, zsec, zi1, ze2, ze3)
+   do k = 1, nz
+      do j = 1, ny
+         do i = 1, nx
+            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+            np = pcs(i, j, k)
+            if (np < 1_I4P) cycle
+            p0 = fpc(i, j, k) - 1_I4P
+            do m = 1, np
+               pcell(1, p0 + m) = i ; pcell(2, p0 + m) = j ; pcell(3, p0 + m) = k
+            enddo
+            hx = x(i + 1) - x(i) ; hy = y(j + 1) - y(j) ; hz = z(k + 1) - z(k)
+            if (np == 1_I4P) then
+               call single_piece_3d(hx, hy, hz, alpha(i, j, k), cen(1, i, j, k), wa(i, j, k), wc(1, i, j, k), &
+                                    wn(1, i, j, k), fx(i, j, k), fx(i + 1, j, k), fy(i, j, k), fy(i, j + 1, k), fz(i, j, k), &
+                                    fz(i, j, k + 1), pvol(p0 + 1), pcen(1, p0 + 1), pwa(p0 + 1), pwc(1, p0 + 1), &
+                                    pwn(1, p0 + 1), pfc(1, p0 + 1))
+            elseif (kd(c) == CK_CUT) then
+               nt = kstart(c + 1) - kstart(c)
+               do q = 1, 8
+                  cs(q) = merge(0_I4P, 1_I4P, nd(i + mod(q - 1, 2), j + mod((q - 1) / 2, 2), k + (q - 1) / 4))
+               enddo
+               faces(1) = fx(i, j, k) ; faces(2) = fx(i + 1, j, k) ; faces(3) = fy(i, j, k) ; faces(4) = fy(i, j + 1, k)
+               faces(5) = fz(i, j, k) ; faces(6) = fz(i, j, k + 1)
+               call cell_pieces_3d(.true., nf, tri, nrm, nt, klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), z(k), &
+                                   z(k + 1), cs, alpha(i, j, k), faces, cct(1, c), pce(off(1, c) + 1), pcq(off(1, c) + 1), &
+                                   pct(off(1, c) + 1), pcn(off(1, c) + 1), 0_I4P, 0_I4P, ze2, ze3, .false., .false., zsec, &
+                                   cct(2, c), rw(off(2, c) + 1), cct(3, c), iw(off(3, c) + 1), np, nivc, nqc, nwc, qwn1, &
+                                   p0, 0_I4P, 0_I4P, 0_I4P, npt, 0_I4P, 0_I4P, 0_I4P, 0_I4P, pvol, pcen, pwa, pwc, pwn, pfc, &
+                                   zr1, zr1, zr1, zi1, zi1, zr1, zr1, zr3, zr1, zr3, zr1, zi1, zi1)
+            endif
+         enddo
+      enddo
+   enddo
+   !$acc end data
+   !$acc end data
+   !$acc exit data delete(fx, fy, fz, fxc, fyc, fzc, fxp, fyp, fzp, fxl, fyl, fzl) if(.not. res)
+   if (.not. res) then ! copy back the outputs (the faces came back from the sections)
+      !$acc exit data copyout(nd, alpha, cen, wa, wc, wn, cls, pcs, fpc, pcell, pvol, pcen, pwa, pwc, pwn, pfc)
+      if (all_edges) then
+         !$acc exit data copyout(ex, ey, ez)
+      else
+         !$acc exit data delete(ex, ey, ez)
+      endif
+   elseif (.not. all_edges) then
+      !$acc exit data delete(ex, ey, ez)
+   endif
+   !$acc end data
+   cut%nx = nx ; cut%ny = ny ; cut%nz = nz ; cut%np = npt ; cut%moments_order = 0_I4P
+   call move_alloc(fx, cut%face_x) ; call move_alloc(fy, cut%face_y) ; call move_alloc(fz, cut%face_z)
+   call move_alloc(fxc, cut%face_x_centroid) ; call move_alloc(fyc, cut%face_y_centroid)
+   call move_alloc(fzc, cut%face_z_centroid)
+   call move_alloc(fxp, cut%face_x_pieces) ; call move_alloc(fyp, cut%face_y_pieces) ; call move_alloc(fzp, cut%face_z_pieces)
+   call move_alloc(fxl, cut%face_x_closed) ; call move_alloc(fyl, cut%face_y_closed) ; call move_alloc(fzl, cut%face_z_closed)
+   allocate(cut%face_x_moments(0, nx + 1, ny, nz), cut%face_y_moments(0, nx, ny + 1, nz), cut%face_z_moments(0, nx, ny, nz + 1))
+   call move_alloc(nd, cut%node_in)
+   if (all_edges) then
+      call move_alloc(ex, cut%edge_x) ; call move_alloc(ey, cut%edge_y) ; call move_alloc(ez, cut%edge_z)
+   endif
+   call move_alloc(alpha, cut%alpha) ; call move_alloc(cen, cut%centroid) ; call move_alloc(wa, cut%wet_area)
+   call move_alloc(wc, cut%wet_centroid) ; call move_alloc(wn, cut%wet_normal) ; call move_alloc(cls, cut%closed)
+   call move_alloc(pcs, cut%pieces) ; call move_alloc(fpc, cut%first_piece)
+   call move_alloc(pcell, cut%piece_cell) ; call move_alloc(pvol, cut%piece_volume) ; call move_alloc(pcen, cut%piece_centroid)
+   call move_alloc(pwa, cut%piece_wet_area) ; call move_alloc(pwc, cut%piece_wet_centroid)
+   call move_alloc(pwn, cut%piece_wet_normal) ; call move_alloc(pfc, cut%piece_face)
+   if (res) call mark_resident(cut)
+   endsubroutine cut_cells_3d_device
+
+   subroutine scan3_dev(n, cnt, off, total)
+   !< Exclusive prefix sums of the three counts cnt(1:3, l) over l = 1..n on the device (issue #100 step 3c), totals on
+   !< the host: as `scan_dev`, three components at once. cnt and off must be present.
+   integer(I4P), intent(in)    :: n           !< Entries.
+   integer(I4P), intent(in)    :: cnt(3, n)   !< Counts.
+   integer(I4P), intent(inout) :: off(3, n)   !< Offsets (written on the device).
+   integer(I4P), intent(out)   :: total(3)    !< Sums.
+   integer(I4P), allocatable   :: tot(:,:)    !< Chunk totals, then offsets [3, nch].
+   integer(I4P)                :: nch, ch, l, a1, a2, a3 !< Work.
+
+   nch = max(1_I4P, (n + SCAN_CHUNK - 1_I4P) / SCAN_CHUNK)
+   allocate(tot(3, nch))
+   !$acc data create(tot)
+   !$acc parallel loop gang vector default(present) present(cnt, tot)
+   do ch = 1_I4P, nch
+      a1 = 0_I4P ; a2 = 0_I4P ; a3 = 0_I4P
+      !$acc loop seq
+      do l = (ch - 1_I4P) * SCAN_CHUNK + 1_I4P, min(ch * SCAN_CHUNK, n)
+         a1 = a1 + cnt(1, l) ; a2 = a2 + cnt(2, l) ; a3 = a3 + cnt(3, l)
+      enddo
+      tot(1, ch) = a1 ; tot(2, ch) = a2 ; tot(3, ch) = a3
+   enddo
+   call chunk_offsets_dev(nch, [0_I4P, 0_I4P, 0_I4P], tot, total)
+   !$acc parallel loop gang vector default(present) present(cnt, off, tot)
+   do ch = 1_I4P, nch
+      a1 = tot(1, ch) ; a2 = tot(2, ch) ; a3 = tot(3, ch)
+      !$acc loop seq
+      do l = (ch - 1_I4P) * SCAN_CHUNK + 1_I4P, min(ch * SCAN_CHUNK, n)
+         off(1, l) = a1 ; off(2, l) = a2 ; off(3, l) = a3
+         a1 = a1 + cnt(1, l) ; a2 = a2 + cnt(2, l) ; a3 = a3 + cnt(3, l)
+      enddo
+   enddo
+   !$acc end data
+   endsubroutine scan3_dev
+
+   subroutine pieces_scan_dev(nx, ny, nz, pcs, fpc, npt)
+   !< first_piece of every cell and the pieces of the block on the device (issue #100 step 3c): fpc(c) = 1 + the pieces
+   !< (max(0, pcs)) of the cells before c in order, the prefix sums of `cut_pieces_3d`, integer for integer. pcs and fpc
+   !< must be present; npt comes back.
+   integer(I4P), intent(in)    :: nx, ny, nz            !< Cells.
+   integer(I4P), intent(in)    :: pcs(nx * ny * nz)     !< Pieces per cell (-1: none).
+   integer(I4P), intent(inout) :: fpc(nx * ny * nz)     !< First pieces (written on the device).
+   integer(I4P), intent(out)   :: npt                   !< Pieces of the block.
+   integer(I4P), allocatable   :: cc(:,:), oo(:,:)      !< Counts, offsets [3, ncell].
+   integer(I4P)                :: c, n, tot(3)          !< Work.
+
+   n = nx * ny * nz
+   allocate(cc(3, n), oo(3, n))
+   !$acc data create(cc, oo)
+   !$acc parallel loop gang vector default(present) present(pcs, cc)
+   do c = 1, n
+      cc(1, c) = max(0_I4P, pcs(c)) ; cc(2, c) = 0_I4P ; cc(3, c) = 0_I4P
+   enddo
+   call scan3_dev(n, cc, oo, tot)
+   !$acc parallel loop gang vector default(present) present(fpc, oo)
+   do c = 1, n
+      fpc(c) = oo(1, c) + 1_I4P
+   enddo
+   !$acc end data
+   npt = tot(1)
+   endsubroutine pieces_scan_dev
+
+   subroutine open_cells_3d(x, y, z, nf, tri, open_cell)
+   !< The cells a mesh boundary edge (an edge of one facet) overlaps (issue #40; `cut_pieces_3d` gives them no count):
+   !< the edges by their end points in lexicographic order, sorted (`sort_keys`), runs of one, their bounding box over
+   !< the cells. Host (issue #100 step 3c: the device path's input, the code of `cut_pieces_3d`).
+   real(R8P),            intent(in)  :: x(:), y(:), z(:) !< Cell edges.
+   integer(I4P),         intent(in)  :: nf               !< Facets.
+   real(R8P),            intent(in)  :: tri(3, 3, nf)    !< Triangles.
+   logical, allocatable, intent(out) :: open_cell(:,:,:) !< Open cells [nx, ny, nz].
+   real(R8P),    allocatable :: ek(:,:)   !< Edge keys [6, 3 nf].
+   integer(I4P), allocatable :: idx(:)    !< Sorted edges.
+   real(R8P)                 :: pa(3), pb(3) !< Edge ends.
+   integer(I4P)              :: nx, ny, nz, f_, m, il, ih, jl, jh, kl, kh !< Work.
+
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   allocate(open_cell(nx, ny, nz), ek(6, 3 * nf), idx(3 * nf)) ; open_cell = .false.
+   do f_ = 1, nf
+      do m = 1, 3
+         pa = tri(:, m, f_) ; pb = tri(:, mod(m, 3) + 1, f_)
+         if (lexless(pb, pa)) then
+            ek(:, 3 * (f_ - 1) + m) = [pb, pa]
+         else
+            ek(:, 3 * (f_ - 1) + m) = [pa, pb]
+         endif
+      enddo
+   enddo
+   call sort_keys(6_I4P, 3_I4P * nf, ek, idx)
+   m = 1
+   do while (m <= 3 * nf)
+      f_ = m
+      do while (f_ < 3 * nf)
+         if (any(ek(:, idx(f_ + 1)) /= ek(:, idx(m)))) exit
+         f_ = f_ + 1
+      enddo
+      if (f_ == m) then ! an edge of one facet
+         pa = ek(1:3, idx(m)) ; pb = ek(4:6, idx(m))
+         il = max(1_I4P, col_of(min(pa(1), pb(1)), x)) ; ih = min(nx, col_of(max(pa(1), pb(1)), x))
+         jl = max(1_I4P, col_of(min(pa(2), pb(2)), y)) ; jh = min(ny, col_of(max(pa(2), pb(2)), y))
+         kl = max(1_I4P, col_of(min(pa(3), pb(3)), z)) ; kh = min(nz, col_of(max(pa(3), pb(3)), z))
+         if (il <= ih .and. jl <= jh .and. kl <= kh) open_cell(il:ih, jl:jh, kl:kh) = .true.
+      endif
+      m = f_ + 1
+   enddo
+   endsubroutine open_cells_3d
+
+   subroutine cut_cells_3d_reset(cut)
+   !< Release a resident cut from the device (`exit_device`), then reset it to the default (issue #100 step 3c): what
+   !< `intent(out)` did, without freeing arrays that are still mapped.
+   type(cut_cells_3d_t), intent(inout) :: cut   !< Cut cells.
+   type(cut_cells_3d_t)                :: fresh !< Default.
+
+   if (cut%on_device) call cut%exit_device
+   cut = fresh
+   endsubroutine cut_cells_3d_reset
+
+   function host_key(cut) result(key)
+   !< Host address of alpha (the key of a mapped cut; 0 if alpha is not allocated).
+   type(cut_cells_3d_t), intent(in), target :: cut !< Cut cells.
+   integer(c_intptr_t)                      :: key !< Address.
+
+   key = 0
+   if (allocated(cut%alpha)) then
+      if (size(cut%alpha) > 0) key = transfer(c_loc(cut%alpha), key)
+   endif
+   endfunction host_key
+
+   subroutine mark_resident(cut)
+   !< Flag the outputs of `cut` as mapped, keyed by the host address of alpha.
+   type(cut_cells_3d_t), intent(inout) :: cut !< Cut cells.
+
+   cut%on_device = .true. ; cut%device_key = host_key(cut)
+   endsubroutine mark_resident
+
+   logical function is_mapped(self)
+   !< The flag is set and the arrays are the ones mapped (not a copy of a resident cut).
+   type(cut_cells_3d_t), intent(in) :: self !< Cut cells.
+
+   is_mapped = .false.
+   if (self%on_device) is_mapped = self%device_key == host_key(self)
+   endfunction is_mapped
+
+   subroutine cut3_enter_device(self)
+   !< Map the outputs of decision 2 (see `cut_cells_3d_t`) of a host result to the device (copyin; issue #100 step 3c).
+   !< Member arrays only, never `self` (#20); the edge fractions if allocated. No-op if already mapped or without
+   !< outputs (a status error, a default cut, the faces of `cut_cells_3d_sections` only). A copy of a resident cut is
+   !< mapped as a new cut.
+   class(cut_cells_3d_t), intent(inout) :: self !< Cut cells.
+
+   if (is_mapped(self)) return
+   self%on_device = .false. ; self%device_key = 0
+   if (.not. (allocated(self%alpha) .and. allocated(self%piece_volume) .and. allocated(self%node_in))) return
+   !$acc enter data copyin(self%face_x, self%face_y, self%face_z, self%face_x_centroid, self%face_y_centroid, &
+   !$acc&                  self%face_z_centroid, self%face_x_pieces, self%face_y_pieces, self%face_z_pieces, &
+   !$acc&                  self%face_x_closed, self%face_y_closed, self%face_z_closed, self%alpha, self%centroid, &
+   !$acc&                  self%wet_area, self%wet_centroid, self%wet_normal, self%closed, self%pieces, self%first_piece, &
+   !$acc&                  self%piece_cell, self%piece_volume, self%piece_centroid, self%piece_wet_area, &
+   !$acc&                  self%piece_wet_centroid, self%piece_wet_normal, self%piece_face, self%node_in)
+   if (allocated(self%edge_x)) then
+      !$acc enter data copyin(self%edge_x, self%edge_y, self%edge_z)
+   endif
+   call mark_resident(self)
+   endsubroutine cut3_enter_device
+
+   subroutine cut3_update_host(self)
+   !< Copy the mapped outputs back to the host (issue #100 step 3c); they stay mapped. No-op if not mapped; on a copy of
+   !< a resident cut a warning on stderr (its arrays are not on the device: update the original before copying it).
+   class(cut_cells_3d_t), intent(inout) :: self !< Cut cells.
+
+   if (.not. self%on_device) return
+   if (.not. is_mapped(self)) then
+      write(stderr, '(A)') 'fossil cut_cells_3d_t%update_host: a copy of a resident cut is not on the device; '// &
+                           'call update_host on the original before copying it'
+      self%on_device = .false. ; self%device_key = 0
+      return
+   endif
+   !$acc update host(self%face_x, self%face_y, self%face_z, self%face_x_centroid, self%face_y_centroid, &
+   !$acc&            self%face_z_centroid, self%face_x_pieces, self%face_y_pieces, self%face_z_pieces, &
+   !$acc&            self%face_x_closed, self%face_y_closed, self%face_z_closed, self%alpha, self%centroid, &
+   !$acc&            self%wet_area, self%wet_centroid, self%wet_normal, self%closed, self%pieces, self%first_piece, &
+   !$acc&            self%piece_cell, self%piece_volume, self%piece_centroid, self%piece_wet_area, &
+   !$acc&            self%piece_wet_centroid, self%piece_wet_normal, self%piece_face, self%node_in)
+   if (allocated(self%edge_x)) then
+      !$acc update host(self%edge_x, self%edge_y, self%edge_z)
+   endif
+   endsubroutine cut3_update_host
+
+   subroutine cut3_exit_device(self)
+   !< Release the device copies of the outputs (issue #100 step 3c); the host arrays are kept as they are (call
+   !< `update_host` first to keep the device values). No-op if not mapped; a copy of a resident cut only drops the flag.
+   class(cut_cells_3d_t), intent(inout) :: self !< Cut cells.
+
+   if (.not. self%on_device) return
+   if (is_mapped(self)) then
+      !$acc exit data delete(self%face_x, self%face_y, self%face_z, self%face_x_centroid, self%face_y_centroid, &
+      !$acc&                 self%face_z_centroid, self%face_x_pieces, self%face_y_pieces, self%face_z_pieces, &
+      !$acc&                 self%face_x_closed, self%face_y_closed, self%face_z_closed, self%alpha, self%centroid, &
+      !$acc&                 self%wet_area, self%wet_centroid, self%wet_normal, self%closed, self%pieces, self%first_piece, &
+      !$acc&                 self%piece_cell, self%piece_volume, self%piece_centroid, self%piece_wet_area, &
+      !$acc&                 self%piece_wet_centroid, self%piece_wet_normal, self%piece_face, self%node_in)
+      if (allocated(self%edge_x)) then
+         !$acc exit data delete(self%edge_x, self%edge_y, self%edge_z)
+      endif
+   endif
+   self%on_device = .false. ; self%device_key = 0
+   endsubroutine cut3_exit_device
+
    subroutine cut_cells_3d_nodes_device(surface, x, y, z, node_in, edge_x, edge_y, edge_z, edges, status)
    !< The grid-node states and, with `edges`, the cell-edge fluid fractions of `cut_cells_3d` on the device (issue #100
    !< step 3c, for the benches and the twin test): `node_in` [nx+1, ny+1, nz+1] and `edge_x/_y/_z`, bit for bit
@@ -2369,7 +2839,7 @@ contains
                                                              !< (written with all_edges only).
    real(R8P),    allocatable :: lfr(:,:) !< Fractions per line [ns, lines].
    logical,      allocatable :: lin(:,:) !< Node flags per line [ns + 1, lines].
-   integer(I4P)              :: i, j, k, s, l !< Counters.
+   integer(I4P)              :: i, j, k, s !< Counters.
 
    ! z lines at (x(i), y(j)), line l = i + (nx + 1) (j - 1)
    allocate(lfr(nz, (nx + 1) * (ny + 1)), lin(nz + 1, (nx + 1) * (ny + 1)))
@@ -2845,13 +3315,15 @@ contains
    !< same bits. `status = STATUS_INVALID_INPUT` on bad edges.
    type(surface_stl_object), intent(in)            :: surface    !< Surface.
    real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
-   type(cut_cells_3d_t),     intent(out)           :: cut        !< Faces (the other outputs unallocated).
+   type(cut_cells_3d_t),     intent(inout)         :: cut        !< Faces (the other outputs unallocated; released
+                                                                 !< from the device and reset first).
    logical,                  intent(in),  optional :: device     !< The sections on the device (default .false.).
    integer(I4P),             intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
    type(cut_cells_2d_t), allocatable :: px(:), py(:), pz(:) !< Not kept.
    integer(I4P)                      :: nx, ny, nz            !< Cells.
    logical                           :: dev                   !< On the device.
 
+   call cut_cells_3d_reset(cut)
    if (present(status)) status = STATUS_OK
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
    if (nx < 1 .or. ny < 1 .or. nz < 1) then

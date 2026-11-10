@@ -43,13 +43,14 @@ use fossil_facet_object, only : facet_object
 use penf,                only : I4P, I8P, R8P
 use vecfor,              only : vector_R8P
 use fossil_distance_field, only : distance_field_object
-use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_3d, device_line_mismatches_3d
+use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_3d, device_line_mismatches_3d, to_surface
 use fossil,              only : rigid_pose_t, pose_from_axis_angle, to_world
 use fossil,              only : curvilinear_block_t, detect_topology, topo_record_t, TOPO_BOUNDARY, wall_cutter
 use fossil_overset,      only : hole_flags, block_logical_t, donor_set_t, donor_candidates
-use fossil,              only : curve_object, slice_surface, cut_cells_3d_t, cut_cells_3d
+use fossil,              only : curve_object, slice_surface, cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device
+use fossil_boolean_bodies, only : BODY_SPHERE, mc_body
 use fossil_cut_cells_3d, only : cut_cells_3d_sections, cut_cells_3d_nodes_device
-use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_face_mismatches
+use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_face_mismatches, cut_cells_3d_mismatches
 use fossil_orient3d_cases, only : orient3d_quadruples, lcb_cases, orient3d_many, lcb_many
 use fossil_predicates,   only : orient3d_xyz
 use fossil_line_query,   only : line_crossing_before
@@ -93,6 +94,7 @@ integer                       :: donor_mismatch            !< Donor candidates: 
 integer                       :: sections_mismatch         !< 3-D cut-cell sections: device vs CPU mismatches (issue #100).
 integer                       :: orient3d_mismatch         !< orient3d, line_crossing_before: device vs CPU (#100 step 3c).
 integer                       :: nodes_mismatch            !< 3-D cut-cell node states, edge fractions: device vs CPU (3c).
+integer                       :: cells_mismatch            !< 3-D cut cells: device vs CPU mismatches (#100 step 3c).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -266,6 +268,8 @@ call orient3d_case(mismatch=orient3d_mismatch)
 rich_ok = rich_ok .and. orient3d_mismatch == 0
 call nodes_case(mismatch=nodes_mismatch)
 rich_ok = rich_ok .and. nodes_mismatch == 0
+call cells_case(mismatch=cells_mismatch)
+rich_ok = rich_ok .and. cells_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -364,6 +368,7 @@ print '(A,I0)',      '   donor candidates device vs serial mismatches: ', donor_
 print '(A,I0)',      '   cut cells 3-D sections device vs serial mismatches: ', sections_mismatch
 print '(A,I0)',      '   orient3d device vs serial mismatches: ', orient3d_mismatch
 print '(A,I0)',      '   cut cells 3-D nodes device vs serial mismatches: ', nodes_mismatch
+print '(A,I0)',      '   cut cells 3-D device vs serial mismatches: ', cells_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -669,6 +674,129 @@ contains
       deallocate(gx, gy, gz)
    enddo
    endsubroutine nodes_case
+
+   subroutine cells_case(mismatch)
+   !< `cut_cells_3d_device` (issue #100 step 3c) against `cut_cells_3d` without links, every output bitwise
+   !< (`cut_cells_3d_mismatches`), with and without the edges, copied back and resident (`update_host`): the bench body
+   !< in its probe box at grid_n^3; with grid_n >= 32 also the bodies of step 0 (the marching-cubes sphere, the cone,
+   !< cube-02.stl) on m^3 cells over their box grown by 10 % at m = 64 and 128, and a timing table: best and median of
+   !< 5 calls after a warm-up, the CPU (`cut_cells_3d`) against the device copied back and resident (the surface mapped
+   !< by `enter_device`; the resident call releases the previous one).
+   integer, intent(out)      :: mismatch               !< Mismatches.
+   type(surface_stl_object)  :: sb(3)                  !< Step-0 bodies.
+   type(body_t), allocatable :: bb(:)                  !< Bench bodies.
+   character(12), parameter  :: NAMES(3) = [character(12) :: 'mc sphere', 'cone', 'cube-02'] !< Their names.
+   real(R8P),    allocatable :: gx(:), gy(:), gz(:)    !< Cell edges.
+   integer(I4P)              :: b, g, m                !< Work.
+
+   mismatch = 0
+   call section_grid(grid_n, gx, gy, gz)
+   mismatch = mismatch + cells_compare(surface, gx, gy, gz)
+   if (grid_n < 32_I4P) return
+   call mc_body(BODY_SPHERE, 24_I4P, sb(1))
+   call bench_bodies(bb) ; call to_surface_bench(bb(7), sb(2))
+   call sb(3)%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true.)
+   do b = 1, 3
+      do g = 1, 2
+         m = 64_I4P * g
+         call box_grid(sb(b), m, gx, gy, gz)
+         mismatch = mismatch + cells_compare(sb(b), gx, gy, gz)
+      enddo
+   enddo
+   print '(A)', 'cut cells 3-D timing (no links; best / median of 5) [s]: body, cells, CPU, device copied back, '// &
+                'device resident, speed-ups of the best'
+   call section_grid(grid_n, gx, gy, gz)
+   call cells_timing('bench body', surface, grid_n, gx, gy, gz)
+   do b = 1, 3
+      do g = 1, 2
+         m = 64_I4P * g
+         call box_grid(sb(b), m, gx, gy, gz)
+         call cells_timing(NAMES(b), sb(b), m, gx, gy, gz)
+      enddo
+   enddo
+   endsubroutine cells_case
+
+   function cells_compare(s, gx, gy, gz) result(mismatch)
+   !< `cut_cells_3d_device` against `cut_cells_3d` on s and the grid gx, gy, gz: with and without the edges, copied back
+   !< and resident (then `update_host`; the resident cut overwritten by the next call).
+   type(surface_stl_object), intent(in) :: s            !< Body.
+   real(R8P),                intent(in) :: gx(:), gy(:), gz(:) !< Cell edges.
+   integer                              :: mismatch     !< Mismatches.
+   type(cut_cells_3d_t)                 :: ch, ce, cd   !< Host with and without edges, device.
+   integer(I4P)                         :: st, st2      !< Status.
+
+   call cut_cells_3d(s, gx, gy, gz, ch, status=st, edges=.true.)
+   call cut_cells_3d(s, gx, gy, gz, ce, status=st)
+   call cut_cells_3d_device(s, gx, gy, gz, cd, status=st2, edges=.true.)
+   mismatch = abs(st - st2) + cut_cells_3d_mismatches(ch, cd)
+   call cut_cells_3d_device(s, gx, gy, gz, cd, status=st2)
+   mismatch = mismatch + abs(st - st2) + cut_cells_3d_mismatches(ce, cd)
+   call cut_cells_3d_device(s, gx, gy, gz, cd, status=st2, resident=.true.)
+   call cd%update_host
+   mismatch = mismatch + abs(st - st2) + cut_cells_3d_mismatches(ce, cd)
+   call cut_cells_3d_device(s, gx, gy, gz, cd, status=st2, edges=.true., resident=.true.)
+   call cd%update_host
+   mismatch = mismatch + abs(st - st2) + cut_cells_3d_mismatches(ch, cd)
+   call cd%exit_device
+   endfunction cells_compare
+
+   subroutine cells_timing(label, s, m, gx, gy, gz)
+   !< One row of the timing table of `cells_case`.
+   character(*),             intent(in)    :: label        !< Body.
+   type(surface_stl_object), intent(inout) :: s            !< Body (mapped for the device runs, then released).
+   integer(I4P),             intent(in)    :: m            !< Cells per axis.
+   real(R8P),                intent(in)    :: gx(:), gy(:), gz(:) !< Cell edges.
+   type(cut_cells_3d_t)                    :: ch, cd       !< Host, device.
+   real(R8P)                               :: t(3, 5)      !< Times.
+   integer(I8P)                            :: c0, c1, rate !< Clock.
+   integer(I4P)                            :: r            !< Counter.
+
+   call system_clock(count_rate=rate)
+   call s%enter_device
+   do r = 1, 3 ! warm-up (issue #100 step 6a: slow pageable copies after a host-heavy phase)
+      call cut_cells_3d_device(s, gx, gy, gz, cd)
+   enddo
+   do r = 1, 5
+      call system_clock(c0) ; call cut_cells_3d(s, gx, gy, gz, ch) ; call system_clock(c1)
+      t(1, r) = real(c1 - c0, R8P) / rate
+      call system_clock(c0) ; call cut_cells_3d_device(s, gx, gy, gz, cd) ; call system_clock(c1)
+      t(2, r) = real(c1 - c0, R8P) / rate
+   enddo
+   do r = 1, 5
+      call system_clock(c0) ; call cut_cells_3d_device(s, gx, gy, gz, cd, resident=.true.) ; call system_clock(c1)
+      t(3, r) = real(c1 - c0, R8P) / rate
+   enddo
+   call cd%exit_device
+   call s%exit_device
+   print '(3X,A12,I4,A,3(2X,ES9.2,A,ES9.2),A,F6.2,A,F6.2,A)', label, m, '^3', minval(t(1, :)), ' /', &
+         median_of5(t(1, :)), minval(t(2, :)), ' /', median_of5(t(2, :)), minval(t(3, :)), ' /', median_of5(t(3, :)), &
+         '  (', minval(t(1, :)) / minval(t(2, :)), 'x, ', minval(t(1, :)) / minval(t(3, :)), 'x)'
+   endsubroutine cells_timing
+
+   subroutine box_grid(s, m, gx, gy, gz)
+   !< m^3 uniform cells over the box of s grown by 10 % (the grid of the perf bench's 3-D cut cells).
+   type(surface_stl_object), intent(in)  :: s              !< Body.
+   integer(I4P),             intent(in)  :: m              !< Cells per axis.
+   real(R8P), allocatable,   intent(out) :: gx(:), gy(:), gz(:) !< Cell edges.
+   type(vector_R8P)                      :: b0, b1         !< Box.
+   integer(I4P)                          :: q              !< Counter.
+
+   b0 = s%get_bmin() ; b1 = s%get_bmax()
+   gx = [(b0%x - 0.1_R8P * (b1%x - b0%x) + 1.2_R8P * (b1%x - b0%x) * q / m, q = 0, m)]
+   gy = [(b0%y - 0.1_R8P * (b1%y - b0%y) + 1.2_R8P * (b1%y - b0%y) * q / m, q = 0, m)]
+   gz = [(b0%z - 0.1_R8P * (b1%z - b0%z) + 1.2_R8P * (b1%z - b0%z) * q / m, q = 0, m)]
+   endsubroutine box_grid
+
+   subroutine to_surface_bench(b, s)
+   !< The bench body b as a surface, centred on its box (the perf bench's cone).
+   type(body_t),             intent(in)    :: b      !< Body.
+   type(surface_stl_object), intent(inout) :: s      !< Surface.
+   type(vector_R8P)                        :: b0, b1 !< Box.
+
+   call to_surface(b%soup, s)
+   b0 = s%get_bmin() ; b1 = s%get_bmax()
+   call s%translate(delta=-0.5_R8P * (b0 + b1)) ; call s%analyze
+   endsubroutine to_surface_bench
 
    subroutine sections_case(mismatch)
    !< The plane sections of `cut_cells_3d` on the device (issue #100 step 3b) against the host path, bitwise, on the

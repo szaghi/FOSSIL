@@ -11,6 +11,7 @@ module fossil_cut_cells_compare
 !< the host-only outputs (moments, boundaries, quadrature) must be unallocated in both. `cut_cells_twin_mismatches(c,
 !< x, y)` runs `c%cut_cells` and `c%cut_cells_device` on the block x, y, with and without the intervals, and sums
 !< them. Used by `fossil_test_cut_cells_device_twin` (CI, host) and by the curve bench (device vs serial).
+!< `cut_cells_3d_mismatches(a, b)` (issue #100 step 3c) does the same for every output of `cut_cells_3d_device`.
 use fossil,              only : curve_object, cut_cells_2d_t, cut_cells_3d_t
 use fossil_curve_object, only : cut_cells_2d_blocks_t, cut_cells_device_many
 use penf,                only : I4P, I8P, R8P
@@ -18,6 +19,7 @@ use penf,                only : I4P, I8P, R8P
 implicit none
 private
 public :: cut_cells_2d_mismatches, cut_cells_twin_mismatches, cut_cells_many_mismatches, cut_cells_3d_face_mismatches
+public :: cut_cells_3d_mismatches
 
 contains
    function cut_cells_twin_mismatches(c, x, y, status) result(n)
@@ -206,6 +208,50 @@ contains
    d%piece_iv_edge = cb%piece_iv_edge(i0:i1) ; d%piece_iv_lo = cb%piece_iv_lo(i0:i1)
    d%piece_iv_hi = cb%piece_iv_hi(i0:i1)
    endsubroutine block_as_cut
+
+   function cut_cells_3d_mismatches(a, b) result(n)
+   !< Differing elements of every output of `cut_cells_3d_device` (issue #100 step 3c) in a and b (0: bit-identical):
+   !< nx, ny, nz, np, moments_order; the faces (`cut_cells_3d_face_mismatches`) and their (empty) moments; alpha,
+   !< centroid, wet_area, wet_centroid, wet_normal, closed, pieces, first_piece, node_in, edge_x/_y/_z (both allocated
+   !< or neither); piece_cell, piece_volume, piece_centroid, piece_wet_area, piece_wet_centroid, piece_wet_normal,
+   !< piece_face; the host-only outputs (moments, quadrature) unallocated in both. Reals by their bits.
+   type(cut_cells_3d_t), intent(in) :: a, b !< Results.
+   integer(I4P)                     :: n    !< Mismatches.
+
+   n = cut_cells_3d_face_mismatches(a, b)
+   if (a%nx /= b%nx .or. a%ny /= b%ny .or. a%nz /= b%nz) return
+   if (a%np /= b%np) n = n + 1_I4P
+   if (a%moments_order /= b%moments_order) n = n + 1_I4P
+   n = n + face_r4(a%face_x_moments, b%face_x_moments) + face_r4(a%face_y_moments, b%face_y_moments) + &
+       face_r4(a%face_z_moments, b%face_z_moments)
+   n = n + face_r(a%alpha, b%alpha) + face_r4(a%centroid, b%centroid) + face_r(a%wet_area, b%wet_area)
+   n = n + face_r4(a%wet_centroid, b%wet_centroid) + face_r4(a%wet_normal, b%wet_normal)
+   n = n + face_l(a%closed, b%closed) + face_i(a%pieces, b%pieces) + face_i(a%first_piece, b%first_piece)
+   n = n + face_l(a%node_in, b%node_in)
+   if (allocated(a%edge_x) .or. allocated(b%edge_x)) n = n + face_r(a%edge_x, b%edge_x)
+   if (allocated(a%edge_y) .or. allocated(b%edge_y)) n = n + face_r(a%edge_y, b%edge_y)
+   if (allocated(a%edge_z) .or. allocated(b%edge_z)) n = n + face_r(a%edge_z, b%edge_z)
+   n = n + int_mismatches(allocated(a%piece_cell), allocated(b%piece_cell), shape_of_i(a%piece_cell), &
+                          shape_of_i(b%piece_cell), flat_i2(a%piece_cell), flat_i2(b%piece_cell))
+   n = n + real_mismatches(allocated(a%piece_volume), allocated(b%piece_volume), shape_of1(a%piece_volume), &
+                           shape_of1(b%piece_volume), flat_r1(a%piece_volume), flat_r1(b%piece_volume))
+   n = n + real_mismatches(allocated(a%piece_centroid), allocated(b%piece_centroid), shape_of(a%piece_centroid), &
+                           shape_of(b%piece_centroid), flat_r2(a%piece_centroid), flat_r2(b%piece_centroid))
+   n = n + real_mismatches(allocated(a%piece_wet_area), allocated(b%piece_wet_area), shape_of1(a%piece_wet_area), &
+                           shape_of1(b%piece_wet_area), flat_r1(a%piece_wet_area), flat_r1(b%piece_wet_area))
+   n = n + real_mismatches(allocated(a%piece_wet_centroid), allocated(b%piece_wet_centroid), &
+                           shape_of(a%piece_wet_centroid), shape_of(b%piece_wet_centroid), flat_r2(a%piece_wet_centroid), &
+                           flat_r2(b%piece_wet_centroid))
+   n = n + real_mismatches(allocated(a%piece_wet_normal), allocated(b%piece_wet_normal), shape_of(a%piece_wet_normal), &
+                           shape_of(b%piece_wet_normal), flat_r2(a%piece_wet_normal), flat_r2(b%piece_wet_normal))
+   n = n + real_mismatches(allocated(a%piece_face), allocated(b%piece_face), shape_of(a%piece_face), &
+                           shape_of(b%piece_face), flat_r2(a%piece_face), flat_r2(b%piece_face))
+   if (allocated(a%piece_moments) .or. allocated(b%piece_moments)) n = n + 1_I4P
+   if (allocated(a%piece_wall_moments) .or. allocated(b%piece_wall_moments)) n = n + 1_I4P
+   if (allocated(a%piece_face_moments) .or. allocated(b%piece_face_moments)) n = n + 1_I4P
+   if (allocated(a%quad_start) .or. allocated(b%quad_start)) n = n + 1_I4P
+   if (allocated(a%wall_quad_start) .or. allocated(b%wall_quad_start)) n = n + 1_I4P
+   endfunction cut_cells_3d_mismatches
 
    function cut_cells_3d_face_mismatches(a, b) result(n)
    !< Differing elements of the face outputs of two 3-D cuts (issue #100 step 3b): nx, ny, nz, face_x/_y/_z, their
