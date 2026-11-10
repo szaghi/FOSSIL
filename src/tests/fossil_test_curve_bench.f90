@@ -21,7 +21,7 @@ use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, T
 use penf,   only : I4P, I8P, R8P
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d, device_line_mismatches_2d, to_surface
 use fossil, only : surface_stl_object, slice_surface, cut_cells_2d_t
-use fossil_cut_cells_compare, only : cut_cells_twin_mismatches
+use fossil_cut_cells_compare, only : cut_cells_twin_mismatches, cut_cells_2d_mismatches
 use fossil, only : rigid_pose_2d_t, pose_2d, to_world
 use fossil, only : curvilinear_block_2d_t, detect_topology_2d, topo_record_t, TOPO_BOUNDARY, wall_cutter_2d
 use fossil_overset, only : hole_flags_2d, block_logical_t, donor_set_t, donor_candidates_2d
@@ -63,6 +63,7 @@ call feature_case(c)
 call thin_case(c)
 call block_case
 call cut_cells_case
+call chain_case
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
@@ -460,6 +461,128 @@ contains
       enddo
    enddo
    endsubroutine cut_cells_case
+
+   subroutine chain_case
+   !< The 2-D per-step chain on the device (issue #100 step 6a): each time step moves the curve (`move`, a rotation about
+   !< the block centre), tags the cells (`box_classify_many`, one box per cell) and computes the cut cells. Three runs
+   !< over the same poses: the CPU, the device with the outputs copied back, the device with the outputs resident
+   !< (`resident=.true.`). Check: at every step the device tags equal the CPU's and the resident cut, brought back by
+   !< `update_host`, equals the CPU's bit for bit (`cut cells 2-D chain device vs serial mismatches`; n^2, 3 steps).
+   !< With n >= 256 a timing table: ellipse and NACA 0012, 20 steps at 256^2 and 1024^2, per-step time of the CPU and of
+   !< both device runs, best and median of 5 repetitions.
+   integer(I4P), parameter   :: NSTEP = 20_I4P          !< Time steps of the timing.
+   integer(I4P), parameter   :: NREP = 5_I4P            !< Repetitions of the timing.
+   type(curve_object)        :: c0(2), cw               !< Curves (reference, moving work copy).
+   type(cut_cells_2d_t)      :: cut_h, cut_d            !< Cut cells (CPU, device).
+   type(rigid_pose_2d_t)     :: step_pose, rot          !< Pose of one time step, rotation.
+   character(16)             :: cname(2)                !< Curve names.
+   real(R8P),    allocatable :: uu(:), vv(:), x(:), y(:), blo(:,:), bhi(:,:) !< Work.
+   real(R8P)                 :: lo(2), hi(2), th, cen(2), tt(NREP, 3), tmed(3), tbest(3) !< Work.
+   integer(I4P), allocatable :: tag_h(:), tag_d(:)      !< Cell tags.
+   integer(I4P)              :: bad, sts, st, i, k, g, r, v, nn, ngrid(2) !< Work.
+   integer(I8P)              :: q0, q1, rate             !< Clock.
+
+   allocate(uu(1024), vv(1024))
+   do k = 1, 1024
+      th = 2._R8P * PI * (k - 1) / 1024
+      uu(k) = 0.5_R8P + 0.4_R8P * cos(th) ; vv(k) = 0.5_R8P + 0.25_R8P * sin(th)
+   enddo
+   call c0(1)%adopt_loops(u=uu, v=vv, loop_sizes=[1024_I4P])
+   deallocate(uu, vv) ; allocate(uu(1022), vv(1022))
+   call naca0012(511_I4P, uu, vv)
+   uu = 0.15_R8P + 0.7_R8P * uu ; vv = 0.5_R8P + 0.7_R8P * vv
+   call c0(2)%adopt_loops(u=uu, v=vv, loop_sizes=[1022_I4P])
+   cname = [character(16) :: 'ellipse', 'NACA 0012']
+   lo = [0.0031_R8P, 0.0031_R8P] ; hi = [0.9969_R8P, 0.9969_R8P] ; cen = [0.5_R8P, 0.5_R8P]
+   rot = pose_2d(PI / 90._R8P, [0._R8P, 0._R8P])                          ! 2 degrees per step about the centre
+   step_pose = pose_2d(PI / 90._R8P, cen - matmul(rot%r, cen))
+   ngrid = [n, min(4_I4P * n, 1024_I4P)]
+   bad = 0_I4P ; sts = 0_I4P
+   do i = 1, 2                                                             ! check: 3 steps at n^2
+      call grid_edges(lo, hi, ngrid(1), x, y)
+      call cell_boxes(x, y, blo, bhi)
+      allocate(tag_h(size(blo, 2)), tag_d(size(blo, 2)))
+      cw = c0(i) ; call cw%enter_device
+      do k = 1, 3
+         call cw%move(step_pose)
+         call cw%box_classify_many(lo=blo, hi=bhi, codes=tag_h)
+         call cw%box_classify_many_device(lo=blo, hi=bhi, codes=tag_d, status=st) ; sts = sts + st
+         bad = bad + count(tag_h /= tag_d)
+         call cw%cut_cells(x=x, y=y, cut=cut_h, status=st) ; sts = sts + st
+         call cw%cut_cells_device(x=x, y=y, cut=cut_d, status=st, resident=.true.) ; sts = sts + st
+         call cut_d%update_host
+         bad = bad + cut_cells_2d_mismatches(cut_h, cut_d)
+         call cut_d%exit_device
+      enddo
+      call cw%exit_device
+      deallocate(tag_h, tag_d)
+   enddo
+   print '(A,I0)', 'cut cells 2-D chain device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0 .and. sts == 0
+   if (n < 256_I4P) return
+   print '(A)', 'cut cells 2-D chain per step (move + tag + cut, 20 steps; best / median of 5) [s]: curve, cells, CPU, '// &
+                'device copy back, device resident'
+   call system_clock(count_rate=rate)
+   cw = c0(1) ; call grid_edges(lo, hi, ngrid(2), x, y)                  ! warm-up: see cut_cells_case
+   do k = 1, 5
+      call cw%cut_cells_device(x=x, y=y, cut=cut_d, status=st)
+   enddo
+   do i = 1, 2
+      do g = 1, 2
+         call grid_edges(lo, hi, ngrid(g), x, y)
+         call cell_boxes(x, y, blo, bhi)
+         allocate(tag_h(size(blo, 2)))
+         do r = 1, NREP
+            do v = 1, 3
+               cw = c0(i)
+               if (v > 1) call cw%enter_device
+               call system_clock(q0)
+               do k = 1, NSTEP
+                  call cw%move(step_pose)
+                  select case (v)
+                  case (1)
+                     call cw%box_classify_many(lo=blo, hi=bhi, codes=tag_h)
+                     call cw%cut_cells(x=x, y=y, cut=cut_h, status=st)
+                  case (2)
+                     call cw%box_classify_many_device(lo=blo, hi=bhi, codes=tag_h, status=st)
+                     call cw%cut_cells_device(x=x, y=y, cut=cut_d, status=st)
+                  case (3)
+                     call cw%box_classify_many_device(lo=blo, hi=bhi, codes=tag_h, status=st)
+                     call cw%cut_cells_device(x=x, y=y, cut=cut_d, status=st, resident=.true.)
+                  endselect
+               enddo
+               call system_clock(q1)
+               tt(r, v) = real(q1 - q0, R8P) / rate / NSTEP
+               if (v == 3) call cut_d%exit_device
+               if (v > 1) call cw%exit_device
+            enddo
+         enddo
+         deallocate(tag_h)
+         do v = 1, 3
+            tbest(v) = minval(tt(:, v)) ; tmed(v) = median5(tt(:, v))
+         enddo
+         nn = ngrid(g)
+         print '(3X,A16,1X,I4,A,3(1X,ES10.3,A,ES10.3),A,F6.2,A,F6.2,A)', cname(i), nn, '^2', &
+               tbest(1), ' /', tmed(1), tbest(2), ' /', tmed(2), tbest(3), ' /', tmed(3), &
+               '  (', tbest(1) / tbest(2), 'x, ', tbest(1) / tbest(3), 'x)'
+      enddo
+   enddo
+   endsubroutine chain_case
+
+   subroutine cell_boxes(x, y, blo, bhi)
+   !< One box per cell of the grid x, y, cell (i, j) at i + (j - 1) nx.
+   real(R8P),              intent(in)  :: x(:), y(:)    !< Cell edges.
+   real(R8P), allocatable, intent(out) :: blo(:,:), bhi(:,:) !< Boxes [2, nx ny].
+   integer(I4P)                        :: i, j, nx, ny   !< Work.
+
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
+   allocate(blo(2, nx * ny), bhi(2, nx * ny))
+   do j = 1, ny
+      do i = 1, nx
+         blo(:, i + (j - 1) * nx) = [x(i), y(j)] ; bhi(:, i + (j - 1) * nx) = [x(i + 1), y(j + 1)]
+      enddo
+   enddo
+   endsubroutine cell_boxes
 
    pure function median5(t) result(m)
    !< Median of five timings.
