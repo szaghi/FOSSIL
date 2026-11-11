@@ -17,7 +17,8 @@ program fossil_test_curve_bench
 !< mismatches` (issue #40) and `thin device vs serial mismatches` (issue #62: box_thin_many_device on the cells of a
 !< 64^2 block, medial thickness and gap), `cut cells 2-D blocks grids device vs serial mismatches` (issue #100 step 4.1:
 !< the multi-block cut cells with a grid per block, the translated planes of the swept geometry among them): all must
-!< be 0.
+!< be 0; `swept cells 2-D device vs serial mismatches` (issue #100 step 4: `swept_cells_2d_device` against
+!< `swept_cells_2d`, exact translation, exact rotation, Gauss and explicit node poses) too.
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
@@ -28,6 +29,8 @@ use fossil, only : rigid_pose_2d_t, pose_2d, to_world
 use fossil, only : curvilinear_block_2d_t, detect_topology_2d, topo_record_t, TOPO_BOUNDARY, wall_cutter_2d
 use fossil_overset, only : hole_flags_2d, block_logical_t, donor_set_t, donor_candidates_2d
 use vecfor, only : vector_R8P
+use fossil, only : pose_interpolate, gauss_legendre_01, swept_cells_2d_t, swept_cells_2d, swept_cells_2d_device
+use fossil_swept_compare, only : swept_twin_mismatches
 
 implicit none
 
@@ -67,6 +70,7 @@ call thin_case(c)
 call block_case
 call cut_cells_case
 call chain_case
+call swept_case
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
@@ -516,6 +520,77 @@ contains
    b0 = s%get_bmin() ; b1 = s%get_bmax()
    lo = [b0%x, b0%y] ; hi = [b1%x, b1%y] ; zmin = b0%z ; zmax = b1%z
    endsubroutine body_box
+
+   subroutine swept_case
+   !< `swept_cells_2d_device` (issue #100 step 4: the end-pose cut cells on the device) against `swept_cells_2d`, every
+   !< output bitwise (`swept_twin_mismatches`): with n >= 256 the 1024-gon ellipse of `chain_case` on n^2 cells,
+   !< translated by (1.7, 0.6) cells (exact), rotated by 2 degrees about the block centre by Gauss-Legendre
+   !< (`exact=.false.`, nq = 4) and with the node poses given, and the NACA 0012 (1022 vertices) rotated on (n/4)^2 cells
+   !< (exact rotation, the costly path); below (the regression run, within its budget) a 128-gon on (n/2)^2 cells and a
+   !< 254-vertex NACA 0012 on 8^2. With n >= 256 a timing table: host and device calls, best of 3, translation and
+   !< Gauss at n^2 and (4n)^2 (at most 1024^2).
+   type(curve_object)        :: ce, cn                  !< Ellipse, NACA 0012.
+   type(rigid_pose_2d_t)     :: p0, pt, pr, rot, pq(4)  !< Poses.
+   type(swept_cells_2d_t)    :: sw                      !< Result.
+   real(R8P),    allocatable :: uu(:), vv(:), x(:), y(:) !< Work.
+   real(R8P),    allocatable :: sq(:), wq(:)            !< Gauss nodes, weights.
+   real(R8P)                 :: lo(2), hi(2), cen(2), th, h, t(2, 3) !< Work.
+   integer(I4P)              :: bad, k, g, p, r, m, ngrid(2), ne, nn, me, mn !< Work.
+   integer(I8P)              :: q0, q1, rate             !< Clock.
+
+   ne = merge(1024_I4P, 128_I4P, n >= 256_I4P) ; nn = merge(511_I4P, 127_I4P, n >= 256_I4P) ! vertices
+   me = merge(n, max(8_I4P, n / 2_I4P), n >= 256_I4P) ; mn = merge(n / 4_I4P, 8_I4P, n >= 256_I4P) ! cells
+   allocate(uu(ne), vv(ne))
+   do k = 1, ne
+      th = 2._R8P * PI * (k - 1) / ne
+      uu(k) = 0.5_R8P + 0.4_R8P * cos(th) ; vv(k) = 0.5_R8P + 0.25_R8P * sin(th)
+   enddo
+   call ce%adopt_loops(u=uu, v=vv, loop_sizes=[ne])
+   deallocate(uu, vv) ; allocate(uu(2 * nn), vv(2 * nn))
+   call naca0012(nn, uu, vv)
+   uu = 0.15_R8P + 0.7_R8P * uu ; vv = 0.5_R8P + 0.7_R8P * vv
+   call cn%adopt_loops(u=uu, v=vv, loop_sizes=[2_I4P * nn])
+   lo = [0.0031_R8P, 0.0031_R8P] ; hi = [0.9969_R8P, 0.9969_R8P] ; cen = [0.5_R8P, 0.5_R8P]
+   p0 = pose_2d(0._R8P, [0._R8P, 0._R8P])
+   rot = pose_2d(PI / 90._R8P, [0._R8P, 0._R8P]) ; pr = pose_2d(PI / 90._R8P, cen - matmul(rot%r, cen))
+   call gauss_legendre_01(4_I4P, sq, wq)
+   do k = 1, 4
+      pq(k) = pose_interpolate(p0, pr, sq(k))
+   enddo
+   call grid_edges(lo, hi, me, x, y) ; h = x(2) - x(1)
+   pt = pose_2d(0._R8P, [1.7_R8P * h, 0.6_R8P * h])
+   bad = swept_twin_mismatches(ce, p0, pt, x, y)
+   bad = bad + swept_twin_mismatches(ce, p0, pr, x, y, nq=4_I4P, exact=.false.)
+   bad = bad + swept_twin_mismatches(ce, p0, pr, x, y, nq=4_I4P, poses=pq)
+   call grid_edges(lo, hi, mn, x, y)
+   bad = bad + swept_twin_mismatches(cn, p0, pr, x, y)
+   print '(A,I0)', 'swept cells 2-D device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0
+   if (n < 256_I4P) return
+   print '(A)', 'swept cells 2-D timing (ellipse; best of 3) [s]: path, cells, host, device, speed-up'
+   call system_clock(count_rate=rate)
+   ngrid = [n, min(4_I4P * n, 1024_I4P)]
+   do p = 1, 2
+      do g = 1, 2
+         call grid_edges(lo, hi, ngrid(g), x, y) ; h = x(2) - x(1)
+         pt = pose_2d(0._R8P, [1.7_R8P * h, 0.6_R8P * h])
+         t = huge(1._R8P)
+         do r = 1, 3
+            do m = 1, 2
+               call system_clock(q0)
+               if (p == 1 .and. m == 1) call swept_cells_2d(ce, p0, pt, x, y, sw)
+               if (p == 1 .and. m == 2) call swept_cells_2d_device(ce, p0, pt, x, y, sw)
+               if (p == 2 .and. m == 1) call swept_cells_2d(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false.)
+               if (p == 2 .and. m == 2) call swept_cells_2d_device(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false.)
+               call system_clock(q1)
+               t(m, r) = real(q1 - q0, R8P) / rate
+            enddo
+         enddo
+         print '(3X,A12,1X,I4,A,2(2X,ES9.2),A,F6.2,A)', merge('translation', 'Gauss nq=4 ', p == 1), ngrid(g), '^2', &
+               minval(t(1, :)), minval(t(2, :)), '  (', minval(t(1, :)) / minval(t(2, :)), 'x)'
+      enddo
+   enddo
+   endsubroutine swept_case
 
    subroutine chain_case
    !< The 2-D per-step chain on the device (issue #100 step 6a): each time step moves the curve (`move`, a rotation about

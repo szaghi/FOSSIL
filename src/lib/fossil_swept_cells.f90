@@ -43,7 +43,8 @@ module fossil_swept_cells
 !< not round-off (a dragon section crossing itself once: 5.3e-6, the knot removed: 7.8e-18). Pass
 !< `check_input=.true.` to have the input checked first (`sw%self_intersecting`, a warning on stderr;
 !< issue #44), or call `self_intersections` / `check_validity(check_self_intersections=.true.)`.
-use fossil_curve_object,       only : curve_object, cut_cells_2d_t, place_for_crossings
+use fossil_curve_object,       only : curve_object, cut_cells_2d_t, cut_cells_2d_blocks_t, cut_cells_device_many, &
+                                     place_for_crossings
 use fossil_curve_slice,        only : slice_surface
 use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d
 use fossil_facet_object,       only : facet_object
@@ -56,6 +57,7 @@ use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 implicit none
 private
 public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
+public :: swept_cells_2d_device
 
 type :: swept_cells_2d_t
    !< Swept geometry of a curve between two poses on a 2-D block (fluid = outside the solid).
@@ -157,9 +159,52 @@ contains
    logical,                intent(in),  optional :: exact    !< Exact translation path (default .true.).
    integer(I4P),           intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    logical,                intent(in),  optional :: check_input !< Check the curve for self-intersections.
+
+   call swept_cells_2d_core(curve, pose0, pose1, x, y, sw, .false., nq, poses, exact, status, check_input)
+   endsubroutine swept_cells_2d
+
+   subroutine swept_cells_2d_device(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input)
+   !< `swept_cells_2d` with the cut cells of the two end poses on the device (issue #100 step 4): the same `sw`, bit for
+   !< bit. Both moved copies go as the two blocks of one `cut_cells_device_many` call (one grid, cell arrays only, no
+   !< pieces or intervals), left resident; only `alpha` comes back (`update host`), then the device copies are
+   !< released. The face apertures, the wall terms and the residual stay on the host (`swept_cells_2d`'s routines):
+   !< they are 94-99.9 % of a call at 256^2 and 1024^2 (step 4.0: `collect` and the node breakpoints of the
+   !< translation, the line crossings of the Gauss path, `place_for_crossings` and the events of the rotation), so the
+   !< end poses are the whole device part. Arguments, defaults and refusals as `swept_cells_2d`. Built without OpenACC
+   !< it runs on the host.
+   type(curve_object),     intent(in)            :: curve    !< Curve (body frame).
+   type(rigid_pose_2d_t),  intent(in)            :: pose0    !< Pose at the start.
+   type(rigid_pose_2d_t),  intent(in)            :: pose1    !< Pose at the end.
+   real(R8P),              intent(in)            :: x(:), y(:) !< Cell edges (strictly increasing).
+   type(swept_cells_2d_t), intent(out)           :: sw       !< Swept geometry.
+   integer(I4P),           intent(in),  optional :: nq       !< Gauss nodes (default 4).
+   type(rigid_pose_2d_t),  intent(in),  optional :: poses(:) !< Poses at the Gauss nodes.
+   logical,                intent(in),  optional :: exact    !< Exact translation path (default .true.).
+   integer(I4P),           intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,                intent(in),  optional :: check_input !< Check the curve for self-intersections.
+
+   call swept_cells_2d_core(curve, pose0, pose1, x, y, sw, .true., nq, poses, exact, status, check_input)
+   endsubroutine swept_cells_2d_device
+
+   subroutine swept_cells_2d_core(curve, pose0, pose1, x, y, sw, device, nq, poses, exact, status, check_input)
+   !< `swept_cells_2d` (device = .false.) and `swept_cells_2d_device` (device = .true.: the end-pose cut cells on the
+   !< device); everything else is the same code.
+   type(curve_object),     intent(in)            :: curve    !< Curve (body frame).
+   type(rigid_pose_2d_t),  intent(in)            :: pose0    !< Pose at the start.
+   type(rigid_pose_2d_t),  intent(in)            :: pose1    !< Pose at the end.
+   real(R8P),              intent(in)            :: x(:), y(:) !< Cell edges (strictly increasing).
+   type(swept_cells_2d_t), intent(out)           :: sw       !< Swept geometry.
+   logical,                intent(in)            :: device   !< End-pose cut cells on the device.
+   integer(I4P),           intent(in),  optional :: nq       !< Gauss nodes (default 4).
+   type(rigid_pose_2d_t),  intent(in),  optional :: poses(:) !< Poses at the Gauss nodes.
+   logical,                intent(in),  optional :: exact    !< Exact translation path (default .true.).
+   integer(I4P),           intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,                intent(in),  optional :: check_input !< Check the curve for self-intersections.
    integer(I4P), allocatable :: pairs(:,:)             !< Crossing pairs (check_input).
-   type(curve_object)       :: c0, c1                !< Copies at the two poses.
-   type(cut_cells_2d_t)     :: k0, k1                !< Their cut cells.
+   type(curve_object)       :: ce(2)                 !< Copies at the two poses.
+   type(cut_cells_2d_t)     :: k0, k1                !< Their cut cells (host).
+   type(cut_cells_2d_blocks_t) :: kb                 !< Their cut cells (device, one call).
+   integer(I4P)             :: st                    !< Status.
    real(R8P), allocatable   :: fu2(:,:), fv2(:,:), fl2(:,:), res(:,:) !< 2 nq face lengths, work, residual.
    integer(I4P)             :: nx, ny, n, i, j       !< Work.
    real(R8P)                :: d(2), dth             !< Displacement, rotation angle.
@@ -196,9 +241,17 @@ contains
       endif
    endif
    ! the volumes: exact cut cells at the two poses
-   c0 = curve ; call c0%move(pose0) ; call c0%cut_cells(x, y, k0)
-   c1 = curve ; call c1%move(pose1) ; call c1%cut_cells(x, y, k1)
-   sw%alpha0 = k0%alpha ; sw%alpha1 = k1%alpha
+   ce(1) = curve ; call ce(1)%move(pose0)
+   ce(2) = curve ; call ce(2)%move(pose1)
+   if (device) then ! both poses as the blocks of one call, cell arrays only; only alpha comes back
+      call cut_cells_device_many(ce, x, y, kb, st, intervals=.false., pieces=.false., resident=.true.)
+      !$acc update host(kb%alpha)
+      sw%alpha0 = kb%alpha(:, :, 1) ; sw%alpha1 = kb%alpha(:, :, 2)
+      call kb%exit_device
+   else
+      call ce(1)%cut_cells(x, y, k0) ; call ce(2)%cut_cells(x, y, k1)
+      sw%alpha0 = k0%alpha ; sw%alpha1 = k1%alpha
+   endif
    do j = 1_I4P, ny
       do i = 1_I4P, nx
          sw%swept(i, j) = (sw%alpha1(i, j) - sw%alpha0(i, j)) * (x(i + 1) - x(i)) * (y(j + 1) - y(j))
@@ -218,7 +271,7 @@ contains
    allocate(res(nx, ny)) ; res = 0._R8P
    if (translation) then
       sw%exact = .true.
-      call faces_translation_2d(c0, d, x, y, sw%face_u, sw%face_v, sw%evaluations)
+      call faces_translation_2d(ce(1), d, x, y, sw%face_u, sw%face_v, sw%evaluations)
       do j = 1_I4P, ny ! the field is uniform (d): only the fluid lengths enter
          do i = 1_I4P, nx
             res(i, j) = d(1) * (sw%face_u(i + 1, j) - sw%face_u(i, j)) + d(2) * (sw%face_v(i, j + 1) - sw%face_v(i, j))
@@ -245,7 +298,7 @@ contains
          if (screw) sw%residual(i, j) = sw%swept(i, j) + res(i, j)
       enddo
    enddo
-   endsubroutine swept_cells_2d
+   endsubroutine swept_cells_2d_core
 
    subroutine faces_rotation_2d(curve, pose0, pose1, x, y, fu, fv, flux, nev, exact)
    !< Exact time-averaged fluid lengths and rigid-field outflows of every face under the screw motion of
