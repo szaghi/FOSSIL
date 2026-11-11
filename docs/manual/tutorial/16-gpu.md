@@ -124,8 +124,12 @@ batches.
   that of `swept_cells_3d` / `swept_cells_2d`. In 3-D the faces are batched over all the sections of a step:
   1.7-4.7x on an RTX 4070 at 32³-64³. In 2-D only the end poses move, so there is no gain today (the
   [moving bodies reference](/guide/advanced/moving-bodies#on-the-device) has the table).
-- `cut_cells_3d_device(surface, x, y, z, cut)` computes the 3-D cut cells of a block on the device (without links,
-  moments or quadrature), bit for bit those of `cut_cells_3d`, copied back or with `resident=.true.` left on the device.
+- The piece links of the cut cells run on the device too: `cut_cells_3d_device(..., links=)` and
+  `cut_links_2d_device(cut, links)`, bit for bit the host's. On an RTX 4070, cut + links is 6.6-9.4x the CPU at 128³
+  and 10.5-12x at 1024² with everything resident (the
+  [cut-solver reference](/guide/advanced/cut-solver#on-the-device) has the table).
+- `cut_cells_3d_device(surface, x, y, z, cut)` computes the 3-D cut cells of a block on the device (with `links=`
+  also their piece links; no moments or quadrature), bit for bit those of `cut_cells_3d`, copied back or with `resident=.true.` left on the device.
   On an RTX 4070 at 128³ cells: 2.1-3.0x the CPU copied back, 2.7-3.8x resident (the
   [cut cells reference](/guide/advanced/cut-cells#on-the-device) has the table and what bounds it).
 - `curve%cut_cells_device(x, y, cut)` computes the 2-D cut cells of a block on the device, bit for bit those of

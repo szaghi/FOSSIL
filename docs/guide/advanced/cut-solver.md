@@ -98,6 +98,31 @@ Measured (`fossil_test_cut_links`, `fossil_test_cut_links_3d`):
 |---|---|
 | 2-D: circle on a generic and an aligned grid, thin plate | link sums = piece aperture × edge length to 1·10⁻¹⁶, exact symmetry, per-piece apertures add up to the cell's exactly; plate pieces never link across the plate |
 | 3-D: tilted wedge, cone, L-prism (generic, aligned), thin plate, square tube (hole as a face island), 8 lattice tetrahedra; 113 298 links, 193 multi-piece cells | link sums = piece face fraction × face area to 1.2·10⁻¹⁴, exact symmetry, 0 unmatched regions; plate pieces never link across the plate |
+| links on the device vs the host: 3-D bench bodies, sphere and cone at 64³; 2-D ellipse, NACA 0012, 50 circles at 256² and 1024²; copied back and resident | every field bit for bit (`cut links 3-D` / `2-D device vs serial mismatches`, `fossil_test_cut_links_3d_twin`, `fossil_test_cut_links_2d_twin`) |
+
+### On the device
+
+The links are built per face (per edge in 2-D) and per piece, with no global sort: each face fills slots of
+(low piece, high piece, area) after a count and a prefix sum, and a per-piece pass emits the CSR in (face, piece
+across) order, adding equal keys in the order the regions of their face come. The result is the same `cut_links_t`
+bit for bit as the sort-based assembly it replaced, and the cost grows with the cells (N³), not with N^3.7-4.0.
+
+On the device:
+- `cut_cells_3d_device(surface, x, y, z, cut, links=, resident=)` computes the cut, keeps the fluid edge intervals of
+  the pieces and the plane sections resident, and runs the link stage there;
+- `cut_links_2d_device(cut, links, resident)` does the 2-D links from a resident or host `cut_cells_2d_t`.
+
+Both return the links copied back or, with `resident=.true.`, mapped on the device (`links%update_host`,
+`links%exit_device`, the cut cells' contract). Measured on an RTX 4070, best of 5 after a warm-up:
+
+| case | CPU, cut + links [s] | device, resident [s] | device, copied back [s] |
+|---|---|---|---|
+| sphere, 128³ | 1.44 | 0.153 | 0.347 |
+| cone, 128³ | 1.35 | 0.205 | 0.369 |
+| ellipse, 1024² | 0.125 | 0.011 | 0.035 |
+| NACA 0012, 1024² | 0.149 | 0.012 | 0.044 |
+
+The link stage itself adds 1-6 % to the device cut cells. SRD, FRD and the merge targets read the links on the host.
 
 ## Neighbourhoods for state redistribution
 
