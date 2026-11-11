@@ -79,7 +79,8 @@ use fossil_box_query,          only : box_tolerance
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t, cut_cells_2d_blocks_t, cut_cells_device_many
 use fossil_curve_slice,        only : slice_planes_t, slice_planes_prepare, slice_surface_plane, slice_surface_planes
 use fossil_cut_cells_2d,       only : chunk_offsets_dev
-use fossil_cut_graph,          only : cut_links_t, build_csr
+use fossil_cut_graph,          only : cut_links_t, links_face_id, links_face_bases, links_piece_count_3d, &
+                                      links_piece_fill_3d
 use fossil_cut_moments,        only : MOMENTS_MAX, mono_count, mono_exponents, triangle_moments, segment_green_moments, &
                                       cell_moments, tet_rule, triangle_rule, tensor_rule
 use fossil_facet_object,       only : facet_object
@@ -2021,169 +2022,306 @@ contains
    !< two share (the edges of the face are cell edges). A one-piece side takes every region. A region with no fluid
    !< interval (a fluid island inside a solid trace) goes to the only piece of that side whose face area it leaves
    !< unexplained; otherwise it is counted in `unmatched` and gets no link.
+   !<
+   !< Flat arrays (issue #100 step 5). The faces are numbered as the face arrays of the cut (`links_face_id`: face_x,
+   !< face_y, face_z; face (a, c) between cells c - e_a and c). Per interior face its slots (`links_face_capacity`: 1
+   !< for two one-piece cells, else the regions of the section cell), a prefix sum, then the fill: slot (low piece, high
+   !< piece, area), low piece 0 for a region without a link; the regions of a multi-piece face by `links_face_regions`
+   !< (matching and `resolve` in region order, unchanged). Then the CSR per piece (`links_piece_count_3d`, prefix sum,
+   !< `links_piece_fill_3d`), with no global sort.
+   !<
+   !< Same bits as the CSR of `build_csr` (used here before step 5): build_csr stable-sorted the directed links (p,
+   !< face f, q, area) by (p, f, q) and summed the areas of equal keys in their input order (SUM: from 0, one add at a
+   !< time, in that order). The directed link (p, f, q) was recorded only at the grid face f of p's cell (p in the low
+   !< cell: f = 2a, its +a face; in the high cell: f = 2a - 1), so the entries of one key all come from one face, where
+   !< they were recorded in region order: the slot order of that face. `links_piece_fill_3d` sums the slots of the key
+   !< in slot order, from 0, and emits the keys of p by face 1..6, then q increasing: the sort order. The face order of
+   !< the plane loop never mattered (no key spans two faces), so the faces may run in any order, or in parallel.
    type(cut_cells_3d_t), intent(in)  :: cut              !< Cut cells (pieces).
    real(R8P),            intent(in)  :: x(:), y(:), z(:) !< Cell edges.
    type(cut_cells_2d_t), intent(in)  :: px(:), py(:), pz(:) !< Plane sections.
    integer(I4P),         intent(in)  :: piv_piece(:), piv_edge(:) !< Fluid edge intervals of multi-piece cells.
    real(R8P),            intent(in)  :: piv_lo(:), piv_hi(:)      !< Their ranges.
    type(cut_links_t),    intent(out) :: links            !< Links.
-   integer(I4P), allocatable :: lp(:), lq(:), lf(:), ivs(:), ivo(:) !< Raw links; intervals by piece (CSR).
-   real(R8P),    allocatable :: la(:)                    !< Raw link areas.
-   integer(I4P) :: nl, a, i, ic(3), jc(3), np2, ua, va, n(3) !< Work.
+   integer(I4P), allocatable :: ivs(:), ivo(:), fill(:)  !< Intervals by piece (CSR), work.
+   integer(I4P), allocatable :: off(:)                   !< Slots of face f: off(f) + 1 .. off(f + 1).
+   integer(I4P), allocatable :: spa(:), spb(:)           !< Pieces of each slot: low, high cell (spa = 0: no link).
+   real(R8P),    allocatable :: sar(:)                   !< Area of each slot.
+   integer(I4P) :: n(3), base(4), a, ua, va, i, j, k, c(3), ic(3), f, p, npiv, ns, nk, nreg, um !< Work.
    real(R8P)    :: af, fr                                !< Face area, face fraction.
    real(R8P)    :: e(3, 2)                               !< Low and high edges of the cell.
 
-   links%np = cut%np ; n = [cut%nx, cut%ny, cut%nz]
+   links%np = cut%np ; n = [cut%nx, cut%ny, cut%nz] ; npiv = size(piv_piece, kind=I4P)
    ! intervals by piece
-   allocate(ivs(cut%np + 1), ivo(size(piv_piece))) ; ivs = 0_I4P
-   do i = 1, size(piv_piece)
+   allocate(ivs(cut%np + 1), ivo(npiv), fill(cut%np)) ; ivs = 0_I4P ; fill = 0_I4P
+   do i = 1, npiv
       ivs(piv_piece(i) + 1) = ivs(piv_piece(i) + 1) + 1_I4P
    enddo
    ivs(1) = 1_I4P
    do i = 1, cut%np
       ivs(i + 1) = ivs(i + 1) + ivs(i)
    enddo
-   allocate(lp(64), lq(64), lf(64), la(64)) ; nl = 0_I4P
-   block
-      integer(I4P) :: fill(cut%np)
-      fill = 0_I4P
-      do i = 1, size(piv_piece)
-         ivo(ivs(piv_piece(i)) + fill(piv_piece(i))) = i ; fill(piv_piece(i)) = fill(piv_piece(i)) + 1_I4P
-      enddo
-   endblock
+   do i = 1, npiv
+      ivo(ivs(piv_piece(i)) + fill(piv_piece(i))) = i ; fill(piv_piece(i)) = fill(piv_piece(i)) + 1_I4P
+   enddo
+   ! slots per face, prefix sum
+   call links_face_bases(n, base)
+   allocate(off(base(4) + 1)) ; off = 0_I4P
    do a = 1, 3
-      ua = mod(a, 3_I4P) + 1_I4P ; va = mod(a + 1_I4P, 3_I4P) + 1_I4P
-      do np2 = 2, n(a) ! interior planes: the face between cells np2 - 1 and np2 along a
-         select case (a)
-         case (1) ; call plane_links(px(np2))
-         case (2) ; call plane_links(py(np2))
-         case default ; call plane_links(pz(np2))
-         endselect
+      do k = merge(2_I4P, 1_I4P, a == 3_I4P), n(3)
+         do j = merge(2_I4P, 1_I4P, a == 2_I4P), n(2)
+            do i = merge(2_I4P, 1_I4P, a == 1_I4P), n(1)
+               c = [i, j, k] ; ic = c ; ic(a) = c(a) - 1_I4P
+               select case (a)
+               case (1) ; fr = cut%face_x(i, j, k) ; nreg = cut%face_x_pieces(i, j, k)
+               case (2) ; fr = cut%face_y(i, j, k) ; nreg = cut%face_y_pieces(i, j, k)
+               case default ; fr = cut%face_z(i, j, k) ; nreg = cut%face_z_pieces(i, j, k)
+               endselect
+               off(links_face_id(a, c, n, base) + 1) = links_face_capacity(cut%pieces(ic(1), ic(2), ic(3)), &
+                                                                             cut%pieces(i, j, k), fr, nreg)
+            enddo
+         enddo
       enddo
    enddo
-   call build_csr(nl, lp, lq, lf, la, links)
-   contains
-      subroutine plane_links(sc)
-      !< Links over the faces of one interior grid plane (axis a, index np2), with its section sc.
-      type(cut_cells_2d_t), intent(in) :: sc !< Plane section.
-      integer(I4P) :: i1, i2, rr, m, nreg   !< Work.
-      integer(I4P), allocatable :: pr(:,:)  !< Pieces of each region on the two sides.
-      real(R8P),    allocatable :: ar(:)    !< Region areas.
-
-      do i2 = 1, n(va)
-         do i1 = 1, n(ua)
-            ic(a) = np2 - 1_I4P ; ic(ua) = i1 ; ic(va) = i2 ; jc = ic ; jc(a) = np2
-            if (cut%pieces(ic(1), ic(2), ic(3)) < 1_I4P .or. cut%pieces(jc(1), jc(2), jc(3)) < 1_I4P) cycle
-            select case (a)
-            case (1) ; fr = cut%face_x(jc(1), jc(2), jc(3))
-            case (2) ; fr = cut%face_y(jc(1), jc(2), jc(3))
-            case default ; fr = cut%face_z(jc(1), jc(2), jc(3))
-            endselect
-            if (fr <= 0._R8P) cycle
-            e(:, 1) = [x(ic(1)), y(ic(2)), z(ic(3))] ; e(:, 2) = [x(ic(1) + 1), y(ic(2) + 1), z(ic(3) + 1)]
-            af = (e(ua, 2) - e(ua, 1)) * (e(va, 2) - e(va, 1))
-            if (cut%pieces(ic(1), ic(2), ic(3)) == 1_I4P .and. cut%pieces(jc(1), jc(2), jc(3)) == 1_I4P) then
-               call add_link(cut%first_piece(ic(1), ic(2), ic(3)), cut%first_piece(jc(1), jc(2), jc(3)), fr * af)
-               cycle
-            endif
-            if (sc%pieces(i1, i2) < 1_I4P) cycle
-            nreg = sc%pieces(i1, i2)
-            allocate(pr(2, nreg), ar(nreg))
-            do rr = 1, nreg
-               m = sc%first_piece(i1, i2) + rr - 1_I4P
-               ar(rr) = sc%piece_area(m)
-               pr(1, rr) = side_piece(sc, m, ic, 1_I4P) ! the low cell: its +a face
-               pr(2, rr) = side_piece(sc, m, jc, 0_I4P) ! the high cell: its -a face
-            enddo
-            call resolve(pr, ar)
-            do rr = 1, nreg
-               if (ar(rr) <= 0._R8P) cycle
-               if (pr(1, rr) == 0_I4P .or. pr(2, rr) == 0_I4P) then
-                  links%unmatched = links%unmatched + 1_I4P ; cycle
+   do f = 1, base(4)
+      off(f + 1) = off(f + 1) + off(f)
+   enddo
+   ! slots: fill
+   ns = off(base(4) + 1) ; allocate(spa(ns), spb(ns), sar(ns))
+   do a = 1, 3
+      ua = mod(a, 3_I4P) + 1_I4P ; va = mod(a + 1_I4P, 3_I4P) + 1_I4P
+      do k = merge(2_I4P, 1_I4P, a == 3_I4P), n(3)
+         do j = merge(2_I4P, 1_I4P, a == 2_I4P), n(2)
+            do i = merge(2_I4P, 1_I4P, a == 1_I4P), n(1)
+               c = [i, j, k] ; f = links_face_id(a, c, n, base)
+               if (off(f + 1) == off(f)) cycle
+               ic = c ; ic(a) = c(a) - 1_I4P
+               e(:, 1) = [x(ic(1)), y(ic(2)), z(ic(3))] ; e(:, 2) = [x(ic(1) + 1), y(ic(2) + 1), z(ic(3) + 1)]
+               af = (e(ua, 2) - e(ua, 1)) * (e(va, 2) - e(va, 1))
+               if (cut%pieces(ic(1), ic(2), ic(3)) == 1_I4P .and. cut%pieces(i, j, k) == 1_I4P) then
+                  select case (a)
+                  case (1) ; fr = cut%face_x(i, j, k)
+                  case (2) ; fr = cut%face_y(i, j, k)
+                  case default ; fr = cut%face_z(i, j, k)
+                  endselect
+                  spa(off(f) + 1) = cut%first_piece(ic(1), ic(2), ic(3)) ; spb(off(f) + 1) = cut%first_piece(i, j, k)
+                  sar(off(f) + 1) = fr * af
+                  cycle
                endif
-               call add_link(pr(1, rr), pr(2, rr), ar(rr))
-            enddo
-            deallocate(pr, ar)
-         enddo
-      enddo
-      endsubroutine plane_links
-
-      integer(I4P) function side_piece(sc, m, cc, sd) result(pq)
-      !< The piece of cell cc whose fluid edge intervals overlap those of region m of the section (0: none). A
-      !< one-piece cell gives its piece.
-      type(cut_cells_2d_t), intent(in) :: sc           !< Section.
-      integer(I4P),         intent(in) :: m, cc(3), sd !< Region, cell, side of the face (axis a) in cc.
-      integer(I4P) :: t, ed, ll, kax, sides(3), le, nu, nv, w, pw !< Work.
-      real(R8P)    :: tol                              !< Overlap tolerance.
-
-      pq = 0_I4P
-      if (cut%pieces(cc(1), cc(2), cc(3)) == 1_I4P) then
-         pq = cut%first_piece(cc(1), cc(2), cc(3)) ; return
-      endif
-      nu = sc%nx ; nv = sc%ny
-      do t = sc%piece_iv_start(m), sc%piece_iv_start(m + 1) - 1
-         ed = sc%piece_iv_edge(t) ; sides = 0_I4P ; sides(a) = sd
-         if (ed <= (nu + 1_I4P) * nv) then ! along v, at u line ll
-            ll = mod(ed - 1_I4P, nu + 1_I4P) + 1_I4P ; kax = va
-            sides(ua) = merge(0_I4P, 1_I4P, ll == cc(ua))
-         else ! along u, at v line ll
-            ll = (ed - (nu + 1_I4P) * nv - 1_I4P) / nu + 1_I4P ; kax = ua
-            sides(va) = merge(0_I4P, 1_I4P, ll == cc(va))
-         endif
-         le = edge_index(kax, sides)
-         tol = 1.e-12_R8P * (sc%piece_iv_hi(t) - sc%piece_iv_lo(t) + abs(sc%piece_iv_hi(t)))
-         do pw = cut%first_piece(cc(1), cc(2), cc(3)), cut%first_piece(cc(1), cc(2), cc(3)) + cut%pieces(cc(1), cc(2), cc(3)) - 1
-            do w = ivs(pw), ivs(pw + 1) - 1
-               if (piv_edge(ivo(w)) /= le) cycle
-               if (min(piv_hi(ivo(w)), sc%piece_iv_hi(t)) - max(piv_lo(ivo(w)), sc%piece_iv_lo(t)) > tol) then
-                  pq = pw ; return
-               endif
+               nreg = off(f + 1) - off(f)
+               select case (a)
+               case (1)
+                  call links_face_regions_host(px(i), a, ic, c, af, cut, ivs, ivo, piv_edge, piv_lo, piv_hi, nreg, &
+                                               spa(off(f) + 1:off(f + 1)), spb(off(f) + 1:off(f + 1)), &
+                                               sar(off(f) + 1:off(f + 1)), um)
+               case (2)
+                  call links_face_regions_host(py(j), a, ic, c, af, cut, ivs, ivo, piv_edge, piv_lo, piv_hi, nreg, &
+                                               spa(off(f) + 1:off(f + 1)), spb(off(f) + 1:off(f + 1)), &
+                                               sar(off(f) + 1:off(f + 1)), um)
+               case default
+                  call links_face_regions_host(pz(k), a, ic, c, af, cut, ivs, ivo, piv_edge, piv_lo, piv_hi, nreg, &
+                                               spa(off(f) + 1:off(f + 1)), spb(off(f) + 1:off(f + 1)), &
+                                               sar(off(f) + 1:off(f + 1)), um)
+               endselect
+               links%unmatched = links%unmatched + um
             enddo
          enddo
       enddo
-      endfunction side_piece
-
-      subroutine resolve(pr, ar)
-      !< Regions left without a piece on a side: the only piece of that side whose face area is not explained by its
-      !< matched regions takes them, one at a time.
-      integer(I4P), intent(inout) :: pr(:,:)       !< Pieces of the regions.
-      real(R8P),    intent(in)    :: ar(:)         !< Region areas.
-      integer(I4P) :: side, rr, pw, cand, ncand, cc(3), fidx !< Work.
-      real(R8P)    :: res, afc                     !< Residual, face area.
-
-      do side = 1, 2
-         if (side == 1) then
-            cc = ic ; fidx = 2_I4P * a
-         else
-            cc = jc ; fidx = 2_I4P * a - 1_I4P
-         endif
-         afc = af
-         do rr = 1, size(ar)
-            if (pr(side, rr) /= 0_I4P .or. ar(rr) <= 0._R8P) cycle
-            ncand = 0_I4P ; cand = 0_I4P
-            do pw = cut%first_piece(cc(1), cc(2), cc(3)), cut%first_piece(cc(1), cc(2), cc(3)) + cut%pieces(cc(1), cc(2), cc(3)) - 1
-               res = cut%piece_face(fidx, pw) * afc - sum(ar, mask=pr(side, :) == pw)
-               if (res > 1.e-12_R8P * afc) then
-                  ncand = ncand + 1_I4P ; cand = pw
-               endif
+   enddo
+   ! CSR per piece: counts, prefix sum, fill
+   allocate(links%start(cut%np + 1)) ; links%start = 0_I4P
+   do k = 1, n(3)
+      do j = 1, n(2)
+         do i = 1, n(1)
+            do p = cut%first_piece(i, j, k), cut%first_piece(i, j, k) + cut%pieces(i, j, k) - 1 ! none if pieces < 1
+               links%start(p + 1) = links_piece_count_3d(p, [i, j, k], n, base, base(4), off, ns, spa, spb)
             enddo
-            if (ncand == 1_I4P) pr(side, rr) = cand
          enddo
       enddo
-      endsubroutine resolve
-
-      subroutine add_link(pa, pb, ar_)
-      !< The two directed links of piece pa (low cell, face +a) and pb (high cell, face -a), area ar_.
-      integer(I4P), intent(in) :: pa, pb !< Pieces.
-      real(R8P),    intent(in) :: ar_    !< Area.
-
-      if (nl + 2_I4P > size(lp)) then
-         lp = [lp, lp] ; lq = [lq, lq] ; lf = [lf, lf] ; la = [la, la]
-      endif
-      nl = nl + 1_I4P ; lp(nl) = pa ; lq(nl) = pb ; lf(nl) = 2_I4P * a ; la(nl) = ar_
-      nl = nl + 1_I4P ; lp(nl) = pb ; lq(nl) = pa ; lf(nl) = 2_I4P * a - 1_I4P ; la(nl) = ar_
-      endsubroutine add_link
+   enddo
+   links%start(1) = 1_I4P
+   do p = 1, cut%np
+      links%start(p + 1) = links%start(p + 1) + links%start(p)
+   enddo
+   nk = links%start(cut%np + 1) - 1_I4P
+   allocate(links%piece(nk), links%face(nk), links%area(nk))
+   do k = 1, n(3)
+      do j = 1, n(2)
+         do i = 1, n(1)
+            do p = cut%first_piece(i, j, k), cut%first_piece(i, j, k) + cut%pieces(i, j, k) - 1
+               call links_piece_fill_3d(p, [i, j, k], n, base, base(4), off, ns, spa, spb, sar, links%start(p) - 1_I4P, &
+                                        nk, links%piece, links%face, links%area)
+            enddo
+         enddo
+      enddo
+   enddo
    endsubroutine links_3d
+
+   pure integer(I4P) function links_face_capacity(pl, ph, fr, nreg) result(cap)
+   !< Kernel, count pass (issue #100 step 5): the link slots of an interior face between a cell with pl pieces (low)
+   !< and one with ph (high), fluid fraction fr, nreg pieces in the section cell: none if a side has no trusted piece
+   !< or no fluid crosses, 1 for two one-piece cells, else one per region.
+   !$acc routine seq
+   integer(I4P), intent(in) :: pl, ph, nreg !< Pieces of the low, high cell and of the section cell.
+   real(R8P),    intent(in) :: fr           !< Face fluid fraction.
+
+   cap = 0_I4P
+   if (pl < 1_I4P .or. ph < 1_I4P) return
+   if (fr <= 0._R8P) return
+   if (pl == 1_I4P .and. ph == 1_I4P) then
+      cap = 1_I4P
+   elseif (nreg >= 1_I4P) then
+      cap = nreg
+   endif
+   endfunction links_face_capacity
+
+   subroutine links_face_regions_host(sc, a, ic, jc, af, cut, ivs, ivo, piv_edge, piv_lo, piv_hi, nreg, pa, pb, ar, um)
+   !< The regions of a multi-piece face (`links_face_regions`) with the arrays of its section sc and of the cut.
+   type(cut_cells_2d_t), intent(in)  :: sc                !< Plane section.
+   integer(I4P),         intent(in)  :: a, ic(3), jc(3)   !< Axis, low and high cell.
+   real(R8P),            intent(in)  :: af                !< Face area.
+   type(cut_cells_3d_t), intent(in)  :: cut               !< Cut cells (pieces).
+   integer(I4P),         intent(in)  :: ivs(:), ivo(:), piv_edge(:) !< Intervals by piece, their edges.
+   real(R8P),            intent(in)  :: piv_lo(:), piv_hi(:)        !< Their ranges.
+   integer(I4P),         intent(in)  :: nreg              !< Regions.
+   integer(I4P),         intent(out) :: pa(nreg), pb(nreg) !< Pieces of the regions (0: no link).
+   real(R8P),            intent(out) :: ar(nreg)          !< Areas.
+   integer(I4P),         intent(out) :: um                !< Unmatched regions.
+   integer(I4P)                      :: m0, i1, i2        !< First region, section cell.
+
+   i1 = jc(mod(a, 3_I4P) + 1_I4P) ; i2 = jc(mod(a + 1_I4P, 3_I4P) + 1_I4P) ; m0 = sc%first_piece(i1, i2)
+   call links_face_regions(a, ic, jc, af, cut%pieces(ic(1), ic(2), ic(3)), cut%first_piece(ic(1), ic(2), ic(3)), &
+                           cut%pieces(jc(1), jc(2), jc(3)), cut%first_piece(jc(1), jc(2), jc(3)), cut%np, cut%piece_face, &
+                           size(piv_edge, kind=I4P), ivs, ivo, piv_edge, piv_lo, piv_hi, sc%nx, sc%ny, nreg, &
+                           sc%piece_area(m0:m0 + nreg - 1), sc%piece_iv_start(m0:m0 + nreg), &
+                           size(sc%piece_iv_edge, kind=I4P), sc%piece_iv_edge, sc%piece_iv_lo, sc%piece_iv_hi, pa, pb, ar, um)
+   endsubroutine links_face_regions_host
+
+   pure subroutine links_face_regions(a, ic, jc, af, npl, fpl, nph, fph, np, piece_face, npiv, ivs, ivo, piv_edge, &
+                                      piv_lo, piv_hi, nu, nv, nreg, rarea, rivs, nsiv, sive, sivl, sivh, pa, pb, ar, um)
+   !< Kernel, fill pass (issue #100 step 5): the regions of a face between two cells that are not both one-piece, in
+   !< region order: area, piece on each side (matched through the fluid edge intervals, then `links_resolve`); a region
+   !< with no area or no piece on a side gets pa = pb = 0, and um counts the unmatched ones (area, no piece).
+   !$acc routine seq
+   integer(I4P), intent(in)  :: a, ic(3), jc(3)      !< Axis, low and high cell.
+   real(R8P),    intent(in)  :: af                   !< Face area.
+   integer(I4P), intent(in)  :: npl, fpl, nph, fph   !< Pieces and first piece of the low and the high cell.
+   integer(I4P), intent(in)  :: np                   !< Pieces of the block.
+   real(R8P),    intent(in)  :: piece_face(6, np)    !< Face fractions of the pieces.
+   integer(I4P), intent(in)  :: npiv                 !< Fluid edge intervals of the pieces.
+   integer(I4P), intent(in)  :: ivs(np + 1), ivo(npiv) !< Intervals of piece p: ivo(ivs(p) .. ivs(p + 1) - 1).
+   integer(I4P), intent(in)  :: piv_edge(npiv)       !< Their cell edges (1-12).
+   real(R8P),    intent(in)  :: piv_lo(npiv), piv_hi(npiv) !< Their ranges.
+   integer(I4P), intent(in)  :: nu, nv               !< Cells of the section.
+   integer(I4P), intent(in)  :: nreg                 !< Regions (pieces of the section cell).
+   real(R8P),    intent(in)  :: rarea(nreg)          !< Their areas.
+   integer(I4P), intent(in)  :: rivs(nreg + 1)       !< Their intervals: rivs(r) .. rivs(r + 1) - 1.
+   integer(I4P), intent(in)  :: nsiv                 !< Intervals of the section.
+   integer(I4P), intent(in)  :: sive(nsiv)           !< Their edges (numbering of `cut_cells_2d_t`).
+   real(R8P),    intent(in)  :: sivl(nsiv), sivh(nsiv) !< Their ranges.
+   integer(I4P), intent(out) :: pa(nreg), pb(nreg)   !< Pieces of the regions in the low, high cell (0: no link).
+   real(R8P),    intent(out) :: ar(nreg)             !< Areas.
+   integer(I4P), intent(out) :: um                   !< Unmatched regions.
+   integer(I4P)              :: rr                   !< Region.
+
+   do rr = 1, nreg
+      ar(rr) = rarea(rr)
+      pa(rr) = links_side_piece(a, ic, npl, fpl, 1_I4P, rivs(rr), rivs(rr + 1) - 1_I4P, nu, nv, nsiv, sive, sivl, sivh, &
+                                np, npiv, ivs, ivo, piv_edge, piv_lo, piv_hi) ! the low cell: its +a face
+      pb(rr) = links_side_piece(a, jc, nph, fph, 0_I4P, rivs(rr), rivs(rr + 1) - 1_I4P, nu, nv, nsiv, sive, sivl, sivh, &
+                                np, npiv, ivs, ivo, piv_edge, piv_lo, piv_hi) ! the high cell: its -a face
+   enddo
+   call links_resolve(a, af, npl, fpl, 1_I4P, np, piece_face, nreg, ar, pa)
+   call links_resolve(a, af, nph, fph, 2_I4P, np, piece_face, nreg, ar, pb)
+   um = 0_I4P
+   do rr = 1, nreg
+      if (ar(rr) > 0._R8P .and. pa(rr) /= 0_I4P .and. pb(rr) /= 0_I4P) cycle
+      if (ar(rr) > 0._R8P) um = um + 1_I4P
+      pa(rr) = 0_I4P ; pb(rr) = 0_I4P
+   enddo
+   endsubroutine links_face_regions
+
+   pure integer(I4P) function links_side_piece(a, cc, npc, fpc, sd, t0, t1, nu, nv, nsiv, sive, sivl, sivh, np, npiv, &
+                                               ivs, ivo, piv_edge, piv_lo, piv_hi) result(pq)
+   !< The piece of cell cc whose fluid edge intervals overlap those of a region (its section intervals t0..t1) (0:
+   !< none). A one-piece cell gives its piece.
+   !$acc routine seq
+   integer(I4P), intent(in) :: a, cc(3)              !< Axis, cell.
+   integer(I4P), intent(in) :: npc, fpc              !< Pieces and first piece of the cell.
+   integer(I4P), intent(in) :: sd                    !< Side of the face (axis a) in cc: 0 low, 1 high.
+   integer(I4P), intent(in) :: t0, t1                !< Section intervals of the region.
+   integer(I4P), intent(in) :: nu, nv                !< Cells of the section.
+   integer(I4P), intent(in) :: nsiv                  !< Intervals of the section.
+   integer(I4P), intent(in) :: sive(nsiv)            !< Their edges.
+   real(R8P),    intent(in) :: sivl(nsiv), sivh(nsiv) !< Their ranges.
+   integer(I4P), intent(in) :: np, npiv              !< Pieces, fluid edge intervals of the pieces.
+   integer(I4P), intent(in) :: ivs(np + 1), ivo(npiv) !< Intervals by piece.
+   integer(I4P), intent(in) :: piv_edge(npiv)        !< Their cell edges (1-12).
+   real(R8P),    intent(in) :: piv_lo(npiv), piv_hi(npiv) !< Their ranges.
+   integer(I4P) :: t, ed, ll, kax, sides(3), le, w, pw, ua, va !< Work.
+   real(R8P)    :: tol                               !< Overlap tolerance.
+
+   pq = 0_I4P
+   if (npc == 1_I4P) then
+      pq = fpc ; return
+   endif
+   ua = mod(a, 3_I4P) + 1_I4P ; va = mod(a + 1_I4P, 3_I4P) + 1_I4P
+   do t = t0, t1
+      ed = sive(t) ; sides = 0_I4P ; sides(a) = sd
+      if (ed <= (nu + 1_I4P) * nv) then ! along v, at u line ll
+         ll = mod(ed - 1_I4P, nu + 1_I4P) + 1_I4P ; kax = va
+         sides(ua) = merge(0_I4P, 1_I4P, ll == cc(ua))
+      else ! along u, at v line ll
+         ll = (ed - (nu + 1_I4P) * nv - 1_I4P) / nu + 1_I4P ; kax = ua
+         sides(va) = merge(0_I4P, 1_I4P, ll == cc(va))
+      endif
+      le = edge_index(kax, sides)
+      tol = 1.e-12_R8P * (sivh(t) - sivl(t) + abs(sivh(t)))
+      do pw = fpc, fpc + npc - 1
+         do w = ivs(pw), ivs(pw + 1) - 1
+            if (piv_edge(ivo(w)) /= le) cycle
+            if (min(piv_hi(ivo(w)), sivh(t)) - max(piv_lo(ivo(w)), sivl(t)) > tol) then
+               pq = pw ; return
+            endif
+         enddo
+      enddo
+   enddo
+   endfunction links_side_piece
+
+   pure subroutine links_resolve(a, af, npc, fpc, side, np, piece_face, nreg, ar, pr)
+   !< Regions left without a piece on one side (side 1: the low cell, its +a face; 2: the high cell, its -a face): the
+   !< only piece of that side whose face area is not explained by its matched regions takes them, one at a time, in
+   !< region order (the explained area is summed in region order from 0, as SUM with a mask does).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: a                  !< Axis.
+   real(R8P),    intent(in)    :: af                 !< Face area.
+   integer(I4P), intent(in)    :: npc, fpc           !< Pieces and first piece of the cell of that side.
+   integer(I4P), intent(in)    :: side               !< Side.
+   integer(I4P), intent(in)    :: np                 !< Pieces of the block.
+   real(R8P),    intent(in)    :: piece_face(6, np)  !< Face fractions of the pieces.
+   integer(I4P), intent(in)    :: nreg               !< Regions.
+   real(R8P),    intent(in)    :: ar(nreg)           !< Region areas.
+   integer(I4P), intent(inout) :: pr(nreg)           !< Pieces of the regions on that side.
+   integer(I4P) :: rr, r2, pw, cand, ncand, fidx     !< Work.
+   real(R8P)    :: res, sm                           !< Residual, explained area.
+
+   fidx = merge(2_I4P * a, 2_I4P * a - 1_I4P, side == 1_I4P)
+   do rr = 1, nreg
+      if (pr(rr) /= 0_I4P .or. ar(rr) <= 0._R8P) cycle
+      ncand = 0_I4P ; cand = 0_I4P
+      do pw = fpc, fpc + npc - 1
+         sm = 0._R8P
+         do r2 = 1, nreg
+            if (pr(r2) == pw) sm = sm + ar(r2)
+         enddo
+         res = piece_face(fidx, pw) * af - sm
+         if (res > 1.e-12_R8P * af) then
+            ncand = ncand + 1_I4P ; cand = pw
+         endif
+      enddo
+      if (ncand == 1_I4P) pr(rr) = cand
+   enddo
+   endsubroutine links_resolve
 
    function section_moments(c2, iu, iv, nm2) result(m)
    !< Fluid moments of the cell (iu, iv) of a plane section: the sum over its pieces (issue #70).

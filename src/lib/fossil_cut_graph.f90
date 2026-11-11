@@ -42,6 +42,8 @@ use penf,                only : I4P, R8P
 implicit none
 private
 public :: cut_links_t, cut_links_2d, build_csr
+! the link kernels of the 3-D blocks (issue #100 step 5), for `fossil_cut_cells_3d` (not re-exported by `fossil`)
+public :: links_face_id, links_face_bases, links_piece_count_3d, links_piece_fill_3d
 public :: srd_t, srd_neighbourhoods, SRD_REGULAR, SRD_COMPLETE, SRD_INCOMPLETE, SRD_NO_VOLUME
 public :: frd_t, frd_neighbourhoods
 public :: merge_t, merge_targets, MERGE_NONE, MERGE_OK, MERGE_CHAIN, MERGE_CYCLE, MERGE_ALONE
@@ -496,67 +498,241 @@ contains
 
    subroutine cut_links_2d(cut, links)
    !< Links of the pieces of the 2-D cut cells `cut` (see the module notes).
+   !<
+   !< Flat arrays (issue #100 step 5): the fluid edge intervals by edge (a counting sort in interval order, then a stable
+   !< insertion sort by start within each edge, `links_edge_sort`: the order of the former global stable sort by (edge,
+   !< start)); per edge the pairs of overlapping intervals of distinct pieces, counted (`links_edge_pairs`), a prefix
+   !< sum, then written in the (interval, later interval) order of the edge (`links_edge_pairs_fill`); the CSR per
+   !< piece (`links_piece_count_2d`, prefix sum, `links_piece_fill_2d`), with no global sort.
+   !<
+   !< Same bits as the sorted CSR of `build_csr` (which this replaced): build_csr stable-sorted the directed links (p,
+   !< face f, q, length) by (p, f, q) and summed the lengths of equal keys in their input order. Face f of p's cell is
+   !< one edge of the grid, and a pair recorded on an edge gave p one directed link (p is either interval of the pair),
+   !< with f the face of p's cell that is that edge: the entries of a key are the pairs of one edge holding p and q,
+   !< in the pair order of that edge, which is the slot order here; `links_piece_fill_2d` sums them in that order (from
+   !< 0, one add at a time, as SUM does) and emits the keys of p by face 1..4, then q increasing, the sort order.
    type(cut_cells_2d_t), intent(in)  :: cut   !< Cut cells.
    type(cut_links_t),    intent(out) :: links !< Links.
-   integer(I4P), allocatable :: owner(:), ord(:), lp(:), lq(:), lf(:) !< Interval piece, order by edge; raw links.
-   real(R8P),    allocatable :: la(:)            !< Raw link lengths.
-   integer(I4P)              :: n, k, kk, m, p, q, nl, cap !< Work.
-   real(R8P)                 :: ov                !< Overlap.
+   integer(I4P), allocatable :: owner(:)          !< Piece of each interval.
+   integer(I4P), allocatable :: eoff(:), eord(:)  !< Intervals of edge e: eord(eoff(e) + 1 .. eoff(e + 1)).
+   integer(I4P), allocatable :: fill(:)           !< Work.
+   integer(I4P), allocatable :: poff(:)           !< Pairs of edge e: slots poff(e) + 1 .. poff(e + 1).
+   integer(I4P), allocatable :: ppa(:), ppb(:)    !< Pieces of each pair (earlier, later interval in the edge order).
+   real(R8P),    allocatable :: plen(:)           !< Shared length of each pair.
+   integer(I4P)              :: n, ne, e, k, m, p, nk !< Work.
 
    links%np = cut%np
    n = size(cut%piece_iv_edge, kind=I4P)
-   allocate(owner(n), ord(n))
+   ne = (cut%nx + 1_I4P) * cut%ny + cut%nx * (cut%ny + 1_I4P)
+   allocate(owner(n))
    do p = 1, cut%np
       owner(cut%piece_iv_start(p):cut%piece_iv_start(p + 1) - 1) = p
    enddo
-   call sort_by_key(cut%piece_iv_edge, cut%piece_iv_lo, ord)
-   cap = max(16_I4P, n) ; allocate(lp(cap), lq(cap), lf(cap), la(cap)) ; nl = 0_I4P
-   k = 1_I4P
-   do while (k <= n)
-      m = k ! intervals of one edge: ord(k:m)
-      do while (m < n)
-         if (cut%piece_iv_edge(ord(m + 1)) /= cut%piece_iv_edge(ord(k))) exit
-         m = m + 1_I4P
-      enddo
-      do kk = k, m
-         do q = kk + 1, m
-            if (owner(ord(kk)) == owner(ord(q))) cycle
-            ov = min(cut%piece_iv_hi(ord(kk)), cut%piece_iv_hi(ord(q))) - max(cut%piece_iv_lo(ord(kk)), cut%piece_iv_lo(ord(q)))
-            if (ov <= 0._R8P) cycle
-            call add_pair(owner(ord(kk)), owner(ord(q)), cut%piece_iv_edge(ord(kk)), ov)
-         enddo
-      enddo
-      k = m + 1_I4P
+   ! intervals by edge, in interval order, then by start within the edge (stable)
+   allocate(eoff(ne + 1), eord(n), fill(ne)) ; eoff = 0_I4P ; fill = 0_I4P
+   do k = 1, n
+      eoff(cut%piece_iv_edge(k) + 1) = eoff(cut%piece_iv_edge(k) + 1) + 1_I4P
    enddo
-   call build_csr(nl, lp, lq, lf, la, links)
-   contains
-      subroutine add_pair(pa, pb, ed, len)
-      !< The two directed links of pieces pa, pb sharing length len of edge ed.
-      integer(I4P), intent(in) :: pa, pb, ed !< Pieces, edge id.
-      real(R8P),    intent(in) :: len        !< Length.
-
-      if (nl + 2_I4P > size(lp)) then
-         lp = [lp, lp] ; lq = [lq, lq] ; lf = [lf, lf] ; la = [la, la]
-      endif
-      nl = nl + 1_I4P ; lp(nl) = pa ; lq(nl) = pb ; lf(nl) = face_2d(pa, ed) ; la(nl) = len
-      nl = nl + 1_I4P ; lp(nl) = pb ; lq(nl) = pa ; lf(nl) = face_2d(pb, ed) ; la(nl) = len
-      endsubroutine add_pair
-
-      integer(I4P) function face_2d(pp, ed) result(fc)
-      !< Face (1 -u, 2 +u, 3 -v, 4 +v) of piece pp's cell that is edge ed.
-      integer(I4P), intent(in) :: pp, ed !< Piece, edge id.
-      integer(I4P)             :: i, j, ll !< Work.
-
-      i = cut%piece_cell(1, pp) ; j = cut%piece_cell(2, pp)
-      if (ed <= (cut%nx + 1_I4P) * cut%ny) then ! vertical edge on line ll
-         ll = mod(ed - 1_I4P, cut%nx + 1_I4P) + 1_I4P
-         fc = merge(1_I4P, 2_I4P, ll == i)
-      else
-         ll = (ed - (cut%nx + 1_I4P) * cut%ny - 1_I4P) / cut%nx + 1_I4P
-         fc = merge(3_I4P, 4_I4P, ll == j)
-      endif
-      endfunction face_2d
+   do e = 1, ne
+      eoff(e + 1) = eoff(e + 1) + eoff(e)
+   enddo
+   do k = 1, n
+      e = cut%piece_iv_edge(k) ; fill(e) = fill(e) + 1_I4P ; eord(eoff(e) + fill(e)) = k
+   enddo
+   do e = 1, ne
+      m = eoff(e + 1) - eoff(e)
+      if (m > 1_I4P) call links_edge_sort(m, eord(eoff(e) + 1:eoff(e + 1)), n, cut%piece_iv_lo)
+   enddo
+   ! pairs per edge: counts, prefix sum, fill
+   allocate(poff(ne + 1)) ; poff = 0_I4P
+   do e = 1, ne
+      m = eoff(e + 1) - eoff(e)
+      if (m > 1_I4P) poff(e + 1) = links_edge_pairs(m, eord(eoff(e) + 1:eoff(e + 1)), n, owner, cut%piece_iv_lo, &
+                                                    cut%piece_iv_hi)
+   enddo
+   do e = 1, ne
+      poff(e + 1) = poff(e + 1) + poff(e)
+   enddo
+   allocate(ppa(poff(ne + 1)), ppb(poff(ne + 1)), plen(poff(ne + 1)))
+   do e = 1, ne
+      if (poff(e + 1) == poff(e)) cycle
+      m = eoff(e + 1) - eoff(e)
+      call links_edge_pairs_fill(m, eord(eoff(e) + 1:eoff(e + 1)), n, owner, cut%piece_iv_lo, cut%piece_iv_hi, &
+                                 poff(e + 1) - poff(e), ppa(poff(e) + 1:poff(e + 1)), ppb(poff(e) + 1:poff(e + 1)), &
+                                 plen(poff(e) + 1:poff(e + 1)))
+   enddo
+   ! CSR per piece
+   allocate(links%start(cut%np + 1)) ; links%start = 0_I4P
+   do p = 1, cut%np
+      links%start(p + 1) = links_piece_count_2d(p, cut%piece_cell(1, p), cut%piece_cell(2, p), cut%nx, cut%ny, ne, poff, &
+                                                size(ppa, kind=I4P), ppa, ppb)
+   enddo
+   links%start(1) = 1_I4P
+   do p = 1, cut%np
+      links%start(p + 1) = links%start(p + 1) + links%start(p)
+   enddo
+   nk = links%start(cut%np + 1) - 1_I4P
+   allocate(links%piece(nk), links%face(nk), links%area(nk))
+   do p = 1, cut%np
+      call links_piece_fill_2d(p, cut%piece_cell(1, p), cut%piece_cell(2, p), cut%nx, cut%ny, ne, poff, &
+                               size(ppa, kind=I4P), ppa, ppb, plen, links%start(p) - 1_I4P, nk, links%piece, links%face, &
+                               links%area)
+   enddo
    endsubroutine cut_links_2d
+
+   pure subroutine links_edge_sort(m, ord, n, lo)
+   !< Kernel (issue #100 step 5): the intervals ord(1:m) of one edge ordered by start, stable (insertion sort: an
+   !< interval moves before an earlier one only if its start is strictly smaller).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: m      !< Intervals of the edge.
+   integer(I4P), intent(inout) :: ord(m) !< Their indexes.
+   integer(I4P), intent(in)    :: n      !< Intervals.
+   real(R8P),    intent(in)    :: lo(n)  !< Starts.
+   integer(I4P)                :: t, u, v !< Work.
+
+   do t = 2, m
+      v = ord(t) ; u = t - 1_I4P
+      do while (u >= 1_I4P)
+         if (.not. lo(v) < lo(ord(u))) exit
+         ord(u + 1) = ord(u) ; u = u - 1_I4P
+      enddo
+      ord(u + 1) = v
+   enddo
+   endsubroutine links_edge_sort
+
+   pure integer(I4P) function links_edge_pairs(m, ord, n, owner, lo, hi) result(np)
+   !< Kernel, count pass (issue #100 step 5): the pairs of overlapping intervals of distinct pieces among the intervals
+   !< ord(1:m) of one edge.
+   !$acc routine seq
+   integer(I4P), intent(in) :: m                !< Intervals of the edge.
+   integer(I4P), intent(in) :: ord(m)           !< Their indexes, by start.
+   integer(I4P), intent(in) :: n                !< Intervals.
+   integer(I4P), intent(in) :: owner(n)         !< Piece of each interval.
+   real(R8P),    intent(in) :: lo(n), hi(n)     !< Ranges.
+   integer(I4P)             :: kk, q            !< Work.
+   real(R8P)                :: ov               !< Overlap.
+
+   np = 0_I4P
+   do kk = 1, m
+      do q = kk + 1, m
+         if (owner(ord(kk)) == owner(ord(q))) cycle
+         ov = min(hi(ord(kk)), hi(ord(q))) - max(lo(ord(kk)), lo(ord(q)))
+         if (ov <= 0._R8P) cycle
+         np = np + 1_I4P
+      enddo
+   enddo
+   endfunction links_edge_pairs
+
+   pure subroutine links_edge_pairs_fill(m, ord, n, owner, lo, hi, np, pa, pb, len)
+   !< Kernel, fill pass (issue #100 step 5): the pairs counted by `links_edge_pairs`, in the order (earlier interval,
+   !< later interval) of the edge.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: m                !< Intervals of the edge.
+   integer(I4P), intent(in)  :: ord(m)           !< Their indexes, by start.
+   integer(I4P), intent(in)  :: n                !< Intervals.
+   integer(I4P), intent(in)  :: owner(n)         !< Piece of each interval.
+   real(R8P),    intent(in)  :: lo(n), hi(n)     !< Ranges.
+   integer(I4P), intent(in)  :: np               !< Pairs.
+   integer(I4P), intent(out) :: pa(np), pb(np)   !< Pieces.
+   real(R8P),    intent(out) :: len(np)          !< Shared lengths.
+   integer(I4P)              :: kk, q, s         !< Work.
+   real(R8P)                 :: ov               !< Overlap.
+
+   s = 0_I4P
+   do kk = 1, m
+      do q = kk + 1, m
+         if (owner(ord(kk)) == owner(ord(q))) cycle
+         ov = min(hi(ord(kk)), hi(ord(q))) - max(lo(ord(kk)), lo(ord(q)))
+         if (ov <= 0._R8P) cycle
+         s = s + 1_I4P ; pa(s) = owner(ord(kk)) ; pb(s) = owner(ord(q)) ; len(s) = ov
+      enddo
+   enddo
+   endsubroutine links_edge_pairs_fill
+
+   pure integer(I4P) function links_edge_of_face_2d(i, j, nx, ny, fc) result(e)
+   !< Edge id of face fc (1 -u, 2 +u, 3 -v, 4 +v) of cell (i, j) (numbering of `cut_cells_2d_t%piece_iv_edge`).
+   !$acc routine seq
+   integer(I4P), intent(in) :: i, j, nx, ny, fc !< Cell, cells, face.
+
+   select case (fc)
+   case (1) ; e = i + (j - 1_I4P) * (nx + 1_I4P)
+   case (2) ; e = i + 1_I4P + (j - 1_I4P) * (nx + 1_I4P)
+   case (3) ; e = (nx + 1_I4P) * ny + i + (j - 1_I4P) * nx
+   case default ; e = (nx + 1_I4P) * ny + i + j * nx
+   endselect
+   endfunction links_edge_of_face_2d
+
+   pure integer(I4P) function links_next_q_2d(pw, last, s0, s1, ns, pa, pb) result(q)
+   !< The smallest piece above `last` paired with piece pw in slots s0..s1 (0: none).
+   !$acc routine seq
+   integer(I4P), intent(in) :: pw, last, s0, s1, ns !< Piece, last piece across, slots, all slots.
+   integer(I4P), intent(in) :: pa(ns), pb(ns)       !< Pieces of the slots.
+   integer(I4P)             :: s, ot               !< Work.
+
+   q = 0_I4P
+   do s = s0, s1
+      if (pa(s) == pw) then
+         ot = pb(s)
+      elseif (pb(s) == pw) then
+         ot = pa(s)
+      else
+         cycle
+      endif
+      if (ot > last .and. (q == 0_I4P .or. ot < q)) q = ot
+   enddo
+   endfunction links_next_q_2d
+
+   pure integer(I4P) function links_piece_count_2d(pw, i, j, nx, ny, ne, poff, ns, pa, pb) result(nk)
+   !< Kernel, count pass (issue #100 step 5): the links of piece pw of cell (i, j): distinct pieces across, per face.
+   !$acc routine seq
+   integer(I4P), intent(in) :: pw, i, j, nx, ny, ne !< Piece, its cell, cells, edges.
+   integer(I4P), intent(in) :: poff(ne + 1)         !< Pairs of edge e: poff(e) + 1 .. poff(e + 1).
+   integer(I4P), intent(in) :: ns                   !< Pairs.
+   integer(I4P), intent(in) :: pa(ns), pb(ns)       !< Pieces of the pairs.
+   integer(I4P)             :: fc, e, q             !< Work.
+
+   nk = 0_I4P
+   do fc = 1, 4
+      e = links_edge_of_face_2d(i, j, nx, ny, fc)
+      q = 0_I4P
+      do
+         q = links_next_q_2d(pw, q, poff(e) + 1_I4P, poff(e + 1), ns, pa, pb)
+         if (q == 0_I4P) exit
+         nk = nk + 1_I4P
+      enddo
+   enddo
+   endfunction links_piece_count_2d
+
+   pure subroutine links_piece_fill_2d(pw, i, j, nx, ny, ne, poff, ns, pa, pb, len, k0, nl, piece, face, area)
+   !< Kernel, fill pass (issue #100 step 5): the links of piece pw of cell (i, j) written at k0 + 1.., by face, then
+   !< piece across; the lengths of one key summed in slot order.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: pw, i, j, nx, ny, ne !< Piece, its cell, cells, edges.
+   integer(I4P), intent(in)    :: poff(ne + 1)         !< Pairs of edge e: poff(e) + 1 .. poff(e + 1).
+   integer(I4P), intent(in)    :: ns                   !< Pairs.
+   integer(I4P), intent(in)    :: pa(ns), pb(ns)       !< Pieces of the pairs.
+   real(R8P),    intent(in)    :: len(ns)              !< Shared lengths.
+   integer(I4P), intent(in)    :: k0, nl               !< Links before pw's, all links.
+   integer(I4P), intent(inout) :: piece(nl), face(nl)  !< Piece across, face.
+   real(R8P),    intent(inout) :: area(nl)             !< Shared length.
+   integer(I4P)                :: fc, e, q, s, k       !< Work.
+   real(R8P)                   :: sm                   !< Sum.
+
+   k = k0
+   do fc = 1, 4
+      e = links_edge_of_face_2d(i, j, nx, ny, fc)
+      q = 0_I4P
+      do
+         q = links_next_q_2d(pw, q, poff(e) + 1_I4P, poff(e + 1), ns, pa, pb)
+         if (q == 0_I4P) exit
+         sm = 0._R8P
+         do s = poff(e) + 1, poff(e + 1)
+            if ((pa(s) == pw .and. pb(s) == q) .or. (pb(s) == pw .and. pa(s) == q)) sm = sm + len(s)
+         enddo
+         k = k + 1_I4P ; piece(k) = q ; face(k) = fc ; area(k) = sm
+      enddo
+   enddo
+   endsubroutine links_piece_fill_2d
 
    subroutine build_csr(nl, lp, lq, lf, la, links)
    !< CSR of the directed links (lp -> lq, face lf, area la), merged per (p, face, q) and sorted by face, then q.
@@ -629,35 +805,126 @@ contains
       endfunction less
    endsubroutine merge_sort_links
 
-   subroutine sort_by_key(ik, rk, ord)
-   !< Order by (ik, rk), stable (bottom-up merge sort).
-   integer(I4P), intent(in)  :: ik(:)  !< Integer key.
-   real(R8P),    intent(in)  :: rk(:)  !< Real key.
-   integer(I4P), intent(out) :: ord(:) !< Order.
-   integer(I4P), allocatable :: tmp(:) !< Work.
-   integer(I4P)              :: n, w, lo, mid, hi, a, b, t !< Work.
+   pure integer(I4P) function links_face_id(a, c, n, base) result(f)
+   !< Face (a, c) of a 3-D block of n cells, the face of axis a at the low side of cell c, numbered as the face arrays
+   !< of `cut_cells_3d_t` (face_x [n1 + 1, n2, n3], then face_y, then face_z: base(a) faces before axis a).
+   !$acc routine seq
+   integer(I4P), intent(in) :: a, c(3), n(3), base(4) !< Axis, cell, cells, faces before each axis.
+   integer(I4P)             :: m1, m2                  !< Face array extents.
 
-   n = size(ord, kind=I4P) ; ord = [(a, a = 1, n)] ; allocate(tmp(n)) ; w = 1_I4P
-   do while (w < n)
-      lo = 1_I4P
-      do while (lo <= n)
-         mid = min(lo + w - 1_I4P, n) ; hi = min(lo + 2_I4P * w - 1_I4P, n)
-         a = lo ; b = mid + 1_I4P ; t = lo
-         do while (t <= hi)
-            if (b > hi) then
-               tmp(t) = ord(a) ; a = a + 1_I4P
-            elseif (a > mid) then
-               tmp(t) = ord(b) ; b = b + 1_I4P
-            elseif (ik(ord(b)) < ik(ord(a)) .or. (ik(ord(b)) == ik(ord(a)) .and. rk(ord(b)) < rk(ord(a)))) then
-               tmp(t) = ord(b) ; b = b + 1_I4P
-            else
-               tmp(t) = ord(a) ; a = a + 1_I4P
-            endif
-            t = t + 1_I4P
-         enddo
-         lo = lo + 2_I4P * w
-      enddo
-      ord = tmp ; w = 2_I4P * w
+   m1 = n(1) ; m2 = n(2)
+   if (a == 1_I4P) m1 = m1 + 1_I4P
+   if (a == 2_I4P) m2 = m2 + 1_I4P
+   f = base(a) + c(1) + m1 * ((c(2) - 1_I4P) + m2 * (c(3) - 1_I4P))
+   endfunction links_face_id
+
+   pure subroutine links_face_bases(n, base)
+   !< Faces before each axis in the numbering of `links_face_id`; base(4) = all faces.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: n(3)    !< Cells.
+   integer(I4P), intent(out) :: base(4) !< Faces before axis a.
+
+   base(1) = 0_I4P
+   base(2) = (n(1) + 1_I4P) * n(2) * n(3)
+   base(3) = base(2) + n(1) * (n(2) + 1_I4P) * n(3)
+   base(4) = base(3) + n(1) * n(2) * (n(3) + 1_I4P)
+   endsubroutine links_face_bases
+
+   pure integer(I4P) function links_next_q_3d(pw, low, last, s0, s1, ns, pa, pb) result(q)
+   !< The smallest piece above `last` linked to piece pw in slots s0..s1 of a face, pw on the low side (pa) if low,
+   !< else on the high side (pb); 0: none. A slot with pa = 0 holds no link.
+   !$acc routine seq
+   integer(I4P), intent(in) :: pw, last, s0, s1, ns !< Piece, last piece across, slots, all slots.
+   logical,      intent(in) :: low                  !< pw in the low cell of the face.
+   integer(I4P), intent(in) :: pa(ns), pb(ns)       !< Pieces of the slots (low, high cell).
+   integer(I4P)             :: s, me, ot            !< Work.
+
+   q = 0_I4P
+   do s = s0, s1
+      if (pa(s) == 0_I4P) cycle
+      if (low) then
+         me = pa(s) ; ot = pb(s)
+      else
+         me = pb(s) ; ot = pa(s)
+      endif
+      if (me /= pw) cycle
+      if (ot > last .and. (q == 0_I4P .or. ot < q)) q = ot
    enddo
-   endsubroutine sort_by_key
+   endfunction links_next_q_3d
+
+   pure integer(I4P) function links_piece_count_3d(pw, c, n, base, nfc, off, ns, pa, pb) result(nk)
+   !< Kernel, count pass (issue #100 step 5): the links of piece pw of cell c: distinct pieces across, per face.
+   !$acc routine seq
+   integer(I4P), intent(in) :: pw, c(3), n(3), base(4) !< Piece, its cell, cells, faces before each axis.
+   integer(I4P), intent(in) :: nfc                     !< Faces.
+   integer(I4P), intent(in) :: off(nfc + 1)            !< Slots of face f: off(f) + 1 .. off(f + 1).
+   integer(I4P), intent(in) :: ns                      !< Slots.
+   integer(I4P), intent(in) :: pa(ns), pb(ns)          !< Pieces of the slots (low, high cell; pa = 0: no link).
+   integer(I4P)             :: fc, a, f, q, cc(3)      !< Work.
+   logical                  :: low                     !< pw in the low cell of the face.
+
+   nk = 0_I4P
+   do fc = 1, 6
+      a = (fc + 1_I4P) / 2_I4P ; low = mod(fc, 2_I4P) == 0_I4P ; cc = c
+      if (low) then
+         if (c(a) >= n(a)) cycle
+         cc(a) = c(a) + 1_I4P
+      else
+         if (c(a) <= 1_I4P) cycle
+      endif
+      f = links_face_id(a, cc, n, base)
+      q = 0_I4P
+      do
+         q = links_next_q_3d(pw, low, q, off(f) + 1_I4P, off(f + 1), ns, pa, pb)
+         if (q == 0_I4P) exit
+         nk = nk + 1_I4P
+      enddo
+   enddo
+   endfunction links_piece_count_3d
+
+   pure subroutine links_piece_fill_3d(pw, c, n, base, nfc, off, ns, pa, pb, ar, k0, nl, piece, face, area)
+   !< Kernel, fill pass (issue #100 step 5): the links of piece pw of cell c written at k0 + 1.., by face, then piece
+   !< across; the areas of one key summed in slot order.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: pw, c(3), n(3), base(4) !< Piece, its cell, cells, faces before each axis.
+   integer(I4P), intent(in)    :: nfc                     !< Faces.
+   integer(I4P), intent(in)    :: off(nfc + 1)            !< Slots of face f: off(f) + 1 .. off(f + 1).
+   integer(I4P), intent(in)    :: ns                      !< Slots.
+   integer(I4P), intent(in)    :: pa(ns), pb(ns)          !< Pieces of the slots (low, high cell; pa = 0: no link).
+   real(R8P),    intent(in)    :: ar(ns)                  !< Areas of the slots.
+   integer(I4P), intent(in)    :: k0, nl                  !< Links before pw's, all links.
+   integer(I4P), intent(inout) :: piece(nl), face(nl)     !< Piece across, face.
+   real(R8P),    intent(inout) :: area(nl)                !< Shared area.
+   integer(I4P)                :: fc, a, f, q, s, k, cc(3), me, ot !< Work.
+   logical                     :: low                     !< pw in the low cell of the face.
+   real(R8P)                   :: sm                      !< Sum.
+
+   k = k0
+   do fc = 1, 6
+      a = (fc + 1_I4P) / 2_I4P ; low = mod(fc, 2_I4P) == 0_I4P ; cc = c
+      if (low) then
+         if (c(a) >= n(a)) cycle
+         cc(a) = c(a) + 1_I4P
+      else
+         if (c(a) <= 1_I4P) cycle
+      endif
+      f = links_face_id(a, cc, n, base)
+      q = 0_I4P
+      do
+         q = links_next_q_3d(pw, low, q, off(f) + 1_I4P, off(f + 1), ns, pa, pb)
+         if (q == 0_I4P) exit
+         sm = 0._R8P
+         do s = off(f) + 1, off(f + 1)
+            if (pa(s) == 0_I4P) cycle
+            if (low) then
+               me = pa(s) ; ot = pb(s)
+            else
+               me = pb(s) ; ot = pa(s)
+            endif
+            if (me == pw .and. ot == q) sm = sm + ar(s)
+         enddo
+         k = k + 1_I4P ; piece(k) = q ; face(k) = fc ; area(k) = sm
+      enddo
+   enddo
+   endsubroutine links_piece_fill_3d
 endmodule fossil_cut_graph
