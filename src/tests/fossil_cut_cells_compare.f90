@@ -20,6 +20,7 @@ use penf,                only : I4P, I8P, R8P
 implicit none
 private
 public :: cut_cells_2d_mismatches, cut_cells_twin_mismatches, cut_cells_many_mismatches, cut_cells_3d_face_mismatches
+public :: cut_cells_many_grids_mismatches
 public :: cut_cells_3d_mismatches, cut_cells_3d_alpha_mismatches
 
 contains
@@ -184,6 +185,48 @@ contains
    enddo
    if (present(status)) status = sts
    endfunction cut_cells_many_mismatches
+
+   function cut_cells_many_grids_mismatches(curves, x, y, status) result(n)
+   !< `cut_cells_many_mismatches` for the per-block grids (issue #100 step 4.1): `cut_cells_device_many(curves, x, y)`
+   !< with x(:, b), y(:, b) the grid of block b, against `curves(b)%cut_cells(x(:, b), y(:, b))`, bitwise, in the same
+   !< three modes, each copied back and resident.
+   type(curve_object), intent(in)            :: curves(:)  !< Curves (blocks).
+   real(R8P),          intent(in)            :: x(:,:), y(:,:) !< Cell edges of each block.
+   integer(I4P),       intent(out), optional :: status     !< Sum of the statuses.
+   integer(I4P)                              :: n          !< Mismatches.
+   type(cut_cells_2d_blocks_t)               :: cb         !< Multi-block result.
+   type(cut_cells_2d_t)                      :: h, d       !< Host block, extracted block.
+   integer(I4P)                              :: b, k, r, st, sts !< Work.
+   logical                                   :: wi, wp     !< Intervals, pieces.
+
+   n = 0_I4P ; sts = 0_I4P
+   do k = 1, 3
+      wi = k == 1 ; wp = k <= 2
+      do r = 1, 2
+         call cut_cells_device_many(curves, x, y, cb, st, intervals=wi, pieces=wp, resident=r == 2)
+         sts = sts + st
+         if (st /= 0_I4P) cycle
+         if (r == 2) then
+            if (.not. cb%on_device) n = n + 1_I4P
+            call cb%update_host
+         endif
+         if (cb%nb /= size(curves, kind=I4P)) n = n + 1_I4P
+         do b = 1, size(curves)
+            call curves(b)%cut_cells(x=x(:, b), y=y(:, b), cut=h, status=st, intervals=wi)
+            sts = sts + st
+            call block_as_cut(cb, b, d)
+            if (wp) then
+               n = n + cut_cells_2d_mismatches(h, d)
+            else
+               n = n + cell_mismatches(h, d)
+            endif
+         enddo
+         call cb%exit_device
+         if (cb%on_device) n = n + 1_I4P
+      enddo
+   enddo
+   if (present(status)) status = sts
+   endfunction cut_cells_many_grids_mismatches
 
    subroutine block_as_cut(cb, b, d)
    !< Block b of a multi-block result as a one-block cut (its own piece and interval numbering).

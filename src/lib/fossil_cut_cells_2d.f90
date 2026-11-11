@@ -37,7 +37,8 @@ use penf,              only : I4P, R8P
 implicit none
 private
 public :: cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device, cut_cells_2d_reset
-public :: cut_cells_2d_blocks_t, compute_cut_cells_2d_blocks_device, cut_cells_2d_blocks_reset
+public :: cut_cells_2d_blocks_t, compute_cut_cells_2d_blocks_device, compute_cut_cells_2d_blocks_grids_device, &
+          cut_cells_2d_blocks_reset
 ! the stages of the two paths, public for the twin test (issue #100 step 6a; not re-exported by `fossil`)
 public :: node_flags, cut_cells_2d_prepare, cut_cells_2d_classify, cut_cells_2d_scan, cut_cells_2d_classify_dev, &
           cut_cells_2d_scan_dev
@@ -105,8 +106,10 @@ type :: cut_cells_2d_t
 endtype cut_cells_2d_t
 
 type :: cut_cells_2d_blocks_t
-   !< Cut cells of nb blocks that share one grid x(nx+1), y(ny+1), each with its own curve (issue #100 step 3b: the plane
-   !< sections of one axis of `cut_cells_3d`), from `compute_cut_cells_2d_blocks_device`. Block b of every cell array
+   !< Cut cells of nb blocks of nx x ny cells, each with its own curve, on one grid x(nx+1), y(ny+1) (issue #100 step 3b:
+   !< the plane sections of one axis of `cut_cells_3d`; `compute_cut_cells_2d_blocks_device`) or on a grid per block
+   !< x(nx+1, nb), y(ny+1, nb) (step 4.1: the translated planes of the swept geometry, the 2-D AMR batching of equal-size
+   !< blocks; `compute_cut_cells_2d_blocks_grids_device`). Block b of every cell array
    !< is the cut of its curve, bit for bit (moments order 0, no boundaries, no quadrature): `cell(..., b)` is the
    !< `cut_cells_2d_t` array of the same name. With pieces (`with_pieces`), the pieces of all blocks are concatenated
    !< in block order: block b owns pieces block_piece(b) + 1 .. block_piece(b + 1) and fluid edge intervals
@@ -484,7 +487,63 @@ contains
    subroutine compute_cut_cells_2d_blocks_device(nbk, vstart, u, v, next, x, y, cb, status, with_iv, with_pieces, resident)
    !< The cut cells of nbk blocks that share the grid x(nx+1), y(ny+1), each with its own curve, in one set of launches
    !< (issue #100 step 3b; the plane sections of one axis of `cut_cells_3d`): block b is `compute_cut_cells_2d` of its
-   !< curve bit for bit, for the outputs of `compute_cut_cells_2d_device` (moments order 0, no boundaries).
+   !< curve bit for bit, for the outputs of `compute_cut_cells_2d_device` (moments order 0, no boundaries). The work is
+   !< `cut_cells_2d_blocks_core` on the one grid; see there. status: 0, or 1 on bad edges or nbk < 1.
+   integer(I4P),                intent(in)           :: nbk         !< Blocks.
+   integer(I4P),                intent(in)           :: vstart(nbk + 1) !< First vertex of each curve (vstart(1) = 1).
+   real(R8P),                   intent(in)           :: u(:), v(:)  !< Vertices of all curves.
+   integer(I4P),                intent(in)           :: next(:)     !< Next vertex within the block (0: none).
+   real(R8P),                   intent(in)           :: x(:), y(:)  !< Cell edges (strictly increasing).
+   type(cut_cells_2d_blocks_t), intent(inout)        :: cb          !< Cut cells (released from the device, reset first).
+   integer(I4P),                intent(out)          :: status      !< 0 ok, 1 bad edges or no block.
+   logical,                     intent(in)           :: with_iv     !< Record the fluid edge intervals (with_pieces).
+   logical,                     intent(in)           :: with_pieces !< Compute the pieces.
+   logical,                     intent(in), optional :: resident    !< Leave the outputs on the device (default .false.).
+   integer(I4P)                                      :: nx, ny      !< Cells per block.
+
+   call cut_cells_2d_blocks_reset(cb)
+   status = 1_I4P
+   if (nbk < 1_I4P) return
+   call cut_cells_2d_grid(x, y, nx, ny, status)
+   if (status /= 0_I4P) return
+   call cut_cells_2d_blocks_core(nbk, 1_I4P, vstart, u, v, next, nx, ny, reshape(x, [nx + 1_I4P, 1_I4P]), &
+                                 reshape(y, [ny + 1_I4P, 1_I4P]), cb, with_iv, with_pieces, resident)
+   endsubroutine compute_cut_cells_2d_blocks_device
+
+   subroutine compute_cut_cells_2d_blocks_grids_device(nbk, vstart, u, v, next, x, y, cb, status, with_iv, with_pieces, &
+                                                       resident)
+   !< The cut cells of nbk blocks, each with its own curve and its own grid x(:, b), y(:, b) of the same nx x ny cells
+   !< (issue #100 step 4.1: the translated planes of the swept geometry; the 2-D AMR batching of equal-size blocks), in
+   !< one set of launches: block b is `compute_cut_cells_2d` of its curve on x(:, b), y(:, b) bit for bit, for the
+   !< outputs of `compute_cut_cells_2d_device`. The work is `cut_cells_2d_blocks_core`; see there. status: 0, or 1 on
+   !< bad edges of any block, a grid count other than nbk, or nbk < 1.
+   integer(I4P),                intent(in)           :: nbk         !< Blocks.
+   integer(I4P),                intent(in)           :: vstart(nbk + 1) !< First vertex of each curve (vstart(1) = 1).
+   real(R8P),                   intent(in)           :: u(:), v(:)  !< Vertices of all curves.
+   integer(I4P),                intent(in)           :: next(:)     !< Next vertex within the block (0: none).
+   real(R8P),                   intent(in)           :: x(:,:), y(:,:) !< Cell edges of each block [nx+1, nbk], [ny+1, nbk].
+   type(cut_cells_2d_blocks_t), intent(inout)        :: cb          !< Cut cells (released from the device, reset first).
+   integer(I4P),                intent(out)          :: status      !< 0 ok, 1 bad edges or no block.
+   logical,                     intent(in)           :: with_iv     !< Record the fluid edge intervals (with_pieces).
+   logical,                     intent(in)           :: with_pieces !< Compute the pieces.
+   logical,                     intent(in), optional :: resident    !< Leave the outputs on the device (default .false.).
+   integer(I4P)                                      :: nx, ny, b   !< Cells per block, block.
+
+   call cut_cells_2d_blocks_reset(cb)
+   status = 1_I4P
+   if (nbk < 1_I4P .or. size(x, 2) /= nbk .or. size(y, 2) /= nbk) return
+   do b = 1_I4P, nbk
+      call cut_cells_2d_grid(x(:, b), y(:, b), nx, ny, status)
+      if (status /= 0_I4P) return
+   enddo
+   call cut_cells_2d_blocks_core(nbk, nbk, vstart, u, v, next, nx, ny, x, y, cb, with_iv, with_pieces, resident)
+   endsubroutine compute_cut_cells_2d_blocks_grids_device
+
+   subroutine cut_cells_2d_blocks_core(nbk, ngr, vstart, u, v, next, nx, ny, xg, yg, cb, with_iv, with_pieces, resident)
+   !< The cut cells of nbk blocks, each with its own curve, on ngr grids of nx x ny cells (ngr = 1: one grid for all
+   !< blocks; ngr = nbk: block b on grid b), in one set of launches (issue #100 steps 3b, 4.1): block b is
+   !< `compute_cut_cells_2d` of its curve on its grid bit for bit, for the outputs of `compute_cut_cells_2d_device`
+   !< (moments order 0, no boundaries). The grids are checked by the callers.
    !<
    !< Curve b is u, v, next(vstart(b) : vstart(b + 1) - 1), next numbered within the block (1.., 0: no segment).
    !< Per block the host runs what the one-block twin runs (`node_rows`, `cut_cells_2d_prepare`: the walk and the
@@ -501,14 +560,16 @@ contains
    !<    (`quiet_cell_2d_measures`): no piece arrays.
    !< Integer offsets and counts only between the stages (exact in any order); the same kernels in the same order per
    !< cell, `-gpu=nofma`: the same bits. Built without OpenACC the loops run on the host in order. `resident` leaves
-   !< the outputs mapped (see `cut_cells_2d_blocks_t`). status: 0, or 1 on bad edges or nbk < 1.
+   !< the outputs mapped (see `cut_cells_2d_blocks_t`). Block b reads grid gb = min(b, ngr): xg(:, gb), yg(:, gb), in
+   !< the host preparation and in every kernel (the per-block offsets come from the same count-then-scan either way).
    integer(I4P),                intent(in)           :: nbk         !< Blocks.
+   integer(I4P),                intent(in)           :: ngr         !< Grids: 1 (shared) or nbk (one per block).
    integer(I4P),                intent(in)           :: vstart(nbk + 1) !< First vertex of each curve (vstart(1) = 1).
    real(R8P),                   intent(in)           :: u(:), v(:)  !< Vertices of all curves.
    integer(I4P),                intent(in)           :: next(:)     !< Next vertex within the block (0: none).
-   real(R8P),                   intent(in)           :: x(:), y(:)  !< Cell edges (strictly increasing).
-   type(cut_cells_2d_blocks_t), intent(inout)        :: cb          !< Cut cells (released from the device, reset first).
-   integer(I4P),                intent(out)          :: status      !< 0 ok, 1 bad edges or no block.
+   integer(I4P),                intent(in)           :: nx, ny      !< Cells per block.
+   real(R8P),                   intent(in)           :: xg(nx + 1, ngr), yg(ny + 1, ngr) !< Cell edges of the grids.
+   type(cut_cells_2d_blocks_t), intent(inout)        :: cb          !< Cut cells (reset by the callers).
    logical,                     intent(in)           :: with_iv     !< Record the fluid edge intervals (with_pieces).
    logical,                     intent(in)           :: with_pieces !< Compute the pieces.
    logical,                     intent(in), optional :: resident    !< Leave the outputs on the device (default .false.).
@@ -535,24 +596,19 @@ contains
    real(R8P)    :: zmom(1, 1), zwmom(1, 1), zbseg(4, 1)  !< No moments, no wall moments, no boundary segments.
    logical      :: zbwall(1)                             !< No wall flags.
    logical      :: res                                   !< Leave the outputs on the device.
-   integer(I4P) :: nx, ny, ne, ne1, ncell, nc1, ntot, nvt, b, v0, v1, g, c, i, j, k, ncut, nrw, niw, np, niv, nbd !< Work.
+   integer(I4P) :: ne, ne1, ncell, nc1, ntot, nvt, b, v0, v1, g, c, i, j, k, ncut, nrw, niw, np, niv, nbd, gb !< Work.
    integer(I4P) :: eid(4)                                !< Edge ids.
 
-   call cut_cells_2d_blocks_reset(cb)
    res = .false. ; if (present(resident)) res = resident
-   status = 1_I4P
-   if (nbk < 1_I4P) return
-   call cut_cells_2d_grid(x, y, nx, ny, status)
-   if (status /= 0_I4P) return
    ne = (nx + 1_I4P) * ny + nx * (ny + 1_I4P) ; ncell = nx * ny ; ntot = ncell * nbk
    ! host: node rows, walk and indexes per block, then concatenated (one padding element: a start element in bounds)
    allocate(pp(nbk), rso(nbk + 1), xo(nbk + 1), po(nbk + 1))
    rso(1) = 0_I4P ; xo(1) = 0_I4P ; po(1) = 0_I4P
    do b = 1_I4P, nbk
-      v0 = vstart(b) ; v1 = vstart(b + 1) - 1_I4P
-      call node_rows(u(v0:v1), v(v0:v1), next(v0:v1), y, pp(b)%rstart, pp(b)%rseg)
-      call cut_cells_2d_prepare(u(v0:v1), v(v0:v1), next(v0:v1), x, y, nx, ny, ne1, nc1, pp(b)%nxs, pp(b)%nps, &
-                                pp(b)%xstart, pp(b)%xord, pp(b)%pstart, pp(b)%pord, pp(b)%xp, pp(b)%pab, pp(b)%ptg)
+      v0 = vstart(b) ; v1 = vstart(b + 1) - 1_I4P ; gb = min(b, ngr)
+      call node_rows(u(v0:v1), v(v0:v1), next(v0:v1), yg(:, gb), pp(b)%rstart, pp(b)%rseg)
+      call cut_cells_2d_prepare(u(v0:v1), v(v0:v1), next(v0:v1), xg(:, gb), yg(:, gb), nx, ny, ne1, nc1, pp(b)%nxs, &
+                                pp(b)%nps, pp(b)%xstart, pp(b)%xord, pp(b)%pstart, pp(b)%pord, pp(b)%xp, pp(b)%pab, pp(b)%ptg)
       rso(b + 1) = rso(b) + size(pp(b)%rseg, kind=I4P) ; xo(b + 1) = xo(b) + pp(b)%nxs ; po(b + 1) = po(b) + pp(b)%nps
    enddo
    nvt = vstart(nbk + 1) - 1_I4P
@@ -578,7 +634,7 @@ contains
    allocate(node_in(nx + 1, ny + 1, nbk), closed(nx, ny, nbk), alpha(nx, ny, nbk), aperture(4, nx, ny, nbk), &
             centroid(2, nx, ny, nbk), wet_length(nx, ny, nbk), wet_centroid(2, nx, ny, nbk), wet_normal(2, nx, ny, nbk), &
             pieces(nx, ny, nbk))
-   !$acc data copyin(x, y, vstart, ua, va, na, rsa, rso, rsg, xsa, xo, xoa, xpa, psa, po, poa, paba, ptga, zme, zmom, &
+   !$acc data copyin(xg, yg, vstart, ua, va, na, rsa, rso, rsg, xsa, xo, xoa, xpa, psa, po, poa, paba, ptga, zme, zmom, &
    !$acc&            zwmom, zbseg, zbwall)
    !$acc enter data create(node_in, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
    ! 1. node flags, one thread per node of every block
@@ -586,9 +642,9 @@ contains
    do b = 1_I4P, nbk
       do j = 1_I4P, ny + 1_I4P
          do i = 1_I4P, nx + 1_I4P
-            node_in(i, j, b) = node_parity(x(i), y(j), rsa(j, b), rsa(j + 1, b) - 1_I4P, rso(b + 1) - rso(b), &
-                                           rsg(rso(b) + 1), vstart(b + 1) - vstart(b), ua(vstart(b)), va(vstart(b)), &
-                                           na(vstart(b)))
+            node_in(i, j, b) = node_parity(xg(i, min(b, ngr)), yg(j, min(b, ngr)), rsa(j, b), rsa(j + 1, b) - 1_I4P, &
+                                           rso(b + 1) - rso(b), rsg(rso(b) + 1), vstart(b + 1) - vstart(b), ua(vstart(b)), &
+                                           va(vstart(b)), na(vstart(b)))
          enddo
       enddo
    enddo
@@ -600,10 +656,10 @@ contains
    !$acc parallel loop gang vector default(present) private(eid) &
    !$acc& present(node_in, cutc, rwo, iwo, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
    do k = 1_I4P, ncut
-      g = cutc(k) ; b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell
+      g = cutc(k) ; b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell ; gb = min(b, ngr)
       i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
       call cell_edge_ids(nx, ny, i, j, eid)
-      call cut_cell_2d_count(x(i), x(i + 1), y(j), y(j + 1), node_in(i, j, b), node_in(i + 1, j, b), &
+      call cut_cell_2d_count(xg(i, gb), xg(i + 1, gb), yg(j, gb), yg(j + 1, gb), node_in(i, j, b), node_in(i + 1, j, b), &
                              node_in(i + 1, j + 1, b), node_in(i, j + 1, b), eid, ne, xo(b + 1) - xo(b), xsa(1, b), &
                              xoa(xo(b) + 1), xpa(1, xo(b) + 1), psa(c + 1, b) - psa(c, b), psa(c, b) - 1_I4P, &
                              po(b + 1) - po(b), poa(po(b) + 1), paba(1, po(b) + 1), ptga(1, po(b) + 1), 0_I4P, zme, with_iv, &
@@ -618,11 +674,11 @@ contains
       !$acc& present(ckind, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
       do g = 1_I4P, ntot
          if (ckind(g) > 0_I4P) cycle
-         b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell
+         b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell ; gb = min(b, ngr)
          i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
-         call quiet_cell_2d_measures(x(i), x(i + 1), y(j), y(j + 1), ckind(g) < 0_I4P, closed(i, j, b), alpha(i, j, b), &
-                                     aperture(1, i, j, b), centroid(1, i, j, b), wet_length(i, j, b), &
-                                     wet_centroid(1, i, j, b), wet_normal(1, i, j, b), pieces(i, j, b))
+         call quiet_cell_2d_measures(xg(i, gb), xg(i + 1, gb), yg(j, gb), yg(j + 1, gb), ckind(g) < 0_I4P, &
+                                     closed(i, j, b), alpha(i, j, b), aperture(1, i, j, b), centroid(1, i, j, b), &
+                                     wet_length(i, j, b), wet_centroid(1, i, j, b), wet_normal(1, i, j, b), pieces(i, j, b))
       enddo
       np = 0_I4P ; niv = 0_I4P
    else
@@ -649,22 +705,23 @@ contains
       !$acc&         ivo, bdo, pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh, bds)
       do g = 1_I4P, ntot
          if (ckind(g) > 0_I4P) cycle
-         b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell
+         b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell ; gb = min(b, ngr)
          i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
          call cell_edge_ids(nx, ny, i, j, eid)
-         call quiet_cell_2d_kernel(x(i), x(i + 1), y(j), y(j + 1), i, j, ckind(g) < 0_I4P, eid, 0_I4P, zme, with_iv, &
-                                   .false., closed(i, j, b), alpha(i, j, b), aperture(1, i, j, b), centroid(1, i, j, b), &
-                                   wet_length(i, j, b), wet_centroid(1, i, j, b), wet_normal(1, i, j, b), pieces(i, j, b), &
-                                   first_piece(i, j, b) - 1_I4P, ivo(g), bdo(g), np, pcell, parea, pcen, pwl, pwn, pap, &
-                                   zmom, zwmom, ivs, niv, ive, ivl, ivh, bds, 0_I4P, zbseg, zbwall)
+         call quiet_cell_2d_kernel(xg(i, gb), xg(i + 1, gb), yg(j, gb), yg(j + 1, gb), i, j, ckind(g) < 0_I4P, eid, &
+                                   0_I4P, zme, with_iv, .false., closed(i, j, b), alpha(i, j, b), aperture(1, i, j, b), &
+                                   centroid(1, i, j, b), wet_length(i, j, b), wet_centroid(1, i, j, b), &
+                                   wet_normal(1, i, j, b), pieces(i, j, b), first_piece(i, j, b) - 1_I4P, ivo(g), bdo(g), np, &
+                                   pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, ive, ivl, ivh, bds, 0_I4P, zbseg, &
+                                   zbwall)
       enddo
       !$acc parallel loop gang vector default(present) private(eid) &
       !$acc& present(cutc, rwo, iwo, first_piece, ivo, bdo, pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh, bds)
       do k = 1_I4P, ncut
-         g = cutc(k) ; b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell
+         g = cutc(k) ; b = (g - 1_I4P) / ncell + 1_I4P ; c = g - (b - 1_I4P) * ncell ; gb = min(b, ngr)
          i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
          call cell_edge_ids(nx, ny, i, j, eid)
-         call cut_cell_2d_fill(x(i), x(i + 1), y(j), y(j + 1), i, j, eid, 0_I4P, zme, with_iv, .false., &
+         call cut_cell_2d_fill(xg(i, gb), xg(i + 1, gb), yg(j, gb), yg(j + 1, gb), i, j, eid, 0_I4P, zme, with_iv, .false., &
                                rwo(k + 1) - rwo(k), rw(rwo(k)), iwo(k + 1) - iwo(k), iw(iwo(k)), first_piece(i, j, b) - 1_I4P, &
                                ivo(g), bdo(g), np, pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, &
                                ive, ivl, ivh, bds, 0_I4P, zbseg, zbwall)
@@ -711,7 +768,7 @@ contains
       endif
    endif
    cb%on_device = res
-   endsubroutine compute_cut_cells_2d_blocks_device
+   endsubroutine cut_cells_2d_blocks_core
 
    subroutine cut_cells_2d_classify_blocks_dev(nx, ny, ne, ncell, nbk, xstart, pstart, node_in, ckind, ncut, cutc, rwo, iwo, &
                                                nrw_tot, niw_tot)

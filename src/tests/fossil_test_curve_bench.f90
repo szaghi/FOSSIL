@@ -15,16 +15,19 @@ program fossil_test_curve_bench
 !< serial mismatches` (sections of the issue #39 benchmark bodies), `deviation device vs serial mismatches` (issue #60:
 !< the last curve rotated by 2 degrees against itself, on the device and on the CPU) and `line crossings device vs serial
 !< mismatches` (issue #40) and `thin device vs serial mismatches` (issue #62: box_thin_many_device on the cells of a
-!< 64^2 block, medial thickness and gap): all must be 0.
+!< 64^2 block, medial thickness and gap), `cut cells 2-D blocks grids device vs serial mismatches` (issue #100 step 4.1:
+!< the multi-block cut cells with a grid per block, the translated planes of the swept geometry among them): all must
+!< be 0.
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d, device_line_mismatches_2d, to_surface
 use fossil, only : surface_stl_object, slice_surface, cut_cells_2d_t
-use fossil_cut_cells_compare, only : cut_cells_twin_mismatches, cut_cells_2d_mismatches
+use fossil_cut_cells_compare, only : cut_cells_twin_mismatches, cut_cells_2d_mismatches, cut_cells_many_grids_mismatches
 use fossil, only : rigid_pose_2d_t, pose_2d, to_world
 use fossil, only : curvilinear_block_2d_t, detect_topology_2d, topo_record_t, TOPO_BOUNDARY, wall_cutter_2d
 use fossil_overset, only : hole_flags_2d, block_logical_t, donor_set_t, donor_candidates_2d
+use vecfor, only : vector_R8P
 
 implicit none
 
@@ -430,6 +433,7 @@ contains
    enddo
    print '(A,I0)', 'cut cells 2-D device vs serial mismatches: ', bad
    ok = ok .and. bad == 0 .and. sts == 0
+   call blocks_grids_case(s, cc)
    if (n < 256_I4P) return
    print '(A)', 'cut cells 2-D timing (5 calls, intervals on, transfers included) [s]: curve, cells, host, device, '// &
                 'device resident (best, median); speed-ups of the best'
@@ -461,6 +465,57 @@ contains
       enddo
    enddo
    endsubroutine cut_cells_case
+
+   subroutine blocks_grids_case(s, cc)
+   !< The multi-block 2-D cut cells with a grid per block on the device (issue #100 step 4.1, `cut_cells_device_many` with
+   !< x(:, b), y(:, b)) against `curve%cut_cells` on each block's grid, every output bitwise, copied back and resident
+   !< (`cut_cells_many_grids_mismatches`): the four curves on n^2 grids shifted per block, and the translated planes of
+   !< the swept geometry (`plane_average`: the sections of the surface s at 16 levels z_k - s d(3), two Gauss nodes s
+   !< each, on the grids x - s d(1), y - s d(2)) as the 32 blocks of one call. `cut cells 2-D blocks grids device vs
+   !< serial mismatches` = 0.
+   type(surface_stl_object), intent(in) :: s       !< Surface (the last bench body).
+   type(curve_object),       intent(in) :: cc(:)   !< Curves.
+   real(R8P), parameter      :: G = 0.5_R8P / sqrt(3._R8P) !< Two-point Gauss offset.
+   type(curve_object)        :: secs(32)           !< Sections.
+   real(R8P),    allocatable :: x(:), y(:), gu(:,:), gv(:,:) !< Grids.
+   real(R8P)                 :: lo(2), hi(2), h, d(3), zmin, zmax, sg, zk !< Work.
+   integer(I4P)              :: bad, st, b, k, q   !< Work.
+
+   lo = [0.0031_R8P, 0.0031_R8P] ; hi = [0.9969_R8P, 0.9969_R8P]
+   call grid_edges(lo, hi, n, x, y)
+   h = x(2) - x(1)
+   allocate(gu(n + 1, size(cc)), gv(n + 1, size(cc)))
+   do b = 1, size(cc)
+      gu(:, b) = x - (b - 1) * 0.37_R8P * h ; gv(:, b) = y + (b - 1) * 0.21_R8P * h
+   enddo
+   bad = cut_cells_many_grids_mismatches(cc, gu, gv, st)
+   call body_box(s, lo, hi, zmin, zmax)
+   call grid_edges(lo, hi, n, x, y)
+   d = [1.7_R8P, 0.6_R8P, -0.4_R8P] * (x(2) - x(1))
+   deallocate(gu, gv) ; allocate(gu(n + 1, 32), gv(n + 1, 32))
+   b = 0
+   do k = 1, 16
+      zk = zmin + (zmax - zmin) * (k - 0.5_R8P) / 16
+      do q = -1, 1, 2
+         b = b + 1 ; sg = 0.5_R8P + q * G
+         call slice_surface(surface=s, normal_axis=3_I4P, level=zk - sg * d(3), curve=secs(b), on_plane_low=.true.)
+         gu(:, b) = x - sg * d(1) ; gv(:, b) = y - sg * d(2)
+      enddo
+   enddo
+   bad = bad + cut_cells_many_grids_mismatches(secs, gu, gv, b) ; st = st + b
+   print '(A,I0)', 'cut cells 2-D blocks grids device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0 .and. st == 0
+   endsubroutine blocks_grids_case
+
+   subroutine body_box(s, lo, hi, zmin, zmax)
+   !< The (x, y) box and the z range of the surface s.
+   type(surface_stl_object), intent(in)  :: s            !< Surface.
+   real(R8P),                intent(out) :: lo(2), hi(2), zmin, zmax !< Box.
+   type(vector_R8P)                      :: b0, b1       !< Corners.
+
+   b0 = s%get_bmin() ; b1 = s%get_bmax()
+   lo = [b0%x, b0%y] ; hi = [b1%x, b1%y] ; zmin = b0%z ; zmax = b1%z
+   endsubroutine body_box
 
    subroutine chain_case
    !< The 2-D per-step chain on the device (issue #100 step 6a): each time step moves the curve (`move`, a rotation about

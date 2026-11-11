@@ -30,7 +30,8 @@ use fossil_box_query,          only : curve_box_contact_oac, curve_box_thin_oac,
                                      BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
 use fossil_line_query,         only : curve_line_crossings_oac, line_crossing_before_2d
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device, &
-                                     cut_cells_2d_blocks_t, compute_cut_cells_2d_blocks_device
+                                     cut_cells_2d_blocks_t, compute_cut_cells_2d_blocks_device, &
+                                     compute_cut_cells_2d_blocks_grids_device
 use fossil_cut_moments,        only : MOMENTS_MAX
 use fossil_rigid_pose,         only : rigid_pose_2d_t, to_body, to_world, rotate, pose_interpolate, pose_angle_2d
 use fossil_projection,         only : projection_target_t, build_target_2d
@@ -66,6 +67,12 @@ integer(I4P), parameter :: CURVE_WRONG_ORIENTATION   = 4_I4P !< A loop's orienta
 integer(I4P), parameter :: CURVE_OPEN_LOOP           = 5_I4P !< A loop is open (a polyline).
 integer(I4P), parameter :: CURVE_SELF_INTERSECTING   = 6_I4P !< Two segments cross, touch or overlap (only with
                                                              !< `check_self_intersections`, issue #44).
+
+interface cut_cells_device_many
+   !< The cut cells of many curves in one set of device launches (issue #100): on one grid x(:), y(:) (step 3b), or on a
+   !< grid per curve x(:, b), y(:, b) of the same nx x ny cells (step 4.1).
+   module procedure cut_cells_device_many_grid, cut_cells_device_many_grids
+endinterface cut_cells_device_many
 
 type :: curve_object
    !< Closed planar curve: loops of vertices in an axis-aligned plane.
@@ -1590,7 +1597,7 @@ contains
    if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
    endsubroutine cut_cells_device
 
-   subroutine cut_cells_device_many(curves, x, y, cut, status, intervals, pieces, resident)
+   subroutine cut_cells_device_many_grid(curves, x, y, cut, status, intervals, pieces, resident)
    !< The cut cells of many curves on one block x(nx+1), y(ny+1) (u, v), in one set of device launches (issue #100 step
    !< 3b: the plane sections of one axis of `cut_cells_3d`): block b of `cut` equals `curves(b)%cut_cells(x, y, ...)` bit
    !< for bit for the outputs of `cut_cells_device` (see `cut_cells_2d_blocks_t` for the layout). The vertices are
@@ -1606,7 +1613,7 @@ contains
    logical,                     intent(in),  optional :: resident  !< Leave the outputs on the device (default .false.).
    real(R8P),    allocatable :: uu(:), vv(:)                       !< Concatenated vertices.
    integer(I4P), allocatable :: nn(:), vs(:)                       !< Next vertex, first vertex of each curve.
-   integer(I4P)              :: nb, b, m, st                       !< Work.
+   integer(I4P)              :: nb, st                             !< Work.
    logical                   :: wi, wp, res                        !< Options.
 
    if (present(status)) status = STATUS_OK
@@ -1614,8 +1621,52 @@ contains
    wp = .true. ; if (present(pieces)) wp = pieces
    res = .false. ; if (present(resident)) res = resident
    nb = size(curves, kind=I4P)
+   call concatenate_curves(curves, vs, uu, vv, nn)
+   call compute_cut_cells_2d_blocks_device(nb, vs, uu, vv, nn, x, y, cut, st, wi, wp, res)
+   if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
+   endsubroutine cut_cells_device_many_grid
+
+   subroutine cut_cells_device_many_grids(curves, x, y, cut, status, intervals, pieces, resident)
+   !< The cut cells of many curves, curve b on its own block x(:, b), y(:, b) (u, v; the same nx x ny cells for every
+   !< block), in one set of device launches (issue #100 step 4.1: the translated planes of the swept geometry, the 2-D
+   !< AMR batching of equal-size blocks): block b of `cut` equals `curves(b)%cut_cells(x(:, b), y(:, b), ...)` bit for
+   !< bit for the outputs of `cut_cells_device` (layout of `cut_cells_2d_blocks_t`; piece_cell is the cell in its own
+   !< block). Options as in the one-grid form. `status = STATUS_INVALID_INPUT` on bad edges of any block, no curve, or
+   !< a number of grids (columns) other than the number of curves. Built without OpenACC it runs on the host.
+   type(curve_object),          intent(in)            :: curves(:) !< Curves (one per block).
+   real(R8P),                   intent(in)            :: x(:,:), y(:,:) !< Cell edges per block [nx+1, nb], [ny+1, nb].
+   type(cut_cells_2d_blocks_t), intent(inout)         :: cut       !< Cut cells (released from the device, reset first).
+   integer(I4P),                intent(out), optional :: status    !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,                     intent(in),  optional :: intervals !< Record the fluid edge intervals (default .true.).
+   logical,                     intent(in),  optional :: pieces    !< Compute the pieces (default .true.).
+   logical,                     intent(in),  optional :: resident  !< Leave the outputs on the device (default .false.).
+   real(R8P),    allocatable :: uu(:), vv(:)                       !< Concatenated vertices.
+   integer(I4P), allocatable :: nn(:), vs(:)                       !< Next vertex, first vertex of each curve.
+   integer(I4P)              :: nb, st                             !< Work.
+   logical                   :: wi, wp, res                        !< Options.
+
+   if (present(status)) status = STATUS_OK
+   wi = .true. ; if (present(intervals)) wi = intervals
+   wp = .true. ; if (present(pieces)) wp = pieces
+   res = .false. ; if (present(resident)) res = resident
+   nb = size(curves, kind=I4P)
+   call concatenate_curves(curves, vs, uu, vv, nn)
+   call compute_cut_cells_2d_blocks_grids_device(nb, vs, uu, vv, nn, x, y, cut, st, wi, wp, res)
+   if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
+   endsubroutine cut_cells_device_many_grids
+
+   subroutine concatenate_curves(curves, vs, uu, vv, nn)
+   !< The vertex arrays the multi-block cut cells take (`cut_cells_device_many`): curve b is uu, vv, nn(vs(b) :
+   !< vs(b + 1) - 1), the arrays `cut_cells` hands to the kernels (all of u, v, next if there are vertices, else none).
+   type(curve_object),        intent(in)  :: curves(:)  !< Curves.
+   integer(I4P), allocatable, intent(out) :: vs(:)      !< First vertex of each curve [nb + 1].
+   real(R8P),    allocatable, intent(out) :: uu(:), vv(:) !< Concatenated vertices.
+   integer(I4P), allocatable, intent(out) :: nn(:)      !< Next vertex (block-local numbering).
+   integer(I4P)                           :: nb, b, m   !< Work.
+
+   nb = size(curves, kind=I4P)
    allocate(vs(nb + 1)) ; vs(1) = 1_I4P
-   do b = 1_I4P, nb ! the arrays `cut_cells` hands to the kernels: all of u, v, next if there are vertices, else none
+   do b = 1_I4P, nb
       m = 0_I4P ; if (curves(b)%nv > 0_I4P) m = size(curves(b)%u, kind=I4P)
       vs(b + 1) = vs(b) + m
    enddo
@@ -1625,9 +1676,7 @@ contains
       uu(vs(b):vs(b + 1) - 1_I4P) = curves(b)%u ; vv(vs(b):vs(b + 1) - 1_I4P) = curves(b)%v
       nn(vs(b):vs(b + 1) - 1_I4P) = curves(b)%next
    enddo
-   call compute_cut_cells_2d_blocks_device(nb, vs, uu, vv, nn, x, y, cut, st, wi, wp, res)
-   if (st /= 0_I4P .and. present(status)) status = STATUS_INVALID_INPUT
-   endsubroutine cut_cells_device_many
+   endsubroutine concatenate_curves
 
    subroutine line_crossings_many(self, axis, a, t0, t1, t, segments, entering, counts, overflow, status)
    !< Crossings of the lines along `axis` (1: u, 2: v) at a(i), i = 1..n, with parameter in [t0, t1]

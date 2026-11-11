@@ -15,10 +15,18 @@ program fossil_test_cut_cells_blocks_twin
 !<    the unit cube `cube-01.stl` on a grid through its faces) as blocks, the same check.
 !< 3. On the same bodies, `cut_cells_3d(..., device_sections=.true.)` and `cut_cells_3d_sections(..., device=.true.)`
 !<    against the host path: the face arrays bitwise, and the cell fractions and pieces that follow from them.
+!< 4. Per-block grids (issue #100 step 4.1, `cut_cells_device_many(curves, x(:, :), y(:, :))`): the stress curves each
+!<    on its own shifted grid (shifts by multiples of the cell size put the curves' vertices and sides on the shifted
+!<    lines: ties), on stretched and uniform grids of one size mixed, and the translated planes of the swept geometry
+!<    (sections of the cone and of cube-01 at the levels a - s d and grids ue - s d of two-point Gauss nodes, as
+!<    `plane_average`), against `curve%cut_cells` on each block's grid (`cut_cells_many_grids_mismatches`); a grid count
+!<    other than the block count and a bad column give STATUS_INVALID_INPUT.
 use fossil,                   only : curve_object, surface_stl_object, slice_surface, cut_cells_3d_t, cut_cells_3d, &
                                      pose_from_axis_angle, facet_object
 use fossil_cut_cells_3d,      only : cut_cells_3d_sections
-use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_face_mismatches
+use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_face_mismatches, cut_cells_many_grids_mismatches
+use fossil_curve_object,      only : cut_cells_2d_blocks_t, cut_cells_device_many
+use fossil_surface_stl_object, only : STATUS_INVALID_INPUT
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, to_surface
 use penf,                     only : I4P, I8P, R8P
 use vecfor,                   only : vector_R8P
@@ -30,7 +38,7 @@ type(curve_object)             :: cv(15)
 type(body_t),     allocatable  :: bb(:)
 type(surface_stl_object)       :: s
 real(R8P)                      :: e8(9), s8(9), g3(4), gx(6), gy(4), go(12), gf(38), gh(30), v(3, 4), vol
-real(R8P),        allocatable  :: u(:), w(:), x(:), y(:), z(:)
+real(R8P),        allocatable  :: u(:), w(:), x(:), y(:), z(:), sh(:,:)
 integer(I4P)                   :: k, n, nv, total, i
 integer(I8P)                   :: seed
 logical                        :: ok
@@ -132,6 +140,23 @@ enddo
 call s%load_from_file(file_name='src/tests/cube-01.stl', guess_format=.true.)
 x = [(-0.25_R8P + 0.125_R8P * i, i = 0, 12)] ; y = [(-0.3_R8P + 0.15_R8P * i, i = 0, 10)] ; z = x
 call body('cube-01, grid through its faces')
+! 4. per-block grids
+allocate(sh(2, 15))
+sh(1, :) = [0._R8P, 0.125_R8P, -0.25_R8P, 0.0625_R8P, 0.375_R8P, -0.125_R8P, 0.5_R8P, 0.03125_R8P, 0.25_R8P, &
+            -0.0375_R8P, 0.125_R8P, -2._R8P, 0.75_R8P, 0.1_R8P, 0._R8P]
+sh(2, :) = [0._R8P, -0.125_R8P, 0.25_R8P, 0.25_R8P, -0.0625_R8P, 0._R8P, 0.125_R8P, -0.5_R8P, 0.0125_R8P, &
+            0.375_R8P, -0.25_R8P, -2._R8P, 0._R8P, 0.2_R8P, 0.0625_R8P]
+call shifted('stress curves, e8 x e8 shifted per block', cv, e8, e8, sh)
+call shifted('stress curves, gf x gh shifted per block', cv, gf, gh, 0.37_R8P * sh)
+call shifted('one empty block, shifted', cv(1:1), e8, e8, sh(:, 2:2))
+call mixed('stress curves, s8 and e8 grids mixed', cv, s8, e8)
+call bad_grids
+call to_surface(bb(7)%soup, s) ! cone
+x = [(-1.13_R8P + 0.19_R8P * i, i = 0, 12)] ; y = x ; z = [(-0.21_R8P + 0.23_R8P * i, i = 0, 18)]
+call translated('cone, translated planes', [0.31_R8P, -0.12_R8P, 0.43_R8P])
+call s%load_from_file(file_name='src/tests/cube-01.stl', guess_format=.true.)
+x = [(-0.25_R8P + 0.125_R8P * i, i = 0, 12)] ; y = [(-0.3_R8P + 0.15_R8P * i, i = 0, 10)] ; z = x
+call translated('cube-01, translated planes through its faces', [0.125_R8P, 0.3_R8P, -0.25_R8P])
 print '(A,I0)', 'total mismatches: ', total
 print '(A,L1)', 'Are all tests passed? ', ok
 
@@ -147,6 +172,92 @@ contains
    total = total + m ; ok = ok .and. m == 0_I4P .and. st == 0_I4P
    print '(A,I0,A,I0)', label//': blocks ', size(cc), ', mismatches ', m
    endsubroutine blocks
+
+   subroutine shifted(label, cc, xx, yy, shift)
+   !< Block b of the curves cc on the grid (xx - shift(1, b)) x (yy - shift(2, b)), against the per-curve host path.
+   character(*),       intent(in) :: label   !< Case.
+   type(curve_object), intent(in) :: cc(:)   !< Curves.
+   real(R8P),          intent(in) :: xx(:), yy(:) !< Cell edges of the unshifted grid.
+   real(R8P),          intent(in) :: shift(:,:) !< Shift of each block's grid [2, size(cc)].
+   real(R8P), allocatable         :: gu(:,:), gv(:,:) !< Grids.
+   integer(I4P)                   :: m, st, b !< Mismatches, status, block.
+
+   allocate(gu(size(xx), size(cc)), gv(size(yy), size(cc)))
+   do b = 1, size(cc)
+      gu(:, b) = xx - shift(1, b) ; gv(:, b) = yy - shift(2, b)
+   enddo
+   m = cut_cells_many_grids_mismatches(cc, gu, gv, st)
+   total = total + m ; ok = ok .and. m == 0_I4P .and. st == 0_I4P
+   print '(A,I0,A,I0)', label//': blocks ', size(cc), ', mismatches ', m
+   endsubroutine shifted
+
+   subroutine mixed(label, cc, xa, xb)
+   !< Blocks on different grids of one size: block b on xa x xb if b is odd, else on xb x xa (the stretched one reversed).
+   character(*),       intent(in) :: label   !< Case.
+   type(curve_object), intent(in) :: cc(:)   !< Curves.
+   real(R8P),          intent(in) :: xa(:), xb(:) !< Two grids of one size.
+   real(R8P), allocatable         :: gu(:,:), gv(:,:) !< Grids.
+   integer(I4P)                   :: m, st, b !< Mismatches, status, block.
+
+   allocate(gu(size(xa), size(cc)), gv(size(xa), size(cc)))
+   do b = 1, size(cc)
+      if (mod(b, 2) == 1) then
+         gu(:, b) = xa ; gv(:, b) = xb
+      else
+         gu(:, b) = xb ; gv(:, b) = 1._R8P - xa(size(xa):1:-1)
+      endif
+   enddo
+   m = cut_cells_many_grids_mismatches(cc, gu, gv, st)
+   total = total + m ; ok = ok .and. m == 0_I4P .and. st == 0_I4P
+   print '(A,I0,A,I0)', label//': blocks ', size(cc), ', mismatches ', m
+   endsubroutine mixed
+
+   subroutine bad_grids
+   !< STATUS_INVALID_INPUT for a grid count other than the block count and for a column that does not increase.
+   type(cut_cells_2d_blocks_t) :: cb       !< Result.
+   real(R8P)                   :: gu(9, 3), gv(9, 3) !< Grids.
+   integer(I4P)                :: st, m, b !< Status, failures, block.
+
+   do b = 1, 3
+      gu(:, b) = e8 + 0.1_R8P * b ; gv(:, b) = e8
+   enddo
+   m = 0_I4P
+   call cut_cells_device_many(cv(2:3), gu, gv, cb, st)
+   if (st /= STATUS_INVALID_INPUT) m = m + 1_I4P
+   gu(5, 3) = gu(4, 3)
+   call cut_cells_device_many(cv(2:4), gu, gv, cb, st)
+   if (st /= STATUS_INVALID_INPUT) m = m + 1_I4P
+   call cut_cells_device_many(cv(2:4), gu(:, [1, 2, 1]), gv, cb, st)
+   if (st /= 0_I4P) m = m + 1_I4P
+   total = total + m ; ok = ok .and. m == 0_I4P
+   print '(A,I0)', 'per-block grids, bad input: failures ', m
+   endsubroutine bad_grids
+
+   subroutine translated(label, d)
+   !< The translated planes of `plane_average` (swept geometry, exact translation by d): for every z plane z_k and two
+   !< Gauss nodes s of [0, 1], the section of s at z_k - s d(3) on the grid (x - s d(1)) x (y - s d(2)), all as the
+   !< blocks of one call.
+   character(*), intent(in) :: label !< Case.
+   real(R8P),    intent(in) :: d(3)  !< Displacement.
+   real(R8P),    parameter  :: G = 0.5_R8P / sqrt(3._R8P) !< Two-point Gauss offset.
+   type(curve_object), allocatable :: secs(:) !< Sections.
+   real(R8P), allocatable   :: gu(:,:), gv(:,:) !< Grids.
+   real(R8P)                :: sg   !< Node.
+   integer(I4P)             :: m, st, k, q, b !< Work.
+
+   allocate(secs(2 * size(z)), gu(size(x), 2 * size(z)), gv(size(y), 2 * size(z)))
+   b = 0
+   do k = 1, size(z)
+      do q = -1, 1, 2
+         b = b + 1 ; sg = 0.5_R8P + q * G
+         call slice_surface(surface=s, normal_axis=3_I4P, level=z(k) - sg * d(3), curve=secs(b), on_plane_low=.true.)
+         gu(:, b) = x - sg * d(1) ; gv(:, b) = y - sg * d(2)
+      enddo
+   enddo
+   m = cut_cells_many_grids_mismatches(secs, gu, gv, st)
+   total = total + m ; ok = ok .and. m == 0_I4P .and. st == 0_I4P
+   print '(A,I0,A,I0)', label//': blocks ', size(secs), ', mismatches ', m
+   endsubroutine translated
 
    subroutine body(label)
    !< The sections of s along each axis as blocks; the 3-D faces with the device sections against the host's.
