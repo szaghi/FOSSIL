@@ -45,19 +45,20 @@ module fossil_swept_cells
 !< issue #44), or call `self_intersections` / `check_validity(check_self_intersections=.true.)`.
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t, cut_cells_2d_blocks_t, cut_cells_device_many, &
                                      place_for_crossings
-use fossil_curve_slice,        only : slice_surface
-use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d
+use fossil_curve_slice,        only : slice_surface, slice_planes_t, slice_planes_prepare, slice_surface_plane
+use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_cells_3d_sections
 use fossil_facet_object,       only : facet_object
 use fossil_rigid_pose,         only : rigid_pose_t, rigid_pose_2d_t, pose_interpolate, pose_angle_2d, pose_log_3d
 use fossil_self_intersection,  only : intersection_pair_t
 use fossil_surface_stl_object, only : surface_stl_object, STATUS_OK, STATUS_INVALID_INPUT
-use penf,                      only : I4P, R8P
+use penf,                      only : I4P, I8P, R8P
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 
 implicit none
 private
 public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
 public :: swept_cells_2d_device
+public :: swept_cells_3d_device
 
 type :: swept_cells_2d_t
    !< Swept geometry of a curve between two poses on a 2-D block (fluid = outside the solid).
@@ -96,6 +97,8 @@ type :: swept_cells_3d_t
    logical                   :: self_intersecting = .false. !< The surface crosses itself (only with `check_input`).
 endtype swept_cells_3d_t
 
+integer(I4P), parameter :: SWEPT_CHUNK_CELLS = 2_I4P**22 !< Section cells per device launch set, and face sums per
+                                                      !< plane group held on the host (`swept_cells_3d_device`).
 real(R8P), parameter :: FLOOR_H = 1e-6_R8P !< Pieces shorter than this converge to 64 eps of the measure times FLOOR_H
                                          !< (issue #69: slices within 1e-10 of a face carry ~1e-7 relative noise).
 ! A piece whose Gauss values miss that target at 64 nodes is still converged if the last change is within 64 eps of
@@ -105,6 +108,18 @@ real(R8P), parameter :: FLOOR_H = 1e-6_R8P !< Pieces shorter than this converge 
 ! the crossings of a moved copy carry round-off amplified by 1 / angle, and the values stop agreeing at a floor
 ! that does not shrink with the piece. Anything a piece hides below that bound (noise, or an event within the
 ! round-off of a zero zone) moves the face's average by at most 64 eps xm (times the side in 3-D).
+
+type :: rotation_planes_t
+   !< The planes of one axis that `faces_rotation_3d` registers in device mode (issue #100 step 4): position, events
+   !< and the convergence tolerances `one_plane` computed, for `rotation_axis_device`.
+   integer(I4P)              :: n = 0_I4P   !< Planes.
+   integer(I4P)              :: nbp = 0_I4P !< Breakpoints stored.
+   integer(I4P), allocatable :: id(:)       !< Plane index along the axis [n].
+   real(R8P),    allocatable :: lev(:)      !< Plane positions [n].
+   integer(I4P), allocatable :: bfirst(:)   !< Events of plane p: bp(bfirst(p) : bfirst(p + 1) - 1) [n + 1].
+   real(R8P),    allocatable :: bp(:)       !< Events (sorted per plane; capacity >= nbp).
+   real(R8P),    allocatable :: tol(:,:)    !< sca, sco, sna, sno of `one_plane` [4, n].
+endtype rotation_planes_t
 
 type :: slist_t
    !< A list of breakpoints.
@@ -968,6 +983,61 @@ contains
    logical,                  intent(in),  optional :: check_input !< Check the surface for self-intersections
                                                                   !< (`find_self_intersections`; see swept_cells_2d).
    integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
+
+   call swept_3d_run(surface, pose0, pose1, x, y, z, sw, .false., SWEPT_CHUNK_CELLS, nq, poses, exact, status, check_input)
+   endsubroutine swept_cells_3d
+
+   subroutine swept_cells_3d_device(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, chunk_cells)
+   !< `swept_cells_3d` on the device (OpenACC, issue #100 step 4): the same `sw`, bit for bit, on every path.
+   !< - End poses: `cut_cells_3d_device(..., alpha_only=.true.)` on the moved copies `swept_cells_3d` cuts.
+   !< - Exact translation: per axis, the host computes every plane's breakpoints (`plane_breakpoints`, unchanged) and
+   !<   the Gauss nodes of `plane_average`; the node sections come from one plane sweep (`slice_planes_prepare` on the
+   !<   node levels, `slice_surface_plane`), their cut cells on the shifted grids from `cut_cells_device_many` (a grid per
+   !<   block), and a device kernel adds 0.5 h alpha per face over the plane's nodes in node order
+   !<   (`translation_axis_device`).
+   !< - Exact rotation: the host computes the events of every plane (`plane_events`, unchanged); the Gauss doubling of
+   !<   `one_plane` runs in rounds over all the pieces of a group of planes, each round one batch of posed sections
+   !<   (`slice_surface_plane` with `pose`, the index built on the swept spans of the facets) cut on the fixed grid; a
+   !<   device kernel sums each (piece, node count) over its nodes in node order, the host makes the convergence
+   !<   decisions and the piece sums in piece order (`rotation_axis_device`).
+   !< - Gauss poses: each node's faces by `cut_cells_3d_sections(..., device=.true., pose=)` (the faces of `cut_cells_3d`
+   !<   on the moved copy, sliced at the pose without copying), the node sums on the host as in `faces_gauss_3d`.
+   !< - `flux`, the wall terms and the residual: the host loops of `swept_cells_3d`.
+   !< The surface needs a SAH BVH (as `cut_cells_3d_device`); `status = STATUS_INVALID_INPUT` also when the device cut
+   !< cells refuse it. No `check_input` (call `swept_cells_3d` or `find_self_intersections` for that).
+   !< `chunk_cells` (default 2^22) bounds the section cells of one device launch set and the face sums of one plane
+   !< group of the rotation held on the host: smaller uses less memory (and more launches), with the same bits.
+   type(surface_stl_object), intent(in)            :: surface  !< Surface (body frame).
+   type(rigid_pose_t),       intent(in)            :: pose0    !< Pose at the start.
+   type(rigid_pose_t),       intent(in)            :: pose1    !< Pose at the end.
+   real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
+   type(swept_cells_3d_t),   intent(out)           :: sw       !< Swept geometry.
+   integer(I4P),             intent(in),  optional :: nq       !< Gauss nodes (default 4).
+   type(rigid_pose_t),       intent(in),  optional :: poses(:) !< Poses at the Gauss nodes.
+   logical,                  intent(in),  optional :: exact    !< Exact paths (default .true.).
+   integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),             intent(in),  optional :: chunk_cells !< Section cells per launch set (default 2^22).
+   integer(I4P)                                    :: ck       !< Chunk.
+
+   ck = SWEPT_CHUNK_CELLS ; if (present(chunk_cells)) ck = max(1_I4P, chunk_cells)
+   call swept_3d_run(surface, pose0, pose1, x, y, z, sw, .true., ck, nq, poses, exact, status)
+   endsubroutine swept_cells_3d_device
+
+   subroutine swept_3d_run(surface, pose0, pose1, x, y, z, sw, dev, chunk, nq, poses, exact, status, check_input)
+   !< The work of `swept_cells_3d` (dev = .false.) and `swept_cells_3d_device` (dev = .true.): the same operations in
+   !< the same order, the cut cells and face sums on the device with dev.
+   type(surface_stl_object), intent(in)            :: surface  !< Surface (body frame).
+   type(rigid_pose_t),       intent(in)            :: pose0    !< Pose at the start.
+   type(rigid_pose_t),       intent(in)            :: pose1    !< Pose at the end.
+   real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
+   type(swept_cells_3d_t),   intent(out)           :: sw       !< Swept geometry.
+   logical,                  intent(in)            :: dev      !< On the device.
+   integer(I4P),             intent(in)            :: chunk    !< Section cells per launch set (dev).
+   integer(I4P),             intent(in),  optional :: nq       !< Gauss nodes (default 4).
+   type(rigid_pose_t),       intent(in),  optional :: poses(:) !< Poses at the Gauss nodes.
+   logical,                  intent(in),  optional :: exact    !< Exact translation path (default .true.).
+   logical,                  intent(in),  optional :: check_input !< Check the surface for self-intersections.
+   integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    type(surface_stl_object) :: s0                 !< Moved copy.
    type(intersection_pair_t), allocatable :: pairs(:) !< Crossing facet pairs (check_input).
    real(R8P)                :: d(3)               !< Displacement.
@@ -1005,8 +1075,19 @@ contains
                                                              size(pairs), ' facet pairs): residuals around them are not round-off'
       endif
    endif
-   s0 = surface ; call s0%move(pose1) ; call cut_cells_3d(s0, x, y, z, k1, st)
-   s0 = surface ; call s0%move(pose0) ; call cut_cells_3d(s0, x, y, z, k0, st)
+   if (dev) then ! alpha alone (issue #100 step 4), the same copies
+      s0 = surface ; call s0%move(pose1) ; call cut_cells_3d_device(s0, x, y, z, k1, st, alpha_only=.true.)
+      if (st == STATUS_OK) then
+         s0 = surface ; call s0%move(pose0) ; call cut_cells_3d_device(s0, x, y, z, k0, st, alpha_only=.true.)
+      endif
+      if (st /= STATUS_OK) then
+         if (present(status)) status = STATUS_INVALID_INPUT
+         return
+      endif
+   else
+      s0 = surface ; call s0%move(pose1) ; call cut_cells_3d(s0, x, y, z, k1, st)
+      s0 = surface ; call s0%move(pose0) ; call cut_cells_3d(s0, x, y, z, k0, st)
+   endif
    sw%alpha0 = k0%alpha ; sw%alpha1 = k1%alpha
    do k = 1_I4P, nz
       do j = 1_I4P, ny
@@ -1026,11 +1107,15 @@ contains
    if (rotation_exact) then
       ! exact rotation (issue #69): certified breakpoints per grid plane, Gauss doubled to round-off on every piece
       call faces_rotation_3d(surface, pose0, pose1, x, y, z, sw%face_x, sw%face_y, sw%face_z, flux, sw%evaluations, &
-                             sw%exact)
+                             sw%exact, dev, chunk)
    elseif (translation) then
       sw%exact = .true.
       d = pose1%t - pose0%t
-      call faces_translation_3d(s0, d, x, y, z, sw%face_x, sw%face_y, sw%face_z, sw%evaluations)
+      if (dev) then
+         call faces_translation_3d_device(s0, d, x, y, z, sw%face_x, sw%face_y, sw%face_z, sw%evaluations, chunk)
+      else
+         call faces_translation_3d(s0, d, x, y, z, sw%face_x, sw%face_y, sw%face_z, sw%evaluations)
+      endif
       do k = 1_I4P, nz ! the field is uniform (d): only the fluid areas enter
          do j = 1_I4P, ny
             do i = 1_I4P, nx
@@ -1041,12 +1126,12 @@ contains
          enddo
       enddo
    else
-      call faces_gauss_3d(surface, pose0, pose1, x, y, z, n, sw%face_x, sw%face_y, sw%face_z, flux, poses)
+      call faces_gauss_3d(surface, pose0, pose1, x, y, z, n, sw%face_x, sw%face_y, sw%face_z, flux, dev, poses)
       sw%evaluations = n
    endif
    if (.not. present(poses) .and. .not. translation .and. .not. rotation_exact) then
       allocate(fx2(nx + 1, ny, nz), fy2(nx, ny + 1, nz), fz2(nx, ny, nz + 1), fl2(nx, ny, nz))
-      call faces_gauss_3d(surface, pose0, pose1, x, y, z, 2_I4P * n, fx2, fy2, fz2, fl2)
+      call faces_gauss_3d(surface, pose0, pose1, x, y, z, 2_I4P * n, fx2, fy2, fz2, fl2, dev)
       sw%error_estimate = max(maxval(abs(fx2 - sw%face_x)), maxval(abs(fy2 - sw%face_y)), maxval(abs(fz2 - sw%face_z)))
    endif
    do k = 1_I4P, nz
@@ -1059,9 +1144,9 @@ contains
          enddo
       enddo
    enddo
-   endsubroutine swept_cells_3d
+   endsubroutine swept_3d_run
 
-   subroutine faces_rotation_3d(surface, pose0, pose1, x, y, z, fx, fy, fz, flux, nev, exact)
+   subroutine faces_rotation_3d(surface, pose0, pose1, x, y, z, fx, fy, fz, flux, nev, exact, device, chunk)
    !< Exact time-averaged fluid face areas and rigid-field outflows under the screw motion with a rotation (issue #69;
    !< moving-bodies page, "Exact rotation"), one grid plane at a time. The body point w = R0 q moves to
    !< X(s) = Rot(s angle) w + t0 + s dt about the fixed unit axis k (Rodrigues: Rot(phi) w = A cos phi + B sin phi + C,
@@ -1072,6 +1157,8 @@ contains
    !< form). On every piece, Gauss-Legendre doubled from 2 nodes until the plane's face areas and outflows change by
    !< round-off (at 64 nodes, to that of one evaluation: FLOOR_H; else exact = .false.); one evaluation slices a
    !< moved copy (`slice_surface` with `on_plane_low` and the 2-D cut cells, as `cut_cells_3d`).
+   !< With `device` (issue #100 step 4) `one_plane` only registers each plane's events and tolerances (after the same
+   !< host work), and `rotation_axis_device` evaluates the registered planes of an axis in batches (see there).
    type(surface_stl_object), intent(in)  :: surface        !< Surface (body frame).
    type(rigid_pose_t),       intent(in)  :: pose0, pose1   !< End poses.
    real(R8P),                intent(in)  :: x(:), y(:), z(:) !< Cell edges.
@@ -1079,12 +1166,20 @@ contains
    real(R8P),                intent(out) :: flux(:,:,:)    !< Time integral of the rigid-field outflow per cell.
    integer(I4P),             intent(out) :: nev            !< Largest number of evaluations per plane.
    logical,                  intent(out) :: exact          !< Every piece converged.
+   logical,      optional,   intent(in)  :: device         !< The section cut cells and face sums on the device.
+   integer(I4P), optional,   intent(in)  :: chunk          !< Section cells per launch set (device).
    type(facet_object), pointer :: f
    real(R8P), allocatable      :: w(:,:,:), vlo(:,:,:), vhi(:,:,:), ox(:,:,:), oy(:,:,:), oz(:,:,:), bp(:)
    real(R8P), allocatable      :: area(:,:), outf(:,:)
    real(R8P)                   :: kax(3), ang, t0(3), dt(3), om(3), blo(3), bhi(3), xs(3), mrg, g(3, 3)
    integer(I4P)                :: nf, nx, ny, nz, i, j, k, q, c, ne, nb
    logical                     :: ok
+   logical                     :: dev                  !< Device mode.
+   type(rotation_planes_t)     :: rp                   !< Registered planes of the current axis (device mode).
+   real(R8P), allocatable      :: ra(:,:,:), ro(:,:,:) !< Their face areas and outflows (device mode).
+   integer(I4P), allocatable   :: rne(:)               !< Their evaluations (device mode).
+   integer(I4P)                :: n0                   !< Registered planes before a plane (device mode).
+   integer(I4P)                :: ck                   !< Section cells per launch set (device mode).
 
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
    call pose_log_3d(pose0, pose1, kax, ang)
@@ -1110,23 +1205,60 @@ contains
    enddo
    allocate(ox(nx + 1, ny, nz), oy(nx, ny + 1, nz), oz(nx, ny, nz + 1))
    nev = 0_I4P ; exact = .true.
+   dev = .false. ; if (present(device)) dev = device
+   ck = SWEPT_CHUNK_CELLS ; if (present(chunk)) ck = chunk
    g(:, 1) = [minval(x), minval(y), minval(z)] ; g(:, 2) = [maxval(x), maxval(y), maxval(z)]
+   if (dev) call rotation_planes_reset(rp, nx + 1_I4P)
    do i = 1_I4P, nx + 1_I4P ! planes x = x_i: (u, v) = (y, z)
+      n0 = rp%n
       call one_plane(1_I4P, x(i), y, z, area, outf)
+      if (rp%n > n0) rp%id(rp%n) = i
       fx(i, :, :) = area ; ox(i, :, :) = outf
    enddo
+   if (dev) then
+      call rotation_axis_device(surface, pose0, pose1, t0, dt, om, 1_I4P, y, z, nf, w, vlo, vhi, rp, ck, ra, ro, rne, &
+                                exact)
+      do q = 1_I4P, rp%n
+         fx(rp%id(q), :, :) = ra(:, :, q) ; ox(rp%id(q), :, :) = ro(:, :, q) ; nev = max(nev, rne(q))
+      enddo
+      call rotation_planes_reset(rp, ny + 1_I4P)
+   endif
    do j = 1_I4P, ny + 1_I4P ! planes y = y_j: (u, v) = (z, x)
+      n0 = rp%n
       call one_plane(2_I4P, y(j), z, x, area, outf)
+      if (rp%n > n0) rp%id(rp%n) = j
       do k = 1_I4P, nz
          do i = 1_I4P, nx
             fy(i, j, k) = area(k, i) ; oy(i, j, k) = outf(k, i)
          enddo
       enddo
    enddo
+   if (dev) then
+      call rotation_axis_device(surface, pose0, pose1, t0, dt, om, 2_I4P, z, x, nf, w, vlo, vhi, rp, ck, ra, ro, rne, &
+                                exact)
+      do q = 1_I4P, rp%n
+         do k = 1_I4P, nz
+            do i = 1_I4P, nx
+               fy(i, rp%id(q), k) = ra(k, i, q) ; oy(i, rp%id(q), k) = ro(k, i, q)
+            enddo
+         enddo
+         nev = max(nev, rne(q))
+      enddo
+      call rotation_planes_reset(rp, nz + 1_I4P)
+   endif
    do k = 1_I4P, nz + 1_I4P ! planes z = z_k: (u, v) = (x, y)
+      n0 = rp%n
       call one_plane(3_I4P, z(k), x, y, area, outf)
+      if (rp%n > n0) rp%id(rp%n) = k
       fz(:, :, k) = area ; oz(:, :, k) = outf
    enddo
+   if (dev) then
+      call rotation_axis_device(surface, pose0, pose1, t0, dt, om, 3_I4P, x, y, nf, w, vlo, vhi, rp, ck, ra, ro, rne, &
+                                exact)
+      do q = 1_I4P, rp%n
+         fz(:, :, rp%id(q)) = ra(:, :, q) ; oz(:, :, rp%id(q)) = ro(:, :, q) ; nev = max(nev, rne(q))
+      enddo
+   endif
    do k = 1_I4P, nz
       do j = 1_I4P, ny
          do i = 1_I4P, nx
@@ -1183,6 +1315,10 @@ contains
       sco = sca * (norm2(om) * xm + norm2(dt))
       sna = xm * max(maxval(gu(2:) - gu(:nu)), maxval(gv(2:) - gv(:nv))) ! round-off of one face area
       sno = sna * (norm2(om) * xm + norm2(dt))
+      if (dev) then ! issue #100 step 4: evaluated with the other planes of the axis (`rotation_axis_device`)
+         call rotation_planes_add(rp, lev, bp, nb, [sca, sco, sna, sno])
+         return
+      endif
       do m = 0_I4P, nb
          sa = 0._R8P ; if (m > 0_I4P) sa = bp(m)
          sb = 1._R8P ; if (m < nb) sb = bp(m + 1)
@@ -1576,15 +1712,18 @@ contains
    enddo
    endsubroutine plane_average
 
-   subroutine faces_gauss_3d(surface, pose0, pose1, x, y, z, n, fx, fy, fz, flux, poses)
+   subroutine faces_gauss_3d(surface, pose0, pose1, x, y, z, n, fx, fy, fz, flux, device, poses)
    !< Time-averaged fluid face areas by n-point Gauss-Legendre (`cut_cells_3d` at each node pose), and
-   !< the time integral of the outflow of the rigid field of the screw motion per cell.
+   !< the time integral of the outflow of the rigid field of the screw motion per cell. With `device` (issue #100 step
+   !< 4) each node's faces come from `cut_cells_3d_sections(surface, ..., device=.true., pose=pq)`: the faces of
+   !< `cut_cells_3d` on the moved copy, the same bits, without the copy; the node sums are the same host loops.
    type(surface_stl_object), intent(in)           :: surface      !< Surface (body frame).
    type(rigid_pose_t),       intent(in)           :: pose0, pose1 !< End poses.
    real(R8P),                intent(in)           :: x(:), y(:), z(:) !< Cell edges.
    integer(I4P),             intent(in)           :: n            !< Nodes.
    real(R8P),                intent(out)          :: fx(:,:,:), fy(:,:,:), fz(:,:,:) !< Fluid areas.
    real(R8P),                intent(out)          :: flux(:,:,:)  !< Outflow of the rigid field.
+   logical,                  intent(in)           :: device       !< The faces by the device sections.
    type(rigid_pose_t),       intent(in), optional :: poses(:)     !< Node poses.
    type(surface_stl_object) :: sq_                 !< Copy at a node.
    type(cut_cells_3d_t)     :: kc                  !< Its cut cells.
@@ -1606,7 +1745,11 @@ contains
          pq = pose_interpolate(pose0, pose1, sq(q))
       endif
       tq = pose0%t + sq(q) * d
-      sq_ = surface ; call sq_%move(pq) ; call cut_cells_3d(sq_, x, y, z, kc, st)
+      if (device) then ! the faces of the moved copy, sliced at the pose (no copy, no move)
+         call cut_cells_3d_sections(surface, x, y, z, kc, device=.true., status=st, pose=pq)
+      else
+         sq_ = surface ; call sq_%move(pq) ; call cut_cells_3d(sq_, x, y, z, kc, st)
+      endif
       ! velocity of the screw motion: om x (x - t(s)) + d; a face flux is area * u(centroid) . n
       do k = 1_I4P, nz
          do j = 1_I4P, ny
@@ -1648,6 +1791,524 @@ contains
       enddo
    enddo
    endsubroutine faces_gauss_3d
+
+   subroutine rotation_planes_reset(rp, nmax)
+   !< Empty the registered planes of `faces_rotation_3d` (device mode) for an axis of at most nmax planes.
+   type(rotation_planes_t), intent(inout) :: rp   !< Registered planes.
+   integer(I4P),            intent(in)    :: nmax !< Planes of the axis.
+
+   if (allocated(rp%id)) deallocate(rp%id, rp%lev, rp%bfirst, rp%bp, rp%tol)
+   allocate(rp%id(nmax), rp%lev(nmax), rp%bfirst(nmax + 1_I4P), rp%bp(64), rp%tol(4, nmax))
+   rp%n = 0_I4P ; rp%nbp = 0_I4P ; rp%bfirst(1) = 1_I4P
+   endsubroutine rotation_planes_reset
+
+   subroutine rotation_planes_add(rp, lev, bp, nb, tol)
+   !< Register a plane of `faces_rotation_3d` (device mode): its position, events bp(1:nb) and tolerances.
+   type(rotation_planes_t), intent(inout) :: rp     !< Registered planes.
+   real(R8P),               intent(in)    :: lev    !< Plane position.
+   real(R8P),               intent(in)    :: bp(:)  !< Events.
+   integer(I4P),            intent(in)    :: nb     !< Their number.
+   real(R8P),               intent(in)    :: tol(4) !< sca, sco, sna, sno.
+   real(R8P), allocatable                 :: tmp(:) !< Grown storage.
+
+   if (rp%nbp + nb > size(rp%bp, kind=I4P)) then ! grown through a new array (no self-referencing growth)
+      allocate(tmp(max(2_I4P * size(rp%bp, kind=I4P), rp%nbp + nb)))
+      tmp(1:rp%nbp) = rp%bp(1:rp%nbp)
+      call move_alloc(tmp, rp%bp)
+   endif
+   rp%n = rp%n + 1_I4P
+   rp%lev(rp%n) = lev ; rp%tol(:, rp%n) = tol
+   rp%bp(rp%nbp + 1_I4P:rp%nbp + nb) = bp(1:nb)
+   rp%nbp = rp%nbp + nb
+   rp%bfirst(rp%n + 1_I4P) = rp%nbp + 1_I4P
+   endsubroutine rotation_planes_add
+
+   subroutine rotation_axis_device(surface, pose0, pose1, t0, dt, om, na, gu, gv, nf, w, vlo, vhi, rp, ck, ra, ro, rne, &
+                                   exact)
+   !< The planes of one axis registered by `faces_rotation_3d` in device mode (issue #100 step 4): the face areas
+   !< ra(nu, nv, p) and outflows ro(nu, nv, p) of plane p, and its evaluations rne(p), as `one_plane` computes them.
+   !<
+   !< Posed plane sweep: every node of plane p slices the body-frame surface at the plane through one index of the axis,
+   !< built on the swept span of each facet along na: [min vlo, max vhi] over its vertices, grown by 1e-9 of its
+   !< magnitude (vlo/vhi bound the path of each vertex over the whole step, `faces_rotation_3d`, with a margin of 1e-12 of
+   !< the coordinate magnitude, far above the round-off by which `to_world(pose_interpolate(...))` differs from that
+   !< path). A facet `slice_surface(pose=)` keeps at a node has the level in its posed span, hence in that span: the
+   !< index lists a superset of those facets in increasing order, and `slice_surface_plane(pose=)` builds the same
+   !< curve bit for bit. A facet with a NaN coordinate or bound is listed on every plane.
+   !<
+   !< The pieces of a group of planes (in plane order, piece order: those of `one_plane`) are then evaluated by
+   !< `rotation_pieces_device`, and each plane's areas and outflows are summed over its pieces in piece order on the
+   !< host (`ar = ar + a2` of `one_plane`). A group holds at most ck face values per piece array (at least one plane).
+   !< ck also bounds the section cells per launch set.
+   type(surface_stl_object), intent(in)    :: surface         !< Surface (body frame).
+   type(rigid_pose_t),       intent(in)    :: pose0, pose1    !< End poses.
+   real(R8P),                intent(in)    :: t0(3), dt(3), om(3) !< Translation at s = 0, its change, rotation vector.
+   integer(I4P),             intent(in)    :: na              !< Plane normal axis.
+   real(R8P),                intent(in)    :: gu(:), gv(:)    !< In-plane cell edges (cyclic order).
+   integer(I4P),             intent(in)    :: nf              !< Facets.
+   real(R8P),                intent(in)    :: w(:,:,:)        !< R0 times the body vertices [3, 3, nf].
+   real(R8P),                intent(in)    :: vlo(:,:,:), vhi(:,:,:) !< Boxes of the vertex paths [3, 3, nf].
+   type(rotation_planes_t),  intent(in)    :: rp              !< Registered planes.
+   integer(I4P),             intent(in)    :: ck              !< Section cells per launch set, face values per group.
+   real(R8P), allocatable,   intent(out)   :: ra(:,:,:)       !< Face areas [nu, nv, rp%n].
+   real(R8P), allocatable,   intent(out)   :: ro(:,:,:)       !< Face outflows [nu, nv, rp%n].
+   integer(I4P), allocatable, intent(out)  :: rne(:)          !< Evaluations per plane [rp%n].
+   logical,                  intent(inout) :: exact           !< Cleared if a piece misses the round-off at 64 nodes.
+   type(slice_planes_t)      :: idx                           !< Posed plane sweep index.
+   real(R8P),    allocatable :: sp(:,:)                       !< Swept spans of the facets [2, nf].
+   integer(I4P), allocatable :: kp(:), pk(:)                  !< Plane of each piece, pieces of each plane [npl + 1].
+   real(R8P),    allocatable :: ksa(:), ksb(:)                !< Piece ends.
+   real(R8P),    allocatable :: fa(:,:,:), fo(:,:,:)          !< Piece sums of a group.
+   real(R8P)                 :: lo, hi, mg, sa, sb            !< Work.
+   integer(I4P)              :: nu, nv, npl, npc, p, m, nb, k, c, i, p0, p1, k0, k1 !< Work.
+   logical                   :: bad                           !< A NaN in a facet.
+
+   nu = size(gu, kind=I4P) - 1_I4P ; nv = size(gv, kind=I4P) - 1_I4P ; npl = rp%n
+   allocate(ra(nu, nv, npl), ro(nu, nv, npl), rne(npl))
+   ra = 0._R8P ; ro = 0._R8P ; rne = 0_I4P
+   if (npl == 0_I4P) return
+   allocate(sp(2, max(1_I4P, nf)))
+   do i = 1_I4P, nf
+      lo = vlo(na, 1, i) ; hi = vhi(na, 1, i)
+      do c = 2, 3
+         if (vlo(na, c, i) < lo) lo = vlo(na, c, i)
+         if (vhi(na, c, i) > hi) hi = vhi(na, c, i)
+      enddo
+      bad = any(w(:, :, i) /= w(:, :, i)) .or. any(vlo(na, :, i) /= vlo(na, :, i)) .or. any(vhi(na, :, i) /= vhi(na, :, i))
+      if (bad .or. .not. (abs(lo) <= huge(1._R8P) .and. abs(hi) <= huge(1._R8P))) then
+         sp(1, i) = -huge(1._R8P) ; sp(2, i) = huge(1._R8P)
+      else
+         mg = 1e-9_R8P * (abs(lo) + abs(hi))
+         sp(1, i) = lo - mg ; sp(2, i) = hi + mg
+      endif
+   enddo
+   call slice_planes_prepare(surface, na, rp%lev(1:npl), idx, on_plane_low=.true., spans=sp(:, 1:nf))
+   ! the pieces of `one_plane`, in plane order and piece order
+   allocate(pk(npl + 1_I4P))
+   npc = 0_I4P
+   do p = 1_I4P, npl
+      pk(p) = npc + 1_I4P
+      nb = rp%bfirst(p + 1_I4P) - rp%bfirst(p)
+      do m = 0_I4P, nb
+         sa = 0._R8P ; if (m > 0_I4P) sa = rp%bp(rp%bfirst(p) + m - 1_I4P)
+         sb = 1._R8P ; if (m < nb) sb = rp%bp(rp%bfirst(p) + m)
+         if (sb <= sa) cycle
+         npc = npc + 1_I4P
+      enddo
+   enddo
+   pk(npl + 1_I4P) = npc + 1_I4P
+   allocate(kp(npc), ksa(npc), ksb(npc))
+   k = 0_I4P
+   do p = 1_I4P, npl
+      nb = rp%bfirst(p + 1_I4P) - rp%bfirst(p)
+      do m = 0_I4P, nb
+         sa = 0._R8P ; if (m > 0_I4P) sa = rp%bp(rp%bfirst(p) + m - 1_I4P)
+         sb = 1._R8P ; if (m < nb) sb = rp%bp(rp%bfirst(p) + m)
+         if (sb <= sa) cycle
+         k = k + 1_I4P ; kp(k) = p ; ksa(k) = sa ; ksb(k) = sb
+      enddo
+   enddo
+   ! groups of whole planes, then the plane sums in piece order
+   p0 = 1_I4P
+   do while (p0 <= npl)
+      p1 = p0
+      do while (p1 < npl)
+         if (int(pk(p1 + 2_I4P) - pk(p0), I8P) * nu * nv > ck) exit
+         p1 = p1 + 1_I4P
+      enddo
+      k0 = pk(p0) ; k1 = pk(p1 + 1_I4P) - 1_I4P
+      if (k1 >= k0) then
+         call rotation_pieces_device(surface, idx, pose0, pose1, t0, dt, om, na, gu, gv, rp, ck, k1 - k0 + 1_I4P, &
+                                     kp(k0:k1), ksa(k0:k1), ksb(k0:k1), fa, fo, rne, exact)
+         do k = k0, k1
+            p = kp(k)
+            ra(:, :, p) = ra(:, :, p) + fa(:, :, k - k0 + 1_I4P) ; ro(:, :, p) = ro(:, :, p) + fo(:, :, k - k0 + 1_I4P)
+         enddo
+      endif
+      p0 = p1 + 1_I4P
+   enddo
+   endsubroutine rotation_axis_device
+
+   subroutine rotation_pieces_device(surface, idx, pose0, pose1, t0, dt, om, na, gu, gv, rp, ck, npc, kp, ksa, ksb, fa, &
+                                     fo, rne, exact)
+   !< The Gauss doubling of `one_plane` on npc pieces at once (issue #100 step 4): round 1 evaluates every piece at 2
+   !< and 4 nodes, each later round the live pieces at twice their last count, through one batch per round
+   !< (`rotation_groups_device`). The decisions per piece are those of `one_plane` on the same values (the same
+   !< `maxval` tests on whole arrays, the same tolerances), so every piece ends at the node count, with the sums, the
+   !< evaluations and the exactness flag of the one-piece loop. fa, fo: the final sums of each piece (a2, o2).
+   type(surface_stl_object), intent(in)    :: surface         !< Surface (body frame).
+   type(slice_planes_t),     intent(in)    :: idx             !< Posed plane sweep index of the axis.
+   type(rigid_pose_t),       intent(in)    :: pose0, pose1    !< End poses.
+   real(R8P),                intent(in)    :: t0(3), dt(3), om(3) !< Translation at s = 0, its change, rotation vector.
+   integer(I4P),             intent(in)    :: na              !< Plane normal axis.
+   real(R8P),                intent(in)    :: gu(:), gv(:)    !< In-plane cell edges.
+   type(rotation_planes_t),  intent(in)    :: rp              !< Registered planes.
+   integer(I4P),             intent(in)    :: ck              !< Section cells per launch set.
+   integer(I4P),             intent(in)    :: npc             !< Pieces.
+   integer(I4P),             intent(in)    :: kp(:)           !< Plane of each piece [npc].
+   real(R8P),                intent(in)    :: ksa(:), ksb(:)  !< Piece ends [npc].
+   real(R8P), allocatable,   intent(out)   :: fa(:,:,:)       !< Areas of each piece [nu, nv, npc].
+   real(R8P), allocatable,   intent(out)   :: fo(:,:,:)       !< Outflows of each piece [nu, nv, npc].
+   integer(I4P),             intent(inout) :: rne(:)          !< Evaluations per plane.
+   logical,                  intent(inout) :: exact           !< Cleared if a piece misses the round-off at 64 nodes.
+   real(R8P),    allocatable :: pa(:,:,:), po(:,:,:)          !< Last level of each piece (then its final sums).
+   real(R8P),    allocatable :: sa(:,:,:), so(:,:,:)          !< Sums of the round's groups.
+   real(R8P),    allocatable :: a1(:,:), o1(:,:), a2(:,:), o2(:,:) !< One piece's levels (as in `one_plane`).
+   integer(I4P), allocatable :: ng(:), gk(:), gng(:)          !< Node count per piece; group piece, node count.
+   logical,      allocatable :: live(:)                       !< Piece still doubling.
+   real(R8P)                 :: sca, sco, sna, sno            !< Tolerances of the piece's plane.
+   integer(I4P)              :: nu, nv, ngr, g, k, p          !< Work.
+   logical                   :: first                         !< Round 1.
+
+   nu = size(gu, kind=I4P) - 1_I4P ; nv = size(gv, kind=I4P) - 1_I4P
+   allocate(pa(nu, nv, npc), po(nu, nv, npc), ng(npc), live(npc), a1(nu, nv), o1(nu, nv), a2(nu, nv), o2(nu, nv))
+   ng = 4_I4P ; live = .true. ; first = .true.
+   do
+      ngr = count(live, kind=I4P) ; if (first) ngr = 2_I4P * ngr
+      if (ngr == 0_I4P) exit
+      allocate(gk(ngr), gng(ngr))
+      g = 0_I4P
+      do k = 1_I4P, npc
+         if (.not. live(k)) cycle
+         if (first) then
+            g = g + 1_I4P ; gk(g) = k ; gng(g) = 2_I4P
+         endif
+         g = g + 1_I4P ; gk(g) = k ; gng(g) = ng(k)
+      enddo
+      call rotation_groups_device(surface, idx, pose0, pose1, t0, dt, om, na, gu, gv, rp%lev, ck, ngr, kp(gk), ksa(gk), &
+                                  ksb(gk), gng, sa, so)
+      g = 0_I4P
+      do k = 1_I4P, npc
+         if (.not. live(k)) cycle
+         p = kp(k)
+         sca = rp%tol(1, p) ; sco = rp%tol(2, p) ; sna = rp%tol(3, p) ; sno = rp%tol(4, p)
+         if (first) then ! a1: the 2-node level
+            g = g + 1_I4P
+            pa(:, :, k) = sa(:, :, g) ; po(:, :, k) = so(:, :, g) ; rne(p) = rne(p) + 2_I4P
+         endif
+         g = g + 1_I4P
+         rne(p) = rne(p) + ng(k)
+         a1 = pa(:, :, k) ; o1 = po(:, :, k) ; a2 = sa(:, :, g) ; o2 = so(:, :, g)
+         pa(:, :, k) = a2 ; po(:, :, k) = o2
+         if (maxval(abs(a2 - a1)) <= 64._R8P * epsilon(1._R8P) * sca * max(ksb(k) - ksa(k), FLOOR_H) .and. &
+             maxval(abs(o2 - o1)) <= 64._R8P * epsilon(1._R8P) * sco * max(ksb(k) - ksa(k), FLOOR_H)) then
+            live(k) = .false.
+         elseif (ng(k) >= 64_I4P) then
+            if (max(maxval(abs(a2 - a1)) / sna, maxval(abs(o2 - o1)) / sno) > 64._R8P * epsilon(1._R8P)) exact = .false.
+            live(k) = .false.
+         else
+            ng(k) = 2_I4P * ng(k)
+         endif
+      enddo
+      deallocate(gk, gng)
+      first = .false.
+   enddo
+   call move_alloc(pa, fa) ; call move_alloc(po, fo)
+   endsubroutine rotation_pieces_device
+
+   subroutine rotation_groups_device(surface, idx, pose0, pose1, t0, dt, om, na, gu, gv, lev, ck, ngr, gpl, gsa, gsb, &
+                                     gng, sa, so)
+   !< One round of `rotation_pieces_device`: group g is the gng(g)-node Gauss rule of `plane_piece` on the piece
+   !< [gsa(g), gsb(g)] of plane gpl(g); sa(:, :, g), so(:, :, g) are its sums ar, ou of `plane_piece`, bit for bit.
+   !<
+   !< The host lists the nodes in group order, each with what `plane_piece` computes for it (sn = sa + (sb - sa) sq,
+   !< the weight (sb - sa) wq, tq = t0 + sn dt, the pose `pose_interpolate(pose0, pose1, sn)`), and slices them through
+   !< the posed index (`slice_surface_plane(pose=)`, equal to `slice_surface(pose=)`) in chunks of at most ck section
+   !< cells (at least one node); each chunk is cut in one `cut_cells_device_many` (the fixed in-plane grid,
+   !< resident: alpha and the centroids are those of `curve%cut_cells`) and `rotation_reduce_dev` adds the chunk's nodes
+   !< to their groups. The sums live on the device across the chunks, each updated by one thread per face, its nodes in
+   !< node order: the additions of `plane_piece` in its order.
+   type(surface_stl_object), intent(in)  :: surface        !< Surface (body frame).
+   type(slice_planes_t),     intent(in)  :: idx            !< Posed plane sweep index of the axis.
+   type(rigid_pose_t),       intent(in)  :: pose0, pose1   !< End poses.
+   real(R8P),                intent(in)  :: t0(3), dt(3), om(3) !< Translation at s = 0, its change, rotation vector.
+   integer(I4P),             intent(in)  :: na             !< Plane normal axis.
+   real(R8P),                intent(in)  :: gu(:), gv(:)   !< In-plane cell edges.
+   real(R8P),                intent(in)  :: lev(:)         !< Plane positions (index planes).
+   integer(I4P),             intent(in)  :: ck             !< Section cells per launch set.
+   integer(I4P),             intent(in)  :: ngr            !< Groups.
+   integer(I4P),             intent(in)  :: gpl(:)         !< Plane of each group [ngr].
+   real(R8P),                intent(in)  :: gsa(:), gsb(:) !< Piece of each group [ngr].
+   integer(I4P),             intent(in)  :: gng(:)         !< Gauss nodes of each group [ngr].
+   real(R8P), allocatable,   intent(out) :: sa(:,:,:)      !< Area sums [nu, nv, ngr].
+   real(R8P), allocatable,   intent(out) :: so(:,:,:)      !< Outflow sums [nu, nv, ngr].
+   type(curve_object),   allocatable :: secs(:)            !< Sections of a chunk.
+   type(cut_cells_2d_blocks_t)       :: cb                 !< Their cut cells.
+   real(R8P),    allocatable :: sq(:), wq(:)               !< Gauss rule.
+   real(R8P),    allocatable :: nsn(:), nwf(:), ntq(:,:), nlv(:) !< Node instants, weights, translations, levels.
+   integer(I4P), allocatable :: npl(:), ngp(:), gfirst(:)  !< Node plane, node group; nodes of each group [ngr + 1].
+   real(R8P),    allocatable :: sal(:,:,:), sol(:,:,:)     !< Sums (built here).
+   real(R8P),    allocatable :: gul(:), gvl(:)             !< Contiguous copies of the cell edges (mapped).
+   real(R8P)                 :: om1, om2, om3, dtn         !< Rotation vector, dt(na).
+   integer(I4P)              :: nu, nv, nn, g, q, b, last, c0, c1, kc, st !< Work.
+
+   nu = size(gu, kind=I4P) - 1_I4P ; nv = size(gv, kind=I4P) - 1_I4P
+   nn = sum(gng(1:ngr))
+   allocate(nsn(nn), nwf(nn), ntq(3, nn), nlv(nn), npl(nn), ngp(nn), gfirst(ngr + 1_I4P))
+   b = 0_I4P ; last = 0_I4P
+   do g = 1_I4P, ngr
+      if (gng(g) /= last) then
+         call gauss_legendre_01(gng(g), sq, wq) ; last = gng(g)
+      endif
+      gfirst(g) = b + 1_I4P
+      do q = 1_I4P, gng(g)
+         b = b + 1_I4P
+         nsn(b) = gsa(g) + (gsb(g) - gsa(g)) * sq(q)
+         nwf(b) = (gsb(g) - gsa(g)) * wq(q)
+         ntq(:, b) = t0 + nsn(b) * dt
+         nlv(b) = lev(gpl(g)) ; npl(b) = gpl(g) ; ngp(b) = g
+      enddo
+   enddo
+   gfirst(ngr + 1_I4P) = nn + 1_I4P
+   allocate(sal(nu, nv, ngr), sol(nu, nv, ngr))
+   sal = 0._R8P ; sol = 0._R8P
+   om1 = om(1) ; om2 = om(2) ; om3 = om(3) ; dtn = dt(na)
+   kc = max(1_I4P, ck / (nu * nv))
+   gul = gu ; gvl = gv
+   !$acc data copyin(gul, gvl, gfirst, nlv, nwf, ntq) copy(sal, sol)
+   c0 = 1_I4P
+   do while (c0 <= nn)
+      c1 = min(nn, c0 + kc - 1_I4P)
+      allocate(secs(c1 - c0 + 1_I4P))
+      do b = c0, c1
+         call slice_surface_plane(surface, idx, npl(b), secs(b - c0 + 1_I4P), pose=pose_interpolate(pose0, pose1, nsn(b)))
+      enddo
+      call cut_cells_device_many(secs, gul, gvl, cb, st, intervals=.false., pieces=.false., resident=.true.)
+      deallocate(secs)
+      call rotation_reduce_dev(nu, nv, c1 - c0 + 1_I4P, cb%alpha, cb%centroid, gul, gvl, na, om1, om2, om3, dtn, c0, &
+                               ngp(c0), ngp(c1), ngr, gfirst, nn, nlv, nwf, ntq, sal, sol)
+      call cb%exit_device
+      c0 = c1 + 1_I4P
+   enddo
+   !$acc end data
+   call move_alloc(sal, sa) ; call move_alloc(sol, so)
+   endsubroutine rotation_groups_device
+
+   subroutine rotation_reduce_dev(nu, nv, nbk, alpha, cen, gu, gv, na, om1, om2, om3, dtn, c0, g0, g1, ngr, gfirst, nn, &
+                                  nlv, nwf, ntq, sa, so)
+   !< Device kernel (issue #100 step 4): the chunk of nodes c0 .. c0 + nbk - 1 (blocks 1 .. nbk of the section cut
+   !< cells) added to the sums of groups g0 .. g1, one thread per (group, face), the group's nodes of the chunk in node
+   !< order: per node `plane_piece`'s a = alpha du dv, ar = ar + w a, ou = ou + w a (cross_k(om, cw - tq, na) + dt(na))
+   !< with w = (sb - sa) wq and cw the fluid centroid on the plane (the component na of the cross product written out
+   !< as `cross` computes it). Every array must be present on the device.
+   integer(I4P), intent(in)    :: nu, nv, nbk, na      !< Face cells, chunk blocks, plane normal axis.
+   real(R8P),    intent(in)    :: alpha(nu, nv, nbk)   !< Section fluid fractions.
+   real(R8P),    intent(in)    :: cen(2, nu, nv, nbk)  !< Section fluid centroids.
+   real(R8P),    intent(in)    :: gu(nu + 1), gv(nv + 1) !< In-plane cell edges.
+   real(R8P),    intent(in)    :: om1, om2, om3, dtn   !< Rotation vector, dt(na).
+   integer(I4P), intent(in)    :: c0, g0, g1, ngr, nn  !< First node of the chunk, its groups, groups, nodes.
+   integer(I4P), intent(in)    :: gfirst(ngr + 1)      !< Nodes of each group.
+   real(R8P),    intent(in)    :: nlv(nn), nwf(nn), ntq(3, nn) !< Node levels, weights, translations.
+   real(R8P),    intent(inout) :: sa(nu, nv, ngr), so(nu, nv, ngr) !< Sums.
+   real(R8P)                   :: ra, ro, a, wa, v1, v2, v3, cr !< Work.
+   integer(I4P)                :: g, ju, jv, b, b0, b1, l !< Work.
+
+   !$acc parallel loop gang vector collapse(3) default(present) private(ra, ro, a, wa, v1, v2, v3, cr, b0, b1, l) &
+   !$acc& present(alpha, cen, gu, gv, gfirst, nlv, nwf, ntq, sa, so)
+   do g = g0, g1
+      do jv = 1_I4P, nv
+         do ju = 1_I4P, nu
+            b0 = max(gfirst(g), c0) ; b1 = min(gfirst(g + 1) - 1_I4P, c0 + nbk - 1_I4P)
+            ra = sa(ju, jv, g) ; ro = so(ju, jv, g)
+            !$acc loop seq
+            do b = b0, b1
+               l = b - c0 + 1_I4P
+               a = alpha(ju, jv, l) * (gu(ju + 1) - gu(ju)) * (gv(jv + 1) - gv(jv))
+               select case (na) ! v = cw - tq with cw(na) = level, cw(iu) = centroid 1, cw(iv) = centroid 2
+               case (1_I4P)
+                  v1 = nlv(b) - ntq(1, b) ; v2 = cen(1, ju, jv, l) - ntq(2, b) ; v3 = cen(2, ju, jv, l) - ntq(3, b)
+                  cr = om2 * v3 - om3 * v2
+               case (2_I4P)
+                  v2 = nlv(b) - ntq(2, b) ; v3 = cen(1, ju, jv, l) - ntq(3, b) ; v1 = cen(2, ju, jv, l) - ntq(1, b)
+                  cr = om3 * v1 - om1 * v3
+               case default
+                  v3 = nlv(b) - ntq(3, b) ; v1 = cen(1, ju, jv, l) - ntq(1, b) ; v2 = cen(2, ju, jv, l) - ntq(2, b)
+                  cr = om1 * v2 - om2 * v1
+               endselect
+               wa = nwf(b) * a
+               ra = ra + wa
+               ro = ro + wa * (cr + dtn)
+            enddo
+            sa(ju, jv, g) = ra ; so(ju, jv, g) = ro
+         enddo
+      enddo
+   enddo
+   endsubroutine rotation_reduce_dev
+
+   subroutine faces_translation_3d_device(s0, d, x, y, z, fx, fy, fz, nev, ck)
+   !< `faces_translation_3d` with the face sums on the device (issue #100 step 4): per axis the breakpoints of every
+   !< plane (`plane_breakpoints`, unchanged), then `translation_axis_device` for all the planes of the axis.
+   type(surface_stl_object), intent(in)  :: s0        !< Surface at pose0.
+   real(R8P),                intent(in)  :: d(3)      !< Displacement over the step.
+   real(R8P),                intent(in)  :: x(:), y(:), z(:) !< Cell edges.
+   real(R8P),                intent(out) :: fx(:,:,:), fy(:,:,:), fz(:,:,:) !< Fluid areas.
+   integer(I4P),             intent(out) :: nev       !< Largest number of evaluations per plane.
+   integer(I4P),             intent(in)  :: ck        !< Section cells per launch set.
+   type(facet_object), pointer :: fp                  !< Facet.
+   real(R8P), allocatable      :: tri(:,:,:)          !< Triangles [3, 3, facets].
+   real(R8P), allocatable      :: ue(:), ve(:), bp(:), lv(:), bps(:), tmp(:), area(:,:,:) !< Work.
+   integer(I4P), allocatable   :: bf(:)               !< Breakpoints of each plane [np + 1].
+   real(R8P)                   :: dl(3)               !< Displacement in the plane frame.
+   integer(I4P)                :: nf, f, m, ax, a1, a2, ip, np, nb, nbp !< Work.
+
+   nf = s0%get_facets_number()
+   allocate(tri(3, 3, nf))
+   do f = 1_I4P, nf
+      fp => s0%facet_at(f)
+      do m = 1_I4P, 3_I4P
+         tri(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
+      enddo
+   enddo
+   nev = 0_I4P
+   do ax = 1_I4P, 3_I4P
+      a1 = mod(ax, 3_I4P) + 1_I4P ; a2 = mod(ax + 1_I4P, 3_I4P) + 1_I4P ! in-plane axes, cyclic (slice_surface)
+      select case (ax)
+      case (1_I4P) ; np = size(x, kind=I4P) ; ue = y ; ve = z ; lv = x
+      case (2_I4P) ; np = size(y, kind=I4P) ; ue = z ; ve = x ; lv = y
+      case default ; np = size(z, kind=I4P) ; ue = x ; ve = y ; lv = z
+      endselect
+      dl = [d(ax), d(a1), d(a2)]
+      if (allocated(bf)) deallocate(bf, bps)
+      allocate(bf(np + 1_I4P), bps(64))
+      bf(1) = 1_I4P ; nbp = 0_I4P
+      do ip = 1_I4P, np
+         call plane_breakpoints(tri, [ax, a1, a2], lv(ip), dl, ue, ve, bp, nb)
+         if (nbp + nb > size(bps, kind=I4P)) then ! grown through a new array (no self-referencing growth)
+            allocate(tmp(max(2_I4P * size(bps, kind=I4P), nbp + nb)))
+            tmp(1:nbp) = bps(1:nbp)
+            call move_alloc(tmp, bps)
+         endif
+         bps(nbp + 1_I4P:nbp + nb) = bp(1:nb) ; nbp = nbp + nb ; bf(ip + 1_I4P) = nbp + 1_I4P
+         nev = max(nev, 2_I4P * (nb + 1_I4P))
+      enddo
+      call translation_axis_device(s0, ax, lv, dl, ue, ve, bf, bps, ck, area)
+      do ip = 1_I4P, np
+         select case (ax)
+         case (1_I4P) ; fx(ip, :, :) = area(:, :, ip)
+         case (2_I4P) ; fy(:, ip, :) = transpose(area(:, :, ip))
+         case default ; fz(:, :, ip) = area(:, :, ip)
+         endselect
+      enddo
+   enddo
+   endsubroutine faces_translation_3d_device
+
+   subroutine translation_axis_device(s0, ax, lv, dl, ue, ve, bf, bp, ck, area)
+   !< The faces of the planes x_ax = lv(p) of `faces_translation_3d` (issue #100 step 4): area(:, :, p) equals
+   !< `plane_average` of plane p bit for bit.
+   !<
+   !< The host lists the nodes of `plane_average` in its order (plane by plane, piece by piece, the two Gauss points
+   !< sg = (sa + sb) / 2 -+ G h of every piece with h > 0): level lv(p) - sg dl(1), weight 0.5 h, grid ue - sg dl(2),
+   !< ve - sg dl(3). The node sections come from a plane sweep per chunk on its node levels (`slice_planes_prepare`,
+   !< `slice_surface_plane`: the curves of `slice_surface`), cut in chunks of at most ck cells (one node at least) by
+   !< `cut_cells_device_many` with a grid per block (the cut cells of `curve%cut_cells` on the shifted grid); per chunk
+   !< `translation_reduce_dev` adds 0.5 h alpha of its nodes to their planes' faces, one thread per face, in node order
+   !< (`area = area + 0.5 h alpha` of `plane_average`). The sums stay on the device across the chunks; the host then
+   !< scales them by the face sizes as `plane_average` does.
+   type(surface_stl_object), intent(in)  :: s0           !< Surface at pose0.
+   integer(I4P),             intent(in)  :: ax           !< Plane normal axis.
+   real(R8P),                intent(in)  :: lv(:)        !< Plane positions [np].
+   real(R8P),                intent(in)  :: dl(3)        !< Displacement in the plane frame.
+   real(R8P),                intent(in)  :: ue(:), ve(:) !< In-plane grid edges.
+   integer(I4P),             intent(in)  :: bf(:)        !< Breakpoints of plane p: bp(bf(p) : bf(p + 1) - 1) [np + 1].
+   real(R8P),                intent(in)  :: bp(:)        !< Breakpoints.
+   integer(I4P),             intent(in)  :: ck           !< Section cells per launch set.
+   real(R8P), allocatable,   intent(out) :: area(:,:,:)  !< Time-averaged fluid areas [nu, nv, np].
+   real(R8P), parameter      :: G = 0.5_R8P / sqrt(3._R8P) !< Two-point Gauss offset on a unit piece (`plane_average`).
+   type(slice_planes_t)      :: idx                      !< Plane sweep index of the node levels.
+   type(curve_object),   allocatable :: secs(:)          !< Sections of a chunk.
+   type(cut_cells_2d_blocks_t)       :: cb               !< Their cut cells.
+   real(R8P),    allocatable :: nlev(:), nsg(:), nhw(:)  !< Node levels, instants, weights.
+   integer(I4P), allocatable :: npl(:), pfirst(:)        !< Node plane; nodes of each plane [np + 1].
+   real(R8P),    allocatable :: acc(:,:,:), xg(:,:), yg(:,:) !< Sums; grids of a chunk.
+   real(R8P)                 :: sa, sb, h, sg            !< Work.
+   integer(I4P)              :: np, nu, nv, nn, p, m, q, g2, b, c0, c1, kc, st, j, k !< Work.
+
+   np = size(lv, kind=I4P) ; nu = size(ue, kind=I4P) - 1_I4P ; nv = size(ve, kind=I4P) - 1_I4P
+   nn = 0_I4P
+   do p = 1_I4P, np
+      m = bf(p + 1_I4P) - bf(p)
+      do q = 0_I4P, m
+         sa = 0._R8P ; if (q > 0_I4P) sa = bp(bf(p) + q - 1_I4P)
+         sb = 1._R8P ; if (q < m) sb = bp(bf(p) + q)
+         if (sb - sa <= 0._R8P) cycle
+         nn = nn + 2_I4P
+      enddo
+   enddo
+   allocate(nlev(nn), nsg(nn), nhw(nn), npl(nn), pfirst(np + 1_I4P))
+   b = 0_I4P
+   do p = 1_I4P, np
+      pfirst(p) = b + 1_I4P
+      m = bf(p + 1_I4P) - bf(p)
+      do q = 0_I4P, m
+         sa = 0._R8P ; if (q > 0_I4P) sa = bp(bf(p) + q - 1_I4P)
+         sb = 1._R8P ; if (q < m) sb = bp(bf(p) + q)
+         h = sb - sa
+         if (h <= 0._R8P) cycle
+         do g2 = -1_I4P, 1_I4P, 2_I4P
+            sg = 0.5_R8P * (sa + sb) + g2 * G * h
+            b = b + 1_I4P
+            nsg(b) = sg ; nlev(b) = lv(p) - sg * dl(1) ; nhw(b) = 0.5_R8P * h ; npl(b) = p
+         enddo
+      enddo
+   enddo
+   pfirst(np + 1_I4P) = nn + 1_I4P
+   allocate(acc(nu, nv, np)) ; acc = 0._R8P
+   kc = max(1_I4P, ck / (nu * nv))
+   !$acc data copyin(nhw, pfirst) copy(acc)
+   c0 = 1_I4P
+   do while (c0 <= nn)
+      c1 = min(nn, c0 + kc - 1_I4P)
+      allocate(secs(c1 - c0 + 1_I4P), xg(nu + 1_I4P, c1 - c0 + 1_I4P), yg(nv + 1_I4P, c1 - c0 + 1_I4P))
+      call slice_planes_prepare(s0, ax, nlev(c0:c1), idx, on_plane_low=.true.) ! the chunk's levels (index memory bound)
+      do b = c0, c1
+         call slice_surface_plane(s0, idx, b - c0 + 1_I4P, secs(b - c0 + 1_I4P))
+         xg(:, b - c0 + 1_I4P) = ue - nsg(b) * dl(2) ; yg(:, b - c0 + 1_I4P) = ve - nsg(b) * dl(3)
+      enddo
+      call cut_cells_device_many(secs, xg, yg, cb, st, intervals=.false., pieces=.false., resident=.true.)
+      deallocate(secs, xg, yg)
+      call translation_reduce_dev(nu, nv, c1 - c0 + 1_I4P, cb%alpha, c0, npl(c0), npl(c1), np, pfirst, nn, nhw, acc)
+      call cb%exit_device
+      c0 = c1 + 1_I4P
+   enddo
+   !$acc end data
+   do p = 1_I4P, np ! the face sizes, as `plane_average`
+      do k = 1_I4P, nv
+         do j = 1_I4P, nu
+            acc(j, k, p) = acc(j, k, p) * (ue(j + 1) - ue(j)) * (ve(k + 1) - ve(k))
+         enddo
+      enddo
+   enddo
+   call move_alloc(acc, area)
+   endsubroutine translation_axis_device
+
+   subroutine translation_reduce_dev(nu, nv, nbk, alpha, c0, p0, p1, np, pfirst, nn, hw, acc)
+   !< Device kernel (issue #100 step 4): the chunk of nodes c0 .. c0 + nbk - 1 (blocks 1 .. nbk of the section cut
+   !< cells) added to the face sums of planes p0 .. p1, one thread per (plane, face), the plane's nodes of the chunk in
+   !< node order: acc = acc + hw alpha, hw = 0.5 h (`plane_average`). Every array must be present on the device.
+   integer(I4P), intent(in)    :: nu, nv, nbk          !< Face cells, chunk blocks.
+   real(R8P),    intent(in)    :: alpha(nu, nv, nbk)   !< Section fluid fractions.
+   integer(I4P), intent(in)    :: c0, p0, p1, np, nn   !< First node of the chunk, its planes, planes, nodes.
+   integer(I4P), intent(in)    :: pfirst(np + 1)       !< Nodes of each plane.
+   real(R8P),    intent(in)    :: hw(nn)               !< Node weights 0.5 h.
+   real(R8P),    intent(inout) :: acc(nu, nv, np)      !< Sums.
+   real(R8P)                   :: sm                   !< Work.
+   integer(I4P)                :: p, j, k, b, b0, b1   !< Work.
+
+   !$acc parallel loop gang vector collapse(3) default(present) private(sm, b0, b1) present(alpha, pfirst, hw, acc)
+   do p = p0, p1
+      do k = 1_I4P, nv
+         do j = 1_I4P, nu
+            b0 = max(pfirst(p), c0) ; b1 = min(pfirst(p + 1) - 1_I4P, c0 + nbk - 1_I4P)
+            sm = acc(j, k, p)
+            !$acc loop seq
+            do b = b0, b1
+               sm = sm + hw(b) * alpha(j, k, b - c0 + 1_I4P)
+            enddo
+            acc(j, k, p) = sm
+         enddo
+      enddo
+   enddo
+   endsubroutine translation_reduce_dev
 
    pure function cross(a, b) result(c)
    !< Cross product.

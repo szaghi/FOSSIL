@@ -85,6 +85,7 @@ use fossil_cut_moments,        only : MOMENTS_MAX, mono_count, mono_exponents, t
 use fossil_facet_object,       only : facet_object
 use fossil_line_query,         only : line_crossing_before, tri_line_hit_oac, bvh_line_crossings_oac, bvh_line_count_oac
 use fossil_predicates,         only : orient2d_xy
+use fossil_rigid_pose,         only : rigid_pose_t, to_world
 use fossil_surface_stl_object, only : surface_stl_object, STATUS_OK, STATUS_INVALID_INPUT
 use penf,                      only : I4P, R8P
 
@@ -3375,18 +3376,26 @@ contains
    enddo
    endsubroutine sections_host
 
-   subroutine cut_cells_3d_sections(surface, x, y, z, cut, device, status)
+   subroutine cut_cells_3d_sections(surface, x, y, z, cut, device, status, pose)
    !< The faces of `cut_cells_3d` only (issue #100 step 3b, for the benches): nx, ny, nz and the face fractions,
    !< centroids, pieces and closed flags of every grid face, moments order 0, by the host sections (`sections_host`,
    !< the path of `cut_cells_3d`) or with `device = .true.` by the batched device sections (`sections_device`): the
    !< same bits. `status = STATUS_INVALID_INPUT` on bad edges.
+   !<
+   !< `pose` (issue #100 step 4, the Gauss nodes of the swept geometry): the faces of the surface moved by `pose`, bit
+   !< for bit those of a moved copy (`s = surface ; call s%move(pose)`), without the copy. On the device path every
+   !< plane is sliced at the pose (`slice_surface_plane(pose=)`, the operation `slice_surface(pose=)` does, which `move`
+   !< matches vertex for vertex), through a sweep index built on the posed facet spans (`posed_spans`: the very
+   !< coordinates the slice compares, so the lists are supersets in increasing order); the host path cuts a moved copy.
    type(surface_stl_object), intent(in)            :: surface    !< Surface.
    real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
    type(cut_cells_3d_t),     intent(inout)         :: cut        !< Faces (the other outputs unallocated; released
                                                                  !< from the device and reset first).
    logical,                  intent(in),  optional :: device     !< The sections on the device (default .false.).
    integer(I4P),             intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_t),       intent(in),  optional :: pose       !< Pose the surface is cut at (default: as is).
    type(cut_cells_2d_t), allocatable :: px(:), py(:), pz(:) !< Not kept.
+   type(surface_stl_object)          :: sm                    !< Moved copy (host path with a pose).
    integer(I4P)                      :: nx, ny, nz            !< Cells.
    logical                           :: dev                   !< On the device.
 
@@ -3404,43 +3413,51 @@ contains
    dev = .false. ; if (present(device)) dev = device
    cut%nx = nx ; cut%ny = ny ; cut%nz = nz
    if (dev) then
-      call sections_device(surface, x, y, z, cut)
+      call sections_device(surface, x, y, z, cut, pose)
    else
       allocate(cut%face_x(nx + 1, ny, nz), cut%face_y(nx, ny + 1, nz), cut%face_z(nx, ny, nz + 1))
       allocate(cut%face_x_centroid(3, nx + 1, ny, nz), cut%face_y_centroid(3, nx, ny + 1, nz), &
                cut%face_z_centroid(3, nx, ny, nz + 1))
       allocate(cut%face_x_pieces(nx + 1, ny, nz), cut%face_y_pieces(nx, ny + 1, nz), cut%face_z_pieces(nx, ny, nz + 1))
       allocate(cut%face_x_closed(nx + 1, ny, nz), cut%face_y_closed(nx, ny + 1, nz), cut%face_z_closed(nx, ny, nz + 1))
-      call sections_host(surface, x, y, z, cut, .false., 0_I4P, .false., 0_I4P, px, py, pz)
+      if (present(pose)) then
+         sm = surface ; call sm%move(pose)
+         call sections_host(sm, x, y, z, cut, .false., 0_I4P, .false., 0_I4P, px, py, pz)
+      else
+         call sections_host(surface, x, y, z, cut, .false., 0_I4P, .false., 0_I4P, px, py, pz)
+      endif
    endif
    endsubroutine cut_cells_3d_sections
 
-   subroutine sections_device(surface, x, y, z, cut)
+   subroutine sections_device(surface, x, y, z, cut, pose)
    !< The plane sections of `cut_cells_3d` on the device (issue #100 step 3b), moments order 0, no intervals, no
    !< boundaries: per axis, the N + 1 planes are sliced on the host (`slice_surface` with `on_plane_low`, as
    !< `sections_host`) and cut as the blocks of one batched launch set (`cut_cells_device_many`, resident, cell arrays
    !< only); a device kernel (`scatter_sections`) writes their cells into the face arrays, which alone come back. The
    !< face arrays of `cut` are replaced (built in locals, moved in). Every value is a copy of the 2-D cut cell's, which
-   !< equals `curve%cut_cells` bit for bit: the faces of `sections_host`.
+   !< equals `curve%cut_cells` bit for bit: the faces of `sections_host`. With `pose` the planes are sliced at the pose
+   !< (see `cut_cells_3d_sections`).
    type(surface_stl_object), intent(in)    :: surface    !< Surface.
    real(R8P),                intent(in)    :: x(:), y(:), z(:) !< Cell edges.
    type(cut_cells_3d_t),     intent(inout) :: cut        !< Cut cells (nx, ny, nz set).
+   type(rigid_pose_t),       intent(in), optional :: pose !< Pose the surface is sliced at.
 
    call sections_axis_device(surface, 1_I4P, x, y, z, cut%nx + 1_I4P, cut%ny, cut%nz, cut%face_x, cut%face_x_centroid, &
-                             cut%face_x_pieces, cut%face_x_closed, .false., .true.)
+                             cut%face_x_pieces, cut%face_x_closed, .false., .true., pose)
    call sections_axis_device(surface, 2_I4P, y, z, x, cut%nx, cut%ny + 1_I4P, cut%nz, cut%face_y, cut%face_y_centroid, &
-                             cut%face_y_pieces, cut%face_y_closed, .false., .true.)
+                             cut%face_y_pieces, cut%face_y_closed, .false., .true., pose)
    call sections_axis_device(surface, 3_I4P, z, x, y, cut%nx, cut%ny, cut%nz + 1_I4P, cut%face_z, cut%face_z_centroid, &
-                             cut%face_z_pieces, cut%face_z_closed, .false., .true.)
+                             cut%face_z_pieces, cut%face_z_closed, .false., .true., pose)
    endsubroutine sections_device
 
-   subroutine sections_axis_device(surface, axis, lv, ga, gb, n1, n2, n3, face, fcen, fpcs, fcls, keep, full)
+   subroutine sections_axis_device(surface, axis, lv, ga, gb, n1, n2, n3, face, fcen, fpcs, fcls, keep, full, pose)
    !< The faces of the planes x(axis) = lv(b) (in-plane grid ga, gb in the cyclic order of `slice_surface`) on the
    !< device: the sections as the blocks of `cut_cells_device_many` (resident), scattered by `scatter_sections` into
    !< the face arrays [n1, n2, n3] (the 3-D shape of the axis). With `keep` (issue #100 step 4) the face arrays stay
    !< mapped (unstructured data on the locals, then `move_alloc`: the host addresses the present table is keyed on) and
    !< their host copies are not written: the caller copies them out or deletes them; else they are copied back. Without
    !< `full` only the fractions and closed flags are made (`scatter_fractions`; fcen and fpcs come back unallocated).
+   !< With `pose` the planes are sliced at the pose through the posed sweep (`posed_spans`, `slice_surface_plane`).
    type(surface_stl_object),  intent(in)  :: surface      !< Surface.
    integer(I4P),              intent(in)  :: axis         !< Plane normal axis.
    real(R8P),                 intent(in)  :: lv(:)        !< Plane levels.
@@ -3452,15 +3469,27 @@ contains
    logical,      allocatable, intent(out) :: fcls(:,:,:)  !< Closed flags.
    logical,                   intent(in)  :: keep         !< Leave the face arrays mapped (host copies not written).
    logical,                   intent(in)  :: full         !< Also the centroids and pieces.
+   type(rigid_pose_t), optional, intent(in) :: pose       !< Pose the surface is sliced at.
    type(curve_object),   allocatable :: secs(:)           !< Sections.
+   type(slice_planes_t)              :: idx               !< Posed sweep index.
+   real(R8P),    allocatable :: sp(:,:)                   !< Posed facet spans.
    type(cut_cells_2d_blocks_t)       :: cb                !< Their cut cells.
    real(R8P),    allocatable :: fa(:,:,:), fc(:,:,:,:)    !< Face arrays (built here).
    integer(I4P), allocatable :: fp(:,:,:)                 !< Face pieces (built here).
    logical,      allocatable :: fl(:,:,:)                 !< Face closed flags (built here).
-   integer(I4P)              :: nb, st                    !< Work.
+   integer(I4P)              :: nb, st, b                 !< Work.
 
    nb = size(lv, kind=I4P)
-   call slice_surface_planes(surface=surface, normal_axis=axis, levels=lv, curves=secs, on_plane_low=.true.) ! one sweep
+   if (present(pose)) then ! issue #100 step 4: the sections of the moved surface, without moving it
+      call posed_spans(surface, axis, pose, sp)
+      call slice_planes_prepare(surface, axis, lv, idx, on_plane_low=.true., spans=sp)
+      allocate(secs(nb))
+      do b = 1_I4P, nb
+         call slice_surface_plane(surface, idx, b, secs(b), pose=pose)
+      enddo
+   else
+      call slice_surface_planes(surface=surface, normal_axis=axis, levels=lv, curves=secs, on_plane_low=.true.) ! one sweep
+   endif
    call cut_cells_device_many(secs, ga, gb, cb, st, intervals=.false., pieces=.false., resident=.true.)
    deallocate(secs)
    allocate(fa(n1, n2, n3), fl(n1, n2, n3))
@@ -3487,6 +3516,31 @@ contains
       call move_alloc(fc, fcen) ; call move_alloc(fp, fpcs)
    endif
    endsubroutine sections_axis_device
+
+   subroutine posed_spans(surface, axis, pose, sp)
+   !< The span along `axis` of every facet of `surface` at `pose` [2, nf] (issue #100 step 4): min and max of the vertex
+   !< coordinates placed by `to_world(pose, vertex)`, the very values `slice_surface(pose=)` compares (a NaN, or a
+   !< non-finite bound: -huge, huge, listed everywhere).
+   type(surface_stl_object), intent(in)  :: surface !< Surface.
+   integer(I4P),             intent(in)  :: axis    !< Axis.
+   type(rigid_pose_t),       intent(in)  :: pose    !< Pose.
+   real(R8P), allocatable,   intent(out) :: sp(:,:) !< Spans.
+   type(facet_object), pointer :: f                 !< Facet.
+   real(R8P)                   :: c(3), xw(3)       !< Posed coordinates, vertex.
+   integer(I4P)                :: i, m              !< Counters.
+
+   allocate(sp(2, surface%get_facets_number()))
+   do i = 1_I4P, surface%get_facets_number()
+      f => surface%facet_at(i)
+      do m = 1_I4P, 3_I4P
+         xw = to_world(pose, [f%vertex(m)%x, f%vertex(m)%y, f%vertex(m)%z]) ; c(m) = xw(axis)
+      enddo
+      sp(1, i) = minval(c) ; sp(2, i) = maxval(c)
+      if (any(c /= c) .or. .not. (abs(sp(1, i)) <= huge(1._R8P) .and. abs(sp(2, i)) <= huge(1._R8P))) then
+         sp(1, i) = -huge(1._R8P) ; sp(2, i) = huge(1._R8P)
+      endif
+   enddo
+   endsubroutine posed_spans
 
    subroutine scatter_sections(axis, nu, nv, nb, lv, alpha, cen, pcs, cls, n1, n2, n3, fa, fc, fp, fl)
    !< Device kernel (issue #100 step 3b): cell (iu, iv) of the section of plane b into the face arrays of the axis, the

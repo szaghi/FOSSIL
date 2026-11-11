@@ -111,16 +111,23 @@ contains
    if (present(open_loops)) open_loops = nopen
    endsubroutine slice_surface
 
-   subroutine slice_planes_prepare(surface, normal_axis, levels, planes, on_plane_low, status)
+   subroutine slice_planes_prepare(surface, normal_axis, levels, planes, on_plane_low, status, spans)
    !< Plane sweep index of `surface` for the planes x(normal_axis) = levels(b) (issue #100 step 3c), any order of the
    !< levels. Pass it to `slice_surface_plane`, with the same surface unchanged. `status = STATUS_INVALID_INPUT` if
    !< normal_axis is not 1-3 (every plane then gives an empty curve and that status, as `slice_surface`).
+   !<
+   !< `spans(2, nf)` (issue #100 step 4, the posed sections of the swept geometry) replaces the facet spans: facet i is
+   !< listed on the planes with spans(1, i) <= level <= spans(2, i) (a NaN bound lists it on every plane). The caller
+   !< makes each span contain the facet's span along the axis at every pose it slices at (`slice_surface_plane` with
+   !< `pose`): the list is then a superset of the facets `slice_surface(pose=)` keeps, in its order.
    type(surface_stl_object), intent(in)            :: surface      !< Surface.
    integer(I4P),             intent(in)            :: normal_axis  !< Plane normal axis (1, 2, 3).
    real(R8P),                intent(in)            :: levels(:)    !< Plane positions.
    type(slice_planes_t),     intent(out)           :: planes       !< Index.
    logical,                  intent(in),  optional :: on_plane_low !< A vertex on the plane counts as below (default .false.).
    integer(I4P),             intent(out), optional :: status       !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),                intent(in),  optional :: spans(:,:)   !< Facet spans along the axis [2, nf] (default: the
+                                                                   !< facets' own).
    type(facet_object), pointer :: f                 !< Facet cursor.
    integer(I4P), allocatable   :: ord(:), lo(:), hi(:), cnt(:), pos(:) !< Sorted planes, facet ranges, counts, cursors.
    real(R8P),    allocatable   :: sl(:)             !< Sorted finite levels.
@@ -156,15 +163,19 @@ contains
    allocate(lo(max(1, nf)), hi(max(1, nf)), cnt(ns + 1_I4P))
    cnt = 0_I4P
    do i = 1, nf
-      f => surface%facet_at(i)
-      select case (normal_axis)
-      case (1_I4P)
-         c = [f%vertex(1)%x, f%vertex(2)%x, f%vertex(3)%x]
-      case (2_I4P)
-         c = [f%vertex(1)%y, f%vertex(2)%y, f%vertex(3)%y]
-      case default
-         c = [f%vertex(1)%z, f%vertex(2)%z, f%vertex(3)%z]
-      endselect
+      if (present(spans)) then ! the caller's spans: [lo, hi, hi] gives mn = lo, mx = hi below
+         c = [spans(1, i), spans(2, i), spans(2, i)]
+      else
+         f => surface%facet_at(i)
+         select case (normal_axis)
+         case (1_I4P)
+            c = [f%vertex(1)%x, f%vertex(2)%x, f%vertex(3)%x]
+         case (2_I4P)
+            c = [f%vertex(1)%y, f%vertex(2)%y, f%vertex(3)%y]
+         case default
+            c = [f%vertex(1)%z, f%vertex(2)%z, f%vertex(3)%z]
+         endselect
+      endif
       if (any(c /= c)) then ! a NaN coordinate: every comparison false, listed everywhere
          lo(i) = 1_I4P ; hi(i) = ns
       else
@@ -220,10 +231,12 @@ contains
    enddo
    endsubroutine slice_planes_prepare
 
-   subroutine slice_surface_plane(surface, planes, b, curve, merge_collinear, open_loops, status)
+   subroutine slice_surface_plane(surface, planes, b, curve, merge_collinear, open_loops, status, pose)
    !< `slice_surface(surface, planes%normal_axis, planes%levels(b), curve, merge_collinear, open_loops,
-   !< planes%on_plane_low, status)` through the plane sweep index (issue #100 step 3c): the same curve bit for bit, the
-   !< facets visited being only those listed for the plane. `surface` must be the one the index was prepared from.
+   !< planes%on_plane_low, status, pose)` through the plane sweep index (issue #100 step 3c): the same curve bit for bit,
+   !< the facets visited being only those listed for the plane. `surface` must be the one the index was prepared from.
+   !< With `pose` (issue #100 step 4) every vertex is placed by `to_world(pose, vertex)` as `slice_surface(pose=)` does;
+   !< the index must then have been prepared with `spans` containing each facet's span at that pose.
    type(surface_stl_object), intent(in)            :: surface         !< Surface.
    type(slice_planes_t),     intent(in)            :: planes          !< Index (`slice_planes_prepare`).
    integer(I4P),             intent(in)            :: b               !< Plane.
@@ -231,6 +244,7 @@ contains
    logical,                  intent(in),  optional :: merge_collinear !< Remove collinear vertices (default .false.).
    integer(I4P),             intent(out), optional :: open_loops      !< Chains that did not close.
    integer(I4P),             intent(out), optional :: status          !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_t),       intent(in),  optional :: pose            !< Pose the surface is sliced at (default: as is).
    type(facet_object), pointer :: f                 !< Facet cursor.
    real(R8P),    allocatable   :: s(:,:)            !< Segments [su, sv, eu, ev; n].
    integer(I4P), allocatable   :: sp(:)             !< Patch of each segment (#66).
@@ -260,6 +274,9 @@ contains
       x(:, 1) = [f%vertex(1)%x, f%vertex(1)%y, f%vertex(1)%z]
       x(:, 2) = [f%vertex(2)%x, f%vertex(2)%y, f%vertex(2)%z]
       x(:, 3) = [f%vertex(3)%x, f%vertex(3)%y, f%vertex(3)%z]
+      if (present(pose)) then ! as `slice_surface(pose=)` places them
+         x(:, 1) = to_world(pose, x(:, 1)) ; x(:, 2) = to_world(pose, x(:, 2)) ; x(:, 3) = to_world(pose, x(:, 3))
+      endif
       call facet_segment(x, axis, level, planes%on_plane_low, pa, pb, hit)
       if (.not. hit) cycle
       n = n + 1_I4P
