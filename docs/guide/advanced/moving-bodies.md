@@ -260,6 +260,39 @@ checks the input: the exact paths assume a wall that does not cross itself
 `cleared` and `covered` flag the cells with no fluid at one pose and
 fluid at the other.
 
+### On the device
+
+`swept_cells_3d_device(surface, pose0, pose1, x, y, z, sw, ...)` and `swept_cells_2d_device(curve, pose0, pose1, x, y,
+sw, ...)` (issue #100) take the arguments of `swept_cells_3d` / `swept_cells_2d` and return the same `sw`, bit for
+bit, on every path: exact translation, exact rotation, Gauss and explicit poses.
+
+**In 3-D:**
+- The end poses go through `cut_cells_3d_device(..., alpha_only=.true.)`.
+- The faces are batched: the host builds each (plane, Gauss node) as `swept_cells_3d` does, with the breakpoints, the
+  events and `isolate_zeros` on the host (they are at most 1 % of a call). It slices every node through a plane sweep,
+  and one multi-block launch per chunk cuts all the sections on their own grids.
+- Each face then adds over its nodes in node order on one device thread: the same additions in the same order.
+- The optional `chunk_cells` caps the device memory of a launch set without changing a bit.
+
+**In 2-D** only the end poses move to the device. The faces, measured at 94–99.9 % of a call, stay on the host, so the
+twin gains nothing measurable today.
+
+Measured on an RTX 4070, best of 5 after a warm-up:
+
+| body | cells | path | CPU [s] | device [s] |
+|---|---|---|---|---|
+| sphere (marching cubes) | 32³ | translation | 10.4 | 6.1 |
+| sphere | 32³ | rotation | 15.0 | 8.3 |
+| sphere | 64³ | translation | 56.8 | 19.8 |
+| sphere | 64³ | Gauss, nq = 4 | 2.37 | 0.59 |
+| cone | 32³ | rotation | 3.95 | 1.38 |
+| cone | 64³ | translation | 17.5 | 3.8 |
+| cone | 64³ | Gauss, nq = 4 | 1.67 | 0.38 |
+
+That is 1.7–4.7×. The exact paths are dominated by the number of (plane, node) sections: 650–15 400 per plane at 64³,
+and the exact rotation costs 250–600 s per host call there. The Gauss path is two to three orders of magnitude cheaper
+than the exact rotation at 64³.
+
 ## Results
 
 | Case | Result |
@@ -282,6 +315,7 @@ fluid at the other.
 | swept, 3-D negative control: unit cube translating, Gauss, nq = 2, 4, 8, 16 | faces vs analytic 2.5e-2 → 2.3e-3; residual 1.3e-2 → 7.1e-4 |
 | swept, 3-D: cube rotating about (1, 1, 1) while translating; nq = 2, 4, 8 | residual 1.1e-2 → 1.6e-3 |
 | swept: explicit node poses = screw poses | face apertures bit for bit |
+| swept on the device vs the host: every output of `swept_cells_3d_t` / `swept_cells_2d_t`, exact translation, exact rotation, Gauss, explicit poses; chunk boundaries (`chunk_cells`) | 0 mismatches (`swept cells 3-D` / `2-D device vs serial mismatches`, `fossil_test_swept_3d_device_twin`, `fossil_test_swept_2d_device_twin`) |
 
 ## Limitations
 

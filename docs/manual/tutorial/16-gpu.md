@@ -120,6 +120,10 @@ batches.
 
 - A `curve_object` has its own `enter_device`, `exit_device`, `distance_many_device` (points as `(2, n)` arrays,
   signed by default, negative inside), `query_many_device` and `box_classify_many_device`, with the same rules.
+- `swept_cells_3d_device` / `swept_cells_2d_device` give the swept geometry of a step on the device, bit for bit
+  that of `swept_cells_3d` / `swept_cells_2d`. In 3-D the faces are batched over all the sections of a step:
+  1.7-4.7x on an RTX 4070 at 32³-64³. In 2-D only the end poses move, so there is no gain today (the
+  [moving bodies reference](/guide/advanced/moving-bodies#on-the-device) has the table).
 - `cut_cells_3d_device(surface, x, y, z, cut)` computes the 3-D cut cells of a block on the device (without links,
   moments or quadrature), bit for bit those of `cut_cells_3d`, copied back or with `resident=.true.` left on the device.
   On an RTX 4070 at 128³ cells: 2.1-3.0x the CPU copied back, 2.7-3.8x resident (the
