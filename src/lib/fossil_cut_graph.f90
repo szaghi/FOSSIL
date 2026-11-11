@@ -36,14 +36,16 @@ module fossil_cut_graph
 !< (conservative mixing, Bezgin et al. 2023 §3.6): the pieces at the offsets o with o_a in {0, sign n_a}, o /= 0, reached
 !< by a monotone path; several in one cell: the largest. Weights beta_o ~ (prod_{a: o_a /= 0} |n_a|)^(2 / |supp o|)
 !< (after Hu et al. 2006, general knowledge: the cited weights are not in the literature base), normalised.
-use fossil_cut_cells_2d, only : cut_cells_2d_t
+use, intrinsic :: iso_c_binding,   only : c_intptr_t, c_loc
+use, intrinsic :: iso_fortran_env, only : stderr => error_unit
+use fossil_cut_cells_2d, only : cut_cells_2d_t, chunk_offsets_dev
 use penf,                only : I4P, R8P
 
 implicit none
 private
-public :: cut_links_t, cut_links_2d, build_csr
+public :: cut_links_t, cut_links_2d, build_csr, cut_links_2d_device, cut_links_reset
 ! the link kernels of the 3-D blocks (issue #100 step 5), for `fossil_cut_cells_3d` (not re-exported by `fossil`)
-public :: links_face_id, links_face_bases, links_piece_count_3d, links_piece_fill_3d
+public :: links_face_id, links_face_bases, links_piece_count_3d, links_piece_fill_3d, links_scan_dev, links_take
 public :: srd_t, srd_neighbourhoods, SRD_REGULAR, SRD_COMPLETE, SRD_INCOMPLETE, SRD_NO_VOLUME
 public :: frd_t, frd_neighbourhoods
 public :: merge_t, merge_targets, MERGE_NONE, MERGE_OK, MERGE_CHAIN, MERGE_CYCLE, MERGE_ALONE
@@ -54,6 +56,8 @@ integer(I4P), parameter :: MERGE_CHAIN = 2_I4P !< Target unsuitable; `final_targ
 integer(I4P), parameter :: MERGE_CYCLE = 3_I4P !< The chain loops or ends before a suitable piece: `final_target` = 0.
 integer(I4P), parameter :: MERGE_ALONE = 4_I4P !< No linked piece has volume.
 
+integer(I4P), parameter :: LINKS_SCAN_CHUNK = 64_I4P !< Entries per chunk of the device prefix sums (`links_scan_dev`).
+
 integer(I4P), parameter :: SRD_REGULAR    = 0_I4P !< Not small: its neighbourhood is itself.
 integer(I4P), parameter :: SRD_COMPLETE   = 1_I4P !< Small, neighbourhood reaches tau |cell|.
 integer(I4P), parameter :: SRD_INCOMPLETE = 2_I4P !< Small, the 5^d tile did not reach tau |cell| (all of it is kept).
@@ -61,12 +65,29 @@ integer(I4P), parameter :: SRD_NO_VOLUME  = 3_I4P !< Zero volume: no state, no n
 
 type :: cut_links_t
    !< Links between the pieces of a block (see the module notes).
+   !<
+   !< Resident on the device (issue #100 step 5, the model of `cut_cells_2d_t`, step 6a). `cut_links_2d_device` and
+   !< `cut_cells_3d_device(..., links=, resident=.true.)` leave start, piece, face and area mapped (OpenACC unstructured
+   !< data) and never write their host copies: until `update_host` they hold garbage (np and unmatched are set).
+   !< `on_device` says so. A device consumer passes the member arrays to its stage routine (the #20 rule: member arrays,
+   !< never the object). `enter_device` maps a host result, `update_host` brings the device values back, `exit_device`
+   !< releases the device copies (call it before resident links go out of scope or are deallocated). Every routine that
+   !< writes links releases them first (`cut_links_reset`); a routine that reads them on the host (SRD, FRD, merge targets,
+   !< the coarsening) needs `update_host` first. A copy `b = a` of resident links is not resident: the type-bound
+   !< procedures recognise it (`device_key`, the host address of start when mapped). Built without OpenACC the
+   !< procedures only set the flag.
    integer(I4P)              :: np = 0_I4P     !< Pieces.
    integer(I4P), allocatable :: start(:)       !< Links of piece p: start(p) .. start(p + 1) - 1 [np + 1].
    integer(I4P), allocatable :: piece(:)       !< Piece across.
    integer(I4P), allocatable :: face(:)        !< Face of p's cell (1-6; 1-4 in 2-D).
    real(R8P),    allocatable :: area(:)        !< Shared fluid area (length in 2-D).
    integer(I4P)              :: unmatched = 0_I4P !< Fluid regions of a face that could not be matched to a piece.
+   logical                   :: on_device = .false. !< The arrays are mapped on the device (issue #100 step 5).
+   integer(c_intptr_t)       :: device_key = 0  !< Host address of start when mapped (a copy has another one).
+   contains
+      procedure, pass(self) :: enter_device => links_enter_device !< Map the arrays to the device (copyin).
+      procedure, pass(self) :: update_host  => links_update_host  !< Copy the mapped arrays back to the host.
+      procedure, pass(self) :: exit_device  => links_exit_device  !< Release the device copies.
 endtype cut_links_t
 
 type :: srd_t
@@ -511,8 +532,8 @@ contains
    !< with f the face of p's cell that is that edge: the entries of a key are the pairs of one edge holding p and q,
    !< in the pair order of that edge, which is the slot order here; `links_piece_fill_2d` sums them in that order (from
    !< 0, one add at a time, as SUM does) and emits the keys of p by face 1..4, then q increasing, the sort order.
-   type(cut_cells_2d_t), intent(in)  :: cut   !< Cut cells.
-   type(cut_links_t),    intent(out) :: links !< Links.
+   type(cut_cells_2d_t), intent(in)    :: cut   !< Cut cells.
+   type(cut_links_t),    intent(inout) :: links !< Links (released from the device and reset first).
    integer(I4P), allocatable :: owner(:)          !< Piece of each interval.
    integer(I4P), allocatable :: eoff(:), eord(:)  !< Intervals of edge e: eord(eoff(e) + 1 .. eoff(e + 1)).
    integer(I4P), allocatable :: fill(:)           !< Work.
@@ -521,6 +542,7 @@ contains
    real(R8P),    allocatable :: plen(:)           !< Shared length of each pair.
    integer(I4P)              :: n, ne, e, k, m, p, nk !< Work.
 
+   call cut_links_reset(links)
    links%np = cut%np
    n = size(cut%piece_iv_edge, kind=I4P)
    ne = (cut%nx + 1_I4P) * cut%ny + cut%nx * (cut%ny + 1_I4P)
@@ -579,6 +601,362 @@ contains
                                links%area)
    enddo
    endsubroutine cut_links_2d
+
+   subroutine cut_links_2d_device(cut, links, resident)
+   !< `cut_links_2d` on the device (OpenACC, issue #100 step 5): the same links bit for bit (np, start, piece, face,
+   !< area, unmatched = 0), from a resident cut (`curve%cut_cells_device(..., resident=.true.)`: its arrays are used where
+   !< they are) or a host one (copied in for the call and released). The links come from the fluid edge intervals
+   !< (`intervals` on, the default; with them off there are none, as on the host); a cut without the interval arrays
+   !< (a default cut, a status error) leaves the links reset.
+   !<
+   !< The same steps as `cut_links_2d`, one thread per edge or per piece (`links_2d_dev`):
+   !< 1. the owner piece of every interval (one thread per piece);
+   !< 2. the intervals of every edge in interval order: a counting sort by edge without a scatter, each edge gathering
+   !<    the intervals of the pieces of its two cells, the lower cell first (an interval lies on an edge of its piece's
+   !<    cell, and the pieces are numbered cell by cell: the order of the host's counting sort); count, prefix sum, fill;
+   !< 3. per edge `links_edge_sort` (stable by start), the pair count `links_edge_pairs`, a prefix sum, the pair fill
+   !<    `links_edge_pairs_fill`;
+   !< 4. per piece `links_piece_count_2d`, a prefix sum, `links_piece_fill_2d` (the sums of one key in pair order).
+   !< The kernels are the host's, the prefix sums integer: the same bits. With `resident` the links stay mapped (see
+   !< `cut_links_t`), else they are copied back. Built without OpenACC the loops run on the host in order (the CI twin).
+   type(cut_cells_2d_t), intent(in), target  :: cut      !< Cut cells (resident or not; intervals needed).
+   type(cut_links_t),    intent(inout)       :: links    !< Links (released from the device and reset first).
+   logical,              intent(in), optional :: resident !< Leave the links on the device (default .false.).
+   integer(I4P), allocatable :: st(:), pc(:), fc(:) !< Links: start, piece across, face.
+   real(R8P),    allocatable :: ar(:)               !< Links: length.
+   integer(I4P), target      :: phi(1)              !< Placeholder of an empty interval array.
+   real(R8P),    target      :: phr(1)              !< Placeholder of an empty interval array.
+   integer(I4P), pointer, contiguous :: ive(:)      !< Interval edges (or the placeholder).
+   real(R8P),    pointer, contiguous :: ivl(:), ivh(:) !< Interval ranges (or the placeholders).
+   integer(I4P)              :: n, st0              !< Intervals, status.
+   logical                   :: res                 !< Resident.
+
+   call cut_links_reset(links)
+   res = .false. ; if (present(resident)) res = resident
+   if (.not. (allocated(cut%piece_iv_start) .and. allocated(cut%piece_iv_edge))) return
+   links%np = cut%np
+   n = size(cut%piece_iv_edge, kind=I4P)
+   if (cut%np < 1_I4P) then ! no pieces: start = [1] (as the host), mapped if resident
+      allocate(st(1), pc(0), fc(0), ar(0)) ; st(1) = 1_I4P
+      if (res) then
+         !$acc enter data copyin(st, pc, fc, ar)
+      endif
+      call links_take(links, st, pc, fc, ar, res)
+      return
+   endif
+   phi = 0_I4P ; phr = 0._R8P
+   if (n > 0_I4P) then
+      ive => cut%piece_iv_edge ; ivl => cut%piece_iv_lo ; ivh => cut%piece_iv_hi
+   else
+      ive => phi ; ivl => phr ; ivh => phr
+   endif
+   call links_2d_dev(cut%nx, cut%ny, cut%np, n, max(1_I4P, n), cut%pieces, cut%first_piece, cut%piece_cell, &
+                     cut%piece_iv_start, ive, ivl, ivh, res, st, pc, fc, ar, st0)
+   if (st0 /= 0_I4P) then
+      write(stderr, '(A)') 'fossil cut_links_2d_device: an interval lies off its piece''s cell edges; links not computed'
+      call cut_links_reset(links) ; return
+   endif
+   call links_take(links, st, pc, fc, ar, res)
+   endsubroutine cut_links_2d_device
+
+   subroutine links_2d_dev(nx, ny, np, n, nv, pcs, fpc, pcell, ivs, ive, ivl, ivh, res, lstart, lpiece, lface, larea, &
+                           status)
+   !< The device stages of `cut_links_2d_device` (see there) on the arrays of a cut of nx x ny cells, np >= 1 pieces and
+   !< n fluid edge intervals (nv = max(1, n): the declared size). The inputs are copied in unless present. The outputs
+   !< are built in locals mapped by unstructured data (#101 item 8), copied back unless `res`, then moved out (the host
+   !< addresses the present table is keyed on are kept). status 1 if the edges did not gather all the intervals.
+   integer(I4P),              intent(in)  :: nx, ny, np, n, nv !< Cells, pieces, intervals, their declared size.
+   integer(I4P),              intent(in)  :: pcs(nx, ny), fpc(nx, ny) !< Pieces and first piece of every cell.
+   integer(I4P),              intent(in)  :: pcell(2, np)  !< Cell of every piece.
+   integer(I4P),              intent(in)  :: ivs(np + 1)   !< Intervals of piece p: ivs(p) .. ivs(p + 1) - 1.
+   integer(I4P),              intent(in)  :: ive(nv)       !< Interval edges.
+   real(R8P),                 intent(in)  :: ivl(nv), ivh(nv) !< Interval ranges.
+   logical,                   intent(in)  :: res           !< Leave the outputs mapped.
+   integer(I4P), allocatable, intent(out) :: lstart(:), lpiece(:), lface(:) !< Links: start, piece across, face.
+   real(R8P),    allocatable, intent(out) :: larea(:)      !< Links: length.
+   integer(I4P),              intent(out) :: status        !< 0 ok, 1 intervals off their cell.
+   integer(I4P), allocatable :: owner(:), ecnt(:), eoff(:), eord(:), pcnt(:), poff(:), scnt(:), soff(:) !< Work.
+   integer(I4P), allocatable :: ppa(:), ppb(:)    !< Pieces of each pair.
+   real(R8P),    allocatable :: plen(:)           !< Shared length of each pair.
+   integer(I4P), allocatable :: st(:), pc(:), fc(:) !< Links: start, piece across, face.
+   real(R8P),    allocatable :: ar(:)             !< Links: length.
+   integer(I4P) :: ne, p, t, e, m, tot, ns, nsv, nk !< Work.
+
+   status = 0_I4P
+   ne = (nx + 1_I4P) * ny + nx * (ny + 1_I4P)
+   allocate(owner(nv), ecnt(ne), eoff(ne + 1), eord(nv), pcnt(ne), poff(ne + 1), scnt(np), soff(np))
+   !$acc data copyin(pcs, fpc, pcell, ivs, ive, ivl, ivh) create(owner, ecnt, eoff, eord, pcnt, poff, scnt, soff)
+   ! 1. owners
+   !$acc parallel loop gang vector default(present) present(ivs, owner)
+   do p = 1, np
+      do t = ivs(p), ivs(p + 1) - 1
+         owner(t) = p
+      enddo
+   enddo
+   ! 2. intervals by edge: counts, prefix sum, gather
+   !$acc parallel loop gang vector default(present) present(pcs, fpc, ivs, ive, ecnt)
+   do e = 1, ne
+      ecnt(e) = links_edge_count_2d(e, nx, ny, np, nv, pcs, fpc, ivs, ive)
+   enddo
+   call links_scan_dev(ne, ecnt, eoff, tot)
+   !$acc serial default(present) present(eoff)
+   eoff(ne + 1) = tot
+   !$acc end serial
+   if (tot /= n) status = 1_I4P
+   if (status == 0_I4P) then
+   ! 3. per edge: gather, stable sort by start, pair counts; prefix sum; pair fill
+   !$acc parallel loop gang vector default(present) present(pcs, fpc, ivs, ive, ivl, ivh, owner, eoff, eord, pcnt)
+   do e = 1, ne
+      pcnt(e) = 0_I4P
+      m = eoff(e + 1) - eoff(e)
+      if (m < 1_I4P) cycle
+      call links_edge_fill_2d(e, nx, ny, np, nv, pcs, fpc, ivs, ive, m, eord(eoff(e) + 1))
+      if (m > 1_I4P) then
+         call links_edge_sort(m, eord(eoff(e) + 1), nv, ivl)
+         pcnt(e) = links_edge_pairs(m, eord(eoff(e) + 1), nv, owner, ivl, ivh)
+      endif
+   enddo
+   call links_scan_dev(ne, pcnt, poff, ns)
+   !$acc serial default(present) present(poff)
+   poff(ne + 1) = ns
+   !$acc end serial
+   nsv = max(1_I4P, ns)
+   allocate(ppa(nsv), ppb(nsv), plen(nsv))
+   !$acc data create(ppa, ppb, plen)
+   !$acc parallel loop gang vector default(present) present(ivl, ivh, owner, eoff, eord, poff, ppa, ppb, plen)
+   do e = 1, ne
+      if (poff(e + 1) == poff(e)) cycle
+      call links_edge_pairs_fill(eoff(e + 1) - eoff(e), eord(eoff(e) + 1), nv, owner, ivl, ivh, poff(e + 1) - poff(e), &
+                                 ppa(poff(e) + 1), ppb(poff(e) + 1), plen(poff(e) + 1))
+   enddo
+   ! 4. CSR per piece: counts, prefix sum, fill
+   !$acc parallel loop gang vector default(present) present(pcell, poff, ppa, ppb, scnt)
+   do p = 1, np
+      scnt(p) = links_piece_count_2d(p, pcell(1, p), pcell(2, p), nx, ny, ne, poff, nsv, ppa, ppb)
+   enddo
+   call links_scan_dev(np, scnt, soff, nk)
+   allocate(st(np + 1), pc(nk), fc(nk), ar(nk))
+   !$acc enter data create(st, pc, fc, ar)
+   !$acc parallel loop gang vector default(present) present(soff, st)
+   do p = 1, np
+      st(p) = soff(p) + 1_I4P
+   enddo
+   !$acc serial default(present) present(st)
+   st(np + 1) = nk + 1_I4P
+   !$acc end serial
+   if (nk > 0_I4P) then
+      !$acc parallel loop gang vector default(present) present(pcell, poff, ppa, ppb, plen, st, pc, fc, ar)
+      do p = 1, np
+         call links_piece_fill_2d(p, pcell(1, p), pcell(2, p), nx, ny, ne, poff, nsv, ppa, ppb, plen, st(p) - 1_I4P, nk, &
+                                  pc, fc, ar)
+      enddo
+   endif
+   !$acc end data
+   endif ! status == 0
+   !$acc end data
+   if (status /= 0_I4P) return
+   if (.not. res) then
+      !$acc exit data copyout(st, pc, fc, ar)
+   endif
+   call move_alloc(st, lstart) ; call move_alloc(pc, lpiece) ; call move_alloc(fc, lface) ; call move_alloc(ar, larea)
+   endsubroutine links_2d_dev
+
+   pure subroutine links_edge_cells_2d(e, nx, ny, ia, ja, ib, jb)
+   !< The cells next to edge e (numbering of `cut_cells_2d_t%piece_iv_edge`) in piece order: (ia, ja) the lower one (left
+   !< of a vertical edge, below a horizontal one), (ib, jb) the upper one; ia = 0 or ib = 0 if outside the block.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: e, nx, ny          !< Edge, cells.
+   integer(I4P), intent(out) :: ia, ja, ib, jb     !< Cells.
+   integer(I4P)              :: l                  !< Work.
+
+   if (e <= (nx + 1_I4P) * ny) then ! vertical edge (u line i, row j)
+      ib = mod(e - 1_I4P, nx + 1_I4P) + 1_I4P ; jb = (e - 1_I4P) / (nx + 1_I4P) + 1_I4P ; ia = ib - 1_I4P ; ja = jb
+      if (ib > nx) ib = 0_I4P
+   else ! horizontal edge (column i, v line j)
+      l = e - (nx + 1_I4P) * ny
+      ib = mod(l - 1_I4P, nx) + 1_I4P ; jb = (l - 1_I4P) / nx + 1_I4P ; ia = ib ; ja = jb - 1_I4P
+      if (ja < 1_I4P) ia = 0_I4P
+      if (jb > ny) ib = 0_I4P
+   endif
+   endsubroutine links_edge_cells_2d
+
+   pure integer(I4P) function links_edge_count_2d(e, nx, ny, np, nv, pcs, fpc, ivs, ive) result(m)
+   !< Kernel (issue #100 step 5): the fluid edge intervals on edge e, among those of the pieces of its two cells.
+   !$acc routine seq
+   integer(I4P), intent(in) :: e, nx, ny, np, nv          !< Edge, cells, pieces, intervals (declared size).
+   integer(I4P), intent(in) :: pcs(nx, ny), fpc(nx, ny)   !< Pieces and first piece of every cell.
+   integer(I4P), intent(in) :: ivs(np + 1)                !< Intervals by piece.
+   integer(I4P), intent(in) :: ive(nv)                    !< Interval edges.
+   integer(I4P)             :: ia, ja, ib, jb, sd, ic, jc, p, t !< Work.
+
+   m = 0_I4P
+   call links_edge_cells_2d(e, nx, ny, ia, ja, ib, jb)
+   do sd = 1, 2
+      if (sd == 1) then
+         ic = ia ; jc = ja
+      else
+         ic = ib ; jc = jb
+      endif
+      if (ic < 1_I4P) cycle
+      do p = fpc(ic, jc), fpc(ic, jc) + pcs(ic, jc) - 1_I4P ! none if pieces < 1
+         do t = ivs(p), ivs(p + 1) - 1_I4P
+            if (ive(t) == e) m = m + 1_I4P
+         enddo
+      enddo
+   enddo
+   endfunction links_edge_count_2d
+
+   pure subroutine links_edge_fill_2d(e, nx, ny, np, nv, pcs, fpc, ivs, ive, m, ord)
+   !< Kernel (issue #100 step 5): the m intervals on edge e in interval order (the pieces of the lower cell, then of the
+   !< upper one, each in piece order, its intervals in order: increasing indexes).
+   !$acc routine seq
+   integer(I4P), intent(in)  :: e, nx, ny, np, nv         !< Edge, cells, pieces, intervals (declared size).
+   integer(I4P), intent(in)  :: pcs(nx, ny), fpc(nx, ny)  !< Pieces and first piece of every cell.
+   integer(I4P), intent(in)  :: ivs(np + 1)               !< Intervals by piece.
+   integer(I4P), intent(in)  :: ive(nv)                   !< Interval edges.
+   integer(I4P), intent(in)  :: m                         !< Intervals of the edge.
+   integer(I4P), intent(out) :: ord(m)                    !< Their indexes.
+   integer(I4P)              :: ia, ja, ib, jb, sd, ic, jc, p, t, w !< Work.
+
+   w = 0_I4P
+   call links_edge_cells_2d(e, nx, ny, ia, ja, ib, jb)
+   do sd = 1, 2
+      if (sd == 1) then
+         ic = ia ; jc = ja
+      else
+         ic = ib ; jc = jb
+      endif
+      if (ic < 1_I4P) cycle
+      do p = fpc(ic, jc), fpc(ic, jc) + pcs(ic, jc) - 1_I4P
+         do t = ivs(p), ivs(p + 1) - 1_I4P
+            if (ive(t) == e .and. w < m) then
+               w = w + 1_I4P ; ord(w) = t
+            endif
+         enddo
+      enddo
+   enddo
+   endsubroutine links_edge_fill_2d
+
+   subroutine links_scan_dev(n, cnt, off, total)
+   !< Exclusive prefix sums off(l) = cnt(1) + ... + cnt(l - 1) on the device (issue #100 step 5; `scan_dev` of the 3-D
+   !< cut cells), total = their sum on the host: chunks of LINKS_SCAN_CHUNK entries (one thread each), the chunk offsets
+   !< by `chunk_offsets_dev`, then one thread per chunk writes its entries. Integer sums: the integers of a sequential
+   !< scan. cnt and off must be present.
+   integer(I4P), intent(in)    :: n        !< Entries.
+   integer(I4P), intent(in)    :: cnt(n)   !< Counts.
+   integer(I4P), intent(inout) :: off(n)   !< Offsets (written on the device).
+   integer(I4P), intent(out)   :: total    !< Sum.
+   integer(I4P), allocatable   :: tot(:,:) !< Chunk totals, then offsets [3, nch].
+   integer(I4P)                :: nch, ch, l, a1, sums(3) !< Work.
+
+   nch = max(1_I4P, (n + LINKS_SCAN_CHUNK - 1_I4P) / LINKS_SCAN_CHUNK)
+   allocate(tot(3, nch))
+   !$acc data create(tot)
+   !$acc parallel loop gang vector default(present) present(cnt, tot)
+   do ch = 1_I4P, nch
+      a1 = 0_I4P
+      !$acc loop seq
+      do l = (ch - 1_I4P) * LINKS_SCAN_CHUNK + 1_I4P, min(ch * LINKS_SCAN_CHUNK, n)
+         a1 = a1 + cnt(l)
+      enddo
+      tot(1, ch) = a1 ; tot(2, ch) = 0_I4P ; tot(3, ch) = 0_I4P
+   enddo
+   call chunk_offsets_dev(nch, [0_I4P, 0_I4P, 0_I4P], tot, sums)
+   total = sums(1)
+   !$acc parallel loop gang vector default(present) present(cnt, off, tot)
+   do ch = 1_I4P, nch
+      a1 = tot(1, ch)
+      !$acc loop seq
+      do l = (ch - 1_I4P) * LINKS_SCAN_CHUNK + 1_I4P, min(ch * LINKS_SCAN_CHUNK, n)
+         off(l) = a1 ; a1 = a1 + cnt(l)
+      enddo
+   enddo
+   !$acc end data
+   endsubroutine links_scan_dev
+
+   subroutine links_take(links, st, pc, fc, ar, res)
+   !< Move the arrays of a device link stage into `links` (issue #100 step 5; move_alloc keeps the host addresses the
+   !< present table is keyed on) and flag them resident if `res`.
+   type(cut_links_t),         intent(inout) :: links      !< Links (np and unmatched set).
+   integer(I4P), allocatable, intent(inout) :: st(:), pc(:), fc(:) !< Start, piece across, face.
+   real(R8P),    allocatable, intent(inout) :: ar(:)      !< Area.
+   logical,                   intent(in)    :: res        !< Mapped.
+
+   call move_alloc(st, links%start) ; call move_alloc(pc, links%piece) ; call move_alloc(fc, links%face)
+   call move_alloc(ar, links%area)
+   if (res) then
+      links%on_device = .true. ; links%device_key = links_host_key(links)
+   endif
+   endsubroutine links_take
+
+   subroutine cut_links_reset(links)
+   !< Release resident links from the device (`exit_device`), then reset them to the default (issue #100 step 5): what
+   !< `intent(out)` did, without freeing arrays that are still mapped.
+   type(cut_links_t), intent(inout) :: links !< Links.
+   type(cut_links_t)                :: fresh !< Default.
+
+   if (links%on_device) call links%exit_device
+   links = fresh
+   endsubroutine cut_links_reset
+
+   function links_host_key(links) result(key)
+   !< Host address of start (the key of mapped links; 0 if start is not allocated).
+   type(cut_links_t), intent(in), target :: links !< Links.
+   integer(c_intptr_t)                   :: key   !< Address.
+
+   key = 0
+   if (allocated(links%start)) then
+      if (size(links%start) > 0) key = transfer(c_loc(links%start), key)
+   endif
+   endfunction links_host_key
+
+   logical function links_is_mapped(self)
+   !< The flag is set and the arrays are the ones mapped (not a copy of resident links).
+   type(cut_links_t), intent(in) :: self !< Links.
+
+   links_is_mapped = .false.
+   if (self%on_device) links_is_mapped = self%device_key == links_host_key(self)
+   endfunction links_is_mapped
+
+   subroutine links_enter_device(self)
+   !< Map start, piece, face and area of host links to the device (copyin; issue #100 step 5). Member arrays only, never
+   !< `self` (#20). No-op if already mapped or without links (start unallocated). A copy of resident links is mapped as
+   !< new links.
+   class(cut_links_t), intent(inout) :: self !< Links.
+
+   if (links_is_mapped(self)) return
+   self%on_device = .false. ; self%device_key = 0
+   if (.not. (allocated(self%start) .and. allocated(self%piece) .and. allocated(self%face) .and. allocated(self%area))) return
+   !$acc enter data copyin(self%start, self%piece, self%face, self%area)
+   self%on_device = .true. ; self%device_key = links_host_key(self)
+   endsubroutine links_enter_device
+
+   subroutine links_update_host(self)
+   !< Copy the mapped arrays back to the host (issue #100 step 5); they stay mapped. No-op if not mapped; on a copy of
+   !< resident links a warning on stderr (its arrays are not on the device: update the original before copying it).
+   class(cut_links_t), intent(inout) :: self !< Links.
+
+   if (.not. self%on_device) return
+   if (.not. links_is_mapped(self)) then
+      write(stderr, '(A)') 'fossil cut_links_t%update_host: a copy of resident links is not on the device; '// &
+                           'call update_host on the original before copying it'
+      self%on_device = .false. ; self%device_key = 0
+      return
+   endif
+   !$acc update host(self%start, self%piece, self%face, self%area)
+   endsubroutine links_update_host
+
+   subroutine links_exit_device(self)
+   !< Release the device copies (issue #100 step 5); the host arrays are kept as they are (call `update_host` first to
+   !< keep the device values). No-op if not mapped; a copy of resident links only drops the flag.
+   class(cut_links_t), intent(inout) :: self !< Links.
+
+   if (.not. self%on_device) return
+   if (links_is_mapped(self)) then
+      !$acc exit data delete(self%start, self%piece, self%face, self%area)
+   endif
+   self%on_device = .false. ; self%device_key = 0
+   endsubroutine links_exit_device
 
    pure subroutine links_edge_sort(m, ord, n, lo)
    !< Kernel (issue #100 step 5): the intervals ord(1:m) of one edge ordered by start, stable (insertion sort: an

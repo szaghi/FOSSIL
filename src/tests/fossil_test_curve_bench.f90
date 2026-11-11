@@ -18,13 +18,15 @@ program fossil_test_curve_bench
 !< 64^2 block, medial thickness and gap), `cut cells 2-D blocks grids device vs serial mismatches` (issue #100 step 4.1:
 !< the multi-block cut cells with a grid per block, the translated planes of the swept geometry among them): all must
 !< be 0; `swept cells 2-D device vs serial mismatches` (issue #100 step 4: `swept_cells_2d_device` against
-!< `swept_cells_2d`, exact translation, exact rotation, Gauss and explicit node poses) too.
+!< `swept_cells_2d`, exact translation, exact rotation, Gauss and explicit node poses) too, and `cut links 2-D device
+!< vs serial mismatches` (issue #100 step 5: `cut_links_2d_device` against `cut_links_2d`).
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatches_2d, device_line_mismatches_2d, to_surface
-use fossil, only : surface_stl_object, slice_surface, cut_cells_2d_t
-use fossil_cut_cells_compare, only : cut_cells_twin_mismatches, cut_cells_2d_mismatches, cut_cells_many_grids_mismatches
+use fossil, only : surface_stl_object, slice_surface, cut_cells_2d_t, cut_links_t, cut_links_2d, cut_links_2d_device
+use fossil_cut_cells_compare, only : cut_cells_twin_mismatches, cut_cells_2d_mismatches, cut_cells_many_grids_mismatches, &
+                                     cut_links_mismatches
 use fossil, only : rigid_pose_2d_t, pose_2d, to_world
 use fossil, only : curvilinear_block_2d_t, detect_topology_2d, topo_record_t, TOPO_BOUNDARY, wall_cutter_2d
 use fossil_overset, only : hole_flags_2d, block_logical_t, donor_set_t, donor_candidates_2d
@@ -438,6 +440,7 @@ contains
    print '(A,I0)', 'cut cells 2-D device vs serial mismatches: ', bad
    ok = ok .and. bad == 0 .and. sts == 0
    call blocks_grids_case(s, cc)
+   call links_2d_case(cc, cname, lo, hi, ngrid)
    if (n < 256_I4P) return
    print '(A)', 'cut cells 2-D timing (5 calls, intervals on, transfers included) [s]: curve, cells, host, device, '// &
                 'device resident (best, median); speed-ups of the best'
@@ -469,6 +472,82 @@ contains
       enddo
    enddo
    endsubroutine cut_cells_case
+
+   subroutine links_2d_case(cc, cname, lo, hi, ngrid)
+   !< The 2-D piece links on the device (issue #100 step 5): `cut_links_2d_device` against `cut_links_2d`, every field
+   !< bitwise (`cut_links_mismatches`), on a host cut (links copied back) and on a resident cut (links copied back and
+   !< resident, then `update_host`): the four curves at n^2, with n >= 256 also at (4n)^2 (at most 1024^2). `cut links
+   !< 2-D device vs serial mismatches` = 0. With n >= 256 a timing table (ellipse, NACA 0012, 50 circles; best / median
+   !< of 5 after a warm-up): the CPU cut + links, the device cut + links (resident cut, links copied back, then the cut
+   !< brought back by `update_host`), the device cut + links all resident, and the links alone (CPU, device resident).
+   type(curve_object), intent(in) :: cc(4)       !< Ellipse, NACA 0012, disc with a hole, 50 circles.
+   character(16),      intent(in) :: cname(4)    !< Their names.
+   real(R8P),          intent(in) :: lo(2), hi(2) !< Box of the grids.
+   integer(I4P),       intent(in) :: ngrid(:)    !< Grid sizes.
+   type(cut_cells_2d_t)           :: ch, cr      !< Host cut, resident cut.
+   type(cut_links_t)              :: lh, ld      !< Host, device links.
+   real(R8P),    allocatable      :: x(:), y(:)  !< Cell edges.
+   real(R8P)                      :: t(5, 5)     !< Times.
+   integer(I4P)                   :: bad, st, sts, i, g, r, k !< Work.
+   integer(I8P)                   :: c0, c1, rate !< Clock.
+
+   bad = 0_I4P ; sts = 0_I4P
+   do i = 1, 4
+      do g = 1, merge(2, 1, n >= 256_I4P)
+         call grid_edges(lo, hi, ngrid(g), x, y)
+         call cc(i)%cut_cells(x=x, y=y, cut=ch, status=st) ; sts = sts + st
+         call cut_links_2d(ch, lh)
+         call cut_links_2d_device(ch, ld)
+         bad = bad + cut_links_mismatches(lh, ld)
+         call cc(i)%cut_cells_device(x=x, y=y, cut=cr, status=st, resident=.true.) ; sts = sts + st
+         call cut_links_2d_device(cr, ld)
+         bad = bad + cut_links_mismatches(lh, ld)
+         call cut_links_2d_device(cr, ld, resident=.true.)
+         if (.not. ld%on_device) bad = bad + 1_I4P
+         call ld%update_host
+         bad = bad + cut_links_mismatches(lh, ld)
+         call ld%exit_device ; call cr%exit_device
+      enddo
+   enddo
+   print '(A,I0)', 'cut links 2-D device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0 .and. sts == 0
+   if (n < 256_I4P) return
+   print '(A)', 'cut links 2-D timing (best / median of 5) [s]: curve, cells, CPU cut + links, device cut + links '// &
+                'copied back, device cut + links resident, CPU links, device links (resident); speed-ups of the best'
+   call grid_edges(lo, hi, ngrid(2), x, y) ! warm-up: see cut_cells_case
+   do r = 1, 10
+      call cc(1)%cut_cells_device(x=x, y=y, cut=cr, status=st, resident=.true.)
+      call cut_links_2d_device(cr, ld)
+   enddo
+   call system_clock(count_rate=rate)
+   do i = 1, 4
+      if (i == 3) cycle
+      do g = 1, 2
+         call grid_edges(lo, hi, ngrid(g), x, y)
+         do r = 1, 5
+            call system_clock(c0)
+            call cc(i)%cut_cells(x=x, y=y, cut=ch, status=st) ; call cut_links_2d(ch, lh)
+            call system_clock(c1) ; t(1, r) = real(c1 - c0, R8P) / rate
+            call system_clock(c0)
+            call cc(i)%cut_cells_device(x=x, y=y, cut=cr, status=st, resident=.true.) ; call cut_links_2d_device(cr, ld)
+            call cr%update_host
+            call system_clock(c1) ; t(2, r) = real(c1 - c0, R8P) / rate
+            call system_clock(c0)
+            call cc(i)%cut_cells_device(x=x, y=y, cut=cr, status=st, resident=.true.)
+            call cut_links_2d_device(cr, ld, resident=.true.)
+            call system_clock(c1) ; t(3, r) = real(c1 - c0, R8P) / rate
+            call system_clock(c0) ; call cut_links_2d(ch, lh) ; call system_clock(c1)
+            t(4, r) = real(c1 - c0, R8P) / rate
+            call system_clock(c0) ; call cut_links_2d_device(cr, ld, resident=.true.) ; call system_clock(c1)
+            t(5, r) = real(c1 - c0, R8P) / rate
+         enddo
+         call ld%exit_device ; call cr%exit_device
+         print '(3X,A16,1X,I4,A,5(2X,ES9.2,1X,ES9.2),3(A,F6.2),A)', cname(i), ngrid(g), '^2', &
+               (minval(t(k, :)), median5(t(k, :)), k = 1, 5), '  (', minval(t(1, :)) / minval(t(2, :)), 'x, ', &
+               minval(t(1, :)) / minval(t(3, :)), 'x; links ', minval(t(4, :)) / minval(t(5, :)), 'x)'
+      enddo
+   enddo
+   endsubroutine links_2d_case
 
    subroutine blocks_grids_case(s, cc)
    !< The multi-block 2-D cut cells with a grid per block on the device (issue #100 step 4.1, `cut_cells_device_many` with

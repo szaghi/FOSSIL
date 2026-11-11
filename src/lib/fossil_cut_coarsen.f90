@@ -19,7 +19,7 @@ module fossil_cut_coarsen
 !< Quadrature rules are not coarsened (concatenating the fine rules is exact; a solver can do it).
 use fossil_cut_cells_2d, only : cut_cells_2d_t, cut_cells_2d_reset
 use fossil_cut_cells_3d, only : cut_cells_3d_t, cut_cells_3d_reset
-use fossil_cut_graph,    only : cut_links_t, build_csr
+use fossil_cut_graph,    only : cut_links_t, build_csr, cut_links_reset
 use fossil_cut_moments,  only : mono_count, mono_exponents
 use penf,                only : I4P, R8P
 
@@ -36,7 +36,7 @@ contains
    real(R8P),                 intent(in)  :: x(:), y(:), z(:) !< Fine cell edges.
    integer(I4P),              intent(in)  :: ratio           !< Refinement ratio (2: every other edge).
    type(cut_cells_3d_t),      intent(inout) :: coarse        !< Coarse cut cells (released from the device, reset).
-   type(cut_links_t),         intent(out) :: coarse_links    !< Coarse links.
+   type(cut_links_t),         intent(inout) :: coarse_links  !< Coarse links (released from the device, reset).
    integer(I4P), allocatable, intent(out) :: fine_to_coarse(:) !< Coarse piece of every fine piece.
    integer(I4P),              intent(out) :: status          !< 0 or 1.
    integer(I4P), allocatable :: par(:), root_piece(:), lp(:), lq(:), lf(:), e3(:,:)
@@ -45,7 +45,7 @@ contains
    integer(I4P)              :: nf(3), n(3), p, q, k, ci(3), cj(3), ic(3), np, f, ax, nm, i, j, kk, nl, c, cell_count
    logical,      allocatable :: bad(:,:,:)
 
-   call cut_cells_3d_reset(coarse)
+   call cut_cells_3d_reset(coarse) ; call cut_links_reset(coarse_links)
    status = 0_I4P
    nf = [fine%nx, fine%ny, fine%nz]
    if (any(mod(nf, ratio) /= 0_I4P) .or. ratio < 1_I4P) then
@@ -374,7 +374,7 @@ contains
    real(R8P),                 intent(in)  :: x(:), y(:)      !< Fine cell edges.
    integer(I4P),              intent(in)  :: ratio           !< Refinement ratio.
    type(cut_cells_2d_t),      intent(inout) :: coarse        !< Coarse cut cells (released from the device, reset).
-   type(cut_links_t),         intent(out) :: coarse_links    !< Coarse links.
+   type(cut_links_t),         intent(inout) :: coarse_links  !< Coarse links (released from the device, reset).
    integer(I4P), allocatable, intent(out) :: fine_to_coarse(:) !< Coarse piece of every fine piece.
    integer(I4P),              intent(out) :: status          !< 0 or 1.
    integer(I4P), allocatable :: par(:), root_piece(:), lp(:), lq(:), lf(:), e2(:,:), corder(:), cstart(:), fill(:)
@@ -384,7 +384,7 @@ contains
    integer(I4P)              :: nf(2), n(2), p, q, k, ci(2), cj(2), ic(2), np, f, ax, nm, i, j, nl, c
    logical,      allocatable :: bad(:,:)
 
-   call cut_cells_2d_reset(coarse)
+   call cut_cells_2d_reset(coarse) ; call cut_links_reset(coarse_links)
    status = 0_I4P
    nf = [fine%nx, fine%ny]
    if (any(mod(nf, ratio) /= 0_I4P) .or. ratio < 1_I4P) then
