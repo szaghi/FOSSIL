@@ -50,7 +50,8 @@ use fossil_overset,      only : hole_flags, block_logical_t, donor_set_t, donor_
 use fossil,              only : curve_object, slice_surface, cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device
 use fossil_boolean_bodies, only : BODY_SPHERE, mc_body
 use fossil_cut_cells_3d, only : cut_cells_3d_sections, cut_cells_3d_nodes_device
-use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_face_mismatches, cut_cells_3d_mismatches
+use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_face_mismatches, cut_cells_3d_mismatches, &
+                                     cut_cells_3d_alpha_mismatches
 use fossil_orient3d_cases, only : orient3d_quadruples, lcb_cases, orient3d_many, lcb_many
 use fossil_predicates,   only : orient3d_xyz
 use fossil_line_query,   only : line_crossing_before
@@ -677,11 +678,13 @@ contains
 
    subroutine cells_case(mismatch)
    !< `cut_cells_3d_device` (issue #100 step 3c) against `cut_cells_3d` without links, every output bitwise
-   !< (`cut_cells_3d_mismatches`), with and without the edges, copied back and resident (`update_host`): the bench body
+   !< (`cut_cells_3d_mismatches`), with and without the edges, copied back and resident (`update_host`; since step 4
+   !< the resident faces too come back only so), and the alpha-only mode (step 4, `cut_cells_3d_alpha_mismatches`:
+   !< alpha bitwise, nothing else allocated), copied back and resident: the bench body
    !< in its probe box at grid_n^3; with grid_n >= 32 also the bodies of step 0 (the marching-cubes sphere, the cone,
    !< cube-02.stl) on m^3 cells over their box grown by 10 % at m = 64 and 128, and a timing table: best and median of
-   !< 5 calls after a warm-up, the CPU (`cut_cells_3d`) against the device copied back and resident (the surface mapped
-   !< by `enter_device`; the resident call releases the previous one).
+   !< 5 calls after a warm-up, the CPU (`cut_cells_3d`) against the device copied back and resident, and the alpha-only
+   !< mode resident (the surface mapped by `enter_device`; the resident call releases the previous one).
    integer, intent(out)      :: mismatch               !< Mismatches.
    type(surface_stl_object)  :: sb(3)                  !< Step-0 bodies.
    type(body_t), allocatable :: bb(:)                  !< Bench bodies.
@@ -704,7 +707,7 @@ contains
       enddo
    enddo
    print '(A)', 'cut cells 3-D timing (no links; best / median of 5) [s]: body, cells, CPU, device copied back, '// &
-                'device resident, speed-ups of the best'
+                'device resident, device alpha-only resident, speed-ups of the best'
    call section_grid(grid_n, gx, gy, gz)
    call cells_timing('bench body', surface, grid_n, gx, gy, gz)
    do b = 1, 3
@@ -718,7 +721,8 @@ contains
 
    function cells_compare(s, gx, gy, gz) result(mismatch)
    !< `cut_cells_3d_device` against `cut_cells_3d` on s and the grid gx, gy, gz: with and without the edges, copied back
-   !< and resident (then `update_host`; the resident cut overwritten by the next call).
+   !< and resident (then `update_host`; the resident cut overwritten by the next call); alpha alone, copied back and
+   !< resident (then `update_host`).
    type(surface_stl_object), intent(in) :: s            !< Body.
    real(R8P),                intent(in) :: gx(:), gy(:), gz(:) !< Cell edges.
    integer                              :: mismatch     !< Mismatches.
@@ -737,6 +741,11 @@ contains
    call cut_cells_3d_device(s, gx, gy, gz, cd, status=st2, edges=.true., resident=.true.)
    call cd%update_host
    mismatch = mismatch + abs(st - st2) + cut_cells_3d_mismatches(ch, cd)
+   call cut_cells_3d_device(s, gx, gy, gz, cd, status=st2, alpha_only=.true.)
+   mismatch = mismatch + abs(st - st2) + cut_cells_3d_alpha_mismatches(ce, cd)
+   call cut_cells_3d_device(s, gx, gy, gz, cd, status=st2, resident=.true., alpha_only=.true.)
+   call cd%update_host
+   mismatch = mismatch + abs(st - st2) + cut_cells_3d_alpha_mismatches(ce, cd)
    call cd%exit_device
    endfunction cells_compare
 
@@ -747,7 +756,7 @@ contains
    integer(I4P),             intent(in)    :: m            !< Cells per axis.
    real(R8P),                intent(in)    :: gx(:), gy(:), gz(:) !< Cell edges.
    type(cut_cells_3d_t)                    :: ch, cd       !< Host, device.
-   real(R8P)                               :: t(3, 5)      !< Times.
+   real(R8P)                               :: t(4, 5)      !< Times.
    integer(I8P)                            :: c0, c1, rate !< Clock.
    integer(I4P)                            :: r            !< Counter.
 
@@ -766,11 +775,17 @@ contains
       call system_clock(c0) ; call cut_cells_3d_device(s, gx, gy, gz, cd, resident=.true.) ; call system_clock(c1)
       t(3, r) = real(c1 - c0, R8P) / rate
    enddo
+   do r = 1, 5
+      call system_clock(c0) ; call cut_cells_3d_device(s, gx, gy, gz, cd, resident=.true., alpha_only=.true.)
+      call system_clock(c1)
+      t(4, r) = real(c1 - c0, R8P) / rate
+   enddo
    call cd%exit_device
    call s%exit_device
-   print '(3X,A12,I4,A,3(2X,ES9.2,A,ES9.2),A,F6.2,A,F6.2,A)', label, m, '^3', minval(t(1, :)), ' /', &
+   print '(3X,A12,I4,A,4(2X,ES9.2,A,ES9.2),A,F6.2,A,F6.2,A,F6.2,A)', label, m, '^3', minval(t(1, :)), ' /', &
          median_of5(t(1, :)), minval(t(2, :)), ' /', median_of5(t(2, :)), minval(t(3, :)), ' /', median_of5(t(3, :)), &
-         '  (', minval(t(1, :)) / minval(t(2, :)), 'x, ', minval(t(1, :)) / minval(t(3, :)), 'x)'
+         minval(t(4, :)), ' /', median_of5(t(4, :)), '  (', minval(t(1, :)) / minval(t(2, :)), 'x, ', &
+         minval(t(1, :)) / minval(t(3, :)), 'x, ', minval(t(1, :)) / minval(t(4, :)), 'x)'
    endsubroutine cells_timing
 
    subroutine box_grid(s, m, gx, gy, gz)

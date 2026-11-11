@@ -104,12 +104,13 @@ type :: cut_cells_3d_t
    !< Cut-cell geometry of a 3-D block (fluid = outside the solid).
    !<
    !< Resident on the device (issue #100 step 3c). `cut_cells_3d_device(..., resident=.true.)` leaves the outputs
-   !< mapped (OpenACC unstructured data) and never writes their host copies but the faces': until `update_host` the
-   !< other host arrays hold garbage (nx, ny, nz, np, moments_order are set). `on_device` says so. The mapped outputs
+   !< mapped (OpenACC unstructured data) and never writes their host copies (the faces' neither since step 4): until
+   !< `update_host` the host arrays hold garbage (nx, ny, nz, np, moments_order are set). `on_device` says so. The mapped outputs
    !< are the face arrays (face_x/_y/_z, their centroids, pieces and closed flags), alpha, centroid, wet_area,
    !< wet_centroid, wet_normal, closed, pieces, first_piece, the piece arrays piece_cell, piece_volume, piece_centroid,
    !< piece_wet_area, piece_wet_centroid, piece_wet_normal, piece_face, node_in and, if computed, edge_x/_y/_z (moments,
-   !< quadrature and links are host-only). A device consumer reads them through pointer aliases with `present` (the #20
+   !< quadrature and links are host-only); of an alpha-only cut (`alpha_only`: alpha allocated, face_x not), alpha
+   !< alone. A device consumer reads them through pointer aliases with `present` (the #20
    !< rule: member arrays, never the object). `enter_device` maps a host result, `update_host` brings the device values
    !< back, `exit_device` releases the device copies (call it before a resident cut goes out of scope or is
    !< deallocated). Every routine that writes a cut (`cut_cells_3d`, `cut_cells_3d_device`, `cut_cells_3d_sections`,
@@ -2290,14 +2291,15 @@ contains
    enddo
    endsubroutine line_fractions
 
-   subroutine cut_cells_3d_device(surface, x, y, z, cut, status, edges, resident)
+   subroutine cut_cells_3d_device(surface, x, y, z, cut, status, edges, resident, alpha_only)
    !< `cut_cells_3d` on the device (OpenACC, issue #100 step 3c), without links, moments or quadrature: the same outputs
    !< bit for bit (cell fractions, centroids, wetted areas, centroids and normals; face fractions, centroids, pieces and
    !< closed flags; pieces and their measures; node_in; with `edges` the cell-edge fractions).
    !<
    !< The host does the grid check, the candidate facets of the cells (`cell_candidates_3d`: binning and the box test),
    !< the cells a mesh boundary edge overlaps (`open_cells_3d`) and the slicing of the grid planes. The device runs:
-   !< 1. the plane sections (`sections_axis_device`, batched per axis; their faces come back and are mapped again);
+   !< 1. the plane sections (`sections_axis_device`, batched per axis; their faces stay mapped for the cell stages and
+   !<    come back with the other outputs, issue #100 step 4);
    !< 2. the node states and edge fractions (`edge_fractions_dev`, one thread per grid line);
    !< 3. the cell totals (`cell_totals_3d`, one thread per cell);
    !< 4. the classification of the cells, the piercing count and the workspace size of every cut cell (one thread per
@@ -2313,12 +2315,22 @@ contains
    !< same operations in the same order, `-gpu=nofma` (#20): the same bits. Built without OpenACC the directives are
    !< comments and the loops run on the host in order (the CI twin test). `status = STATUS_INVALID_INPUT` on bad edges or
    !< a surface without a SAH BVH (`cut` is then reset).
+   !<
+   !< `alpha_only = .true.` (issue #100 step 4, the end poses of the swept geometry) computes alpha alone, bit for bit
+   !< the alpha of `cut_cells_3d`: `cut` holds nx, ny, nz and alpha (np = 0, every other output unallocated; with
+   !< `resident` alpha alone stays mapped). alpha is written once, by `cell_totals_3d`, from the cell's candidates, its
+   !< edges, the fractions of its +x, +y, +z faces and the closed flags of its six faces; the pieces stage only reads it.
+   !< So the mode runs the sections (fractions and closed flags only: `scatter_fractions`), the candidates and that
+   !< kernel (its other outputs in private scratch), on the same inputs: the same bits. It skips the open cells, the face
+   !< centroids and pieces, the node states and edge fractions (`edges` is ignored), the classification, the piercings,
+   !< the pieces and their measures, and the copy of the BVH (the surface still needs one: the same checks).
    type(surface_stl_object), intent(in), target    :: surface    !< Surface.
    real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
    type(cut_cells_3d_t),     intent(inout)         :: cut        !< Cut cells (released from the device and reset first).
    integer(I4P),             intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
    logical,                  intent(in),  optional :: edges      !< Also the fluid fractions of the cell edges.
    logical,                  intent(in),  optional :: resident   !< Leave the outputs on the device (default .false.).
+   logical,                  intent(in),  optional :: alpha_only !< alpha alone (default .false.).
    type(aabb_node_object),       pointer :: node_p(:)    !< Alias of surface%aabb%node.
    type(facet_distance_payload), pointer :: payload_p(:) !< Alias of surface%aabb%payload.
    real(R8P),                    pointer :: tv_p(:,:)    !< Alias of surface%tri_vertices.
@@ -2344,10 +2356,12 @@ contains
    real(R8P)    :: zr1(1), zr3(3, 1), zr6(6, 1), zsec(1, 6) !< Placeholders (count pass, no moments, intervals, rules).
    integer(I4P) :: zi1(1), ze2(2, 1), ze3(3, 1)          !< Placeholders.
    real(R8P)    :: c0(3), c1(3), faces(6), hx, hy, hz     !< Per-cell work.
+   real(R8P)    :: tc(3), tw, twc(3), twn(3)              !< Per-cell scratch of the alpha-only totals.
+   logical      :: tcl                                    !< Per-cell scratch of the alpha-only totals.
    integer(I4P) :: cs(8), tot(3)                          !< Per-cell work, totals.
    type(facet_object), pointer :: fp                      !< Facet.
    integer(I4P) :: nx, ny, nz, ncell, nf, i, j, k, c, f, m, q, nt, npc, nrw, niw, np, npt, nivc, nqc, nwc, qwn1, p0, st
-   logical      :: all_edges, res, same                   !< Options, work.
+   logical      :: all_edges, res, same, ao               !< Options, work.
 
    if (cut%on_device) call cut%exit_device
    call device_grid_check(surface, x, y, z, nx, ny, nz, st)
@@ -2356,6 +2370,8 @@ contains
    if (st /= STATUS_OK) return
    all_edges = .false. ; if (present(edges)) all_edges = edges
    res = .false. ; if (present(resident)) res = resident
+   ao = .false. ; if (present(alpha_only)) ao = alpha_only
+   if (ao) all_edges = .false.
    ncell = nx * ny * nz
    ! host: triangles, candidates, open cells (as `cut_cells_3d`)
    nf = surface%get_facets_number()
@@ -2368,16 +2384,37 @@ contains
       nrm(:, f) = cross3(tri(:, 2, f) - tri(:, 1, f), tri(:, 3, f) - tri(:, 1, f))
    enddo
    call cell_candidates_3d(x, y, z, nf, tri, nrm, cnt, kstart, klst)
-   call open_cells_3d(x, y, z, nf, tri, open_cell)
-   ! 1. the plane sections (host slicing, device cut; the faces come back)
-   call sections_axis_device(surface, 1_I4P, x, y, z, nx + 1_I4P, ny, nz, fx, fxc, fxp, fxl)
-   call sections_axis_device(surface, 2_I4P, y, z, x, nx, ny + 1_I4P, nz, fy, fyc, fyp, fyl)
-   call sections_axis_device(surface, 3_I4P, z, x, y, nx, ny, nz + 1_I4P, fz, fzc, fzp, fzl)
+   if (ao) then
+      allocate(open_cell(1, 1, 1)) ; open_cell = .false. ! not used
+   else
+      call open_cells_3d(x, y, z, nf, tri, open_cell)
+   endif
+   ! 1. the plane sections (host slicing, device cut; the faces stay mapped, alpha-only: fractions and flags only)
+   call sections_axis_device(surface, 1_I4P, x, y, z, nx + 1_I4P, ny, nz, fx, fxc, fxp, fxl, .true., .not. ao)
+   call sections_axis_device(surface, 2_I4P, y, z, x, nx, ny + 1_I4P, nz, fy, fyc, fyp, fyl, .true., .not. ao)
+   call sections_axis_device(surface, 3_I4P, z, x, y, nx, ny, nz + 1_I4P, fz, fzc, fzp, fzl, .true., .not. ao)
    node_p => surface%aabb%node ; payload_p => surface%aabb%payload ; tv_p => surface%tri_vertices
    zr1 = 0._R8P ; zr3 = 0._R8P ; zr6 = 0._R8P ; zsec = 0._R8P ; zi1 = 0_I4P ; ze2 = 0_I4P ; ze3 = 0_I4P
-   !$acc data copyin(node_p, payload_p, tv_p, x, y, z, tri, nrm, cnt, kstart, klst, open_cell, zr1, zr3, zr6, zsec, zi1, &
-   !$acc&            ze2, ze3)
-   !$acc enter data copyin(fx, fy, fz, fxc, fyc, fzc, fxp, fyp, fzp, fxl, fyl, fzl)
+   !$acc data copyin(x, y, z, tri, kstart, klst)
+   if (ao) then ! the cell totals for alpha alone, the other outputs in private scratch
+      allocate(alpha(nx, ny, nz))
+      !$acc enter data create(alpha)
+      !$acc parallel loop gang vector collapse(3) default(present) private(tc, tw, twc, twn, tcl) &
+      !$acc& present(x, y, z, tri, kstart, klst, fx, fy, fz, fxl, fyl, fzl, alpha)
+      do k = 1, nz
+         do j = 1, ny
+            do i = 1, nx
+               c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+               call cell_totals_3d(nf, tri, kstart(c + 1) - kstart(c), klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), &
+                                   z(k), z(k + 1), fx(i + 1, j, k), fy(i, j + 1, k), fz(i, j, k + 1), fxl(i, j, k), &
+                                   fxl(i + 1, j, k), fyl(i, j, k), fyl(i, j + 1, k), fzl(i, j, k), fzl(i, j, k + 1), &
+                                   alpha(i, j, k), tc, tw, twc, twn, tcl)
+            enddo
+         enddo
+      enddo
+   endif
+   !$acc data copyin(node_p, payload_p, tv_p, nrm, cnt, open_cell, zr1, zr3, zr6, zsec, zi1, ze2, ze3) if(.not. ao)
+   if (.not. ao) then
    ! 2. node states and edge fractions
    allocate(nd(nx + 1, ny + 1, nz + 1))
    if (all_edges) then
@@ -2516,8 +2553,21 @@ contains
    enddo
    !$acc end data
    !$acc end data
-   !$acc exit data delete(fx, fy, fz, fxc, fyc, fzc, fxp, fyp, fzp, fxl, fyl, fzl) if(.not. res)
-   if (.not. res) then ! copy back the outputs (the faces came back from the sections)
+   endif ! .not. ao
+   !$acc end data
+   !$acc end data
+   if (ao) then ! alpha alone: release the faces, copy alpha back unless resident
+      !$acc exit data delete(fx, fy, fz, fxl, fyl, fzl)
+      if (.not. res) then
+         !$acc exit data copyout(alpha)
+      endif
+      cut%nx = nx ; cut%ny = ny ; cut%nz = nz ; cut%np = 0_I4P ; cut%moments_order = 0_I4P
+      call move_alloc(alpha, cut%alpha)
+      if (res) call mark_resident(cut)
+      return
+   endif
+   if (.not. res) then ! copy back the outputs (the faces with them)
+      !$acc exit data copyout(fx, fy, fz, fxc, fyc, fzc, fxp, fyp, fzp, fxl, fyl, fzl)
       !$acc exit data copyout(nd, alpha, cen, wa, wc, wn, cls, pcs, fpc, pcell, pvol, pcen, pwa, pwc, pwn, pfc)
       if (all_edges) then
          !$acc exit data copyout(ex, ey, ez)
@@ -2527,7 +2577,6 @@ contains
    elseif (.not. all_edges) then
       !$acc exit data delete(ex, ey, ez)
    endif
-   !$acc end data
    cut%nx = nx ; cut%ny = ny ; cut%nz = nz ; cut%np = npt ; cut%moments_order = 0_I4P
    call move_alloc(fx, cut%face_x) ; call move_alloc(fy, cut%face_y) ; call move_alloc(fz, cut%face_z)
    call move_alloc(fxc, cut%face_x_centroid) ; call move_alloc(fyc, cut%face_y_centroid)
@@ -2682,6 +2731,13 @@ contains
    cut%on_device = .true. ; cut%device_key = host_key(cut)
    endsubroutine mark_resident
 
+   logical function is_alpha_only(self)
+   !< An alpha-only cut (`cut_cells_3d_device(..., alpha_only=.true.)`, issue #100 step 4): alpha without faces.
+   type(cut_cells_3d_t), intent(in) :: self !< Cut cells.
+
+   is_alpha_only = allocated(self%alpha) .and. .not. allocated(self%face_x)
+   endfunction is_alpha_only
+
    logical function is_mapped(self)
    !< The flag is set and the arrays are the ones mapped (not a copy of a resident cut).
    type(cut_cells_3d_t), intent(in) :: self !< Cut cells.
@@ -2692,13 +2748,18 @@ contains
 
    subroutine cut3_enter_device(self)
    !< Map the outputs of decision 2 (see `cut_cells_3d_t`) of a host result to the device (copyin; issue #100 step 3c).
-   !< Member arrays only, never `self` (#20); the edge fractions if allocated. No-op if already mapped or without
-   !< outputs (a status error, a default cut, the faces of `cut_cells_3d_sections` only). A copy of a resident cut is
-   !< mapped as a new cut.
+   !< Member arrays only, never `self` (#20); the edge fractions if allocated; alpha alone of an alpha-only cut. No-op if
+   !< already mapped or without outputs (a status error, a default cut, the faces of `cut_cells_3d_sections` only). A copy
+   !< of a resident cut is mapped as a new cut.
    class(cut_cells_3d_t), intent(inout) :: self !< Cut cells.
 
    if (is_mapped(self)) return
    self%on_device = .false. ; self%device_key = 0
+   if (is_alpha_only(self)) then
+      !$acc enter data copyin(self%alpha)
+      call mark_resident(self)
+      return
+   endif
    if (.not. (allocated(self%alpha) .and. allocated(self%piece_volume) .and. allocated(self%node_in))) return
    !$acc enter data copyin(self%face_x, self%face_y, self%face_z, self%face_x_centroid, self%face_y_centroid, &
    !$acc&                  self%face_z_centroid, self%face_x_pieces, self%face_y_pieces, self%face_z_pieces, &
@@ -2724,6 +2785,10 @@ contains
       self%on_device = .false. ; self%device_key = 0
       return
    endif
+   if (is_alpha_only(self)) then
+      !$acc update host(self%alpha)
+      return
+   endif
    !$acc update host(self%face_x, self%face_y, self%face_z, self%face_x_centroid, self%face_y_centroid, &
    !$acc&            self%face_z_centroid, self%face_x_pieces, self%face_y_pieces, self%face_z_pieces, &
    !$acc&            self%face_x_closed, self%face_y_closed, self%face_z_closed, self%alpha, self%centroid, &
@@ -2741,7 +2806,9 @@ contains
    class(cut_cells_3d_t), intent(inout) :: self !< Cut cells.
 
    if (.not. self%on_device) return
-   if (is_mapped(self)) then
+   if (is_mapped(self) .and. is_alpha_only(self)) then
+      !$acc exit data delete(self%alpha)
+   elseif (is_mapped(self)) then
       !$acc exit data delete(self%face_x, self%face_y, self%face_z, self%face_x_centroid, self%face_y_centroid, &
       !$acc&                 self%face_z_centroid, self%face_x_pieces, self%face_y_pieces, self%face_z_pieces, &
       !$acc&                 self%face_x_closed, self%face_y_closed, self%face_z_closed, self%alpha, self%centroid, &
@@ -3360,26 +3427,31 @@ contains
    type(cut_cells_3d_t),     intent(inout) :: cut        !< Cut cells (nx, ny, nz set).
 
    call sections_axis_device(surface, 1_I4P, x, y, z, cut%nx + 1_I4P, cut%ny, cut%nz, cut%face_x, cut%face_x_centroid, &
-                             cut%face_x_pieces, cut%face_x_closed)
+                             cut%face_x_pieces, cut%face_x_closed, .false., .true.)
    call sections_axis_device(surface, 2_I4P, y, z, x, cut%nx, cut%ny + 1_I4P, cut%nz, cut%face_y, cut%face_y_centroid, &
-                             cut%face_y_pieces, cut%face_y_closed)
+                             cut%face_y_pieces, cut%face_y_closed, .false., .true.)
    call sections_axis_device(surface, 3_I4P, z, x, y, cut%nx, cut%ny, cut%nz + 1_I4P, cut%face_z, cut%face_z_centroid, &
-                             cut%face_z_pieces, cut%face_z_closed)
+                             cut%face_z_pieces, cut%face_z_closed, .false., .true.)
    endsubroutine sections_device
 
-   subroutine sections_axis_device(surface, axis, lv, ga, gb, n1, n2, n3, face, fcen, fpcs, fcls)
+   subroutine sections_axis_device(surface, axis, lv, ga, gb, n1, n2, n3, face, fcen, fpcs, fcls, keep, full)
    !< The faces of the planes x(axis) = lv(b) (in-plane grid ga, gb in the cyclic order of `slice_surface`) on the
    !< device: the sections as the blocks of `cut_cells_device_many` (resident), scattered by `scatter_sections` into
-   !< the face arrays [n1, n2, n3] (the 3-D shape of the axis), copied back.
+   !< the face arrays [n1, n2, n3] (the 3-D shape of the axis). With `keep` (issue #100 step 4) the face arrays stay
+   !< mapped (unstructured data on the locals, then `move_alloc`: the host addresses the present table is keyed on) and
+   !< their host copies are not written: the caller copies them out or deletes them; else they are copied back. Without
+   !< `full` only the fractions and closed flags are made (`scatter_fractions`; fcen and fpcs come back unallocated).
    type(surface_stl_object),  intent(in)  :: surface      !< Surface.
    integer(I4P),              intent(in)  :: axis         !< Plane normal axis.
    real(R8P),                 intent(in)  :: lv(:)        !< Plane levels.
    real(R8P),                 intent(in)  :: ga(:), gb(:) !< In-plane cell edges (u, v).
    integer(I4P),              intent(in)  :: n1, n2, n3   !< Face array shape.
    real(R8P),    allocatable, intent(out) :: face(:,:,:)  !< Fluid fractions.
-   real(R8P),    allocatable, intent(out) :: fcen(:,:,:,:) !< Fluid centroids [3, n1, n2, n3].
-   integer(I4P), allocatable, intent(out) :: fpcs(:,:,:)  !< Fluid pieces.
+   real(R8P),    allocatable, intent(out) :: fcen(:,:,:,:) !< Fluid centroids [3, n1, n2, n3] (with `full`).
+   integer(I4P), allocatable, intent(out) :: fpcs(:,:,:)  !< Fluid pieces (with `full`).
    logical,      allocatable, intent(out) :: fcls(:,:,:)  !< Closed flags.
+   logical,                   intent(in)  :: keep         !< Leave the face arrays mapped (host copies not written).
+   logical,                   intent(in)  :: full         !< Also the centroids and pieces.
    type(curve_object),   allocatable :: secs(:)           !< Sections.
    type(cut_cells_2d_blocks_t)       :: cb                !< Their cut cells.
    real(R8P),    allocatable :: fa(:,:,:), fc(:,:,:,:)    !< Face arrays (built here).
@@ -3391,13 +3463,29 @@ contains
    call slice_surface_planes(surface=surface, normal_axis=axis, levels=lv, curves=secs, on_plane_low=.true.) ! one sweep
    call cut_cells_device_many(secs, ga, gb, cb, st, intervals=.false., pieces=.false., resident=.true.)
    deallocate(secs)
-   allocate(fa(n1, n2, n3), fc(3, n1, n2, n3), fp(n1, n2, n3), fl(n1, n2, n3))
-   !$acc data copyout(fa, fc, fp, fl) copyin(lv)
-   call scatter_sections(axis, cb%nx, cb%ny, nb, lv, cb%alpha, cb%centroid, cb%pieces, cb%closed, n1, n2, n3, fa, fc, &
-                         fp, fl)
-   !$acc end data
+   allocate(fa(n1, n2, n3), fl(n1, n2, n3))
+   !$acc enter data create(fa, fl)
+   if (full) then
+      allocate(fc(3, n1, n2, n3), fp(n1, n2, n3))
+      !$acc enter data create(fc, fp)
+      !$acc data copyin(lv)
+      call scatter_sections(axis, cb%nx, cb%ny, nb, lv, cb%alpha, cb%centroid, cb%pieces, cb%closed, n1, n2, n3, fa, fc, &
+                            fp, fl)
+      !$acc end data
+      if (.not. keep) then
+         !$acc exit data copyout(fc, fp)
+      endif
+   else
+      call scatter_fractions(axis, cb%nx, cb%ny, nb, cb%alpha, cb%closed, n1, n2, n3, fa, fl)
+   endif
+   if (.not. keep) then
+      !$acc exit data copyout(fa, fl)
+   endif
    call cb%exit_device
-   call move_alloc(fa, face) ; call move_alloc(fc, fcen) ; call move_alloc(fp, fpcs) ; call move_alloc(fl, fcls)
+   call move_alloc(fa, face) ; call move_alloc(fl, fcls)
+   if (full) then
+      call move_alloc(fc, fcen) ; call move_alloc(fp, fpcs)
+   endif
    endsubroutine sections_axis_device
 
    subroutine scatter_sections(axis, nu, nv, nb, lv, alpha, cen, pcs, cls, n1, n2, n3, fa, fc, fp, fl)
@@ -3450,4 +3538,46 @@ contains
       enddo
    endselect
    endsubroutine scatter_sections
+
+   subroutine scatter_fractions(axis, nu, nv, nb, alpha, cls, n1, n2, n3, fa, fl)
+   !< Device kernel (issue #100 step 4): the fractions and closed flags of `scatter_sections` alone (the alpha-only mode of
+   !< `cut_cells_3d_device`), the same copies. Every array must be present on the device.
+   integer(I4P), intent(in)  :: axis, nu, nv, nb       !< Axis, section cells, planes.
+   real(R8P),    intent(in)  :: alpha(nu, nv, nb)      !< Section fluid fractions.
+   logical,      intent(in)  :: cls(nu, nv, nb)        !< Section closed flags.
+   integer(I4P), intent(in)  :: n1, n2, n3             !< Face array shape.
+   real(R8P),    intent(out) :: fa(n1, n2, n3)         !< Face fractions.
+   logical,      intent(out) :: fl(n1, n2, n3)         !< Face closed flags.
+   integer(I4P)              :: b, iu, iv              !< Counters.
+
+   select case (axis)
+   case (1)
+      !$acc parallel loop gang vector collapse(3) default(present) present(alpha, cls, fa, fl)
+      do iv = 1_I4P, nv
+         do iu = 1_I4P, nu
+            do b = 1_I4P, nb
+               fa(b, iu, iv) = alpha(iu, iv, b) ; fl(b, iu, iv) = cls(iu, iv, b)
+            enddo
+         enddo
+      enddo
+   case (2)
+      !$acc parallel loop gang vector collapse(3) default(present) present(alpha, cls, fa, fl)
+      do iu = 1_I4P, nu
+         do b = 1_I4P, nb
+            do iv = 1_I4P, nv
+               fa(iv, b, iu) = alpha(iu, iv, b) ; fl(iv, b, iu) = cls(iu, iv, b)
+            enddo
+         enddo
+      enddo
+   case default
+      !$acc parallel loop gang vector collapse(3) default(present) present(alpha, cls, fa, fl)
+      do b = 1_I4P, nb
+         do iv = 1_I4P, nv
+            do iu = 1_I4P, nu
+               fa(iu, iv, b) = alpha(iu, iv, b) ; fl(iu, iv, b) = cls(iu, iv, b)
+            enddo
+         enddo
+      enddo
+   endselect
+   endsubroutine scatter_fractions
 endmodule fossil_cut_cells_3d

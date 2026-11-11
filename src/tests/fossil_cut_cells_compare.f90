@@ -11,7 +11,8 @@ module fossil_cut_cells_compare
 !< the host-only outputs (moments, boundaries, quadrature) must be unallocated in both. `cut_cells_twin_mismatches(c,
 !< x, y)` runs `c%cut_cells` and `c%cut_cells_device` on the block x, y, with and without the intervals, and sums
 !< them. Used by `fossil_test_cut_cells_device_twin` (CI, host) and by the curve bench (device vs serial).
-!< `cut_cells_3d_mismatches(a, b)` (issue #100 step 3c) does the same for every output of `cut_cells_3d_device`.
+!< `cut_cells_3d_mismatches(a, b)` (issue #100 step 3c) does the same for every output of `cut_cells_3d_device`;
+!< `cut_cells_3d_alpha_mismatches(a, b)` (step 4) for its alpha-only mode.
 use fossil,              only : curve_object, cut_cells_2d_t, cut_cells_3d_t
 use fossil_curve_object, only : cut_cells_2d_blocks_t, cut_cells_device_many
 use penf,                only : I4P, I8P, R8P
@@ -19,7 +20,7 @@ use penf,                only : I4P, I8P, R8P
 implicit none
 private
 public :: cut_cells_2d_mismatches, cut_cells_twin_mismatches, cut_cells_many_mismatches, cut_cells_3d_face_mismatches
-public :: cut_cells_3d_mismatches
+public :: cut_cells_3d_mismatches, cut_cells_3d_alpha_mismatches
 
 contains
    function cut_cells_twin_mismatches(c, x, y, status) result(n)
@@ -252,6 +253,25 @@ contains
    if (allocated(a%quad_start) .or. allocated(b%quad_start)) n = n + 1_I4P
    if (allocated(a%wall_quad_start) .or. allocated(b%wall_quad_start)) n = n + 1_I4P
    endfunction cut_cells_3d_mismatches
+
+   function cut_cells_3d_alpha_mismatches(a, b) result(n)
+   !< Mismatches of an alpha-only cut b (`cut_cells_3d_device(..., alpha_only=.true.)`, issue #100 step 4) against a
+   !< full cut a: nx, ny, nz, alpha by its bits; b must have np = 0 and every other output unallocated (1 each).
+   type(cut_cells_3d_t), intent(in) :: a, b !< Full result, alpha-only result.
+   integer(I4P)                     :: n    !< Mismatches.
+
+   if (a%nx /= b%nx .or. a%ny /= b%ny .or. a%nz /= b%nz) then
+      n = 1_I4P ; return
+   endif
+   n = face_r(a%alpha, b%alpha)
+   if (b%np /= 0_I4P .or. b%moments_order /= 0_I4P) n = n + 1_I4P
+   if (allocated(b%face_x) .or. allocated(b%face_y) .or. allocated(b%face_z)) n = n + 1_I4P
+   if (allocated(b%face_x_centroid) .or. allocated(b%face_x_pieces) .or. allocated(b%face_x_closed)) n = n + 1_I4P
+   if (allocated(b%centroid) .or. allocated(b%wet_area) .or. allocated(b%wet_centroid)) n = n + 1_I4P
+   if (allocated(b%wet_normal) .or. allocated(b%closed) .or. allocated(b%pieces)) n = n + 1_I4P
+   if (allocated(b%first_piece) .or. allocated(b%node_in) .or. allocated(b%edge_x)) n = n + 1_I4P
+   if (allocated(b%piece_cell) .or. allocated(b%piece_volume) .or. allocated(b%piece_face)) n = n + 1_I4P
+   endfunction cut_cells_3d_alpha_mismatches
 
    function cut_cells_3d_face_mismatches(a, b) result(n)
    !< Differing elements of the face outputs of two 3-D cuts (issue #100 step 3b): nx, ny, nz, face_x/_y/_z, their

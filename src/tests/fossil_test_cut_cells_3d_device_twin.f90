@@ -14,9 +14,13 @@ program fossil_test_cut_cells_3d_device_twin
 !<    and fill passes of the pieces on workspace slices, prefix sums) against `cut_cells_3d` without links, every output
 !<    bitwise (`cut_cells_3d_mismatches`), with and without the edges, copied back and resident (then `update_host`),
 !<    the resident cut overwritten by the next call (the writers release it), on the same bodies.
+!< 3. The alpha-only mode (issue #100 step 4, the end poses of the swept geometry): `cut_cells_3d_device(...,
+!<    alpha_only=.true.)` against the alpha of `cut_cells_3d`, bitwise, every other output unallocated
+!<    (`cut_cells_3d_alpha_mismatches`), copied back and resident (then `update_host`), with `edges` (ignored); then a
+!<    full cut written over the resident alpha-only one.
 use fossil,                   only : surface_stl_object, cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, &
                                      pose_from_axis_angle, facet_object
-use fossil_cut_cells_compare, only : cut_cells_3d_mismatches
+use fossil_cut_cells_compare, only : cut_cells_3d_mismatches, cut_cells_3d_alpha_mismatches
 use fossil_cut_cells_3d,      only : cut_cells_3d_nodes_device
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, to_surface
 use penf,                     only : I4P, I8P, R8P
@@ -103,6 +107,16 @@ contains
    call cd%exit_device
    call cut_cells_3d_device(s, x, y, z, cd, status=st2)
    m = m + abs(st - st2) + cut_cells_3d_mismatches(ce, cd)
+   ! alpha alone, copied back over a full cut, then resident with the edges (ignored) and released
+   call cut_cells_3d_device(s, x, y, z, cd, status=st2, alpha_only=.true.)
+   m = m + abs(st - st2) + cut_cells_3d_alpha_mismatches(ce, cd)
+   call cut_cells_3d_device(s, x, y, z, cd, status=st2, edges=.true., resident=.true., alpha_only=.true.)
+   if (.not. cd%on_device) m = m + 1_I4P
+   call cd%update_host
+   m = m + abs(st - st2) + cut_cells_3d_alpha_mismatches(ce, cd)
+   call cut_cells_3d_device(s, x, y, z, cd, status=st2) ! a full cut over a resident alpha-only one (released first)
+   m = m + abs(st - st2) + cut_cells_3d_mismatches(ce, cd)
+   if (cd%on_device) m = m + 1_I4P
    nm = count(ch%pieces > 1) ; nu = count(ch%pieces < 0)
    total = total + m ; ok = ok .and. m == 0_I4P .and. st == 0_I4P
    print '(A,I0,A,I0,A,I0,A,I0,A,I0)', label//': nodes ', size(nd), ', cells ', size(ch%alpha), ' (', nm, &
