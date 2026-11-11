@@ -12,9 +12,11 @@ module fossil_cut_cells_compare
 !< x, y)` runs `c%cut_cells` and `c%cut_cells_device` on the block x, y, with and without the intervals, and sums
 !< them. Used by `fossil_test_cut_cells_device_twin` (CI, host) and by the curve bench (device vs serial).
 !< `cut_cells_3d_mismatches(a, b)` (issue #100 step 3c) does the same for every output of `cut_cells_3d_device`;
-!< `cut_cells_3d_alpha_mismatches(a, b)` (step 4) for its alpha-only mode.
+!< `cut_cells_3d_alpha_mismatches(a, b)` (step 4) for its alpha-only mode. `link_inputs_mismatches` (step 5) compares the
+!< link inputs of `cut_cells_3d_link_inputs_device` against those of the host twin `cut_cells_3d_link_inputs`.
 use fossil,              only : curve_object, cut_cells_2d_t, cut_cells_3d_t
 use fossil_curve_object, only : cut_cells_2d_blocks_t, cut_cells_device_many
+use fossil_cut_cells_3d, only : cut_link_inputs_3d_t
 use penf,                only : I4P, I8P, R8P
 
 implicit none
@@ -22,6 +24,7 @@ private
 public :: cut_cells_2d_mismatches, cut_cells_twin_mismatches, cut_cells_many_mismatches, cut_cells_3d_face_mismatches
 public :: cut_cells_many_grids_mismatches
 public :: cut_cells_3d_mismatches, cut_cells_3d_alpha_mismatches
+public :: link_inputs_mismatches
 
 contains
    function cut_cells_twin_mismatches(c, x, y, status) result(n)
@@ -296,6 +299,70 @@ contains
    if (allocated(a%quad_start) .or. allocated(b%quad_start)) n = n + 1_I4P
    if (allocated(a%wall_quad_start) .or. allocated(b%wall_quad_start)) n = n + 1_I4P
    endfunction cut_cells_3d_mismatches
+
+   function link_inputs_mismatches(ch, px, py, pz, piv_piece, piv_edge, piv_lo, piv_hi, li) result(n)
+   !< Mismatches of the link inputs li (`cut_cells_3d_link_inputs_device`, issue #100 step 5, copied back or after
+   !< `update_host`) against the host twin's (`cut_cells_3d_link_inputs`: its cut ch, sections px, py, pz, intervals
+   !< piv_*): the intervals bitwise (niv, piece, edge, range), cell_iv_start against the host's intervals counted per
+   !< cell of their piece (ch%piece_cell: the intervals come cell by cell), every block of the three sections against
+   !< the host section (`block_as_cut`, `cut_cells_2d_mismatches`: every output, the intervals included).
+   type(cut_cells_3d_t),       intent(in) :: ch                  !< Host cut.
+   type(cut_cells_2d_t),       intent(in) :: px(:), py(:), pz(:) !< Host sections.
+   integer(I4P), allocatable,  intent(in) :: piv_piece(:), piv_edge(:) !< Host intervals: piece, edge.
+   real(R8P),    allocatable,  intent(in) :: piv_lo(:), piv_hi(:)      !< Host intervals: range.
+   type(cut_link_inputs_3d_t), intent(in) :: li                  !< Device link inputs (host copies valid).
+   integer(I4P)                           :: n                   !< Mismatches.
+   integer(I4P), allocatable :: cis(:)                           !< Host first interval of each cell.
+   type(cut_cells_2d_t)      :: d                                !< A block of the device sections.
+   integer(I4P)              :: w, c, b, ncell                   !< Work.
+
+   n = 0_I4P
+   if (li%niv /= size(piv_piece, kind=I4P)) n = n + 1_I4P
+   n = n + int_mismatches(allocated(piv_piece), allocated(li%piv_piece), shape_of_i1(piv_piece), shape_of_i1(li%piv_piece), &
+                          piv_piece, flat_i1(li%piv_piece))
+   n = n + int_mismatches(allocated(piv_edge), allocated(li%piv_edge), shape_of_i1(piv_edge), shape_of_i1(li%piv_edge), piv_edge, &
+                          flat_i1(li%piv_edge))
+   n = n + real_mismatches(allocated(piv_lo), allocated(li%piv_lo), shape_of1(piv_lo), shape_of1(li%piv_lo), piv_lo, &
+                           flat_r1(li%piv_lo))
+   n = n + real_mismatches(allocated(piv_hi), allocated(li%piv_hi), shape_of1(piv_hi), shape_of1(li%piv_hi), piv_hi, &
+                           flat_r1(li%piv_hi))
+   ncell = ch%nx * ch%ny * ch%nz
+   allocate(cis(ncell + 1)) ; cis = 0_I4P
+   do w = 1, size(piv_piece)
+      c = piece_cell_of(ch, piv_piece(w))
+      cis(c + 1) = cis(c + 1) + 1_I4P
+      if (w > 1) then ! the host intervals come cell by cell (else cell_iv_start means nothing)
+         if (c < piece_cell_of(ch, piv_piece(w - 1))) n = n + 1_I4P
+      endif
+   enddo
+   cis(1) = 1_I4P
+   do c = 1, ncell
+      cis(c + 1) = cis(c + 1) + cis(c)
+   enddo
+   n = n + int_mismatches(.true., allocated(li%cell_iv_start), shape_of_i1(cis), shape_of_i1(li%cell_iv_start), cis, &
+                          flat_i1(li%cell_iv_start))
+   if (li%sec_x%nb /= size(px, kind=I4P) .or. li%sec_y%nb /= size(py, kind=I4P) .or. li%sec_z%nb /= size(pz, kind=I4P) &
+       .or. .not. (li%sec_x%with_pieces .and. li%sec_y%with_pieces .and. li%sec_z%with_pieces)) then
+      n = n + 1_I4P ; return
+   endif
+   do b = 1, size(px)
+      call block_as_cut(li%sec_x, b, d) ; n = n + cut_cells_2d_mismatches(px(b), d)
+   enddo
+   do b = 1, size(py)
+      call block_as_cut(li%sec_y, b, d) ; n = n + cut_cells_2d_mismatches(py(b), d)
+   enddo
+   do b = 1, size(pz)
+      call block_as_cut(li%sec_z, b, d) ; n = n + cut_cells_2d_mismatches(pz(b), d)
+   enddo
+   endfunction link_inputs_mismatches
+
+   pure integer(I4P) function piece_cell_of(c3, p) result(c)
+   !< Linear index of the cell of piece p.
+   type(cut_cells_3d_t), intent(in) :: c3 !< Cut.
+   integer(I4P),         intent(in) :: p  !< Piece.
+
+   c = c3%piece_cell(1, p) + c3%nx * ((c3%piece_cell(2, p) - 1_I4P) + c3%ny * (c3%piece_cell(3, p) - 1_I4P))
+   endfunction piece_cell_of
 
    function cut_cells_3d_alpha_mismatches(a, b) result(n)
    !< Mismatches of an alpha-only cut b (`cut_cells_3d_device(..., alpha_only=.true.)`, issue #100 step 4) against a

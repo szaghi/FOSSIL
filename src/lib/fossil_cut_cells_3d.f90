@@ -95,6 +95,8 @@ private
 public :: cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_cells_3d_sections, cut_cells_3d_reset
 ! the device stages (issue #100 step 3c), public for the benches and the twin test (not re-exported by `fossil`)
 public :: cut_cells_3d_nodes_device
+! the inputs of the piece links (issue #100 step 5), for the link stage and the benches (not re-exported by `fossil`)
+public :: cut_link_inputs_3d_t, cut_cells_3d_link_inputs_device, cut_cells_3d_link_inputs, link_inputs_reset
 
 integer(I4P), parameter :: MONO2_MAX = 15_I4P !< mono_count(2, MOMENTS_MAX): moments per face, at most.
 integer(I4P), parameter :: MONO3_MAX = 35_I4P !< mono_count(3, MOMENTS_MAX): moments per piece, at most.
@@ -175,6 +177,33 @@ type :: cut_cells_3d_t
       procedure, pass(self) :: update_host  => cut3_update_host  !< Copy the mapped outputs back to the host.
       procedure, pass(self) :: exit_device  => cut3_exit_device  !< Release the device copies.
 endtype cut_cells_3d_t
+
+type :: cut_link_inputs_3d_t
+   !< The inputs of the piece links of a 3-D cut (issue #100 step 5), made on the device by
+   !< `cut_cells_3d_link_inputs_device` with the cut, bit for bit what `cut_cells_3d(..., links=)` hands to its links
+   !< (`cut_cells_3d_link_inputs` gives them on the host):
+   !< - the fluid edge intervals of the pieces of the multi-piece cells (`cut_pieces_3d`'s piv_*): cells in order, each
+   !<   cell's intervals in the order of its kernel; interval w belongs to piece piv_piece(w) (a global piece index),
+   !<   lies on cell edge piv_edge(w) (1-12, `edge_index`) over [piv_lo(w), piv_hi(w)]. The intervals of cell c (linear
+   !<   index i + nx ((j - 1) + ny (k - 1))) are cell_iv_start(c) .. cell_iv_start(c + 1) - 1 (one-piece cells: none);
+   !< - the plane sections with their pieces and fluid edge intervals, as the blocks of `cut_cells_device_many`: sec_x
+   !<   holds the nx + 1 planes x = x_i (block i, cut on (y, z)), sec_y the planes y = y_j (on (z, x)), sec_z the planes
+   !<   z = z_k (on (x, y)); block b is `curve%cut_cells(..., intervals=.true.)` of the section, bit for bit (the
+   !<   `px`, `py`, `pz` of `cut_cells_3d`; layout and numbering in `cut_cells_2d_blocks_t`).
+   !< Resident (`on_device`): the interval arrays and cell_iv_start are mapped and the three sections are resident
+   !< (`cut_cells_2d_blocks_t`); the host copies are garbage until `update_host`; `exit_device` releases them all (before
+   !< the result goes out of scope). Do not copy a resident result. Every writer releases it first.
+   integer(I4P)                :: niv = 0_I4P          !< Intervals.
+   integer(I4P), allocatable   :: cell_iv_start(:)     !< First interval of each cell [nx ny nz + 1].
+   integer(I4P), allocatable   :: piv_piece(:)         !< Piece of each interval [niv].
+   integer(I4P), allocatable   :: piv_edge(:)          !< Cell edge of each interval (1-12) [niv].
+   real(R8P),    allocatable   :: piv_lo(:), piv_hi(:) !< Range of each interval along its edge [niv].
+   type(cut_cells_2d_blocks_t) :: sec_x, sec_y, sec_z  !< Plane sections x = x_i, y = y_j, z = z_k.
+   logical                     :: on_device = .false.  !< The outputs are mapped on the device.
+   contains
+      procedure, pass(self) :: update_host => link_inputs_update_host !< Copy the mapped outputs back to the host.
+      procedure, pass(self) :: exit_device => link_inputs_exit_device !< Release the device copies.
+endtype cut_link_inputs_3d_t
 
 contains
    subroutine cut_cells_3d(surface, x, y, z, cut, status, links, edges, moments_order, quadrature, device_sections)
@@ -1033,11 +1062,10 @@ contains
       endif
    endif
    ! counts
-   if (want_iv .and. npieces > 1_I4P) then
-      do a = 1, niv
-         if (pid(uf_find(na, parent, iva(a))) >= 1_I4P) nivc = nivc + 1_I4P
-      enddo
-   endif
+   ! the intervals of the links in a callee (issue #100 step 5): niv was bumped by `walk_edge` and `faces_islands`
+   ! (intent(inout)), and nvfortran 26.9 -O2 device code read a stale niv in this routine's own loops (#101 item 6)
+   if (want_iv .and. npieces > 1_I4P) call piece_link_ivs(.false., na, parent, ni, niv, ive_, iva, ivl_, ivh_, pid, p0, iv0, &
+                                                          nivo, ivp, ive, ivl, ivh, nivc)
    if (qd) then
       nqc = qst(nn + 1) - 1_I4P ; nwc = wst(nn + 1) - 1_I4P
       if (nn >= 1_I4P) qwn1 = qwn(1)
@@ -1050,15 +1078,8 @@ contains
          pcen_(:, p0 + a) = pm(2:4, a) ; pwa(p0 + a) = pm(5, a) ; pwc(:, p0 + a) = pm(6:8, a)
          pwn(:, p0 + a) = pm(9:11, a) ; pfc(:, p0 + a) = pm(12:17, a)
       enddo
-      if (want_iv) then
-         w = iv0
-         do a = 1, niv
-            cpp = pid(uf_find(na, parent, iva(a)))
-            if (cpp < 1_I4P) cycle
-            w = w + 1_I4P
-            ivp(w) = p0 + cpp ; ive(w) = ive_(a) ; ivl(w) = ivl_(a) ; ivh(w) = ivh_(a)
-         enddo
-      endif
+      if (want_iv) call piece_link_ivs(.true., na, parent, ni, niv, ive_, iva, ivl_, ivh_, pid, p0, iv0, nivo, ivp, ive, &
+                                       ivl, ivh, cpp)
    endif
    if (nm3 > 0_I4P) then
       do q = 1, natom
@@ -1076,6 +1097,35 @@ contains
    if (qd) call piece_rules(npieces > 1_I4P, nt, c0, c1, pv, pn, na, parent, tgt, pid, nn, ns, nfs, fsg, fsf, fsr, qst, &
                             wst, fq, p0, q0, nqo, qpt, qwt, nqcd, qcnt, wcnt)
    endsubroutine cell_pieces_core
+
+   subroutine piece_link_ivs(fill, na, parent, ni, niv, ive_, iva, ivl_, ivh_, pid, p0, iv0, nivo, ivp, ive, ivl, ivh, nivc)
+   !< The fluid edge intervals of a multi-piece cell that belong to a piece (the links' intervals, issue #70): count them
+   !< (nivc), with fill also write them at iv0 + 1.. (piece p0 + its id, cell edge, range), in interval order. Its own
+   !< routine since issue #100 step 5: niv reaches it as an argument (the caller's loops read a stale niv in nvfortran
+   !< 26.9 -O2 device code, #101 item 6).
+   !$acc routine seq
+   logical,      intent(in)    :: fill                 !< Write the intervals.
+   integer(I4P), intent(in)    :: na, ni, niv          !< Atoms, interval capacity, intervals.
+   integer(I4P), intent(in)    :: parent(na)           !< Union-find.
+   integer(I4P), intent(in)    :: ive_(ni), iva(ni)    !< Intervals: edge, atom.
+   real(R8P),    intent(in)    :: ivl_(ni), ivh_(ni)   !< Intervals: range.
+   integer(I4P), intent(in)    :: pid(na)              !< Piece ids of the roots.
+   integer(I4P), intent(in)    :: p0, iv0, nivo        !< Pieces, intervals before the cell's; output size.
+   integer(I4P), intent(inout) :: ivp(nivo), ive(nivo) !< Intervals: piece, cell edge.
+   real(R8P),    intent(inout) :: ivl(nivo), ivh(nivo) !< Intervals: range.
+   integer(I4P), intent(out)   :: nivc                 !< Intervals of the pieces.
+   integer(I4P)                :: a, cp, w             !< Work.
+
+   nivc = 0_I4P ; w = iv0
+   do a = 1, niv
+      cp = pid(uf_find(na, parent, iva(a)))
+      if (cp < 1_I4P) cycle
+      nivc = nivc + 1_I4P
+      if (.not. fill) cycle
+      w = w + 1_I4P
+      ivp(w) = p0 + cp ; ive(w) = ive_(a) ; ivl(w) = ivl_(a) ; ivh(w) = ivh_(a)
+   enddo
+   endsubroutine piece_link_ivs
 
    pure integer(I4P) function uf_find(na, parent, i) result(r)
    !< Root of atom i (the least atom of its set; no path compression: the sets are small).
@@ -2470,6 +2520,29 @@ contains
    logical,                  intent(in),  optional :: edges      !< Also the fluid fractions of the cell edges.
    logical,                  intent(in),  optional :: resident   !< Leave the outputs on the device (default .false.).
    logical,                  intent(in),  optional :: alpha_only !< alpha alone (default .false.).
+
+   call cut3_device_core(surface, x, y, z, cut, status, edges, resident, alpha_only)
+   endsubroutine cut_cells_3d_device
+
+   subroutine cut3_device_core(surface, x, y, z, cut, status, edges, resident, alpha_only, li)
+   !< The work of `cut_cells_3d_device` (see there). With li (issue #100 step 5; not with alpha_only) also the inputs of
+   !< the piece links (`cut_link_inputs_3d_t`), on the device:
+   !< - the sections are the blocks of `cut_cells_device_many` with pieces and intervals (`sections_axis_device` with
+   !<   `sec`), kept resident in li%sec_x/_y/_z instead of being released after the scatter (the face arrays come from
+   !<   their cell arrays, which do not depend on the pieces: the same faces);
+   !< - the count pass of the pieces records the intervals (want_iv: nivc per multi-piece cell, as `cut_pieces_3d`), the
+   !<   prefix sums of the pieces scan them too (`pieces_scan_dev`), and the fill pass writes them at the cell offsets:
+   !<   `cut_pieces_3d`'s piv_* (the same kernel, the same calls); cell_iv_start from the offsets.
+   !< With `resident` li stays mapped, else it is copied back. Without li nothing changes but the extra (zero) column
+   !< of the pieces scan.
+   type(surface_stl_object),   intent(in), target    :: surface    !< Surface.
+   real(R8P),                  intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
+   type(cut_cells_3d_t),       intent(inout)         :: cut        !< Cut cells (released from the device and reset first).
+   integer(I4P),               intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,                    intent(in),  optional :: edges      !< Also the fluid fractions of the cell edges.
+   logical,                    intent(in),  optional :: resident   !< Leave the outputs on the device (default .false.).
+   logical,                    intent(in),  optional :: alpha_only !< alpha alone (default .false.).
+   type(cut_link_inputs_3d_t), intent(inout), optional :: li     !< Inputs of the links (released and reset first).
    type(aabb_node_object),       pointer :: node_p(:)    !< Alias of surface%aabb%node.
    type(facet_distance_payload), pointer :: payload_p(:) !< Alias of surface%aabb%payload.
    real(R8P),                    pointer :: tv_p(:,:)    !< Alias of surface%tri_vertices.
@@ -2492,6 +2565,9 @@ contains
    real(R8P),    allocatable :: pct(:)                   !< Piercings: positions.
    real(R8P),    allocatable :: rw(:)                    !< Real workspace pool.
    integer(I4P), allocatable :: iw(:)                    !< Integer workspace pool.
+   integer(I4P), allocatable :: civ(:), ivo(:)           !< Link intervals per cell, before each cell (issue #100 step 5).
+   integer(I4P), allocatable :: ivp(:), ive(:), cis(:)   !< Link intervals: piece, cell edge; first of each cell.
+   real(R8P),    allocatable :: ivl(:), ivh(:)           !< Link intervals: range.
    real(R8P)    :: zr1(1), zr3(3, 1), zr6(6, 1), zsec(1, 6) !< Placeholders (count pass, no moments, intervals, rules).
    integer(I4P) :: zi1(1), ze2(2, 1), ze3(3, 1)          !< Placeholders.
    real(R8P)    :: c0(3), c1(3), faces(6), hx, hy, hz     !< Per-cell work.
@@ -2500,8 +2576,11 @@ contains
    integer(I4P) :: cs(8), tot(3)                          !< Per-cell work, totals.
    type(facet_object), pointer :: fp                      !< Facet.
    integer(I4P) :: nx, ny, nz, ncell, nf, i, j, k, c, f, m, q, nt, npc, nrw, niw, np, npt, nivc, nqc, nwc, qwn1, p0, st
-   logical      :: all_edges, res, same, ao               !< Options, work.
+   integer(I4P) :: nivt                                   !< Link intervals of the block.
+   logical      :: all_edges, res, same, ao, wiv          !< Options, work.
 
+   wiv = present(li)
+   if (wiv) call link_inputs_reset(li)
    if (cut%on_device) call cut%exit_device
    call device_grid_check(surface, x, y, z, nx, ny, nz, st)
    if (present(status)) status = st
@@ -2511,6 +2590,7 @@ contains
    res = .false. ; if (present(resident)) res = resident
    ao = .false. ; if (present(alpha_only)) ao = alpha_only
    if (ao) all_edges = .false.
+   if (ao) wiv = .false.
    ncell = nx * ny * nz
    ! host: triangles, candidates, open cells (as `cut_cells_3d`)
    nf = surface%get_facets_number()
@@ -2529,9 +2609,15 @@ contains
       call open_cells_3d(x, y, z, nf, tri, open_cell)
    endif
    ! 1. the plane sections (host slicing, device cut; the faces stay mapped, alpha-only: fractions and flags only)
-   call sections_axis_device(surface, 1_I4P, x, y, z, nx + 1_I4P, ny, nz, fx, fxc, fxp, fxl, .true., .not. ao)
-   call sections_axis_device(surface, 2_I4P, y, z, x, nx, ny + 1_I4P, nz, fy, fyc, fyp, fyl, .true., .not. ao)
-   call sections_axis_device(surface, 3_I4P, z, x, y, nx, ny, nz + 1_I4P, fz, fzc, fzp, fzl, .true., .not. ao)
+   if (wiv) then ! (issue #100 step 5) the sections with their pieces and intervals, kept for the links
+      call sections_axis_device(surface, 1_I4P, x, y, z, nx + 1_I4P, ny, nz, fx, fxc, fxp, fxl, .true., .true., sec=li%sec_x)
+      call sections_axis_device(surface, 2_I4P, y, z, x, nx, ny + 1_I4P, nz, fy, fyc, fyp, fyl, .true., .true., sec=li%sec_y)
+      call sections_axis_device(surface, 3_I4P, z, x, y, nx, ny, nz + 1_I4P, fz, fzc, fzp, fzl, .true., .true., sec=li%sec_z)
+   else
+      call sections_axis_device(surface, 1_I4P, x, y, z, nx + 1_I4P, ny, nz, fx, fxc, fxp, fxl, .true., .not. ao)
+      call sections_axis_device(surface, 2_I4P, y, z, x, nx, ny + 1_I4P, nz, fy, fyc, fyp, fyl, .true., .not. ao)
+      call sections_axis_device(surface, 3_I4P, z, x, y, nx, ny, nz + 1_I4P, fz, fzc, fzp, fzl, .true., .not. ao)
+   endif
    node_p => surface%aabb%node ; payload_p => surface%aabb%payload ; tv_p => surface%tri_vertices
    zr1 = 0._R8P ; zr3 = 0._R8P ; zr6 = 0._R8P ; zsec = 0._R8P ; zi1 = 0_I4P ; ze2 = 0_I4P ; ze3 = 0_I4P
    !$acc data copyin(x, y, z, tri, kstart, klst)
@@ -2581,15 +2667,15 @@ contains
       enddo
    enddo
    ! 4. classification, piercing counts, workspace sizes (cut_pieces_3d's first pass), prefix sums
-   allocate(kd(ncell), cct(3, ncell), off(3, ncell))
-   !$acc data create(kd, cct, off)
+   allocate(kd(ncell), cct(3, ncell), off(3, ncell), civ(ncell), ivo(ncell))
+   !$acc data create(kd, cct, off, civ, ivo)
    !$acc parallel loop gang vector collapse(3) default(present) private(cs, c0, c1) &
-   !$acc& present(x, y, z, tri, cnt, kstart, klst, open_cell, nd, alpha, cls, pcs, kd, cct, zi1, zr1)
+   !$acc& present(x, y, z, tri, cnt, kstart, klst, open_cell, nd, alpha, cls, pcs, kd, cct, civ, zi1, zr1)
    do k = 1, nz
       do j = 1, ny
          do i = 1, nx
             c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
-            kd(c) = CK_NONE ; cct(1, c) = 0_I4P ; cct(2, c) = 0_I4P ; cct(3, c) = 0_I4P
+            kd(c) = CK_NONE ; cct(1, c) = 0_I4P ; cct(2, c) = 0_I4P ; cct(3, c) = 0_I4P ; civ(c) = 0_I4P
             if (.not. cls(i, j, k) .or. open_cell(i, j, k) .or. alpha(i, j, k) < -1.e-12_R8P .or. &
                 alpha(i, j, k) > 1._R8P + 1.e-12_R8P) then
                pcs(i, j, k) = -1_I4P
@@ -2624,8 +2710,8 @@ contains
    !$acc data create(pce, pcq, pcn, pct, rw, iw)
    ! 5. piercings, then the count pass of the pieces
    !$acc parallel loop gang vector collapse(3) default(present) private(cs, c0, c1, faces) &
-   !$acc& present(x, y, z, tri, nrm, kstart, klst, nd, alpha, fx, fy, fz, pcs, kd, cct, off, pce, pcq, pcn, pct, rw, iw, &
-   !$acc&         zr1, zr3, zr6, zsec, zi1, ze2, ze3)
+   !$acc& present(x, y, z, tri, nrm, kstart, klst, nd, alpha, fx, fy, fz, pcs, kd, cct, off, civ, pce, pcq, pcn, pct, rw, &
+   !$acc&         iw, zr1, zr3, zr6, zsec, zi1, ze2, ze3)
    do k = 1, nz
       do j = 1, ny
          do i = 1, nx
@@ -2642,21 +2728,24 @@ contains
             faces(5) = fz(i, j, k) ; faces(6) = fz(i, j, k + 1)
             call cell_pieces_3d(.false., nf, tri, nrm, nt, klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), z(k), z(k + 1), &
                                 cs, alpha(i, j, k), faces, cct(1, c), pce(off(1, c) + 1), pcq(off(1, c) + 1), &
-                                pct(off(1, c) + 1), pcn(off(1, c) + 1), 0_I4P, 0_I4P, ze2, ze3, .false., .false., zsec, &
+                                pct(off(1, c) + 1), pcn(off(1, c) + 1), 0_I4P, 0_I4P, ze2, ze3, .false., wiv, zsec, &
                                 cct(2, c), rw(off(2, c) + 1), cct(3, c), iw(off(3, c) + 1), np, nivc, nqc, nwc, qwn1, &
                                 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, 0_I4P, zr1, zr3, zr1, zr3, zr3, zr6, &
                                 zr1, zr1, zr1, zi1, zi1, zr1, zr1, zr3, zr1, zr3, zr1, zi1, zi1)
             pcs(i, j, k) = np
+            if (np > 1_I4P) civ(c) = nivc ! the link intervals (with wiv; else 0): `cut_pieces_3d`'s civ
          enddo
       enddo
    enddo
-   call pieces_scan_dev(nx, ny, nz, pcs, fpc, npt)
+   call pieces_scan_dev(nx, ny, nz, pcs, civ, fpc, ivo, npt, nivt)
    allocate(pcell(3, npt), pvol(npt), pcen(3, npt), pwa(npt), pwc(3, npt), pwn(3, npt), pfc(6, npt))
-   !$acc enter data create(pcell, pvol, pcen, pwa, pwc, pwn, pfc)
+   allocate(ivp(max(1_I4P, nivt)), ive(max(1_I4P, nivt)), ivl(max(1_I4P, nivt)), ivh(max(1_I4P, nivt)))
+   !$acc enter data create(pcell, pvol, pcen, pwa, pwc, pwn, pfc, ivp, ive, ivl, ivh)
    ! 6. the pieces: the cell totals for one, the fill pass of the kernel for several
    !$acc parallel loop gang vector collapse(3) default(present) private(cs, faces) &
-   !$acc& present(x, y, z, tri, nrm, kstart, klst, nd, alpha, cen, wa, wc, wn, fx, fy, fz, pcs, fpc, kd, cct, off, pce, &
-   !$acc&         pcq, pcn, pct, rw, iw, pcell, pvol, pcen, pwa, pwc, pwn, pfc, zr1, zr3, zsec, zi1, ze2, ze3)
+   !$acc& present(x, y, z, tri, nrm, kstart, klst, nd, alpha, cen, wa, wc, wn, fx, fy, fz, pcs, fpc, kd, cct, off, ivo, &
+   !$acc&         pce, pcq, pcn, pct, rw, iw, pcell, pvol, pcen, pwa, pwc, pwn, pfc, ivp, ive, ivl, ivh, zr1, zr3, zsec, zi1, &
+   !$acc&         ze2, ze3)
    do k = 1, nz
       do j = 1, ny
          do i = 1, nx
@@ -2682,14 +2771,25 @@ contains
                faces(5) = fz(i, j, k) ; faces(6) = fz(i, j, k + 1)
                call cell_pieces_3d(.true., nf, tri, nrm, nt, klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), z(k), &
                                    z(k + 1), cs, alpha(i, j, k), faces, cct(1, c), pce(off(1, c) + 1), pcq(off(1, c) + 1), &
-                                   pct(off(1, c) + 1), pcn(off(1, c) + 1), 0_I4P, 0_I4P, ze2, ze3, .false., .false., zsec, &
+                                   pct(off(1, c) + 1), pcn(off(1, c) + 1), 0_I4P, 0_I4P, ze2, ze3, .false., wiv, zsec, &
                                    cct(2, c), rw(off(2, c) + 1), cct(3, c), iw(off(3, c) + 1), np, nivc, nqc, nwc, qwn1, &
-                                   p0, 0_I4P, 0_I4P, 0_I4P, npt, 0_I4P, 0_I4P, 0_I4P, 0_I4P, pvol, pcen, pwa, pwc, pwn, pfc, &
-                                   zr1, zr1, zr1, zi1, zi1, zr1, zr1, zr3, zr1, zr3, zr1, zi1, zi1)
+                                   p0, ivo(c), 0_I4P, 0_I4P, npt, nivt, 0_I4P, 0_I4P, 0_I4P, pvol, pcen, pwa, pwc, pwn, pfc, &
+                                   zr1, zr1, zr1, ivp, ive, ivl, ivh, zr3, zr1, zr3, zr1, zi1, zi1)
             endif
          enddo
       enddo
    enddo
+   if (wiv) then ! the first link interval of every cell (issue #100 step 5)
+      allocate(cis(ncell + 1))
+      !$acc enter data create(cis)
+      !$acc parallel loop gang vector default(present) present(ivo, cis)
+      do c = 1, ncell
+         cis(c) = ivo(c) + 1_I4P
+      enddo
+      !$acc serial default(present) present(cis)
+      cis(ncell + 1) = nivt + 1_I4P
+      !$acc end serial
+   endif
    !$acc end data
    !$acc end data
    endif ! .not. ao
@@ -2734,7 +2834,32 @@ contains
    call move_alloc(pwa, cut%piece_wet_area) ; call move_alloc(pwc, cut%piece_wet_centroid)
    call move_alloc(pwn, cut%piece_wet_normal) ; call move_alloc(pfc, cut%piece_face)
    if (res) call mark_resident(cut)
-   endsubroutine cut_cells_3d_device
+   ! the link inputs (issue #100 step 5): the intervals (exact size), the sections copied back unless resident
+   if (.not. wiv) then
+      !$acc exit data delete(ivp, ive, ivl, ivh)
+      return
+   endif
+   if (.not. res) then
+      !$acc exit data copyout(ivp, ive, ivl, ivh, cis)
+      call li%sec_x%update_host ; call li%sec_x%exit_device ; call li%sec_y%update_host ; call li%sec_y%exit_device
+      call li%sec_z%update_host ; call li%sec_z%exit_device
+   endif
+   li%niv = nivt
+   if (nivt > 0_I4P) then
+      call move_alloc(ivp, li%piv_piece) ; call move_alloc(ive, li%piv_edge) ; call move_alloc(ivl, li%piv_lo)
+      call move_alloc(ivh, li%piv_hi)
+   else ! the one-element placeholders go; the empty outputs are mapped too when resident
+      if (res) then
+         !$acc exit data delete(ivp, ive, ivl, ivh)
+      endif
+      allocate(li%piv_piece(0), li%piv_edge(0), li%piv_lo(0), li%piv_hi(0))
+      if (res) then
+         !$acc enter data create(li%piv_piece, li%piv_edge, li%piv_lo, li%piv_hi)
+      endif
+   endif
+   call move_alloc(cis, li%cell_iv_start)
+   li%on_device = res
+   endsubroutine cut3_device_core
 
    subroutine scan3_dev(n, cnt, off, total)
    !< Exclusive prefix sums of the three counts cnt(1:3, l) over l = 1..n on the device (issue #100 step 3c), totals on
@@ -2771,31 +2896,34 @@ contains
    !$acc end data
    endsubroutine scan3_dev
 
-   subroutine pieces_scan_dev(nx, ny, nz, pcs, fpc, npt)
+   subroutine pieces_scan_dev(nx, ny, nz, pcs, civ, fpc, ivo, npt, nivt)
    !< first_piece of every cell and the pieces of the block on the device (issue #100 step 3c): fpc(c) = 1 + the pieces
-   !< (max(0, pcs)) of the cells before c in order, the prefix sums of `cut_pieces_3d`, integer for integer. pcs and fpc
-   !< must be present; npt comes back.
+   !< (max(0, pcs)) of the cells before c in order, the prefix sums of `cut_pieces_3d`, integer for integer; with them
+   !< (issue #100 step 5) ivo(c) = the link intervals civ of the cells before c (`cut_pieces_3d`'s ivo). pcs, civ, fpc
+   !< and ivo must be present; npt and nivt come back.
    integer(I4P), intent(in)    :: nx, ny, nz            !< Cells.
    integer(I4P), intent(in)    :: pcs(nx * ny * nz)     !< Pieces per cell (-1: none).
+   integer(I4P), intent(in)    :: civ(nx * ny * nz)     !< Link intervals per cell.
    integer(I4P), intent(inout) :: fpc(nx * ny * nz)     !< First pieces (written on the device).
-   integer(I4P), intent(out)   :: npt                   !< Pieces of the block.
+   integer(I4P), intent(inout) :: ivo(nx * ny * nz)     !< Link intervals before each cell (written on the device).
+   integer(I4P), intent(out)   :: npt, nivt             !< Pieces, link intervals of the block.
    integer(I4P), allocatable   :: cc(:,:), oo(:,:)      !< Counts, offsets [3, ncell].
    integer(I4P)                :: c, n, tot(3)          !< Work.
 
    n = nx * ny * nz
    allocate(cc(3, n), oo(3, n))
    !$acc data create(cc, oo)
-   !$acc parallel loop gang vector default(present) present(pcs, cc)
+   !$acc parallel loop gang vector default(present) present(pcs, civ, cc)
    do c = 1, n
-      cc(1, c) = max(0_I4P, pcs(c)) ; cc(2, c) = 0_I4P ; cc(3, c) = 0_I4P
+      cc(1, c) = max(0_I4P, pcs(c)) ; cc(2, c) = civ(c) ; cc(3, c) = 0_I4P
    enddo
    call scan3_dev(n, cc, oo, tot)
-   !$acc parallel loop gang vector default(present) present(fpc, oo)
+   !$acc parallel loop gang vector default(present) present(fpc, ivo, oo)
    do c = 1, n
-      fpc(c) = oo(1, c) + 1_I4P
+      fpc(c) = oo(1, c) + 1_I4P ; ivo(c) = oo(2, c)
    enddo
    !$acc end data
-   npt = tot(1)
+   npt = tot(1) ; nivt = tot(2)
    endsubroutine pieces_scan_dev
 
    subroutine open_cells_3d(x, y, z, nf, tri, open_cell)
@@ -2960,6 +3088,129 @@ contains
    endif
    self%on_device = .false. ; self%device_key = 0
    endsubroutine cut3_exit_device
+
+   subroutine cut_cells_3d_link_inputs_device(surface, x, y, z, cut, inputs, status, edges, resident)
+   !< `cut_cells_3d_device` with the inputs of the piece links (issue #100 step 5): `cut` bit for bit the cut of
+   !< `cut_cells_3d_device` (and of `cut_cells_3d` without links), and `inputs` bit for bit what `cut_cells_3d(...,
+   !< links=)` hands to its links (`cut_link_inputs_3d_t`; the host twin is `cut_cells_3d_link_inputs`): the fluid edge
+   !< intervals of the pieces, from the fill pass of the pieces on the device, and the plane sections with their pieces
+   !< and intervals, kept as the device made them. With `resident` both stay mapped (`cut_cells_3d_t`,
+   !< `cut_link_inputs_3d_t`), else both are copied back. `status` as `cut_cells_3d_device` (inputs reset on error).
+   type(surface_stl_object),   intent(in), target    :: surface  !< Surface.
+   real(R8P),                  intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
+   type(cut_cells_3d_t),       intent(inout)         :: cut      !< Cut cells (released from the device and reset first).
+   type(cut_link_inputs_3d_t), intent(inout)         :: inputs   !< Inputs of the links (released and reset first).
+   integer(I4P),               intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,                    intent(in),  optional :: edges    !< Also the fluid fractions of the cell edges.
+   logical,                    intent(in),  optional :: resident !< Leave the outputs on the device (default .false.).
+
+   call cut3_device_core(surface, x, y, z, cut, status, edges, resident, li=inputs)
+   endsubroutine cut_cells_3d_link_inputs_device
+
+   subroutine cut_cells_3d_link_inputs(surface, x, y, z, cut, px, py, pz, piv_piece, piv_edge, piv_lo, piv_hi, status, &
+                                       edges)
+   !< The host twin of `cut_cells_3d_link_inputs_device` (issue #100 step 5, for the benches and the twin tests): the
+   !< steps of `cut_cells_3d(..., links=)` up to its links, the same calls on the same inputs: `cut` (the cut of
+   !< `cut_cells_3d`), the plane sections px(nx + 1), py(ny + 1), pz(nz + 1) (`curve%cut_cells(..., intervals=.true.)`
+   !< of every grid plane) and the fluid edge intervals of the pieces piv_* (`cut_pieces_3d`). `status =
+   !< STATUS_INVALID_INPUT` on bad edges (the arrays then unallocated).
+   type(surface_stl_object),          intent(in)            :: surface   !< Surface.
+   real(R8P),                         intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
+   type(cut_cells_3d_t),              intent(inout)         :: cut       !< Cut cells (released from the device, reset).
+   type(cut_cells_2d_t), allocatable, intent(out)           :: px(:), py(:), pz(:) !< Plane sections.
+   integer(I4P),         allocatable, intent(out)           :: piv_piece(:), piv_edge(:) !< Intervals: piece, cell edge.
+   real(R8P),            allocatable, intent(out)           :: piv_lo(:), piv_hi(:) !< Intervals: range.
+   integer(I4P),                      intent(out), optional :: status    !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,                           intent(in),  optional :: edges     !< Also the fluid fractions of the cell edges.
+   real(R8P),    allocatable :: tri(:,:,:), nrm(:,:)     !< Triangles [3, 3, nf], normals [3, nf].
+   integer(I4P), allocatable :: cnt(:), kstart(:), klst(:) !< Candidates of the cells.
+   type(facet_object), pointer :: fp                     !< Facet.
+   integer(I4P) :: nx, ny, nz, i, j, k, f, m, c, nf      !< Work.
+   logical      :: all_edges                             !< Edge fractions asked.
+
+   call cut_cells_3d_reset(cut)
+   if (present(status)) status = STATUS_OK
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   if (nx < 1 .or. ny < 1 .or. nz < 1) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (any(x(2:) <= x(:nx)) .or. any(y(2:) <= y(:ny)) .or. any(z(2:) <= z(:nz))) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   ! as `cut_cells_3d` with links (no moments, no quadrature)
+   cut%nx = nx ; cut%ny = ny ; cut%nz = nz
+   allocate(cut%face_x(nx + 1, ny, nz), cut%face_y(nx, ny + 1, nz), cut%face_z(nx, ny, nz + 1))
+   allocate(cut%face_x_centroid(3, nx + 1, ny, nz), cut%face_y_centroid(3, nx, ny + 1, nz), &
+            cut%face_z_centroid(3, nx, ny, nz + 1))
+   allocate(cut%face_x_pieces(nx + 1, ny, nz), cut%face_y_pieces(nx, ny + 1, nz), cut%face_z_pieces(nx, ny, nz + 1))
+   allocate(cut%face_x_closed(nx + 1, ny, nz), cut%face_y_closed(nx, ny + 1, nz), cut%face_z_closed(nx, ny, nz + 1))
+   allocate(px(nx + 1), py(ny + 1), pz(nz + 1))
+   cut%moments_order = 0_I4P
+   allocate(cut%face_x_moments(0, nx + 1, ny, nz), cut%face_y_moments(0, nx, ny + 1, nz), &
+            cut%face_z_moments(0, nx, ny, nz + 1))
+   call sections_host(surface, x, y, z, cut, .true., 0_I4P, .false., 0_I4P, px, py, pz)
+   all_edges = .false. ; if (present(edges)) all_edges = edges
+   call edge_fractions(surface, x, y, z, cut, all_edges)
+   nf = surface%get_facets_number()
+   allocate(tri(3, 3, nf), nrm(3, nf))
+   do f = 1, nf
+      fp => surface%facet_at(f)
+      do m = 1, 3
+         tri(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
+      enddo
+      nrm(:, f) = cross3(tri(:, 2, f) - tri(:, 1, f), tri(:, 3, f) - tri(:, 1, f))
+   enddo
+   call cell_candidates_3d(x, y, z, nf, tri, nrm, cnt, kstart, klst)
+   allocate(cut%alpha(nx, ny, nz), cut%centroid(3, nx, ny, nz), cut%wet_area(nx, ny, nz), cut%wet_centroid(3, nx, ny, nz), &
+            cut%wet_normal(3, nx, ny, nz), cut%closed(nx, ny, nz))
+   do k = 1, nz
+      do j = 1, ny
+         do i = 1, nx
+            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+            call cell_totals_3d(nf, tri, kstart(c + 1) - kstart(c), klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), &
+                                z(k), z(k + 1), cut%face_x(i + 1, j, k), cut%face_y(i, j + 1, k), cut%face_z(i, j, k + 1), &
+                                cut%face_x_closed(i, j, k), cut%face_x_closed(i + 1, j, k), cut%face_y_closed(i, j, k), &
+                                cut%face_y_closed(i, j + 1, k), cut%face_z_closed(i, j, k), cut%face_z_closed(i, j, k + 1), &
+                                cut%alpha(i, j, k), cut%centroid(1, i, j, k), cut%wet_area(i, j, k), &
+                                cut%wet_centroid(1, i, j, k), cut%wet_normal(1, i, j, k), cut%closed(i, j, k))
+         enddo
+      enddo
+   enddo
+   call cut_pieces_3d(x, y, z, cut, nf, tri, nrm, cnt, kstart, klst, 0_I4P, .false., piv_piece, piv_edge, piv_lo, piv_hi, &
+                      px, py, pz)
+   endsubroutine cut_cells_3d_link_inputs
+
+   subroutine link_inputs_reset(li)
+   !< Release resident link inputs from the device (`exit_device`), then reset them to the default (issue #100 step 5).
+   type(cut_link_inputs_3d_t), intent(inout) :: li    !< Link inputs.
+   type(cut_link_inputs_3d_t)                :: fresh !< Default.
+
+   call li%exit_device
+   li = fresh
+   endsubroutine link_inputs_reset
+
+   subroutine link_inputs_update_host(self)
+   !< Copy the mapped link inputs back to the host (issue #100 step 5); they stay mapped. No-op if not mapped.
+   class(cut_link_inputs_3d_t), intent(inout) :: self !< Link inputs.
+
+   if (.not. self%on_device) return
+   !$acc update host(self%cell_iv_start, self%piv_piece, self%piv_edge, self%piv_lo, self%piv_hi)
+   call self%sec_x%update_host ; call self%sec_y%update_host ; call self%sec_z%update_host
+   endsubroutine link_inputs_update_host
+
+   subroutine link_inputs_exit_device(self)
+   !< Release the device copies of the link inputs (issue #100 step 5); the host arrays are kept as they are. The
+   !< sections are released in any case (resident ones only).
+   class(cut_link_inputs_3d_t), intent(inout) :: self !< Link inputs.
+
+   if (self%on_device) then
+      !$acc exit data delete(self%cell_iv_start, self%piv_piece, self%piv_edge, self%piv_lo, self%piv_hi)
+   endif
+   call self%sec_x%exit_device ; call self%sec_y%exit_device ; call self%sec_z%exit_device
+   self%on_device = .false.
+   endsubroutine link_inputs_exit_device
 
    subroutine cut_cells_3d_nodes_device(surface, x, y, z, node_in, edge_x, edge_y, edge_z, edges, status)
    !< The grid-node states and, with `edges`, the cell-edge fluid fractions of `cut_cells_3d` on the device (issue #100
@@ -3588,7 +3839,7 @@ contains
                              cut%face_z_pieces, cut%face_z_closed, .false., .true., pose)
    endsubroutine sections_device
 
-   subroutine sections_axis_device(surface, axis, lv, ga, gb, n1, n2, n3, face, fcen, fpcs, fcls, keep, full, pose)
+   subroutine sections_axis_device(surface, axis, lv, ga, gb, n1, n2, n3, face, fcen, fpcs, fcls, keep, full, pose, sec)
    !< The faces of the planes x(axis) = lv(b) (in-plane grid ga, gb in the cyclic order of `slice_surface`) on the
    !< device: the sections as the blocks of `cut_cells_device_many` (resident), scattered by `scatter_sections` into
    !< the face arrays [n1, n2, n3] (the 3-D shape of the axis). With `keep` (issue #100 step 4) the face arrays stay
@@ -3596,6 +3847,9 @@ contains
    !< their host copies are not written: the caller copies them out or deletes them; else they are copied back. Without
    !< `full` only the fractions and closed flags are made (`scatter_fractions`; fcen and fpcs come back unallocated).
    !< With `pose` the planes are sliced at the pose through the posed sweep (`posed_spans`, `slice_surface_plane`).
+   !< With `sec` (issue #100 step 5, the link inputs) the sections are cut with their pieces and fluid edge intervals
+   !< into sec, left resident for the caller (the face arrays from its cell arrays, which the pieces do not change: the
+   !< same faces); else they are cut without pieces and released.
    type(surface_stl_object),  intent(in)  :: surface      !< Surface.
    integer(I4P),              intent(in)  :: axis         !< Plane normal axis.
    real(R8P),                 intent(in)  :: lv(:)        !< Plane levels.
@@ -3608,6 +3862,7 @@ contains
    logical,                   intent(in)  :: keep         !< Leave the face arrays mapped (host copies not written).
    logical,                   intent(in)  :: full         !< Also the centroids and pieces.
    type(rigid_pose_t), optional, intent(in) :: pose       !< Pose the surface is sliced at.
+   type(cut_cells_2d_blocks_t), optional, intent(inout) :: sec !< Sections kept, with pieces and intervals (resident).
    type(curve_object),   allocatable :: secs(:)           !< Sections.
    type(slice_planes_t)              :: idx               !< Posed sweep index.
    real(R8P),    allocatable :: sp(:,:)                   !< Posed facet spans.
@@ -3628,32 +3883,61 @@ contains
    else
       call slice_surface_planes(surface=surface, normal_axis=axis, levels=lv, curves=secs, on_plane_low=.true.) ! one sweep
    endif
-   call cut_cells_device_many(secs, ga, gb, cb, st, intervals=.false., pieces=.false., resident=.true.)
-   deallocate(secs)
-   allocate(fa(n1, n2, n3), fl(n1, n2, n3))
-   !$acc enter data create(fa, fl)
-   if (full) then
-      allocate(fc(3, n1, n2, n3), fp(n1, n2, n3))
-      !$acc enter data create(fc, fp)
-      !$acc data copyin(lv)
-      call scatter_sections(axis, cb%nx, cb%ny, nb, lv, cb%alpha, cb%centroid, cb%pieces, cb%closed, n1, n2, n3, fa, fc, &
-                            fp, fl)
-      !$acc end data
-      if (.not. keep) then
-         !$acc exit data copyout(fc, fp)
-      endif
+   if (present(sec)) then
+      call cut_cells_device_many(secs, ga, gb, sec, st, intervals=.true., pieces=.true., resident=.true.)
+      deallocate(secs)
+      call faces_of_blocks(sec, axis, lv, nb, n1, n2, n3, keep, full, fa, fc, fp, fl)
    else
-      call scatter_fractions(axis, cb%nx, cb%ny, nb, cb%alpha, cb%closed, n1, n2, n3, fa, fl)
+      call cut_cells_device_many(secs, ga, gb, cb, st, intervals=.false., pieces=.false., resident=.true.)
+      deallocate(secs)
+      call faces_of_blocks(cb, axis, lv, nb, n1, n2, n3, keep, full, fa, fc, fp, fl)
+      call cb%exit_device
    endif
-   if (.not. keep) then
-      !$acc exit data copyout(fa, fl)
-   endif
-   call cb%exit_device
    call move_alloc(fa, face) ; call move_alloc(fl, fcls)
    if (full) then
       call move_alloc(fc, fcen) ; call move_alloc(fp, fpcs)
    endif
    endsubroutine sections_axis_device
+
+   subroutine faces_of_blocks(cb, axis, lv, nb, n1, n2, n3, keep, full, fa, fc, fp, fl)
+   !< The face arrays of the axis from the resident sections cb (the cell arrays of `cut_cells_device_many`; see
+   !< `sections_axis_device`): built here, mapped (unstructured data); copied back unless `keep`. Without `full` only
+   !< the fractions and closed flags (fc, fp unallocated).
+   type(cut_cells_2d_blocks_t), intent(in)  :: cb         !< Sections (resident).
+   integer(I4P),                intent(in)  :: axis, nb   !< Plane normal axis, planes.
+   real(R8P),                   intent(in)  :: lv(:)      !< Plane levels.
+   integer(I4P),                intent(in)  :: n1, n2, n3 !< Face array shape.
+   logical,                     intent(in)  :: keep, full !< Leave the arrays mapped, also the centroids and pieces.
+   real(R8P),    allocatable,   intent(out) :: fa(:,:,:), fc(:,:,:,:) !< Fractions, centroids.
+   integer(I4P), allocatable,   intent(out) :: fp(:,:,:)  !< Pieces.
+   logical,      allocatable,   intent(out) :: fl(:,:,:)  !< Closed flags.
+   real(R8P),    allocatable :: ta(:,:,:), tc(:,:,:,:)    !< Built here, moved out (#101 item 8).
+   integer(I4P), allocatable :: tp(:,:,:)                 !< Built here.
+   logical,      allocatable :: tl(:,:,:)                 !< Built here.
+
+   allocate(ta(n1, n2, n3), tl(n1, n2, n3))
+   !$acc enter data create(ta, tl)
+   if (full) then
+      allocate(tc(3, n1, n2, n3), tp(n1, n2, n3))
+      !$acc enter data create(tc, tp)
+      !$acc data copyin(lv)
+      call scatter_sections(axis, cb%nx, cb%ny, nb, lv, cb%alpha, cb%centroid, cb%pieces, cb%closed, n1, n2, n3, ta, tc, &
+                            tp, tl)
+      !$acc end data
+      if (.not. keep) then
+         !$acc exit data copyout(tc, tp)
+      endif
+   else
+      call scatter_fractions(axis, cb%nx, cb%ny, nb, cb%alpha, cb%closed, n1, n2, n3, ta, tl)
+   endif
+   if (.not. keep) then
+      !$acc exit data copyout(ta, tl)
+   endif
+   call move_alloc(ta, fa) ; call move_alloc(tl, fl)
+   if (full) then
+      call move_alloc(tc, fc) ; call move_alloc(tp, fp)
+   endif
+   endsubroutine faces_of_blocks
 
    subroutine posed_spans(surface, axis, pose, sp)
    !< The span along `axis` of every facet of `surface` at `pose` [2, nf] (issue #100 step 4): min and max of the vertex

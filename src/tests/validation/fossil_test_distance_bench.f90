@@ -26,7 +26,7 @@
 !<      `sign bench device vs serial mismatches` (the issue #39 benchmark points) and
 !<      `line crossings device vs serial mismatches` (issue #40) must be 0, and so must every later device line
 !<      (`orient3d device vs serial mismatches`, issue #100 step 3c, among them; `swept cells 3-D device vs serial
-!<      mismatches`, issue #100 step 4).
+!<      mismatches`, issue #100 step 4; `cut cells 3-D link inputs device vs serial mismatches`, step 5).
 !<
 !< Usage: fossil_test_distance_bench [<stl_path> [<grid_n>]]
 !<        default <stl_path> = src/tests/dragon-fine.stl
@@ -51,8 +51,10 @@ use fossil_overset,      only : hole_flags, block_logical_t, donor_set_t, donor_
 use fossil,              only : curve_object, slice_surface, cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device
 use fossil_boolean_bodies, only : BODY_SPHERE, mc_body
 use fossil_cut_cells_3d, only : cut_cells_3d_sections, cut_cells_3d_nodes_device
+use fossil_cut_cells_3d, only : cut_link_inputs_3d_t, cut_cells_3d_link_inputs_device, cut_cells_3d_link_inputs
+use fossil,              only : cut_cells_2d_t
 use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_face_mismatches, cut_cells_3d_mismatches, &
-                                     cut_cells_3d_alpha_mismatches
+                                     cut_cells_3d_alpha_mismatches, link_inputs_mismatches
 use fossil_orient3d_cases, only : orient3d_quadruples, lcb_cases, orient3d_many, lcb_many
 use fossil_predicates,   only : orient3d_xyz
 use fossil_line_query,   only : line_crossing_before
@@ -101,6 +103,7 @@ integer                       :: orient3d_mismatch         !< orient3d, line_cro
 integer                       :: nodes_mismatch            !< 3-D cut-cell node states, edge fractions: device vs CPU (3c).
 integer                       :: cells_mismatch            !< 3-D cut cells: device vs CPU mismatches (#100 step 3c).
 integer                       :: swept_mismatch            !< 3-D swept cells: device vs CPU mismatches (#100 step 4).
+integer                       :: link_inputs_mismatch      !< 3-D link inputs: device vs CPU mismatches (#100 step 5).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -276,6 +279,8 @@ call nodes_case(mismatch=nodes_mismatch)
 rich_ok = rich_ok .and. nodes_mismatch == 0
 call cells_case(mismatch=cells_mismatch)
 rich_ok = rich_ok .and. cells_mismatch == 0
+call link_inputs_case(mismatch=link_inputs_mismatch)
+rich_ok = rich_ok .and. link_inputs_mismatch == 0
 call swept_case(mismatch=swept_mismatch)
 rich_ok = rich_ok .and. swept_mismatch == 0
 
@@ -377,6 +382,7 @@ print '(A,I0)',      '   cut cells 3-D sections device vs serial mismatches: ', 
 print '(A,I0)',      '   orient3d device vs serial mismatches: ', orient3d_mismatch
 print '(A,I0)',      '   cut cells 3-D nodes device vs serial mismatches: ', nodes_mismatch
 print '(A,I0)',      '   cut cells 3-D device vs serial mismatches: ', cells_mismatch
+print '(A,I0)',      '   cut cells 3-D link inputs device vs serial mismatches: ', link_inputs_mismatch
 print '(A,I0)',      '   swept cells 3-D device vs serial mismatches: ', swept_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
@@ -795,6 +801,121 @@ contains
          minval(t(4, :)), ' /', median_of5(t(4, :)), '  (', minval(t(1, :)) / minval(t(2, :)), 'x, ', &
          minval(t(1, :)) / minval(t(3, :)), 'x, ', minval(t(1, :)) / minval(t(4, :)), 'x)'
    endsubroutine cells_timing
+
+   subroutine link_inputs_case(mismatch)
+   !< The inputs of the piece links on the device (issue #100 step 5): `cut_cells_3d_link_inputs_device` against the host
+   !< twin `cut_cells_3d_link_inputs` (the steps of `cut_cells_3d(..., links=)` before its links), the intervals, the
+   !< first interval of every cell and every section block bitwise (`link_inputs_mismatches`), and the cut against
+   !< `cut_cells_3d` without links, copied back and resident (`update_host`), with and without the edges: the bench body
+   !< in its probe box at grid_n^3; with grid_n >= 32 also the sphere, the cone and cube-02 at 64^3 and 128^3 (the
+   !< grids of `cells_case`) and a timing table of the extra work: best and median of 5 after a warm-up, the CPU cut
+   !< without links against the host twin, the device cut resident without and with the link inputs (resident).
+   integer, intent(out)      :: mismatch               !< Mismatches.
+   type(surface_stl_object)  :: sb(3)                  !< Step-0 bodies.
+   type(body_t), allocatable :: bb(:)                  !< Bench bodies.
+   character(12), parameter  :: NAMES(3) = [character(12) :: 'mc sphere', 'cone', 'cube-02'] !< Their names.
+   real(R8P),    allocatable :: gx(:), gy(:), gz(:)    !< Cell edges.
+   integer(I4P)              :: b, g, m                !< Work.
+
+   mismatch = 0
+   call section_grid(grid_n, gx, gy, gz)
+   mismatch = mismatch + link_inputs_compare(surface, gx, gy, gz)
+   if (grid_n < 32_I4P) return
+   call mc_body(BODY_SPHERE, 24_I4P, sb(1))
+   call bench_bodies(bb) ; call to_surface_bench(bb(7), sb(2))
+   call sb(3)%load_from_file(file_name='src/tests/cube-02.stl', guess_format=.true.)
+   do b = 1, 3
+      do g = 1, 2
+         m = 64_I4P * g
+         call box_grid(sb(b), m, gx, gy, gz)
+         mismatch = mismatch + link_inputs_compare(sb(b), gx, gy, gz)
+      enddo
+   enddo
+   print '(A)', 'cut cells 3-D link inputs timing (best / median of 5) [s]: body, cells, CPU cut, CPU cut + inputs, '// &
+                'device resident cut, device resident cut + inputs, extra of the inputs (CPU, device; best)'
+   call section_grid(grid_n, gx, gy, gz)
+   call link_inputs_timing('bench body', surface, grid_n, gx, gy, gz)
+   do b = 1, 3
+      do g = 1, 2
+         m = 64_I4P * g
+         call box_grid(sb(b), m, gx, gy, gz)
+         call link_inputs_timing(NAMES(b), sb(b), m, gx, gy, gz)
+      enddo
+   enddo
+   endsubroutine link_inputs_case
+
+   function link_inputs_compare(s, gx, gy, gz) result(mismatch)
+   !< `cut_cells_3d_link_inputs_device` against `cut_cells_3d_link_inputs` and `cut_cells_3d` on s and the grid gx, gy,
+   !< gz: with and without the edges, copied back and resident (then `update_host`; the next call releases it).
+   type(surface_stl_object), intent(in) :: s            !< Body.
+   real(R8P),                intent(in) :: gx(:), gy(:), gz(:) !< Cell edges.
+   integer                              :: mismatch     !< Mismatches.
+   type(cut_cells_3d_t)                 :: ce, ch, cd   !< `cut_cells_3d`, host twin, device.
+   type(cut_cells_2d_t), allocatable    :: px(:), py(:), pz(:) !< Host sections.
+   integer(I4P),         allocatable    :: ivp(:), ive(:)      !< Host intervals: piece, edge.
+   real(R8P),            allocatable    :: ivl(:), ivh(:)      !< Host intervals: range.
+   type(cut_link_inputs_3d_t)           :: li           !< Device link inputs.
+   integer(I4P)                         :: st, st2, e, r !< Work.
+
+   mismatch = 0
+   do e = 1, 2
+      call cut_cells_3d(s, gx, gy, gz, ce, status=st, edges=e == 2)
+      call cut_cells_3d_link_inputs(s, gx, gy, gz, ch, px, py, pz, ivp, ive, ivl, ivh, status=st2, edges=e == 2)
+      mismatch = mismatch + abs(st - st2) + cut_cells_3d_mismatches(ce, ch)
+      do r = 1, 2
+         call cut_cells_3d_link_inputs_device(s, gx, gy, gz, cd, li, status=st2, edges=e == 2, resident=r == 2)
+         if (r == 2) then
+            if (.not. (li%on_device .and. cd%on_device)) mismatch = mismatch + 1
+            call cd%update_host ; call li%update_host
+         endif
+         mismatch = mismatch + abs(st - st2) + cut_cells_3d_mismatches(ce, cd) + &
+                    link_inputs_mismatches(ch, px, py, pz, ivp, ive, ivl, ivh, li)
+      enddo
+   enddo
+   call li%exit_device ; call cd%exit_device
+   endfunction link_inputs_compare
+
+   subroutine link_inputs_timing(label, s, m, gx, gy, gz)
+   !< One row of the timing table of `link_inputs_case`.
+   character(*),             intent(in)    :: label        !< Body.
+   type(surface_stl_object), intent(inout) :: s            !< Body (mapped for the device runs, then released).
+   integer(I4P),             intent(in)    :: m            !< Cells per axis.
+   real(R8P),                intent(in)    :: gx(:), gy(:), gz(:) !< Cell edges.
+   type(cut_cells_3d_t)                    :: ch, cd       !< Host, device.
+   type(cut_cells_2d_t), allocatable       :: px(:), py(:), pz(:) !< Host sections.
+   integer(I4P),         allocatable       :: ivp(:), ive(:)      !< Host intervals: piece, edge.
+   real(R8P),            allocatable       :: ivl(:), ivh(:)      !< Host intervals: range.
+   type(cut_link_inputs_3d_t)              :: li           !< Device link inputs.
+   real(R8P)                               :: t(4, 5)      !< Times.
+   integer(I8P)                            :: c0, c1, rate !< Clock.
+   integer(I4P)                            :: r            !< Counter.
+
+   call system_clock(count_rate=rate)
+   call s%enter_device
+   do r = 1, 3 ! warm-up
+      call cut_cells_3d_link_inputs_device(s, gx, gy, gz, cd, li, resident=.true.)
+   enddo
+   do r = 1, 5
+      call system_clock(c0) ; call cut_cells_3d(s, gx, gy, gz, ch) ; call system_clock(c1)
+      t(1, r) = real(c1 - c0, R8P) / rate
+      call system_clock(c0) ; call cut_cells_3d_link_inputs(s, gx, gy, gz, ch, px, py, pz, ivp, ive, ivl, ivh)
+      call system_clock(c1)
+      t(2, r) = real(c1 - c0, R8P) / rate
+   enddo
+   do r = 1, 5
+      call system_clock(c0) ; call cut_cells_3d_device(s, gx, gy, gz, cd, resident=.true.) ; call system_clock(c1)
+      t(3, r) = real(c1 - c0, R8P) / rate
+      call system_clock(c0) ; call cut_cells_3d_link_inputs_device(s, gx, gy, gz, cd, li, resident=.true.)
+      call system_clock(c1)
+      t(4, r) = real(c1 - c0, R8P) / rate
+   enddo
+   call li%exit_device ; call cd%exit_device
+   call s%exit_device
+   print '(3X,A12,I4,A,4(2X,ES9.2,A,ES9.2),A,ES9.2,A,ES9.2,A)', label, m, '^3', minval(t(1, :)), ' /', &
+         median_of5(t(1, :)), minval(t(2, :)), ' /', median_of5(t(2, :)), minval(t(3, :)), ' /', median_of5(t(3, :)), &
+         minval(t(4, :)), ' /', median_of5(t(4, :)), '  (', minval(t(2, :)) - minval(t(1, :)), ', ', &
+         minval(t(4, :)) - minval(t(3, :)), ')'
+   endsubroutine link_inputs_timing
 
    subroutine swept_case(mismatch)
    !< `swept_cells_3d_device` (issue #100 step 4) against `swept_cells_3d`, every output of `swept_cells_3d_t` bitwise
