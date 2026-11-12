@@ -25,9 +25,10 @@ type(body_t)              :: box
 type(soup_t)              :: rc, tet
 type(surface_stl_object)  :: s
 type(cut_cells_3d_t)      :: cut
-real(R8P)                 :: u(7), w(7), g(9), rot(3, 3), cth, sth, cph, sph, n(3), d, p0(3), t1(3), t2(3)
+real(R8P)                 :: u(7), w(7), g(9), q(13), rot(3, 3), cth, sth, cph, sph, n(3), d, p0(3), t1(3), t2(3)
 integer(I4P)              :: k, f, m
-logical                   :: ok(4)
+logical                   :: ok(6)
+integer(I4P), parameter   :: OPEN_UNTRUSTED = 233 !< Untrusted cells of the open box (measured, unchanged by #103).
 
 call bench_bodies(b)
 do k = 1, 7
@@ -88,6 +89,34 @@ ok(4) = all(cut%closed) .and. all(abs(cut%alpha) < 1.e-14_R8P .or. abs(cut%alpha
         count(cut%alpha < 0.5_R8P) == 64 .and. abs(sum(1._R8P - cut%alpha) / 64._R8P - 1._R8P) < 1.e-13_R8P
 print '(A,L1)', 'unit cube on grid planes: cells 0 or 1 to round-off, 64 solid, total exact: ', ok(4)
 ok(4) = ok(4) .and. sums(s, g, g, g, 1._R8P, 6._R8P, [0.5_R8P, 0.5_R8P, 0.5_R8P], 'unit cube on grid planes')
+
+! 5. solid cells without a wall get alpha exactly 0 (issue #103): the unit cube on a grid of spacing 0.1 (not
+!    representable), whose interior cells have no facet; before the fix the face-sum volume left +-1.3e-16
+q = [(-0.1_R8P + 0.1_R8P * (k - 1), k = 1, 13)]
+call to_surface(b(1)%soup, s)
+call cut_cells_3d(surface=s, x=q, y=q, z=q, cut=cut)
+ok(5) = count(cut%pieces == 0) > 0 .and. count(cut%pieces == 0 .and. cut%alpha /= 0._R8P) == 0 .and. &
+        count(cut%pieces == 1 .and. cut%alpha == 1._R8P) > 0
+print '(A,I0,A,I0,A,L1)', 'unit cube on a 0.1 grid: solid cells ', count(cut%pieces == 0), ', with alpha /= 0 ', &
+      count(cut%pieces == 0 .and. cut%alpha /= 0._R8P), ': ', ok(5)
+! 6. an open box (the unit cube without its +z facets) on the same grid: cells whose faces disagree keep their
+!    fraction and stay untrusted (#103 snaps only cells whose three faces agree); solid cells still exactly 0
+m = 0
+do f = 1, size(b(1)%soup%v, 3)
+   if (any(b(1)%soup%v(3, :, f) < maxval(b(1)%soup%v(3, :, :)))) m = m + 1
+enddo
+if (allocated(rc%v)) deallocate(rc%v)
+allocate(rc%v(3, 3, m)) ; m = 0
+do f = 1, size(b(1)%soup%v, 3)
+   if (any(b(1)%soup%v(3, :, f) < maxval(b(1)%soup%v(3, :, :)))) then
+      m = m + 1 ; rc%v(:, :, m) = b(1)%soup%v(:, :, f)
+   endif
+enddo
+call to_surface(rc, s)
+call cut_cells_3d(surface=s, x=q, y=q, z=q, cut=cut)
+ok(6) = count(cut%pieces == -1) == OPEN_UNTRUSTED .and. count(cut%pieces == 0 .and. cut%alpha /= 0._R8P) == 0
+print '(A,I0,A,I0,A,L1)', 'open box on a 0.1 grid: untrusted cells ', count(cut%pieces == -1), ' (expected ', &
+      OPEN_UNTRUSTED, '): ', ok(6)
 
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1

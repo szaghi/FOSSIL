@@ -457,7 +457,11 @@ contains
       return
    endif
    alpha = (vc - vs) / vc
-   if (vc - vs > 0._R8P) then
+   ! no facet and the three faces agree (all solid or all fluid): vs is then vc, or 0, in exact arithmetic, but the face
+   ! sum rounds differently from vc and left +-1.3e-16 on solid cells (issue #103): take the fraction exactly. Faces
+   ! that disagree (an open surface) keep their fraction, which marks the cell untrusted.
+   if (nt == 0_I4P .and. fx1 == fy1 .and. fx1 == fz1 .and. (fx1 == 0._R8P .or. fx1 == 1._R8P)) alpha = fx1
+   if (vc - vs > 0._R8P .and. alpha > 0._R8P) then ! a solid cell keeps the cell centre (vc - vs was round-off)
       do a = 1, 3
          centroid(a) = c0(a) + (vc * 0.5_R8P * h(a) - ms(a)) / (vc - vs)
       enddo
