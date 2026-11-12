@@ -15,13 +15,18 @@ program fossil_val_moving_conservation
 !<   the track's cell with the largest aperture of the track that has the largest aperture on that face (else the
 !<   largest new piece of the 3 x 3, then 5 x 5 neighbourhood);
 !< - the new pieces of a track share its mass in proportion to their areas.
-!< Checks, per case (gate: the first two, no untrusted cell, and no mass lost beyond 1e-14 of the total):
+!< Checks, per case (gate: the first two, no untrusted cell, and no mass lost beyond 1e-14 of the total). The face
+!< outflows of a multi-track cell on the Gauss path are exact per event interval while a single-track neighbour copies
+!< the Gauss value: the two sides of a face then differ by the quadrature error, which the split spreads by aperture
+!< (both sides still exchange F_f: conservation stays exact).
 !< 1. mass: a smooth q0 = 1 + sin(2 pi x) cos(2 pi y) / 2; the total over the pieces plus the domain-boundary outflow
 !<    stays constant, drift <= 1e-12 relative per step accumulated (printed);
 !< 2. uniform flow moving with the body: q = 1 stays 1, max |M - V| / |cell| <= 1e-11 on the exact paths, printed with
 !<    the map's largest per-track |residual| / |cell| of a step: the floor of the cut-cell areas (Green sums of unit
 !<    coordinates, ~1e-16 absolute, a few 1e-12 of a 1/100 cell); |q - 1| printed over pieces of at least |cell| / 10;
-!<    on the Gauss path reported with the per-track residual and the nq-vs-2nq estimate;
+!<    on the Gauss path (gated) the floor is the swept geometry's own per-cell Gauss residual, which single-track cells
+!<    copy: max |M - V| / |cell| <= 2 times the largest per-track |residual| / |cell| of a step, and the tracks of
+!<    multi-track cells (integrated per event interval on every path) at <= 1e-11 of a cell;
 !< 3. counts over the steps: tracks per status, untrusted, dead and transient remainders (count, total |mass|);
 !< 4. control, reported: two scalars a = 1 above the body's chord line (body frame, extended both ways), b = 1 below;
 !<    the exact solution is the initial field carried with the body. After the period, the mass of a in pieces whose
@@ -94,7 +99,7 @@ contains
    real(R8P),    allocatable      :: x(:), m0(:,:), m1(:,:) !< Grid, masses per field [np, NF].
    integer(I4P), allocatable      :: grp(:,:)                !< Group of each track per grouping [nt, 3].
    real(R8P)                      :: h, tot0(NF), bout(NF), lost(NF), rmass(NF), drift, efree, qfree, eest, dmax, w(2)
-   real(R8P)                      :: leak(2, 3), cel, floor
+   real(R8P)                      :: leak(2, 3), cel, floor, fmulti
    integer(I4P)                   :: k, st, f, nst(-1:7), nrem(NF), nmulti, nuntr, nskip, ndead_nt, nsw
    integer(I8P)                   :: t0, t1, rate
 
@@ -109,7 +114,7 @@ contains
       tot0(f) = sum(m0(:, f))
    enddo
    bout = 0._R8P ; lost = 0._R8P ; rmass = 0._R8P ; nrem = 0_I4P ; drift = 0._R8P ; efree = 0._R8P ; qfree = 0._R8P
-   eest = 0._R8P ; floor = 0._R8P ; nsw = 0_I4P ; nst = 0_I4P ; nmulti = 0_I4P ; nuntr = 0_I4P ; nskip = 0_I4P
+   eest = 0._R8P ; floor = 0._R8P ; fmulti = 0._R8P ; nsw = 0_I4P ; nst = 0_I4P ; nmulti = 0_I4P ; nuntr = 0_I4P ; nskip = 0_I4P
    good = .true. ; ndead_nt = 0_I4P
    do k = 1_I4P, NSTEP
       call swept_cells_2d(body, p(k - 1), p(k), x, x, sw, exact=path /= PATH_GAUSS, status=st, map=map)
@@ -130,6 +135,9 @@ contains
       efree = max(efree, maxval(abs(m1(:, 2) - k1%piece_area)) / cel)
       qfree = max(qfree, maxval(abs(m1(:, 2) / k1%piece_area - 1._R8P), mask=k1%piece_area >= 0.1_R8P * cel))
       floor = max(floor, maxval(abs(map%residual)) / cel)
+      do f = 1_I4P, map%nt ! the floor of the multi-track cells' tracks (integrated per event interval on every path)
+         if (map%tracks(map%track_cell(1, f), map%track_cell(2, f)) > 1_I4P) fmulti = max(fmulti, abs(map%residual(f)) / cel)
+      enddo
       call move_alloc(m1, m0) ; k0 = k1
       ndead_nt = ndead_nt + map%n_status(TRACK_DEAD) + map%n_status(TRACK_TRANSIENT)
    enddo
@@ -138,9 +146,10 @@ contains
    print '(A,A,1X,I0,A,A,A,F4.1,A,F5.2,A,F6.1,A)', '- ', trim(label), n, '^2, ', trim(PATHS(path)), ', delta ', delta, &
          ' cells (measured ', dmax / h, '), ', real(t1 - t0, R8P) / rate, ' s'
    print '(A,ES9.2,A,ES9.2,A)', '  1. mass drift (max over steps, relative) ', drift, ' (bound ', 1e-12_R8P * NSTEP, ')'
-   print '(A,ES9.2,A,ES9.2,A,ES9.2,A,ES9.2)', '  2. uniform flow: max |M - V| / |cell| ', efree, &
-         ' (bound 1e-11 exact paths), max |q - 1| (pieces >= |cell| / 10) ', qfree, &
-         '; the map''s largest per-track |residual| / |cell| of a step ', floor, ', nq-vs-2nq face estimate ', eest
+   print '(A,ES9.2,A,ES9.2)', '  2. uniform flow: max |M - V| / |cell| ', efree, ', max |q - 1| (pieces >= |cell| / 10) ', &
+         qfree
+   print '(A,ES9.2,A,ES9.2,A,ES9.2)', '     largest per-track |residual| / |cell| of a step ', floor, &
+         ' (tracks of multi-track cells ', fmulti, '), nq-vs-2nq face estimate ', eest
    print '(A,8I8)', '  3. tracks continuing/fresh/dead/split/merge/split-merge/transient/untrusted ', &
          nst([TRACK_CONTINUING, TRACK_FRESH, TRACK_DEAD, TRACK_SPLIT, TRACK_MERGE, TRACK_SPLIT_MERGE, TRACK_TRANSIENT, &
               TRACK_UNTRUSTED])
@@ -152,7 +161,11 @@ contains
    print '(A,3(ES10.3,A,ES10.3,A))', '  4. leak a below / b above: tracks ', leak(1, 1), ' / ', leak(2, 1), &
          ', overlap ', leak(1, 2), ' / ', leak(2, 2), ', lumped ', leak(1, 3), ' / ', leak(2, 3), ''
    good = drift <= 1e-12_R8P * NSTEP .and. all(lost <= 1e-14_R8P * abs(tot0)) .and. nuntr == 0_I4P
-   if (path /= PATH_GAUSS) good = good .and. efree <= 1e-11_R8P
+   if (path /= PATH_GAUSS) then
+      good = good .and. efree <= 1e-11_R8P
+   else ! the floor is the cells' own Gauss residual (single-track cells copy it); multi-track cells' tracks are exact
+      good = good .and. efree <= 2._R8P * floor .and. fmulti <= 1e-11_R8P
+   endif
    print '(A,L1)', '  ok ', good
    endfunction run
 

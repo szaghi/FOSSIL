@@ -16,11 +16,14 @@ program fossil_test_piece_map_2d
 !<   line at the event and persist through it; a rule calling them volatile would declare the piece dead + fresh.
 !< Every case also passes the map checks (`check_map`): every piece at pose0 and at pose1 in exactly one track of its
 !< cell, numbered as the cut cells of a copy moved to the pose (and the track volumes equal to their pieces' areas bit
-!< for bit), per-cell sums over the tracks equal to the swept geometry (faces, wall, residual, swept = V1 - V0), every
-!< per-track residual at round-off on the exact paths, residual = V1 - V0 + sum of the track's face outflows, and each face's
-!< outflow summed over the tracks equal from its two cells (and to d times its aperture on a translation). Then the same checks on an ellipse and a NACA 0012 at a modest
-!< grid, translating and rotating, and on a cell of the NACA's thin aft region crossed within the step (one piece at
-!< each end, dead + fresh).
+!< for bit); residual = V1 - V0 + the sum of the track's face outflows; per-cell sums over the tracks equal to the swept
+!< geometry (faces, wall, residual, swept = V1 - V0) and each face's outflow summed over the tracks equal from its two
+!< cells (and to d times its aperture on a translation), to round-off on the exact paths; every per-track residual of a
+!< multi-track cell at round-off on every path (its tracks are integrated per event interval). On the Gauss path the
+!< multi-track cells' sums differ from the cell's Gauss values by the quadrature error: bounded by 4 times the
+!< nq-vs-2nq estimate (`error_estimate`, lengths; times the largest rigid-field speed for outflows and residuals).
+!< Then the same checks on an ellipse and a NACA 0012 at a modest grid, translating and rotating (exact and Gauss), and
+!< on a cell of the NACA's thin aft region crossed within the step (one piece at each end, dead + fresh).
 use fossil, only : curve_object, rigid_pose_2d_t, pose_2d, swept_cells_2d_t, swept_cells_2d, piece_map_2d_t, &
                    cut_cells_2d_t, STATUS_OK, STATUS_INVALID_INPUT, TRACK_CONTINUING, TRACK_FRESH, TRACK_DEAD, &
                    TRACK_SPLIT, TRACK_MERGE, TRACK_UNTRUSTED
@@ -35,7 +38,7 @@ real(R8P)              :: x(4)
 real(R8P), allocatable :: u(:), v(:), xg(:)
 real(R8P), parameter   :: PI = acos(-1._R8P)
 integer(I4P)           :: i, st
-logical                :: ok(20)
+logical                :: ok(22)
 
 ok = .true.
 x = [-1._R8P, 0._R8P, 1._R8P, 2._R8P]
@@ -111,6 +114,11 @@ call lattice(c)
 xg = [(-0.25_R8P + 0.125_R8P * i, i = 0, 12)]
 ok(18) = body_2d('lattice, translation', pose_2d(0._R8P), pose_2d(0._R8P, [0.31_R8P, 0.17_R8P]))
 ok(19) = body_2d('lattice, rotation', about(0._R8P), about(0.35_R8P))
+! 21-22. the Gauss path (nq = 4) of the lattice and the NACA 0012 rotating: multi-track cells per event interval
+ok(21) = body_2d('lattice, rotation, Gauss', about(0._R8P), about(0.35_R8P), gauss=.true.)
+xg = [(0.0031_R8P + 0.9938_R8P * i / 24._R8P, i = 0, 24)]
+call naca(c)
+ok(22) = body_2d('NACA 0012, rotation, Gauss', about(0._R8P), about(0.12_R8P), gauss=.true.)
 
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
@@ -143,15 +151,18 @@ contains
    print '(A,A,A,L1)', '  ', label, ': ok ', good
    endfunction case_2d
 
-   function body_2d(label, p0, p1) result(good)
-   !< Map checks of c between p0 and p1 on the grid xg^2 (exact path).
-   character(*),          intent(in) :: label  !< Label.
-   type(rigid_pose_2d_t), intent(in) :: p0, p1 !< Poses.
-   logical                           :: good   !< Result.
-   integer(I4P)                      :: s_     !< Work.
+   function body_2d(label, p0, p1, gauss) result(good)
+   !< Map checks of c between p0 and p1 on the grid xg^2 (exact path, or the Gauss path with `gauss`).
+   character(*),          intent(in)           :: label  !< Label.
+   type(rigid_pose_2d_t), intent(in)           :: p0, p1 !< Poses.
+   logical,               intent(in), optional :: gauss  !< Gauss path (nq = 4).
+   logical                                     :: good   !< Result.
+   integer(I4P)                                :: s_     !< Work.
+   logical                                     :: ex     !< Exact path.
 
-   call swept_cells_2d(c, p0, p1, xg, xg, sw, status=s_, map=map)
-   good = s_ == STATUS_OK .and. check_map(p0, p1, xg, xg, .true.) .and. map%untrusted_cells == 0_I4P
+   ex = .true. ; if (present(gauss)) ex = .not. gauss
+   call swept_cells_2d(c, p0, p1, xg, xg, sw, exact=ex, status=s_, map=map)
+   good = s_ == STATUS_OK .and. check_map(p0, p1, xg, xg, ex) .and. map%untrusted_cells == 0_I4P
    print '(A,A,A,L1)', '  ', label, ': ok ', good
    endfunction body_2d
 
@@ -167,6 +178,7 @@ contains
    real(R8P)                         :: fsum(4), wsum(2), rsum, dv, efa, ewa, era, esw, eres, vol !< Work.
    real(R8P), allocatable            :: ou(:,:), ov(:,:) !< Face outflows (+u, +v) summed over the tracks, per side.
    real(R8P)                         :: eid, eof, etr, d(2) !< Identity, face sides, translation errors; displacement.
+   real(R8P)                         :: est, vmax  !< Gauss path: nq-vs-2nq estimate, largest rigid-field speed.
    integer(I4P)                      :: i_, j_, t, k, p, nbad !< Work.
 
    cm = c ; call cm%move(p0) ; call cm%cut_cells(gx, gy, k0)
@@ -204,7 +216,8 @@ contains
             ov(i_, 2 * j_ - 1) = ov(i_, 2 * j_ - 1) - map%outflow(3, t)
             ov(i_, 2 * j_ + 2) = ov(i_, 2 * j_ + 2) + map%outflow(4, t)
             dv = dv + (map%volume1(t) - map%volume0(t))
-            if (exact .and. map%status(t) /= TRACK_UNTRUSTED) eres = max(eres, abs(map%residual(t)))
+            if ((exact .or. map%tracks(i_, j_) > 1_I4P) .and. map%status(t) /= TRACK_UNTRUSTED) &
+               eres = max(eres, abs(map%residual(t)))
          enddo
          if (map%tracks(i_, j_) == 0_I4P) cycle
          efa = max(efa, maxval(abs(fsum - [sw%face_u(i_, j_), sw%face_u(i_ + 1, j_), sw%face_v(i_, j_), &
@@ -234,13 +247,24 @@ contains
          enddo
       enddo
    endif
-   good = nbad == 0_I4P .and. max(efa, ewa, era, esw) < 1.e-13_R8P .and. eres < 1.e-13_R8P .and. &
-          max(eid, eof, etr) < 1.e-13_R8P
+   if (exact) then
+      good = nbad == 0_I4P .and. max(efa, ewa, era, esw) < 1.e-13_R8P .and. eres < 1.e-13_R8P .and. &
+             max(eid, eof, etr) < 1.e-13_R8P
+   else ! the Gauss path: the cell's values carry the quadrature error, the multi-track cells' tracks do not
+      est = sw%error_estimate
+      vmax = abs(atan2(p1%r(2, 1), p1%r(1, 1)) - atan2(p0%r(2, 1), p0%r(1, 1))) * &
+             (maxval(abs(gx)) + maxval(abs(gy)) + sqrt(sum(p0%t**2)) + sqrt(sum(d**2))) + sqrt(sum(d**2))
+      good = nbad == 0_I4P .and. efa <= 4._R8P * est + 1.e-13_R8P .and. ewa <= 8._R8P * est + 1.e-13_R8P .and. &
+             era <= 16._R8P * est * vmax + 1.e-13_R8P .and. eof <= 4._R8P * est * vmax + 1.e-13_R8P .and. &
+             esw < 1.e-13_R8P .and. eres < 1.e-13_R8P .and. eid < 1.e-13_R8P
+      print '(A,ES9.1,A,4F7.3)', '  Gauss: nq-vs-2nq estimate ', est, ', faces / est, wall / est, residual / (est vmax), &
+            &face outflow / (est vmax) ', efa / est, ewa / est, era / (est * vmax), eof / (est * vmax)
+   endif
    print '(A,I0,A,I0,A,I0,A,I0,A,I0,A,I0,A,I0,A,I0)', '  tracks ', map%nt, ', multi-track cells ', map%multi_track_cells, &
          ', untrusted cells ', map%untrusted_cells, ', evaluated cells ', map%evaluated_cells, ', evaluations ', &
          map%evaluations, ', skipped nodes ', map%skipped_nodes, ', pieces ', map%np0, ' -> ', map%np1
    print '(A,I0,A,4ES9.1,A,ES9.1,A,L1)', '  bad links ', nbad, ', per-cell sums - swept (faces, wall, residual, swept) ', &
-         efa, ewa, era, esw, ', max per-track residual ', eres, ', exact ', map%exact
+         efa, ewa, era, esw, ', max per-track residual (multi-track cells on Gauss) ', eres, ', exact ', map%exact
    print '(A,3ES9.1)', '  outflow: residual - (V1 - V0 + sum outflow), face from its two sides, translation vs d L: ', &
          eid, eof, etr
    endfunction check_map

@@ -193,6 +193,7 @@ type :: cell_eval_t
    integer(I4P), allocatable :: kpiece(:)        !< Piece next to each feature [nk].
    real(R8P),    allocatable :: plen(:,:)        !< Fluid length of the faces (-u, +u, -v, +v) per piece [4, np].
    real(R8P),    allocatable :: pmom(:,:)        !< First moment of the faces' fluid parts per piece [4, np].
+   logical                   :: fl(4) = .false.  !< The corner flags it was evaluated with.
 endtype cell_eval_t
 
 contains
@@ -1612,7 +1613,7 @@ contains
    endselect
    call cut_cell_2d_pieces(lu, lv, lnx, x0, x1, y0, y1, flags, e%closed, e%np, parea, nw, wseg, wpiece, cp, e%plen, &
                            e%pmom)
-   call move_alloc(parea, e%parea)
+   call move_alloc(parea, e%parea) ; e%fl = flags
    e%nk = count(cp > 0_I4P, kind=I4P) + count(wpiece > 0_I4P, kind=I4P)
    allocate(e%key(e%nk), e%kpiece(e%nk))
    e%nk = 0_I4P
@@ -1632,8 +1633,10 @@ contains
    !< an interval the pieces keep their features, so each piece of an evaluation at a quadrature node belongs to the
    !< track of the interval's evaluation that holds its features (`map_node`). Translation: two-point Gauss per
    !< interval (exact: the lengths are linear in s). Rotation: Gauss doubled from 2 nodes per interval until every
-   !< track's values agree to round-off (the criteria of `integrate_face_2d`; mc%exact false if not at 64). Gauss path:
-   !< the nq nodes over the step, each in its interval. ok false if a piece at a node cannot be assigned.
+   !< track's values agree to round-off (the criteria of `integrate_face_2d`; mc%exact false if not at 64). The Gauss
+   !< path integrates the same way, by its motion (two-point per interval without rotation, doubled with one): its nq
+   !< nodes over the step would miss a track living between two events, or weight it heavily (issue #102 step 3:
+   !< per-track residuals up to 0.39 of a cell). ok false if a piece at a node cannot be assigned.
    type(map_ctx_t),        intent(inout) :: mc             !< State.
    type(curve_object),     intent(in)    :: curve, c0      !< Curve (body frame), copy at pose0.
    real(R8P),              intent(in)    :: x0, x1, y0, y1 !< Cell.
@@ -1651,11 +1654,11 @@ contains
    real(R8P), allocatable :: a1(:,:), a2(:,:), sq(:), wq(:) !< Work.
    real(R8P)              :: sa, sb, h, scl(4), sco(4), sno, vel, tol !< Work.
    integer(I4P)           :: m, ng, q, t, f, r, a      !< Work.
-   logical                :: conv                          !< Converged.
+   logical                :: conv, rot                     !< Converged, a rotation.
 
    allocate(meas(8, nt)) ; meas = 0._R8P ; ok = .true.
-   select case (mc%path)
-   case (MAP_TRANSLATION)
+   rot = mc%dth /= 0._R8P
+   if (.not. rot) then
       do m = 1_I4P, nb + 1_I4P
          call map_interval(b, nb, m, sa, sb) ; h = sb - sa
          if (h <= 0._R8P) cycle
@@ -1665,7 +1668,7 @@ contains
          call map_node(mc, curve, c0, 0.5_R8P * (sa + sb) + G * h, 0.5_R8P * h, x0, x1, y0, y1, lg, lnx, ev(r), nstart(r), &
                        ev(a), nstart(a), comp, meas, ok)
       enddo
-   case (MAP_ROTATION)
+   else
       vel = abs(mc%dth) * mc%xm + sqrt(mc%d(1)**2 + mc%d(2)**2)
       scl = [y1 - y0, y1 - y0, x1 - x0, x1 - x0] ; sco = scl * vel ; sno = mc%xm * vel
       allocate(a1(8, nt), a2(8, nt))
@@ -1709,19 +1712,7 @@ contains
          enddo
          meas = meas + a2
       enddo
-   case default
-      call gauss_legendre_01(mc%nq, sq, wq)
-      do q = 1_I4P, mc%nq
-         m = 1_I4P
-         do while (m <= nb)
-            if (sq(q) < b(m)) exit
-            m = m + 1_I4P
-         enddo
-         r = eref(m) ; a = ealt(m)
-         call map_node(mc, curve, c0, sq(q), wq(q), x0, x1, y0, y1, lg, lnx, ev(r), nstart(r), ev(a), nstart(a), comp, &
-                       meas, ok)
-      enddo
-   endselect
+   endif
    endsubroutine map_measures
 
    pure subroutine map_interval(b, nb, m, sa, sb)
@@ -1735,7 +1726,8 @@ contains
    endsubroutine map_interval
 
    subroutine map_node(mc, curve, c0, s, w, x0, x1, y0, y1, lg, lnx, evr, nr, eva, na, comp, acc, ok)
-   !< One quadrature node (instant s, weight w): the pieces at s (corner flags computed at s), each added to a track
+   !< One quadrature node (instant s, weight w): the pieces at s (corner flags of the interval's evaluation, computed
+   !< at s in a narrow interval), each added to a track
    !< with w times its face lengths and rigid-field outflows. A piece takes the track of the pieces of the interval's
    !< evaluation evr (first node nr) that hold its features (wall segments, fluid corners); a narrow interval also tries
    !< the evaluation after it, eva (na). The features must point to one track; a piece none of whose features is known
@@ -1760,10 +1752,14 @@ contains
    integer(I4P)                      :: p, t, f, k     !< Work.
 
    if (.not. ok) return
-   cn = reshape([x0, y0, x1, y0, x1, y1, x0, y1], [2, 4])
-   do k = 1_I4P, 4_I4P
-      fl(k) = map_corner_in(mc, curve, c0, s, cn(:, k))
-   enddo
+   if (na == nr) then ! a wide interval: no corner crosses a segment inside it, its evaluation's flags hold
+      fl = evr%fl
+   else
+      cn = reshape([x0, y0, x1, y0, x1, y1, x0, y1], [2, 4])
+      do k = 1_I4P, 4_I4P
+         fl(k) = map_corner_in(mc, curve, c0, s, cn(:, k))
+      enddo
+   endif
    call map_eval(mc, 2_I4P, s, x0, x1, y0, y1, lg, lnx, fl, e)
    if (.not. e%closed) then
       if (na /= nr) then

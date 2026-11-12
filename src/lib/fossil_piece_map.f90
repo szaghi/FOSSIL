@@ -48,10 +48,13 @@ type :: piece_map_2d_t
    !< balance of the rigid field, volume1 - volume0 + int_0^1 (outflow through the track's face parts) ds, as
    !< `swept_cells_2d_t%residual` per cell (round-off on the exact paths, the quadrature error on the Gauss path). A cell
    !< with one track takes the cell's own values of `swept_cells_2d_t` (faces, wall, residual: bit for bit); a cell with
-   !< several tracks integrates them per track, on the cell's event intervals (so their sum over the cell's tracks is the
-   !< cell's value to round-off). An untrusted cell (status TRACK_UNTRUSTED: an evaluation did not close, its pieces did
-   !< not match the end-pose cuts, a breakpoint was not certified, or a face part could not be assigned) has one track
-   !< with all its pieces and the cell's values.
+   !< several tracks integrates them per track on the cell's event intervals, on every path: two-point Gauss per interval
+   !< without rotation, Gauss doubled to round-off with one (a track lives between events, so the step's nq nodes of the
+   !< Gauss path would miss or overweight it). Its tracks' residuals are then round-off, and their sums over the cell are
+   !< the cell's values to round-off on the exact paths; on the Gauss path they differ from the cell's Gauss values by
+   !< that quadrature error (about the nq-vs-2nq estimate). An untrusted cell (status TRACK_UNTRUSTED: an evaluation did
+   !< not close, its pieces did not match the end-pose cuts, a breakpoint was not certified, or a face part could not be
+   !< assigned) has one track with all its pieces and the cell's values.
    !<
    !< `outflow(f, t)`: the time integral over the step of the outward flux of the **rigid** field of the screw motion
    !< through the track's part of face f, so that residual = volume1 - volume0 + sum_f outflow(f, t). It is what makes a
