@@ -158,7 +158,7 @@ follow from the fixed grid (issue #41):
 ![a 12 x 12 grid seen from above, the middle layer of a 12 x 12 x 3 block, each cell shaded by the volume the unit cube sweeps through it over one step of a screw motion (0.35 rad about a tilted axis plus a shift), divided by the cell volume: ember where the cell gains fluid on the trailing side, teal where it loses fluid on the leading side, cream elsewhere; the section of the cube at mid-layer at the start in dark brown and at the end in yellow](../../examples/images/ref-moving-bodies-swept.svg){.fossil-figure}
 
 In the figure the step takes the exact rotation path, with the cube's faces x, y = ±0.5 starting on grid planes
-(issue #84): the residual is at most 9.69·10⁻¹⁷ in every cell, and the swept volumes add up to -3.84·10⁻¹⁷.
+(issue #84): the residual is at most 9.69·10⁻¹⁷ in every cell, and the swept volumes add up to -3.14·10⁻¹⁷.
 
 ```fortran
 call swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input)

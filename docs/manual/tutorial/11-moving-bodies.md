@@ -124,7 +124,7 @@ axis.
 The section has 229 segments and no crossing pair, so both paths are exact. Turning it by 10 degrees sweeps 225 cells,
 and one face needed at most 190 evaluations. The swept areas sum to 5.3e-17 and the largest residual is 7.0e-18. The
 animation turns it through nine steps of 10 degrees, every one exact, with residuals of at most 2.4e-17. The
-cube turned by 15 degrees sweeps 327 cells and clears 27, with the swept volumes summing to 1.4e-16 and the largest
+cube turned by 15 degrees sweeps 327 cells and clears 48, with the swept volumes summing to 1.4e-16 and the largest
 residual 4.7e-17.
 
 ![the section of the dragon at z = -0.2 turning about the origin in nine steps of 10 degrees: each frame shows the section before the step in grey and after it in yellow, and the cells shaded by that step's swept area, ember where fluid is gained and teal where it is lost](../../examples/images/tut11-rotation.svg){.fossil-figure}

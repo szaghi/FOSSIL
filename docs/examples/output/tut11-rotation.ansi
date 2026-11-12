@@ -2,8 +2,8 @@ $ tut11_4_rotation
 section z = -0.2: 229 segments, crossing pairs 0
 rotation: exact T, cells swept 225, largest evaluations per face 190
   sum of the swept areas  5.26E-17, largest |residual|  7.03E-18
-cube, 15 degrees: exact T, cells swept 327, cleared 27
-  sum of the swept volumes  1.42E-16, largest |residual|  4.72E-17
+cube, 15 degrees: exact T, cells swept 327, cleared 48
+  sum of the swept volumes  1.40E-16, largest |residual|  4.72E-17
 step 1: exact T, largest |residual|  7.03E-18
 step 2: exact T, largest |residual|  1.49E-17
 step 3: exact T, largest |residual|  2.33E-17

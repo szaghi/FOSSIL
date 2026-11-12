@@ -1,5 +1,5 @@
 $ tut10_c_cells3d
-cells: fluid 12829, solid 94, cut 895, flagged 17
+cells: fluid 12829, solid 96, cut 895, flagged 17
 faces z = 0: cut 43, largest |face_z - 2-D alpha|  3.47E-15
 pieces 13797, cells with two or more 75
 cell (13,7,6) alpha  0.06856 =  0.06533 0.00323
