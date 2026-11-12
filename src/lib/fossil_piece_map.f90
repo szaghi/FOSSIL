@@ -15,11 +15,16 @@ module fossil_piece_map
 !< share (wall segments, fluid corners: a feature present on both sides of one event persists through it, so the fluid
 !< next to it is one track). The kernels here are the device-ready parts (plain arrays, no allocation): the union of
 !< the evaluations' pieces into tracks and the status of a track.
+!<
+!< In 3-D (`swept_cells_3d(..., map=)`, issue #102 step 2) the instants are a mesh vertex crossing a face plane of the
+!< cell inside the face, a mesh edge crossing one of its 12 edges and one of its 8 corners crossing a facet; the
+!< features are the facets (a planar facet clipped to a convex cell bounds exactly one piece) and the fluid corners. The
+!< construction is the 2-D one.
 use penf, only : I4P, R8P
 
 implicit none
 private
-public :: piece_map_2d_t
+public :: piece_map_2d_t, piece_map_3d_t
 public :: TRACK_CONTINUING, TRACK_FRESH, TRACK_DEAD, TRACK_SPLIT, TRACK_MERGE, TRACK_SPLIT_MERGE, TRACK_TRANSIENT, &
           TRACK_UNTRUSTED
 public :: track_components, track_status_of
@@ -90,6 +95,61 @@ type :: piece_map_2d_t
    integer(I4P)              :: skipped_nodes = 0_I4P !< Quadrature nodes or pieces skipped inside intervals between two
                                                       !< events closer than 1e-10 (their weight is below that).
 endtype piece_map_2d_t
+
+type :: piece_map_3d_t
+   !< The piece map of one time step on a 3-D block (issue #102 step 2): the tracks of every cell, CSR like
+   !< `cut_links_t`; the 3-D twin of `piece_map_2d_t`, built by `swept_cells_3d(..., map=)`.
+   !<
+   !< Pieces are those of `cut_cells_3d` at pose0 (old) and at pose1 (new), numbered as the cut cells number them
+   !< (`swept_cells_3d`'s end-pose cuts: a copy moved to the pose, then `cut_cells_3d`). Tracks of cell (i, j, k):
+   !< first_track(i, j, k) .. first_track(i, j, k) + tracks(i, j, k) - 1, ordered by their first piece (old pieces first,
+   !< in piece order, then the pieces born within the step in time order). Old pieces of track t:
+   !< old_piece(old_start(t) : old_start(t + 1) - 1), new pieces likewise; old_track / new_track invert them.
+   !<
+   !< Measures per track: volume0 / volume1 (sum of its pieces' volumes), the time-averaged fluid area of the six faces
+   !< of its cell taken by the track (faces(-x, +x, -y, +y, -z, +z)), the time integral over the step of the rigid
+   !< field's outflow through each of them (outflow, outward from the cell: a low face counts the flux in -axis), the
+   !< wall -sum_f A_f n_f, and the residual: the volume balance of the rigid field, volume1 - volume0 +
+   !< sum_f outflow(f), as `swept_cells_3d_t%residual` per cell (round-off on the exact paths, the quadrature error on
+   !< the Gauss path). A cell with one track takes the cell's own values of `swept_cells_3d_t` (faces, wall, residual:
+   !< bit for bit; outflow: the face outflows of the call); a cell with several tracks integrates them per track on the
+   !< cell's event intervals with the exact paths' rules on every path (two-point Gauss without rotation, Gauss doubled
+   !< to round-off with one): their sum over the cell's tracks is the cell's value to round-off on the exact paths, and
+   !< differs from it by the cell's quadrature error on the Gauss path (`exact=.false.`; of the order of
+   !< `swept_cells_3d_t%error_estimate`), where the per-track values are the accurate ones. An untrusted cell
+   !< (status TRACK_UNTRUSTED: an end cut or an evaluation not trusted (pieces -1), its end evaluations not equal to the
+   !< end-pose cuts, a breakpoint not certified, or a face part that could not be assigned) has one track with all its
+   !< pieces and the cell's values.
+   integer(I4P)              :: nx = 0_I4P, ny = 0_I4P, nz = 0_I4P !< Cells.
+   integer(I4P)              :: nt = 0_I4P            !< Tracks.
+   integer(I4P)              :: np0 = 0_I4P           !< Pieces at pose0.
+   integer(I4P)              :: np1 = 0_I4P           !< Pieces at pose1.
+   integer(I4P), allocatable :: tracks(:,:,:)         !< Tracks per cell [nx, ny, nz].
+   integer(I4P), allocatable :: first_track(:,:,:)    !< First track of each cell [nx, ny, nz].
+   integer(I4P), allocatable :: track_cell(:,:)       !< Cell (i, j, k) of each track [3, nt].
+   integer(I4P), allocatable :: status(:)             !< TRACK_* of each track [nt].
+   integer(I4P), allocatable :: old_start(:)          !< Old pieces of each track [nt + 1].
+   integer(I4P), allocatable :: old_piece(:)          !< Old pieces (pose0 piece indexes) [np0].
+   integer(I4P), allocatable :: new_start(:)          !< New pieces of each track [nt + 1].
+   integer(I4P), allocatable :: new_piece(:)          !< New pieces (pose1 piece indexes) [np1].
+   integer(I4P), allocatable :: old_track(:)          !< Track of each pose0 piece [np0].
+   integer(I4P), allocatable :: new_track(:)          !< Track of each pose1 piece [np1].
+   real(R8P),    allocatable :: volume0(:)            !< Fluid volume of the old pieces [nt].
+   real(R8P),    allocatable :: volume1(:)            !< Fluid volume of the new pieces [nt].
+   real(R8P),    allocatable :: faces(:,:)            !< Time-averaged fluid area of the faces (-x, +x, -y, +y, -z, +z)
+                                                      !< [6, nt].
+   real(R8P),    allocatable :: outflow(:,:)          !< Time-integrated outflow of the rigid field per face [6, nt].
+   real(R8P),    allocatable :: wall(:,:)             !< Time-averaged projected wall, -sum_f A_f n_f [3, nt].
+   real(R8P),    allocatable :: residual(:)           !< Volume balance of the rigid field [nt].
+   logical                   :: exact = .true.        !< Every multi-track cell's integration converged (rotation).
+   integer(I4P)              :: n_status(-1:7) = 0_I4P !< Tracks per status (index TRACK_*; 0 unused).
+   integer(I4P)              :: untrusted_cells = 0_I4P !< Cells marked untrusted.
+   integer(I4P)              :: multi_track_cells = 0_I4P !< Cells with more than one track.
+   integer(I4P)              :: evaluated_cells = 0_I4P !< Cells whose pieces were evaluated within the step.
+   integer(I4P)              :: evaluations = 0_I4P   !< One-cell piece evaluations (topology pass).
+   integer(I4P)              :: skipped_nodes = 0_I4P !< Quadrature nodes or pieces skipped inside intervals between two
+                                                      !< events closer than 1e-10 (their weight is below that).
+endtype piece_map_3d_t
 
 contains
    pure subroutine track_components(ne, nstart, lstart, nl, lkey, lpiece, par, comp, nt)

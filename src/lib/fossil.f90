@@ -61,7 +61,7 @@ use fossil_rigid_pose, only : rigid_pose_t, rigid_pose_2d_t, pose_identity, pose
 use fossil_swept_cells, only : swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
 use fossil_swept_cells, only : swept_cells_2d_device
 use fossil_swept_cells, only : swept_cells_3d_device
-use fossil_piece_map, only : piece_map_2d_t, TRACK_CONTINUING, TRACK_FRESH, TRACK_DEAD, TRACK_SPLIT, TRACK_MERGE, &
+use fossil_piece_map, only : piece_map_2d_t, piece_map_3d_t, TRACK_CONTINUING, TRACK_FRESH, TRACK_DEAD, TRACK_SPLIT, TRACK_MERGE, &
                             TRACK_SPLIT_MERGE, TRACK_TRANSIENT, TRACK_UNTRUSTED
 use fossil_mass_properties, only : inertia_to_world, principal_frame
 use fossil_feature_edges, only : FEATURE_EDGE_SHARP, FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, &
@@ -109,7 +109,7 @@ public :: hyperbolic_grid_2d, geometric_spacing
 public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, gauss_legendre_01
 public :: swept_cells_2d_device
 public :: swept_cells_3d_device
-public :: piece_map_2d_t, TRACK_CONTINUING, TRACK_FRESH, TRACK_DEAD, TRACK_SPLIT, TRACK_MERGE, TRACK_SPLIT_MERGE, &
+public :: piece_map_2d_t, piece_map_3d_t, TRACK_CONTINUING, TRACK_FRESH, TRACK_DEAD, TRACK_SPLIT, TRACK_MERGE, TRACK_SPLIT_MERGE, &
           TRACK_TRANSIENT, TRACK_UNTRUSTED
 public :: inertia_to_world, principal_frame
 public :: FEATURE_EDGE_SHARP, FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, FEATURE_EDGE_DEFAULT_ANGLE

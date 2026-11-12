@@ -46,6 +46,8 @@ public :: node_flags, cut_cells_2d_prepare, cut_cells_2d_classify, cut_cells_2d_
 public :: chunk_offsets_dev
 ! one cell with its pieces' boundary features, for the piece map of a time step (issue #102)
 public :: cut_cell_2d_pieces, cut_cell_2d_labels
+! one cell's fluid fraction and centroid, for the faces of the 3-D piece map (issue #102 step 2)
+public :: cut_cell_2d_measures
 
 type :: cut_cells_2d_t
    !< Cut-cell geometry of a block (fluid = outside the solid).
@@ -2075,6 +2077,44 @@ contains
       endif
    enddo
    endsubroutine cut_cell_2d_labels
+
+   subroutine cut_cell_2d_measures(u, v, next, x0, x1, y0, y1, flags, closed, alpha, centroid)
+   !< The fluid fraction and centroid of the single cell [x0, x1] x [y0, y1] of the curve (u, v, next) with given corner
+   !< inside flags (issue #102 step 2: a face of a 3-D cell at an instant within the step, from the section of the facets
+   !< around it). As `cut_cell_2d_pieces`, the curve may be any part of a curve that holds every segment meeting the cell
+   !< (open chains included) and the flags replace the parity of the far segments; the cell is walked as a one-cell
+   !< block and measured by `cut_cell_2d_count`. `closed` false (flags that disagree with the crossings): no measures.
+   real(R8P),    intent(in)  :: u(:), v(:)     !< Vertices.
+   integer(I4P), intent(in)  :: next(:)        !< Next vertex (0: none).
+   real(R8P),    intent(in)  :: x0, x1, y0, y1 !< Cell.
+   logical,      intent(in)  :: flags(4)       !< Corners inside the solid: (x0,y0), (x1,y0), (x1,y1), (x0,y1).
+   logical,      intent(out) :: closed         !< The cell boundary closed.
+   real(R8P),    intent(out) :: alpha          !< Fluid fraction.
+   real(R8P),    intent(out) :: centroid(2)    !< Fluid centroid (the cell centre without fluid).
+   type(xing_t),  allocatable :: xs(:)         !< Crossings.
+   type(piece_t), allocatable :: ps(:)         !< Wall pieces.
+   integer(I4P),  allocatable :: xstart(:), xord(:), pstart(:), pord(:), ptg(:,:), iw(:) !< Work.
+   real(R8P),     allocatable :: xp(:,:), pab(:,:), rw(:) !< Work.
+   integer(I4P)               :: nxs, nps, k, nrw, niw, nivc, nbdc, np, eid(4), me(2, 0) !< Work.
+   real(R8P)                  :: aperture(4), wl, wc(2), wn(2) !< Other measures (unused).
+
+   call walk_all(u, v, next, [x0, x1], [y0, y1], xs, nxs, ps, nps)
+   call index_crossings(xs, nxs, 4_I4P, xstart, xord)
+   call index_pieces(ps, nps, 1_I4P, pstart, pord)
+   call cell_edge_ids(1_I4P, 1_I4P, 1_I4P, 1_I4P, eid)
+   allocate(xp(2, nxs), pab(4, nps), ptg(2, nps))
+   do k = 1_I4P, nxs
+      xp(:, k) = xs(k)%p
+   enddo
+   do k = 1_I4P, nps
+      pab(1:2, k) = ps(k)%a ; pab(3:4, k) = ps(k)%b ; ptg(1, k) = ps(k)%ta ; ptg(2, k) = ps(k)%tb
+   enddo
+   call cut_cell_2d_sizes(nxs, nps, 0_I4P, nrw, niw)
+   allocate(rw(nrw), iw(niw)) ; rw = 0._R8P ; iw = 0_I4P
+   call cut_cell_2d_count(x0, x1, y0, y1, flags(1), flags(2), flags(3), flags(4), eid, 4_I4P, nxs, xstart, xord, xp, nps, &
+                          0_I4P, nps, pord, pab, ptg, 0_I4P, me, .false., .false., nrw, rw, niw, iw, closed, alpha, &
+                          aperture, centroid, wl, wc, wn, np, nivc, nbdc)
+   endsubroutine cut_cell_2d_measures
 
    pure subroutine open_cell(x0, x1, y0, y1, closed, alpha, aperture, centroid, npieces, wet_length, wet_normal)
    !< The cell boundary does not close: no measures, no pieces (the wetted centroid keeps the cell centre).

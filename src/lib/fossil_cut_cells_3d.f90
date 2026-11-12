@@ -99,6 +99,8 @@ public :: cut_cells_3d_nodes_device
 public :: cut_link_inputs_3d_t, cut_cells_3d_link_inputs_device, cut_cells_3d_link_inputs, link_inputs_reset
 ! the piece links on the device (issue #100 step 5), the stage of `cut_cells_3d_device(..., links=)`, for the benches
 public :: cut_links_3d_device
+! one cell at a pose with its pieces' boundary features, for the piece map of a time step (issue #102 step 2)
+public :: cut_cell_3d_pieces, cut_cell_3d_totals
 
 integer(I4P), parameter :: MONO2_MAX = 15_I4P !< mono_count(2, MOMENTS_MAX): moments per face, at most.
 integer(I4P), parameter :: MONO3_MAX = 35_I4P !< mono_count(3, MOMENTS_MAX): moments per piece, at most.
@@ -727,6 +729,114 @@ contains
       call move_alloc(ivh, piv_hi)
    endif
    endsubroutine cut_pieces_3d
+
+   subroutine cut_cell_3d_pieces(tl, x0, x1, y0, y1, z0, z1, cs, alpha, faces, measures, np, apiece, cpiece, pvol, pfc, &
+                                 pfm)
+   !< The fluid pieces of the single cell [x0, x1] x [y0, y1] x [z0, z1] cut by the triangles tl(:, :, 1:n) (issue #102
+   !< step 2, the piece map of a time step), with the boundary features of every piece: the piece next to each triangle's
+   !< clipped polygon (a planar facet clipped to a convex cell bounds exactly one piece; an inclusion takes the piece
+   !< around it) and the piece of each fluid corner.
+   !<
+   !< The triangles are the candidates of the cell in increasing facet order (any superset of the facets that touch the
+   !< closed cell: a candidate that misses the cell is a singleton atom never counted, and set roots are least atoms), the
+   !< corner states cs exact (0 solid, 1 fluid; corners in the order 1 + bx + 2 by + 4 bz). The normals, the piercings
+   !< (`cell_piercings`) and the kernel (`cell_pieces_3d`) are those of `cut_pieces_3d`, so with the triangles, corner
+   !< states, alpha and face fractions of a `cut_cells_3d` call the pieces, their order and (several pieces) their
+   !< measures are those of that call, bit for bit. alpha and faces enter only the trust test of a multi-piece split
+   !< (`split_closes`): fractions of -1 make every multi-piece cell -1. np = -1: the cell is not trusted (no
+   !< features).
+   !< With `measures` and several pieces: pvol(np), the face fractions pfc(6, np) (-x, +x, -y, +y, -z, +z) and the face
+   !< moments of order 1 pfm(3, 6, np) (int 1, X, Y over each face, in-face coordinates in cyclic order, X = (x - x_c) / h,
+   !< see `fossil_cut_moments`); one piece takes the cell totals (the caller's).
+   real(R8P),                 intent(in)  :: tl(:,:,:)              !< Triangles [3, 3, n].
+   real(R8P),                 intent(in)  :: x0, x1, y0, y1, z0, z1 !< Cell.
+   integer(I4P),              intent(in)  :: cs(8)                  !< Corner states (0 solid, 1 fluid).
+   real(R8P),                 intent(in)  :: alpha, faces(6)        !< Cell and face fluid fractions (split test).
+   logical,                   intent(in)  :: measures               !< Measures of several pieces.
+   integer(I4P),              intent(out) :: np                     !< Pieces (-1: not trusted).
+   integer(I4P), allocatable, intent(out) :: apiece(:)              !< Piece next to each triangle (0: none) [n].
+   integer(I4P),              intent(out) :: cpiece(8)              !< Piece of each corner (0: solid).
+   real(R8P),    allocatable, intent(out) :: pvol(:), pfc(:,:), pfm(:,:,:) !< Measures (measures, np > 1).
+   real(R8P),    allocatable :: tri(:,:,:), nrm(:,:), rw(:), pt(:), pcen_(:,:), pwa(:), pwc(:,:), pwn(:,:), pmom(:,:), &
+                                pwmom(:,:), ivl(:), ivh(:), qpt(:,:), qwt(:), wpt(:,:), wwt(:), secm(:,:) !< Work.
+   integer(I4P), allocatable :: lst(:), pce(:), pcq(:), pcen(:), iw(:), e2(:,:), e3(:,:), ivp(:), ive(:), qcnt(:), wcnt(:)
+   integer(I4P)              :: n, q, npc, nrw, niw, nm2, nm3, na, npo, nivc, nqc, nwc, qwn1, ro(14), io(20), c !< Work.
+
+   n = size(tl, 3, kind=I4P)
+   allocate(tri(3, 3, max(1_I4P, n)), nrm(3, max(1_I4P, n)), lst(max(1_I4P, n)), apiece(n))
+   do q = 1_I4P, n
+      tri(:, :, q) = tl(:, :, q) ; lst(q) = q
+      nrm(:, q) = cross3(tri(:, 2, q) - tri(:, 1, q), tri(:, 3, q) - tri(:, 1, q))
+   enddo
+   apiece = 0_I4P ; cpiece = 0_I4P
+   allocate(pce(12 * max(1_I4P, n)), pcq(12 * max(1_I4P, n)), pcen(12 * max(1_I4P, n)), pt(12 * max(1_I4P, n)))
+   call cell_piercings(.true., max(1_I4P, n), tri, n, lst, [x0, y0, z0], [x1, y1, z1], size(pce, kind=I4P), npc, pce, pcq, &
+                       pt, pcen)
+   nm2 = 0_I4P ; nm3 = 0_I4P
+   if (measures) then
+      nm2 = mono_count(2_I4P, 1_I4P) ; nm3 = mono_count(3_I4P, 1_I4P)
+      e2 = mono_exponents(2_I4P, 1_I4P) ; e3 = mono_exponents(3_I4P, 1_I4P)
+   else
+      allocate(e2(2, 0), e3(3, 0))
+   endif
+   na = n + 20_I4P + npc ; npo = 0_I4P ; if (measures) npo = na
+   call cell_pieces_sizes(n, npc, nm2, nm3, .false., nrw, niw)
+   allocate(rw(nrw), iw(niw), secm(nm2, 6)) ; rw = 0._R8P ; iw = 0_I4P ; secm = 0._R8P
+   allocate(pvol(npo), pcen_(3, npo), pwa(npo), pwc(3, npo), pwn(3, npo), pfc(6, npo), pmom(nm3, npo), pwmom(nm3, npo), &
+            pfm(nm2, 6, npo), ivp(0), ive(0), ivl(0), ivh(0), qpt(3, 0), qwt(0), wpt(3, 0), wwt(0), qcnt(0), wcnt(0))
+   call cell_pieces_3d(measures, max(1_I4P, n), tri, nrm, n, lst, x0, x1, y0, y1, z0, z1, cs, alpha, faces, npc, pce, pcq, &
+                       pt, pcen, nm2, nm3, e2, e3, .false., .false., secm, nrw, rw, niw, iw, np, nivc, nqc, nwc, qwn1, &
+                       0_I4P, 0_I4P, 0_I4P, 0_I4P, npo, 0_I4P, 0_I4P, 0_I4P, 0_I4P, pvol, pcen_, pwa, pwc, pwn, pfc, pmom, &
+                       pwmom, pfm, ivp, ive, ivl, ivh, qpt, qwt, wpt, wwt, qcnt, wcnt)
+   if (np < 1_I4P) return
+   ! the features, from the kernel's workspace: vertex counts, union-find, inclusion targets, piece ids
+   call cell_pieces_layout(n, npc, nm2, nm3, .false., ro, io)
+   do q = 1_I4P, n
+      if (iw(io(2) + q - 1_I4P) > 0_I4P) apiece(q) = atom_piece(q, n, na, iw(io(6)), iw(io(10)), iw(io(11)))
+   enddo
+   do c = 1_I4P, 8_I4P
+      if (cs(c) == 1_I4P) cpiece(c) = atom_piece(n + c, n, na, iw(io(6)), iw(io(10)), iw(io(11)))
+   enddo
+   endsubroutine cut_cell_3d_pieces
+
+   pure integer(I4P) function atom_piece(a, nt, na, parent, tgt, pid) result(p)
+   !< Piece of atom a of a cell left by `cell_pieces_core` (0: none): its set's id, or the id of the set around it (an
+   !< inclusion, `piece_ids`).
+   !$acc routine seq
+   integer(I4P), intent(in) :: a, nt, na          !< Atom, polygons, atoms.
+   integer(I4P), intent(in) :: parent(na)         !< Union-find.
+   integer(I4P), intent(in) :: tgt(na), pid(na)   !< Inclusion targets, piece ids.
+   integer(I4P)             :: r                  !< Root.
+
+   r = uf_find(na, parent, a)
+   if (r <= nt) then
+      if (tgt(r) /= 0_I4P) r = tgt(r)
+   endif
+   p = pid(r)
+   endfunction atom_piece
+
+   subroutine cut_cell_3d_totals(tl, x0, x1, y0, y1, z0, z1, fx1, fy1, fz1, alpha, closed)
+   !< The fluid fraction of the single cell [x0, x1] x [y0, y1] x [z0, z1] cut by the triangles tl(:, :, 1:n) (its
+   !< candidates, increasing facet order), from the fluid fractions of its +x, +y, +z faces (`cell_totals_3d`; issue #102
+   !< step 2: the trust test of a multi-piece split at an instant within the step). The faces are taken as closed.
+   real(R8P),    intent(in)  :: tl(:,:,:)              !< Triangles [3, 3, n].
+   real(R8P),    intent(in)  :: x0, x1, y0, y1, z0, z1 !< Cell.
+   real(R8P),    intent(in)  :: fx1, fy1, fz1          !< Fluid fractions of the +x, +y, +z faces.
+   real(R8P),    intent(out) :: alpha                  !< Fluid fraction.
+   logical,      intent(out) :: closed                 !< All faces closed.
+   real(R8P),    allocatable :: tri(:,:,:)             !< Triangles.
+   integer(I4P), allocatable :: lst(:)                 !< Candidates.
+   real(R8P)                 :: cen(3), wa, wc(3), wn(3) !< Other measures (unused).
+   integer(I4P)              :: n, q                   !< Work.
+
+   n = size(tl, 3, kind=I4P)
+   allocate(tri(3, 3, max(1_I4P, n)), lst(max(1_I4P, n)))
+   do q = 1_I4P, n
+      tri(:, :, q) = tl(:, :, q) ; lst(q) = q
+   enddo
+   call cell_totals_3d(max(1_I4P, n), tri, n, lst, x0, x1, y0, y1, z0, z1, fx1, fy1, fz1, .true., .true., .true., .true., &
+                       .true., .true., alpha, cen, wa, wc, wn, closed)
+   endsubroutine cut_cell_3d_totals
 
    subroutine cell_piercings(fill, nf, tri, nt, lst, c0, c1, ncap, npc, pce, pcq, pct, pcen)
    !< Exact crossings of the 12 edges of the cell [c0, c1] by its candidates lst (issue #70): a crossing belongs to the

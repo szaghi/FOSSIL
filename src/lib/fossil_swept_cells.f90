@@ -45,13 +45,15 @@ module fossil_swept_cells
 !< issue #44), or call `self_intersections` / `check_validity(check_self_intersections=.true.)`.
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t, cut_cells_2d_blocks_t, cut_cells_device_many, &
                                      place_for_crossings
-use fossil_curve_slice,        only : slice_surface, slice_planes_t, slice_planes_prepare, slice_surface_plane
-use fossil_cut_cells_2d,       only : cut_cell_2d_pieces
-use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_cells_3d_sections
+use fossil_curve_slice,        only : slice_surface, slice_planes_t, slice_planes_prepare, slice_surface_plane, slice_triangles
+use fossil_cut_cells_2d,       only : cut_cell_2d_pieces, cut_cell_2d_measures
+use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_cells_3d_sections, &
+                                     cut_cell_3d_pieces, cut_cell_3d_totals
 use fossil_facet_object,       only : facet_object
-use fossil_piece_map,          only : piece_map_2d_t, TRACK_UNTRUSTED, track_components, track_status_of
+use fossil_piece_map,          only : piece_map_2d_t, piece_map_3d_t, TRACK_UNTRUSTED, track_components, track_status_of
 use fossil_rigid_pose,         only : rigid_pose_t, rigid_pose_2d_t, pose_interpolate, pose_angle_2d, pose_log_3d, to_world, &
                                      to_body
+use fossil_line_query,         only : line_crossing_before
 use fossil_self_intersection,  only : intersection_pair_t
 use fossil_surface_stl_object, only : surface_stl_object, STATUS_OK, STATUS_INVALID_INPUT
 use penf,                      only : I4P, I8P, R8P
@@ -195,6 +197,53 @@ type :: cell_eval_t
    real(R8P),    allocatable :: pmom(:,:)        !< First moment of the faces' fluid parts per piece [4, np].
    logical                   :: fl(4) = .false.  !< The corner flags it was evaluated with.
 endtype cell_eval_t
+
+type :: map3_ctx_t
+   !< State of the 3-D piece map construction shared by its module-level helpers (issue #102 step 2).
+   integer(I4P)              :: path = MAP_TRANSLATION !< MAP_TRANSLATION, MAP_ROTATION or MAP_GAUSS.
+   integer(I4P)              :: nq = 4_I4P      !< Gauss nodes (MAP_GAUSS).
+   integer(I4P)              :: nf = 0_I4P      !< Facets.
+   integer(I4P)              :: nvx = 0_I4P     !< Mesh vertices (distinct body-frame points).
+   integer(I4P)              :: ned = 0_I4P     !< Mesh edges.
+   logical                   :: rot = .false.   !< The step rotates: screw events, evaluations on posed facets.
+   real(R8P),    allocatable :: tb(:,:,:)       !< Body-frame facets [3, 3, nf].
+   real(R8P),    allocatable :: t0(:,:,:)       !< Facets of the pose0 copy (`move`, as the end-pose cut) [3, 3, nf].
+   real(R8P),    allocatable :: t1(:,:,:)       !< Facets of the pose1 copy [3, 3, nf].
+   real(R8P),    allocatable :: w(:,:,:)        !< R0 q of every facet vertex (screw events) [3, 3, nf].
+   real(R8P),    allocatable :: vlo(:,:,:)      !< Box of every facet vertex's path over the step, low [3, 3, nf].
+   real(R8P),    allocatable :: vhi(:,:,:)      !< Box of every facet vertex's path over the step, high [3, 3, nf].
+   integer(I4P), allocatable :: fv(:,:)         !< Mesh vertex of every facet vertex [3, nf].
+   integer(I4P), allocatable :: fe(:,:)         !< Mesh edge of every facet edge (m -> m + 1) [3, nf].
+   integer(I4P), allocatable :: vstamp(:)       !< Work: the last cell that visited a mesh vertex (its tick).
+   integer(I4P), allocatable :: estamp(:)       !< Work: the last cell that visited a mesh edge (its tick).
+   integer(I4P)              :: tick = 0_I4P    !< Work: a stamp per cell.
+   type(rigid_pose_t)        :: pose0, pose1    !< End poses.
+   real(R8P)                 :: d(3) = 0._R8P   !< Translation over the step (pose1%t - pose0%t).
+   real(R8P)                 :: kax(3) = 0._R8P !< Rotation axis of the step (unit).
+   real(R8P)                 :: ang = 0._R8P    !< Rotation angle of the step.
+   real(R8P)                 :: om(3) = 0._R8P  !< Rotation vector ang kax.
+   real(R8P)                 :: xm = 0._R8P     !< Coordinate magnitude (the round-off scale of a crossing).
+   real(R8P)                 :: tol = 0._R8P    !< Position tolerance of an event check, 1e-12 (max |grid| + 1).
+   logical                   :: exact = .true.  !< Every multi-track integration converged.
+   integer(I4P)              :: skipped = 0_I4P !< Quadrature nodes or pieces skipped in narrow intervals (`map3_node`).
+   integer(I4P)              :: cs0(8) = 1_I4P  !< Current cell: corner states at pose0 (k0's node flags).
+   logical                   :: known(8) = .false. !< Current cell: the corner's states follow from its events.
+   integer(I4P)              :: ncn = 0_I4P     !< Current cell: corner events.
+   real(R8P),    allocatable :: ctime(:)        !< Current cell: instants of the corner events [ncn].
+   real(R8P),    allocatable :: ccor(:)         !< Current cell: their corners (1..8, as reals) [ncn].
+endtype map3_ctx_t
+
+type :: cell_eval3_t
+   !< The pieces of one 3-D cell at one instant with their boundary features (issue #102 step 2, `map3_eval`).
+   logical                   :: closed = .false. !< Trusted (every face section closed, the pieces counted).
+   integer(I4P)              :: np = 0_I4P       !< Pieces.
+   integer(I4P)              :: nk = 0_I4P       !< Features.
+   integer(I4P), allocatable :: key(:)           !< Features, increasing: fluid corners -8..-1, facets (global ids) [nk].
+   integer(I4P), allocatable :: kpiece(:)        !< Piece next to each feature [nk].
+   real(R8P),    allocatable :: pvol(:)          !< Piece volumes (measures, several pieces) [np].
+   real(R8P),    allocatable :: pa(:,:)          !< Fluid area of the faces (-x, +x, -y, +y, -z, +z) per piece [6, np].
+   real(R8P),    allocatable :: pm(:,:,:)        !< int of the two in-face coordinates (cyclic) over them [2, 6, np].
+endtype cell_eval3_t
 
 contains
    subroutine swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input, map)
@@ -1824,13 +1873,1158 @@ contains
    enddo
    endfunction piece_track
 
-   subroutine swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, check_input)
+   subroutine piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, path, nq, map)
+   !< The 3-D piece map of the step (issue #102 step 2; `piece_map_3d_t`), from the end-pose cuts k0, k1 of the copies
+   !< of `surface` moved to pose0 (s0) and pose1; the 3-D twin of `piece_map_2d_build`.
+   !<
+   !< 1. Candidates: the cells a facet can meet during the step (the box of its vertices' paths: the segment of the
+   !<    translation, or 17 samples of the screw path grown by its curvature bound), each with its facets (CSR,
+   !<    increasing facet order).
+   !< 2. Topology per cell (`map3_cell`): the events of the cell from its facets (`map3_events`: a mesh vertex crossing a
+   !<    face plane inside the face, a mesh edge crossing a cell edge, a corner crossing a facet; explicit on a
+   !<    translation, `isolate_zeros` under a rotation); a cell without events whose two end cuts have the same single
+   !<    piece (or none) takes the trivial track. Otherwise its pieces are evaluated at pose0 (the pose0 copy, k0's
+   !<    corner states and fractions: they must equal k0's pieces bit for bit, which fixes the numbering), at the middle
+   !<    of every interval between events, and at pose1, and pieces of consecutive evaluations sharing a boundary
+   !<    feature (a facet or a fluid corner) are one track (`track_components`).
+   !< 3. Measures: one track takes the cell's `sw` values and the face outflows of the call (fox, foy, foz: the time
+   !<    integral of the rigid field's flux in +axis through every grid face); several tracks integrate their face
+   !<    parts on the cell's event intervals with the exact paths' rules, on the Gauss path too (`map3_measures`).
+   !< 4. CSR fill in cell order.
+   type(surface_stl_object), intent(in)  :: surface        !< Surface (body frame).
+   type(surface_stl_object), intent(in)  :: s0             !< Copy at pose0 (`move`, the end-pose cut's).
+   type(rigid_pose_t),       intent(in)  :: pose0, pose1   !< End poses.
+   real(R8P),                intent(in)  :: x(:), y(:), z(:) !< Cell edges.
+   type(cut_cells_3d_t),     intent(in)  :: k0, k1         !< Cut cells at pose0 and pose1.
+   type(swept_cells_3d_t),   intent(in)  :: sw             !< Swept geometry of the step.
+   real(R8P),                intent(in)  :: fox(:,:,:), foy(:,:,:), foz(:,:,:) !< Face outflows in +axis.
+   integer(I4P),             intent(in)  :: path           !< MAP_TRANSLATION, MAP_ROTATION or MAP_GAUSS.
+   integer(I4P),             intent(in)  :: nq             !< Gauss nodes (MAP_GAUSS).
+   type(piece_map_3d_t),     intent(out) :: map            !< Piece map.
+   type(map3_ctx_t)          :: mc                         !< State.
+   integer(I4P), allocatable :: cstart(:), cfac(:)         !< Facets of every cell.
+   integer(I4P), allocatable :: ntr(:), ckind(:)           !< Tracks and kind (0 trivial, 1 evaluated, -1 untrusted).
+   integer(I4P), allocatable :: otr(:), ntn(:)             !< Track (in its cell) of every old and new piece.
+   integer(I4P), allocatable :: moff(:), oc(:), nc(:), fo(:), fn(:) !< Work.
+   real(R8P),    allocatable :: meas(:,:), mloc(:,:)       !< Per-track measures of the multi-track cells.
+   integer(I4P)              :: nx, ny, nz, ncell, c, i, j, k, nt, kind, nev, tot, t, p, a0, a1, b0, b1 !< Work.
+
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   ncell = nx * ny * nz
+   map%nx = nx ; map%ny = ny ; map%nz = nz ; map%np0 = k0%np ; map%np1 = k1%np
+   call map3_context(surface, s0, pose0, pose1, x, y, z, path, nq, mc)
+   call map3_candidates(mc, x, y, z, cstart, cfac)
+   allocate(ntr(ncell), ckind(ncell), otr(k0%np), ntn(k1%np), moff(ncell))
+   ! topology of every cell
+   do k = 1_I4P, nz
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx
+            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+            a0 = k0%first_piece(i, j, k) ; a1 = a0 + max(0_I4P, k0%pieces(i, j, k)) - 1_I4P
+            b0 = k1%first_piece(i, j, k) ; b1 = b0 + max(0_I4P, k1%pieces(i, j, k)) - 1_I4P
+            call map3_cell(mc, surface, s0, i, j, k, x, y, z, k0, k1, cfac(cstart(c):cstart(c + 1) - 1_I4P), .false., &
+                           kind, nt, otr(a0:a1), ntn(b0:b1), mloc, nev)
+            ckind(c) = kind ; ntr(c) = nt
+            map%evaluations = map%evaluations + nev
+            if (nev > 0_I4P) map%evaluated_cells = map%evaluated_cells + 1_I4P
+         enddo
+      enddo
+   enddo
+   ! the multi-track cells again, with their per-track measures
+   tot = 0_I4P ; moff = 0_I4P
+   do c = 1_I4P, ncell
+      if (ckind(c) == 1_I4P .and. ntr(c) >= 2_I4P) then
+         moff(c) = tot + 1_I4P ; tot = tot + ntr(c)
+      endif
+   enddo
+   allocate(meas(12, tot))
+   do k = 1_I4P, nz
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx
+            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+            if (moff(c) == 0_I4P) cycle
+            a0 = k0%first_piece(i, j, k) ; a1 = a0 + max(0_I4P, k0%pieces(i, j, k)) - 1_I4P
+            b0 = k1%first_piece(i, j, k) ; b1 = b0 + max(0_I4P, k1%pieces(i, j, k)) - 1_I4P
+            call map3_cell(mc, surface, s0, i, j, k, x, y, z, k0, k1, cfac(cstart(c):cstart(c + 1) - 1_I4P), .true., &
+                           kind, nt, otr(a0:a1), ntn(b0:b1), mloc, nev)
+            if (kind == 1_I4P .and. nt == ntr(c)) then
+               meas(:, moff(c):moff(c) + nt - 1_I4P) = mloc(:, 1:nt)
+            else
+               ckind(c) = -1_I4P ; moff(c) = 0_I4P
+            endif
+         enddo
+      enddo
+   enddo
+   ! untrusted cells: one track with every piece
+   allocate(map%tracks(nx, ny, nz), map%first_track(nx, ny, nz))
+   nt = 0_I4P
+   do k = 1_I4P, nz
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx
+            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+            if (ckind(c) == -1_I4P) then
+               ntr(c) = 1_I4P
+               a0 = k0%first_piece(i, j, k) ; a1 = a0 + max(0_I4P, k0%pieces(i, j, k)) - 1_I4P
+               b0 = k1%first_piece(i, j, k) ; b1 = b0 + max(0_I4P, k1%pieces(i, j, k)) - 1_I4P
+               otr(a0:a1) = 1_I4P ; ntn(b0:b1) = 1_I4P
+               map%untrusted_cells = map%untrusted_cells + 1_I4P
+            endif
+            if (ntr(c) >= 2_I4P) map%multi_track_cells = map%multi_track_cells + 1_I4P
+            map%tracks(i, j, k) = ntr(c) ; map%first_track(i, j, k) = nt + 1_I4P ; nt = nt + ntr(c)
+         enddo
+      enddo
+   enddo
+   map%nt = nt
+   allocate(map%track_cell(3, nt), map%status(nt), map%old_start(nt + 1), map%new_start(nt + 1), map%old_piece(k0%np), &
+            map%new_piece(k1%np), map%old_track(k0%np), map%new_track(k1%np), map%volume0(nt), map%volume1(nt), &
+            map%faces(6, nt), map%outflow(6, nt), map%wall(3, nt), map%residual(nt), oc(nt), nc(nt), fo(nt), fn(nt))
+   map%volume0 = 0._R8P ; map%volume1 = 0._R8P ; oc = 0_I4P ; nc = 0_I4P
+   do p = 1_I4P, k0%np ! pieces in order: volumes summed in piece order
+      t = map%first_track(k0%piece_cell(1, p), k0%piece_cell(2, p), k0%piece_cell(3, p)) + otr(p) - 1_I4P
+      map%old_track(p) = t ; oc(t) = oc(t) + 1_I4P ; map%volume0(t) = map%volume0(t) + k0%piece_volume(p)
+   enddo
+   do p = 1_I4P, k1%np
+      t = map%first_track(k1%piece_cell(1, p), k1%piece_cell(2, p), k1%piece_cell(3, p)) + ntn(p) - 1_I4P
+      map%new_track(p) = t ; nc(t) = nc(t) + 1_I4P ; map%volume1(t) = map%volume1(t) + k1%piece_volume(p)
+   enddo
+   map%old_start(1) = 1_I4P ; map%new_start(1) = 1_I4P
+   do t = 1_I4P, nt
+      map%old_start(t + 1) = map%old_start(t) + oc(t) ; map%new_start(t + 1) = map%new_start(t) + nc(t)
+      fo(t) = map%old_start(t) ; fn(t) = map%new_start(t)
+   enddo
+   do p = 1_I4P, k0%np
+      t = map%old_track(p) ; map%old_piece(fo(t)) = p ; fo(t) = fo(t) + 1_I4P
+   enddo
+   do p = 1_I4P, k1%np
+      t = map%new_track(p) ; map%new_piece(fn(t)) = p ; fn(t) = fn(t) + 1_I4P
+   enddo
+   do k = 1_I4P, nz
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx
+            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+            do t = map%first_track(i, j, k), map%first_track(i, j, k) + ntr(c) - 1_I4P
+               map%track_cell(:, t) = [i, j, k]
+               if (ckind(c) == -1_I4P) then
+                  map%status(t) = TRACK_UNTRUSTED
+               else
+                  map%status(t) = track_status_of(oc(t), nc(t))
+               endif
+               map%n_status(map%status(t)) = map%n_status(map%status(t)) + 1_I4P
+               if (moff(c) > 0_I4P) then ! several tracks: integrated per track
+                  p = moff(c) + t - map%first_track(i, j, k)
+                  map%faces(:, t) = meas(1:6, p) ; map%outflow(:, t) = meas(7:12, p)
+                  map%wall(:, t) = -[meas(2, p) - meas(1, p), meas(4, p) - meas(3, p), meas(6, p) - meas(5, p)]
+                  map%residual(t) = map%volume1(t) - map%volume0(t) + (meas(7, p) + meas(8, p) + meas(9, p) + &
+                                    meas(10, p) + meas(11, p) + meas(12, p))
+               else ! one track: the cell's values
+                  map%faces(:, t) = [sw%face_x(i, j, k), sw%face_x(i + 1, j, k), sw%face_y(i, j, k), sw%face_y(i, j + 1, k), &
+                                     sw%face_z(i, j, k), sw%face_z(i, j, k + 1)]
+                  map%outflow(:, t) = [-fox(i, j, k), fox(i + 1, j, k), -foy(i, j, k), foy(i, j + 1, k), -foz(i, j, k), &
+                                       foz(i, j, k + 1)]
+                  map%wall(:, t) = sw%wall(:, i, j, k)
+                  map%residual(t) = sw%residual(i, j, k)
+               endif
+            enddo
+         enddo
+      enddo
+   enddo
+   map%exact = mc%exact ; map%skipped_nodes = mc%skipped
+   endsubroutine piece_map_3d_build
+
+   subroutine map3_context(surface, s0, pose0, pose1, x, y, z, path, nq, mc)
+   !< The state of the 3-D piece map construction: facets (body, pose0 and pose1 copies), motion, vertex path boxes, mesh
+   !< vertex and edge ids (exact equality of the body-frame points), work stamps.
+   type(surface_stl_object), intent(in)  :: surface, s0       !< Surface (body frame), copy at pose0.
+   type(rigid_pose_t),       intent(in)  :: pose0, pose1      !< End poses.
+   real(R8P),                intent(in)  :: x(:), y(:), z(:)  !< Cell edges.
+   integer(I4P),             intent(in)  :: path, nq          !< Path, Gauss nodes.
+   type(map3_ctx_t),         intent(out) :: mc                !< State.
+   type(surface_stl_object)    :: s1                          !< Copy at pose1.
+   type(facet_object), pointer :: fp                          !< Facet.
+   real(R8P),    allocatable   :: key(:,:)                    !< Sort keys.
+   integer(I4P), allocatable   :: ord(:)                      !< Sorted order.
+   real(R8P)                   :: xs(3), mrg, pad             !< Work.
+   integer(I4P)                :: f, m, q, n, id              !< Work.
+
+   mc%path = path ; mc%nq = nq ; mc%nf = surface%get_facets_number()
+   allocate(mc%tb(3, 3, mc%nf), mc%t0(3, 3, mc%nf), mc%t1(3, 3, mc%nf), mc%w(3, 3, mc%nf), mc%vlo(3, 3, mc%nf), &
+            mc%vhi(3, 3, mc%nf), mc%fv(3, mc%nf), mc%fe(3, mc%nf))
+   s1 = surface ; call s1%move(pose1)
+   do f = 1_I4P, mc%nf
+      fp => surface%facet_at(f)
+      do m = 1_I4P, 3_I4P
+         mc%tb(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
+      enddo
+      fp => s0%facet_at(f)
+      do m = 1_I4P, 3_I4P
+         mc%t0(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
+      enddo
+      fp => s1%facet_at(f)
+      do m = 1_I4P, 3_I4P
+         mc%t1(:, m, f) = [fp%vertex(m)%x, fp%vertex(m)%y, fp%vertex(m)%z]
+      enddo
+   enddo
+   mc%pose0 = pose0 ; mc%pose1 = pose1 ; mc%d = pose1%t - pose0%t
+   call pose_log_3d(pose0, pose1, mc%kax, mc%ang) ; mc%om = mc%ang * mc%kax
+   mc%rot = path /= MAP_TRANSLATION .and. .not. all(pose1%r == pose0%r)
+   mc%xm = max(maxval(abs(x)), maxval(abs(y)), maxval(abs(z))) + norm2(pose0%t) + norm2(mc%d)
+   mc%tol = 1e-12_R8P * (max(maxval(abs(x)), maxval(abs(y)), maxval(abs(z))) + 1._R8P)
+   pad = 64._R8P * epsilon(1._R8P) * mc%xm + mc%tol
+   do f = 1_I4P, mc%nf ! the box of every vertex path
+      do m = 1_I4P, 3_I4P
+         mc%w(:, m, f) = matmul(pose0%r, mc%tb(:, m, f))
+         if (mc%rot) then ! 17 samples, |X''| <= ang^2 |w| (as `faces_rotation_3d`)
+            mc%vlo(:, m, f) = huge(1._R8P) ; mc%vhi(:, m, f) = -huge(1._R8P)
+            do q = 0_I4P, 16_I4P
+               xs = screw_at(mc, mc%w(:, m, f), real(q, R8P) / 16._R8P)
+               mc%vlo(:, m, f) = min(mc%vlo(:, m, f), xs) ; mc%vhi(:, m, f) = max(mc%vhi(:, m, f), xs)
+            enddo
+            mrg = mc%ang**2 * norm2(mc%w(:, m, f)) / (8._R8P * 16._R8P**2) + 1e-12_R8P * (norm2(mc%w(:, m, f)) + &
+                  norm2(pose0%t) + norm2(mc%d) + 1._R8P)
+         else
+            mc%vlo(:, m, f) = min(mc%t0(:, m, f), mc%t0(:, m, f) + mc%d)
+            mc%vhi(:, m, f) = max(mc%t0(:, m, f), mc%t0(:, m, f) + mc%d)
+            mrg = 0._R8P
+         endif
+         mc%vlo(:, m, f) = mc%vlo(:, m, f) - mrg - pad ; mc%vhi(:, m, f) = mc%vhi(:, m, f) + mrg + pad
+      enddo
+   enddo
+   ! mesh vertices: equal body-frame points (sorted lexicographically); mesh edges: equal vertex pairs
+   n = 3_I4P * mc%nf
+   allocate(key(3, n))
+   do f = 1_I4P, mc%nf
+      do m = 1_I4P, 3_I4P
+         key(:, 3_I4P * (f - 1_I4P) + m) = mc%tb(:, m, f)
+      enddo
+   enddo
+   call sort_lex(key, ord)
+   id = 0_I4P
+   do q = 1_I4P, n
+      if (q == 1_I4P) then
+         id = 1_I4P
+      elseif (any(key(:, ord(q)) /= key(:, ord(q - 1_I4P)))) then
+         id = id + 1_I4P
+      endif
+      mc%fv(mod(ord(q) - 1_I4P, 3_I4P) + 1_I4P, (ord(q) - 1_I4P) / 3_I4P + 1_I4P) = id
+   enddo
+   mc%nvx = id
+   key = 0._R8P
+   do f = 1_I4P, mc%nf
+      do m = 1_I4P, 3_I4P
+         q = 3_I4P * (f - 1_I4P) + m
+         key(1, q) = real(min(mc%fv(m, f), mc%fv(mod(m, 3_I4P) + 1_I4P, f)), R8P)
+         key(2, q) = real(max(mc%fv(m, f), mc%fv(mod(m, 3_I4P) + 1_I4P, f)), R8P)
+      enddo
+   enddo
+   call sort_lex(key, ord)
+   id = 0_I4P
+   do q = 1_I4P, n
+      if (q == 1_I4P) then
+         id = 1_I4P
+      elseif (any(key(:, ord(q)) /= key(:, ord(q - 1_I4P)))) then
+         id = id + 1_I4P
+      endif
+      mc%fe(mod(ord(q) - 1_I4P, 3_I4P) + 1_I4P, (ord(q) - 1_I4P) / 3_I4P + 1_I4P) = id
+   enddo
+   mc%ned = id
+   allocate(mc%vstamp(max(1_I4P, mc%nvx)), mc%estamp(max(1_I4P, mc%ned)))
+   mc%vstamp = 0_I4P ; mc%estamp = 0_I4P ; mc%tick = 0_I4P ; mc%exact = .true. ; mc%skipped = 0_I4P
+   endsubroutine map3_context
+
+   subroutine sort_lex(key, ord)
+   !< Stable bottom-up merge sort of the columns of key [3, n] in lexicographic order: key(:, ord(1)) <= ...
+   real(R8P),                 intent(in)  :: key(:,:) !< Keys.
+   integer(I4P), allocatable, intent(out) :: ord(:)   !< Order.
+   integer(I4P), allocatable :: tmp(:)                !< Work.
+   integer(I4P)              :: n, wdt, lo, mid, hi, a, b, o, r !< Work.
+   logical                   :: le                    !< key(:, a) <= key(:, b).
+
+   n = size(key, 2, kind=I4P)
+   allocate(ord(n), tmp(n))
+   do a = 1_I4P, n
+      ord(a) = a
+   enddo
+   wdt = 1_I4P
+   do while (wdt < n)
+      lo = 1_I4P
+      do while (lo <= n)
+         mid = min(lo + wdt, n + 1_I4P) ; hi = min(lo + 2_I4P * wdt, n + 1_I4P)
+         a = lo ; b = mid ; o = lo
+         do while (a < mid .and. b < hi)
+            le = .true.
+            do r = 1_I4P, size(key, 1, kind=I4P)
+               if (key(r, ord(a)) < key(r, ord(b))) exit
+               if (key(r, ord(a)) > key(r, ord(b))) then
+                  le = .false. ; exit
+               endif
+            enddo
+            if (le) then
+               tmp(o) = ord(a) ; a = a + 1_I4P
+            else
+               tmp(o) = ord(b) ; b = b + 1_I4P
+            endif
+            o = o + 1_I4P
+         enddo
+         do while (a < mid)
+            tmp(o) = ord(a) ; a = a + 1_I4P ; o = o + 1_I4P
+         enddo
+         do while (b < hi)
+            tmp(o) = ord(b) ; b = b + 1_I4P ; o = o + 1_I4P
+         enddo
+         lo = hi
+      enddo
+      ord = tmp ; wdt = 2_I4P * wdt
+   enddo
+   endsubroutine sort_lex
+
+   pure function screw_at(mc, wv, s) result(xv)
+   !< Position at instant s of the body point with R0 q = wv under the screw motion of the step (as `faces_rotation_3d`).
+   type(map3_ctx_t), intent(in) :: mc    !< State.
+   real(R8P),        intent(in) :: wv(3) !< R0 q.
+   real(R8P),        intent(in) :: s     !< Instant.
+   real(R8P)                    :: xv(3), cv(3) !< Position, work.
+
+   cv = mc%kax * dot_product(mc%kax, wv)
+   xv = (wv - cv) * cos(s * mc%ang) + cross(mc%kax, wv) * sin(s * mc%ang) + cv + mc%pose0%t + s * mc%d
+   endfunction screw_at
+
+   pure subroutine rodrigues_k(kax, wv, a3, b3, c3)
+   !< Rot(phi) wv = a3 cos phi + b3 sin phi + c3 about the unit axis kax.
+   real(R8P), intent(in)  :: kax(3), wv(3)  !< Axis, vector.
+   real(R8P), intent(out) :: a3(3), b3(3), c3(3) !< Coefficients.
+
+   c3 = kax * dot_product(kax, wv) ; a3 = wv - c3 ; b3 = cross(kax, wv)
+   endsubroutine rodrigues_k
+
+   subroutine map3_candidates(mc, x, y, z, cstart, cfac)
+   !< The cells a facet can meet during the step, with their facets (CSR over the cells c = i + nx ((j - 1) + ny (k - 1)),
+   !< the facets of a cell in increasing order): the box of the facet's vertex paths, the cells meeting it (closed).
+   !< Count, then fill.
+   type(map3_ctx_t),          intent(in)  :: mc               !< State.
+   real(R8P),                 intent(in)  :: x(:), y(:), z(:) !< Cell edges.
+   integer(I4P), allocatable, intent(out) :: cstart(:)        !< [ncell + 1].
+   integer(I4P), allocatable, intent(out) :: cfac(:)          !< Facets.
+   integer(I4P), allocatable :: fill(:)                       !< Fill pointers.
+   real(R8P)                 :: lo(3), hi(3)                  !< Box.
+   integer(I4P)              :: nx, ny, nz, ncell, pass, f, q, i1, i2, j1, j2, l1, l2, ii, jj, kk, c !< Work.
+
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   ncell = nx * ny * nz
+   allocate(cstart(ncell + 1), fill(ncell))
+   cstart = 0_I4P
+   do pass = 1_I4P, 2_I4P
+      if (pass == 2_I4P) then
+         q = 1_I4P
+         do c = 1_I4P, ncell
+            fill(c) = q ; q = q + cstart(c) ; cstart(c) = fill(c)
+         enddo
+         cstart(ncell + 1) = q
+         allocate(cfac(q - 1_I4P))
+      endif
+      do f = 1_I4P, mc%nf
+         lo = min(mc%vlo(:, 1, f), mc%vlo(:, 2, f), mc%vlo(:, 3, f))
+         hi = max(mc%vhi(:, 1, f), mc%vhi(:, 2, f), mc%vhi(:, 3, f))
+         if (.not. (all(lo <= hi))) then ! a NaN coordinate: every cell
+            lo = -huge(1._R8P) ; hi = huge(1._R8P)
+         endif
+         call index_range(x, lo(1), hi(1), i1, i2) ; call index_range(y, lo(2), hi(2), j1, j2)
+         call index_range(z, lo(3), hi(3), l1, l2)
+         i1 = max(1_I4P, i1 - 1_I4P) ; i2 = min(nx, i2) ; j1 = max(1_I4P, j1 - 1_I4P) ; j2 = min(ny, j2)
+         l1 = max(1_I4P, l1 - 1_I4P) ; l2 = min(nz, l2)
+         do kk = l1, l2
+            do jj = j1, j2
+               do ii = i1, i2
+                  c = ii + nx * ((jj - 1_I4P) + ny * (kk - 1_I4P))
+                  if (pass == 1_I4P) then
+                     cstart(c) = cstart(c) + 1_I4P
+                  else
+                     cfac(fill(c)) = f ; fill(c) = fill(c) + 1_I4P
+                  endif
+               enddo
+            enddo
+         enddo
+      enddo
+   enddo
+   endsubroutine map3_candidates
+
+   subroutine map3_cell(mc, surface, s0, i, j, k, x, y, z, k0, k1, lf, with_meas, kind, nt, otr, ntn, meas, nev)
+   !< The tracks of cell (i, j, k) (see `piece_map_3d_build`, step 2): kind 0 (trivial: no evaluation), 1 (evaluated) or
+   !< -1 (untrusted); nt tracks; the track of each of its old pieces (otr, in k0's order) and new pieces (ntn); with
+   !< `with_meas` and nt >= 2, the per-track time integrals meas(1:6) of the faces' fluid areas and meas(7:12) of their
+   !< outward rigid-field outflows (`map3_measures`; kind -1 if a face part could not be assigned). Intervals between
+   !< events narrower than EVENT_GAP are not evaluated (their events act as one), as `map_cell`.
+   type(map3_ctx_t),          intent(inout) :: mc               !< State.
+   type(surface_stl_object),  intent(in)    :: surface, s0      !< Surface (body frame), copy at pose0.
+   integer(I4P),              intent(in)    :: i, j, k          !< Cell.
+   real(R8P),                 intent(in)    :: x(:), y(:), z(:) !< Cell edges.
+   type(cut_cells_3d_t),      intent(in)    :: k0, k1           !< End-pose cuts.
+   integer(I4P),              intent(in)    :: lf(:)            !< Facets of the cell (increasing).
+   logical,                   intent(in)    :: with_meas        !< Integrate the per-track measures.
+   integer(I4P),              intent(out)   :: kind             !< 0 trivial, 1 evaluated, -1 untrusted.
+   integer(I4P),              intent(out)   :: nt               !< Tracks.
+   integer(I4P),              intent(out)   :: otr(:)           !< Track of each old piece of the cell.
+   integer(I4P),              intent(out)   :: ntn(:)           !< Track of each new piece of the cell.
+   real(R8P),    allocatable, intent(out)   :: meas(:,:)        !< Per-track measures [12, nt] (with_meas, nt >= 2).
+   integer(I4P),              intent(out)   :: nev              !< Evaluations.
+   type(cell_eval3_t), allocatable :: ev(:)                     !< Evaluations: pose0, the wide intervals' middles, pose1.
+   integer(I4P),       allocatable :: nstart(:), lstart(:), lkey(:), lpiece(:), par(:), comp(:) !< Work.
+   integer(I4P),       allocatable :: eref(:), ealt(:)          !< Per interval: its evaluation, the one after it (narrow).
+   real(R8P),          allocatable :: b(:)                      !< Events.
+   real(R8P)                       :: c0(3), c1(3), sa, sb, fr(6) !< Cell, interval, face fractions.
+   integer(I4P)                    :: np0, np1, nb, ne, e, m, q, nk, cs(8) !< Work.
+   logical                         :: cert                      !< Certified events.
+
+   kind = 0_I4P ; nt = 0_I4P ; nev = 0_I4P
+   c0 = [x(i), y(j), z(k)] ; c1 = [x(i + 1), y(j + 1), z(k + 1)]
+   np0 = k0%pieces(i, j, k) ; np1 = k1%pieces(i, j, k)
+   if (np0 < 0_I4P .or. np1 < 0_I4P) then
+      kind = -1_I4P ; return
+   endif
+   if (size(lf) == 0) then ! no wall near the cell during the step: the same state throughout
+      if (np0 == np1 .and. np0 <= 1_I4P) then
+         nt = np0 ; otr = 1_I4P ; ntn = 1_I4P
+      else
+         kind = -1_I4P
+      endif
+      return
+   endif
+   call map3_events(mc, c0, c1, lf, b, nb, cert)
+   if (.not. cert) then
+      kind = -1_I4P ; return
+   endif
+   if (nb == 0_I4P .and. np0 == np1 .and. np0 <= 1_I4P) then ! one state throughout, at most one piece
+      nt = np0 ; otr = 1_I4P ; ntn = 1_I4P ; return
+   endif
+   kind = 1_I4P
+   ! the intervals: a wide one has its evaluation (2 .. ne - 1); a narrow one refers to those before and after it
+   allocate(eref(nb + 1), ealt(nb + 1))
+   ne = 1_I4P
+   do m = 1_I4P, nb + 1_I4P
+      call map_interval(b, nb, m, sa, sb)
+      if (sb - sa >= EVENT_GAP) then
+         ne = ne + 1_I4P ; eref(m) = ne ; ealt(m) = ne
+      else
+         eref(m) = ne ; ealt(m) = 0_I4P
+      endif
+   enddo
+   ne = ne + 1_I4P ; nev = ne
+   e = ne
+   do m = nb + 1_I4P, 1_I4P, -1_I4P
+      if (ealt(m) == 0_I4P) then
+         ealt(m) = e
+      else
+         e = eref(m)
+      endif
+   enddo
+   allocate(ev(ne))
+   call node_states(k0%node_in, i, j, k, mc%cs0) ; call node_states(k1%node_in, i, j, k, cs)
+   call map3_corner_known(mc, cs)
+   call node_states(k0%node_in, i, j, k, cs)
+   fr = [k0%face_x(i, j, k), k0%face_x(i + 1, j, k), k0%face_y(i, j, k), k0%face_y(i, j + 1, k), k0%face_z(i, j, k), &
+         k0%face_z(i, j, k + 1)]
+   call map3_eval(mc, surface, s0, 0_I4P, 0._R8P, c0, c1, lf, cs, k0%alpha(i, j, k), fr, np0 > 1_I4P, ev(1))
+   e = 1_I4P
+   do m = 1_I4P, nb + 1_I4P
+      call map_interval(b, nb, m, sa, sb)
+      if (sb - sa < EVENT_GAP) cycle
+      e = e + 1_I4P
+      call map3_eval(mc, surface, s0, 2_I4P, 0.5_R8P * (sa + sb), c0, c1, lf, cs, 0._R8P, fr, .false., ev(e))
+   enddo
+   call node_states(k1%node_in, i, j, k, cs)
+   fr = [k1%face_x(i, j, k), k1%face_x(i + 1, j, k), k1%face_y(i, j, k), k1%face_y(i, j + 1, k), k1%face_z(i, j, k), &
+         k1%face_z(i, j, k + 1)]
+   call map3_eval(mc, surface, s0, 1_I4P, 1._R8P, c0, c1, lf, cs, k1%alpha(i, j, k), fr, np1 > 1_I4P, ev(ne))
+   ! every evaluation trusted; the end evaluations are the end-pose cuts' pieces, bit for bit
+   do e = 1_I4P, ne
+      if (.not. ev(e)%closed) kind = -1_I4P
+   enddo
+   if (kind == -1_I4P) return
+   if (ev(1)%np /= np0 .or. ev(ne)%np /= np1) kind = -1_I4P
+   if (kind == -1_I4P) return
+   if (np0 > 1_I4P) then
+      do q = 1_I4P, np0
+         if (ev(1)%pvol(q) /= k0%piece_volume(k0%first_piece(i, j, k) + q - 1_I4P)) kind = -1_I4P
+      enddo
+   endif
+   if (np1 > 1_I4P) then
+      do q = 1_I4P, np1
+         if (ev(ne)%pvol(q) /= k1%piece_volume(k1%first_piece(i, j, k) + q - 1_I4P)) kind = -1_I4P
+      enddo
+   endif
+   if (kind == -1_I4P) return
+   ! tracks: pieces of consecutive evaluations sharing a feature
+   allocate(nstart(ne + 1), lstart(ne + 1))
+   nstart(1) = 1_I4P ; lstart(1) = 1_I4P
+   do e = 1_I4P, ne
+      nstart(e + 1) = nstart(e) + ev(e)%np ; lstart(e + 1) = lstart(e) + ev(e)%nk
+   enddo
+   nk = lstart(ne + 1) - 1_I4P
+   allocate(lkey(nk), lpiece(nk), par(nstart(ne + 1) - 1_I4P), comp(nstart(ne + 1) - 1_I4P))
+   do e = 1_I4P, ne
+      lkey(lstart(e):lstart(e + 1) - 1_I4P) = ev(e)%key ; lpiece(lstart(e):lstart(e + 1) - 1_I4P) = ev(e)%kpiece
+   enddo
+   call track_components(ne, nstart, lstart, nk, lkey, lpiece, par, comp, nt)
+   otr = comp(nstart(1):nstart(2) - 1_I4P) ; ntn = comp(nstart(ne):nstart(ne + 1) - 1_I4P)
+   if (.not. (with_meas .and. nt >= 2_I4P)) return
+   call map3_measures(mc, surface, s0, c0, c1, lf, b, nb, eref, ealt, ev, nstart, comp, nt, meas, cert)
+   if (.not. cert) kind = -1_I4P
+   endsubroutine map3_cell
+
+   pure subroutine node_states(node_in, i, j, k, cs)
+   !< The corner states of cell (i, j, k) from the exact node flags of a cut (0 solid, 1 fluid; corner 1 + bx + 2 by + 4 bz).
+   logical,      intent(in)  :: node_in(:,:,:) !< Grid node inside the solid.
+   integer(I4P), intent(in)  :: i, j, k        !< Cell.
+   integer(I4P), intent(out) :: cs(8)          !< Corner states.
+   integer(I4P)              :: q              !< Corner.
+
+   do q = 1_I4P, 8_I4P
+      cs(q) = merge(0_I4P, 1_I4P, node_in(i + mod(q - 1_I4P, 2_I4P), j + mod((q - 1_I4P) / 2_I4P, 2_I4P), k + (q - 1_I4P) / 4_I4P))
+   enddo
+   endsubroutine node_states
+
+   subroutine map3_events(mc, c0, c1, lf, b, nb, cert)
+   !< The events of the cell [c0, c1] in (0, 1), sorted, each once, from its facets lf: a mesh vertex crossing one of its
+   !< six face planes inside the face, a mesh edge crossing one of its 12 edges, one of its 8 corners crossing a facet;
+   !< each mesh vertex and edge once per cell. Without rotation, explicit (the formulas of `plane_breakpoints` on the
+   !< pose0 copy); with a rotation, `isolate_zeros` on the screw forms of `plane_events` (cert false if one is not
+   !< certified). The position checks are inclusive by mc%tol: an extra event only adds an evaluation.
+   type(map3_ctx_t),       intent(inout) :: mc           !< State.
+   real(R8P),              intent(in)    :: c0(3), c1(3) !< Cell.
+   integer(I4P),           intent(in)    :: lf(:)        !< Facets.
+   real(R8P), allocatable, intent(out)   :: b(:)         !< Events.
+   integer(I4P),           intent(out)   :: nb           !< Their number.
+   logical,                intent(out)   :: cert         !< Every event certified.
+   real(R8P), allocatable :: tmp(:)                      !< Work.
+   real(R8P)              :: p(3), lo(3), hi(3)          !< Corner, facet box.
+   integer(I4P)           :: q, f, m, cn, nb0, k, nc     !< Work.
+
+   cert = .true. ; nb = 0_I4P ; mc%tick = mc%tick + 1_I4P
+   allocate(tmp(16))
+   if (allocated(mc%ctime)) deallocate(mc%ctime, mc%ccor)
+   allocate(mc%ctime(8), mc%ccor(8)) ; mc%ncn = 0_I4P
+   do q = 1_I4P, size(lf, kind=I4P)
+      f = lf(q)
+      lo = min(mc%vlo(:, 1, f), mc%vlo(:, 2, f), mc%vlo(:, 3, f))
+      hi = max(mc%vhi(:, 1, f), mc%vhi(:, 2, f), mc%vhi(:, 3, f))
+      do cn = 1_I4P, 8_I4P
+         p = corner_point(c0, c1, cn)
+         if (any(p < lo) .or. any(p > hi)) cycle
+         nb0 = nb
+         call event_corner(mc, f, p, tmp, nb, cert)
+         do k = nb0 + 1_I4P, nb ! the corner's own list, for its states within the step (`map3_corner_known`)
+            nc = mc%ncn
+            call push_value(mc%ctime, nc, tmp(k))
+            call push_value(mc%ccor, mc%ncn, real(cn, R8P))
+         enddo
+      enddo
+      do m = 1_I4P, 3_I4P
+         if (mc%vstamp(mc%fv(m, f)) /= mc%tick) then
+            mc%vstamp(mc%fv(m, f)) = mc%tick
+            call event_vertex(mc, f, m, c0, c1, tmp, nb, cert)
+         endif
+         if (mc%estamp(mc%fe(m, f)) /= mc%tick) then
+            mc%estamp(mc%fe(m, f)) = mc%tick
+            call event_edge(mc, f, m, c0, c1, tmp, nb, cert)
+         endif
+      enddo
+   enddo
+   call sort_unique(tmp, nb)
+   b = tmp(1:nb)
+   endsubroutine map3_events
+
+   pure function corner_point(c0, c1, cn) result(p)
+   !< Corner cn (1 + bx + 2 by + 4 bz) of the box [c0, c1].
+   real(R8P),    intent(in) :: c0(3), c1(3) !< Box.
+   integer(I4P), intent(in) :: cn           !< Corner.
+   real(R8P)                :: p(3)         !< Point.
+
+   p(1) = merge(c1(1), c0(1), mod(cn - 1_I4P, 2_I4P) == 1_I4P)
+   p(2) = merge(c1(2), c0(2), mod((cn - 1_I4P) / 2_I4P, 2_I4P) == 1_I4P)
+   p(3) = merge(c1(3), c0(3), (cn - 1_I4P) / 4_I4P == 1_I4P)
+   endfunction corner_point
+
+   subroutine event_vertex(mc, f, m, c0, c1, tmp, nb, cert)
+   !< Events of vertex m of facet f crossing a face plane of the cell [c0, c1] inside the face.
+   type(map3_ctx_t),       intent(in)    :: mc           !< State.
+   integer(I4P),           intent(in)    :: f, m         !< Facet, vertex.
+   real(R8P),              intent(in)    :: c0(3), c1(3) !< Cell.
+   real(R8P), allocatable, intent(inout) :: tmp(:)       !< Events.
+   integer(I4P),           intent(inout) :: nb           !< Their number.
+   logical,                intent(inout) :: cert         !< Certified.
+   real(R8P), allocatable :: zz(:)                       !< Zeros.
+   real(R8P)              :: lev, s, pp(3), a3(3), b3(3), c3(3), co(6) !< Work.
+   integer(I4P)           :: a, bb, cc, side, nz, q      !< Work.
+   logical                :: ce                          !< Certified.
+
+   do a = 1_I4P, 3_I4P
+      bb = mod(a, 3_I4P) + 1_I4P ; cc = mod(a + 1_I4P, 3_I4P) + 1_I4P
+      if (mc%vhi(bb, m, f) < c0(bb) .or. mc%vlo(bb, m, f) > c1(bb) .or. mc%vhi(cc, m, f) < c0(cc) .or. &
+          mc%vlo(cc, m, f) > c1(cc)) cycle
+      do side = 0_I4P, 1_I4P
+         lev = merge(c1(a), c0(a), side == 1_I4P)
+         if (lev < mc%vlo(a, m, f) .or. lev > mc%vhi(a, m, f)) cycle
+         if (.not. mc%rot) then
+            if (mc%d(a) == 0._R8P) cycle
+            s = (lev - mc%t0(a, m, f)) / mc%d(a)
+            if (s <= 0._R8P .or. s >= 1._R8P) cycle
+            pp = mc%t0(:, m, f) + s * mc%d
+            if (in_rect(pp, c0, c1, bb, cc, mc%tol)) call push_value(tmp, nb, s)
+         else
+            call rodrigues_k(mc%kax, mc%w(:, m, f), a3, b3, c3)
+            co = [a3(a), 0._R8P, b3(a), 0._R8P, c3(a) + mc%pose0%t(a) - lev, mc%d(a)]
+            call isolate_zeros(co, 0._R8P, mc%ang, norm2(mc%w(:, m, f)) + norm2(mc%pose0%t) + abs(lev) + norm2(mc%d), zz, &
+                               nz, ce)
+            if (.not. ce) cert = .false.
+            do q = 1_I4P, nz
+               pp = screw_at(mc, mc%w(:, m, f), zz(q))
+               if (in_rect(pp, c0, c1, bb, cc, mc%tol)) call push_value(tmp, nb, zz(q))
+            enddo
+         endif
+      enddo
+   enddo
+   endsubroutine event_vertex
+
+   pure logical function in_rect(pt, c0, c1, bb, cc, tol)
+   !< The point within the box [c0, c1] along the axes bb and cc, inclusive by tol.
+   real(R8P),    intent(in) :: pt(3), c0(3), c1(3) !< Point, box.
+   integer(I4P), intent(in) :: bb, cc              !< Axes.
+   real(R8P),    intent(in) :: tol                 !< Tolerance.
+
+   in_rect = pt(bb) >= c0(bb) - tol .and. pt(bb) <= c1(bb) + tol .and. pt(cc) >= c0(cc) - tol .and. pt(cc) <= c1(cc) + tol
+   endfunction in_rect
+
+   subroutine event_edge(mc, f, m, c0, c1, tmp, nb, cert)
+   !< Events of edge m (vertex m to m + 1) of facet f crossing one of the 12 edges of the cell [c0, c1].
+   type(map3_ctx_t),       intent(in)    :: mc           !< State.
+   integer(I4P),           intent(in)    :: f, m         !< Facet, edge.
+   real(R8P),              intent(in)    :: c0(3), c1(3) !< Cell.
+   real(R8P), allocatable, intent(inout) :: tmp(:)       !< Events.
+   integer(I4P),           intent(inout) :: nb           !< Their number.
+   logical,                intent(inout) :: cert         !< Certified.
+   real(R8P), allocatable :: zz(:)                       !< Zeros.
+   real(R8P)              :: lo(3), hi(3), pb, pc, p(3), e(3), det, rb, rc, lam, s, pa, pp(3), el(3), d3(3), wxd(3) !< Work.
+   real(R8P)              :: a3(3), b3(3), c3(3), ae(3), be(3), ce3(3), f0(3), f1(3), co(6), xq(3), dd(3), fx, ox !< Work.
+   integer(I4P)           :: m2, g, a, bb, cc, kk, nz, q, ax, oa !< Work.
+   logical                :: ce                          !< Certified.
+
+   m2 = mod(m, 3_I4P) + 1_I4P
+   lo = min(mc%vlo(:, m, f), mc%vlo(:, m2, f)) ; hi = max(mc%vhi(:, m, f), mc%vhi(:, m2, f))
+   do g = 1_I4P, 12_I4P
+      a = (g - 1_I4P) / 4_I4P + 1_I4P ; kk = mod(g - 1_I4P, 4_I4P)
+      bb = mod(a, 3_I4P) + 1_I4P ; cc = mod(a + 1_I4P, 3_I4P) + 1_I4P
+      pb = merge(c1(bb), c0(bb), mod(kk, 2_I4P) == 1_I4P) ; pc = merge(c1(cc), c0(cc), kk / 2_I4P == 1_I4P)
+      if (pb < lo(bb) .or. pb > hi(bb) .or. pc < lo(cc) .or. pc > hi(cc) .or. c1(a) < lo(a) .or. c0(a) > hi(a)) cycle
+      if (.not. mc%rot) then ! p + lam e + s d on the line (b, c) = (pb, pc): Cramer
+         p = mc%t0(:, m, f) ; e = mc%t0(:, m2, f) - p
+         det = e(bb) * mc%d(cc) - mc%d(bb) * e(cc)
+         if (det == 0._R8P) cycle
+         rb = pb - p(bb) ; rc = pc - p(cc)
+         lam = (rb * mc%d(cc) - mc%d(bb) * rc) / det ; s = (e(bb) * rc - rb * e(cc)) / det
+         if (s <= 0._R8P .or. s >= 1._R8P .or. lam < -1e-12_R8P .or. lam > 1._R8P + 1e-12_R8P) cycle
+         pa = p(a) + lam * e(a) + s * mc%d(a)
+         if (pa >= c0(a) - mc%tol .and. pa <= c1(a) + mc%tol) call push_value(tmp, nb, s)
+      else ! the forms of `plane_events` (b)
+         pp(a) = c0(a) ; pp(bb) = pb ; pp(cc) = pc
+         el = 0._R8P ; el(a) = 1._R8P
+         d3 = mc%w(:, m2, f) - mc%w(:, m, f) ; wxd = cross(mc%w(:, m, f), d3)
+         call rodrigues_k(mc%kax, d3, a3, b3, c3) ; call rodrigues_k(mc%kax, el, ae, be, ce3)
+         f0 = cross(el, pp - mc%pose0%t) ; f1 = cross(el, -mc%d)
+         co = [dot_product(a3, f0) - dot_product(ae, wxd), dot_product(a3, f1), dot_product(b3, f0) + dot_product(be, wxd), &
+               dot_product(b3, f1), dot_product(c3, f0) - dot_product(ce3, wxd), dot_product(c3, f1)]
+         call isolate_zeros(co, 0._R8P, mc%ang, norm2(d3) * (norm2(pp) + norm2(mc%pose0%t) + norm2(mc%d) + &
+                            norm2(mc%w(:, m, f))), zz, nz, ce)
+         if (.not. ce) cert = .false.
+         do q = 1_I4P, nz
+            xq = screw_at(mc, mc%w(:, m, f), zz(q)) ; dd = screw_at(mc, mc%w(:, m2, f), zz(q)) - xq
+            if (abs(dd(bb)) >= abs(dd(cc))) then
+               ax = bb ; fx = pb ; oa = cc ; ox = pc
+            else
+               ax = cc ; fx = pc ; oa = bb ; ox = pb
+            endif
+            if (dd(ax) == 0._R8P) cycle
+            lam = (fx - xq(ax)) / dd(ax)
+            if (lam < -1e-12_R8P .or. lam > 1._R8P + 1e-12_R8P) cycle
+            if (abs(xq(oa) + lam * dd(oa) - ox) > 1e3_R8P * mc%tol) cycle
+            pa = xq(a) + lam * dd(a)
+            if (pa >= c0(a) - mc%tol .and. pa <= c1(a) + mc%tol) call push_value(tmp, nb, zz(q))
+         enddo
+      endif
+   enddo
+   endsubroutine event_edge
+
+   subroutine event_corner(mc, f, p, tmp, nb, cert)
+   !< Events of the corner p crossing facet f.
+   type(map3_ctx_t),       intent(in)    :: mc     !< State.
+   integer(I4P),           intent(in)    :: f      !< Facet.
+   real(R8P),              intent(in)    :: p(3)   !< Corner.
+   real(R8P), allocatable, intent(inout) :: tmp(:) !< Events.
+   integer(I4P),           intent(inout) :: nb     !< Their number.
+   logical,                intent(inout) :: cert   !< Certified.
+   real(R8P), allocatable :: zz(:)                 !< Zeros.
+   real(R8P)              :: e1(3), e2(3), r(3), det, s, be, ga, nn(3), a3(3), b3(3), c3(3), f0(3), f1(3), co(6) !< Work.
+   real(R8P)              :: xa(3), xb(3), xc(3), el(3), bary(3) !< Work.
+   integer(I4P)           :: nz, q                 !< Work.
+   logical                :: ce                    !< Certified.
+
+   if (.not. mc%rot) then ! w1 + be e1 + ga e2 + s d = p (as `plane_breakpoints`)
+      e1 = mc%t0(:, 2, f) - mc%t0(:, 1, f) ; e2 = mc%t0(:, 3, f) - mc%t0(:, 1, f)
+      det = dot_product(e1, cross(e2, mc%d))
+      if (det == 0._R8P) return
+      r = p - mc%t0(:, 1, f)
+      s = dot_product(e1, cross(e2, r)) / det
+      if (s <= 0._R8P .or. s >= 1._R8P) return
+      be = dot_product(r, cross(e2, mc%d)) / det ; ga = dot_product(e1, cross(r, mc%d)) / det
+      if (be >= -1e-12_R8P .and. ga >= -1e-12_R8P .and. be + ga <= 1._R8P + 1e-12_R8P) call push_value(tmp, nb, s)
+   else ! the forms of `plane_events` (c)
+      nn = cross(mc%w(:, 2, f) - mc%w(:, 1, f), mc%w(:, 3, f) - mc%w(:, 1, f))
+      call rodrigues_k(mc%kax, nn, a3, b3, c3)
+      f0 = p - mc%pose0%t ; f1 = -mc%d
+      co = [dot_product(a3, f0), dot_product(a3, f1), dot_product(b3, f0), dot_product(b3, f1), &
+            dot_product(c3, f0) - dot_product(nn, mc%w(:, 1, f)), dot_product(c3, f1)]
+      call isolate_zeros(co, 0._R8P, mc%ang, norm2(nn) * (norm2(p) + norm2(mc%pose0%t) + norm2(mc%d) + &
+                         norm2(mc%w(:, 1, f))), zz, nz, ce)
+      if (.not. ce) cert = .false.
+      do q = 1_I4P, nz
+         xa = screw_at(mc, mc%w(:, 1, f), zz(q)) ; xb = screw_at(mc, mc%w(:, 2, f), zz(q))
+         xc = screw_at(mc, mc%w(:, 3, f), zz(q))
+         el = cross(xb - xa, xc - xa)
+         if (dot_product(el, el) <= 0._R8P) cycle
+         bary = [dot_product(cross(xc - xb, p - xb), el), dot_product(cross(xa - xc, p - xc), el), &
+                 dot_product(cross(xb - xa, p - xa), el)] / dot_product(el, el)
+         if (all(bary >= -1e-12_R8P)) call push_value(tmp, nb, zz(q))
+      enddo
+   endif
+   endsubroutine event_corner
+
+   function map3_corner_in(mc, surface, s0, q) result(inside)
+   !< The point q inside the solid, by the exact parity of the crossings below it on its z line (`line_crossings` and
+   !< `line_crossing_before`, the perturbation of the cut cells' node flags), q given in the frame of the surface the
+   !< path moves: the pose0 copy (q shifted back by s d) without rotation, the body frame (`to_body`) with one.
+   type(map3_ctx_t),         intent(in) :: mc          !< State.
+   type(surface_stl_object), intent(in) :: surface, s0 !< Surface (body frame), copy at pose0.
+   real(R8P),                intent(in) :: q(3)        !< Point.
+   logical                              :: inside      !< Inside the solid.
+   real(R8P),    allocatable :: t(:)                   !< Crossings.
+   integer(I4P), allocatable :: fc(:)                  !< Facets.
+   logical,      allocatable :: en(:)                  !< Entering flags.
+   integer(I4P)              :: n, c, cnt              !< Work.
+
+   if (mc%rot) then
+      call surface%line_crossings(3_I4P, q(1), q(2), -huge(1._R8P), huge(1._R8P), t, fc, en, n)
+   else
+      call s0%line_crossings(3_I4P, q(1), q(2), -huge(1._R8P), huge(1._R8P), t, fc, en, n)
+   endif
+   cnt = 0_I4P
+   do c = 1_I4P, n
+      if (mc%rot) then
+         if (line_crossing_before(reshape(surface%tri_vertices(:, fc(c)), [3, 3]), 3_I4P, q(1), q(2), q(3), en(c))) &
+            cnt = cnt + 1_I4P
+      else
+         if (line_crossing_before(reshape(s0%tri_vertices(:, fc(c)), [3, 3]), 3_I4P, q(1), q(2), q(3), en(c))) &
+            cnt = cnt + 1_I4P
+      endif
+   enddo
+   inside = mod(cnt, 2_I4P) == 1_I4P
+   endfunction map3_corner_in
+
+   subroutine map3_corner_known(mc, cs1)
+   !< Which corners of the current cell have states that follow from their events (the flip rule): the corner's events
+   !< (it crossing a facet, `map3_events`) at least 1e-9 apart, so that each is one transversal crossing, and their
+   !< parity taking the pose0 state (mc%cs0) to the pose1 state cs1. A corner passing through a mesh edge or vertex (two
+   !< facets at once), touching a facet, or whose count disagrees takes the exact query (`map3_corner_in`) instead.
+   type(map3_ctx_t), intent(inout) :: mc      !< State.
+   integer(I4P),     intent(in)    :: cs1(8)  !< Corner states at pose1.
+   real(R8P)                       :: t(64)   !< Instants of one corner.
+   integer(I4P)                    :: q, k, n !< Work.
+
+   do q = 1_I4P, 8_I4P
+      n = 0_I4P ; mc%known(q) = .true.
+      do k = 1_I4P, mc%ncn
+         if (nint(mc%ccor(k), I4P) /= q) cycle
+         if (n == size(t, kind=I4P)) then
+            mc%known(q) = .false. ; exit
+         endif
+         n = n + 1_I4P ; t(n) = mc%ctime(k)
+      enddo
+      if (.not. mc%known(q)) cycle
+      call sort_unique(t, n)
+      do k = 2_I4P, n
+         if (t(k) - t(k - 1_I4P) <= 1e-9_R8P) mc%known(q) = .false.
+      enddo
+      if (count(nint(mc%ccor(1:mc%ncn), I4P) == q) /= n) mc%known(q) = .false. ! exact repeats merged by sort_unique
+      if (mod(mc%cs0(q) + n, 2_I4P) /= cs1(q)) mc%known(q) = .false.
+   enddo
+   endsubroutine map3_corner_known
+
+   function map3_corner_state(mc, surface, s0, s, c0, c1, b0, b1, q, known) result(st)
+   !< The state (0 solid, 1 fluid) of corner q of the cell [c0, c1] at instant s: by the flip rule from its events when
+   !< known (`map3_corner_known`), else by the exact query `map3_corner_in` (the cell [b0, b1] shifted back on the
+   !< pose0 copy without rotation, the corner taken to the body frame with one).
+   type(map3_ctx_t),         intent(in) :: mc           !< State.
+   type(surface_stl_object), intent(in) :: surface, s0  !< Surface (body frame), copy at pose0.
+   real(R8P),                intent(in) :: s            !< Instant.
+   real(R8P),                intent(in) :: c0(3), c1(3) !< Cell.
+   real(R8P),                intent(in) :: b0(3), b1(3) !< Cell shifted back (no rotation).
+   integer(I4P),             intent(in) :: q            !< Corner.
+   logical,                  intent(in) :: known        !< Its states follow from its events.
+   integer(I4P)                         :: st           !< State.
+   integer(I4P)                         :: k, n         !< Work.
+
+   if (known) then
+      n = 0_I4P
+      do k = 1_I4P, mc%ncn
+         if (nint(mc%ccor(k), I4P) == q .and. mc%ctime(k) < s) n = n + 1_I4P
+      enddo
+      st = mod(mc%cs0(q) + n, 2_I4P)
+   elseif (mc%rot) then
+      st = merge(0_I4P, 1_I4P, map3_corner_in(mc, surface, s0, to_body(pose_interpolate(mc%pose0, mc%pose1, s), &
+                                                                         corner_point(c0, c1, q))))
+   else
+      st = merge(0_I4P, 1_I4P, map3_corner_in(mc, surface, s0, corner_point(b0, b1, q)))
+   endif
+   endfunction map3_corner_state
+
+   subroutine map3_eval(mc, surface, s0, kind, s, c0, c1, lf, cs_in, alpha_in, faces_in, measures, e)
+   !< The pieces of the cell [c0, c1] at one instant with their features (`cut_cell_3d_pieces` on its facets lf): kind 0
+   !< the pose0 copy, 1 the pose1 copy (corner states cs_in, fractions alpha_in, faces_in of the end cut), 2 the instant
+   !< s: without rotation the pose0 copy and the cell shifted back by s d, else the facets placed by `to_world` of the
+   !< screw pose (as `slice_surface(pose=)`); corner states by `map3_corner_in`, the face fractions (needed by a
+   !< multi-piece split, and with `measures`) from the six face sections (`map3_sections`), alpha from them
+   !< (`cut_cell_3d_totals`). Without `measures` the kernel runs first with fractions of -1, which fail only a
+   !< multi-piece split (`split_closes`): the sections are computed only then. Features: the fluid corners (keys
+   !< -8..-1) then the facets (global ids), increasing. With `measures`: the face areas and first moments of every piece
+   !< (one piece: the sections'), and the volumes of several pieces.
+   type(map3_ctx_t),         intent(in)  :: mc          !< State.
+   type(surface_stl_object), intent(in)  :: surface, s0 !< Surface (body frame), copy at pose0.
+   integer(I4P),             intent(in)  :: kind        !< 0 pose0, 1 pose1, 2 instant s.
+   real(R8P),                intent(in)  :: s           !< Instant (kind 2).
+   real(R8P),                intent(in)  :: c0(3), c1(3) !< Cell.
+   integer(I4P),             intent(in)  :: lf(:)       !< Facets (increasing).
+   integer(I4P),             intent(in)  :: cs_in(8)    !< Corner states (kinds 0, 1).
+   real(R8P),                intent(in)  :: alpha_in, faces_in(6) !< Cell and face fractions (kinds 0, 1).
+   logical,                  intent(in)  :: measures    !< Piece measures.
+   type(cell_eval3_t),       intent(out) :: e           !< Pieces and features.
+   real(R8P),    allocatable :: tl(:,:,:), pvol(:), pfc(:,:), pfm(:,:,:) !< Facets, kernel measures.
+   integer(I4P), allocatable :: apiece(:)               !< Piece of each facet.
+   type(rigid_pose_t)        :: ps                      !< Pose at s.
+   real(R8P)                 :: b0(3), b1(3), fa(6), fm(2, 6), fr(6), al, h(3), ar(6), xc(3) !< Work.
+   integer(I4P)              :: n, q, m, np, cs(8), cp(8), f, a, bb, cc, p !< Work.
+   logical                   :: secs, ok, cl            !< Sections computed, sections closed, faces closed.
+
+   n = size(lf, kind=I4P)
+   allocate(tl(3, 3, n))
+   b0 = c0 ; b1 = c1 ; cs = cs_in
+   select case (kind)
+   case (0_I4P)
+      tl = mc%t0(:, :, lf)
+   case (1_I4P)
+      tl = mc%t1(:, :, lf)
+   case default
+      if (.not. mc%rot) then
+         tl = mc%t0(:, :, lf) ; b0 = c0 - s * mc%d ; b1 = c1 - s * mc%d
+      else
+         ps = pose_interpolate(mc%pose0, mc%pose1, s)
+         do q = 1_I4P, n
+            do m = 1_I4P, 3_I4P
+               tl(:, m, q) = to_world(ps, mc%tb(:, m, lf(q)))
+            enddo
+         enddo
+      endif
+      do q = 1_I4P, 8_I4P
+         cs(q) = map3_corner_state(mc, surface, s0, s, c0, c1, b0, b1, q, mc%known(q))
+      enddo
+   endselect
+   h = b1 - b0 ; ar = [h(2) * h(3), h(2) * h(3), h(3) * h(1), h(3) * h(1), h(1) * h(2), h(1) * h(2)]
+   secs = .false. ; fa = 0._R8P ; fm = 0._R8P
+   if (kind /= 2_I4P) then
+      fr = faces_in ; al = alpha_in
+   elseif (measures) then
+      call map3_sections(tl, b0, b1, cs, ok, fa, fm)
+      if (.not. ok) return
+      secs = .true. ; fr = fa / ar
+      call cut_cell_3d_totals(tl, b0(1), b1(1), b0(2), b1(2), b0(3), b1(3), fr(2), fr(4), fr(6), al, cl)
+   else ! fractions of -1 make a multi-piece split untrusted (`split_closes`): the sections only if one comes
+      fr = -1._R8P ; al = -1._R8P
+   endif
+   call cut_cell_3d_pieces(tl, b0(1), b1(1), b0(2), b1(2), b0(3), b1(3), cs, al, fr, measures, np, apiece, cp, pvol, pfc, pfm)
+   if (np < 0_I4P .and. kind == 2_I4P .and. .not. secs) then
+      call map3_sections(tl, b0, b1, cs, ok, fa, fm)
+      if (ok) then
+         secs = .true. ; fr = fa / ar
+         call cut_cell_3d_totals(tl, b0(1), b1(1), b0(2), b1(2), b0(3), b1(3), fr(2), fr(4), fr(6), al, cl)
+         call cut_cell_3d_pieces(tl, b0(1), b1(1), b0(2), b1(2), b0(3), b1(3), cs, al, fr, measures, np, apiece, cp, pvol, &
+                                 pfc, pfm)
+      endif
+   endif
+   if (np < 0_I4P .and. kind == 2_I4P .and. any(mc%known)) then ! the corner states by the exact queries, and again
+      do q = 1_I4P, 8_I4P
+         cs(q) = map3_corner_state(mc, surface, s0, s, c0, c1, b0, b1, q, .false.)
+      enddo
+      call map3_sections(tl, b0, b1, cs, ok, fa, fm)
+      if (.not. ok) return
+      secs = .true. ; fr = fa / ar
+      call cut_cell_3d_totals(tl, b0(1), b1(1), b0(2), b1(2), b0(3), b1(3), fr(2), fr(4), fr(6), al, cl)
+      call cut_cell_3d_pieces(tl, b0(1), b1(1), b0(2), b1(2), b0(3), b1(3), cs, al, fr, measures, np, apiece, cp, pvol, pfc, &
+                              pfm)
+   endif
+   if (np < 0_I4P) return
+   e%closed = .true. ; e%np = np
+   e%nk = count(cp > 0_I4P, kind=I4P) + count(apiece > 0_I4P, kind=I4P)
+   allocate(e%key(e%nk), e%kpiece(e%nk))
+   e%nk = 0_I4P
+   do q = 8_I4P, 1_I4P, -1_I4P
+      if (cp(q) == 0_I4P) cycle
+      e%nk = e%nk + 1_I4P ; e%key(e%nk) = -q ; e%kpiece(e%nk) = cp(q)
+   enddo
+   do q = 1_I4P, n
+      if (apiece(q) == 0_I4P) cycle
+      e%nk = e%nk + 1_I4P ; e%key(e%nk) = lf(q) ; e%kpiece(e%nk) = apiece(q)
+   enddo
+   if (.not. measures) return
+   allocate(e%pa(6, np), e%pm(2, 6, np), e%pvol(np))
+   e%pvol = 0._R8P
+   if (np == 1_I4P) then
+      e%pa(:, 1) = fa ; e%pm(:, :, 1) = fm
+   elseif (np > 1_I4P) then
+      xc = 0.5_R8P * (b0 + b1)
+      do p = 1_I4P, np
+         e%pvol(p) = pvol(p)
+         do f = 1_I4P, 6_I4P
+            a = (f + 1_I4P) / 2_I4P ; bb = mod(a, 3_I4P) + 1_I4P ; cc = mod(a + 1_I4P, 3_I4P) + 1_I4P
+            e%pa(f, p) = pfc(f, p) * ar(f)
+            e%pm(1, f, p) = xc(bb) * e%pa(f, p) + h(bb) * pfm(2, f, p)
+            e%pm(2, f, p) = xc(cc) * e%pa(f, p) + h(cc) * pfm(3, f, p)
+         enddo
+      enddo
+   endif
+   endsubroutine map3_eval
+
+   subroutine map3_sections(tl, b0, b1, cs, ok, fa, fm)
+   !< The fluid area and the first moments of the two in-face coordinates (cyclic) of the six faces of the cell [b0, b1]
+   !< cut by the facets tl: the section of each face plane (`slice_triangles`, the cut cells' on-plane rule) measured on
+   !< the face with the cell's corner states (`cut_cell_2d_measures`). ok false if a face does not close.
+   real(R8P),    intent(in)  :: tl(:,:,:)    !< Facets.
+   real(R8P),    intent(in)  :: b0(3), b1(3) !< Cell.
+   integer(I4P), intent(in)  :: cs(8)        !< Corner states (0 solid, 1 fluid).
+   logical,      intent(out) :: ok           !< Every face closed.
+   real(R8P),    intent(out) :: fa(6)        !< Fluid areas (-x, +x, -y, +y, -z, +z).
+   real(R8P),    intent(out) :: fm(2, 6)     !< int u, int v over them.
+   real(R8P),    allocatable :: u(:), v(:)   !< Section.
+   integer(I4P), allocatable :: nxt(:)       !< Next vertex.
+   integer(I4P), parameter   :: BU(4) = [0_I4P, 1_I4P, 1_I4P, 0_I4P], BV(4) = [0_I4P, 0_I4P, 1_I4P, 1_I4P] !< Face corners.
+   real(R8P)                 :: lev, al, cen(2), ar !< Work.
+   integer(I4P)              :: f, a, bb, cc, q, bit(3) !< Work.
+   logical                   :: fl(4), cl   !< Corner flags, closed.
+
+   ok = .true. ; fa = 0._R8P ; fm = 0._R8P
+   do f = 1_I4P, 6_I4P
+      a = (f + 1_I4P) / 2_I4P ; bb = mod(a, 3_I4P) + 1_I4P ; cc = mod(a + 1_I4P, 3_I4P) + 1_I4P
+      lev = merge(b1(a), b0(a), mod(f, 2_I4P) == 0_I4P)
+      do q = 1_I4P, 4_I4P
+         bit(a) = merge(1_I4P, 0_I4P, mod(f, 2_I4P) == 0_I4P) ; bit(bb) = BU(q) ; bit(cc) = BV(q)
+         fl(q) = cs(1_I4P + bit(1) + 2_I4P * bit(2) + 4_I4P * bit(3)) == 0_I4P
+      enddo
+      call slice_triangles(tl, a, lev, u, v, nxt)
+      call cut_cell_2d_measures(u, v, nxt, b0(bb), b1(bb), b0(cc), b1(cc), fl, cl, al, cen)
+      if (.not. cl) then
+         ok = .false. ; return
+      endif
+      ar = al * ((b1(bb) - b0(bb)) * (b1(cc) - b0(cc)))
+      fa(f) = ar ; fm(1, f) = ar * cen(1) ; fm(2, f) = ar * cen(2)
+   enddo
+   endsubroutine map3_sections
+
+   subroutine map3_measures(mc, surface, s0, c0, c1, lf, b, nb, eref, ealt, ev, nstart, comp, nt, meas, ok)
+   !< Per-track time integrals over the step of the fluid areas of the cell's six faces (meas(1:6)) and of the outward
+   !< rigid-field outflows through them (meas(7:12)), interval by interval between the cell's events, on every path:
+   !< without rotation two-point Gauss per interval (exact: the areas are quadratic in s), with one Gauss doubled from 2
+   !< nodes per interval until every track's values agree to round-off (the criteria of `one_plane`; mc%exact false if
+   !< not at 64). A track exists only between events, so its integrand jumps there: the step's nq Gauss nodes of the
+   !< Gauss path (`exact=.false.`) would give a short-lived track no node, or one of a large weight (2-D, NACA 0012,
+   !< nq = 4: a per-track residual of 0.39 of a cell where the cell's is 1e-6). On the Gauss path the sums over a cell's
+   !< tracks therefore differ from the cell's Gauss values in `sw` by the quadrature error of these (the per-track
+   !< values are the better ones). ok false if a piece at a node cannot be assigned.
+   type(map3_ctx_t),         intent(inout) :: mc           !< State.
+   type(surface_stl_object), intent(in)    :: surface, s0  !< Surface (body frame), copy at pose0.
+   real(R8P),                intent(in)    :: c0(3), c1(3) !< Cell.
+   integer(I4P),             intent(in)    :: lf(:)        !< Facets.
+   real(R8P),                intent(in)    :: b(:)         !< Events.
+   integer(I4P),             intent(in)    :: nb           !< Their number.
+   integer(I4P),             intent(in)    :: eref(:), ealt(:) !< Evaluations of each interval (see `map3_cell`).
+   type(cell_eval3_t),       intent(in)    :: ev(:)        !< Evaluations.
+   integer(I4P),             intent(in)    :: nstart(:)    !< First node of each evaluation.
+   integer(I4P),             intent(in)    :: comp(:)      !< Track of each node.
+   integer(I4P),             intent(in)    :: nt           !< Tracks.
+   real(R8P), allocatable,   intent(out)   :: meas(:,:)    !< Measures [12, nt].
+   logical,                  intent(out)   :: ok           !< Every piece assigned.
+   real(R8P), parameter   :: G = 0.5_R8P / sqrt(3._R8P)    !< Two-point Gauss offset on a unit interval.
+   real(R8P), allocatable :: a1(:,:), a2(:,:), sq(:), wq(:) !< Work.
+   real(R8P)              :: sa, sb, h, hc(3), scl(6), sco(6), sna, sno, vel, tol !< Work.
+   integer(I4P)           :: m, ng, q, t, f, r, a      !< Work.
+   logical                :: conv                      !< Converged.
+
+   allocate(meas(12, nt)) ; meas = 0._R8P ; ok = .true.
+   if (.not. mc%rot) then
+      do m = 1_I4P, nb + 1_I4P
+         call map_interval(b, nb, m, sa, sb) ; h = sb - sa
+         if (h <= 0._R8P) cycle
+         r = eref(m) ; a = ealt(m)
+         call map3_node(mc, surface, s0, 0.5_R8P * (sa + sb) - G * h, 0.5_R8P * h, c0, c1, lf, ev(r), nstart(r), ev(a), &
+                        nstart(a), comp, meas, ok)
+         call map3_node(mc, surface, s0, 0.5_R8P * (sa + sb) + G * h, 0.5_R8P * h, c0, c1, lf, ev(r), nstart(r), ev(a), &
+                        nstart(a), comp, meas, ok)
+      enddo
+   else
+      vel = norm2(mc%om) * mc%xm + norm2(mc%d)
+      hc = c1 - c0
+      scl = [hc(2) * hc(3), hc(2) * hc(3), hc(3) * hc(1), hc(3) * hc(1), hc(1) * hc(2), hc(1) * hc(2)]
+      sco = scl * vel ; sna = mc%xm * maxval(hc) ; sno = sna * vel
+      allocate(a1(12, nt), a2(12, nt))
+      do m = 1_I4P, nb + 1_I4P
+         call map_interval(b, nb, m, sa, sb) ; h = sb - sa
+         if (h <= 0._R8P) cycle
+         r = eref(m) ; a = ealt(m)
+         ng = 2_I4P ; a1 = 0._R8P
+         call gauss_legendre_01(ng, sq, wq)
+         do q = 1_I4P, ng
+            call map3_node(mc, surface, s0, sa + h * sq(q), h * wq(q), c0, c1, lf, ev(r), nstart(r), ev(a), nstart(a), &
+                           comp, a1, ok)
+         enddo
+         do
+            ng = 2_I4P * ng ; a2 = 0._R8P
+            call gauss_legendre_01(ng, sq, wq)
+            do q = 1_I4P, ng
+               call map3_node(mc, surface, s0, sa + h * sq(q), h * wq(q), c0, c1, lf, ev(r), nstart(r), ev(a), nstart(a), &
+                              comp, a2, ok)
+            enddo
+            if (.not. ok) exit
+            tol = 64._R8P * epsilon(1._R8P) * max(h, FLOOR_H)
+            conv = .true.
+            do t = 1_I4P, nt
+               do f = 1_I4P, 6_I4P
+                  if (abs(a2(f, t) - a1(f, t)) > tol * scl(f) .or. abs(a2(6 + f, t) - a1(6 + f, t)) > tol * sco(f)) &
+                     conv = .false.
+               enddo
+            enddo
+            if (conv) exit
+            if (ng >= 64_I4P) then ! the round-off of one evaluation (see FLOOR_H)
+               do t = 1_I4P, nt
+                  do f = 1_I4P, 6_I4P
+                     if (max(abs(a2(f, t) - a1(f, t)) / sna, abs(a2(6 + f, t) - a1(6 + f, t)) / sno) > &
+                         64._R8P * epsilon(1._R8P)) mc%exact = .false.
+                  enddo
+               enddo
+               exit
+            endif
+            a1 = a2
+         enddo
+         meas = meas + a2
+      enddo
+   endif
+   endsubroutine map3_measures
+
+   subroutine map3_node(mc, surface, s0, s, w, c0, c1, lf, evr, nr, eva, na, comp, acc, ok)
+   !< One quadrature node (instant s, weight w): the pieces at s with their measures, each added to a track with w times
+   !< its face areas and outward rigid-field outflows; a piece takes the track of the pieces of the interval's evaluation
+   !< evr (first node nr) that hold its features, a narrow interval also tries the one after it, eva (na); as `map_node`
+   !< (a negligible piece without a known feature is dropped; in a narrow interval a node or piece that cannot be
+   !< assigned is skipped, mc%skipped). Outflow of a face normal to a, (a, b, c) cyclic: the field
+   !< om x (x - t(s)) + d, int (om_b (x_c - t_c) - om_c (x_b - t_b) + d_a) dA from the area and the first moments (as
+   !< `faces_gauss_3d` / `plane_piece`); without rotation d_a A.
+   type(map3_ctx_t),         intent(inout) :: mc           !< State.
+   type(surface_stl_object), intent(in)    :: surface, s0  !< Surface (body frame), copy at pose0.
+   real(R8P),                intent(in)    :: s, w         !< Instant, weight.
+   real(R8P),                intent(in)    :: c0(3), c1(3) !< Cell.
+   integer(I4P),             intent(in)    :: lf(:)        !< Facets.
+   type(cell_eval3_t),       intent(in)    :: evr, eva     !< The interval's evaluation, the one after it.
+   integer(I4P),             intent(in)    :: nr, na       !< Their first nodes.
+   integer(I4P),             intent(in)    :: comp(:)      !< Track of each node.
+   real(R8P),                intent(inout) :: acc(:,:)     !< Sums [12, nt].
+   logical,                  intent(inout) :: ok           !< Every piece assigned.
+   type(cell_eval3_t)                      :: e            !< Pieces at s.
+   real(R8P)                               :: tq(3), ar, o, fz(6) !< Work.
+   integer(I4P)                            :: p, t, f, a, bb, cc, cs(8) !< Work.
+
+   if (.not. ok) return
+   cs = 0_I4P ; fz = 0._R8P
+   call map3_eval(mc, surface, s0, 2_I4P, s, c0, c1, lf, cs, 0._R8P, fz, .true., e)
+   if (.not. e%closed) then
+      if (na /= nr) then
+         mc%skipped = mc%skipped + 1_I4P
+      else
+         ok = .false.
+      endif
+      return
+   endif
+   tq = mc%pose0%t + s * mc%d
+   do p = 1_I4P, e%np
+      t = piece_track3(e, p, evr, nr, comp)
+      if (t == 0_I4P .and. na /= nr) t = piece_track3(e, p, eva, na, comp)
+      if (t <= 0_I4P) then ! no known feature (negligible, or a missed event) or two tracks
+         if (t == 0_I4P .and. maxval(e%pa(:, p)) <= 1e-9_R8P * maxval(c1 - c0)**2) cycle
+         if (na /= nr) then
+            mc%skipped = mc%skipped + 1_I4P ; cycle
+         endif
+         ok = .false. ; return
+      endif
+      do f = 1_I4P, 6_I4P
+         a = (f + 1_I4P) / 2_I4P ; bb = mod(a, 3_I4P) + 1_I4P ; cc = mod(a + 1_I4P, 3_I4P) + 1_I4P
+         ar = e%pa(f, p)
+         if (mc%rot) then
+            o = mc%om(bb) * (e%pm(2, f, p) - tq(cc) * ar) - mc%om(cc) * (e%pm(1, f, p) - tq(bb) * ar) + mc%d(a) * ar
+         else
+            o = mc%d(a) * ar
+         endif
+         if (mod(f, 2_I4P) == 1_I4P) o = -o
+         acc(f, t) = acc(f, t) + w * ar ; acc(6 + f, t) = acc(6 + f, t) + w * o
+      enddo
+   enddo
+   endsubroutine map3_node
+
+   pure integer(I4P) function piece_track3(e, p, evr, nr, comp) result(t)
+   !< The track of piece p of e through its features found in evr (first node nr): 0 if none is found, -1 if they point
+   !< to two tracks (`piece_track` in 3-D).
+   type(cell_eval3_t), intent(in) :: e, evr  !< Evaluation, reference evaluation.
+   integer(I4P),       intent(in) :: p, nr   !< Piece, first node of evr.
+   integer(I4P),       intent(in) :: comp(:) !< Track of each node.
+   integer(I4P)                   :: k, q, lo, hi, mid, tk !< Work.
+
+   t = 0_I4P
+   do k = 1_I4P, e%nk
+      if (e%kpiece(k) /= p) cycle
+      q = 0_I4P ; lo = 1_I4P ; hi = evr%nk ! the feature in evr (keys increasing)
+      do while (lo <= hi)
+         mid = (lo + hi) / 2_I4P
+         if (evr%key(mid) == e%key(k)) then
+            q = evr%kpiece(mid) ; exit
+         elseif (evr%key(mid) < e%key(k)) then
+            lo = mid + 1_I4P
+         else
+            hi = mid - 1_I4P
+         endif
+      enddo
+      if (q == 0_I4P) cycle
+      tk = comp(nr + q - 1_I4P)
+      if (t == 0_I4P) then
+         t = tk
+      elseif (t /= tk) then
+         t = -1_I4P ; return
+      endif
+   enddo
+   endfunction piece_track3
+
+   subroutine swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, check_input, map)
    !< Swept geometry of `surface` between `pose0` and `pose1` on the block with cell edges x(nx+1),
    !< y(ny+1), z(nz+1) (issue #41 step 5): volumes from `cut_cells_3d` at the two poses; face apertures
    !< exact for a pure translation and, since issue #69, for the screw motion with a rotation (`exact`, default
    !< .true.; see the module notes and the moving-bodies page), else by `nq`-point Gauss-Legendre (default 4) on
    !< copies moved to the screw poses or to `poses(nq)`.
    !< `status = STATUS_INVALID_INPUT` on bad edges, nq < 1 or a poses size other than nq.
+   !< `map` (issue #102 step 2): the piece map of the step, the tracks of every cell (`piece_map_3d_t`): the space-time
+   !< components of the cell's fluid over the step, linking the pieces of the cut cells at pose0 to those at pose1, with
+   !< per-track volumes, face apertures and outflows, wall and residual (see `piece_map_3d_build`). It needs the screw
+   !< motion: with `poses`, `status = STATUS_INVALID_INPUT` and nothing is computed. Without `map` every other output is
+   !< unchanged.
    type(surface_stl_object), intent(in)            :: surface  !< Surface (body frame).
    type(rigid_pose_t),       intent(in)            :: pose0    !< Pose at the start.
    type(rigid_pose_t),       intent(in)            :: pose1    !< Pose at the end.
@@ -1842,8 +3036,10 @@ contains
    logical,                  intent(in),  optional :: check_input !< Check the surface for self-intersections
                                                                   !< (`find_self_intersections`; see swept_cells_2d).
    integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(piece_map_3d_t),     intent(out), optional :: map      !< Piece map of the step (issue #102 step 2).
 
-   call swept_3d_run(surface, pose0, pose1, x, y, z, sw, .false., SWEPT_CHUNK_CELLS, nq, poses, exact, status, check_input)
+   call swept_3d_run(surface, pose0, pose1, x, y, z, sw, .false., SWEPT_CHUNK_CELLS, nq, poses, exact, status, check_input, &
+                     map)
    endsubroutine swept_cells_3d
 
    subroutine swept_cells_3d_device(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, chunk_cells)
@@ -1882,9 +3078,10 @@ contains
    call swept_3d_run(surface, pose0, pose1, x, y, z, sw, .true., ck, nq, poses, exact, status)
    endsubroutine swept_cells_3d_device
 
-   subroutine swept_3d_run(surface, pose0, pose1, x, y, z, sw, dev, chunk, nq, poses, exact, status, check_input)
+   subroutine swept_3d_run(surface, pose0, pose1, x, y, z, sw, dev, chunk, nq, poses, exact, status, check_input, map)
    !< The work of `swept_cells_3d` (dev = .false.) and `swept_cells_3d_device` (dev = .true.): the same operations in
-   !< the same order, the cut cells and face sums on the device with dev.
+   !< the same order, the cut cells and face sums on the device with dev. The piece map (`map`, host path only) is built
+   !< last, from the end-pose cuts and the face outflows (an extra output of the face routines, their arithmetic as is).
    type(surface_stl_object), intent(in)            :: surface  !< Surface (body frame).
    type(rigid_pose_t),       intent(in)            :: pose0    !< Pose at the start.
    type(rigid_pose_t),       intent(in)            :: pose1    !< Pose at the end.
@@ -1897,6 +3094,7 @@ contains
    logical,                  intent(in),  optional :: exact    !< Exact translation path (default .true.).
    logical,                  intent(in),  optional :: check_input !< Check the surface for self-intersections.
    integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(piece_map_3d_t),     intent(out), optional :: map      !< Piece map of the step (issue #102 step 2).
    type(surface_stl_object) :: s0                 !< Moved copy.
    type(intersection_pair_t), allocatable :: pairs(:) !< Crossing facet pairs (check_input).
    real(R8P)                :: d(3)               !< Displacement.
@@ -1904,7 +3102,9 @@ contains
    logical                  :: rotation_exact     !< Exact rotation path (issue #69).
    type(cut_cells_3d_t)     :: k0, k1             !< Cut cells at the end poses.
    real(R8P), allocatable   :: fx2(:,:,:), fy2(:,:,:), fz2(:,:,:), flux(:,:,:), fl2(:,:,:) !< Work.
+   real(R8P), allocatable   :: fox(:,:,:), foy(:,:,:), foz(:,:,:) !< Face outflows in +axis (map).
    integer(I4P)             :: nx, ny, nz, n, i, j, k, st !< Work.
+   logical                  :: want_map           !< The piece map asked (host path).
 
    if (present(status)) status = STATUS_OK
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
@@ -1918,11 +3118,12 @@ contains
       return
    endif
    if (present(poses)) then
-      if (size(poses) /= n) then
+      if (size(poses) /= n .or. present(map)) then
          if (present(status)) status = STATUS_INVALID_INPUT
          return
       endif
    endif
+   want_map = present(map) .and. .not. dev
    sw%nx = nx ; sw%ny = ny ; sw%nz = nz
    allocate(sw%swept(nx, ny, nz), sw%face_x(nx + 1, ny, nz), sw%face_y(nx, ny + 1, nz), sw%face_z(nx, ny, nz + 1), &
             sw%wall(3, nx, ny, nz), sw%residual(nx, ny, nz), flux(nx, ny, nz))
@@ -1963,10 +3164,16 @@ contains
    if (present(exact)) then
       translation = translation .and. exact ; rotation_exact = rotation_exact .and. exact
    endif
+   if (want_map) allocate(fox(nx + 1, ny, nz), foy(nx, ny + 1, nz), foz(nx, ny, nz + 1))
    if (rotation_exact) then
       ! exact rotation (issue #69): certified breakpoints per grid plane, Gauss doubled to round-off on every piece
-      call faces_rotation_3d(surface, pose0, pose1, x, y, z, sw%face_x, sw%face_y, sw%face_z, flux, sw%evaluations, &
-                             sw%exact, dev, chunk)
+      if (want_map) then
+         call faces_rotation_3d(surface, pose0, pose1, x, y, z, sw%face_x, sw%face_y, sw%face_z, flux, sw%evaluations, &
+                                sw%exact, dev, chunk, fox, foy, foz)
+      else
+         call faces_rotation_3d(surface, pose0, pose1, x, y, z, sw%face_x, sw%face_y, sw%face_z, flux, sw%evaluations, &
+                                sw%exact, dev, chunk)
+      endif
    elseif (translation) then
       sw%exact = .true.
       d = pose1%t - pose0%t
@@ -1984,8 +3191,16 @@ contains
             enddo
          enddo
       enddo
+      if (want_map) then ! the uniform field's outflows in +axis
+         fox = d(1) * sw%face_x ; foy = d(2) * sw%face_y ; foz = d(3) * sw%face_z
+      endif
    else
-      call faces_gauss_3d(surface, pose0, pose1, x, y, z, n, sw%face_x, sw%face_y, sw%face_z, flux, dev, poses)
+      if (want_map) then
+         call faces_gauss_3d(surface, pose0, pose1, x, y, z, n, sw%face_x, sw%face_y, sw%face_z, flux, dev, poses, fox, foy, &
+                             foz)
+      else
+         call faces_gauss_3d(surface, pose0, pose1, x, y, z, n, sw%face_x, sw%face_y, sw%face_z, flux, dev, poses)
+      endif
       sw%evaluations = n
    endif
    if (.not. present(poses) .and. .not. translation .and. .not. rotation_exact) then
@@ -2003,9 +3218,18 @@ contains
          enddo
       enddo
    enddo
+   if (want_map) then
+      if (translation) then
+         call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_TRANSLATION, n, map)
+      elseif (rotation_exact) then
+         call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_ROTATION, n, map)
+      else
+         call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_GAUSS, n, map)
+      endif
+   endif
    endsubroutine swept_3d_run
 
-   subroutine faces_rotation_3d(surface, pose0, pose1, x, y, z, fx, fy, fz, flux, nev, exact, device, chunk)
+   subroutine faces_rotation_3d(surface, pose0, pose1, x, y, z, fx, fy, fz, flux, nev, exact, device, chunk, fox, foy, foz)
    !< Exact time-averaged fluid face areas and rigid-field outflows under the screw motion with a rotation (issue #69;
    !< moving-bodies page, "Exact rotation"), one grid plane at a time. The body point w = R0 q moves to
    !< X(s) = Rot(s angle) w + t0 + s dt about the fixed unit axis k (Rodrigues: Rot(phi) w = A cos phi + B sin phi + C,
@@ -2027,6 +3251,8 @@ contains
    logical,                  intent(out) :: exact          !< Every piece converged.
    logical,      optional,   intent(in)  :: device         !< The section cut cells and face sums on the device.
    integer(I4P), optional,   intent(in)  :: chunk          !< Section cells per launch set (device).
+   real(R8P),    optional,   intent(out) :: fox(:,:,:), foy(:,:,:), foz(:,:,:) !< Time-integrated outflows in +axis per
+                                                           !< face (issue #102: the piece map's single-track cells).
    type(facet_object), pointer :: f
    real(R8P), allocatable      :: w(:,:,:), vlo(:,:,:), vhi(:,:,:), ox(:,:,:), oy(:,:,:), oz(:,:,:), bp(:)
    real(R8P), allocatable      :: area(:,:), outf(:,:)
@@ -2125,6 +3351,9 @@ contains
          enddo
       enddo
    enddo
+   if (present(fox)) fox = ox
+   if (present(foy)) foy = oy
+   if (present(foz)) foz = oz
    contains
       pure function at(wv, sv) result(xv)
       !< Position at s of the body point with R0 q = wv.
@@ -2571,7 +3800,7 @@ contains
    enddo
    endsubroutine plane_average
 
-   subroutine faces_gauss_3d(surface, pose0, pose1, x, y, z, n, fx, fy, fz, flux, device, poses)
+   subroutine faces_gauss_3d(surface, pose0, pose1, x, y, z, n, fx, fy, fz, flux, device, poses, fox, foy, foz)
    !< Time-averaged fluid face areas by n-point Gauss-Legendre (`cut_cells_3d` at each node pose), and
    !< the time integral of the outflow of the rigid field of the screw motion per cell. With `device` (issue #100 step
    !< 4) each node's faces come from `cut_cells_3d_sections(surface, ..., device=.true., pose=pq)`: the faces of
@@ -2584,6 +3813,8 @@ contains
    real(R8P),                intent(out)          :: flux(:,:,:)  !< Outflow of the rigid field.
    logical,                  intent(in)           :: device       !< The faces by the device sections.
    type(rigid_pose_t),       intent(in), optional :: poses(:)     !< Node poses.
+   real(R8P),                intent(out), optional :: fox(:,:,:), foy(:,:,:), foz(:,:,:) !< Time-integrated outflows in
+                                                                  !< +axis per face (issue #102, the piece map).
    type(surface_stl_object) :: sq_                 !< Copy at a node.
    type(cut_cells_3d_t)     :: kc                  !< Its cut cells.
    type(rigid_pose_t)       :: pq                  !< Node pose.
@@ -2595,6 +3826,9 @@ contains
    call gauss_legendre_01(n, sq, wq)
    allocate(ox(nx + 1, ny, nz), oy(nx, ny + 1, nz), oz(nx, ny, nz + 1))
    fx = 0._R8P ; fy = 0._R8P ; fz = 0._R8P ; flux = 0._R8P
+   if (present(fox)) fox = 0._R8P
+   if (present(foy)) foy = 0._R8P
+   if (present(foz)) foz = 0._R8P
    d = pose1%t - pose0%t
    call pose_log_3d(pose0, pose1, axis, angle) ; om = angle * axis
    do q = 1_I4P, n
@@ -2648,6 +3882,9 @@ contains
             enddo
          enddo
       enddo
+      if (present(fox)) fox = fox + wq(q) * ox
+      if (present(foy)) foy = foy + wq(q) * oy
+      if (present(foz)) foz = foz + wq(q) * oz
    enddo
    endsubroutine faces_gauss_3d
 

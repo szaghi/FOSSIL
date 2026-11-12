@@ -38,6 +38,8 @@ implicit none
 private
 public :: slice_surface
 public :: slice_planes_t, slice_planes_prepare, slice_surface_plane, slice_surface_planes
+! the section of a few triangles, for one-cell evaluations (issue #102, the 3-D piece map)
+public :: slice_triangles
 
 type :: slice_planes_t
    !< Plane sweep over a set of parallel planes (issue #100 step 3c): the facets that can meet each plane.
@@ -310,6 +312,43 @@ contains
       if (present(status) .and. st /= STATUS_OK) status = st
    enddo
    endsubroutine slice_surface_planes
+
+   subroutine slice_triangles(tri, axis, level, u, v, nxt)
+   !< The section of the triangles tri(:, :, 1:n) by the plane x(axis) = level with the rule of the cut cells (a vertex
+   !< on the plane counts as below, `on_plane_low`), as plain arrays (issue #102): the directed segments of
+   !< `facet_segment` (canonical crossings: two triangles sharing an edge give the same bits) chained by `chain`, vertex
+   !< k followed by vertex nxt(k) (0: the end of an open chain). The triangles are a few facets around one cell, so the
+   !< chains are open in general; the loops' order is the order of `chain`, not the order of the facets.
+   real(R8P),                 intent(in)  :: tri(:,:,:)   !< Triangles [3, 3, n].
+   integer(I4P),              intent(in)  :: axis         !< Plane normal axis.
+   real(R8P),                 intent(in)  :: level        !< Plane position.
+   real(R8P),    allocatable, intent(out) :: u(:), v(:)   !< Section vertices (in-plane axes in cyclic order).
+   integer(I4P), allocatable, intent(out) :: nxt(:)       !< Next vertex (0: none).
+   real(R8P),    allocatable :: s(:,:)                    !< Segments [su, sv, eu, ev; m].
+   integer(I4P), allocatable :: sp(:), lp(:), sizes(:)    !< Patches (unused), loop sizes.
+   logical,      allocatable :: closed(:)                 !< Loop closed flags.
+   real(R8P)                 :: pa(2), pb(2)              !< Segment.
+   integer(I4P)              :: n, m, f, l, k, k0, nopen  !< Work.
+   logical                   :: hit                       !< A segment.
+
+   n = size(tri, 3, kind=I4P)
+   allocate(s(4, max(1_I4P, n)), sp(max(1_I4P, n))) ; sp = 1_I4P ; m = 0_I4P
+   do f = 1_I4P, n
+      call facet_segment(tri(:, :, f), axis, level, .true., pa, pb, hit)
+      if (.not. hit) cycle
+      m = m + 1_I4P ; s(:, m) = [pa, pb]
+   enddo
+   call chain(s(:, 1:m), u, v, sizes, closed, nopen, sp(1:m), lp)
+   allocate(nxt(size(u)))
+   k0 = 0_I4P
+   do l = 1_I4P, size(sizes, kind=I4P)
+      do k = k0 + 1_I4P, k0 + sizes(l) - 1_I4P
+         nxt(k) = k + 1_I4P
+      enddo
+      nxt(k0 + sizes(l)) = merge(k0 + 1_I4P, 0_I4P, closed(l))
+      k0 = k0 + sizes(l)
+   enddo
+   endsubroutine slice_triangles
 
    ! private
    pure subroutine facet_segment(x, normal_axis, level, low, pa, pb, hit)
