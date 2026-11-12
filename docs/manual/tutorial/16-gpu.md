@@ -138,6 +138,11 @@ batches.
   1024² cells: 1.4-2.1x the CPU with the outputs copied back, 6-7x resident; a moving body (move, tag, cut per step)
   gains 1.8-2.3x and 3.6-4.3x. The tables are in the
   [cut cells reference](/guide/advanced/cut-cells#on-the-device).
+- A whole time step of a moving body runs on the device too: move, tag, cut + links, swept. Each stage is bit for
+  bit the CPU's. On an RTX 4070 a 3-D step gains 1.8-3.9x at 32³, 5.4-5.9x at 64³ and 6.6-9.3x at 128³. The swept
+  geometry and, on dense meshes, the tags take most of the device step. A 2-D step gains nothing (0.84-1.01x):
+  its swept faces are host work. The table is in the
+  [GPU reference](/guide/advanced/device-distance#a-moving-body-time-step).
 
 <<< @/examples/output/tut16c.ansi{ansi}
 

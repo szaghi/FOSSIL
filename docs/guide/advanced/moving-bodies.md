@@ -293,6 +293,10 @@ That is 1.7–4.7×. The exact paths are dominated by the number of (plane, node
 and the exact rotation costs 250–600 s per host call there. The Gauss path is two to three orders of magnitude cheaper
 than the exact rotation at 64³.
 
+In a whole time step (move, tag, cut + links, swept) the swept geometry stays the largest device stage: 37–85 % of
+the step at 64³–128³. The step gains 5.4–9.3× there; the table is in
+[GPU queries](/guide/advanced/device-distance#a-moving-body-time-step).
+
 ## Results
 
 | Case | Result |

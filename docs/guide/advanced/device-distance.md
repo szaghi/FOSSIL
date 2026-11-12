@@ -262,6 +262,62 @@ pseudo-normal one, against 1.3 to 2.5 times on the CPU. Use it where the
 surface is open; on a closed, sanitized surface the pseudo-normal gives
 the same signs for a fraction of the cost.
 
+### A moving-body time step
+
+`fossil_val_device_chain` (issue #100; the manual mode `tests-nvidia-chain`) runs the time step of a moving-body
+cut-cell solver.
+
+**The chain, in order:**
+1. **Move** the body to its new pose.
+2. **Tag** one box per cell with `box_classify_many(_device)`.
+3. **Cut** the cells and compute their piece links: `cut_cells_3d(_device)(..., links=)`, or in 2-D
+   `cut_cells(_device)` with `cut_links_2d(_device)`.
+4. **Sweep:** the swept geometry between the two poses (`swept_cells_3d(_device)` / `swept_cells_2d(_device)`).
+
+**Three modes:**
+- the CPU;
+- the device with every output copied back;
+- the device with the cut and the links left resident.
+
+At every step each device output equals the CPU's bit for bit (`device chain vs serial mismatches: 0`).
+
+Measured on an RTX 4070 (`full` run, 3 steps; the step-0 sizes of issue #100). Times are seconds per step, the best of 3. The swept
+geometry is Gauss-Legendre nq = 4 under a rotation of 2° plus a translation per step, unless the motion says
+"translation" (the exact path):
+
+| body | cells | motion | CPU | copied back | resident | speed-up |
+|---|---|---|---|---|---|---|
+| sphere (marching cubes) | 32³ | Gauss | 1.21 | 0.317 | 0.312 | 3.8–3.9× |
+| sphere | 64³ | Gauss | 6.42 | 1.10 | 1.09 | 5.8–5.9× |
+| sphere | 128³ | Gauss | 50.9 | 5.67 | 5.49 | 9.0–9.3× |
+| cone | 32³ | Gauss | 0.354 | 0.193 | 0.192 | 1.8× |
+| cone | 64³ | Gauss | 2.07 | 0.381 | 0.365 | 5.4–5.7× |
+| cone | 128³ | Gauss | 15.1 | 2.29 | 2.16 | 6.6–7.0× |
+| sphere | 32³ | translation | 5.92 | 3.18 | 3.24 | 1.8–1.9× |
+| cone | 32³ | translation | 1.18 | 0.383 | 0.417 | 2.8–3.1× |
+| ellipse (2-D) | 256² | Gauss | 0.326 | 0.379 | 0.368 | 0.86–0.89× |
+| NACA 0012 (2-D) | 256² | Gauss | 0.303 | 0.360 | 0.346 | 0.84–0.88× |
+| ellipse (2-D) | 1024² | Gauss | 5.07 | 5.04 | 5.04 | 1.01× |
+| NACA 0012 (2-D) | 1024² | Gauss | 4.74 | 4.68 | 4.68 | 1.01× |
+
+How to read these numbers:
+
+- **In 3-D on the CPU** the swept geometry is 74–84 % of the cone's step. On the marching-cubes sphere the tags take
+  41–72 % (36.9 of 50.9 s at 128³: a winding-number sign at two million box centres on a dense mesh) and the swept
+  geometry 23–55 %.
+- **On the device:**
+  - **The swept geometry** is 37–85 % of the step at 64³–128³. It is bound by the host sections and walks of its
+    batched launch ([moving bodies](/guide/advanced/moving-bodies#on-the-device)).
+  - **The tags** come next: 3.3 s for the sphere at 128³. Each call uploads the cell boxes, about 100 MB at 128³.
+  - **Cut + links** is 3–18 % of the step. Keeping it resident saves 0.15–0.18 s per step at 128³ (sphere 0.33 →
+    0.15 s); the other stages are the same in both device modes.
+- **In 2-D there is no gain.** The swept faces are host algorithms and 82–96 % of the step. Resident cut + links is
+  12× the CPU at 1024² (9.3 against 113 ms), but under 1 % of the step. The device tags are slower than the host's:
+  the curve kernel takes a full signed distance at every box centre not cut, and the boxes are uploaded every call.
+- **The exact translation** is bound by the host work of the swept geometry: 1.8–3.1× at 32³.
+- **Double work in the chain:** the swept routines recompute the cut cells at both end poses, which the chain already
+  has (alpha0 and alpha1 equal the cut alphas bit for bit).
+
 ### Surface deviation
 
 `surface%deviation(other, ..., device=.true.)` (issue #60) runs its batched closest-point queries through

@@ -89,6 +89,13 @@ The `tests-nvidia-curve` mode is its 2-D twin (issue #36): it builds
 the device). Same clean-build rule (shared `exe/`), pass criterion
 `device vs serial max |d| err 0.000E+00`; the `rich`, `box`, `posed`, `sign bench`, `line crossings`, `deviation`, `feature`, `thin`, `cut cells 2-D` and `cut cells 2-D chain` mismatch lines must be 0 too (the 3-D bench prints the same lines, the 2-D cut cells excepted, plus `orient3d`, `cut cells 3-D sections`, `cut cells 3-D nodes`, `cut cells 3-D` and `swept cells 3-D`, `cut cells 3-D link inputs` and `cut links 3-D`; the curve bench also `cut cells 2-D blocks grids`, `swept cells 2-D` and `cut links 2-D`). Validated on the GPU 2026-11-05 (26.9, RTX 4070, 512²).
 
+The `tests-nvidia-chain` mode (WP2 #100 step 6b) builds `src/tests/validation/fossil_val_device_chain.f90` only: the
+per-step chain of a moving-body cut-cell solver (move, tag, cut + links, swept; 3-D sphere and cone, 2-D ellipse and
+NACA 0012), every stage's device output compared bitwise with the CPU (pass criterion `device chain vs serial
+mismatches: 0`), then timed on the CPU, the device copied back and the device resident. The default run is the gate
+(3-D 32³/64³, 2-D 256², about 5 min on GPU 1); `fossil_val_device_chain full` adds the step-0 sizes 128³ and 1024²
+(about 35 min). Built with gfortran it is a validation program: the device routines run as host twins at 8³/48².
+
 The NVIDIA modes compile with `-gpu=nofma -Mnofma` (`$CSTATIC_NV`): with FMA contraction the
 device lost host bit-exactness (1-ulp distances, sign and facet-id flips at near-ties); the device
 kernels are 15-30 % slower for it. Do not remove it unless the gates stay at 0.
@@ -98,7 +105,7 @@ Subnormals: the nvfortran host code flushes subnormal results to zero (FTZ) and 
 agreement there needs both `-Mnoflushz -Mnodaz` on the host: `-Mnoflushz` alone is not enough. Neither is in
 `$CSTATIC_NV` today (an open owner decision; issue #101, item 9b).
 
-The device build scope is **BVH-only** (the octree stays CPU-only). The 2-D and 3-D cut cells also run on the device (`curve%cut_cells_device`, `cut_cells_3d_device`, WP2 #100).
+The device build scope is **BVH-only** (the octree stays CPU-only). The 2-D and 3-D cut cells also run on the device (`curve%cut_cells_device`, `cut_cells_3d_device`, WP2 #100), with their piece links (`links=`, `cut_links_2d_device`) and the swept geometry (`swept_cells_3d_device`, `swept_cells_2d_device`): the whole per-step chain of a moving body (move, tag, cut + links, swept), bit for bit the CPU's.
 
 ### Running tests
 
