@@ -14,6 +14,12 @@ program fossil_test_piece_map_2d
 !<   (overlap: a split);
 !< - a fluid wedge whose apex enters the cell through a face: continuing. The two segments at the apex cross the face
 !<   line at the event and persist through it; a rule calling them volatile would declare the piece dead + fresh.
+!< - tangential contacts under a rotation (`contact_cells`): the corner (1, 1) grazing a segment at the turning point
+!<   of the rotation, and the apex of a fluid notch grazing the face x = 1 from inside the cell. The cell's piece shrinks
+!<   towards a point and grows back. Exactly at the contact (delta = 0) the event is not certified by a sign change: the
+!<   contact is within the round-off of its function, so whether the piece vanishes (dead + fresh) or not (continuing) is
+!<   undecidable in double precision: untrusted (it read continuing before). The corner 1e-9 inside the segment's solid
+!<   at the turning point: dead + fresh; 1e-9 short of it: continuing.
 !< Every case also passes the map checks (`check_map`): every piece at pose0 and at pose1 in exactly one track of its
 !< cell, numbered as the cut cells of a copy moved to the pose (and the track volumes equal to their pieces' areas bit
 !< for bit); residual = V1 - V0 + the sum of the track's face outflows; per-cell sums over the tracks equal to the swept
@@ -38,7 +44,7 @@ real(R8P)              :: x(4)
 real(R8P), allocatable :: u(:), v(:), xg(:)
 real(R8P), parameter   :: PI = acos(-1._R8P)
 integer(I4P)           :: i, st
-logical                :: ok(22)
+logical                :: ok(26)
 
 ok = .true.
 x = [-1._R8P, 0._R8P, 1._R8P, 2._R8P]
@@ -120,10 +126,43 @@ xg = [(0.0031_R8P + 0.9938_R8P * i / 24._R8P, i = 0, 24)]
 call naca(c)
 ok(22) = body_2d('NACA 0012, rotation, Gauss', about(0._R8P), about(0.12_R8P), gauss=.true.)
 
+! 23-25. the corner (1, 1) grazing a segment at the turning point of the rotation (delta: the gap left at the contact)
+call grazing_corner(0._R8P)
+ok(23) = case_2d('corner grazing, delta 0', graze_pose(-1._R8P), graze_pose(1._R8P), .true., [TRACK_UNTRUSTED]) .and. &
+         map%contact_cells >= 1_I4P
+call grazing_corner(-1e-9_R8P)
+ok(24) = case_2d('corner grazing, delta -1e-9', graze_pose(-1._R8P), graze_pose(1._R8P), .true., [TRACK_DEAD, TRACK_FRESH])
+call grazing_corner(1e-9_R8P)
+ok(25) = case_2d('corner grazing, delta 1e-9', graze_pose(-1._R8P), graze_pose(1._R8P), .true., [TRACK_CONTINUING])
+! 26. the apex of a fluid notch grazing the face x = 1 from inside the cell
+call c%adopt_loops(u=[-5._R8P, 8._R8P, 8._R8P, 2._R8P, 8._R8P, 8._R8P, -5._R8P], &
+                   v=[-5._R8P, -5._R8P, -6._R8P * tan(PI / 9._R8P), 0._R8P, 6._R8P * tan(PI / 9._R8P), 5._R8P, 5._R8P], &
+                   loop_sizes=[7_I4P])
+ok(26) = case_2d('notch apex grazing a face', pose_2d(-0.15_R8P, [-1._R8P, 0.5_R8P]), pose_2d(0.15_R8P, [-1._R8P, 0.5_R8P]), &
+                 .true., [TRACK_UNTRUSTED]) .and. map%contact_cells >= 1_I4P
+
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
 
 contains
+   subroutine grazing_corner(delta)
+   !< A big block whose face, rotating about a pivot beyond the corner (1, 1) on the diagonal (`graze_pose`), comes
+   !< closest to the corner at the middle of the step, delta short of it (the corner on the face for delta = 0): the
+   !< cell's only fluid is the corner triangle.
+   real(R8P), intent(in) :: delta !< Gap left at the contact (< 0: the corner inside the solid).
+
+   call rect(c, [-22._R8P - delta, -2._R8P - delta, -10._R8P, 13._R8P])
+   endsubroutine grazing_corner
+
+   function graze_pose(sgn) result(p)
+   !< The end poses of `grazing_corner`: the body origin on the pivot (1, 1) + 2 (1, 1) / sqrt(2), its +u axis along the
+   !< diagonal turned by sgn 0.3.
+   real(R8P), intent(in) :: sgn !< -1 (pose0) or 1 (pose1).
+   type(rigid_pose_2d_t) :: p   !< Pose.
+
+   p = pose_2d(PI / 4._R8P + sgn * 0.3_R8P, [1._R8P, 1._R8P] + sqrt(2._R8P) * [1._R8P, 1._R8P])
+   endfunction graze_pose
+
    subroutine rect(cv, b)
    !< The rectangle [b(1), b(2)] x [b(3), b(4)], counter-clockwise.
    type(curve_object), intent(inout) :: cv   !< Curve.

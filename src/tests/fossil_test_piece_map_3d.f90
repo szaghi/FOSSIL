@@ -15,7 +15,13 @@ program fossil_test_piece_map_3d
 !< - a fluid groove (V notch) whose apex line enters the cell through a face: continuing (its facets, its only
 !<   features, persist through the events);
 !< - a slab sweeping over the cell corner (1, 1, 1) and stopping past it: the main piece continues and the corner piece
-!<   is fresh (overlap: a split).
+!<   is fresh (overlap: a split);
+!< - tangential contacts under a rotation (`contact_cells`): the corner (1, 1, 1) grazing a facet at the turning point
+!<   of the rotation, and the apex of a fluid pit grazing the face x = 1 from inside the cell. The cell's piece shrinks
+!<   towards a point and grows back. Exactly at the contact (delta = 0) the event is not certified by a sign change: the
+!<   contact is within the round-off of its function, so whether the piece vanishes (dead + fresh) or not (continuing)
+!<   is undecidable in double precision: untrusted (it read continuing before). The corner 1e-9 inside the facet's
+!<   solid at the turning point: dead + fresh; 1e-9 short of it: continuing.
 !< Every case also passes the map checks (`check_map`): every piece at pose0 and at pose1 in exactly one track of its
 !< cell, numbered as the cut cells of a copy moved to the pose (the track volumes equal to their pieces' volumes bit for
 !< bit), per-cell sums over the tracks equal to the swept geometry (faces, wall, residual, swept = V1 - V0, outflows =
@@ -23,7 +29,8 @@ program fossil_test_piece_map_3d
 !< exact paths (`fossil_piece_map_3d_checks`). The cone on a grid and the refusals: `fossil_test_piece_map_3d_bodies`.
 use fossil,                   only : surface_stl_object, rigid_pose_t, pose_from_axis_angle, swept_cells_3d_t, &
                                      swept_cells_3d, piece_map_3d_t, cut_cells_3d_t, cut_cells_3d, STATUS_OK, &
-                                     TRACK_CONTINUING, TRACK_FRESH, TRACK_DEAD, TRACK_SPLIT, TRACK_MERGE
+                                     TRACK_CONTINUING, TRACK_FRESH, TRACK_DEAD, TRACK_SPLIT, TRACK_MERGE, &
+                                     TRACK_UNTRUSTED
 use fossil_piece_map_3d_checks, only : check_map
 use fossil_sign_bench_bodies, only : soup_t, body_t, make_prism, to_surface
 use penf,                     only : I4P, R8P
@@ -38,7 +45,8 @@ type(body_t)                    :: gb
 type(rigid_pose_t)              :: p0, p1
 real(R8P)                       :: x(4), n(3), c(3), ax(3)
 real(R8P), parameter            :: TA(3) = [0.3_R8P, 0.5_R8P, 0.8_R8P], TANG = 0.02_R8P !< Tilt of the box bodies.
-logical                         :: ok(14)
+logical                         :: ok(18)
+integer(I4P)                    :: nput !< Facets written by `put`.
 
 ok = .true.
 x = [-1._R8P, 0._R8P, 1._R8P, 2._R8P]
@@ -96,10 +104,85 @@ call to_surface(gb%soup, s)
 ok(14) = case_3d('groove apex entering', tilt([0._R8P, 0._R8P, -3._R8P]), tilt([0.3_R8P, 0._R8P, -3._R8P]), .true., &
                  [TRACK_CONTINUING])
 
+! 15-17. the corner (1, 1, 1) grazing a facet at the turning point of the rotation (delta: the gap left at the contact)
+call grazing_corner(0._R8P)
+ok(15) = case_3d('corner grazing, delta 0', graze_pose(-1._R8P), graze_pose(1._R8P), .true., [TRACK_UNTRUSTED]) .and. &
+         map%contact_cells >= 1_I4P
+call grazing_corner(-1e-9_R8P)
+ok(16) = case_3d('corner grazing, delta -1e-9', graze_pose(-1._R8P), graze_pose(1._R8P), .true., [TRACK_DEAD, TRACK_FRESH])
+call grazing_corner(1e-9_R8P)
+ok(17) = case_3d('corner grazing, delta 1e-9', graze_pose(-1._R8P), graze_pose(1._R8P), .true., [TRACK_CONTINUING])
+! 18. the apex of a fluid pit grazing the face x = 1 from inside the cell
+call pit(s)
+p0 = pose_from_axis_angle([0._R8P, 0._R8P, 1._R8P], -0.15_R8P, [-1._R8P, 0.5_R8P, 0.5_R8P])
+p1 = pose_from_axis_angle([0._R8P, 0._R8P, 1._R8P], 0.15_R8P, [-1._R8P, 0.5_R8P, 0.5_R8P])
+ok(18) = case_3d('pit apex grazing a face', p0, p1, .true., [TRACK_UNTRUSTED]) .and. map%contact_cells >= 1_I4P
+
+
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
 
 contains
+   subroutine grazing_corner(delta)
+   !< A big block whose face, rotating about a pivot beyond the corner (1, 1, 1) on the diagonal (`graze_pose`), comes
+   !< closest to the corner at the middle of the step, delta short of it (the corner on the face for delta = 0): the
+   !< cell's only fluid is the corner tetrahedron.
+   real(R8P), intent(in) :: delta !< Gap left at the contact (< 0: the corner inside the solid).
+
+   call boxes(s, reshape([-22._R8P - delta, -10._R8P, -12._R8P, -2._R8P - delta, 13._R8P, 10._R8P], [3, 2, 1]))
+   endsubroutine grazing_corner
+
+   function graze_pose(sgn) result(p)
+   !< The end poses of `grazing_corner`: the body origin on the pivot (1, 1, 1) + 2 (1, 1, 1) / sqrt(3), its +x axis
+   !< along the diagonal turned by sgn 0.3 about (1, -1, 0).
+   real(R8P), intent(in) :: sgn  !< -1 (pose0) or 1 (pose1).
+   type(rigid_pose_t)    :: p    !< Pose.
+   type(rigid_pose_t)    :: r, a !< Work.
+   real(R8P)             :: d(3) !< Diagonal.
+
+   d = [1._R8P, 1._R8P, 1._R8P] / sqrt(3._R8P)
+   r = pose_from_axis_angle([0._R8P, -1._R8P, 1._R8P], acos(d(1)))
+   a = pose_from_axis_angle([1._R8P, -1._R8P, 0._R8P], sgn * 0.3_R8P)
+   p%r = matmul(a%r, r%r) ; p%t = [1._R8P, 1._R8P, 1._R8P] + 2._R8P * d
+   endfunction graze_pose
+
+   subroutine pit(surf)
+   !< A block with a square pyramidal pit (fluid) on its +x face, the apex at (2, 0, 0): the block [-8, 3] x [-8, 8]^2,
+   !< the pit's opening [-0.4, 0.4]^2 on x = 3.
+   type(surface_stl_object), intent(inout) :: surf    !< Surface.
+   real(R8P)                               :: q(3, 8) !< The +x face's outer and inner rings.
+
+   if (allocated(sp%v)) deallocate(sp%v)
+   allocate(sp%v(3, 3, 22)) ; nput = 0_I4P
+   call put4([-8._R8P, -8._R8P, -8._R8P], [-8._R8P, -8._R8P, 8._R8P], [-8._R8P, 8._R8P, 8._R8P], [-8._R8P, 8._R8P, -8._R8P])
+   call put4([-8._R8P, -8._R8P, -8._R8P], [3._R8P, -8._R8P, -8._R8P], [3._R8P, -8._R8P, 8._R8P], [-8._R8P, -8._R8P, 8._R8P])
+   call put4([-8._R8P, 8._R8P, -8._R8P], [-8._R8P, 8._R8P, 8._R8P], [3._R8P, 8._R8P, 8._R8P], [3._R8P, 8._R8P, -8._R8P])
+   call put4([-8._R8P, -8._R8P, -8._R8P], [-8._R8P, 8._R8P, -8._R8P], [3._R8P, 8._R8P, -8._R8P], [3._R8P, -8._R8P, -8._R8P])
+   call put4([-8._R8P, -8._R8P, 8._R8P], [3._R8P, -8._R8P, 8._R8P], [3._R8P, 8._R8P, 8._R8P], [-8._R8P, 8._R8P, 8._R8P])
+   q(:, 1) = [3._R8P, -8._R8P, -8._R8P] ; q(:, 2) = [3._R8P, 8._R8P, -8._R8P] ; q(:, 3) = [3._R8P, 8._R8P, 8._R8P]
+   q(:, 4) = [3._R8P, -8._R8P, 8._R8P] ; q(:, 5) = [3._R8P, -0.4_R8P, -0.4_R8P] ; q(:, 6) = [3._R8P, 0.4_R8P, -0.4_R8P]
+   q(:, 7) = [3._R8P, 0.4_R8P, 0.4_R8P] ; q(:, 8) = [3._R8P, -0.4_R8P, 0.4_R8P]
+   call put4(q(:, 1), q(:, 2), q(:, 6), q(:, 5)) ; call put4(q(:, 2), q(:, 3), q(:, 7), q(:, 6))
+   call put4(q(:, 3), q(:, 4), q(:, 8), q(:, 7)) ; call put4(q(:, 4), q(:, 1), q(:, 5), q(:, 8))
+   call put(q(:, 5), q(:, 6), [2._R8P, 0._R8P, 0._R8P]) ; call put(q(:, 6), q(:, 7), [2._R8P, 0._R8P, 0._R8P])
+   call put(q(:, 7), q(:, 8), [2._R8P, 0._R8P, 0._R8P]) ; call put(q(:, 8), q(:, 5), [2._R8P, 0._R8P, 0._R8P])
+   call to_surface(sp, surf)
+   endsubroutine pit
+
+   subroutine put4(a1, a2, a3, a4)
+   !< The quad a1 a2 a3 a4 (outward by the right-hand rule) as two facets of sp.
+   real(R8P), intent(in) :: a1(3), a2(3), a3(3), a4(3) !< Vertices.
+
+   call put(a1, a2, a3) ; call put(a1, a3, a4)
+   endsubroutine put4
+
+   subroutine put(a1, a2, a3)
+   !< One facet of sp.
+   real(R8P), intent(in) :: a1(3), a2(3), a3(3) !< Vertices.
+
+   nput = nput + 1_I4P ; sp%v(:, 1, nput) = a1 ; sp%v(:, 2, nput) = a2 ; sp%v(:, 3, nput) = a3
+   endsubroutine put
+
    function tilt(t) result(p)
    !< The tilt of the box bodies (a small rotation about the origin) with translation t.
    real(R8P), intent(in) :: t(3) !< Translation.

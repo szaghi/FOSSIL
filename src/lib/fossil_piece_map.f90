@@ -58,8 +58,9 @@ type :: piece_map_2d_t
    !< Gauss path would miss or overweight it). Its tracks' residuals are then round-off, and their sums over the cell are
    !< the cell's values to round-off on the exact paths; on the Gauss path they differ from the cell's Gauss values by
    !< that quadrature error (about the nq-vs-2nq estimate). An untrusted cell (status TRACK_UNTRUSTED: an evaluation did
-   !< not close, its pieces did not match the end-pose cuts, a breakpoint was not certified, or a face part could not be
-   !< assigned) has one track with all its pieces and the cell's values.
+   !< not close, its pieces did not match the end-pose cuts, a breakpoint was not certified, an event was a contact not
+   !< certified by a sign change (`contact_cells`), or a face part could not be assigned) has one track with all its
+   !< pieces and the cell's values.
    !<
    !< `outflow(f, t)`: the time integral over the step of the outward flux of the **rigid** field of the screw motion
    !< through the track's part of face f, so that residual = volume1 - volume0 + sum_f outflow(f, t). It is what makes a
@@ -94,6 +95,10 @@ type :: piece_map_2d_t
    integer(I4P)              :: evaluations = 0_I4P   !< One-cell piece evaluations (topology pass).
    integer(I4P)              :: skipped_nodes = 0_I4P !< Quadrature nodes or pieces skipped inside intervals between two
                                                       !< events closer than 1e-10 (their weight is below that).
+   integer(I4P)              :: contact_cells = 0_I4P !< Untrusted cells with an event not certified by a sign change: a
+                                                      !< contact within the round-off of its function under a rotation
+                                                      !< (a corner or vertex grazing, where a piece can shrink to a point
+                                                      !< and come back as another track; issue #102).
 endtype piece_map_2d_t
 
 type :: piece_map_3d_t
@@ -118,8 +123,8 @@ type :: piece_map_3d_t
    !< differs from it by the cell's quadrature error on the Gauss path (`exact=.false.`; of the order of
    !< `swept_cells_3d_t%error_estimate`), where the per-track values are the accurate ones. An untrusted cell
    !< (status TRACK_UNTRUSTED: an end cut or an evaluation not trusted (pieces -1), its end evaluations not equal to the
-   !< end-pose cuts, a breakpoint not certified, or a face part that could not be assigned) has one track with all its
-   !< pieces and the cell's values.
+   !< end-pose cuts, a breakpoint not certified, a contact not certified by a sign change (`contact_cells`), or a face
+   !< part that could not be assigned) has one track with all its pieces and the cell's values.
    integer(I4P)              :: nx = 0_I4P, ny = 0_I4P, nz = 0_I4P !< Cells.
    integer(I4P)              :: nt = 0_I4P            !< Tracks.
    integer(I4P)              :: np0 = 0_I4P           !< Pieces at pose0.
@@ -149,6 +154,10 @@ type :: piece_map_3d_t
    integer(I4P)              :: evaluations = 0_I4P   !< One-cell piece evaluations (topology pass).
    integer(I4P)              :: skipped_nodes = 0_I4P !< Quadrature nodes or pieces skipped inside intervals between two
                                                       !< events closer than 1e-10 (their weight is below that).
+   integer(I4P)              :: contact_cells = 0_I4P !< Untrusted cells with an event not certified by a sign change: a
+                                                      !< contact within the round-off of its function under a rotation
+                                                      !< (a corner or vertex grazing, where a piece can shrink to a point
+                                                      !< and come back as another track; issue #102).
 endtype piece_map_3d_t
 
 contains
