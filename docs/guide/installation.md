@@ -31,8 +31,9 @@ now build too, but they are not tested. Verified versions:
 | gfortran | Result |
 |----------|--------|
 | 13.3, 14.2 | internal compiler error before the workaround; not retested |
-| 14.3 | builds, all tests pass (CI) |
-| 15.1, 15.2, 16.2 | builds, all tests pass |
+| 14.3 | builds, all tests pass (`install.yml` on the runner) |
+| 15.1, 15.2 | builds, all tests pass |
+| 16.2 | builds, all tests pass (CI: the toolchain image `ghcr.io/szaghi/fortran-toolchains:gnu-16.2`) |
 :::
 
 The NVIDIA modes (`static-nvidia`, `tests-nvidia`) build the OpenACC GPU distance

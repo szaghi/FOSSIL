@@ -138,7 +138,13 @@ fobis build --mode validation-gnu    # -O2, into exe-validation/
 ./scripts/run_validation.sh          # or: ./scripts/run_validation.sh fossil_val_sdf
 ```
 
-Every `tests-*` mode excludes `src/tests/validation/`. `fobis clean` leaves stale executables of
+CI toolchain: `ci.yml` (tests, coverage), `docs-snippets.yml`, `validation.yml` and the build job of `docs.yml` run in
+the container `ghcr.io/szaghi/fortran-toolchains:gnu-16.2` (repo `~/fortran/fortran-toolchains`: gfortran 16.2 on the
+official `gcc` image, Open MPI 5.0.11, HDF5 2.3.0, FoBiS, formal, gcovr; nothing is installed per job), set by
+`[scaffold] toolchain_image` in `fobos`. Only `install.yml` (the install script, gfortran 14 by `setup-build-env`) and
+`release.yml` stay on the bare runner. The ubuntu-26.04 runners install amd64v3 packages: their gfortran emitted FMAs at
+-O2 and broke the bitwise device-twin checks of `fossil_val_device_chain` / `fossil_test_distance_bench` (run
+43194838880); the image's gfortran targets baseline x86-64 (no FMA). Every `tests-*` mode excludes `src/tests/validation/`. `fobis clean` leaves stale executables of
 moved sources in `exe/`: delete them by hand, or `run_tests.sh` runs them.
 
 Performance (issue #94): `fossil_val_perf` (validation) times 24 kernels (query batches, body distance, cut cells,

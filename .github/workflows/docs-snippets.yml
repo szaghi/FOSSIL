@@ -14,6 +14,7 @@ on:
 jobs:
   snippets:
     runs-on: ubuntu-latest
+    container: ghcr.io/szaghi/fortran-toolchains:gnu-16.2
     permissions:
       contents: read
 
@@ -22,15 +23,12 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Setup build environment
-      uses: ./.github/actions/setup-build-env
-
     - name: Fetch dependencies
       if: hashFiles('**/.deps_config.ini') != ''
       run: FoBiS.py fetch
 
     - name: Build static library (gnu)
-      run: FoBiS.py build -mode static-gnu
+      run: FoBiS.py build --mode static-gnu
 
     - name: Compile every doc snippet
       run: ./scripts/check_doc_snippets.sh
