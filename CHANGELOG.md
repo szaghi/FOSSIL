@@ -4,6 +4,85 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.1.0] — 2026-11-12
+### Added
+- **cut**: The 2-D cut cells on the device
+
+- **cut**: Resident 2-D cut cells on the device
+
+- **cut**: The plane sections of the 3-D cut cells on the device
+
+- **predicates**: Exact orient3d and the line placement on the device
+
+- **cut**: The node states and edge fractions of the 3-D cut cells on the device
+
+- **cut**: The 3-D cut cells on the device
+
+- **cut**: The multi-block 2-D device path on a grid per block
+
+- **swept**: The end poses of the 2-D swept cells on the device
+
+- **swept**: The 3-D swept cells on the device
+
+- **cut**: The inputs of the piece links on the device
+
+- **cut**: The piece links on the device
+
+
+### Changed
+- **tritri**: The exact degenerate-contact predicate is shared
+
+- **cut**: The 2-D per-cell kernels on flat arrays, count then fill
+
+- **cut**: The 3-D per-cell kernels on flat arrays, count then fill
+
+
+### Documentation
+- CLAUDE.md notes for the degenerate facets of #98
+
+- CLAUDE.md notes and the wp2-1 baseline of WP2 step 1
+
+- The 2-D cut cells on the device
+
+- Resident 2-D cut cells and the per-step chain
+
+- CLAUDE.md rules for device norm2 and nvfortran subnormals
+
+- The 3-D per-cell kernels and the plane sections on the device
+
+- The 3-D cut cells on the device
+
+- The swept cells on the device
+
+- The piece links on the device
+
+- The per-step chain of a moving body on the device
+
+
+### Fixed
+- **boolean**: Zero-area facets pass through or are reported
+
+- **selfint**: Exact contact for zero-area facets in find_self_intersections
+
+- **scripts**: Find the repo root of check_test_budgets.sh without git
+
+
+### Performance
+- **cut**: Classify and scan the 2-D cut cells on the device
+
+- **predicates**: Grow expansions in place
+
+- **predicates**: Orient2d returns zero early for coincident points
+
+- **cut**: Drop the 3-D candidate facets that miss the cell
+
+- **slice**: A plane sweep for the sections of the 3-D cut cells
+
+- **cut**: Keep the faces on the device, and an alpha-only 3-D device path
+
+- **cut**: The piece links on flat arrays, without growth or a global sort
+
+
 ## [3.0.1] — 2026-11-09
 ### Documentation
 - **brand**: The ammonite in the Sumi hand
