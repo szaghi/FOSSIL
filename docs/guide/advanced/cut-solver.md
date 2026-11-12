@@ -427,5 +427,12 @@ edge fractions, moments to order 2 and quadrature rules, the neighbourhoods and 
 - **Redistribution itself**: applying the weights to states or fluxes, the
   slope limiter, re-redistribution registers. The graph and W in sparse form
   are what such a register needs.
-- **Piece identity over time** for moving bodies beyond fresh and dead pieces:
-  decided with the moving overset grids (WP3 of roadmap #68).
+- **Piece identity over time** is no longer left out: the
+  [piece map](/guide/advanced/moving-bodies#piece-map) of a step
+  (`swept_cells_2d(..., map=)`, `swept_cells_3d(..., map=)`, issue #102)
+  links the pieces at t to the
+  pieces at t + dt through the cell's tracks. It also carries the per-track
+  apertures, wall and rigid-field outflows. Through it, a fresh piece fills by
+  its own inflow, and a uniform flow moving with the body stays exact on the
+  exact paths (`fossil_val_moving_conservation`). Where a dead track's
+  remainder goes is still the solver's choice.

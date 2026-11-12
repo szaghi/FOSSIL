@@ -141,7 +141,9 @@ follow from the fixed grid (issue #41):
   - So `swept` = (α₁ − α₀)·|cell| comes exactly from the cut cells at the
     two poses, in 2-D and 3-D.
   - The geometric conservation law holds by construction.
-  - Natarajan et al. (2022) omit this term and lose order.
+  - Natarajan et al. (2022) omit this term and lose up to 0.92 % of the
+    mass at 32³. The authors attribute their lost order to the fresh-cell
+    fill, so the missing swept term is not its established cause.
 - **The only time integral is the face aperture.**
   - `face_u` / `face_v` (2-D) and `face_x` / `face_y` / `face_z` (3-D)
     are the fluid length or area of every grid face, averaged over the
@@ -297,6 +299,122 @@ In a whole time step (move, tag, cut + links, swept) the swept geometry stays th
 the step at 64³–128³. The step gains 5.4–9.3× there; the table is in
 [GPU queries](/guide/advanced/device-distance#a-moving-body-time-step).
 
+## Piece map
+
+A cut cell can hold several fluid pieces, and over a step the wall can move through it. A solver must then know
+which fluid at the end of the step came from which fluid at its start (issue #102). `swept_cells_2d(..., map=)`
+answers with the **tracks** of every cell, and `swept_cells_3d(..., map=)` does the same in 3-D.
+
+**Definition.** Take the cell's fluid over the whole step, as a region of space and time:
+{(p, s) : p in the cell, p in the fluid at pose s, s in [0, 1]}. Its connected components are the tracks.
+- **Pieces:** every piece of the cut cells at pose0, and every piece at pose1, lies in exactly one track.
+- **Fresh and dead:** a track with no old piece is fresh; one with no new piece is dead.
+- **Splits and merges:** several pieces on one side make a split or a merge.
+- **Transient:** a track with no piece at either end is fluid that crosses the cell within the step.
+
+<<< @/examples/snippets/anim_ref_moving_bodies_tracks-step.f90
+
+![a thin plate 0.9 by 0.03, tilted 60 degrees, moving right by 0.16 per step and turning 0.04 rad over a 24 by 12 grid of spacing 0.1, each frame one step: the cells with several tracks in yellow (18 to 21 per step), along the band the plate swept between its start (grey) and its end (red); there the fluid ahead of the plate was pushed out of the cell, a dead track, while the fluid behind it grew, a continuing one; cells the wall touches with one continuing track in grey](../../examples/images/anim-ref-moving-bodies-tracks.svg){.fossil-figure}
+
+<<< @/examples/output/anim-ref-moving-bodies-tracks.ansi{ansi}
+
+**The end-pose overlap is not enough.** Linking a piece at t with a piece at t + dt when they overlap gets two cases
+wrong, and both happen where a body is thin compared with its step:
+
+| In one cell, over one step | Tracks | Overlap of the end poses |
+|---|---|---|
+| The plate pushes the fluid ahead of it out of the cell, and the fluid behind it fills the cell | a dead track and a continuing one | one merged piece: the fluid on both sides of the wall mixes |
+| A thin plate crosses the whole cell | a dead track and a fresh one | "continuing" |
+| A narrow gap moves more than its own width | continuing | dead + fresh |
+
+On the bench bodies (`fossil_val_device_chain`'s ellipse, NACA 0012, sphere and cone, at displacements of 0.5 and
+2 cells per step), the overlap disagrees with the tracks in 0.02–0.14 % of the cells the wall touches. Most of these
+cells are at the NACA trailing edge and on the cone's base rim.
+
+**How it is built** (in 2-D):
+- **Events.** The topology of a cell's fluid changes only when the wall's contact with the cell boundary changes:
+  - a wall vertex crossing a face line;
+  - a cell corner crossing a wall segment.
+
+  These are the instants the exact swept faces already isolate. Two parts of a rigid curve keep their distance, so
+  they cannot meet inside a cell.
+- **Pieces.** They are evaluated at the two end poses, which must reproduce the end cuts bit for bit, and once inside
+  every interval between events.
+- **Links.** Pieces of consecutive evaluations that share a boundary feature (a wall segment, a fluid corner) are one
+  track. A feature present on both sides of an event keeps a non-degenerate part in the cell, and the fluid next to
+  it is continuous.
+- **The trivial case.** A cell with no event has one track per piece, unchanged. "One piece at each end" is not
+  enough: on the 2-D bench motions, 148 such cells have two tracks.
+
+**What a track carries:**
+- its old and new pieces, numbered as `cut_cells` numbers them on a moved copy, plus the inverse maps
+  `old_track` / `new_track`;
+- V0 and V1;
+- the time-averaged fluid length of each face that belongs to it;
+- its wall −Σ_f Ā_f n_f;
+- `outflow`: the time-integrated outflow of the step's rigid field through each face part, the consistency term that
+  keeps a uniform flow moving with the body exact (under rotation the velocity varies along a face, so the apertures
+  alone do not give it);
+- its residual, V1 − V0 + Σ_f outflow: the rigid-field balance of `residual`, per track.
+
+The per-track residual is round-off on the exact paths: at most 1.3·10⁻¹⁶ in the run above. Summed over a cell's
+tracks, the measures give the cell's `swept_cells_2d_t` values: copied in a one-track cell, and to round-off in the
+others.
+
+**On the Gauss path** (`exact=.false.`) a cell with several tracks still integrates per interval between its events,
+because a track lives only between events and Gauss nodes spread over the whole step would miss a short-lived one. Its
+tracks' residuals stay at round-off, and their sums differ from the cell's Gauss values by the quadrature error.
+A one-track cell copies the cell's Gauss values, quadrature error included.
+
+**A conservative update through the map.** `fossil_val_moving_conservation` (validation) advects a passive scalar
+across 100 steps of an ellipse and a NACA 0012 at 40²–96², by translation and by the screw motion, at 0.5 and 2 cells
+per step. The update has four parts:
+- **Face fluxes:** one flux F_f per grid face, split to each side's tracks by their own rigid outflow `outflow`, so
+  both sides exchange exactly F_f.
+- **Track update:** each track takes its old pieces' mass plus its fluxes. A fresh track fills by its own inflow,
+  with no interpolation.
+- **Dead tracks:** a dead track hands its remainder to a neighbouring new piece.
+- **New pieces:** a track's mass is shared among its new pieces by area.
+
+Results:
+- **Mass:** constant to 1.5·10⁻¹⁴ (relative) in every case.
+- **A uniform scalar carried by the body's own rigid field:** stays uniform to 2.4·10⁻¹² of a cell on the exact
+  paths. That is the per-track residual: a uniform flow moving with the body is exact, as Falcovitz et al. (1997)
+  require, here shown numerically.
+
+It is a demonstration, not a solver. Its first-order implicit upwind smears the two scalars of the leakage control
+(one on each side of the body). Tracks leak less than the end-pose overlap and than a per-cell lumped update, but only
+by 0.1–1 %.
+
+**Tolerances.** The construction is exact, with two explicit thresholds:
+- intervals between events narrower than 1e-10 of the step are not evaluated, so a state shorter than that is
+  not seen: a plate 1e-10 thick crossing a cell corner at 2 cells per step reads continuing (at 1e-8 it reads dead +
+  fresh);
+- a piece with no known feature is dropped only if its face lengths are below 1e-9 of the cell side.
+
+- **Exact tangential contact under rotation.** A wall feature can touch a cell feature tangentially and leave
+  without crossing, a double root of an event function. When that root lies within the round-off of the event
+  function, it cannot be certified. Its cell is then marked `TRACK_UNTRUSTED` and counted in `contact_cells`, never
+  linked by guess. Off by more than about 1e-12, the two roots are certified and the tracks are right. Translation
+  cannot produce it, because its event functions are linear.
+
+A cell whose evaluations cannot be matched is also flagged `TRACK_UNTRUSTED`: one track with all its pieces and the
+cell's values, so a conservative update stays exact there. Apart from the constructed exact-contact cases, there were
+none in the tests, the benches or the conservation runs.
+
+**In 3-D,** `swept_cells_3d(..., map=)` returns a `piece_map_3d_t` with the same layout: six faces, a wall of three
+components, `outflow(6, nt)`.
+- **Events:** a mesh vertex crossing one of the cell's face planes, a mesh edge crossing one of its edges, a cell
+  corner crossing a facet. They come from the per-plane breakpoints of the exact swept faces.
+- **Features:** facet ids (a triangle clipped to a box is convex and bounds one piece) and fluid corners.
+- **Results:** on the sphere and the cone, under translation, exact rotation and Gauss rotation, there are 0
+  untrusted cells, and the per-track residuals stay at most 2.7·10⁻¹⁵ on the exact paths.
+
+**Cost:** in 3-D, 3–13 % on top of a translating `swept_cells_3d` at 32³–64³ and 49–281 % on top of a Gauss rotation,
+where the swept call itself is cheap (0.15–1.7 s). In 2-D, 1–22 % on top of `swept_cells_2d` at 256²–1024², and 0 to 281 cells with several tracks per step (the
+NACA 0012 under a Gauss rotation at 1024²). The map is CPU-only and not combined with `poses=` (it needs the screw
+motion).
+
 ## Results
 
 | Case | Result |
@@ -323,6 +441,14 @@ the step at 64³–128³. The step gains 5.4–9.3× there; the table is in
 
 ## Limitations
 
+- **Swept geometry: the Gauss path at large steps.** With `exact=.false.` the face apertures use nq Gauss nodes over
+  the whole step. The face integrands kink at the events (a vertex crossing a face line, a corner crossing a
+  segment), and global nodes resolve kinks poorly.
+  - At nq = 4 and 2 cells per step under rotation, the per-cell residual of `fossil_val_moving_conservation`'s NACA
+    0012 and ellipse reaches 0.12–0.34 of a cell.
+  - `error_estimate` (the nq-vs-2nq face change) reads 2.5·10⁻³ there, and understates the residual.
+  - Use the exact path, or keep Gauss steps well under a cell.
+  - The piece map's multi-track cells do not inherit the error: they integrate per event interval on every path.
 - **Swept geometry: a self-intersecting wall breaks the balance.** The swept
   volumes come from the cut cells (Green's theorem: a region counts by its
   winding number) and the face apertures from line crossings (parity). Where
