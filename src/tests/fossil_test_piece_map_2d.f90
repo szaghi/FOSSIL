@@ -17,7 +17,8 @@ program fossil_test_piece_map_2d
 !< Every case also passes the map checks (`check_map`): every piece at pose0 and at pose1 in exactly one track of its
 !< cell, numbered as the cut cells of a copy moved to the pose (and the track volumes equal to their pieces' areas bit
 !< for bit), per-cell sums over the tracks equal to the swept geometry (faces, wall, residual, swept = V1 - V0), every
-!< per-track residual at round-off on the exact paths. Then the same checks on an ellipse and a NACA 0012 at a modest
+!< per-track residual at round-off on the exact paths, residual = V1 - V0 + sum of the track's face outflows, and each face's
+!< outflow summed over the tracks equal from its two cells (and to d times its aperture on a translation). Then the same checks on an ellipse and a NACA 0012 at a modest
 !< grid, translating and rotating, and on a cell of the NACA's thin aft region crossed within the step (one piece at
 !< each end, dead + fresh).
 use fossil, only : curve_object, rigid_pose_2d_t, pose_2d, swept_cells_2d_t, swept_cells_2d, piece_map_2d_t, &
@@ -164,6 +165,8 @@ contains
    type(cut_cells_2d_t)              :: k0, k1    !< Cuts of the moved copies.
    integer(I4P), allocatable         :: seen0(:), seen1(:) !< Pieces listed.
    real(R8P)                         :: fsum(4), wsum(2), rsum, dv, efa, ewa, era, esw, eres, vol !< Work.
+   real(R8P), allocatable            :: ou(:,:), ov(:,:) !< Face outflows (+u, +v) summed over the tracks, per side.
+   real(R8P)                         :: eid, eof, etr, d(2) !< Identity, face sides, translation errors; displacement.
    integer(I4P)                      :: i_, j_, t, k, p, nbad !< Work.
 
    cm = c ; call cm%move(p0) ; call cm%cut_cells(gx, gy, k0)
@@ -174,7 +177,8 @@ contains
       good = .false. ; print '(A)', '  sizes differ' ; return
    endif
    allocate(seen0(k0%np), seen1(k1%np)) ; seen0 = 0_I4P ; seen1 = 0_I4P
-   efa = 0._R8P ; ewa = 0._R8P ; era = 0._R8P ; esw = 0._R8P ; eres = 0._R8P
+   efa = 0._R8P ; ewa = 0._R8P ; era = 0._R8P ; esw = 0._R8P ; eres = 0._R8P ; eid = 0._R8P ; eof = 0._R8P ; etr = 0._R8P
+   allocate(ou(2 * size(gx), size(gy)), ov(size(gx), 2 * size(gy))) ; ou = 0._R8P ; ov = 0._R8P
    do j_ = 1, size(gy) - 1
       do i_ = 1, size(gx) - 1
          fsum = 0._R8P ; wsum = 0._R8P ; rsum = 0._R8P ; dv = 0._R8P
@@ -193,6 +197,12 @@ contains
             enddo
             if (vol /= map%volume1(t)) nbad = nbad + 1_I4P
             fsum = fsum + map%faces(:, t) ; wsum = wsum + map%wall(:, t) ; rsum = rsum + map%residual(t)
+            ! outflow: residual = V1 - V0 + sum_f outflow; face F from the cell above it at 2F - 1, below it at 2F
+            eid = max(eid, abs(map%residual(t) - (map%volume1(t) - map%volume0(t) + sum(map%outflow(:, t)))))
+            ou(2 * i_ - 1, j_) = ou(2 * i_ - 1, j_) - map%outflow(1, t)
+            ou(2 * i_ + 2, j_) = ou(2 * i_ + 2, j_) + map%outflow(2, t)
+            ov(i_, 2 * j_ - 1) = ov(i_, 2 * j_ - 1) - map%outflow(3, t)
+            ov(i_, 2 * j_ + 2) = ov(i_, 2 * j_ + 2) + map%outflow(4, t)
             dv = dv + (map%volume1(t) - map%volume0(t))
             if (exact .and. map%status(t) /= TRACK_UNTRUSTED) eres = max(eres, abs(map%residual(t)))
          enddo
@@ -205,12 +215,34 @@ contains
       enddo
    enddo
    nbad = nbad + count(seen0 /= 1_I4P, kind=I4P) + count(seen1 /= 1_I4P, kind=I4P)
-   good = nbad == 0_I4P .and. max(efa, ewa, era, esw) < 1.e-13_R8P .and. eres < 1.e-13_R8P
+   ! a face's outflow from its two cells (interior faces) and, on the translation path, against d times the aperture
+   d = p1%t - p0%t
+   do j_ = 1, size(gy) - 1
+      do i_ = 2, size(gx) - 1
+         eof = max(eof, abs(ou(2 * i_ - 1, j_) - ou(2 * i_, j_)))
+      enddo
+   enddo
+   do j_ = 2, size(gy) - 1
+      do i_ = 1, size(gx) - 1
+         eof = max(eof, abs(ov(i_, 2 * j_ - 1) - ov(i_, 2 * j_)))
+      enddo
+   enddo
+   if (all(p0%r == p1%r) .and. exact) then
+      do j_ = 1, size(gy) - 1
+         do i_ = 1, size(gx)
+            if (i_ > 1) etr = max(etr, abs(ou(2 * i_, j_) - d(1) * sw%face_u(i_, j_)))
+         enddo
+      enddo
+   endif
+   good = nbad == 0_I4P .and. max(efa, ewa, era, esw) < 1.e-13_R8P .and. eres < 1.e-13_R8P .and. &
+          max(eid, eof, etr) < 1.e-13_R8P
    print '(A,I0,A,I0,A,I0,A,I0,A,I0,A,I0,A,I0,A,I0)', '  tracks ', map%nt, ', multi-track cells ', map%multi_track_cells, &
          ', untrusted cells ', map%untrusted_cells, ', evaluated cells ', map%evaluated_cells, ', evaluations ', &
          map%evaluations, ', skipped nodes ', map%skipped_nodes, ', pieces ', map%np0, ' -> ', map%np1
    print '(A,I0,A,4ES9.1,A,ES9.1,A,L1)', '  bad links ', nbad, ', per-cell sums - swept (faces, wall, residual, swept) ', &
          efa, ewa, era, esw, ', max per-track residual ', eres, ', exact ', map%exact
+   print '(A,3ES9.1)', '  outflow: residual - (V1 - V0 + sum outflow), face from its two sides, translation vs d L: ', &
+         eid, eof, etr
    endfunction check_map
 
    pure function about(angle) result(p)

@@ -52,6 +52,12 @@ type :: piece_map_2d_t
    !< cell's value to round-off). An untrusted cell (status TRACK_UNTRUSTED: an evaluation did not close, its pieces did
    !< not match the end-pose cuts, a breakpoint was not certified, or a face part could not be assigned) has one track
    !< with all its pieces and the cell's values.
+   !<
+   !< `outflow(f, t)`: the time integral over the step of the outward flux of the **rigid** field of the screw motion
+   !< through the track's part of face f, so that residual = volume1 - volume0 + sum_f outflow(f, t). It is what makes a
+   !< uniform flow moving with the body exact (the geometric conservation law of a moving cut cell): split each face's
+   !< flux among the tracks in proportion to it. A solver with its own velocity field uses the apertures, and the rigid
+   !< outflow is its consistency term. One track: the cell's face outflows; several: integrated with the apertures.
    integer(I4P)              :: nx = 0_I4P, ny = 0_I4P !< Cells.
    integer(I4P)              :: nt = 0_I4P            !< Tracks.
    integer(I4P)              :: np0 = 0_I4P           !< Pieces at pose0.
@@ -71,6 +77,7 @@ type :: piece_map_2d_t
    real(R8P),    allocatable :: faces(:,:)            !< Time-averaged fluid length of the faces (-u, +u, -v, +v) [4, nt].
    real(R8P),    allocatable :: wall(:,:)             !< Time-averaged projected wall, -sum_f A_f n_f [2, nt].
    real(R8P),    allocatable :: residual(:)           !< Volume balance of the rigid field [nt].
+   real(R8P),    allocatable :: outflow(:,:)          !< Rigid-field outflow through each face, outward [4, nt].
    logical                   :: exact = .true.        !< Every multi-track cell's integration converged (rotation).
    integer(I4P)              :: n_status(-1:7) = 0_I4P !< Tracks per status (index TRACK_*; 0 unused).
    integer(I4P)              :: untrusted_cells = 0_I4P !< Cells marked untrusted.

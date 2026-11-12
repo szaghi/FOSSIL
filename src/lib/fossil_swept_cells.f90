@@ -272,6 +272,7 @@ contains
    type(cut_cells_2d_blocks_t) :: kb                 !< Their cut cells (device, one call).
    integer(I4P)             :: st                    !< Status.
    real(R8P), allocatable   :: fu2(:,:), fv2(:,:), fl2(:,:), res(:,:) !< 2 nq face lengths, work, residual.
+   real(R8P), allocatable   :: fou(:,:), fov(:,:)    !< Face outflows in +u / +v, time-integrated (the map only).
    integer(I4P)             :: nx, ny, n, i, j       !< Work.
    real(R8P)                :: d(2), dth             !< Displacement, rotation angle.
    logical                  :: translation, screw    !< Paths.
@@ -335,9 +336,13 @@ contains
    endif
    screw = .not. present(poses)
    allocate(res(nx, ny)) ; res = 0._R8P
+   if (present(map)) allocate(fou(nx + 1, ny), fov(nx, ny + 1))
    if (translation) then
       sw%exact = .true.
       call faces_translation_2d(ce(1), d, x, y, sw%face_u, sw%face_v, sw%evaluations)
+      if (present(map)) then ! the field is uniform: the outflow is d times the fluid length
+         fou = d(1) * sw%face_u ; fov = d(2) * sw%face_v
+      endif
       do j = 1_I4P, ny ! the field is uniform (d): only the fluid lengths enter
          do i = 1_I4P, nx
             res(i, j) = d(1) * (sw%face_u(i + 1, j) - sw%face_u(i, j)) + d(2) * (sw%face_v(i, j + 1) - sw%face_v(i, j))
@@ -345,9 +350,17 @@ contains
       enddo
    elseif (screw .and. rotation_exact .and. dth /= 0._R8P) then
       ! exact rotation (issue #69): certified breakpoints per face, Gauss doubled to round-off on every piece
-      call faces_rotation_2d(curve, pose0, pose1, x, y, sw%face_u, sw%face_v, res, sw%evaluations, sw%exact)
+      if (present(map)) then
+         call faces_rotation_2d(curve, pose0, pose1, x, y, sw%face_u, sw%face_v, res, sw%evaluations, sw%exact, fou, fov)
+      else
+         call faces_rotation_2d(curve, pose0, pose1, x, y, sw%face_u, sw%face_v, res, sw%evaluations, sw%exact)
+      endif
    else
-      call faces_gauss_2d(curve, pose0, pose1, x, y, n, sw%face_u, sw%face_v, res, poses)
+      if (present(map)) then ! no node poses with a map
+         call faces_gauss_2d(curve, pose0, pose1, x, y, n, sw%face_u, sw%face_v, res, fou=fou, fov=fov)
+      else
+         call faces_gauss_2d(curve, pose0, pose1, x, y, n, sw%face_u, sw%face_v, res, poses)
+      endif
       sw%evaluations = n
       if (screw) then
          allocate(fu2(nx + 1, ny), fv2(nx, ny + 1), fl2(nx, ny))
@@ -366,16 +379,16 @@ contains
    enddo
    if (present(map)) then
       if (translation) then
-         call piece_map_2d_build(curve, ce(1), ce(2), pose0, pose1, x, y, k0, k1, sw, MAP_TRANSLATION, n, map)
+         call piece_map_2d_build(curve, ce(1), ce(2), pose0, pose1, x, y, k0, k1, sw, fou, fov, MAP_TRANSLATION, n, map)
       elseif (screw .and. rotation_exact .and. dth /= 0._R8P) then
-         call piece_map_2d_build(curve, ce(1), ce(2), pose0, pose1, x, y, k0, k1, sw, MAP_ROTATION, n, map)
+         call piece_map_2d_build(curve, ce(1), ce(2), pose0, pose1, x, y, k0, k1, sw, fou, fov, MAP_ROTATION, n, map)
       else
-         call piece_map_2d_build(curve, ce(1), ce(2), pose0, pose1, x, y, k0, k1, sw, MAP_GAUSS, n, map)
+         call piece_map_2d_build(curve, ce(1), ce(2), pose0, pose1, x, y, k0, k1, sw, fou, fov, MAP_GAUSS, n, map)
       endif
    endif
    endsubroutine swept_cells_2d_core
 
-   subroutine faces_rotation_2d(curve, pose0, pose1, x, y, fu, fv, flux, nev, exact)
+   subroutine faces_rotation_2d(curve, pose0, pose1, x, y, fu, fv, flux, nev, exact, fou, fov)
    !< Exact time-averaged fluid lengths and rigid-field outflows of every face under the screw motion of
    !< `pose_interpolate` with a rotation (issue #69; see the moving-bodies reference page, "Exact rotation"). A face
    !< outside the box swept by the body's bounding circle is fluid throughout (closed form). Every other face gets its
@@ -392,6 +405,7 @@ contains
    real(R8P),             intent(out) :: flux(:,:)    !< Time integral of the rigid-field outflow per cell.
    integer(I4P),          intent(out) :: nev          !< Largest number of evaluations per face.
    logical,               intent(out) :: exact        !< Every piece converged.
+   real(R8P), optional,   intent(out) :: fou(:,:), fov(:,:) !< Time integrals of the outflows in +u / +v (issue #102).
    type(rotation_2d_t)            :: ctx
    type(events_2d_t), allocatable :: line_u(:), line_v(:), node(:,:) !< Events of the lines u = x_i, v = y_j, the nodes.
    real(R8P),    allocatable :: ou(:,:), ov(:,:), bp(:)
@@ -455,6 +469,8 @@ contains
       enddo
    enddo
    exact = exact .and. ctx%exact
+   if (present(fou)) fou = ou
+   if (present(fov)) fov = ov
    contains
       function closed_outflow(lax, lo, hi) result(o)
       !< Time integral of the rigid-field outflow through a face fluid throughout: the face along `lax` from lo to hi.
@@ -972,7 +988,7 @@ contains
       endsubroutine add
    endsubroutine face_measure
 
-   subroutine faces_gauss_2d(curve, pose0, pose1, x, y, n, fu, fv, flux, poses)
+   subroutine faces_gauss_2d(curve, pose0, pose1, x, y, n, fu, fv, flux, poses, fou, fov)
    !< Time-averaged fluid lengths by n-point Gauss-Legendre, and the time integral of the outflow of the
    !< rigid field of the screw motion per cell (`flux`, zero if `poses` given).
    type(curve_object),    intent(in)           :: curve      !< Curve (body frame).
@@ -982,6 +998,7 @@ contains
    real(R8P),             intent(out)          :: fu(:,:), fv(:,:) !< Fluid lengths.
    real(R8P),             intent(out)          :: flux(:,:)  !< Outflow of the rigid field [nx, ny].
    type(rigid_pose_2d_t), intent(in), optional :: poses(:)   !< Node poses.
+   real(R8P), intent(out), optional :: fou(:,:), fov(:,:)    !< Time integrals of the outflows in +u / +v (issue #102).
    type(curve_object)       :: cq                  !< Copy at a node.
    type(rigid_pose_2d_t)    :: pq                  !< Node pose.
    real(R8P), allocatable   :: sq(:), wq(:), ou(:,:), ov(:,:) !< Nodes, weights, face outflows.
@@ -992,6 +1009,8 @@ contains
    call gauss_legendre_01(n, sq, wq)
    allocate(ou(nx + 1, ny), ov(nx, ny + 1))
    fu = 0._R8P ; fv = 0._R8P ; flux = 0._R8P
+   if (present(fou)) fou = 0._R8P
+   if (present(fov)) fov = 0._R8P
    d = pose1%t - pose0%t
    dth = pose_angle_2d(pose1) - pose_angle_2d(pose0) ; dth = atan2(sin(dth), cos(dth))
    do q = 1_I4P, n
@@ -1022,10 +1041,12 @@ contains
             flux(i, j) = flux(i, j) + wq(q) * (ou(i + 1, j) - ou(i, j) + ov(i, j + 1) - ov(i, j))
          enddo
       enddo
+      if (present(fou)) fou = fou + wq(q) * ou
+      if (present(fov)) fov = fov + wq(q) * ov
    enddo
    endsubroutine faces_gauss_2d
 
-   subroutine piece_map_2d_build(curve, c0, c1, pose0, pose1, x, y, k0, k1, sw, path, nq, map)
+   subroutine piece_map_2d_build(curve, c0, c1, pose0, pose1, x, y, k0, k1, sw, fou, fov, path, nq, map)
    !< The piece map of the step (issue #102; `piece_map_2d_t`), from the end-pose cuts k0, k1 of the copies c0, c1.
    !<
    !< 1. Candidates: the cells that a segment can meet during the step (its endpoints' paths, boxed per sub-step with
@@ -1037,8 +1058,8 @@ contains
    !<    end-pose copy, k0's corner flags: they must equal k0's pieces bit for bit, which fixes the numbering), at the
    !<    middle of every interval between events, and at pose1, and pieces of consecutive evaluations sharing a boundary
    !<    feature (a wall segment or a fluid corner) are one track (`track_components`).
-   !< 3. Measures: one track takes the cell's `sw` values; several tracks integrate their face parts on the cell's
-   !<    event intervals (`map_measures`).
+   !< 3. Measures: one track takes the cell's `sw` values and face outflows (fou, fov); several tracks integrate their
+   !<    face parts on the cell's event intervals (`map_measures`).
    !< 4. CSR fill in cell order.
    type(curve_object),     intent(in)  :: curve        !< Curve (body frame).
    type(curve_object),     intent(in)  :: c0, c1       !< Copies at pose0 and pose1 (`move`).
@@ -1046,6 +1067,8 @@ contains
    real(R8P),              intent(in)  :: x(:), y(:)   !< Cell edges.
    type(cut_cells_2d_t),   intent(in)  :: k0, k1       !< Cut cells of c0 and c1.
    type(swept_cells_2d_t), intent(in)  :: sw           !< Swept geometry of the step.
+   real(R8P),              intent(in)  :: fou(:,:)     !< Time-integrated rigid-field outflow of the faces u = x_i (+u).
+   real(R8P),              intent(in)  :: fov(:,:)     !< Time-integrated rigid-field outflow of the faces v = y_j (+v).
    integer(I4P),           intent(in)  :: path         !< MAP_TRANSLATION, MAP_ROTATION or MAP_GAUSS.
    integer(I4P),           intent(in)  :: nq           !< Gauss nodes (MAP_GAUSS).
    type(piece_map_2d_t),   intent(out) :: map          !< Piece map.
@@ -1118,7 +1141,7 @@ contains
    map%nt = nt
    allocate(map%track_cell(2, nt), map%status(nt), map%old_start(nt + 1), map%new_start(nt + 1), map%old_piece(k0%np), &
             map%new_piece(k1%np), map%old_track(k0%np), map%new_track(k1%np), map%volume0(nt), map%volume1(nt), &
-            map%faces(4, nt), map%wall(2, nt), map%residual(nt), oc(nt), nc(nt), fo(nt), fn(nt))
+            map%faces(4, nt), map%wall(2, nt), map%residual(nt), map%outflow(4, nt), oc(nt), nc(nt), fo(nt), fn(nt))
    map%volume0 = 0._R8P ; map%volume1 = 0._R8P ; oc = 0_I4P ; nc = 0_I4P
    do p = 1_I4P, k0%np ! pieces in order: volumes summed in piece order
       t = map%first_track(k0%piece_cell(1, p), k0%piece_cell(2, p)) + otr(p) - 1_I4P
@@ -1153,10 +1176,12 @@ contains
             if (moff(c) > 0_I4P) then ! several tracks: integrated per track
                p = moff(c) + t - map%first_track(i, j)
                map%faces(:, t) = meas(1:4, p)
+               map%outflow(:, t) = [-meas(5, p), meas(6, p), -meas(7, p), meas(8, p)]
                map%wall(:, t) = -[meas(2, p) - meas(1, p), meas(4, p) - meas(3, p)]
                map%residual(t) = map%volume1(t) - map%volume0(t) + (meas(6, p) - meas(5, p) + meas(8, p) - meas(7, p))
             else ! one track: the cell's values
                map%faces(:, t) = [sw%face_u(i, j), sw%face_u(i + 1, j), sw%face_v(i, j), sw%face_v(i, j + 1)]
+               map%outflow(:, t) = [-fou(i, j), fou(i + 1, j), -fov(i, j), fov(i, j + 1)]
                map%wall(:, t) = sw%wall(:, i, j)
                map%residual(t) = sw%residual(i, j)
             endif
