@@ -18,6 +18,10 @@ program fossil_test_cut_cells_2d
 !< - Loops inside one cell: an island (1 piece, alpha = 1 - island), a hole in a solid (1 piece,
 !<   alpha = hole), an island inside that hole (1 piece, alpha = hole - island).
 !< - An open polyline: the cells it crosses are flagged not closed. Bad edges refused.
+!< - A convex kite whose tip vertex pokes out through the low-u face of cell (3, 3): the tip cuts the face's fluid in
+!<   two, so the cell has 2 fluid pieces of exact areas 663/256000 each (WP3 step 0 found one such cell on the 1024-gon
+!<   ellipse at 1024^2: its tip 8.8e-7 beyond a face, slivers of 7.9e-4 and 1.5e-5 of the cell; issue #104). A convex
+!<   body can split a cell.
 
 use fossil, only : curve_object, cut_cells_2d_t, STATUS_INVALID_INPUT
 use penf,   only : I4P, R8P
@@ -29,7 +33,7 @@ type(curve_object)   :: c
 type(cut_cells_2d_t) :: cut
 real(R8P)            :: e8(9), s8(9), poly(2, 128), u(12), v(12)
 integer(I4P)         :: k, st
-logical              :: ok(6)
+logical              :: ok(7)
 
 do k = 1, 9
    e8(k) = (k - 1) / 8._R8P
@@ -91,6 +95,14 @@ print '(A,L1,A,I0)', 'open polyline: crossed cells flagged not closed: ', ok(5),
 call c%cut_cells(x=[0._R8P, 0._R8P], y=e8, cut=cut, status=st)
 ok(6) = st == STATUS_INVALID_INPUT
 print '(A,L1)', 'bad edges refused: ', ok(6)
+! 7. a convex kite, tip (0.24, 0.3125) out through the face u = 0.25 of cell (3, 3), the other vertices beyond or inside
+call c%adopt_loops(u=[0.24_R8P, 0.30_R8P, 0.9_R8P, 0.30_R8P], v=[0.3125_R8P, 0.26_R8P, 0.3125_R8P, 0.365_R8P], &
+                   loop_sizes=[4_I4P])
+call c%cut_cells(x=e8, y=e8, cut=cut)
+ok(7) = cut%pieces(3, 3) == 2 .and. cut%pieces(2, 3) == 1
+if (ok(7)) ok(7) = all(abs(cut%piece_area(cut%first_piece(3, 3):cut%first_piece(3, 3) + 1) - 663._R8P / 256000._R8P) &
+                       < 1.e-15_R8P) .and. abs(cut%alpha(3, 3) - 2._R8P * 663._R8P / 256000._R8P / 0.015625_R8P) < 1.e-13_R8P
+print '(A,L1,A,I0)', 'convex kite, tip out through a face: 2 pieces of exact areas: ', ok(7), '  pieces ', cut%pieces(3, 3)
 
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
