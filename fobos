@@ -47,10 +47,13 @@ default = local_gnu
 $NVF_CC = cc89
 
 [common-variables]
-$CSHARED_GNU = -cpp -c -fPIC -frealloc-lhs
+# -ffp-contract=off: no FMA contraction on the host either (the gfortran twin of -Mnofma below). The device twins are
+# checked bit for bit against the serial path; a gfortran targeting FMA hardware (-march=x86-64-v3, the amd64v3
+# packages of the ubuntu-26.04 runners) contracted at -O2 and broke them (run 43194838880: 251 chain mismatches).
+$CSHARED_GNU = -cpp -c -fPIC -frealloc-lhs -ffp-contract=off
 $CSHARED_INT = -cpp -c -fpic -assume realloc_lhs
 $LSHARED     = -shared
-$CSTATIC_GNU = -cpp -c -frealloc-lhs
+$CSTATIC_GNU = -cpp -c -frealloc-lhs -ffp-contract=off
 $CSTATIC_INT = -cpp -c -assume realloc_lhs
 # nofma on host and device: FMA contraction differs between them, so the device path lost
 # host bit-exactness (1-ulp distances, 1504 sign-bench flips at near-ties; 2026-11-04, nvfortran
