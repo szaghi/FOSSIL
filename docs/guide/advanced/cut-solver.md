@@ -223,6 +223,9 @@ Two families, both reported per piece:
   (`cleared`, `covered`): the caller passes the pieces to serve as a mask and
   the pieces that may not serve as targets (for a dead piece, the pieces of the
   covered cells), and the same rules apply on the cut cells at the right pose.
+  A target that switches on or off between steps changes the discrete operator abruptly: Schneiders et al. (2013,
+  §4-§6) measure drag jumps from it in a conservative merged scheme, while Seo & Mittal (2011) and Xie et al. (2022)
+  find that conservation alone removes most oscillations (an open disagreement in the llm-wiki).
 - A piece is **suitable** as a target if it has volume, is not small and is
   not excluded. An unsuitable single target (a small one, or a dying neighbour
   of a dying piece) starts a chain followed to the first suitable piece
@@ -435,4 +438,6 @@ edge fractions, moments to order 2 and quadrature rules, the neighbourhoods and 
   apertures, wall and rigid-field outflows. Through it, a fresh piece fills by
   its own inflow, and a uniform flow moving with the body stays exact on the
   exact paths (`fossil_val_moving_conservation`). Where a dead track's
-  remainder goes is still the solver's choice.
+  remainder goes is still the solver's choice: published options are the
+  neighbours by volume weights (Schneiders et al. 2016, §3.8; Bennett et al.
+  2018) or merging for the step (Bayyuk et al. 1993; Falcovitz et al. 1997).

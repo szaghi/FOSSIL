@@ -16,7 +16,8 @@ the kind of query decides which one to use:
 | **Moved copy**: `move(pose)` with a tree refit | grid-aligned queries: box tagging, line crossings, cut cells | O(N) (a refit, not a rebuild) | bit for bit (feet at edge and vertex ties to 4 ulps) |
 
 `state_changes` flags the points (cell centres) that change state between
-two poses: fresh (solid → fluid) and dead (fluid → solid).
+two poses: fresh (solid → fluid; newborn in Bayyuk et al. 1993, emerging in Schneiders et al. 2013) and dead
+(fluid → solid; vanishing, submerging).
 
 ![a NACA 0012 section seen from above at the start of a step (dark brown) and at its end (yellow), pitched 3 degrees nose up and moved 0.02 forward and 0.01 up, inside the outline of a grid of cell centres of spacing 0.02: only the 292 centres near the wall that the band filter sends to a second query are drawn, grey; among them 59 fresh centres (teal) along the lower aft surface the section leaves and 54 dead centres (ember) along the upper surface it covers](../../examples/images/ref-moving-bodies-states.svg){.fossil-figure}
 
@@ -132,18 +133,22 @@ half pose twice turns the first half-step's translation too, which the screw mot
 
 A conservative cut-cell update over a step with a moving wall needs, per
 cell, the old and new fluid volumes. Per grid face it needs the fluid
-aperture averaged over the step (Falcovitz et al. 1997). Three decisions
-follow from the fixed grid (issue #41):
+aperture averaged over the step (Falcovitz et al. 1997; Murman et al. 2003, §4). These apertures are those of the
+unsplit motion: Falcovitz et al. split it by direction, and Bennett et al. (2018, §2) find that directional swept
+volumes do not add up to the unsplit one, so a solver that splits by direction cannot use them as they are. Three
+decisions follow from the fixed grid (issue #41):
 
 - **Nothing sweeps through a fixed face.**
   - The volume the wall sweeps through a cell is its fluid volume change,
     by Reynolds transport.
   - So `swept` = (α₁ − α₀)·|cell| comes exactly from the cut cells at the
     two poses, in 2-D and 3-D.
-  - The geometric conservation law holds by construction.
-  - Natarajan et al. (2022) omit this term and lose up to 0.92 % of the
-    mass at 32³. The authors attribute their lost order to the fresh-cell
-    fill, so the missing swept term is not its established cause.
+  - The geometric conservation law holds by construction for the geometry: volume change = swept volume (Murman et
+    al. 2003, §4). A scheme's GCL also depends on how its time integrator uses them (Schneiders et al. 2016, §3.6).
+  - Natarajan et al. (2022) divide by the old volume fraction with no swept term (§2.1) and lose up to 0.92 % of the
+    mass at 32³, 0.31 % at 64³ (§3.6); the paper does not isolate the cause. They attribute their first order on a
+    receding piston to the fresh-cell fill (§3.2.2), untested: their flux redistribution is itself first order at
+    cut cells (Berger & Giuliani 2021, §1), a disagreement the llm-wiki records as open.
 - **The only time integral is the face aperture.**
   - `face_u` / `face_v` (2-D) and `face_x` / `face_y` / `face_z` (3-D)
     are the fluid length or area of every grid face, averaged over the
@@ -197,7 +202,12 @@ call swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status
   1.8e-15 on the cases below, where 4-node Gauss left 1.0e-3 to 9.3e-3.
 - **Otherwise (explicit node poses, or `exact=.false.`): Gauss–Legendre at `nq` nodes**
   (default 4), on copies moved to the node poses. With the screw motion, `error_estimate` is the
-  largest face change between `nq` and `2 nq` nodes.
+  larger of the face change between `nq` and `2 nq` nodes and the largest |residual| divided by the
+  largest rigid-field speed on the grid (issue #104): a face's Gauss error enters its cells' balance
+  times that speed, so the estimate is in face units and never below what the residual shows.
+  `refine=.true.` (screw motion only) integrates the faces of every cell with an event inside the step
+  per event interval on the cell's own wall elements, the piece map's machinery: the residual drops to
+  round-off, and the faces of the other cells keep their Gauss values (no kink there).
 
 **Exact rotation (design, issue #69).** The Gauss path converges algebraically under rotation (rate 2–3,
 see the validation table), because a face's fluid measure has kinks inside the step. The exact path
@@ -305,6 +315,12 @@ A cut cell can hold several fluid pieces, and over a step the wall can move thro
 which fluid at the end of the step came from which fluid at its start (issue #102). `swept_cells_2d(..., map=)`
 answers with the **tracks** of every cell, and `swept_cells_3d(..., map=)` does the same in 3-D.
 
+**In the literature.** Bayyuk et al. (1993) merge cells so that no combined cell changes its intersection topology
+within a step, which needs the body wider than the cut cells and the step shorter than the smallest uncut cell.
+Meinke et al. (2013, §3.2) handle cells cut several times or split into unconnected parts. Murman et al. (2003, §4)
+and Badia et al. (2023, §2) treat a cut cell as a space-time cell. None of the sources in the llm-wiki bundle
+`immersed-boundary-methods` is recorded as linking a cell's pieces through a step.
+
 **Definition.** Take the cell's fluid over the whole step, as a region of space and time:
 {(p, s) : p in the cell, p in the fluid at pose s, s in [0, 1]}. Its connected components are the tracks.
 - **Pieces:** every piece of the cut cells at pose0, and every piece at pose1, lies in exactly one track.
@@ -327,8 +343,11 @@ wrong, and both happen where a body is thin compared with its step:
 | A thin plate crosses the whole cell | a dead track and a fresh one | "continuing" |
 | A narrow gap moves more than its own width | continuing | dead + fresh |
 
-On the bench bodies (`fossil_val_device_chain`'s ellipse, NACA 0012, sphere and cone, at displacements of 0.5 and
-2 cells per step), the overlap disagrees with the tracks in 0.02–0.14 % of the cells the wall touches. Most of these
+Published schemes keep a step below one cell: Falcovitz et al. (1997, §3) assume no cell goes from fully exposed to
+fully covered in one step, Bayyuk et al. (1993) bound the step by the smallest uncut cell, and Mittal et al. (2008,
+§2.2) get one layer of fresh cells per step. The plate rows above and the 2-cell bench steps lie outside those
+assumptions. On the bench bodies (`fossil_val_device_chain`'s ellipse, NACA 0012, sphere and cone, at displacements
+of 0.5 and 2 cells per step), the overlap disagrees with the tracks in 0.02–0.14 % of the cells the wall touches. Most of these
 cells are at the NACA trailing edge and on the cone's base rim.
 
 **How it is built** (in 2-D):
@@ -375,6 +394,9 @@ per step. The update has four parts:
   with no interpolation.
 - **Dead tracks:** a dead track hands its remainder to a neighbouring new piece.
 - **New pieces:** a track's mass is shared among its new pieces by area.
+- **In the literature:** Murman et al. (2003, §4) integrate an emerging cell without reconstructing it, as a fresh
+  track does here. A dead track's remainder is the vanishing-cell state of Bayyuk et al. (1993), not guaranteed to
+  vanish; Schneiders et al. (2016, §3.8) give it to the neighbours by volume weights.
 
 Results:
 - **Mass:** constant to 1.5·10⁻¹⁴ (relative) in every case.
@@ -387,9 +409,12 @@ It is a demonstration, not a solver. Its first-order implicit upwind smears the 
 by 0.1–1 %.
 
 **Tolerances.** The construction is exact, with two explicit thresholds:
-- intervals between events narrower than 1e-10 of the step are not evaluated, so a state shorter than that is
-  not seen: a plate 1e-10 thick crossing a cell corner at 2 cells per step reads continuing (at 1e-8 it reads dead +
-  fresh);
+- every event carries the round-off of its instant: the explicit translation formulas their magnitudes over their
+  denominator (times 64 eps), the screw events the width `isolate_zeros` localises them to (issue #104). Two events
+  closer than the sum of their widths are one instant in double precision; the state between two farther apart is
+  evaluated at its middle, however short (`narrow_cells` counts the cells with one shorter than 1e-10): a plate
+  2e-11 thick crossing a cell reads dead + fresh. In the bench every pair closer than 1e-10 is round-off (1e-17 to
+  2.5e-13 apart on translations, dyadic widths of uncertified zeros on rotations): no bench cell changed;
 - a piece with no known feature is dropped only if its face lengths are below 1e-9 of the cell side.
 
 - **Exact tangential contact under rotation.** A wall feature can touch a cell feature tangentially and leave
@@ -442,13 +467,19 @@ motion).
 ## Limitations
 
 - **Swept geometry: the Gauss path at large steps.** With `exact=.false.` the face apertures use nq Gauss nodes over
-  the whole step. The face integrands kink at the events (a vertex crossing a face line, a corner crossing a
-  segment), and global nodes resolve kinks poorly.
-  - At nq = 4 and 2 cells per step under rotation, the per-cell residual of `fossil_val_moving_conservation`'s NACA
-    0012 and ellipse reaches 0.12–0.34 of a cell.
-  - `error_estimate` (the nq-vs-2nq face change) reads 2.5·10⁻³ there, and understates the residual.
-  - Use the exact path, or keep Gauss steps well under a cell.
+  the whole step. The face integrands kink, and jump, at the events (a vertex crossing a face line, a corner crossing
+  a segment, a face leaving the body), and global nodes resolve them at about first order.
+  - Measured (issue #104; ellipse and NACA 0012 at 256², sphere and cone at 32³; 0.5, 1 and 2 cells per step): the
+    largest per-cell residual is 7·10⁻⁴ to 0.45 of a cell at nq = 4, and still 2·10⁻⁴ to 0.15 at nq = 8.
+  - `error_estimate` includes the residual since issue #104; the face change alone understated it a hundredfold.
+  - `refine=.true.` makes the residual round-off: 1.1–2.2 times the Gauss call in 2-D (the exact rotation path takes
+    15–45 times), 2.7–22 times in 3-D, about the exact path's cost there. It is off by default, and the default is
+    an open decision. The exact path stays the reference.
   - The piece map's multi-track cells do not inherit the error: they integrate per event interval on every path.
+- **Spurious force oscillations are not addressed.** Exact swept volumes remove the fresh/dead volume source that
+  Seo & Mittal (2011, §2) call their primary cause. Schneiders et al. (2013, §4-§5) show oscillations in a
+  conservative scheme whose discrete operator switches, a merge target turning on or off; the llm-wiki records the
+  disagreement as open.
 - **Swept geometry: a self-intersecting wall breaks the balance.** The swept
   volumes come from the cut cells (Green's theorem: a region counts by its
   winding number) and the face apertures from line crossings (parity). Where
@@ -465,10 +496,8 @@ motion).
   - A face's fluid length (area) jumps when the face's line (plane)
     leaves the body. Gauss across a jump is O(1/nq).
   - Rotation in 2-D gives rates of about 2–3; in 3-D about first order
-    (cube: residual 1.1e-2 → 1.6e-3 from nq = 2 to 8).
-  - Only translations are exact: under a rotation the polygon vertices
-    no longer move linearly, so there is no finite set of pieces on which
-    a fixed rule is exact.
+    (cube: residual 1.1e-2 → 1.6e-3 from nq = 2 to 8). The exact paths
+    (the default) and `refine` do not have this error.
 - **Swept geometry: the cost.** The 2-D exact path costs O((faces +
   nodes) × segments). The 3-D exact path costs, per grid plane, a scan of
   the triangles in the slab the plane sweeps, plus 2 (breakpoints + 1)

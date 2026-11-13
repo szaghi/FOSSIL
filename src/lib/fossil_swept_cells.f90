@@ -105,7 +105,9 @@ endtype swept_cells_3d_t
 integer(I4P), parameter :: SWEPT_CHUNK_CELLS = 2_I4P**22 !< Section cells per device launch set, and face sums per
                                                       !< plane group held on the host (`swept_cells_3d_device`).
 real(R8P), parameter :: EVENT_GAP = 1e-10_R8P !< Piece map (issue #102): an interval between two events narrower than
-                                             !< this is not evaluated (its events act as one; `map_cell`).
+                                             !< this is evaluated only if wider than its events' round-off widths
+                                             !< (issue #104, `interval_wide`), else its events act as one; its
+                                             !< quadrature nodes may be skipped (`map_node`).
 real(R8P), parameter :: EVENT_RES = 64._R8P * epsilon(1._R8P) !< Piece map (issue #104): the round-off of an
                                                              !< explicit event instant, in units of its formula's magnitudes
                                                              !< over its denominator (see `node_breakpoints`).
@@ -1654,10 +1656,10 @@ contains
    !< `with_meas` and nt >= 1, the per-track time integrals meas(1:4) of the faces' fluid lengths and meas(5:8) of
    !< their rigid-field outflows (`map_measures`; kind -1 if a face part could not be assigned).
    !<
-   !< The events split [0, 1] into intervals; one narrower than EVENT_GAP (two events computed apart by round-off, or
-   !< closer than the precision of an evaluation) is not evaluated: its two events act as one. The others are
-   !< evaluated at their middle, at least EVENT_GAP / 2 from any event. A cell with an event that no sign change
-   !< certifies (issue #102: a contact within the round-off of its function under a rotation, a corner grazing a
+   !< The events split [0, 1] into intervals; one narrower than EVENT_GAP whose two events are within their round-off
+   !< widths of each other (`interval_wide`, issue #104: the same instant computed twice) is not evaluated: its two
+   !< events act as one. The others are evaluated at their middle, beyond both events' widths. A cell with an event
+   !< that no sign change certifies (issue #102: a contact within the round-off of its function under a rotation, a corner grazing a
    !< segment or a vertex grazing a face line at the turning point of its arc) is untrusted: the piece next to it may
    !< shrink to a point and come back as another track, or not, undecidably in double precision.
    type(map_ctx_t),           intent(inout) :: mc         !< State.
@@ -2596,7 +2598,8 @@ contains
    !< -1 (untrusted); nt tracks; the track of each of its old pieces (otr, in k0's order) and new pieces (ntn); with
    !< `with_meas` and nt >= 1, the per-track time integrals meas(1:6) of the faces' fluid areas and meas(7:12) of their
    !< outward rigid-field outflows (`map3_measures`; kind -1 if a face part could not be assigned). Intervals between
-   !< events narrower than EVENT_GAP are not evaluated (their events act as one), as `map_cell`; a cell with an
+   !< events narrower than EVENT_GAP and within their round-off widths are not evaluated (their events act as one), as
+   !< `map_cell`; a cell with an
    !< uncertified contact (a corner grazing a facet, a vertex grazing a face plane or an edge a cell edge, under a
    !< rotation) is untrusted.
    type(map3_ctx_t),          intent(inout) :: mc               !< State.

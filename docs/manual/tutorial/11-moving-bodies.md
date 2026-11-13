@@ -39,8 +39,9 @@ The two ways agree to round-off: 2.2e-16 on the distances, 2.8e-15 on the closes
 
 ## Cells that change state
 
-A cut-cell solver must initialize the cells that the wall uncovers during the step (fresh: solid to fluid) and
-retire the ones it covers (dead: fluid to solid).
+A cut-cell solver must handle the cells that the wall uncovers during the step (fresh: solid to fluid) and the ones
+it covers (dead: fluid to solid). It can merge them for the step (Bayyuk et al. 1993), integrate a fresh cell from
+the instant it appears (Murman et al. 2003), or fill it from its neighbours (Natarajan et al. 2022).
 
 <<< @/examples/snippets/tut11_2_state-state.f90
 
