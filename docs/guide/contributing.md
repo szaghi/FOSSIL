@@ -32,7 +32,7 @@ The tests are in two tiers (issue #45):
 | Tier | Where | Built by | Run by | When |
 |---|---|---|---|---|
 | regression | `src/tests/*.f90` | `fobis build --mode tests-gnu` (CI: `tests-gnu-debug --coverage`) | `scripts/run_tests.sh` | every push |
-| validation | `src/tests/validation/*.f90` | `fobis build --mode validation-gnu` (-O2, `exe-validation/`) | `scripts/run_validation.sh` | nightly (`.github/workflows/validation.yml`) and before a release |
+| validation | `src/tests/validation/*.f90` | `fobis build --mode validation-gnu` (-O2, `exe-validation/`) | `scripts/run_validation.sh [-j N]` | nightly (`.github/workflows/validation.yml`) and before a release |
 
 A regression test must run in **2 s or less** in the debug coverage build (the CI build: `-O0 -fcheck=all`,
 coverage instrumented; `fossil_test_boolean_coplanar` is the one approved exception, 3 s). Keep it fast by the choice

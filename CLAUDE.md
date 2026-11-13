@@ -98,7 +98,10 @@ mismatches: 0`), then timed on the CPU, the device copied back and the device re
 
 The NVIDIA modes compile with `-gpu=nofma -Mnofma` (`$CSTATIC_NV`): with FMA contraction the
 device lost host bit-exactness (1-ulp distances, sign and facet-id flips at near-ties); the device
-kernels are 15-30 % slower for it. Do not remove it unless the gates stay at 0.
+kernels are 15-30 % slower for it. Do not remove it unless the gates stay at 0. The GNU modes have the twin guard
+`-ffp-contract=off` (`$CSTATIC_GNU`, `$CSHARED_GNU`): a gfortran targeting FMA hardware (`-march=x86-64-v3`)
+contracted at -O2 and broke the bitwise twin checks (296 chain mismatches without it, 0 with it; outputs and perf
+hashes on baseline x86-64 unchanged). VecFor's explicit `fma` calls stay FMAs (correctly rounded either way).
 
 Subnormals: the nvfortran host code flushes subnormal results to zero (FTZ) and treats subnormal operands as zero
 (DAZ); the device does neither, so a result below ~2.2e-308 can differ host vs device. Host/device (and gfortran)
@@ -136,7 +139,17 @@ are in validation); never loosen a tolerance to save time.
 ```bash
 fobis build --mode validation-gnu    # -O2, into exe-validation/
 ./scripts/run_validation.sh          # or: ./scripts/run_validation.sh fossil_val_sdf
+./scripts/run_validation.sh -j 4     # 4 programs at a time (single-threaded, no files written); results in name
+                                     # order, a failing test prints its log tail (whole log: exe-validation/NAME.log)
 ```
+
+The memory-heavy programs (`SOLO` in the script: `fossil_test_distance_bench` 11.9 GB peak resident,
+`fossil_val_cut_solver` 5.0 GB; every other one under 1.6 GB) run first, alone: a GitHub runner has 16 GB.
+
+`fossil_test_distance_bench` prints its five timing tables of the 3-D device kernels only when built with OpenACC (or
+with `FOSSIL_BENCH_TIMING=1`): without it they time the host twins against the CPU (gfortran, dragon-fine 40^3: 1375 s
+with them, 384 s without). The nightly `validation.yml` runs `-j $(nproc)` and uploads `exe-validation/*.log` as the
+artifact `validation-logs` when it fails.
 
 CI toolchain: `ci.yml` (tests, coverage), `docs-snippets.yml`, `validation.yml` and the build job of `docs.yml` run in
 the container `ghcr.io/szaghi/fortran-toolchains:gnu-16.2` (repo `~/fortran/fortran-toolchains`: gfortran 16.2 on the
@@ -144,7 +157,7 @@ official `gcc` image, Open MPI 5.0.11, HDF5 2.3.0, FoBiS, formal, gcovr; nothing
 `[scaffold] toolchain_image` in `fobos`. Only `install.yml` (the install script, gfortran 14 by `setup-build-env`) and
 `release.yml` stay on the bare runner. The ubuntu-26.04 runners install amd64v3 packages: their gfortran emitted FMAs at
 -O2 and broke the bitwise device-twin checks of `fossil_val_device_chain` / `fossil_test_distance_bench` (run
-43194838880); the image's gfortran targets baseline x86-64 (no FMA). Every `tests-*` mode excludes `src/tests/validation/`. `fobis clean` leaves stale executables of
+43194838880); the image's gfortran targets baseline x86-64 (no FMA), and `-ffp-contract=off` guards any other. Every `tests-*` mode excludes `src/tests/validation/`. `fobis clean` leaves stale executables of
 moved sources in `exe/`: delete them by hand, or `run_tests.sh` runs them.
 
 Performance (issue #94): `fossil_val_perf` (validation) times 24 kernels (query batches, body distance, cut cells,
