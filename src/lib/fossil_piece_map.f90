@@ -99,6 +99,9 @@ type :: piece_map_2d_t
                                                       !< contact within the round-off of its function under a rotation
                                                       !< (a corner or vertex grazing, where a piece can shrink to a point
                                                       !< and come back as another track; issue #102).
+   integer(I4P)              :: narrow_cells = 0_I4P  !< Cells with a state between two events closer than 1e-10 yet
+                                                      !< farther apart than their instants' round-off, evaluated at its
+                                                      !< middle (a thin plate crossing a corner; issue #104).
 endtype piece_map_2d_t
 
 type :: piece_map_3d_t
@@ -158,6 +161,9 @@ type :: piece_map_3d_t
                                                       !< contact within the round-off of its function under a rotation
                                                       !< (a corner or vertex grazing, where a piece can shrink to a point
                                                       !< and come back as another track; issue #102).
+   integer(I4P)              :: narrow_cells = 0_I4P  !< Cells with a state between two events closer than 1e-10 yet
+                                                      !< farther apart than their instants' round-off, evaluated at its
+                                                      !< middle (a thin plate crossing a corner; issue #104).
 endtype piece_map_3d_t
 
 contains

@@ -7,6 +7,9 @@ program fossil_test_piece_map_3d
 !< contrast). The bodies are boxes, tilted by a small rotation so that no face of them lies on a grid plane:
 !< - a thin plate crossing the whole cell within the step (translation; the Gauss path; rotation about a far pivot,
 !<   exact and Gauss): one dead and one fresh track (overlap: continuing);
+!< - a plate 2e-11 thick crossing the cell (issue #104): each corner covered for 1e-11 of the step, between two events
+!<   closer than the 1e-10 under which they used to act as one (continuing), far apart against their round-off: the
+!<   state is evaluated (`narrow_cells`): dead + fresh, exact and Gauss;
 !< - a narrow slot between two slabs moving by more than its width inside the cell: continuing (overlap: dead + fresh);
 !< - a plate entering from the top and crossing the cell: split; leaving: merge;
 !< - a block uncovering the cell: fresh (cleared); covering it: dead (covered);
@@ -45,7 +48,7 @@ type(body_t)                    :: gb
 type(rigid_pose_t)              :: p0, p1
 real(R8P)                       :: x(4), n(3), c(3), ax(3)
 real(R8P), parameter            :: TA(3) = [0.3_R8P, 0.5_R8P, 0.8_R8P], TANG = 0.02_R8P !< Tilt of the box bodies.
-logical                         :: ok(18)
+logical                         :: ok(20)
 integer(I4P)                    :: nput !< Facets written by `put`.
 
 ok = .true.
@@ -56,6 +59,13 @@ ok(1) = case_3d('plate crossing, translation', tilt([0._R8P, 0._R8P, 0._R8P]), t
                 [TRACK_DEAD, TRACK_FRESH])
 ok(2) = case_3d('plate crossing, translation, Gauss', tilt([0._R8P, 0._R8P, 0._R8P]), tilt([0._R8P, 0._R8P, 2._R8P]), &
                 .false., [TRACK_DEAD, TRACK_FRESH])
+! 19-20. a plate 2e-11 thick crossing the cell: each corner covered for 1e-11 of the step (issue #104): dead + fresh
+call boxes(s, reshape([-3._R8P, -3._R8P, -0.55_R8P, 4._R8P, 4._R8P, -0.55_R8P + 2e-11_R8P], [3, 2, 1]))
+ok(19) = case_3d('plate 2e-11 thick crossing, translation', tilt([0._R8P, 0._R8P, 0._R8P]), tilt([0._R8P, 0._R8P, 2._R8P]), &
+                 .true., [TRACK_DEAD, TRACK_FRESH]) .and. map%narrow_cells >= 1_I4P
+ok(20) = case_3d('plate 2e-11 thick crossing, translation, Gauss', tilt([0._R8P, 0._R8P, 0._R8P]), &
+                 tilt([0._R8P, 0._R8P, 2._R8P]), .false., [TRACK_DEAD, TRACK_FRESH]) .and. map%narrow_cells >= 1_I4P
+print '(A,I0)', '  narrow cells (state between events 1e-11 apart evaluated): ', map%narrow_cells
 call boxes(s, reshape([-0.05_R8P, 3._R8P, -3._R8P, 0.05_R8P, 8._R8P, 4._R8P], [3, 2, 1]))
 ax = [0.02_R8P, 0.01_R8P, 1._R8P]
 ok(3) = case_3d('plate crossing, rotation', pose_from_axis_angle(ax, 0.2_R8P, [0.5_R8P, -5._R8P, 0._R8P]), &

@@ -20,6 +20,9 @@ program fossil_test_piece_map_2d
 !<   contact is within the round-off of its function, so whether the piece vanishes (dead + fresh) or not (continuing) is
 !<   undecidable in double precision: untrusted (it read continuing before). The corner 1e-9 inside the segment's solid
 !<   at the turning point: dead + fresh; 1e-9 short of it: continuing.
+!< - a plate 2e-11 wide crossing the cell (issue #104): its two sides pass each corner 1e-11 of the step apart, less
+!<   than the 1e-10 under which two events used to act as one (the corner read fluid throughout: continuing), far more
+!<   than the instants' round-off: the state between them is evaluated (`narrow_cells`): dead + fresh, exact and Gauss.
 !< Every case also passes the map checks (`check_map`): every piece at pose0 and at pose1 in exactly one track of its
 !< cell, numbered as the cut cells of a copy moved to the pose (and the track volumes equal to their pieces' areas bit
 !< for bit); residual = V1 - V0 + the sum of the track's face outflows; per-cell sums over the tracks equal to the swept
@@ -44,7 +47,7 @@ real(R8P)              :: x(4)
 real(R8P), allocatable :: u(:), v(:), xg(:)
 real(R8P), parameter   :: PI = acos(-1._R8P)
 integer(I4P)           :: i, st
-logical                :: ok(26)
+logical                :: ok(28)
 
 ok = .true.
 x = [-1._R8P, 0._R8P, 1._R8P, 2._R8P]
@@ -60,6 +63,13 @@ ok(3) = case_2d('plate crossing, rotation', pose_2d(0.2_R8P, [0.5_R8P, -5._R8P])
                 .true., [TRACK_DEAD, TRACK_FRESH])
 ok(4) = case_2d('plate crossing, rotation, Gauss', pose_2d(0.2_R8P, [0.5_R8P, -5._R8P]), &
                 pose_2d(-0.2_R8P, [0.5_R8P, -5._R8P]), .false., [TRACK_DEAD, TRACK_FRESH])
+! 27-28. a plate 2e-11 wide crossing the cell: each corner covered for 1e-11 of the step (issue #104): dead + fresh
+call rect(c, [-0.55_R8P, -0.55_R8P + 2e-11_R8P, -3._R8P, 4._R8P])
+ok(27) = case_2d('plate 2e-11 wide crossing, translation', pose_2d(0._R8P), pose_2d(0._R8P, [2._R8P, 0._R8P]), .true., &
+                 [TRACK_DEAD, TRACK_FRESH]) .and. map%narrow_cells >= 1_I4P
+ok(28) = case_2d('plate 2e-11 wide crossing, translation, Gauss', pose_2d(0._R8P), pose_2d(0._R8P, [2._R8P, 0._R8P]), &
+                 .false., [TRACK_DEAD, TRACK_FRESH]) .and. map%narrow_cells >= 1_I4P
+print '(A,I0)', '  narrow cells (state between events 1e-11 apart evaluated): ', map%narrow_cells
 ! 5. a gap of width 0.05 moving by 0.2 inside the cell: continuing
 call c%adopt_loops(u=[-3._R8P, 4._R8P, 4._R8P, -3._R8P, -3._R8P, 4._R8P, 4._R8P, -3._R8P], &
                    v=[-3._R8P, -3._R8P, 0.40_R8P, 0.40_R8P, 0.45_R8P, 0.45_R8P, 4._R8P, 4._R8P], loop_sizes=[4_I4P, 4_I4P])
