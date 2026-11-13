@@ -4,6 +4,29 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.2.0] — 2026-11-13
+### Added
+- **swept**: The piece map of a 2-D time step
+
+- **swept**: The piece map of a 3-D time step
+
+
+### Documentation
+- The piece map of a moving-body time step
+
+- The outputs and notes after exact alpha in facet-free cells
+
+- The FMA guard, the parallel validation runner and the bench tables
+
+
+### Fixed
+- **swept**: Integrate multi-track cells per event interval on the Gauss path
+
+- **swept**: Narrow event clusters and uncertified tangential contacts
+
+- **cut**: Exact alpha for 3-D cells without facets
+
+
 ## [3.1.0] — 2026-11-12
 ### Added
 - **cut**: The 2-D cut cells on the device
