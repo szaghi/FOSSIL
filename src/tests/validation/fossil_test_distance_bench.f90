@@ -29,6 +29,12 @@
 !<      mismatches`, issue #100 step 4; `cut cells 3-D link inputs device vs serial mismatches` and `cut links 3-D
 !<      device vs serial mismatches`, step 5).
 !<
+!<   6. Timing tables of the 3-D device kernels (sections, cut cells, link inputs, links, swept; best / median of 5):
+!<      only when built with OpenACC, where they compare the CPU with the GPU. Built without it the `device` routines
+!<      are host twins, so the tables would time the CPU twice (gfortran -O2, dragon-fine 40^3: 1375 s with them,
+!<      384 s without); the environment variable FOSSIL_BENCH_TIMING=1 prints them anyway, FOSSIL_BENCH_TIMING=0
+!<      skips them. Every mismatch check runs either way.
+!<
 !< Usage: fossil_test_distance_bench [<stl_path> [<grid_n>]]
 !<        default <stl_path> = src/tests/dragon-fine.stl
 !<        default <grid_n>   = 40
@@ -85,6 +91,9 @@ integer(I4P)                  :: i, j, k, q
 integer(I4P)                  :: argc, n_sample, s, stride
 integer(I4P)                  :: n_threads
 character(len=512)            :: stl_path, arg2
+character(len=8)              :: env_value                 !< FOSSIL_BENCH_TIMING.
+integer                       :: env_status                !< Its status (0: set).
+logical                       :: timing                    !< Print the timing tables of the 3-D device kernels.
 logical                       :: correctness_ok, batch_ok, device_ok, fwn_ok, refuse_ok, holed_ok, field_ok
 logical                       :: rich_ok                   !< Rich queries: device equals CPU (issue #37).
 real(R8P)                     :: rich_err                  !< Rich queries: max |device - CPU| over distance, closest point, normal.
@@ -125,6 +134,14 @@ if (argc >= 2) then
    read(arg2, *) grid_n
 endif
 if (grid_n < 2_I4P) grid_n = 2_I4P
+#ifdef _OPENACC
+timing = .true.
+#else
+timing = .false.
+#endif
+call get_environment_variable('FOSSIL_BENCH_TIMING', env_value, status=env_status)
+if (env_status == 0) timing = trim(env_value) == '1'
+print '(A,L1)', 'timing tables of the 3-D device kernels (OpenACC builds; FOSSIL_BENCH_TIMING=0/1 overrides): ', timing
 
 ! ---- load --------------------------------------------------------------------
 call surface%load_from_file(file_name=trim(stl_path), guess_format=.true.)
@@ -726,6 +743,7 @@ contains
          mismatch = mismatch + cells_compare(sb(b), gx, gy, gz)
       enddo
    enddo
+   if (.not. timing) return
    print '(A)', 'cut cells 3-D timing (no links; best / median of 5) [s]: body, cells, CPU, device copied back, '// &
                 'device resident, device alpha-only resident, speed-ups of the best'
    call section_grid(grid_n, gx, gy, gz)
@@ -837,6 +855,7 @@ contains
          mismatch = mismatch + link_inputs_compare(sb(b), gx, gy, gz)
       enddo
    enddo
+   if (.not. timing) return
    print '(A)', 'cut cells 3-D link inputs timing (best / median of 5) [s]: body, cells, CPU cut, CPU cut + inputs, '// &
                 'device resident cut, device resident cut + inputs, extra of the inputs (CPU, device; best)'
    call section_grid(grid_n, gx, gy, gz)
@@ -947,6 +966,7 @@ contains
       call box_grid(sb(b), 64_I4P, gx, gy, gz)
       mismatch = mismatch + links_compare(NAMES(b), sb(b), gx, gy, gz)
    enddo
+   if (.not. timing) return
    print '(A)', 'cut links 3-D timing (best / median of 5) [s]: body, cells, CPU cut, CPU cut + links, device resident '// &
                 'cut, device resident cut + links, device cut + links copied back; links extra (CPU, device resident), '// &
                 'speed-up of cut + links (copied back, resident; best)'
@@ -1066,6 +1086,7 @@ contains
       call box_grid(sb(b), 64_I4P, gx, gy, gz)
       mismatch = mismatch + swept_compare(sb(b), gx, gy, gz, 1_I4P) + swept_compare(sb(b), gx, gy, gz, 3_I4P)
    enddo
+   if (.not. timing) return
    print '(A)', 'swept cells 3-D timing (best / median of 5) [s]: body, cells, path, CPU, device, speed-up of the best'
    do b = 1, 2
       call box_grid(sb(b), 32_I4P, gx, gy, gz)
@@ -1225,6 +1246,7 @@ contains
       call cut_cells_3d_sections(surface, gx, gy, gz, cd, device=.true., status=st2)
       mismatch = mismatch + cut_cells_3d_face_mismatches(ch, cd) + abs(st - st2)
    enddo
+   if (.not. timing) return
    print '(A)', 'cut cells 3-D sections timing (3(N+1) planes, faces copied back; best / median of 5) [s]: cells, host, '// &
                 'device, speed-up of the best'
    call system_clock(count_rate=rate)
