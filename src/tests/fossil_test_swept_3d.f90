@@ -18,6 +18,9 @@ program fossil_test_swept_3d
 !<   for bit; the 3-D `pose_interpolate` returns the end poses exactly and the mid pose at half the
 !<   relative angle.
 !< - Refusals: decreasing edges, nq = 0.
+!< - Issue #104, the rotating cube on the Gauss path (nq = 4): `error_estimate` times the largest rigid-field speed
+!<   bounds the largest residual; with `refine` the cells with events integrate per event interval: the residual at
+!<   round-off and the faces equal to the exact path's to 1e-12.
 
 use fossil,                   only : surface_stl_object, rigid_pose_t, pose_identity, pose_from_axis_angle, pose_interpolate, &
                                      swept_cells_3d_t, swept_cells_3d, gauss_legendre_01, STATUS_OK, STATUS_INVALID_INPUT
@@ -37,7 +40,9 @@ type(rigid_pose_t), allocatable :: pq(:)
 real(R8P), allocatable          :: sq(:), wq(:)
 real(R8P)                       :: e(5), err(4), res(4), d(3), ax(3), ang, ang_m, w(3), c(3)
 integer(I4P)                    :: i, k, st, st2
-logical                         :: ok(7)
+logical                         :: ok(8)
+type(swept_cells_3d_t)          :: sw3
+real(R8P)                       :: est, vmax
 
 call bench_bodies(b)
 call to_surface(b(1)%soup, s) ! unit cube [0, 1]^3
@@ -93,6 +98,19 @@ enddo
 ok(2) = st == STATUS_OK .and. res(2) < res(1) .and. res(3) < res(2)
 print '(A,3ES9.1,A,ES9.1,A,L1)', 'cube rotating and translating: max residual nq=2,4,8 ', res(1:3), '  estimate (nq=8) ', &
       sw%error_estimate, '  ok ', ok(2)
+! issue #104: the estimate bounds the residual; refine: the residual at round-off, the faces as the exact path's
+call swept_cells_3d(s, p0, p1, e, e, e, sw, nq=4_I4P, exact=.false., status=st)
+call swept_cells_3d(s, p0, p1, e, e, e, sw2, nq=4_I4P, exact=.false., status=st2, refine=.true.)
+call swept_cells_3d(s, p0, p1, e, e, e, sw3, status=i)
+vmax = 0.3_R8P * (maxval(abs(e)) + norm2(p0%t) + norm2(p1%t - p0%t)) + norm2(p1%t - p0%t)
+res0 = maxval(abs(sw%residual)) ; est = sw%error_estimate
+ok(8) = st == STATUS_OK .and. st2 == STATUS_OK .and. i == STATUS_OK .and. res0 > 1.e-6_R8P .and. est * vmax >= res0 .and. &
+        maxval(abs(sw2%residual)) < 1.e-13_R8P .and. maxval(abs(sw2%face_x - sw3%face_x)) < 1.e-12_R8P .and. &
+        maxval(abs(sw2%face_y - sw3%face_y)) < 1.e-12_R8P .and. maxval(abs(sw2%face_z - sw3%face_z)) < 1.e-12_R8P
+print '(A,2ES10.2,A,2ES10.2,A,L1)', 'Gauss nq=4: max residual, estimate x vmax ', res0, est * vmax, &
+      '; refine: max residual, max face diff vs exact ', maxval(abs(sw2%residual)), &
+      max(maxval(abs(sw2%face_x - sw3%face_x)), maxval(abs(sw2%face_y - sw3%face_y)), &
+          maxval(abs(sw2%face_z - sw3%face_z))), '  ok ', ok(8)
 ! explicit poses, interpolation
 call gauss_legendre_01(3_I4P, sq, wq)
 allocate(pq(3))

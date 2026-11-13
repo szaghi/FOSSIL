@@ -255,7 +255,7 @@ type :: cell_eval3_t
 endtype cell_eval3_t
 
 contains
-   subroutine swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input, map)
+   subroutine swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input, map, refine)
    !< Swept geometry of `curve` between `pose0` and `pose1` on the block with cell edges x(nx+1),
    !< y(ny+1) (issue #41 step 5; see the module notes). `nq` (default 4) Gauss-Legendre nodes for the
    !< rotating case; `poses(nq)` the poses at the nodes (`gauss_legendre_01`) instead of the screw
@@ -271,6 +271,14 @@ contains
    !< components of the cell's fluid over the step, linking the pieces of the cut cells at pose0 to those at pose1, with
    !< per-track volumes, face apertures, wall and residual (see `piece_map_2d_build`). It needs the screw motion: with
    !< `poses`, `status = STATUS_INVALID_INPUT` and nothing is computed. Without `map` every other output is unchanged.
+   !< On the Gauss path of the screw motion `sw%error_estimate` is the larger of the nq-vs-2nq face change and the
+   !< largest |residual| over the largest rigid-field speed (issue #104): a face's Gauss error enters its cells' balance
+   !< times the speed, and the face change alone understated it a hundredfold at 2 cells per step.
+   !< `refine` (default .false., issue #104; screw motion only: with `poses`, `status = STATUS_INVALID_INPUT`): on the
+   !< Gauss path every cell with an event inside the step integrates its faces per event interval on its own wall
+   !< segments (the piece map's machinery, `piece_map_2d_build(all_meas=)`), so the residual drops to round-off; the
+   !< other faces keep their Gauss values (no kink). Measured (256^2, 0.5-2 cells per step): 1.1-2.2 times the Gauss
+   !< call, against 15-45 for the exact rotation path. Without `refine` every output but `error_estimate` is unchanged.
    type(curve_object),     intent(in)            :: curve    !< Curve (body frame).
    type(rigid_pose_2d_t),  intent(in)            :: pose0    !< Pose at the start.
    type(rigid_pose_2d_t),  intent(in)            :: pose1    !< Pose at the end.
@@ -282,11 +290,12 @@ contains
    integer(I4P),           intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    logical,                intent(in),  optional :: check_input !< Check the curve for self-intersections.
    type(piece_map_2d_t),   intent(out), optional :: map      !< Piece map of the step (issue #102).
+   logical,                intent(in),  optional :: refine   !< Gauss path: event cells per event interval (#104).
 
-   call swept_cells_2d_core(curve, pose0, pose1, x, y, sw, .false., nq, poses, exact, status, check_input, map)
+   call swept_cells_2d_core(curve, pose0, pose1, x, y, sw, .false., nq, poses, exact, status, check_input, map, refine)
    endsubroutine swept_cells_2d
 
-   subroutine swept_cells_2d_device(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input)
+   subroutine swept_cells_2d_device(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input, refine)
    !< `swept_cells_2d` with the cut cells of the two end poses on the device (issue #100 step 4): the same `sw`, bit for
    !< bit. Both moved copies go as the two blocks of one `cut_cells_device_many` call (one grid, cell arrays only, no
    !< pieces or intervals), left resident; only `alpha` comes back (`update host`), then the device copies are
@@ -294,7 +303,7 @@ contains
    !< they are 94-99.9 % of a call at 256^2 and 1024^2 (step 4.0: `collect` and the node breakpoints of the
    !< translation, the line crossings of the Gauss path, `place_for_crossings` and the events of the rotation), so the
    !< end poses are the whole device part. Arguments, defaults and refusals as `swept_cells_2d`. Built without OpenACC
-   !< it runs on the host.
+   !< it runs on the host. With `refine` the end-pose cuts are made on the host too (the refinement needs their pieces).
    type(curve_object),     intent(in)            :: curve    !< Curve (body frame).
    type(rigid_pose_2d_t),  intent(in)            :: pose0    !< Pose at the start.
    type(rigid_pose_2d_t),  intent(in)            :: pose1    !< Pose at the end.
@@ -305,11 +314,13 @@ contains
    logical,                intent(in),  optional :: exact    !< Exact translation path (default .true.).
    integer(I4P),           intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    logical,                intent(in),  optional :: check_input !< Check the curve for self-intersections.
+   logical,                intent(in),  optional :: refine   !< Gauss path: event cells per event interval (#104).
 
-   call swept_cells_2d_core(curve, pose0, pose1, x, y, sw, .true., nq, poses, exact, status, check_input)
+   call swept_cells_2d_core(curve, pose0, pose1, x, y, sw, .true., nq, poses, exact, status, check_input, refine=refine)
    endsubroutine swept_cells_2d_device
 
-   subroutine swept_cells_2d_core(curve, pose0, pose1, x, y, sw, device, nq, poses, exact, status, check_input, map)
+   subroutine swept_cells_2d_core(curve, pose0, pose1, x, y, sw, device, nq, poses, exact, status, check_input, map, &
+                                  refine)
    !< `swept_cells_2d` (device = .false.) and `swept_cells_2d_device` (device = .true.: the end-pose cut cells on the
    !< device); everything else is the same code. The piece map (`map`, host path only) is built last, from the end-pose
    !< cuts.
@@ -325,7 +336,12 @@ contains
    integer(I4P),           intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    logical,                intent(in),  optional :: check_input !< Check the curve for self-intersections.
    type(piece_map_2d_t),   intent(out), optional :: map      !< Piece map of the step (issue #102).
+   logical,                intent(in),  optional :: refine   !< Gauss path: event cells per event interval (#104).
    integer(I4P), allocatable :: pairs(:,:)             !< Crossing pairs (check_input).
+   type(piece_map_2d_t)     :: mp                    !< Piece map of the refinement (issue #104).
+   logical,      allocatable :: meas_c(:), ru(:,:), rv(:,:) !< Cells integrated, faces replaced (refine).
+   real(R8P)                :: vmax                  !< Largest rigid-field speed (error_estimate).
+   logical                  :: rfn, flows            !< Refine; face outflows needed.
    type(curve_object)       :: ce(2)                 !< Copies at the two poses.
    type(cut_cells_2d_t)     :: k0, k1                !< Their cut cells (host).
    type(cut_cells_2d_blocks_t) :: kb                 !< Their cut cells (device, one call).
@@ -348,8 +364,9 @@ contains
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
+   rfn = .false. ; if (present(refine)) rfn = refine
    if (present(poses)) then
-      if (size(poses) /= n .or. present(map)) then
+      if (size(poses) /= n .or. present(map) .or. rfn) then
          if (present(status)) status = STATUS_INVALID_INPUT
          return
       endif
@@ -374,6 +391,9 @@ contains
       !$acc update host(kb%alpha)
       sw%alpha0 = kb%alpha(:, :, 1) ; sw%alpha1 = kb%alpha(:, :, 2)
       call kb%exit_device
+      if (rfn) then ! the refinement needs the end cuts' pieces: on the host, equal to the device's bit for bit
+         call ce(1)%cut_cells(x, y, k0) ; call ce(2)%cut_cells(x, y, k1)
+      endif
    else
       call ce(1)%cut_cells(x, y, k0) ; call ce(2)%cut_cells(x, y, k1)
       sw%alpha0 = k0%alpha ; sw%alpha1 = k1%alpha
@@ -395,7 +415,8 @@ contains
    endif
    screw = .not. present(poses)
    allocate(res(nx, ny)) ; res = 0._R8P
-   if (present(map)) allocate(fou(nx + 1, ny), fov(nx, ny + 1))
+   flows = present(map) .or. rfn
+   if (flows) allocate(fou(nx + 1, ny), fov(nx, ny + 1))
    if (translation) then
       sw%exact = .true.
       call faces_translation_2d(ce(1), d, x, y, sw%face_u, sw%face_v, sw%evaluations)
@@ -415,7 +436,7 @@ contains
          call faces_rotation_2d(curve, pose0, pose1, x, y, sw%face_u, sw%face_v, res, sw%evaluations, sw%exact)
       endif
    else
-      if (present(map)) then ! no node poses with a map
+      if (flows) then ! no node poses with a map or refine
          call faces_gauss_2d(curve, pose0, pose1, x, y, n, sw%face_u, sw%face_v, res, fou=fou, fov=fov)
       else
          call faces_gauss_2d(curve, pose0, pose1, x, y, n, sw%face_u, sw%face_v, res, poses)
@@ -424,7 +445,21 @@ contains
       if (screw) then
          allocate(fu2(nx + 1, ny), fv2(nx, ny + 1), fl2(nx, ny))
          call faces_gauss_2d(curve, pose0, pose1, x, y, 2_I4P * n, fu2, fv2, fl2)
-         sw%error_estimate = max(maxval(abs(fu2 - sw%face_u)), maxval(abs(fv2 - sw%face_v)))
+         if (rfn) then ! event cells per event interval (issue #104)
+            call piece_map_2d_build(curve, ce(1), ce(2), pose0, pose1, x, y, k0, k1, sw, fou, fov, MAP_GAUSS, n, mp, &
+                                    all_meas=.true., measured=meas_c)
+            allocate(ru(nx + 1, ny), rv(nx, ny + 1))
+            call refine_faces_2d(mp, meas_c, nx, ny, sw%face_u, sw%face_v, fou, fov, ru, rv)
+            do j = 1_I4P, ny
+               do i = 1_I4P, nx
+                  res(i, j) = fou(i + 1, j) - fou(i, j) + fov(i, j + 1) - fov(i, j)
+               enddo
+            enddo
+            sw%error_estimate = max(maxval(abs(fu2 - sw%face_u), mask=.not. ru), &
+                                    maxval(abs(fv2 - sw%face_v), mask=.not. rv), 0._R8P)
+         else
+            sw%error_estimate = max(maxval(abs(fu2 - sw%face_u)), maxval(abs(fv2 - sw%face_v)))
+         endif
       else
          res = 0._R8P
       endif
@@ -436,7 +471,14 @@ contains
          if (screw) sw%residual(i, j) = sw%swept(i, j) + res(i, j)
       enddo
    enddo
-   if (present(map)) then
+   if (screw .and. .not. translation .and. .not. (rotation_exact .and. dth /= 0._R8P)) then ! the Gauss path (#104)
+      vmax = abs(dth) * (maxval(abs([x, y])) + norm2(pose0%t) + norm2(d)) + norm2(d)
+      if (vmax > 0._R8P) sw%error_estimate = max(sw%error_estimate, maxval(abs(sw%residual)) / vmax)
+   endif
+   if (rfn .and. present(map)) then
+      call refine_map_2d(mp, meas_c, sw, fou, fov)
+      map = mp
+   elseif (present(map)) then
       if (translation) then
          call piece_map_2d_build(curve, ce(1), ce(2), pose0, pose1, x, y, k0, k1, sw, fou, fov, MAP_TRANSLATION, n, map)
       elseif (screw .and. rotation_exact .and. dth /= 0._R8P) then
@@ -1205,7 +1247,7 @@ contains
    enddo
    endsubroutine faces_gauss_2d
 
-   subroutine piece_map_2d_build(curve, c0, c1, pose0, pose1, x, y, k0, k1, sw, fou, fov, path, nq, map)
+   subroutine piece_map_2d_build(curve, c0, c1, pose0, pose1, x, y, k0, k1, sw, fou, fov, path, nq, map, all_meas, measured)
    !< The piece map of the step (issue #102; `piece_map_2d_t`), from the end-pose cuts k0, k1 of the copies c0, c1.
    !<
    !< 1. Candidates: the cells that a segment can meet during the step (its endpoints' paths, boxed per sub-step with
@@ -1220,6 +1262,8 @@ contains
    !< 3. Measures: one track takes the cell's `sw` values and face outflows (fou, fov); several tracks integrate their
    !<    face parts on the cell's event intervals (`map_measures`).
    !< 4. CSR fill in cell order.
+   !< `all_meas` (issue #104, `refine`): every evaluated cell integrates its tracks per event interval, one track included
+   !< (a single-track cell whose integration fails keeps the `sw` values); `measured` flags those cells (cell order).
    type(curve_object),     intent(in)  :: curve        !< Curve (body frame).
    type(curve_object),     intent(in)  :: c0, c1       !< Copies at pose0 and pose1 (`move`).
    type(rigid_pose_2d_t),  intent(in)  :: pose0, pose1 !< End poses.
@@ -1231,14 +1275,19 @@ contains
    integer(I4P),           intent(in)  :: path         !< MAP_TRANSLATION, MAP_ROTATION or MAP_GAUSS.
    integer(I4P),           intent(in)  :: nq           !< Gauss nodes (MAP_GAUSS).
    type(piece_map_2d_t),   intent(out) :: map          !< Piece map.
+   logical,      optional,   intent(in)  :: all_meas   !< Integrate every evaluated cell (issue #104).
+   logical, allocatable, optional, intent(out) :: measured(:) !< Cells integrated per event interval [nx ny].
    type(map_ctx_t)           :: mc                     !< State.
    integer(I4P), allocatable :: cstart(:), cseg(:)     !< Local segments of every cell.
    integer(I4P), allocatable :: ntr(:), ckind(:)       !< Tracks and kind (0 trivial, 1 evaluated, -1 untrusted) per cell.
    integer(I4P), allocatable :: otr(:), ntn(:)         !< Track (in its cell) of every old and new piece.
    integer(I4P), allocatable :: moff(:), oc(:), nc(:), fo(:), fn(:) !< Work.
    real(R8P),    allocatable :: meas(:,:), mloc(:,:)   !< Per-track measures of the multi-track cells.
+   integer(I4P), allocatable :: so(:), sn(:)           !< Saved tracks of a cell's pieces (all_meas).
    integer(I4P)              :: nx, ny, ncell, c, i, j, nt, kind, nev, tot, t, p, a0, a1, b0, b1 !< Work.
+   logical                   :: allm                   !< all_meas.
 
+   allm = .false. ; if (present(all_meas)) allm = all_meas
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; ncell = nx * ny
    map%nx = nx ; map%ny = ny ; map%np0 = k0%np ; map%np1 = k1%np
    call map_context(curve, c0, c1, pose0, pose1, x, y, path, nq, mc)
@@ -1260,7 +1309,7 @@ contains
    ! the multi-track cells again, with their per-track measures
    tot = 0_I4P ; moff = 0_I4P
    do c = 1_I4P, ncell
-      if (ckind(c) == 1_I4P .and. ntr(c) >= 2_I4P) then
+      if (ckind(c) == 1_I4P .and. (ntr(c) >= 2_I4P .or. allm)) then
          moff(c) = tot + 1_I4P ; tot = tot + ntr(c)
       endif
    enddo
@@ -1271,15 +1320,19 @@ contains
          if (moff(c) == 0_I4P) cycle
          a0 = k0%first_piece(i, j) ; a1 = a0 + k0%pieces(i, j) - 1_I4P
          b0 = k1%first_piece(i, j) ; b1 = b0 + k1%pieces(i, j) - 1_I4P
+         so = otr(a0:a1) ; sn = ntn(b0:b1)
          call map_cell(mc, curve, c0, i, j, x, y, k0, k1, cseg(cstart(c):cstart(c + 1) - 1_I4P), .true., kind, nt, &
                        otr(a0:a1), ntn(b0:b1), mloc, nev)
          if (kind == 1_I4P .and. nt == ntr(c)) then
             meas(:, moff(c):moff(c) + nt - 1_I4P) = mloc(:, 1:nt)
+         elseif (ntr(c) == 1_I4P .and. allm) then ! one track (all_meas): keep it with the sw values
+            otr(a0:a1) = so ; ntn(b0:b1) = sn ; moff(c) = 0_I4P
          else
             ckind(c) = -1_I4P ; moff(c) = 0_I4P
          endif
       enddo
    enddo
+   if (present(measured)) measured = moff > 0_I4P
    ! untrusted cells: one track with every piece
    allocate(map%tracks(nx, ny), map%first_track(nx, ny))
    nt = 0_I4P
@@ -1350,6 +1403,135 @@ contains
    map%exact = mc%exact ; map%skipped_nodes = mc%skipped
    map%contact_cells = mc%contacts ; map%narrow_cells = mc%resolved
    endsubroutine piece_map_2d_build
+
+   subroutine refine_faces_2d(map, measured, nx, ny, fu, fv, fou, fov, ru, rv)
+   !< The Gauss path's faces next to the wall integrated per event interval (issue #104, `refine`): every cell the map
+   !< integrated (`measured`, `piece_map_2d_build(all_meas=)`) gives its four faces and their outflows as the sums
+   !< over its tracks; a face between two such cells takes the value of the low one. Every face with an event inside the
+   !< step belongs to such a cell (an event on a face is an event of both its cells); the others keep their Gauss
+   !< values, accurate for an integrand without kinks. ru, rv flag the faces replaced.
+   type(piece_map_2d_t), intent(in)    :: map              !< Piece map (all_meas).
+   logical,              intent(in)    :: measured(:)      !< Cells integrated per event interval [nx ny].
+   integer(I4P),         intent(in)    :: nx, ny           !< Cells.
+   real(R8P),            intent(inout) :: fu(:,:), fv(:,:) !< Time-averaged fluid lengths.
+   real(R8P),            intent(inout) :: fou(:,:), fov(:,:) !< Time-integrated outflows in +u / +v.
+   logical,              intent(out)   :: ru(:,:), rv(:,:) !< Faces replaced.
+   real(R8P)                           :: fl(4), ol(4)     !< Sums over a cell's tracks.
+   integer(I4P)                        :: i, j, c, t       !< Work.
+
+   ru = .false. ; rv = .false.
+   do j = 1_I4P, ny
+      do i = 1_I4P, nx
+         c = i + (j - 1_I4P) * nx
+         if (.not. measured(c)) cycle
+         fl = 0._R8P ; ol = 0._R8P
+         do t = map%first_track(i, j), map%first_track(i, j) + map%tracks(i, j) - 1_I4P
+            fl = fl + map%faces(:, t) ; ol = ol + map%outflow(:, t)
+         enddo
+         fu(i + 1, j) = fl(2) ; fou(i + 1, j) = ol(2) ; ru(i + 1, j) = .true.
+         fv(i, j + 1) = fl(4) ; fov(i, j + 1) = ol(4) ; rv(i, j + 1) = .true.
+         if (i == 1_I4P) then
+            fu(i, j) = fl(1) ; fou(i, j) = -ol(1) ; ru(i, j) = .true.
+         elseif (.not. measured(c - 1_I4P)) then
+            fu(i, j) = fl(1) ; fou(i, j) = -ol(1) ; ru(i, j) = .true.
+         endif
+         if (j == 1_I4P) then
+            fv(i, j) = fl(3) ; fov(i, j) = -ol(3) ; rv(i, j) = .true.
+         elseif (.not. measured(c - nx)) then
+            fv(i, j) = fl(3) ; fov(i, j) = -ol(3) ; rv(i, j) = .true.
+         endif
+      enddo
+   enddo
+   endsubroutine refine_faces_2d
+
+   subroutine refine_map_2d(map, measured, sw, fou, fov)
+   !< The tracks of the cells `refine_faces_2d` did not integrate take the final `sw` values (they were built from the
+   !< Gauss faces): faces, outflows, wall, residual (issue #104).
+   type(piece_map_2d_t),   intent(inout) :: map          !< Piece map.
+   logical,                intent(in)    :: measured(:)  !< Cells integrated per event interval.
+   type(swept_cells_2d_t), intent(in)    :: sw           !< Swept geometry (refined).
+   real(R8P),              intent(in)    :: fou(:,:), fov(:,:) !< Time-integrated outflows in +u / +v (refined).
+   integer(I4P)                          :: i, j, t      !< Work.
+
+   do j = 1_I4P, map%ny
+      do i = 1_I4P, map%nx
+         if (measured(i + (j - 1_I4P) * map%nx)) cycle
+         do t = map%first_track(i, j), map%first_track(i, j) + map%tracks(i, j) - 1_I4P
+            map%faces(:, t) = [sw%face_u(i, j), sw%face_u(i + 1, j), sw%face_v(i, j), sw%face_v(i, j + 1)]
+            map%outflow(:, t) = [-fou(i, j), fou(i + 1, j), -fov(i, j), fov(i, j + 1)]
+            map%wall(:, t) = sw%wall(:, i, j) ; map%residual(t) = sw%residual(i, j)
+         enddo
+      enddo
+   enddo
+   endsubroutine refine_map_2d
+
+   subroutine refine_faces_3d(map, measured, nx, ny, nz, fx, fy, fz, fox, foy, foz, rx, ry, rz)
+   !< The 3-D twin of `refine_faces_2d`: six faces per integrated cell, the low cell's value on a shared face.
+   type(piece_map_3d_t), intent(in)    :: map                       !< Piece map (all_meas).
+   logical,              intent(in)    :: measured(:)               !< Cells integrated per event interval [nx ny nz].
+   integer(I4P),         intent(in)    :: nx, ny, nz                !< Cells.
+   real(R8P),            intent(inout) :: fx(:,:,:), fy(:,:,:), fz(:,:,:) !< Time-averaged fluid areas.
+   real(R8P),            intent(inout) :: fox(:,:,:), foy(:,:,:), foz(:,:,:) !< Time-integrated outflows in +axis.
+   logical,              intent(out)   :: rx(:,:,:), ry(:,:,:), rz(:,:,:) !< Faces replaced.
+   real(R8P)                           :: fl(6), ol(6)              !< Sums over a cell's tracks.
+   integer(I4P)                        :: i, j, k, c, t             !< Work.
+
+   rx = .false. ; ry = .false. ; rz = .false.
+   do k = 1_I4P, nz
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx
+            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+            if (.not. measured(c)) cycle
+            fl = 0._R8P ; ol = 0._R8P
+            do t = map%first_track(i, j, k), map%first_track(i, j, k) + map%tracks(i, j, k) - 1_I4P
+               fl = fl + map%faces(:, t) ; ol = ol + map%outflow(:, t)
+            enddo
+            fx(i + 1, j, k) = fl(2) ; fox(i + 1, j, k) = ol(2) ; rx(i + 1, j, k) = .true.
+            fy(i, j + 1, k) = fl(4) ; foy(i, j + 1, k) = ol(4) ; ry(i, j + 1, k) = .true.
+            fz(i, j, k + 1) = fl(6) ; foz(i, j, k + 1) = ol(6) ; rz(i, j, k + 1) = .true.
+            if (i == 1_I4P) then
+               fx(i, j, k) = fl(1) ; fox(i, j, k) = -ol(1) ; rx(i, j, k) = .true.
+            elseif (.not. measured(c - 1_I4P)) then
+               fx(i, j, k) = fl(1) ; fox(i, j, k) = -ol(1) ; rx(i, j, k) = .true.
+            endif
+            if (j == 1_I4P) then
+               fy(i, j, k) = fl(3) ; foy(i, j, k) = -ol(3) ; ry(i, j, k) = .true.
+            elseif (.not. measured(c - nx)) then
+               fy(i, j, k) = fl(3) ; foy(i, j, k) = -ol(3) ; ry(i, j, k) = .true.
+            endif
+            if (k == 1_I4P) then
+               fz(i, j, k) = fl(5) ; foz(i, j, k) = -ol(5) ; rz(i, j, k) = .true.
+            elseif (.not. measured(c - nx * ny)) then
+               fz(i, j, k) = fl(5) ; foz(i, j, k) = -ol(5) ; rz(i, j, k) = .true.
+            endif
+         enddo
+      enddo
+   enddo
+   endsubroutine refine_faces_3d
+
+   subroutine refine_map_3d(map, measured, sw, fox, foy, foz)
+   !< The 3-D twin of `refine_map_2d`.
+   type(piece_map_3d_t),   intent(inout) :: map          !< Piece map.
+   logical,                intent(in)    :: measured(:)  !< Cells integrated per event interval.
+   type(swept_cells_3d_t), intent(in)    :: sw           !< Swept geometry (refined).
+   real(R8P),              intent(in)    :: fox(:,:,:), foy(:,:,:), foz(:,:,:) !< Outflows in +axis (refined).
+   integer(I4P)                          :: i, j, k, t   !< Work.
+
+   do k = 1_I4P, map%nz
+      do j = 1_I4P, map%ny
+         do i = 1_I4P, map%nx
+            if (measured(i + map%nx * ((j - 1_I4P) + map%ny * (k - 1_I4P)))) cycle
+            do t = map%first_track(i, j, k), map%first_track(i, j, k) + map%tracks(i, j, k) - 1_I4P
+               map%faces(:, t) = [sw%face_x(i, j, k), sw%face_x(i + 1, j, k), sw%face_y(i, j, k), sw%face_y(i, j + 1, k), &
+                                  sw%face_z(i, j, k), sw%face_z(i, j, k + 1)]
+               map%outflow(:, t) = [-fox(i, j, k), fox(i + 1, j, k), -foy(i, j, k), foy(i, j + 1, k), -foz(i, j, k), &
+                                    foz(i, j, k + 1)]
+               map%wall(:, t) = sw%wall(:, i, j, k) ; map%residual(t) = sw%residual(i, j, k)
+            enddo
+         enddo
+      enddo
+   enddo
+   endsubroutine refine_map_3d
 
    subroutine map_context(curve, c0, c1, pose0, pose1, x, y, path, nq, mc)
    !< The state of the piece map construction: vertices (body, pose0 and pose1 copies), motion, work arrays.
@@ -1469,7 +1651,7 @@ contains
    subroutine map_cell(mc, curve, c0, i, j, x, y, k0, k1, lseg, with_meas, kind, nt, otr, ntn, meas, nev)
    !< The tracks of cell (i, j) (see `piece_map_2d_build`, step 2): kind 0 (trivial: no evaluation), 1 (evaluated) or
    !< -1 (untrusted); nt tracks; the track of each of its old pieces (otr, in k0's order) and new pieces (ntn); with
-   !< `with_meas` and nt >= 2, the per-track time integrals meas(1:4) of the faces' fluid lengths and meas(5:8) of
+   !< `with_meas` and nt >= 1, the per-track time integrals meas(1:4) of the faces' fluid lengths and meas(5:8) of
    !< their rigid-field outflows (`map_measures`; kind -1 if a face part could not be assigned).
    !<
    !< The events split [0, 1] into intervals; one narrower than EVENT_GAP (two events computed apart by round-off, or
@@ -1489,7 +1671,7 @@ contains
    integer(I4P),              intent(out)   :: nt         !< Tracks.
    integer(I4P),              intent(out)   :: otr(:)     !< Track of each old piece of the cell.
    integer(I4P),              intent(out)   :: ntn(:)     !< Track of each new piece of the cell.
-   real(R8P),    allocatable, intent(out)   :: meas(:,:)  !< Per-track measures [8, nt] (with_meas, nt >= 2).
+   real(R8P),    allocatable, intent(out)   :: meas(:,:)  !< Per-track measures [8, nt] (with_meas, nt >= 1).
    integer(I4P),              intent(out)   :: nev        !< Evaluations.
    type(cell_eval_t), allocatable :: ev(:)                 !< Evaluations: pose0, the wide intervals' middles, pose1.
    integer(I4P),      allocatable :: lg(:), lnx(:), nstart(:), lstart(:), lkey(:), lpiece(:), par(:), comp(:) !< Work.
@@ -1592,7 +1774,7 @@ contains
    enddo
    call track_components(ne, nstart, lstart, nk, lkey, lpiece, par, comp, nt)
    otr = comp(nstart(1):nstart(2) - 1_I4P) ; ntn = comp(nstart(ne):nstart(ne + 1) - 1_I4P)
-   if (.not. (with_meas .and. nt >= 2_I4P)) return
+   if (.not. (with_meas .and. nt >= 1_I4P)) return
    call map_measures(mc, curve, c0, x0, x1, y0, y1, lg, lnx, b, nb, eref, ealt, small, ev, nstart, comp, nt, meas, ok)
    if (.not. ok) kind = -1_I4P
    endsubroutine map_cell
@@ -2025,7 +2207,7 @@ contains
    enddo
    endfunction piece_track
 
-   subroutine piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, path, nq, map)
+   subroutine piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, path, nq, map, all_meas, measured)
    !< The 3-D piece map of the step (issue #102 step 2; `piece_map_3d_t`), from the end-pose cuts k0, k1 of the copies
    !< of `surface` moved to pose0 (s0) and pose1; the 3-D twin of `piece_map_2d_build`.
    !<
@@ -2053,14 +2235,19 @@ contains
    integer(I4P),             intent(in)  :: path           !< MAP_TRANSLATION, MAP_ROTATION or MAP_GAUSS.
    integer(I4P),             intent(in)  :: nq             !< Gauss nodes (MAP_GAUSS).
    type(piece_map_3d_t),     intent(out) :: map            !< Piece map.
+   logical,      optional,   intent(in)  :: all_meas     !< Integrate every evaluated cell (issue #104).
+   logical, allocatable, optional, intent(out) :: measured(:) !< Cells integrated per event interval [nx ny nz].
    type(map3_ctx_t)          :: mc                         !< State.
    integer(I4P), allocatable :: cstart(:), cfac(:)         !< Facets of every cell.
    integer(I4P), allocatable :: ntr(:), ckind(:)           !< Tracks and kind (0 trivial, 1 evaluated, -1 untrusted).
    integer(I4P), allocatable :: otr(:), ntn(:)             !< Track (in its cell) of every old and new piece.
    integer(I4P), allocatable :: moff(:), oc(:), nc(:), fo(:), fn(:) !< Work.
    real(R8P),    allocatable :: meas(:,:), mloc(:,:)       !< Per-track measures of the multi-track cells.
+   integer(I4P), allocatable :: so(:), sn(:)               !< Saved tracks of a cell's pieces (all_meas).
    integer(I4P)              :: nx, ny, nz, ncell, c, i, j, k, nt, kind, nev, tot, t, p, a0, a1, b0, b1 !< Work.
+   logical                   :: allm                       !< all_meas.
 
+   allm = .false. ; if (present(all_meas)) allm = all_meas
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
    ncell = nx * ny * nz
    map%nx = nx ; map%ny = ny ; map%nz = nz ; map%np0 = k0%np ; map%np1 = k1%np
@@ -2085,7 +2272,7 @@ contains
    ! the multi-track cells again, with their per-track measures
    tot = 0_I4P ; moff = 0_I4P
    do c = 1_I4P, ncell
-      if (ckind(c) == 1_I4P .and. ntr(c) >= 2_I4P) then
+      if (ckind(c) == 1_I4P .and. (ntr(c) >= 2_I4P .or. allm)) then
          moff(c) = tot + 1_I4P ; tot = tot + ntr(c)
       endif
    enddo
@@ -2097,16 +2284,20 @@ contains
             if (moff(c) == 0_I4P) cycle
             a0 = k0%first_piece(i, j, k) ; a1 = a0 + max(0_I4P, k0%pieces(i, j, k)) - 1_I4P
             b0 = k1%first_piece(i, j, k) ; b1 = b0 + max(0_I4P, k1%pieces(i, j, k)) - 1_I4P
+            so = otr(a0:a1) ; sn = ntn(b0:b1)
             call map3_cell(mc, surface, s0, i, j, k, x, y, z, k0, k1, cfac(cstart(c):cstart(c + 1) - 1_I4P), .true., &
                            kind, nt, otr(a0:a1), ntn(b0:b1), mloc, nev)
             if (kind == 1_I4P .and. nt == ntr(c)) then
                meas(:, moff(c):moff(c) + nt - 1_I4P) = mloc(:, 1:nt)
+            elseif (ntr(c) == 1_I4P .and. allm) then ! one track (all_meas): keep it with the sw values
+               otr(a0:a1) = so ; ntn(b0:b1) = sn ; moff(c) = 0_I4P
             else
                ckind(c) = -1_I4P ; moff(c) = 0_I4P
             endif
          enddo
       enddo
    enddo
+   if (present(measured)) measured = moff > 0_I4P
    ! untrusted cells: one track with every piece
    allocate(map%tracks(nx, ny, nz), map%first_track(nx, ny, nz))
    nt = 0_I4P
@@ -2403,7 +2594,7 @@ contains
    subroutine map3_cell(mc, surface, s0, i, j, k, x, y, z, k0, k1, lf, with_meas, kind, nt, otr, ntn, meas, nev)
    !< The tracks of cell (i, j, k) (see `piece_map_3d_build`, step 2): kind 0 (trivial: no evaluation), 1 (evaluated) or
    !< -1 (untrusted); nt tracks; the track of each of its old pieces (otr, in k0's order) and new pieces (ntn); with
-   !< `with_meas` and nt >= 2, the per-track time integrals meas(1:6) of the faces' fluid areas and meas(7:12) of their
+   !< `with_meas` and nt >= 1, the per-track time integrals meas(1:6) of the faces' fluid areas and meas(7:12) of their
    !< outward rigid-field outflows (`map3_measures`; kind -1 if a face part could not be assigned). Intervals between
    !< events narrower than EVENT_GAP are not evaluated (their events act as one), as `map_cell`; a cell with an
    !< uncertified contact (a corner grazing a facet, a vertex grazing a face plane or an edge a cell edge, under a
@@ -2419,7 +2610,7 @@ contains
    integer(I4P),              intent(out)   :: nt               !< Tracks.
    integer(I4P),              intent(out)   :: otr(:)           !< Track of each old piece of the cell.
    integer(I4P),              intent(out)   :: ntn(:)           !< Track of each new piece of the cell.
-   real(R8P),    allocatable, intent(out)   :: meas(:,:)        !< Per-track measures [12, nt] (with_meas, nt >= 2).
+   real(R8P),    allocatable, intent(out)   :: meas(:,:)        !< Per-track measures [12, nt] (with_meas, nt >= 1).
    integer(I4P),              intent(out)   :: nev              !< Evaluations.
    type(cell_eval3_t), allocatable :: ev(:)                     !< Evaluations: pose0, the wide intervals' middles, pose1.
    integer(I4P),       allocatable :: nstart(:), lstart(:), lkey(:), lpiece(:), par(:), comp(:) !< Work.
@@ -2527,7 +2718,7 @@ contains
    enddo
    call track_components(ne, nstart, lstart, nk, lkey, lpiece, par, comp, nt)
    otr = comp(nstart(1):nstart(2) - 1_I4P) ; ntn = comp(nstart(ne):nstart(ne + 1) - 1_I4P)
-   if (.not. (with_meas .and. nt >= 2_I4P)) return
+   if (.not. (with_meas .and. nt >= 1_I4P)) return
    call map3_measures(mc, surface, s0, c0, c1, lf, b, nb, eref, ealt, small, ev, nstart, comp, nt, meas, cert)
    if (.not. cert) kind = -1_I4P
    endsubroutine map3_cell
@@ -3206,7 +3397,7 @@ contains
    enddo
    endfunction piece_track3
 
-   subroutine swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, check_input, map)
+   subroutine swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, check_input, map, refine)
    !< Swept geometry of `surface` between `pose0` and `pose1` on the block with cell edges x(nx+1),
    !< y(ny+1), z(nz+1) (issue #41 step 5): volumes from `cut_cells_3d` at the two poses; face apertures
    !< exact for a pure translation and, since issue #69, for the screw motion with a rotation (`exact`, default
@@ -3218,6 +3409,8 @@ contains
    !< per-track volumes, face apertures and outflows, wall and residual (see `piece_map_3d_build`). It needs the screw
    !< motion: with `poses`, `status = STATUS_INVALID_INPUT` and nothing is computed. Without `map` every other output is
    !< unchanged.
+   !< `error_estimate` and `refine` (issue #104): as `swept_cells_2d` (the residual is a volume, the face change an area).
+   !< Measured with `refine` (32^3, 0.5-2 cells per step): 2.7-22 times the Gauss call, about the exact path's cost.
    type(surface_stl_object), intent(in)            :: surface  !< Surface (body frame).
    type(rigid_pose_t),       intent(in)            :: pose0    !< Pose at the start.
    type(rigid_pose_t),       intent(in)            :: pose1    !< Pose at the end.
@@ -3230,12 +3423,13 @@ contains
                                                                   !< (`find_self_intersections`; see swept_cells_2d).
    integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    type(piece_map_3d_t),     intent(out), optional :: map      !< Piece map of the step (issue #102 step 2).
+   logical,                  intent(in),  optional :: refine   !< Gauss path: event cells per event interval (#104).
 
    call swept_3d_run(surface, pose0, pose1, x, y, z, sw, .false., SWEPT_CHUNK_CELLS, nq, poses, exact, status, check_input, &
-                     map)
+                     map, refine)
    endsubroutine swept_cells_3d
 
-   subroutine swept_cells_3d_device(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, chunk_cells)
+   subroutine swept_cells_3d_device(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, chunk_cells, refine)
    !< `swept_cells_3d` on the device (OpenACC, issue #100 step 4): the same `sw`, bit for bit, on every path.
    !< - End poses: `cut_cells_3d_device(..., alpha_only=.true.)` on the moved copies `swept_cells_3d` cuts.
    !< - Exact translation: per axis, the host computes every plane's breakpoints (`plane_breakpoints`, unchanged) and
@@ -3255,6 +3449,8 @@ contains
    !< cells refuse it. No `check_input` (call `swept_cells_3d` or `find_self_intersections` for that).
    !< `chunk_cells` (default 2^22) bounds the section cells of one device launch set and the face sums of one plane
    !< group of the rotation held on the host: smaller uses less memory (and more launches), with the same bits.
+   !< `refine` (issue #104): the end poses' full cuts (`cut_cells_3d_device` without `alpha_only`), then the host
+   !< refinement of `swept_cells_3d`.
    type(surface_stl_object), intent(in)            :: surface  !< Surface (body frame).
    type(rigid_pose_t),       intent(in)            :: pose0    !< Pose at the start.
    type(rigid_pose_t),       intent(in)            :: pose1    !< Pose at the end.
@@ -3265,13 +3461,15 @@ contains
    logical,                  intent(in),  optional :: exact    !< Exact paths (default .true.).
    integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    integer(I4P),             intent(in),  optional :: chunk_cells !< Section cells per launch set (default 2^22).
+   logical,                  intent(in),  optional :: refine   !< Gauss path: event cells per event interval (#104).
    integer(I4P)                                    :: ck       !< Chunk.
 
    ck = SWEPT_CHUNK_CELLS ; if (present(chunk_cells)) ck = max(1_I4P, chunk_cells)
-   call swept_3d_run(surface, pose0, pose1, x, y, z, sw, .true., ck, nq, poses, exact, status)
+   call swept_3d_run(surface, pose0, pose1, x, y, z, sw, .true., ck, nq, poses, exact, status, refine=refine)
    endsubroutine swept_cells_3d_device
 
-   subroutine swept_3d_run(surface, pose0, pose1, x, y, z, sw, dev, chunk, nq, poses, exact, status, check_input, map)
+   subroutine swept_3d_run(surface, pose0, pose1, x, y, z, sw, dev, chunk, nq, poses, exact, status, check_input, map, &
+                           refine)
    !< The work of `swept_cells_3d` (dev = .false.) and `swept_cells_3d_device` (dev = .true.): the same operations in
    !< the same order, the cut cells and face sums on the device with dev. The piece map (`map`, host path only) is built
    !< last, from the end-pose cuts and the face outflows (an extra output of the face routines, their arithmetic as is).
@@ -3288,7 +3486,12 @@ contains
    logical,                  intent(in),  optional :: check_input !< Check the surface for self-intersections.
    integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    type(piece_map_3d_t),     intent(out), optional :: map      !< Piece map of the step (issue #102 step 2).
+   logical,                  intent(in),  optional :: refine   !< Gauss path: event cells per event interval (#104).
    type(surface_stl_object) :: s0                 !< Moved copy.
+   type(piece_map_3d_t)     :: mp                 !< Piece map of the refinement (issue #104).
+   logical,     allocatable :: meas_c(:), rx(:,:,:), ry(:,:,:), rz(:,:,:) !< Cells integrated, faces replaced.
+   real(R8P)                :: vmax, ax(3), ang   !< Largest rigid-field speed; rotation of the step.
+   logical                  :: rfn, flows         !< Refine; face outflows needed.
    type(intersection_pair_t), allocatable :: pairs(:) !< Crossing facet pairs (check_input).
    real(R8P)                :: d(3)               !< Displacement.
    logical                  :: translation        !< Exact path.
@@ -3310,8 +3513,9 @@ contains
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
+   rfn = .false. ; if (present(refine)) rfn = refine
    if (present(poses)) then
-      if (size(poses) /= n .or. present(map)) then
+      if (size(poses) /= n .or. present(map) .or. rfn) then
          if (present(status)) status = STATUS_INVALID_INPUT
          return
       endif
@@ -3329,9 +3533,9 @@ contains
       endif
    endif
    if (dev) then ! alpha alone (issue #100 step 4), the same copies
-      s0 = surface ; call s0%move(pose1) ; call cut_cells_3d_device(s0, x, y, z, k1, st, alpha_only=.true.)
+      s0 = surface ; call s0%move(pose1) ; call cut_cells_3d_device(s0, x, y, z, k1, st, alpha_only=.not. rfn)
       if (st == STATUS_OK) then
-         s0 = surface ; call s0%move(pose0) ; call cut_cells_3d_device(s0, x, y, z, k0, st, alpha_only=.true.)
+         s0 = surface ; call s0%move(pose0) ; call cut_cells_3d_device(s0, x, y, z, k0, st, alpha_only=.not. rfn)
       endif
       if (st /= STATUS_OK) then
          if (present(status)) status = STATUS_INVALID_INPUT
@@ -3357,7 +3561,8 @@ contains
    if (present(exact)) then
       translation = translation .and. exact ; rotation_exact = rotation_exact .and. exact
    endif
-   if (want_map) allocate(fox(nx + 1, ny, nz), foy(nx, ny + 1, nz), foz(nx, ny, nz + 1))
+   flows = want_map .or. rfn
+   if (flows) allocate(fox(nx + 1, ny, nz), foy(nx, ny + 1, nz), foz(nx, ny, nz + 1))
    if (rotation_exact) then
       ! exact rotation (issue #69): certified breakpoints per grid plane, Gauss doubled to round-off on every piece
       if (want_map) then
@@ -3388,7 +3593,7 @@ contains
          fox = d(1) * sw%face_x ; foy = d(2) * sw%face_y ; foz = d(3) * sw%face_z
       endif
    else
-      if (want_map) then
+      if (flows) then
          call faces_gauss_3d(surface, pose0, pose1, x, y, z, n, sw%face_x, sw%face_y, sw%face_z, flux, dev, poses, fox, foy, &
                              foz)
       else
@@ -3399,7 +3604,24 @@ contains
    if (.not. present(poses) .and. .not. translation .and. .not. rotation_exact) then
       allocate(fx2(nx + 1, ny, nz), fy2(nx, ny + 1, nz), fz2(nx, ny, nz + 1), fl2(nx, ny, nz))
       call faces_gauss_3d(surface, pose0, pose1, x, y, z, 2_I4P * n, fx2, fy2, fz2, fl2, dev)
-      sw%error_estimate = max(maxval(abs(fx2 - sw%face_x)), maxval(abs(fy2 - sw%face_y)), maxval(abs(fz2 - sw%face_z)))
+      if (rfn) then ! event cells per event interval (issue #104), on the host for both paths
+         call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_GAUSS, n, mp, &
+                                 all_meas=.true., measured=meas_c)
+         allocate(rx(nx + 1, ny, nz), ry(nx, ny + 1, nz), rz(nx, ny, nz + 1))
+         call refine_faces_3d(mp, meas_c, nx, ny, nz, sw%face_x, sw%face_y, sw%face_z, fox, foy, foz, rx, ry, rz)
+         do k = 1_I4P, nz
+            do j = 1_I4P, ny
+               do i = 1_I4P, nx
+                  flux(i, j, k) = fox(i + 1, j, k) - fox(i, j, k) + foy(i, j + 1, k) - foy(i, j, k) + &
+                                  foz(i, j, k + 1) - foz(i, j, k)
+               enddo
+            enddo
+         enddo
+         sw%error_estimate = max(maxval(abs(fx2 - sw%face_x), mask=.not. rx), maxval(abs(fy2 - sw%face_y), mask=.not. ry), &
+                                 maxval(abs(fz2 - sw%face_z), mask=.not. rz), 0._R8P)
+      else
+         sw%error_estimate = max(maxval(abs(fx2 - sw%face_x)), maxval(abs(fy2 - sw%face_y)), maxval(abs(fz2 - sw%face_z)))
+      endif
    endif
    do k = 1_I4P, nz
       do j = 1_I4P, ny
@@ -3411,7 +3633,16 @@ contains
          enddo
       enddo
    enddo
-   if (want_map) then
+   if (.not. present(poses) .and. .not. translation .and. .not. rotation_exact) then ! the Gauss path (issue #104)
+      call pose_log_3d(pose0, pose1, ax, ang)
+      d = pose1%t - pose0%t
+      vmax = abs(ang) * (maxval(abs([x, y, z])) + norm2(pose0%t) + norm2(d)) + norm2(d)
+      if (vmax > 0._R8P) sw%error_estimate = max(sw%error_estimate, maxval(abs(sw%residual)) / vmax)
+   endif
+   if (rfn .and. want_map) then
+      call refine_map_3d(mp, meas_c, sw, fox, foy, foz)
+      map = mp
+   elseif (want_map) then
       if (translation) then
          call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_TRANSLATION, n, map)
       elseif (rotation_exact) then

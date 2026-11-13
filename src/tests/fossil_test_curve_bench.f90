@@ -604,7 +604,8 @@ contains
    !< `swept_cells_2d_device` (issue #100 step 4: the end-pose cut cells on the device) against `swept_cells_2d`, every
    !< output bitwise (`swept_twin_mismatches`): with n >= 256 the 1024-gon ellipse of `chain_case` on n^2 cells,
    !< translated by (1.7, 0.6) cells (exact), rotated by 2 degrees about the block centre by Gauss-Legendre
-   !< (`exact=.false.`, nq = 4) and with the node poses given, and the NACA 0012 (1022 vertices) rotated on (n/4)^2 cells
+   !< (`exact=.false.`, nq = 4; also with `refine`, issue #104) and with the node poses given, and the NACA 0012 (1022
+   !< vertices) rotated on (n/4)^2 cells
    !< (exact rotation, the costly path); below (the regression run, within its budget) a 128-gon on (n/2)^2 cells and a
    !< 254-vertex NACA 0012 on 8^2. With n >= 256 a timing table: host and device calls, best of 3, translation and
    !< Gauss at n^2 and (4n)^2 (at most 1024^2).
@@ -640,6 +641,7 @@ contains
    pt = pose_2d(0._R8P, [1.7_R8P * h, 0.6_R8P * h])
    bad = swept_twin_mismatches(ce, p0, pt, x, y)
    bad = bad + swept_twin_mismatches(ce, p0, pr, x, y, nq=4_I4P, exact=.false.)
+   bad = bad + swept_twin_mismatches(ce, p0, pr, x, y, nq=4_I4P, exact=.false., refine=.true.)
    bad = bad + swept_twin_mismatches(ce, p0, pr, x, y, nq=4_I4P, poses=pq)
    call grid_edges(lo, hi, mn, x, y)
    bad = bad + swept_twin_mismatches(cn, p0, pr, x, y)

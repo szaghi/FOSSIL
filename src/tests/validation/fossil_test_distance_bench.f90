@@ -1083,6 +1083,7 @@ contains
       do k = 1, 4
          mismatch = mismatch + swept_compare(sb(b), gx, gy, gz, k)
       enddo
+      mismatch = mismatch + swept_compare(sb(b), gx, gy, gz, 5_I4P) ! issue #104: Gauss with refine
       call box_grid(sb(b), 64_I4P, gx, gy, gz)
       mismatch = mismatch + swept_compare(sb(b), gx, gy, gz, 1_I4P) + swept_compare(sb(b), gx, gy, gz, 3_I4P)
    enddo
@@ -1124,7 +1125,7 @@ contains
 
    function swept_compare(s, gx, gy, gz, path) result(mismatch)
    !< `swept_cells_3d_device` against `swept_cells_3d` on one path (1 exact translation, 2 exact rotation, 3 Gauss
-   !< nq = 4, 4 explicit poses nq = 3), every output bitwise, statuses equal.
+   !< nq = 4, 4 explicit poses nq = 3, 5 Gauss nq = 4 with `refine`, issue #104), every output bitwise, statuses equal.
    type(surface_stl_object), intent(in) :: s            !< Body.
    real(R8P),                intent(in) :: gx(:), gy(:), gz(:) !< Cell edges.
    integer(I4P),             intent(in) :: path         !< Path.
@@ -1143,6 +1144,9 @@ contains
    case (3_I4P)
       call swept_cells_3d(s, p0, p1, gx, gy, gz, sh, nq=4_I4P, exact=.false., status=st)
       call swept_cells_3d_device(s, p0, p1, gx, gy, gz, sd, nq=4_I4P, exact=.false., status=st2)
+   case (5_I4P)
+      call swept_cells_3d(s, p0, p1, gx, gy, gz, sh, nq=4_I4P, exact=.false., status=st, refine=.true.)
+      call swept_cells_3d_device(s, p0, p1, gx, gy, gz, sd, nq=4_I4P, exact=.false., status=st2, refine=.true.)
    case default
       call gauss_legendre_01(3_I4P, sq, wq)
       allocate(pq(3))

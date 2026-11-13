@@ -21,6 +21,9 @@ program fossil_test_swept_2d
 !< - the poses at the Gauss nodes given explicitly (equal to the screw poses) give the same face
 !<   lengths bit for bit; `pose_interpolate` returns the end poses exactly and the mid pose at half
 !<   the angle.
+!< Issue #104, the NACA 0012 pitching on the Gauss path (nq = 4): `error_estimate` times the largest rigid-field speed
+!< bounds the largest residual; with `refine` the cells with events integrate per event interval: the residual at
+!< round-off and the faces equal to the exact path's to 1e-12.
 
 use fossil, only : curve_object, rigid_pose_2d_t, pose_2d, swept_cells_2d_t, swept_cells_2d, STATUS_INVALID_INPUT, STATUS_OK, &
                    pose_interpolate, gauss_legendre_01
@@ -32,9 +35,10 @@ type(curve_object)     :: c
 type(swept_cells_2d_t) :: sw
 real(R8P)              :: x(9), y(7), err, res, d(2), sq(4)
 integer(I4P)           :: i, j, st, st2, st3
-logical                :: ok(8)
+logical                :: ok(9)
 real(R8P), parameter   :: PI = acos(-1._R8P)
-type(swept_cells_2d_t) :: sw2
+type(swept_cells_2d_t) :: sw2, sw3
+real(R8P)              :: est, vmax
 type(rigid_pose_2d_t)  :: p0, p1, pm, pe0, pe1
 type(rigid_pose_2d_t), allocatable :: pq(:)
 real(R8P), allocatable :: sq_(:), wq(:)
@@ -109,6 +113,19 @@ ok(8) = st == STATUS_OK .and. st2 == STATUS_OK .and. all(sw%face_u == sw2%face_u
         all(sw2%residual == 0._R8P) .and. all(pe0%r == p0%r) .and. all(pe0%t == p0%t) .and. &
         all(pe1%r == p1%r) .and. all(pe1%t == p1%t) .and. abs(atan2(pm%r(2, 1), pm%r(1, 1)) - 0.075_R8P) < 1.e-15_R8P
 print '(A,L1)', 'explicit node poses = screw poses bit for bit, interpolation ends exact, mid angle: ', ok(8)
+! 9. issue #104: the estimate bounds the residual; refine: the residual at round-off, the faces as the exact path's
+call swept_cells_2d(c, p0, p1, x, y, sw, nq=4_I4P, exact=.false., status=st)
+call swept_cells_2d(c, p0, p1, x, y, sw2, nq=4_I4P, exact=.false., status=st2, refine=.true.)
+call swept_cells_2d(c, p0, p1, x, y, sw3, status=st3)
+d = p1%t - p0%t
+vmax = 0.15_R8P * (maxval(abs([x, y])) + norm2(p0%t) + norm2(d)) + norm2(d)
+res = maxval(abs(sw%residual)) ; est = sw%error_estimate
+ok(9) = st == STATUS_OK .and. st2 == STATUS_OK .and. st3 == STATUS_OK .and. res > 1.e-6_R8P .and. est * vmax >= res .and. &
+        maxval(abs(sw2%residual)) < 1.e-13_R8P .and. maxval(abs(sw2%face_u - sw3%face_u)) < 1.e-12_R8P .and. &
+        maxval(abs(sw2%face_v - sw3%face_v)) < 1.e-12_R8P
+print '(A,2ES10.2,A,2ES10.2,A,L1)', 'Gauss nq=4: max residual, estimate x vmax ', res, est * vmax, &
+      '; refine: max residual, max face diff vs exact ', maxval(abs(sw2%residual)), &
+      max(maxval(abs(sw2%face_u - sw3%face_u)), maxval(abs(sw2%face_v - sw3%face_v))), '  ok ', ok(9)
 
 print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1

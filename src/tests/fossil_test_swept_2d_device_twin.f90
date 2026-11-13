@@ -9,7 +9,8 @@ program fossil_test_swept_2d_device_twin
 !< - exact translation: an ellipse on a stretched grid, a square moving by exactly one cell (its sides on grid lines at
 !<   both poses: ties), a heptagon translating at a rotated pose;
 !< - exact rotation: the ellipse about an off-centre point, the square about a grid node;
-!< - Gauss-Legendre (`exact=.false.`, nq = 3) on a rotation, and explicit node poses;
+!< - Gauss-Legendre (`exact=.false.`, nq = 3) on a rotation, and explicit node poses; the Gauss path with `refine`
+!<   (issue #104: the end cuts on the host, the event cells per event interval) on the rotation and a translation;
 !< - an empty curve, and the refusals (decreasing edges, nq = 0, a poses size other than nq): the same statuses;
 !< - negative control: a pose one ulp off gives mismatches.
 use fossil, only : curve_object, rigid_pose_2d_t, pose_2d, pose_interpolate, gauss_legendre_01, swept_cells_2d_t, &
@@ -66,6 +67,10 @@ do k = 1, 3
    pq(k) = pose_interpolate(p0, pr, sn(k))
 enddo
 call check('ellipse, explicit node poses', swept_twin_mismatches(ce, p0, pr, x, y, nq=3_I4P, poses=pq))
+call check('ellipse, Gauss nq = 3, refine', swept_twin_mismatches(ce, p0, pr, x, y, nq=3_I4P, exact=.false., refine=.true.))
+call check('heptagon, Gauss translation, refine', swept_twin_mismatches(hp, p0, pose_2d(0._R8P, [0.13_R8P, -0.17_R8P]), x, &
+                                                                         y, nq=3_I4P, exact=.false., refine=.true.))
+call check('refusal: refine with poses', swept_twin_mismatches(ce, p0, pr, x, y, nq=3_I4P, poses=pq, refine=.true.))
 ! empty curve, refusals
 call check('empty curve, translation', swept_twin_mismatches(em, p0, pose_2d(0._R8P, [0.1_R8P, 0._R8P]), xu, xu))
 xd = xu ; xd(4) = xd(3)

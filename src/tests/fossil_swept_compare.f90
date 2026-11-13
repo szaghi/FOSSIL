@@ -16,7 +16,7 @@ private
 public :: swept_cells_2d_mismatches, swept_twin_mismatches
 
 contains
-   function swept_twin_mismatches(c, p0, p1, x, y, nq, poses, exact) result(n)
+   function swept_twin_mismatches(c, p0, p1, x, y, nq, poses, exact, refine) result(n)
    !< Mismatches of `swept_cells_2d_device` against `swept_cells_2d` (same arguments), statuses included.
    type(curve_object),    intent(in)           :: c          !< Curve.
    type(rigid_pose_2d_t), intent(in)           :: p0, p1     !< End poses.
@@ -24,12 +24,13 @@ contains
    integer(I4P),          intent(in), optional :: nq         !< Gauss nodes.
    type(rigid_pose_2d_t), intent(in), optional :: poses(:)   !< Node poses.
    logical,               intent(in), optional :: exact      !< Exact paths.
+   logical,               intent(in), optional :: refine     !< Gauss path refined per event interval (issue #104).
    integer(I4P)                                :: n          !< Mismatches.
    type(swept_cells_2d_t)                      :: h, d       !< Host, device.
    integer(I4P)                                :: sh, sd     !< Statuses.
 
-   call swept_cells_2d(c, p0, p1, x, y, h, nq=nq, poses=poses, exact=exact, status=sh)
-   call swept_cells_2d_device(c, p0, p1, x, y, d, nq=nq, poses=poses, exact=exact, status=sd)
+   call swept_cells_2d(c, p0, p1, x, y, h, nq=nq, poses=poses, exact=exact, status=sh, refine=refine)
+   call swept_cells_2d_device(c, p0, p1, x, y, d, nq=nq, poses=poses, exact=exact, status=sd, refine=refine)
    n = swept_cells_2d_mismatches(h, d) + abs(sh - sd)
    endfunction swept_twin_mismatches
 

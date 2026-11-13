@@ -55,6 +55,7 @@ p1 = pose_from_axis_angle([1._R8P, 1._R8P, 1._R8P], 0.3_R8P)
 p1%t = c - matmul(p1%r, c) + [0.13_R8P, -0.07_R8P, 0.05_R8P]
 call compare('cube rotation (exact)', .true.)
 call compare_gauss('cube rotation (Gauss nq = 2)')
+call compare_gauss('cube rotation (Gauss nq = 2, refine)', .true.)
 call gauss_legendre_01(3_I4P, sq, wq)
 allocate(pq(3))
 do i = 1, 3
@@ -96,13 +97,15 @@ contains
    call report(label, n)
    endsubroutine compare
 
-   subroutine compare_gauss(label)
-   !< The Gauss path (exact = .false., nq = 2, with the 4-node error estimate), both chunk sizes.
-   character(*), intent(in) :: label !< Case.
-   integer(I4P)             :: n     !< Mismatches.
+   subroutine compare_gauss(label, refine)
+   !< The Gauss path (exact = .false., nq = 2, with the 4-node error estimate); with `refine` (issue #104) the event
+   !< cells per event interval (the device's full end cuts, then the host refinement).
+   character(*), intent(in)           :: label  !< Case.
+   logical,      intent(in), optional :: refine !< Refine.
+   integer(I4P)                       :: n      !< Mismatches.
 
-   call swept_cells_3d(s, p0, p1, e, e, e, sh, nq=2_I4P, exact=.false., status=st)
-   call swept_cells_3d_device(s, p0, p1, e, e, e, sd, nq=2_I4P, exact=.false., status=st2)
+   call swept_cells_3d(s, p0, p1, e, e, e, sh, nq=2_I4P, exact=.false., status=st, refine=refine)
+   call swept_cells_3d_device(s, p0, p1, e, e, e, sd, nq=2_I4P, exact=.false., status=st2, refine=refine)
    n = swept_cells_3d_mismatches(sh, sd) + abs(st - st2) + abs(st)
    call report(label, n)
    endsubroutine compare_gauss
