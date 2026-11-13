@@ -28,7 +28,14 @@ jobs:
     - name: Build the validation suite
       run: FoBiS.py build --mode validation-gnu
 
+    # one program per core: they are single-threaded (validation-gnu has no OpenMP) and write no files
     - name: Run the validation suite
-      env:
-        OMP_NUM_THREADS: 4
-      run: ./scripts/run_validation.sh
+      run: ./scripts/run_validation.sh -j "$(nproc)"
+
+    - name: Upload the logs of the validation programs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: validation-logs
+        path: exe-validation/*.log
+        retention-days: 14
