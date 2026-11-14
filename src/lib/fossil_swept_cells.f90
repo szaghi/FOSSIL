@@ -184,9 +184,6 @@ type :: map_ctx_t
    real(R8P),    allocatable :: u0(:), v0(:) !< Vertices of the pose0 copy (`move`, as the end-pose cut).
    real(R8P),    allocatable :: u1(:), v1(:) !< Vertices of the pose1 copy.
    integer(I4P), allocatable :: nxt(:)       !< Next vertex (0: none).
-   integer(I4P), allocatable :: loc(:)       !< Work: local index of a vertex in the current cell (where stamp is set).
-   integer(I4P), allocatable :: stamp(:)     !< Work: the last cell that listed a vertex (its tick).
-   integer(I4P)              :: tick = 0_I4P !< Work: a stamp per local curve.
    type(rigid_pose_2d_t)     :: pose0, pose1 !< End poses.
    real(R8P)                 :: d(2) = 0._R8P   !< Translation over the step (pose1%t - pose0%t).
    real(R8P)                 :: th0 = 0._R8P    !< Angle at pose0.
@@ -196,8 +193,6 @@ type :: map_ctx_t
    real(R8P)                 :: bmin(2) = 0._R8P  !< Box minimum of the body.
    logical                   :: exact = .true.  !< Every multi-track integration converged.
    integer(I4P)              :: skipped = 0_I4P !< Quadrature nodes or pieces skipped in narrow intervals (`map_node`).
-   integer(I4P)              :: contacts = 0_I4P !< Cells untrusted for an uncertified contact (`map_cell`).
-   integer(I4P)              :: resolved = 0_I4P !< Cells with a state narrower than EVENT_GAP evaluated (issue #104).
 endtype map_ctx_t
 
 type :: cell_eval_t
@@ -229,9 +224,6 @@ type :: map3_ctx_t
    real(R8P),    allocatable :: vhi(:,:,:)      !< Box of every facet vertex's path over the step, high [3, 3, nf].
    integer(I4P), allocatable :: fv(:,:)         !< Mesh vertex of every facet vertex [3, nf].
    integer(I4P), allocatable :: fe(:,:)         !< Mesh edge of every facet edge (m -> m + 1) [3, nf].
-   integer(I4P), allocatable :: vstamp(:)       !< Work: the last cell that visited a mesh vertex (its tick).
-   integer(I4P), allocatable :: estamp(:)       !< Work: the last cell that visited a mesh edge (its tick).
-   integer(I4P)              :: tick = 0_I4P    !< Work: a stamp per cell.
    type(rigid_pose_t)        :: pose0, pose1    !< End poses.
    real(R8P)                 :: d(3) = 0._R8P   !< Translation over the step (pose1%t - pose0%t).
    real(R8P)                 :: kax(3) = 0._R8P !< Rotation axis of the step (unit).
@@ -241,13 +233,6 @@ type :: map3_ctx_t
    real(R8P)                 :: tol = 0._R8P    !< Position tolerance of an event check, 1e-12 (max |grid| + 1).
    logical                   :: exact = .true.  !< Every multi-track integration converged.
    integer(I4P)              :: skipped = 0_I4P !< Quadrature nodes or pieces skipped in narrow intervals (`map3_node`).
-   integer(I4P)              :: contacts = 0_I4P !< Cells untrusted for an uncertified contact (`map3_cell`).
-   integer(I4P)              :: resolved = 0_I4P !< Cells with a state narrower than EVENT_GAP evaluated (issue #104).
-   integer(I4P)              :: cs0(8) = 1_I4P  !< Current cell: corner states at pose0 (k0's node flags).
-   logical                   :: known(8) = .false. !< Current cell: the corner's states follow from its events.
-   integer(I4P)              :: ncn = 0_I4P     !< Current cell: corner events.
-   real(R8P),    allocatable :: ctime(:)        !< Current cell: instants of the corner events [ncn].
-   real(R8P),    allocatable :: ccor(:)         !< Current cell: their corners (1..8, as reals) [ncn].
 endtype map3_ctx_t
 
 type :: cell_eval3_t
@@ -261,6 +246,59 @@ type :: cell_eval3_t
    real(R8P),    allocatable :: pa(:,:)          !< Fluid area of the faces (-x, +x, -y, +y, -z, +z) per piece [6, np].
    real(R8P),    allocatable :: pm(:,:,:)        !< int of the two in-face coordinates (cyclic) over them [2, 6, np].
 endtype cell_eval3_t
+
+integer(I4P), parameter :: PLAN_UNTRUSTED = -1_I4P !< Map plan (issue #105 step 1c): the cell is untrusted.
+integer(I4P), parameter :: PLAN_TRIVIAL   = 0_I4P  !< Map plan: the cell keeps one state, its trivial track (no evaluation).
+integer(I4P), parameter :: PLAN_EVAL      = 1_I4P  !< Map plan: the cell is evaluated.
+
+type :: map_plan_t
+   !< The host phase of the piece map (issue #105 step 1c), as flat CSR arrays over the cells c (2-D c = i + (j - 1) nx,
+   !< 3-D c = i + nx ((j - 1) + ny (k - 1))): every cell's status and, for an evaluated cell (PLAN_EVAL), its local
+   !< elements, events, interval layout, evaluation list and (3-D) corner events; a pose table, one placed pose per
+   !< distinct instant of a middle evaluation (on the paths that place by a pose: 2-D off the translation path, 3-D
+   !< with a rotation), computed by `pose_interpolate` as before; the Gauss node sets of the measures. Built once per
+   !< step by `map_plan_2d` / `map_plan_3d` (count per cell, scan, fill; a cell's slices depend on that cell only), read
+   !< by `map_cell` / `map3_cell`. A slice of cell c is x(xstart(c) : xstart(c + 1) - 1), empty unless PLAN_EVAL.
+   integer(I4P)              :: ncell = 0_I4P    !< Cells.
+   integer(I4P)              :: contacts = 0_I4P !< Cells untrusted for an uncertified contact (issue #102).
+   integer(I4P)              :: resolved = 0_I4P !< Evaluated cells with a state narrower than EVENT_GAP (issue #104).
+   integer(I4P), allocatable :: status(:)        !< PLAN_UNTRUSTED, PLAN_TRIVIAL or PLAN_EVAL [ncell].
+   integer(I4P), allocatable :: lstart(:)        !< Local elements [ncell + 1].
+   integer(I4P), allocatable :: lel(:)           !< 2-D: local vertices (curve indexes, increasing); 3-D: facets (increasing).
+   integer(I4P), allocatable :: lnext(:)         !< 2-D: the next local vertex in the cell's numbering (0: none).
+   integer(I4P), allocatable :: bstart(:)        !< Events [ncell + 1].
+   real(R8P),    allocatable :: bs(:)            !< Event instants in (0, 1), sorted, distinct.
+   real(R8P),    allocatable :: bw(:)            !< Their round-off half-widths (issue #104).
+   integer(I4P), allocatable :: istart(:)        !< Intervals between the events (events + 1 per evaluated cell) [ncell + 1].
+   logical,      allocatable :: wide(:)          !< The interval is evaluated (`interval_wide`).
+   logical,      allocatable :: small(:)         !< The interval is narrower than EVENT_GAP.
+   integer(I4P), allocatable :: eref(:)          !< Its evaluation (index in the cell's list).
+   integer(I4P), allocatable :: ealt(:)          !< The evaluation after it (= eref for a wide interval).
+   integer(I4P), allocatable :: vstart(:)        !< Evaluations: pose0, the wide intervals' middles, pose1 [ncell + 1].
+   real(R8P),    allocatable :: vs(:)            !< Their instants (0, 0.5 (sa + sb), 1).
+   integer(I4P), allocatable :: vkind(:)         !< 0 the pose0 copy, 1 the pose1 copy, 2 the instant vs.
+   integer(I4P), allocatable :: vpose(:)         !< Pose of a kind-2 evaluation in the table (0: placed by s d, or kind 0/1).
+   integer(I4P)              :: npose = 0_I4P    !< Poses.
+   real(R8P),    allocatable :: pose_s(:)        !< Their instants, increasing, distinct [npose].
+   real(R8P),    allocatable :: pose_r(:,:,:)    !< Rotations [dim, dim, npose].
+   real(R8P),    allocatable :: pose_t(:,:)      !< Translations [dim, npose].
+   integer(I4P), allocatable :: cnstart(:)       !< 3-D: corner events (`map3_corner_known`) [ncell + 1].
+   real(R8P),    allocatable :: cntime(:)        !< Their instants (in the cell's event order).
+   integer(I4P), allocatable :: cncor(:)         !< Their corners (1..8).
+   real(R8P)                 :: gq_s(126) = 0._R8P !< Gauss-Legendre nodes on [0, 1], n = 2, 4, ..., 64: set n at n - 1 .. 2n - 2.
+   real(R8P)                 :: gq_w(126) = 0._R8P !< Their weights.
+endtype map_plan_t
+
+type :: plan_cell_t
+   !< One candidate cell of the map plan before the scan (`map_plan_2d`, `map_plan_3d`).
+   integer(I4P)              :: status = PLAN_UNTRUSTED !< PLAN_UNTRUSTED, PLAN_TRIVIAL or PLAN_EVAL.
+   logical                   :: contact = .false.  !< Untrusted for an uncertified contact.
+   logical                   :: resolved = .false. !< A wide interval narrower than EVENT_GAP.
+   integer(I4P)              :: ne = 0_I4P         !< Evaluations.
+   integer(I4P), allocatable :: lg(:), lnx(:)      !< 2-D local vertices and next.
+   real(R8P),    allocatable :: b(:), bw(:)        !< Events, half-widths.
+   real(R8P),    allocatable :: ct(:), cc(:)       !< 3-D corner events: instants, corners (as reals).
+endtype plan_cell_t
 
 contains
    subroutine swept_cells_2d(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input, map, refine)
@@ -1280,9 +1318,12 @@ contains
    !<
    !< 1. Candidates: the cells that a segment can meet during the step (its endpoints' paths, boxed per sub-step with
    !<    the curvature bound of the screw motion), each with its local segments (CSR, increasing order).
-   !< 2. Topology per cell (`map_cell`): the events of its four faces from its local segments (a wall vertex crossing a
-   !<    face line inside the face, a corner crossing a wall segment: the translation formulas of `faces_translation_2d`,
-   !<    or `line_events_2d` / `node_events_2d` certified by `isolate_zeros`); a cell without events whose two end cuts
+   !<    The host phase (`map_plan_2d`, issue #105 step 1c) then gives every cell its status and, if it is evaluated,
+   !<    its local curve, events, interval layout and evaluation instants, as flat CSR arrays, with a pose table.
+   !< 2. Topology per cell (`map_cell`, from the plan): the events of its four faces from its local segments (a wall
+   !<    vertex crossing a face line inside the face, a corner crossing a wall segment: the translation formulas of
+   !<    `faces_translation_2d`, or `line_events_2d` / `node_events_2d` certified by `isolate_zeros`); a cell without
+   !<    events whose two end cuts
    !<    have the same single piece (or none) takes the trivial track. Otherwise its pieces are evaluated at pose0 (the
    !<    end-pose copy, k0's corner flags: they must equal k0's pieces bit for bit, which fixes the numbering), at the
    !<    middle of every interval between events, and at pose1, and pieces of consecutive evaluations sharing a boundary
@@ -1306,6 +1347,7 @@ contains
    logical,      optional,   intent(in)  :: all_meas   !< Integrate every evaluated cell (issue #104).
    logical, allocatable, optional, intent(out) :: measured(:) !< Cells integrated per event interval [nx ny].
    type(map_ctx_t)           :: mc                     !< State.
+   type(map_plan_t)          :: plan                   !< Host phase (issue #105 step 1c).
    integer(I4P), allocatable :: cstart(:), cseg(:)     !< Local segments of every cell.
    integer(I4P), allocatable :: ntr(:), ckind(:)       !< Tracks and kind (0 trivial, 1 evaluated, -1 untrusted) per cell.
    integer(I4P), allocatable :: otr(:), ntn(:)         !< Track (in its cell) of every old and new piece.
@@ -1320,6 +1362,8 @@ contains
    map%nx = nx ; map%ny = ny ; map%np0 = k0%np ; map%np1 = k1%np
    call map_context(curve, c0, c1, pose0, pose1, x, y, path, nq, mc)
    call map_candidates(mc, x, y, cstart, cseg)
+   call map_plan_2d(mc, x, y, k0, k1, cstart, cseg, plan)
+   deallocate(cstart, cseg)
    allocate(ntr(ncell), ckind(ncell), otr(k0%np), ntn(k1%np), moff(ncell))
    ! topology of every cell
    do j = 1_I4P, ny
@@ -1327,8 +1371,7 @@ contains
          c = i + (j - 1_I4P) * nx
          a0 = k0%first_piece(i, j) ; a1 = a0 + k0%pieces(i, j) - 1_I4P
          b0 = k1%first_piece(i, j) ; b1 = b0 + k1%pieces(i, j) - 1_I4P
-         call map_cell(mc, curve, c0, i, j, x, y, k0, k1, cseg(cstart(c):cstart(c + 1) - 1_I4P), .false., kind, nt, &
-                       otr(a0:a1), ntn(b0:b1), mloc, nev)
+         call map_cell(mc, plan, curve, c0, c, i, j, x, y, k0, k1, .false., kind, nt, otr(a0:a1), ntn(b0:b1), mloc, nev)
          ckind(c) = kind ; ntr(c) = nt
          map%evaluations = map%evaluations + nev
          if (nev > 0_I4P) map%evaluated_cells = map%evaluated_cells + 1_I4P
@@ -1349,8 +1392,7 @@ contains
          a0 = k0%first_piece(i, j) ; a1 = a0 + k0%pieces(i, j) - 1_I4P
          b0 = k1%first_piece(i, j) ; b1 = b0 + k1%pieces(i, j) - 1_I4P
          so = otr(a0:a1) ; sn = ntn(b0:b1)
-         call map_cell(mc, curve, c0, i, j, x, y, k0, k1, cseg(cstart(c):cstart(c + 1) - 1_I4P), .true., kind, nt, &
-                       otr(a0:a1), ntn(b0:b1), mloc, nev)
+         call map_cell(mc, plan, curve, c0, c, i, j, x, y, k0, k1, .true., kind, nt, otr(a0:a1), ntn(b0:b1), mloc, nev)
          if (kind == 1_I4P .and. nt == ntr(c)) then
             meas(:, moff(c):moff(c) + nt - 1_I4P) = mloc(:, 1:nt)
          elseif (ntr(c) == 1_I4P .and. allm) then ! one track (all_meas): keep it with the sw values
@@ -1429,7 +1471,7 @@ contains
       enddo
    enddo
    map%exact = mc%exact ; map%skipped_nodes = mc%skipped
-   map%contact_cells = mc%contacts ; map%narrow_cells = mc%resolved
+   map%contact_cells = plan%contacts ; map%narrow_cells = plan%resolved
    endsubroutine piece_map_2d_build
 
    subroutine refine_faces_2d(map, measured, nx, ny, fu, fv, fou, fov, ru, rv)
@@ -1573,15 +1615,13 @@ contains
    integer(I4P)                       :: g            !< Vertex.
 
    mc%path = path ; mc%nq = nq ; mc%nv = curve%get_vertices_number()
-   allocate(mc%bu(mc%nv), mc%bv(mc%nv), mc%u0(mc%nv), mc%v0(mc%nv), mc%u1(mc%nv), mc%v1(mc%nv), mc%nxt(mc%nv), &
-            mc%loc(mc%nv), mc%stamp(mc%nv))
+   allocate(mc%bu(mc%nv), mc%bv(mc%nv), mc%u0(mc%nv), mc%v0(mc%nv), mc%u1(mc%nv), mc%v1(mc%nv), mc%nxt(mc%nv))
    do g = 1_I4P, mc%nv
       uv = curve%get_vertex(g) ; mc%bu(g) = uv(1) ; mc%bv(g) = uv(2)
       uv = c0%get_vertex(g) ; mc%u0(g) = uv(1) ; mc%v0(g) = uv(2)
       uv = c1%get_vertex(g) ; mc%u1(g) = uv(1) ; mc%v1(g) = uv(2)
       mc%nxt(g) = curve%get_next(g)
    enddo
-   mc%loc = 0_I4P ; mc%stamp = 0_I4P ; mc%tick = 0_I4P
    mc%pose0 = pose0 ; mc%pose1 = pose1 ; mc%d = pose1%t - pose0%t
    mc%th0 = pose_angle_2d(pose0) ; mc%dth = pose_angle_2d(pose1) - mc%th0 ; mc%dth = atan2(sin(mc%dth), cos(mc%dth))
    mc%xm = max(maxval(abs(x)), maxval(abs(y))) + sqrt(pose0%t(1)**2 + pose0%t(2)**2) + sqrt(mc%d(1)**2 + mc%d(2)**2)
@@ -1676,71 +1716,109 @@ contains
    lo = lo - pad ; hi = hi + pad
    endsubroutine map_segment_box
 
-   subroutine map_cell(mc, curve, c0, i, j, x, y, k0, k1, lseg, with_meas, kind, nt, otr, ntn, meas, nev)
-   !< The tracks of cell (i, j) (see `piece_map_2d_build`, step 2): kind 0 (trivial: no evaluation), 1 (evaluated) or
-   !< -1 (untrusted); nt tracks; the track of each of its old pieces (otr, in k0's order) and new pieces (ntn); with
-   !< `with_meas` and nt >= 1, the per-track time integrals meas(1:4) of the faces' fluid lengths and meas(5:8) of
-   !< their rigid-field outflows (`map_measures`; kind -1 if a face part could not be assigned).
-   !<
-   !< The events split [0, 1] into intervals; one narrower than EVENT_GAP whose two events are within their round-off
-   !< widths of each other (`interval_wide`, issue #104: the same instant computed twice) is not evaluated: its two
-   !< events act as one. The others are evaluated at their middle, beyond both events' widths. A cell with an event
-   !< that no sign change certifies (issue #102: a contact within the round-off of its function under a rotation, a corner grazing a
-   !< segment or a vertex grazing a face line at the turning point of its arc) is untrusted: the piece next to it may
-   !< shrink to a point and come back as another track, or not, undecidably in double precision.
-   type(map_ctx_t),           intent(inout) :: mc         !< State.
-   type(curve_object),        intent(in)    :: curve, c0  !< Curve (body frame), copy at pose0.
-   integer(I4P),              intent(in)    :: i, j       !< Cell.
-   real(R8P),                 intent(in)    :: x(:), y(:) !< Cell edges.
-   type(cut_cells_2d_t),      intent(in)    :: k0, k1     !< End-pose cuts.
-   integer(I4P),              intent(in)    :: lseg(:)    !< Local segments (increasing).
-   logical,                   intent(in)    :: with_meas  !< Integrate the per-track measures.
-   integer(I4P),              intent(out)   :: kind       !< 0 trivial, 1 evaluated, -1 untrusted.
-   integer(I4P),              intent(out)   :: nt         !< Tracks.
-   integer(I4P),              intent(out)   :: otr(:)     !< Track of each old piece of the cell.
-   integer(I4P),              intent(out)   :: ntn(:)     !< Track of each new piece of the cell.
-   real(R8P),    allocatable, intent(out)   :: meas(:,:)  !< Per-track measures [8, nt] (with_meas, nt >= 1).
-   integer(I4P),              intent(out)   :: nev        !< Evaluations.
-   type(cell_eval_t), allocatable :: ev(:)                 !< Evaluations: pose0, the wide intervals' middles, pose1.
-   integer(I4P),      allocatable :: lg(:), lnx(:), nstart(:), lstart(:), lkey(:), lpiece(:), par(:), comp(:) !< Work.
-   integer(I4P),      allocatable :: eref(:), ealt(:)      !< Per interval: its evaluation, the one after it (narrow).
-   real(R8P),         allocatable :: b(:), bw(:)           !< Events, their half-widths.
-   logical,           allocatable :: wide(:), small(:)     !< Per interval: evaluated; narrower than EVENT_GAP.
-   real(R8P)                      :: x0, x1, y0, y1, sa, sb, cn(2, 4) !< Cell, interval, corners.
-   logical                        :: fl(4)                 !< Corner flags.
-   integer(I4P)                   :: np0, np1, nl, nb, ne, e, m, k, nk !< Work.
-   logical                        :: cert, ok, unc         !< Certified events, measures assigned, uncertified contact.
+   subroutine map_plan_2d(mc, x, y, k0, k1, cstart, cseg, plan)
+   !< The host phase of the 2-D piece map (issue #105 step 1c; `map_plan_t`). Per cell, the checks of `map_cell` that
+   !< come before its evaluations: both end cuts closed, a wall near the cell during the step, its events certified and
+   !< free of uncertified contacts, more than one state. An evaluated cell also gets its local curve (`map_local`, a
+   !< per-cell deduplication), its events (`map_events`), its interval layout and its evaluation list (`plan_layout`).
+   !< Then the pose table (`plan_instants`, off the translation path). The candidate cells are independent: each fills
+   !< its own `plan_cell_t` (an OpenMP loop when built with OpenMP), then `plan_fill` scans and copies them in cell order,
+   !< so the plan does not depend on the threads.
+   type(map_ctx_t),      intent(in)  :: mc                 !< State.
+   real(R8P),            intent(in)  :: x(:), y(:)         !< Cell edges.
+   type(cut_cells_2d_t), intent(in)  :: k0, k1             !< End-pose cuts.
+   integer(I4P),         intent(in)  :: cstart(:), cseg(:) !< Local segments of every cell (`map_candidates`).
+   type(map_plan_t),     intent(out) :: plan               !< Plan.
+   type(plan_cell_t), allocatable :: pc(:)                 !< Candidate cells.
+   integer(I4P),      allocatable :: cand(:)               !< Their cells.
+   type(rigid_pose_2d_t)          :: ps                    !< Pose.
+   integer(I4P)                   :: nx, ny, ncell, nc, ic, c, i, j, np0, np1, nb, k !< Work.
+   logical                        :: cert, unc             !< Events certified, an uncertified contact.
 
-   kind = 0_I4P ; nt = 0_I4P ; nev = 0_I4P
-   x0 = x(i) ; x1 = x(i + 1) ; y0 = y(j) ; y1 = y(j + 1)
-   np0 = k0%pieces(i, j) ; np1 = k1%pieces(i, j)
-   if (.not. (k0%closed(i, j) .and. k1%closed(i, j))) then
-      kind = -1_I4P ; return
-   endif
-   if (size(lseg) == 0) then ! no wall near the cell during the step: the same state throughout
-      if (np0 == np1 .and. np0 <= 1_I4P) then
-         nt = np0 ; otr = 1_I4P ; ntn = 1_I4P
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; ncell = nx * ny
+   plan%ncell = ncell ; allocate(plan%status(ncell))
+   nc = 0_I4P
+   do c = 1_I4P, ncell
+      i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      np0 = k0%pieces(i, j) ; np1 = k1%pieces(i, j)
+      if (.not. (k0%closed(i, j) .and. k1%closed(i, j))) then
+         plan%status(c) = PLAN_UNTRUSTED
+      elseif (cstart(c + 1) == cstart(c)) then ! no wall near the cell during the step: the same state throughout
+         plan%status(c) = merge(PLAN_TRIVIAL, PLAN_UNTRUSTED, np0 == np1 .and. np0 <= 1_I4P)
       else
-         kind = -1_I4P
+         plan%status(c) = PLAN_EVAL ; nc = nc + 1_I4P
       endif
-      return
+   enddo
+   allocate(cand(nc), pc(nc))
+   nc = 0_I4P
+   do c = 1_I4P, ncell
+      if (plan%status(c) /= PLAN_EVAL) cycle
+      nc = nc + 1_I4P ; cand(nc) = c
+   enddo
+   !$omp parallel do default(shared) private(ic, c, i, j, nb, cert, unc) schedule(dynamic, 4)
+   do ic = 1_I4P, nc ! independent cells, each into its own pc(ic)
+      c = cand(ic) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
+      call map_local(mc%nxt, cseg(cstart(c):cstart(c + 1) - 1_I4P), pc(ic)%lg, pc(ic)%lnx)
+      call map_events(mc, x(i), x(i + 1), y(j), y(j + 1), size(pc(ic)%lg, kind=I4P), pc(ic)%lg, pc(ic)%lnx, pc(ic)%b, &
+                      pc(ic)%bw, nb, cert, unc)
+      call plan_classify(pc(ic), cert, unc, k0%pieces(i, j), k1%pieces(i, j))
+   enddo
+   !$omp end parallel do
+   call plan_fill(plan, cand, pc, 2_I4P)
+   if (mc%path /= MAP_TRANSLATION) then ! the middle evaluations placed by the screw pose (`map_eval`)
+      call plan_instants(plan, 2_I4P)
+      do k = 1_I4P, plan%npose
+         ps = pose_interpolate(mc%pose0, mc%pose1, plan%pose_s(k))
+         plan%pose_r(:, :, k) = ps%r ; plan%pose_t(:, k) = ps%t
+      enddo
    endif
-   call map_local(mc, lseg, nl, lg, lnx)
-   call map_events(mc, x0, x1, y0, y1, nl, lg, lnx, b, bw, nb, cert, unc)
+   endsubroutine map_plan_2d
+
+   subroutine plan_classify(pc, cert, unc, np0, np1)
+   !< The status of a candidate cell from its events (`map_cell`'s checks, in its order): untrusted if an event is not
+   !< certified or is an uncertified contact; trivial without events and with the same single piece (or none) at both
+   !< ends; evaluated otherwise, with its evaluations counted and its narrow states flagged (`plan_layout`). Only an
+   !< evaluated cell keeps its local elements and events.
+   type(plan_cell_t), intent(inout) :: pc        !< Candidate cell (events in pc%b).
+   logical,           intent(in)    :: cert, unc !< Events certified, an uncertified contact.
+   integer(I4P),      intent(in)    :: np0, np1  !< Pieces at the two ends.
+   logical,      allocatable        :: wide(:), small(:) !< Interval layout.
+   integer(I4P), allocatable        :: eref(:), ealt(:)  !< Interval layout.
+   integer(I4P)                     :: nb        !< Events.
+
+   nb = size(pc%b, kind=I4P)
    if (.not. cert) then
-      kind = -1_I4P ; return
+      pc%status = PLAN_UNTRUSTED
+   elseif (unc) then ! an uncertified contact: a state the evaluations cannot decide (issue #102)
+      pc%status = PLAN_UNTRUSTED ; pc%contact = .true.
+   elseif (nb == 0_I4P .and. np0 == np1 .and. np0 <= 1_I4P) then ! one state throughout, at most one piece
+      pc%status = PLAN_TRIVIAL
+   else
+      pc%status = PLAN_EVAL
+      allocate(wide(nb + 1), small(nb + 1), eref(nb + 1), ealt(nb + 1))
+      call plan_layout(pc%b, pc%bw, nb, wide, small, eref, ealt, pc%ne)
+      pc%resolved = any(wide .and. small)
    endif
-   if (unc) then ! an uncertified contact: a state the evaluations cannot decide (issue #102)
-      if (.not. with_meas) mc%contacts = mc%contacts + 1_I4P
-      kind = -1_I4P ; return
+   if (pc%status /= PLAN_EVAL) then
+      if (allocated(pc%lg)) deallocate(pc%lg)
+      if (allocated(pc%lnx)) deallocate(pc%lnx)
+      if (allocated(pc%ct)) deallocate(pc%ct, pc%cc)
+      deallocate(pc%b, pc%bw)
    endif
-   if (nb == 0_I4P .and. np0 == np1 .and. np0 <= 1_I4P) then ! one state throughout, at most one piece
-      nt = np0 ; otr = 1_I4P ; ntn = 1_I4P ; return
-   endif
-   kind = 1_I4P
-   cn = reshape([x0, y0, x1, y0, x1, y1, x0, y1], [2, 4])
-   ! the intervals: a wide one has its evaluation (2 .. ne - 1); a narrow one refers to those before and after it
-   allocate(eref(nb + 1), ealt(nb + 1), wide(nb + 1), small(nb + 1))
+   endsubroutine plan_classify
+
+   pure subroutine plan_layout(b, bw, nb, wide, small, eref, ealt, ne)
+   !< The interval layout of an evaluated cell (issue #102): the events b(1:nb) split [0, 1] into nb + 1 intervals; a
+   !< wide one (`interval_wide`) has an evaluation of its own at its middle (2 .. ne - 1, ne the evaluations with pose0
+   !< and pose1); a narrow one refers to the evaluations before (eref) and after (ealt) it.
+   real(R8P),    intent(in)  :: b(:), bw(:)     !< Events, their half-widths.
+   integer(I4P), intent(in)  :: nb              !< Events.
+   logical,      intent(out) :: wide(:), small(:) !< Per interval: evaluated; narrower than EVENT_GAP [nb + 1].
+   integer(I4P), intent(out) :: eref(:), ealt(:)  !< Per interval: its evaluation, the one after it [nb + 1].
+   integer(I4P), intent(out) :: ne              !< Evaluations.
+   real(R8P)                 :: sa, sb          !< Interval.
+   integer(I4P)              :: m, e            !< Work.
+
    ne = 1_I4P
    do m = 1_I4P, nb + 1_I4P
       call map_interval(b, nb, m, sa, sb)
@@ -1751,8 +1829,7 @@ contains
          eref(m) = ne ; ealt(m) = 0_I4P
       endif
    enddo
-   if (.not. with_meas .and. any(wide .and. small)) mc%resolved = mc%resolved + 1_I4P
-   ne = ne + 1_I4P ; nev = ne
+   ne = ne + 1_I4P
    e = ne
    do m = nb + 1_I4P, 1_I4P, -1_I4P
       if (ealt(m) == 0_I4P) then
@@ -1761,21 +1838,197 @@ contains
          e = eref(m)
       endif
    enddo
-   allocate(ev(ne))
-   fl = [k0%node_in(i, j), k0%node_in(i + 1, j), k0%node_in(i + 1, j + 1), k0%node_in(i, j + 1)]
-   call map_eval(mc, 0_I4P, 0._R8P, x0, x1, y0, y1, lg, lnx, fl, ev(1))
-   e = 1_I4P
-   do m = 1_I4P, nb + 1_I4P
-      call map_interval(b, nb, m, sa, sb)
-      if (.not. wide(m)) cycle
-      e = e + 1_I4P
-      do k = 1_I4P, 4_I4P
-         fl(k) = map_corner_in(mc, curve, c0, 0.5_R8P * (sa + sb), cn(:, k))
-      enddo
-      call map_eval(mc, 2_I4P, 0.5_R8P * (sa + sb), x0, x1, y0, y1, lg, lnx, fl, ev(e))
+   endsubroutine plan_layout
+
+   subroutine plan_fill(plan, cand, pc, dim)
+   !< The flat arrays of the plan from its candidate cells (`map_plan_2d`, `map_plan_3d`): the counts per cell, an
+   !< exclusive scan into the CSR starts, then each evaluated cell's slices (local elements, events, interval layout,
+   !< evaluation list: pose0, the wide intervals' middles 0.5 (sa + sb), pose1; 3-D corner events); the counters; the
+   !< Gauss node sets n = 2, 4, ..., 64 of the measures.
+   type(map_plan_t),  intent(inout) :: plan    !< Plan (status set).
+   integer(I4P),      intent(in)    :: cand(:) !< Candidate cells.
+   type(plan_cell_t), intent(in)    :: pc(:)   !< Their host phase.
+   integer(I4P),      intent(in)    :: dim     !< 2 or 3.
+   real(R8P), allocatable           :: sq(:), wq(:) !< Gauss nodes, weights.
+   real(R8P)                        :: sa, sb  !< Interval.
+   integer(I4P)                     :: ncell, ic, c, l0, b0, i0, v0, k0, nl, nb, ncn, m, e, n, ne !< Work.
+
+   ncell = plan%ncell
+   allocate(plan%lstart(ncell + 1), plan%bstart(ncell + 1), plan%istart(ncell + 1), plan%vstart(ncell + 1), &
+            plan%cnstart(ncell + 1))
+   plan%lstart = 0_I4P ; plan%bstart = 0_I4P ; plan%istart = 0_I4P ; plan%vstart = 0_I4P ; plan%cnstart = 0_I4P
+   plan%contacts = 0_I4P ; plan%resolved = 0_I4P
+   do ic = 1_I4P, size(cand, kind=I4P)
+      c = cand(ic) ; plan%status(c) = pc(ic)%status
+      if (pc(ic)%contact) plan%contacts = plan%contacts + 1_I4P
+      if (pc(ic)%status /= PLAN_EVAL) cycle
+      if (pc(ic)%resolved) plan%resolved = plan%resolved + 1_I4P
+      plan%lstart(c) = size(pc(ic)%lg, kind=I4P) ; plan%bstart(c) = size(pc(ic)%b, kind=I4P)
+      plan%istart(c) = plan%bstart(c) + 1_I4P ; plan%vstart(c) = pc(ic)%ne
+      if (allocated(pc(ic)%ct)) plan%cnstart(c) = size(pc(ic)%ct, kind=I4P)
    enddo
-   fl = [k1%node_in(i, j), k1%node_in(i + 1, j), k1%node_in(i + 1, j + 1), k1%node_in(i, j + 1)]
-   call map_eval(mc, 1_I4P, 1._R8P, x0, x1, y0, y1, lg, lnx, fl, ev(ne))
+   call csr_scan(plan%lstart) ; call csr_scan(plan%bstart) ; call csr_scan(plan%istart) ; call csr_scan(plan%vstart)
+   call csr_scan(plan%cnstart)
+   allocate(plan%lel(plan%lstart(ncell + 1) - 1_I4P), plan%bs(plan%bstart(ncell + 1) - 1_I4P), &
+            plan%bw(plan%bstart(ncell + 1) - 1_I4P), plan%wide(plan%istart(ncell + 1) - 1_I4P), &
+            plan%small(plan%istart(ncell + 1) - 1_I4P), plan%eref(plan%istart(ncell + 1) - 1_I4P), &
+            plan%ealt(plan%istart(ncell + 1) - 1_I4P), plan%vs(plan%vstart(ncell + 1) - 1_I4P), &
+            plan%vkind(plan%vstart(ncell + 1) - 1_I4P), plan%vpose(plan%vstart(ncell + 1) - 1_I4P), &
+            plan%cntime(plan%cnstart(ncell + 1) - 1_I4P), plan%cncor(plan%cnstart(ncell + 1) - 1_I4P))
+   if (dim == 2_I4P) allocate(plan%lnext(plan%lstart(ncell + 1) - 1_I4P))
+   plan%vpose = 0_I4P
+   do ic = 1_I4P, size(cand, kind=I4P)
+      if (pc(ic)%status /= PLAN_EVAL) cycle
+      c = cand(ic)
+      l0 = plan%lstart(c) ; nl = plan%lstart(c + 1) - l0
+      b0 = plan%bstart(c) ; nb = plan%bstart(c + 1) - b0
+      i0 = plan%istart(c) ; v0 = plan%vstart(c) ; k0 = plan%cnstart(c) ; ncn = plan%cnstart(c + 1) - k0
+      plan%lel(l0:l0 + nl - 1_I4P) = pc(ic)%lg
+      if (dim == 2_I4P) plan%lnext(l0:l0 + nl - 1_I4P) = pc(ic)%lnx
+      plan%bs(b0:b0 + nb - 1_I4P) = pc(ic)%b ; plan%bw(b0:b0 + nb - 1_I4P) = pc(ic)%bw
+      call plan_layout(plan%bs(b0:b0 + nb - 1_I4P), plan%bw(b0:b0 + nb - 1_I4P), nb, plan%wide(i0:i0 + nb), &
+                       plan%small(i0:i0 + nb), plan%eref(i0:i0 + nb), plan%ealt(i0:i0 + nb), ne)
+      plan%vkind(v0) = 0_I4P ; plan%vs(v0) = 0._R8P
+      e = v0
+      do m = 1_I4P, nb + 1_I4P
+         if (.not. plan%wide(i0 + m - 1_I4P)) cycle
+         call map_interval(plan%bs(b0:b0 + nb - 1_I4P), nb, m, sa, sb)
+         e = e + 1_I4P ; plan%vkind(e) = 2_I4P ; plan%vs(e) = 0.5_R8P * (sa + sb)
+      enddo
+      plan%vkind(v0 + ne - 1_I4P) = 1_I4P ; plan%vs(v0 + ne - 1_I4P) = 1._R8P
+      if (ncn > 0_I4P) then
+         plan%cntime(k0:k0 + ncn - 1_I4P) = pc(ic)%ct ; plan%cncor(k0:k0 + ncn - 1_I4P) = nint(pc(ic)%cc, I4P)
+      endif
+   enddo
+   do m = 1_I4P, 6_I4P
+      n = 2_I4P**m
+      call gauss_legendre_01(n, sq, wq)
+      plan%gq_s(n - 1_I4P:2_I4P * n - 2_I4P) = sq ; plan%gq_w(n - 1_I4P:2_I4P * n - 2_I4P) = wq
+   enddo
+   plan%npose = 0_I4P
+   allocate(plan%pose_s(0), plan%pose_r(dim, dim, 0), plan%pose_t(dim, 0))
+   endsubroutine plan_fill
+
+   pure subroutine csr_scan(a)
+   !< Counts a(1:n) to CSR starts in place: a(1) = 1, a(k + 1) = a(k) + count k (a(n + 1) on input is ignored).
+   integer(I4P), intent(inout) :: a(:) !< Counts [n + 1] -> starts.
+   integer(I4P)                :: k, s, t !< Work.
+
+   s = 1_I4P
+   do k = 1_I4P, size(a, kind=I4P) - 1_I4P
+      t = a(k) ; a(k) = s ; s = s + t
+   enddo
+   a(size(a)) = s
+   endsubroutine csr_scan
+
+   subroutine plan_instants(plan, dim)
+   !< The pose table's instants: the distinct instants of the kind-2 evaluations, increasing (exact equality), each
+   !< evaluation pointing to its own (vpose). The caller places the poses.
+   type(map_plan_t), intent(inout) :: plan  !< Plan (evaluations filled).
+   integer(I4P),     intent(in)    :: dim   !< 2 or 3.
+   real(R8P),    allocatable       :: key(:,:) !< Instants.
+   integer(I4P), allocatable       :: idx(:), ord(:) !< Their evaluations, sorted order.
+   integer(I4P)                    :: n, v, r !< Work.
+
+   n = count(plan%vkind == 2_I4P, kind=I4P)
+   allocate(key(1, n), idx(n))
+   n = 0_I4P
+   do v = 1_I4P, size(plan%vkind, kind=I4P)
+      if (plan%vkind(v) /= 2_I4P) cycle
+      n = n + 1_I4P ; key(1, n) = plan%vs(v) ; idx(n) = v
+   enddo
+   call sort_lex(key, ord)
+   plan%npose = 0_I4P
+   do r = 1_I4P, n
+      if (r == 1_I4P) then
+         plan%npose = 1_I4P
+      elseif (key(1, ord(r)) /= key(1, ord(r - 1_I4P))) then
+         plan%npose = plan%npose + 1_I4P
+      endif
+      plan%vpose(idx(ord(r))) = plan%npose
+   enddo
+   deallocate(plan%pose_s, plan%pose_r, plan%pose_t)
+   allocate(plan%pose_s(plan%npose), plan%pose_r(dim, dim, plan%npose), plan%pose_t(dim, plan%npose))
+   do r = 1_I4P, n
+      plan%pose_s(plan%vpose(idx(ord(r)))) = key(1, ord(r))
+   enddo
+   endsubroutine plan_instants
+
+   pure function plan_pose_2d(plan, k) result(ps)
+   !< Pose k of the plan's table (the identity for k = 0).
+   type(map_plan_t), intent(in) :: plan !< Plan.
+   integer(I4P),     intent(in) :: k    !< Pose (0: none).
+   type(rigid_pose_2d_t)        :: ps   !< Pose.
+
+   if (k > 0_I4P) then
+      ps%r = plan%pose_r(:, :, k) ; ps%t = plan%pose_t(:, k)
+   endif
+   endfunction plan_pose_2d
+
+   subroutine map_cell(mc, plan, curve, c0, c, i, j, x, y, k0, k1, with_meas, kind, nt, otr, ntn, meas, nev)
+   !< The tracks of cell (i, j) (see `piece_map_2d_build`, step 2): kind 0 (trivial: no evaluation), 1 (evaluated) or
+   !< -1 (untrusted); nt tracks; the track of each of its old pieces (otr, in k0's order) and new pieces (ntn); with
+   !< `with_meas` and nt >= 1, the per-track time integrals meas(1:4) of the faces' fluid lengths and meas(5:8) of
+   !< their rigid-field outflows (`map_measures`; kind -1 if a face part could not be assigned).
+   !<
+   !< The status, local curve, events, intervals and evaluation instants come from the plan (`map_plan_2d`, issue #105
+   !< step 1c). The events split [0, 1] into intervals; one narrower than EVENT_GAP whose two events are within their
+   !< round-off widths of each other (`interval_wide`, issue #104: the same instant computed twice) is not evaluated: its
+   !< two events act as one. The others are evaluated at their middle, beyond both events' widths. A cell with an event
+   !< that no sign change certifies (issue #102: a contact within the round-off of its function under a rotation, a
+   !< corner grazing a segment or a vertex grazing a face line at the turning point of its arc) is untrusted: the piece
+   !< next to it may shrink to a point and come back as another track, or not, undecidably in double precision.
+   type(map_ctx_t),           intent(inout) :: mc         !< State.
+   type(map_plan_t),          intent(in)    :: plan       !< Host phase.
+   type(curve_object),        intent(in)    :: curve, c0  !< Curve (body frame), copy at pose0.
+   integer(I4P),              intent(in)    :: c, i, j    !< Cell (c = i + (j - 1) nx).
+   real(R8P),                 intent(in)    :: x(:), y(:) !< Cell edges.
+   type(cut_cells_2d_t),      intent(in)    :: k0, k1     !< End-pose cuts.
+   logical,                   intent(in)    :: with_meas  !< Integrate the per-track measures.
+   integer(I4P),              intent(out)   :: kind       !< 0 trivial, 1 evaluated, -1 untrusted.
+   integer(I4P),              intent(out)   :: nt         !< Tracks.
+   integer(I4P),              intent(out)   :: otr(:)     !< Track of each old piece of the cell.
+   integer(I4P),              intent(out)   :: ntn(:)     !< Track of each new piece of the cell.
+   real(R8P),    allocatable, intent(out)   :: meas(:,:)  !< Per-track measures [8, nt] (with_meas, nt >= 1).
+   integer(I4P),              intent(out)   :: nev        !< Evaluations.
+   type(cell_eval_t), allocatable :: ev(:)                 !< Evaluations: pose0, the wide intervals' middles, pose1.
+   integer(I4P),      allocatable :: nstart(:), lstart(:), lkey(:), lpiece(:), par(:), comp(:) !< Work.
+   type(rigid_pose_2d_t)          :: ps                    !< Pose of an evaluation.
+   real(R8P)                      :: x0, x1, y0, y1, cn(2, 4), s !< Cell, corners, instant.
+   logical                        :: fl(4)                 !< Corner flags.
+   integer(I4P)                   :: np0, np1, l0, l1, b0, nb, i0, i1, v0, ne, e, k, nk, vk !< Work.
+   logical                        :: ok                    !< Measures assigned.
+
+   kind = 0_I4P ; nt = 0_I4P ; nev = 0_I4P
+   np0 = k0%pieces(i, j) ; np1 = k1%pieces(i, j)
+   select case (plan%status(c))
+   case (PLAN_UNTRUSTED)
+      kind = -1_I4P ; return
+   case (PLAN_TRIVIAL)
+      nt = np0 ; otr = 1_I4P ; ntn = 1_I4P ; return
+   endselect
+   kind = 1_I4P
+   x0 = x(i) ; x1 = x(i + 1) ; y0 = y(j) ; y1 = y(j + 1)
+   cn = reshape([x0, y0, x1, y0, x1, y1, x0, y1], [2, 4])
+   l0 = plan%lstart(c) ; l1 = plan%lstart(c + 1) - 1_I4P
+   b0 = plan%bstart(c) ; nb = plan%bstart(c + 1) - b0
+   i0 = plan%istart(c) ; i1 = plan%istart(c + 1) - 1_I4P
+   v0 = plan%vstart(c) ; ne = plan%vstart(c + 1) - v0 ; nev = ne
+   allocate(ev(ne))
+   do e = 1_I4P, ne
+      vk = plan%vkind(v0 + e - 1_I4P) ; s = plan%vs(v0 + e - 1_I4P) ; ps = plan_pose_2d(plan, plan%vpose(v0 + e - 1_I4P))
+      select case (vk)
+      case (0_I4P)
+         fl = [k0%node_in(i, j), k0%node_in(i + 1, j), k0%node_in(i + 1, j + 1), k0%node_in(i, j + 1)]
+      case (1_I4P)
+         fl = [k1%node_in(i, j), k1%node_in(i + 1, j), k1%node_in(i + 1, j + 1), k1%node_in(i, j + 1)]
+      case default
+         do k = 1_I4P, 4_I4P
+            fl(k) = map_corner_in(mc, curve, c0, s, ps, cn(:, k))
+         enddo
+      endselect
+      call map_eval(mc, vk, s, ps, x0, x1, y0, y1, plan%lel(l0:l1), plan%lnext(l0:l1), fl, ev(e))
+   enddo
    ! every evaluation closed; the end evaluations are the end-pose cuts' pieces, bit for bit
    do e = 1_I4P, ne
       if (.not. ev(e)%closed) kind = -1_I4P
@@ -1803,32 +2056,29 @@ contains
    call track_components(ne, nstart, lstart, nk, lkey, lpiece, par, comp, nt)
    otr = comp(nstart(1):nstart(2) - 1_I4P) ; ntn = comp(nstart(ne):nstart(ne + 1) - 1_I4P)
    if (.not. (with_meas .and. nt >= 1_I4P)) return
-   call map_measures(mc, curve, c0, x0, x1, y0, y1, lg, lnx, b, nb, eref, ealt, small, ev, nstart, comp, nt, meas, ok)
+   call map_measures(mc, curve, c0, x0, x1, y0, y1, plan%lel(l0:l1), plan%lnext(l0:l1), plan%bs(b0:b0 + nb - 1_I4P), nb, &
+                     plan%eref(i0:i1), plan%ealt(i0:i1), plan%small(i0:i1), plan%gq_s, plan%gq_w, ev, nstart, comp, nt, &
+                     meas, ok)
    if (.not. ok) kind = -1_I4P
    endsubroutine map_cell
 
-   subroutine map_local(mc, lseg, nl, lg, lnx)
+   pure subroutine map_local(nxt, lseg, lg, lnx)
    !< The local curve of a cell: the end vertices of its segments in increasing order (lg, as the whole curve's indexes)
    !< and the next vertex of each in that numbering (0 if its segment is not local), so that `walk_all` walks the local
-   !< segments in the whole curve's order.
-   type(map_ctx_t),           intent(inout) :: mc      !< State.
-   integer(I4P),              intent(in)    :: lseg(:) !< Local segments.
-   integer(I4P),              intent(out)   :: nl      !< Local vertices.
-   integer(I4P), allocatable, intent(out)   :: lg(:)   !< Their indexes in the curve.
-   integer(I4P), allocatable, intent(out)   :: lnx(:)  !< Next local vertex.
-   integer(I4P), allocatable                :: tmp(:)  !< Work.
-   integer(I4P)                             :: k, e, g, a, h !< Work.
+   !< segments in the whole curve's order. A per-cell deduplication (sort, then unique; issue #105 step 1c).
+   integer(I4P),              intent(in)  :: nxt(:)  !< Next vertex of every curve vertex.
+   integer(I4P),              intent(in)  :: lseg(:) !< Local segments.
+   integer(I4P), allocatable, intent(out) :: lg(:)   !< Their end vertices, increasing, distinct.
+   integer(I4P), allocatable, intent(out) :: lnx(:)  !< Next local vertex.
+   integer(I4P), allocatable              :: tmp(:)  !< Work.
+   integer(I4P)                           :: k, n, a, h, nl !< Work.
 
-   mc%tick = mc%tick + 1_I4P
-   allocate(tmp(2 * size(lseg))) ; nl = 0_I4P
+   n = 2_I4P * size(lseg, kind=I4P)
+   allocate(tmp(n))
    do k = 1_I4P, size(lseg, kind=I4P)
-      do e = 1_I4P, 2_I4P
-         g = lseg(k) ; if (e == 2_I4P) g = mc%nxt(lseg(k))
-         if (mc%stamp(g) == mc%tick) cycle
-         mc%stamp(g) = mc%tick ; nl = nl + 1_I4P ; tmp(nl) = g
-      enddo
+      tmp(2_I4P * k - 1_I4P) = lseg(k) ; tmp(2_I4P * k) = nxt(lseg(k))
    enddo
-   do k = 2_I4P, nl ! insertion sort (a few vertices)
+   do k = 2_I4P, n ! insertion sort (a few vertices)
       a = tmp(k) ; h = k - 1_I4P
       do while (h >= 1_I4P)
          if (tmp(h) <= a) exit
@@ -1836,15 +2086,37 @@ contains
       enddo
       tmp(h + 1_I4P) = a
    enddo
+   nl = min(n, 1_I4P)
+   do k = 2_I4P, n
+      if (tmp(k) /= tmp(nl)) then
+         nl = nl + 1_I4P ; tmp(nl) = tmp(k)
+      endif
+   enddo
    lg = tmp(1:nl)
    allocate(lnx(nl)) ; lnx = 0_I4P
-   do k = 1_I4P, nl
-      mc%loc(lg(k)) = k
-   enddo
    do k = 1_I4P, size(lseg, kind=I4P)
-      lnx(mc%loc(lseg(k))) = mc%loc(mc%nxt(lseg(k)))
+      lnx(local_index(lg, lseg(k))) = local_index(lg, nxt(lseg(k)))
    enddo
    endsubroutine map_local
+
+   pure integer(I4P) function local_index(lg, g) result(k)
+   !< The position of g in the increasing list lg (bisection; g is in lg).
+   integer(I4P), intent(in) :: lg(:) !< Increasing, distinct.
+   integer(I4P), intent(in) :: g     !< Value.
+   integer(I4P)             :: lo, hi, mid !< Work.
+
+   lo = 1_I4P ; hi = size(lg, kind=I4P) ; k = 0_I4P
+   do while (lo <= hi)
+      mid = (lo + hi) / 2_I4P
+      if (lg(mid) == g) then
+         k = mid ; return
+      elseif (lg(mid) < g) then
+         lo = mid + 1_I4P
+      else
+         hi = mid - 1_I4P
+      endif
+   enddo
+   endfunction local_index
 
    subroutine map_events(mc, x0, x1, y0, y1, nl, lg, lnx, b, bw, nb, cert, unc)
    !< The events of the cell [x0, x1] x [y0, y1] in (0, 1), sorted, each once: a local vertex crossing one of its four
@@ -1944,13 +2216,15 @@ contains
    n = n + 1_I4P ; a(n) = z
    endsubroutine push_value
 
-   function map_corner_in(mc, curve, c0, s, p) result(inside)
+   function map_corner_in(mc, curve, c0, s, ps, p) result(inside)
    !< The corner p inside the solid at instant s: the parity of the curve's crossings left of p on its horizontal line
    !< (`line_crossings`, exact with the symbolic tie-break), p taken to the frame of the curve that the path moves:
-   !< the pose0 copy shifted back by s d on the translation path, the body frame (`to_body` of the screw pose) else.
-   type(map_ctx_t),    intent(in) :: mc        !< State.
-   type(curve_object), intent(in) :: curve, c0 !< Curve (body frame), copy at pose0.
-   real(R8P),          intent(in) :: s, p(2)   !< Instant, corner.
+   !< the pose0 copy shifted back by s d on the translation path, the body frame (`to_body` of the screw pose ps at s,
+   !< `pose_interpolate`) else.
+   type(map_ctx_t),       intent(in) :: mc        !< State.
+   type(curve_object),    intent(in) :: curve, c0 !< Curve (body frame), copy at pose0.
+   real(R8P),             intent(in) :: s, p(2)   !< Instant, corner.
+   type(rigid_pose_2d_t), intent(in) :: ps        !< Screw pose at s (off the translation path).
    logical                        :: inside    !< Inside the solid.
    real(R8P),    allocatable      :: t(:)      !< Crossings.
    integer(I4P), allocatable      :: g(:)      !< Segments.
@@ -1962,27 +2236,27 @@ contains
       q = p - s * mc%d
       call c0%line_crossings(1_I4P, q(2), min(q(1), mc%bmin0(1)) - 1._R8P, q(1), t, g, e, n)
    else
-      q = to_body(pose_interpolate(mc%pose0, mc%pose1, s), p)
+      q = to_body(ps, p)
       call curve%line_crossings(1_I4P, q(2), min(q(1), mc%bmin(1)) - 1._R8P, q(1), t, g, e, n)
    endif
    inside = mod(n, 2_I4P) == 1_I4P
    endfunction map_corner_in
 
-   subroutine map_eval(mc, kind, s, x0, x1, y0, y1, lg, lnx, flags, e)
+   subroutine map_eval(mc, kind, s, ps, x0, x1, y0, y1, lg, lnx, flags, e)
    !< The pieces of the cell at one instant with their features (`cut_cell_2d_pieces` on the local curve): kind 0 the
    !< pose0 copy, 1 the pose1 copy, 2 the instant s (the pose0 copy moved by s d on the translation path, `to_world` of
-   !< the screw pose else, as `place_for_crossings`). Features: the fluid corners (keys -4..-1) then the wall segments
-   !< (their indexes in the curve), increasing.
-   type(map_ctx_t),   intent(in)  :: mc             !< State.
-   integer(I4P),      intent(in)  :: kind           !< 0 pose0, 1 pose1, 2 instant s.
-   real(R8P),         intent(in)  :: s              !< Instant (kind 2).
-   real(R8P),         intent(in)  :: x0, x1, y0, y1 !< Cell.
-   integer(I4P),      intent(in)  :: lg(:), lnx(:)  !< Local vertices, next.
-   logical,           intent(in)  :: flags(4)       !< Corner flags.
-   type(cell_eval_t), intent(out) :: e              !< Pieces and features.
+   !< the screw pose ps at s else, as `place_for_crossings`). Features: the fluid corners (keys -4..-1) then the wall
+   !< segments (their indexes in the curve), increasing.
+   type(map_ctx_t),       intent(in)  :: mc         !< State.
+   integer(I4P),          intent(in)  :: kind       !< 0 pose0, 1 pose1, 2 instant s.
+   real(R8P),             intent(in)  :: s          !< Instant (kind 2).
+   type(rigid_pose_2d_t), intent(in)  :: ps         !< Screw pose at s (kind 2, off the translation path).
+   real(R8P),             intent(in)  :: x0, x1, y0, y1 !< Cell.
+   integer(I4P),          intent(in)  :: lg(:), lnx(:) !< Local vertices, next.
+   logical,               intent(in)  :: flags(4)   !< Corner flags.
+   type(cell_eval_t),     intent(out) :: e          !< Pieces and features.
    real(R8P),    allocatable :: lu(:), lv(:), parea(:) !< Placed vertices, areas.
    integer(I4P), allocatable :: wseg(:), wpiece(:)  !< Wall pieces.
-   type(rigid_pose_2d_t)     :: ps                  !< Pose at s.
    real(R8P)                 :: w(2)                !< Vertex.
    integer(I4P)              :: nl, k, nw, cp(4)    !< Work.
 
@@ -1999,7 +2273,6 @@ contains
             lu(k) = mc%u0(lg(k)) + s * mc%d(1) ; lv(k) = mc%v0(lg(k)) + s * mc%d(2)
          enddo
       else
-         ps = pose_interpolate(mc%pose0, mc%pose1, s)
          do k = 1_I4P, nl
             w = to_world(ps, [mc%bu(lg(k)), mc%bv(lg(k))]) ; lu(k) = w(1) ; lv(k) = w(2)
          enddo
@@ -2021,8 +2294,8 @@ contains
    enddo
    endsubroutine map_eval
 
-   subroutine map_measures(mc, curve, c0, x0, x1, y0, y1, lg, lnx, b, nb, eref, ealt, small, ev, nstart, comp, nt, meas, &
-                           ok)
+   subroutine map_measures(mc, curve, c0, x0, x1, y0, y1, lg, lnx, b, nb, eref, ealt, small, gq_s, gq_w, ev, nstart, comp, &
+                           nt, meas, ok)
    !< Per-track time integrals over the step of the fluid lengths of the cell's four faces (meas(1:4), -u, +u, -v, +v)
    !< and of the rigid-field outflows through them (meas(5:8)), interval by interval between the cell's events: inside
    !< an interval the pieces keep their features, so each piece of an evaluation at a quadrature node belongs to the
@@ -2040,6 +2313,7 @@ contains
    integer(I4P),           intent(in)    :: nb             !< Their number.
    integer(I4P),           intent(in)    :: eref(:), ealt(:) !< Evaluations of each interval (see `map_cell`).
    logical,                intent(in)    :: small(:)       !< Intervals narrower than EVENT_GAP (nodes may be skipped).
+   real(R8P),              intent(in)    :: gq_s(:), gq_w(:) !< Gauss node sets (`map_plan_t`).
    type(cell_eval_t),      intent(in)    :: ev(:)          !< Evaluations.
    integer(I4P),           intent(in)    :: nstart(:)      !< First node of each evaluation.
    integer(I4P),           intent(in)    :: comp(:)        !< Track of each node.
@@ -2047,7 +2321,7 @@ contains
    real(R8P), allocatable, intent(out)   :: meas(:,:)      !< Measures [8, nt].
    logical,                intent(out)   :: ok             !< Every piece assigned.
    real(R8P), parameter   :: G = 0.5_R8P / sqrt(3._R8P)    !< Two-point Gauss offset on a unit interval.
-   real(R8P), allocatable :: a1(:,:), a2(:,:), sq(:), wq(:) !< Work.
+   real(R8P), allocatable :: a1(:,:), a2(:,:)             !< Work.
    real(R8P)              :: sa, sb, h, scl(4), sco(4), sno, vel, tol !< Work.
    integer(I4P)           :: m, ng, q, t, f, r, a      !< Work.
    logical                :: conv, rot                     !< Converged, a rotation.
@@ -2073,17 +2347,15 @@ contains
          if (h <= 0._R8P) cycle
          r = eref(m) ; a = ealt(m)
          ng = 2_I4P ; a1 = 0._R8P
-         call gauss_legendre_01(ng, sq, wq)
-         do q = 1_I4P, ng
-            call map_node(mc, curve, c0, sa + h * sq(q), h * wq(q), x0, x1, y0, y1, lg, lnx, ev(r), nstart(r), ev(a), &
+         do q = ng - 1_I4P, 2_I4P * ng - 2_I4P
+            call map_node(mc, curve, c0, sa + h * gq_s(q), h * gq_w(q), x0, x1, y0, y1, lg, lnx, ev(r), nstart(r), ev(a), &
                           nstart(a), r /= a .or. small(m), comp, a1, ok)
          enddo
          do
             ng = 2_I4P * ng ; a2 = 0._R8P
-            call gauss_legendre_01(ng, sq, wq)
-            do q = 1_I4P, ng
-               call map_node(mc, curve, c0, sa + h * sq(q), h * wq(q), x0, x1, y0, y1, lg, lnx, ev(r), nstart(r), ev(a), &
-                             nstart(a), r /= a .or. small(m), comp, a2, ok)
+            do q = ng - 1_I4P, 2_I4P * ng - 2_I4P
+               call map_node(mc, curve, c0, sa + h * gq_s(q), h * gq_w(q), x0, x1, y0, y1, lg, lnx, ev(r), nstart(r), &
+                             ev(a), nstart(a), r /= a .or. small(m), comp, a2, ok)
             enddo
             if (.not. ok) exit
             tol = 64._R8P * epsilon(1._R8P) * max(h, FLOOR_H)
@@ -2158,20 +2430,22 @@ contains
    real(R8P),          intent(inout) :: acc(:,:)       !< Sums [8, nt].
    logical,            intent(inout) :: ok             !< Every piece assigned.
    type(cell_eval_t)                 :: e              !< Pieces at s.
+   type(rigid_pose_2d_t)             :: ps             !< Screw pose at s (off the translation path).
    real(R8P)                         :: tq(2), l, mm, o, cn(2, 4) !< Work.
    logical                           :: fl(4)          !< Corner flags at s.
    integer(I4P)                      :: p, t, f, k     !< Work.
 
    if (.not. ok) return
+   if (mc%path /= MAP_TRANSLATION) ps = pose_interpolate(mc%pose0, mc%pose1, s)
    if (na == nr) then ! a wide interval: no corner crosses a segment inside it, its evaluation's flags hold
       fl = evr%fl
    else
       cn = reshape([x0, y0, x1, y0, x1, y1, x0, y1], [2, 4])
       do k = 1_I4P, 4_I4P
-         fl(k) = map_corner_in(mc, curve, c0, s, cn(:, k))
+         fl(k) = map_corner_in(mc, curve, c0, s, ps, cn(:, k))
       enddo
    endif
-   call map_eval(mc, 2_I4P, s, x0, x1, y0, y1, lg, lnx, fl, e)
+   call map_eval(mc, 2_I4P, s, ps, x0, x1, y0, y1, lg, lnx, fl, e)
    if (.not. e%closed) then
       if (narrow) then
          mc%skipped = mc%skipped + 1_I4P
@@ -2241,10 +2515,12 @@ contains
    !<
    !< 1. Candidates: the cells a facet can meet during the step (the box of its vertices' paths: the segment of the
    !<    translation, or 17 samples of the screw path grown by its curvature bound), each with its facets (CSR,
-   !<    increasing facet order).
-   !< 2. Topology per cell (`map3_cell`): the events of the cell from its facets (`map3_events`: a mesh vertex crossing a
-   !<    face plane inside the face, a mesh edge crossing a cell edge, a corner crossing a facet; explicit on a
-   !<    translation, `isolate_zeros` under a rotation); a cell without events whose two end cuts have the same single
+   !<    increasing facet order). The host phase (`map_plan_3d`, issue #105 step 1c) then gives every cell its status
+   !<    and, if it is evaluated, its facets, events, corner events, interval layout and evaluation instants, as flat CSR
+   !<    arrays, with a pose table.
+   !< 2. Topology per cell (`map3_cell`, from the plan): the events of the cell from its facets (`map3_events`: a mesh
+   !<    vertex crossing a face plane inside the face, a mesh edge crossing a cell edge, a corner crossing a facet;
+   !<    explicit on a translation, `isolate_zeros` under a rotation); a cell without events whose two end cuts have the same single
    !<    piece (or none) takes the trivial track. Otherwise its pieces are evaluated at pose0 (the pose0 copy, k0's
    !<    corner states and fractions: they must equal k0's pieces bit for bit, which fixes the numbering), at the middle
    !<    of every interval between events, and at pose1, and pieces of consecutive evaluations sharing a boundary
@@ -2266,6 +2542,7 @@ contains
    logical,      optional,   intent(in)  :: all_meas     !< Integrate every evaluated cell (issue #104).
    logical, allocatable, optional, intent(out) :: measured(:) !< Cells integrated per event interval [nx ny nz].
    type(map3_ctx_t)          :: mc                         !< State.
+   type(map_plan_t)          :: plan                       !< Host phase (issue #105 step 1c).
    integer(I4P), allocatable :: cstart(:), cfac(:)         !< Facets of every cell.
    integer(I4P), allocatable :: ntr(:), ckind(:)           !< Tracks and kind (0 trivial, 1 evaluated, -1 untrusted).
    integer(I4P), allocatable :: otr(:), ntn(:)             !< Track (in its cell) of every old and new piece.
@@ -2281,6 +2558,8 @@ contains
    map%nx = nx ; map%ny = ny ; map%nz = nz ; map%np0 = k0%np ; map%np1 = k1%np
    call map3_context(surface, s0, pose0, pose1, x, y, z, path, nq, mc)
    call map3_candidates(mc, x, y, z, cstart, cfac)
+   call map_plan_3d(mc, x, y, z, k0, k1, cstart, cfac, plan)
+   deallocate(cstart, cfac)
    allocate(ntr(ncell), ckind(ncell), otr(k0%np), ntn(k1%np), moff(ncell))
    ! topology of every cell
    do k = 1_I4P, nz
@@ -2289,8 +2568,8 @@ contains
             c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
             a0 = k0%first_piece(i, j, k) ; a1 = a0 + max(0_I4P, k0%pieces(i, j, k)) - 1_I4P
             b0 = k1%first_piece(i, j, k) ; b1 = b0 + max(0_I4P, k1%pieces(i, j, k)) - 1_I4P
-            call map3_cell(mc, surface, s0, i, j, k, x, y, z, k0, k1, cfac(cstart(c):cstart(c + 1) - 1_I4P), .false., &
-                           kind, nt, otr(a0:a1), ntn(b0:b1), mloc, nev)
+            call map3_cell(mc, plan, surface, s0, c, i, j, k, x, y, z, k0, k1, .false., kind, nt, otr(a0:a1), &
+                           ntn(b0:b1), mloc, nev)
             ckind(c) = kind ; ntr(c) = nt
             map%evaluations = map%evaluations + nev
             if (nev > 0_I4P) map%evaluated_cells = map%evaluated_cells + 1_I4P
@@ -2313,8 +2592,8 @@ contains
             a0 = k0%first_piece(i, j, k) ; a1 = a0 + max(0_I4P, k0%pieces(i, j, k)) - 1_I4P
             b0 = k1%first_piece(i, j, k) ; b1 = b0 + max(0_I4P, k1%pieces(i, j, k)) - 1_I4P
             so = otr(a0:a1) ; sn = ntn(b0:b1)
-            call map3_cell(mc, surface, s0, i, j, k, x, y, z, k0, k1, cfac(cstart(c):cstart(c + 1) - 1_I4P), .true., &
-                           kind, nt, otr(a0:a1), ntn(b0:b1), mloc, nev)
+            call map3_cell(mc, plan, surface, s0, c, i, j, k, x, y, z, k0, k1, .true., kind, nt, otr(a0:a1), &
+                           ntn(b0:b1), mloc, nev)
             if (kind == 1_I4P .and. nt == ntr(c)) then
                meas(:, moff(c):moff(c) + nt - 1_I4P) = mloc(:, 1:nt)
             elseif (ntr(c) == 1_I4P .and. allm) then ! one track (all_meas): keep it with the sw values
@@ -2400,7 +2679,7 @@ contains
       enddo
    enddo
    map%exact = mc%exact ; map%skipped_nodes = mc%skipped
-   map%contact_cells = mc%contacts ; map%narrow_cells = mc%resolved
+   map%contact_cells = plan%contacts ; map%narrow_cells = plan%resolved
    endsubroutine piece_map_3d_build
 
    subroutine map3_context(surface, s0, pose0, pose1, x, y, z, path, nq, mc)
@@ -2499,8 +2778,7 @@ contains
       mc%fe(mod(ord(q) - 1_I4P, 3_I4P) + 1_I4P, (ord(q) - 1_I4P) / 3_I4P + 1_I4P) = id
    enddo
    mc%ned = id
-   allocate(mc%vstamp(max(1_I4P, mc%nvx)), mc%estamp(max(1_I4P, mc%ned)))
-   mc%vstamp = 0_I4P ; mc%estamp = 0_I4P ; mc%tick = 0_I4P ; mc%exact = .true. ; mc%skipped = 0_I4P
+   mc%exact = .true. ; mc%skipped = 0_I4P
    endsubroutine map3_context
 
    subroutine sort_lex(key, ord)
@@ -2619,21 +2897,98 @@ contains
    enddo
    endsubroutine map3_candidates
 
-   subroutine map3_cell(mc, surface, s0, i, j, k, x, y, z, k0, k1, lf, with_meas, kind, nt, otr, ntn, meas, nev)
+   subroutine map_plan_3d(mc, x, y, z, k0, k1, cstart, cfac, plan)
+   !< The host phase of the 3-D piece map (issue #105 step 1c; `map_plan_t`), the twin of `map_plan_2d`: per cell the
+   !< checks of `map3_cell` that come before its evaluations (both end cuts trusted, a wall near the cell during the
+   !< step, its events certified and free of uncertified contacts, more than one state); an evaluated cell also gets its
+   !< facets, its events and corner events (`map3_events`, a per-cell deduplication of mesh vertices and edges), its
+   !< interval layout and its evaluation list; then the pose table (`plan_instants`, with a rotation).
+   type(map3_ctx_t),     intent(in)  :: mc                 !< State.
+   real(R8P),            intent(in)  :: x(:), y(:), z(:)   !< Cell edges.
+   type(cut_cells_3d_t), intent(in)  :: k0, k1             !< End-pose cuts.
+   integer(I4P),         intent(in)  :: cstart(:), cfac(:) !< Facets of every cell (`map3_candidates`).
+   type(map_plan_t),     intent(out) :: plan               !< Plan.
+   type(plan_cell_t), allocatable :: pc(:)                 !< Candidate cells.
+   integer(I4P),      allocatable :: cand(:)               !< Their cells.
+   type(rigid_pose_t)             :: ps                    !< Pose.
+   real(R8P)                      :: b0(3), b1(3)          !< Cell.
+   integer(I4P)                   :: nx, ny, nz, ncell, nc, ic, c, i, j, k, np0, np1, nb !< Work.
+   logical                        :: cert, unc             !< Events certified, an uncertified contact.
+
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   ncell = nx * ny * nz
+   plan%ncell = ncell ; allocate(plan%status(ncell))
+   nc = 0_I4P
+   do c = 1_I4P, ncell
+      call cell_ijk(c, nx, ny, i, j, k)
+      np0 = k0%pieces(i, j, k) ; np1 = k1%pieces(i, j, k)
+      if (np0 < 0_I4P .or. np1 < 0_I4P) then
+         plan%status(c) = PLAN_UNTRUSTED
+      elseif (cstart(c + 1) == cstart(c)) then ! no wall near the cell during the step: the same state throughout
+         plan%status(c) = merge(PLAN_TRIVIAL, PLAN_UNTRUSTED, np0 == np1 .and. np0 <= 1_I4P)
+      else
+         plan%status(c) = PLAN_EVAL ; nc = nc + 1_I4P
+      endif
+   enddo
+   allocate(cand(nc), pc(nc))
+   nc = 0_I4P
+   do c = 1_I4P, ncell
+      if (plan%status(c) /= PLAN_EVAL) cycle
+      nc = nc + 1_I4P ; cand(nc) = c
+   enddo
+   !$omp parallel do default(shared) private(ic, c, i, j, k, b0, b1, nb, cert, unc) schedule(dynamic, 4)
+   do ic = 1_I4P, nc ! independent cells, each into its own pc(ic)
+      c = cand(ic) ; call cell_ijk(c, nx, ny, i, j, k)
+      b0 = [x(i), y(j), z(k)] ; b1 = [x(i + 1), y(j + 1), z(k + 1)]
+      pc(ic)%lg = cfac(cstart(c):cstart(c + 1) - 1_I4P)
+      call map3_events(mc, b0, b1, pc(ic)%lg, pc(ic)%b, pc(ic)%bw, nb, cert, unc, pc(ic)%ct, pc(ic)%cc)
+      call plan_classify(pc(ic), cert, unc, k0%pieces(i, j, k), k1%pieces(i, j, k))
+   enddo
+   !$omp end parallel do
+   call plan_fill(plan, cand, pc, 3_I4P)
+   if (mc%rot) then ! the middle evaluations placed by the screw pose (`map3_eval`)
+      call plan_instants(plan, 3_I4P)
+      do k = 1_I4P, plan%npose
+         ps = pose_interpolate(mc%pose0, mc%pose1, plan%pose_s(k))
+         plan%pose_r(:, :, k) = ps%r ; plan%pose_t(:, k) = ps%t
+      enddo
+   endif
+   endsubroutine map_plan_3d
+
+   pure subroutine cell_ijk(c, nx, ny, i, j, k)
+   !< The indexes of cell c = i + nx ((j - 1) + ny (k - 1)).
+   integer(I4P), intent(in)  :: c, nx, ny !< Cell, cells along x and y.
+   integer(I4P), intent(out) :: i, j, k   !< Indexes.
+
+   i = mod(c - 1_I4P, nx) + 1_I4P ; j = mod((c - 1_I4P) / nx, ny) + 1_I4P ; k = (c - 1_I4P) / (nx * ny) + 1_I4P
+   endsubroutine cell_ijk
+
+   pure function plan_pose_3d(plan, k) result(ps)
+   !< Pose k of the plan's table (the identity for k = 0).
+   type(map_plan_t), intent(in) :: plan !< Plan.
+   integer(I4P),     intent(in) :: k    !< Pose (0: none).
+   type(rigid_pose_t)           :: ps   !< Pose.
+
+   if (k > 0_I4P) then
+      ps%r = plan%pose_r(:, :, k) ; ps%t = plan%pose_t(:, k)
+   endif
+   endfunction plan_pose_3d
+
+   subroutine map3_cell(mc, plan, surface, s0, c, i, j, k, x, y, z, k0, k1, with_meas, kind, nt, otr, ntn, meas, nev)
    !< The tracks of cell (i, j, k) (see `piece_map_3d_build`, step 2): kind 0 (trivial: no evaluation), 1 (evaluated) or
    !< -1 (untrusted); nt tracks; the track of each of its old pieces (otr, in k0's order) and new pieces (ntn); with
    !< `with_meas` and nt >= 1, the per-track time integrals meas(1:6) of the faces' fluid areas and meas(7:12) of their
-   !< outward rigid-field outflows (`map3_measures`; kind -1 if a face part could not be assigned). Intervals between
-   !< events narrower than EVENT_GAP and within their round-off widths are not evaluated (their events act as one), as
-   !< `map_cell`; a cell with an
-   !< uncertified contact (a corner grazing a facet, a vertex grazing a face plane or an edge a cell edge, under a
-   !< rotation) is untrusted.
+   !< outward rigid-field outflows (`map3_measures`; kind -1 if a face part could not be assigned). The status, facets,
+   !< events, intervals, evaluation instants and corner events come from the plan (`map_plan_3d`, issue #105 step 1c).
+   !< Intervals between events narrower than EVENT_GAP and within their round-off widths are not evaluated (their events
+   !< act as one), as `map_cell`; a cell with an uncertified contact (a corner grazing a facet, a vertex grazing a face
+   !< plane or an edge a cell edge, under a rotation) is untrusted.
    type(map3_ctx_t),          intent(inout) :: mc               !< State.
+   type(map_plan_t),          intent(in)    :: plan             !< Host phase.
    type(surface_stl_object),  intent(in)    :: surface, s0      !< Surface (body frame), copy at pose0.
-   integer(I4P),              intent(in)    :: i, j, k          !< Cell.
+   integer(I4P),              intent(in)    :: c, i, j, k       !< Cell (c = i + nx ((j - 1) + ny (k - 1))).
    real(R8P),                 intent(in)    :: x(:), y(:), z(:) !< Cell edges.
    type(cut_cells_3d_t),      intent(in)    :: k0, k1           !< End-pose cuts.
-   integer(I4P),              intent(in)    :: lf(:)            !< Facets of the cell (increasing).
    logical,                   intent(in)    :: with_meas        !< Integrate the per-track measures.
    integer(I4P),              intent(out)   :: kind             !< 0 trivial, 1 evaluated, -1 untrusted.
    integer(I4P),              intent(out)   :: nt               !< Tracks.
@@ -2643,79 +2998,47 @@ contains
    integer(I4P),              intent(out)   :: nev              !< Evaluations.
    type(cell_eval3_t), allocatable :: ev(:)                     !< Evaluations: pose0, the wide intervals' middles, pose1.
    integer(I4P),       allocatable :: nstart(:), lstart(:), lkey(:), lpiece(:), par(:), comp(:) !< Work.
-   integer(I4P),       allocatable :: eref(:), ealt(:)          !< Per interval: its evaluation, the one after it (narrow).
-   real(R8P),          allocatable :: b(:), bw(:)               !< Events, their half-widths.
-   logical,            allocatable :: wide(:), small(:)         !< Per interval: evaluated; narrower than EVENT_GAP.
-   real(R8P)                       :: c0(3), c1(3), sa, sb, fr(6) !< Cell, interval, face fractions.
-   integer(I4P)                    :: np0, np1, nb, ne, e, m, q, nk, cs(8) !< Work.
-   logical                         :: cert, unc                 !< Certified events, uncertified contact.
+   type(rigid_pose_t)              :: ps                        !< Pose of an evaluation.
+   real(R8P)                       :: c0(3), c1(3), fr(6), al, s !< Cell, face and cell fractions, instant.
+   integer(I4P)                    :: np0, np1, l0, l1, b0, nb, i0, i1, v0, n0, n1, ne, e, q, nk, vk !< Work.
+   integer(I4P)                    :: cs0(8), cs(8)             !< Corner states at pose0, of an evaluation.
+   logical                         :: known(8), mp, ok          !< Corners known, piece measures, measures assigned.
 
    kind = 0_I4P ; nt = 0_I4P ; nev = 0_I4P
-   c0 = [x(i), y(j), z(k)] ; c1 = [x(i + 1), y(j + 1), z(k + 1)]
    np0 = k0%pieces(i, j, k) ; np1 = k1%pieces(i, j, k)
-   if (np0 < 0_I4P .or. np1 < 0_I4P) then
+   select case (plan%status(c))
+   case (PLAN_UNTRUSTED)
       kind = -1_I4P ; return
-   endif
-   if (size(lf) == 0) then ! no wall near the cell during the step: the same state throughout
-      if (np0 == np1 .and. np0 <= 1_I4P) then
-         nt = np0 ; otr = 1_I4P ; ntn = 1_I4P
-      else
-         kind = -1_I4P
-      endif
-      return
-   endif
-   call map3_events(mc, c0, c1, lf, b, bw, nb, cert, unc)
-   if (.not. cert) then
-      kind = -1_I4P ; return
-   endif
-   if (unc) then ! an uncertified contact: a state the evaluations cannot decide (issue #102)
-      if (.not. with_meas) mc%contacts = mc%contacts + 1_I4P
-      kind = -1_I4P ; return
-   endif
-   if (nb == 0_I4P .and. np0 == np1 .and. np0 <= 1_I4P) then ! one state throughout, at most one piece
+   case (PLAN_TRIVIAL)
       nt = np0 ; otr = 1_I4P ; ntn = 1_I4P ; return
-   endif
+   endselect
    kind = 1_I4P
-   ! the intervals: a wide one has its evaluation (2 .. ne - 1); a narrow one refers to those before and after it
-   allocate(eref(nb + 1), ealt(nb + 1), wide(nb + 1), small(nb + 1))
-   ne = 1_I4P
-   do m = 1_I4P, nb + 1_I4P
-      call map_interval(b, nb, m, sa, sb)
-      wide(m) = interval_wide(b, bw, nb, m) ; small(m) = sb - sa < EVENT_GAP
-      if (wide(m)) then
-         ne = ne + 1_I4P ; eref(m) = ne ; ealt(m) = ne
-      else
-         eref(m) = ne ; ealt(m) = 0_I4P
-      endif
-   enddo
-   if (.not. with_meas .and. any(wide .and. small)) mc%resolved = mc%resolved + 1_I4P
-   ne = ne + 1_I4P ; nev = ne
-   e = ne
-   do m = nb + 1_I4P, 1_I4P, -1_I4P
-      if (ealt(m) == 0_I4P) then
-         ealt(m) = e
-      else
-         e = eref(m)
-      endif
-   enddo
+   c0 = [x(i), y(j), z(k)] ; c1 = [x(i + 1), y(j + 1), z(k + 1)]
+   l0 = plan%lstart(c) ; l1 = plan%lstart(c + 1) - 1_I4P
+   b0 = plan%bstart(c) ; nb = plan%bstart(c + 1) - b0
+   i0 = plan%istart(c) ; i1 = plan%istart(c + 1) - 1_I4P
+   n0 = plan%cnstart(c) ; n1 = plan%cnstart(c + 1) - 1_I4P
+   v0 = plan%vstart(c) ; ne = plan%vstart(c + 1) - v0 ; nev = ne
    allocate(ev(ne))
-   call node_states(k0%node_in, i, j, k, mc%cs0) ; call node_states(k1%node_in, i, j, k, cs)
-   call map3_corner_known(mc, cs)
-   call node_states(k0%node_in, i, j, k, cs)
-   fr = [k0%face_x(i, j, k), k0%face_x(i + 1, j, k), k0%face_y(i, j, k), k0%face_y(i, j + 1, k), k0%face_z(i, j, k), &
-         k0%face_z(i, j, k + 1)]
-   call map3_eval(mc, surface, s0, 0_I4P, 0._R8P, c0, c1, lf, cs, k0%alpha(i, j, k), fr, np0 > 1_I4P, ev(1))
-   e = 1_I4P
-   do m = 1_I4P, nb + 1_I4P
-      call map_interval(b, nb, m, sa, sb)
-      if (.not. wide(m)) cycle
-      e = e + 1_I4P
-      call map3_eval(mc, surface, s0, 2_I4P, 0.5_R8P * (sa + sb), c0, c1, lf, cs, 0._R8P, fr, .false., ev(e))
+   call node_states(k0%node_in, i, j, k, cs0) ; call node_states(k1%node_in, i, j, k, cs)
+   call map3_corner_known(plan%cntime(n0:n1), plan%cncor(n0:n1), cs0, cs, known)
+   do e = 1_I4P, ne
+      vk = plan%vkind(v0 + e - 1_I4P) ; s = plan%vs(v0 + e - 1_I4P) ; ps = plan_pose_3d(plan, plan%vpose(v0 + e - 1_I4P))
+      if (vk == 1_I4P) then
+         call node_states(k1%node_in, i, j, k, cs) ; al = k1%alpha(i, j, k) ; mp = np1 > 1_I4P
+         fr = [k1%face_x(i, j, k), k1%face_x(i + 1, j, k), k1%face_y(i, j, k), k1%face_y(i, j + 1, k), k1%face_z(i, j, k), &
+               k1%face_z(i, j, k + 1)]
+      else
+         cs = cs0 ; al = k0%alpha(i, j, k) ; mp = np0 > 1_I4P
+         if (vk == 2_I4P) then
+            al = 0._R8P ; mp = .false.
+         endif
+         fr = [k0%face_x(i, j, k), k0%face_x(i + 1, j, k), k0%face_y(i, j, k), k0%face_y(i, j + 1, k), k0%face_z(i, j, k), &
+               k0%face_z(i, j, k + 1)]
+      endif
+      call map3_eval(mc, surface, s0, vk, s, ps, c0, c1, plan%lel(l0:l1), cs, al, fr, mp, cs0, known, plan%cntime(n0:n1), &
+                     plan%cncor(n0:n1), ev(e))
    enddo
-   call node_states(k1%node_in, i, j, k, cs)
-   fr = [k1%face_x(i, j, k), k1%face_x(i + 1, j, k), k1%face_y(i, j, k), k1%face_y(i, j + 1, k), k1%face_z(i, j, k), &
-         k1%face_z(i, j, k + 1)]
-   call map3_eval(mc, surface, s0, 1_I4P, 1._R8P, c0, c1, lf, cs, k1%alpha(i, j, k), fr, np1 > 1_I4P, ev(ne))
    ! every evaluation trusted; the end evaluations are the end-pose cuts' pieces, bit for bit
    do e = 1_I4P, ne
       if (.not. ev(e)%closed) kind = -1_I4P
@@ -2748,8 +3071,10 @@ contains
    call track_components(ne, nstart, lstart, nk, lkey, lpiece, par, comp, nt)
    otr = comp(nstart(1):nstart(2) - 1_I4P) ; ntn = comp(nstart(ne):nstart(ne + 1) - 1_I4P)
    if (.not. (with_meas .and. nt >= 1_I4P)) return
-   call map3_measures(mc, surface, s0, c0, c1, lf, b, nb, eref, ealt, small, ev, nstart, comp, nt, meas, cert)
-   if (.not. cert) kind = -1_I4P
+   call map3_measures(mc, surface, s0, c0, c1, plan%lel(l0:l1), plan%bs(b0:b0 + nb - 1_I4P), nb, plan%eref(i0:i1), &
+                      plan%ealt(i0:i1), plan%small(i0:i1), plan%gq_s, plan%gq_w, cs0, known, plan%cntime(n0:n1), &
+                      plan%cncor(n0:n1), ev, nstart, comp, nt, meas, ok)
+   if (.not. ok) kind = -1_I4P
    endsubroutine map3_cell
 
    pure subroutine node_states(node_in, i, j, k, cs)
@@ -2764,31 +3089,45 @@ contains
    enddo
    endsubroutine node_states
 
-   subroutine map3_events(mc, c0, c1, lf, b, bw, nb, cert, unc)
+   subroutine map3_events(mc, c0, c1, lf, b, bw, nb, cert, unc, ct, cc)
    !< The events of the cell [c0, c1] in (0, 1), sorted, each once, from its facets lf: a mesh vertex crossing one of its
    !< six face planes inside the face, a mesh edge crossing one of its 12 edges, one of its 8 corners crossing a facet;
-   !< each mesh vertex and edge once per cell. Without rotation, explicit (the formulas of `plane_breakpoints` on the
-   !< pose0 copy); with a rotation, `isolate_zeros` on the screw forms of `plane_events` (cert false if one is not
-   !< certified; unc true if a kept event is not certified by a sign change: an uncertified contact). The position
-   !< checks are inclusive by mc%tol: an extra event only adds an evaluation. bw (issue #104): each event's half-width
-   !< (`EVENT_RES` on the explicit formulas, `isolate_zeros`' width on the screw ones; a duplicate keeps the larger).
-   type(map3_ctx_t),       intent(inout) :: mc           !< State.
-   real(R8P),              intent(in)    :: c0(3), c1(3) !< Cell.
-   integer(I4P),           intent(in)    :: lf(:)        !< Facets.
-   real(R8P), allocatable, intent(out)   :: b(:)         !< Events.
-   real(R8P), allocatable, intent(out)   :: bw(:)        !< Their half-widths.
-   integer(I4P),           intent(out)   :: nb           !< Their number.
-   logical,                intent(out)   :: cert         !< Every event certified.
-   logical,                intent(out)   :: unc          !< An event is an uncertified contact.
-   real(R8P), allocatable :: tmp(:), tw(:)               !< Work.
-   real(R8P)              :: p(3), lo(3), hi(3)          !< Corner, facet box.
-   integer(I4P)           :: q, f, m, cn, nb0, k, nc     !< Work.
+   !< each mesh vertex and edge once per cell (at its first facet vertex, edge, in the order of lf: a per-cell
+   !< deduplication, `first_in_order`, issue #105 step 1c). Without rotation, explicit (the formulas of
+   !< `plane_breakpoints` on the pose0 copy); with a rotation, `isolate_zeros` on the screw forms of `plane_events` (cert
+   !< false if one is not certified; unc true if a kept event is not certified by a sign change: an uncertified contact).
+   !< The position checks are inclusive by mc%tol: an extra event only adds an evaluation. bw (issue #104): each event's
+   !< half-width (`EVENT_RES` on the explicit formulas, `isolate_zeros`' width on the screw ones; a duplicate keeps the
+   !< larger). ct, cc: the corner events, instants and corners (as reals), for `map3_corner_known`.
+   type(map3_ctx_t),       intent(in)  :: mc           !< State.
+   real(R8P),              intent(in)  :: c0(3), c1(3) !< Cell.
+   integer(I4P),           intent(in)  :: lf(:)        !< Facets.
+   real(R8P), allocatable, intent(out) :: b(:)         !< Events.
+   real(R8P), allocatable, intent(out) :: bw(:)        !< Their half-widths.
+   integer(I4P),           intent(out) :: nb           !< Their number.
+   logical,                intent(out) :: cert         !< Every event certified.
+   logical,                intent(out) :: unc          !< An event is an uncertified contact.
+   real(R8P), allocatable, intent(out) :: ct(:)        !< Corner events: instants (in event order).
+   real(R8P), allocatable, intent(out) :: cc(:)        !< Their corners (1..8, as reals).
+   real(R8P),    allocatable :: tmp(:), tw(:)           !< Work.
+   integer(I4P)              :: ids(3 * size(lf))       !< Mesh vertex or edge of every facet vertex (q, m), visit order.
+   logical                   :: fv1(3 * size(lf))       !< First visit of the mesh vertex of facet vertex (q, m).
+   logical                   :: fe1(3 * size(lf))       !< First visit of the mesh edge of facet edge (q, m).
+   real(R8P)                 :: p(3), lo(3), hi(3)      !< Corner, facet box.
+   integer(I4P)              :: q, f, m, cn, nb0, k, nc, ncn, n !< Work.
 
-   cert = .true. ; unc = .false. ; nb = 0_I4P ; mc%tick = mc%tick + 1_I4P
-   allocate(tmp(16), tw(16))
-   if (allocated(mc%ctime)) deallocate(mc%ctime, mc%ccor)
-   allocate(mc%ctime(8), mc%ccor(8)) ; mc%ncn = 0_I4P
-   do q = 1_I4P, size(lf, kind=I4P)
+   cert = .true. ; unc = .false. ; nb = 0_I4P
+   n = size(lf, kind=I4P)
+   allocate(tmp(16), tw(16), ct(8), cc(8)) ; ncn = 0_I4P
+   do q = 1_I4P, n
+      ids(3_I4P * (q - 1_I4P) + 1_I4P:3_I4P * q) = mc%fv(:, lf(q))
+   enddo
+   call first_in_order(ids, fv1)
+   do q = 1_I4P, n
+      ids(3_I4P * (q - 1_I4P) + 1_I4P:3_I4P * q) = mc%fe(:, lf(q))
+   enddo
+   call first_in_order(ids, fe1)
+   do q = 1_I4P, n
       f = lf(q)
       lo = min(mc%vlo(:, 1, f), mc%vlo(:, 2, f), mc%vlo(:, 3, f))
       hi = max(mc%vhi(:, 1, f), mc%vhi(:, 2, f), mc%vhi(:, 3, f))
@@ -2798,25 +3137,46 @@ contains
          nb0 = nb
          call event_corner(mc, f, p, tmp, tw, nb, cert, unc)
          do k = nb0 + 1_I4P, nb ! the corner's own list, for its states within the step (`map3_corner_known`)
-            nc = mc%ncn
-            call push_value(mc%ctime, nc, tmp(k))
-            call push_value(mc%ccor, mc%ncn, real(cn, R8P))
+            nc = ncn
+            call push_value(ct, nc, tmp(k))
+            call push_value(cc, ncn, real(cn, R8P))
          enddo
       enddo
       do m = 1_I4P, 3_I4P
-         if (mc%vstamp(mc%fv(m, f)) /= mc%tick) then
-            mc%vstamp(mc%fv(m, f)) = mc%tick
-            call event_vertex(mc, f, m, c0, c1, tmp, tw, nb, cert, unc)
-         endif
-         if (mc%estamp(mc%fe(m, f)) /= mc%tick) then
-            mc%estamp(mc%fe(m, f)) = mc%tick
-            call event_edge(mc, f, m, c0, c1, tmp, tw, nb, cert, unc)
-         endif
+         if (fv1(3_I4P * (q - 1_I4P) + m)) call event_vertex(mc, f, m, c0, c1, tmp, tw, nb, cert, unc)
+         if (fe1(3_I4P * (q - 1_I4P) + m)) call event_edge(mc, f, m, c0, c1, tmp, tw, nb, cert, unc)
       enddo
    enddo
    call sort_unique_w(tmp, tw, nb)
    b = tmp(1:nb) ; bw = tw(1:nb)
+   tmp = ct(1:ncn) ; call move_alloc(tmp, ct)
+   tw = cc(1:ncn) ; call move_alloc(tw, cc)
    endsubroutine map3_events
+
+   pure subroutine first_in_order(ids, first)
+   !< first(r): ids(r) differs from every ids(r') with r' < r (the positions sorted by id with a stable insertion sort,
+   !< then the head of each run of equal ids: its smallest position). A few dozen ids per cell.
+   integer(I4P), intent(in)  :: ids(:)   !< Ids in visit order [n].
+   logical,      intent(out) :: first(:) !< First occurrences [n].
+   integer(I4P)              :: ord(size(ids)) !< Positions sorted by id.
+   integer(I4P)              :: r, h, a  !< Work.
+
+   do r = 1_I4P, size(ids, kind=I4P)
+      a = r ; h = r - 1_I4P
+      do while (h >= 1_I4P)
+         if (ids(ord(h)) <= ids(a)) exit
+         ord(h + 1_I4P) = ord(h) ; h = h - 1_I4P
+      enddo
+      ord(h + 1_I4P) = a
+   enddo
+   do r = 1_I4P, size(ids, kind=I4P)
+      if (r == 1_I4P) then
+         first(ord(r)) = .true.
+      else
+         first(ord(r)) = ids(ord(r)) /= ids(ord(r - 1_I4P))
+      endif
+   enddo
+   endsubroutine first_in_order
 
    pure function corner_point(c0, c1, cn) result(p)
    !< Corner cn (1 + bx + 2 by + 4 bz) of the box [c0, c1].
@@ -3038,64 +3398,73 @@ contains
    inside = mod(cnt, 2_I4P) == 1_I4P
    endfunction map3_corner_in
 
-   subroutine map3_corner_known(mc, cs1)
-   !< Which corners of the current cell have states that follow from their events (the flip rule): the corner's events
-   !< (it crossing a facet, `map3_events`) at least 1e-9 apart, so that each is one transversal crossing, and their
-   !< parity taking the pose0 state (mc%cs0) to the pose1 state cs1. A corner passing through a mesh edge or vertex (two
-   !< facets at once), touching a facet, or whose count disagrees takes the exact query (`map3_corner_in`) instead.
-   type(map3_ctx_t), intent(inout) :: mc      !< State.
-   integer(I4P),     intent(in)    :: cs1(8)  !< Corner states at pose1.
-   real(R8P)                       :: t(64)   !< Instants of one corner.
-   integer(I4P)                    :: q, k, n !< Work.
+   pure subroutine map3_corner_known(ct, cc, cs0, cs1, known)
+   !< Which corners of a cell have states that follow from their events (the flip rule): the corner's events (it
+   !< crossing a facet, `map3_events`: instants ct, corners cc) at least 1e-9 apart, so that each is one transversal
+   !< crossing, and their parity taking the pose0 state cs0 to the pose1 state cs1. A corner passing through a mesh edge
+   !< or vertex (two facets at once), touching a facet, or whose count disagrees takes the exact query
+   !< (`map3_corner_in`) instead.
+   real(R8P),    intent(in)  :: ct(:)    !< The cell's corner events: instants.
+   integer(I4P), intent(in)  :: cc(:)    !< Their corners.
+   integer(I4P), intent(in)  :: cs0(8)   !< Corner states at pose0.
+   integer(I4P), intent(in)  :: cs1(8)   !< Corner states at pose1.
+   logical,      intent(out) :: known(8) !< The corner's states follow from its events.
+   real(R8P)                 :: t(64)    !< Instants of one corner.
+   integer(I4P)              :: q, k, n  !< Work.
 
    do q = 1_I4P, 8_I4P
-      n = 0_I4P ; mc%known(q) = .true.
-      do k = 1_I4P, mc%ncn
-         if (nint(mc%ccor(k), I4P) /= q) cycle
+      n = 0_I4P ; known(q) = .true.
+      do k = 1_I4P, size(ct, kind=I4P)
+         if (cc(k) /= q) cycle
          if (n == size(t, kind=I4P)) then
-            mc%known(q) = .false. ; exit
+            known(q) = .false. ; exit
          endif
-         n = n + 1_I4P ; t(n) = mc%ctime(k)
+         n = n + 1_I4P ; t(n) = ct(k)
       enddo
-      if (.not. mc%known(q)) cycle
+      if (.not. known(q)) cycle
       call sort_unique(t, n)
       do k = 2_I4P, n
-         if (t(k) - t(k - 1_I4P) <= 1e-9_R8P) mc%known(q) = .false.
+         if (t(k) - t(k - 1_I4P) <= 1e-9_R8P) known(q) = .false.
       enddo
-      if (count(nint(mc%ccor(1:mc%ncn), I4P) == q) /= n) mc%known(q) = .false. ! exact repeats merged by sort_unique
-      if (mod(mc%cs0(q) + n, 2_I4P) /= cs1(q)) mc%known(q) = .false.
+      if (count(cc == q) /= n) known(q) = .false. ! exact repeats merged by sort_unique
+      if (mod(cs0(q) + n, 2_I4P) /= cs1(q)) known(q) = .false.
    enddo
    endsubroutine map3_corner_known
 
-   function map3_corner_state(mc, surface, s0, s, c0, c1, b0, b1, q, known) result(st)
-   !< The state (0 solid, 1 fluid) of corner q of the cell [c0, c1] at instant s: by the flip rule from its events when
-   !< known (`map3_corner_known`), else by the exact query `map3_corner_in` (the cell [b0, b1] shifted back on the
-   !< pose0 copy without rotation, the corner taken to the body frame with one).
+   function map3_corner_state(mc, surface, s0, s, ps, c0, c1, b0, b1, q, known, cs0, ct, cc) result(st)
+   !< The state (0 solid, 1 fluid) of corner q of the cell [c0, c1] at instant s: by the flip rule from its events (ct,
+   !< cc) and its pose0 state cs0 when known (`map3_corner_known`), else by the exact query `map3_corner_in` (the cell
+   !< [b0, b1] shifted back on the pose0 copy without rotation, the corner taken to the body frame by the screw pose ps
+   !< at s with one).
    type(map3_ctx_t),         intent(in) :: mc           !< State.
    type(surface_stl_object), intent(in) :: surface, s0  !< Surface (body frame), copy at pose0.
    real(R8P),                intent(in) :: s            !< Instant.
+   type(rigid_pose_t),       intent(in) :: ps           !< Screw pose at s (with a rotation).
    real(R8P),                intent(in) :: c0(3), c1(3) !< Cell.
    real(R8P),                intent(in) :: b0(3), b1(3) !< Cell shifted back (no rotation).
    integer(I4P),             intent(in) :: q            !< Corner.
    logical,                  intent(in) :: known        !< Its states follow from its events.
+   integer(I4P),             intent(in) :: cs0(8)       !< Corner states at pose0.
+   real(R8P),                intent(in) :: ct(:)        !< The cell's corner events: instants.
+   integer(I4P),             intent(in) :: cc(:)        !< Their corners.
    integer(I4P)                         :: st           !< State.
    integer(I4P)                         :: k, n         !< Work.
 
    if (known) then
       n = 0_I4P
-      do k = 1_I4P, mc%ncn
-         if (nint(mc%ccor(k), I4P) == q .and. mc%ctime(k) < s) n = n + 1_I4P
+      do k = 1_I4P, size(ct, kind=I4P)
+         if (cc(k) == q .and. ct(k) < s) n = n + 1_I4P
       enddo
-      st = mod(mc%cs0(q) + n, 2_I4P)
+      st = mod(cs0(q) + n, 2_I4P)
    elseif (mc%rot) then
-      st = merge(0_I4P, 1_I4P, map3_corner_in(mc, surface, s0, to_body(pose_interpolate(mc%pose0, mc%pose1, s), &
-                                                                         corner_point(c0, c1, q))))
+      st = merge(0_I4P, 1_I4P, map3_corner_in(mc, surface, s0, to_body(ps, corner_point(c0, c1, q))))
    else
       st = merge(0_I4P, 1_I4P, map3_corner_in(mc, surface, s0, corner_point(b0, b1, q)))
    endif
    endfunction map3_corner_state
 
-   subroutine map3_eval(mc, surface, s0, kind, s, c0, c1, lf, cs_in, alpha_in, faces_in, measures, e)
+   subroutine map3_eval(mc, surface, s0, kind, s, ps, c0, c1, lf, cs_in, alpha_in, faces_in, measures, cs0, known, ct, cc, &
+                        e)
    !< The pieces of the cell [c0, c1] at one instant with their features (`cut_cell_3d_pieces` on its facets lf): kind 0
    !< the pose0 copy, 1 the pose1 copy (corner states cs_in, fractions alpha_in, faces_in of the end cut), 2 the instant
    !< s: without rotation the pose0 copy and the cell shifted back by s d, else the facets placed by `to_world` of the
@@ -3104,22 +3473,27 @@ contains
    !< (`cut_cell_3d_totals`). Without `measures` the kernel runs first with fractions of -1, which fail only a
    !< multi-piece split (`split_closes`): the sections are computed only then. Features: the fluid corners (keys
    !< -8..-1) then the facets (global ids), increasing. With `measures`: the face areas and first moments of every piece
-   !< (one piece: the sections'), and the volumes of several pieces.
+   !< (one piece: the sections'), and the volumes of several pieces. The screw pose ps at s (kind 2 with a rotation) and
+   !< the cell's corner data (cs0, known, ct, cc: `map3_corner_state`) come from the caller (issue #105 step 1c).
    type(map3_ctx_t),         intent(in)  :: mc          !< State.
    type(surface_stl_object), intent(in)  :: surface, s0 !< Surface (body frame), copy at pose0.
    integer(I4P),             intent(in)  :: kind        !< 0 pose0, 1 pose1, 2 instant s.
    real(R8P),                intent(in)  :: s           !< Instant (kind 2).
+   type(rigid_pose_t),       intent(in)  :: ps          !< Screw pose at s (kind 2, with a rotation).
    real(R8P),                intent(in)  :: c0(3), c1(3) !< Cell.
    integer(I4P),             intent(in)  :: lf(:)       !< Facets (increasing).
    integer(I4P),             intent(in)  :: cs_in(8)    !< Corner states (kinds 0, 1).
    real(R8P),                intent(in)  :: alpha_in, faces_in(6) !< Cell and face fractions (kinds 0, 1).
    logical,                  intent(in)  :: measures    !< Piece measures.
+   integer(I4P),             intent(in)  :: cs0(8)      !< Corner states at pose0.
+   logical,                  intent(in)  :: known(8)    !< The corner's states follow from its events.
+   real(R8P),                intent(in)  :: ct(:)       !< The cell's corner events: instants.
+   integer(I4P),             intent(in)  :: cc(:)       !< Their corners.
    type(cell_eval3_t),       intent(out) :: e           !< Pieces and features.
    real(R8P),    allocatable :: tl(:,:,:), pvol(:), pfc(:,:), pfm(:,:,:) !< Facets, kernel measures.
    integer(I4P), allocatable :: apiece(:)               !< Piece of each facet.
-   type(rigid_pose_t)        :: ps                      !< Pose at s.
    real(R8P)                 :: b0(3), b1(3), fa(6), fm(2, 6), fr(6), al, h(3), ar(6), xc(3) !< Work.
-   integer(I4P)              :: n, q, m, np, cs(8), cp(8), f, a, bb, cc, p !< Work.
+   integer(I4P)              :: n, q, m, np, cs(8), cp(8), f, a, bb, ec, p !< Work.
    logical                   :: secs, ok, cl            !< Sections computed, sections closed, faces closed.
 
    n = size(lf, kind=I4P)
@@ -3134,7 +3508,6 @@ contains
       if (.not. mc%rot) then
          tl = mc%t0(:, :, lf) ; b0 = c0 - s * mc%d ; b1 = c1 - s * mc%d
       else
-         ps = pose_interpolate(mc%pose0, mc%pose1, s)
          do q = 1_I4P, n
             do m = 1_I4P, 3_I4P
                tl(:, m, q) = to_world(ps, mc%tb(:, m, lf(q)))
@@ -3142,7 +3515,7 @@ contains
          enddo
       endif
       do q = 1_I4P, 8_I4P
-         cs(q) = map3_corner_state(mc, surface, s0, s, c0, c1, b0, b1, q, mc%known(q))
+         cs(q) = map3_corner_state(mc, surface, s0, s, ps, c0, c1, b0, b1, q, known(q), cs0, ct, cc)
       enddo
    endselect
    h = b1 - b0 ; ar = [h(2) * h(3), h(2) * h(3), h(3) * h(1), h(3) * h(1), h(1) * h(2), h(1) * h(2)]
@@ -3167,9 +3540,9 @@ contains
                                  pfc, pfm)
       endif
    endif
-   if (np < 0_I4P .and. kind == 2_I4P .and. any(mc%known)) then ! the corner states by the exact queries, and again
+   if (np < 0_I4P .and. kind == 2_I4P .and. any(known)) then ! the corner states by the exact queries, and again
       do q = 1_I4P, 8_I4P
-         cs(q) = map3_corner_state(mc, surface, s0, s, c0, c1, b0, b1, q, .false.)
+         cs(q) = map3_corner_state(mc, surface, s0, s, ps, c0, c1, b0, b1, q, .false., cs0, ct, cc)
       enddo
       call map3_sections(tl, b0, b1, cs, ok, fa, fm)
       if (.not. ok) return
@@ -3201,10 +3574,10 @@ contains
       do p = 1_I4P, np
          e%pvol(p) = pvol(p)
          do f = 1_I4P, 6_I4P
-            a = (f + 1_I4P) / 2_I4P ; bb = mod(a, 3_I4P) + 1_I4P ; cc = mod(a + 1_I4P, 3_I4P) + 1_I4P
+            a = (f + 1_I4P) / 2_I4P ; bb = mod(a, 3_I4P) + 1_I4P ; ec = mod(a + 1_I4P, 3_I4P) + 1_I4P
             e%pa(f, p) = pfc(f, p) * ar(f)
             e%pm(1, f, p) = xc(bb) * e%pa(f, p) + h(bb) * pfm(2, f, p)
-            e%pm(2, f, p) = xc(cc) * e%pa(f, p) + h(cc) * pfm(3, f, p)
+            e%pm(2, f, p) = xc(ec) * e%pa(f, p) + h(ec) * pfm(3, f, p)
          enddo
       enddo
    endif
@@ -3242,7 +3615,8 @@ contains
    enddo
    endsubroutine map3_sections
 
-   subroutine map3_measures(mc, surface, s0, c0, c1, lf, b, nb, eref, ealt, small, ev, nstart, comp, nt, meas, ok)
+   subroutine map3_measures(mc, surface, s0, c0, c1, lf, b, nb, eref, ealt, small, gq_s, gq_w, cs0, known, ct, cc, ev, &
+                            nstart, comp, nt, meas, ok)
    !< Per-track time integrals over the step of the fluid areas of the cell's six faces (meas(1:6)) and of the outward
    !< rigid-field outflows through them (meas(7:12)), interval by interval between the cell's events, on every path:
    !< without rotation two-point Gauss per interval (exact: the areas are quadratic in s), with one Gauss doubled from 2
@@ -3260,6 +3634,11 @@ contains
    integer(I4P),             intent(in)    :: nb           !< Their number.
    integer(I4P),             intent(in)    :: eref(:), ealt(:) !< Evaluations of each interval (see `map3_cell`).
    logical,                  intent(in)    :: small(:)     !< Intervals narrower than EVENT_GAP (nodes may be skipped).
+   real(R8P),                intent(in)    :: gq_s(:), gq_w(:) !< Gauss node sets (`map_plan_t`).
+   integer(I4P),             intent(in)    :: cs0(8)       !< Corner states at pose0.
+   logical,                  intent(in)    :: known(8)     !< The corner's states follow from its events.
+   real(R8P),                intent(in)    :: ct(:)        !< The cell's corner events: instants.
+   integer(I4P),             intent(in)    :: cc(:)        !< Their corners.
    type(cell_eval3_t),       intent(in)    :: ev(:)        !< Evaluations.
    integer(I4P),             intent(in)    :: nstart(:)    !< First node of each evaluation.
    integer(I4P),             intent(in)    :: comp(:)      !< Track of each node.
@@ -3267,7 +3646,7 @@ contains
    real(R8P), allocatable,   intent(out)   :: meas(:,:)    !< Measures [12, nt].
    logical,                  intent(out)   :: ok           !< Every piece assigned.
    real(R8P), parameter   :: G = 0.5_R8P / sqrt(3._R8P)    !< Two-point Gauss offset on a unit interval.
-   real(R8P), allocatable :: a1(:,:), a2(:,:), sq(:), wq(:) !< Work.
+   real(R8P), allocatable :: a1(:,:), a2(:,:)             !< Work.
    real(R8P)              :: sa, sb, h, hc(3), scl(6), sco(6), sna, sno, vel, tol !< Work.
    integer(I4P)           :: m, ng, q, t, f, r, a      !< Work.
    logical                :: conv                      !< Converged.
@@ -3278,10 +3657,10 @@ contains
          call map_interval(b, nb, m, sa, sb) ; h = sb - sa
          if (h <= 0._R8P) cycle
          r = eref(m) ; a = ealt(m)
-         call map3_node(mc, surface, s0, 0.5_R8P * (sa + sb) - G * h, 0.5_R8P * h, c0, c1, lf, ev(r), nstart(r), ev(a), &
-                        nstart(a), r /= a .or. small(m), comp, meas, ok)
-         call map3_node(mc, surface, s0, 0.5_R8P * (sa + sb) + G * h, 0.5_R8P * h, c0, c1, lf, ev(r), nstart(r), ev(a), &
-                        nstart(a), r /= a .or. small(m), comp, meas, ok)
+         call map3_node(mc, surface, s0, 0.5_R8P * (sa + sb) - G * h, 0.5_R8P * h, c0, c1, lf, cs0, known, ct, cc, ev(r), &
+                        nstart(r), ev(a), nstart(a), r /= a .or. small(m), comp, meas, ok)
+         call map3_node(mc, surface, s0, 0.5_R8P * (sa + sb) + G * h, 0.5_R8P * h, c0, c1, lf, cs0, known, ct, cc, ev(r), &
+                        nstart(r), ev(a), nstart(a), r /= a .or. small(m), comp, meas, ok)
       enddo
    else
       vel = norm2(mc%om) * mc%xm + norm2(mc%d)
@@ -3294,17 +3673,15 @@ contains
          if (h <= 0._R8P) cycle
          r = eref(m) ; a = ealt(m)
          ng = 2_I4P ; a1 = 0._R8P
-         call gauss_legendre_01(ng, sq, wq)
-         do q = 1_I4P, ng
-            call map3_node(mc, surface, s0, sa + h * sq(q), h * wq(q), c0, c1, lf, ev(r), nstart(r), ev(a), nstart(a), &
-                           r /= a .or. small(m), comp, a1, ok)
+         do q = ng - 1_I4P, 2_I4P * ng - 2_I4P
+            call map3_node(mc, surface, s0, sa + h * gq_s(q), h * gq_w(q), c0, c1, lf, cs0, known, ct, cc, ev(r), &
+                           nstart(r), ev(a), nstart(a), r /= a .or. small(m), comp, a1, ok)
          enddo
          do
             ng = 2_I4P * ng ; a2 = 0._R8P
-            call gauss_legendre_01(ng, sq, wq)
-            do q = 1_I4P, ng
-               call map3_node(mc, surface, s0, sa + h * sq(q), h * wq(q), c0, c1, lf, ev(r), nstart(r), ev(a), nstart(a), &
-                              r /= a .or. small(m), comp, a2, ok)
+            do q = ng - 1_I4P, 2_I4P * ng - 2_I4P
+               call map3_node(mc, surface, s0, sa + h * gq_s(q), h * gq_w(q), c0, c1, lf, cs0, known, ct, cc, ev(r), &
+                              nstart(r), ev(a), nstart(a), r /= a .or. small(m), comp, a2, ok)
             enddo
             if (.not. ok) exit
             tol = 64._R8P * epsilon(1._R8P) * max(h, FLOOR_H)
@@ -3332,7 +3709,7 @@ contains
    endif
    endsubroutine map3_measures
 
-   subroutine map3_node(mc, surface, s0, s, w, c0, c1, lf, evr, nr, eva, na, narrow, comp, acc, ok)
+   subroutine map3_node(mc, surface, s0, s, w, c0, c1, lf, cs0, known, ct, cc, evr, nr, eva, na, narrow, comp, acc, ok)
    !< One quadrature node (instant s, weight w): the pieces at s with their measures, each added to a track with w times
    !< its face areas and outward rigid-field outflows; a piece takes the track of the pieces of the interval's evaluation
    !< evr (first node nr) that hold its features, a narrow interval also tries the one after it, eva (na); as `map_node`
@@ -3345,6 +3722,10 @@ contains
    real(R8P),                intent(in)    :: s, w         !< Instant, weight.
    real(R8P),                intent(in)    :: c0(3), c1(3) !< Cell.
    integer(I4P),             intent(in)    :: lf(:)        !< Facets.
+   integer(I4P),             intent(in)    :: cs0(8)       !< Corner states at pose0.
+   logical,                  intent(in)    :: known(8)     !< The corner's states follow from its events.
+   real(R8P),                intent(in)    :: ct(:)        !< The cell's corner events: instants.
+   integer(I4P),             intent(in)    :: cc(:)        !< Their corners.
    type(cell_eval3_t),       intent(in)    :: evr, eva     !< The interval's evaluation, the one after it.
    integer(I4P),             intent(in)    :: nr, na       !< Their first nodes.
    logical,                  intent(in)    :: narrow       !< A narrow interval (evr and eva differ; issue #102).
@@ -3352,12 +3733,14 @@ contains
    real(R8P),                intent(inout) :: acc(:,:)     !< Sums [12, nt].
    logical,                  intent(inout) :: ok           !< Every piece assigned.
    type(cell_eval3_t)                      :: e            !< Pieces at s.
+   type(rigid_pose_t)                      :: ps           !< Screw pose at s (with a rotation).
    real(R8P)                               :: tq(3), ar, o, fz(6) !< Work.
-   integer(I4P)                            :: p, t, f, a, bb, cc, cs(8) !< Work.
+   integer(I4P)                            :: p, t, f, a, bb, ec, cs(8) !< Work.
 
    if (.not. ok) return
    cs = 0_I4P ; fz = 0._R8P
-   call map3_eval(mc, surface, s0, 2_I4P, s, c0, c1, lf, cs, 0._R8P, fz, .true., e)
+   if (mc%rot) ps = pose_interpolate(mc%pose0, mc%pose1, s)
+   call map3_eval(mc, surface, s0, 2_I4P, s, ps, c0, c1, lf, cs, 0._R8P, fz, .true., cs0, known, ct, cc, e)
    if (.not. e%closed) then
       if (narrow) then
          mc%skipped = mc%skipped + 1_I4P
@@ -3378,10 +3761,10 @@ contains
          ok = .false. ; return
       endif
       do f = 1_I4P, 6_I4P
-         a = (f + 1_I4P) / 2_I4P ; bb = mod(a, 3_I4P) + 1_I4P ; cc = mod(a + 1_I4P, 3_I4P) + 1_I4P
+         a = (f + 1_I4P) / 2_I4P ; bb = mod(a, 3_I4P) + 1_I4P ; ec = mod(a + 1_I4P, 3_I4P) + 1_I4P
          ar = e%pa(f, p)
          if (mc%rot) then
-            o = mc%om(bb) * (e%pm(2, f, p) - tq(cc) * ar) - mc%om(cc) * (e%pm(1, f, p) - tq(bb) * ar) + mc%d(a) * ar
+            o = mc%om(bb) * (e%pm(2, f, p) - tq(ec) * ar) - mc%om(ec) * (e%pm(1, f, p) - tq(bb) * ar) + mc%d(a) * ar
          else
             o = mc%d(a) * ar
          endif
