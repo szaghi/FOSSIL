@@ -1357,7 +1357,9 @@ contains
    !< 3. Measures: one track takes the cell's `sw` values and face outflows (fou, fov); several tracks integrate their
    !<    face parts on the cell's event intervals (`map_measures_2d`: by rounds over flat (cell, interval, node) items,
    !<    issue #105 step 1e).
-   !< 4. CSR fill in cell order.
+   !< 4. Assembly (issue #105 step 1f): tracks per cell and their scan (`map_asm_tracks`), the old and new pieces per
+   !<    track by count / scan / fill per cell (`map_asm_pieces`), the statuses and measures per cell (`map_asm_status`,
+   !<    `map_asm_measures_*`); the same bits as the former loops in cell and piece order.
    !< `all_meas` (issue #104, `refine`): every evaluated cell integrates its tracks per event interval, one track included
    !< (a single-track cell whose integration fails keeps the `sw` values); `measured` flags those cells (cell order).
    type(curve_object),     intent(in)  :: curve        !< Curve (body frame).
@@ -1381,10 +1383,10 @@ contains
    integer(I4P), allocatable :: otr(:), ntn(:)         !< Track (in its cell) of every old and new piece.
    integer(I4P), allocatable :: comp(:)                !< Track (in its cell) of every piece of every evaluation.
    integer(I4P), allocatable :: tw(:)                  !< Work of `map_tracks`.
-   integer(I4P), allocatable :: moff(:), oc(:), nc(:), fo(:), fn(:) !< Work.
+   integer(I4P), allocatable :: moff(:)                !< First measure of every measured cell's tracks.
    real(R8P),    allocatable :: meas(:,:)              !< Per-track measures of the measured cells.
    logical,      allocatable :: cok(:)                 !< Measured cells whose measures are assigned.
-   integer(I4P)              :: nx, ny, ncell, c, i, j, nt, tot, t, p, a0, a1, b0, b1, v0, ne, p0, nn, q0, nk !< Work.
+   integer(I4P)              :: nx, ny, ncell, c, i, j, nt, tot, t, a0, a1, b0, b1, v0, ne, p0, nn, q0, nk !< Work.
    logical                   :: allm                   !< all_meas.
 
    allm = .false. ; if (present(all_meas)) allm = all_meas
@@ -1444,76 +1446,247 @@ contains
       endif
    enddo
    if (present(measured)) measured = moff > 0_I4P
-   ! untrusted cells: one track with every piece
+   ! assembly (issue #105 step 1f): tracks per cell, scan; pieces per track, scan, fill; status; measures
    allocate(map%tracks(nx, ny), map%first_track(nx, ny))
-   nt = 0_I4P
-   do j = 1_I4P, ny
-      do i = 1_I4P, nx
-         c = i + (j - 1_I4P) * nx
-         if (ckind(c) == -1_I4P) then
-            ntr(c) = 1_I4P
-            a0 = k0%first_piece(i, j) ; a1 = a0 + k0%pieces(i, j) - 1_I4P
-            b0 = k1%first_piece(i, j) ; b1 = b0 + k1%pieces(i, j) - 1_I4P
-            otr(a0:a1) = 1_I4P ; ntn(b0:b1) = 1_I4P
-            map%untrusted_cells = map%untrusted_cells + 1_I4P
-         endif
-         if (ntr(c) >= 2_I4P) map%multi_track_cells = map%multi_track_cells + 1_I4P
-         map%tracks(i, j) = ntr(c) ; map%first_track(i, j) = nt + 1_I4P ; nt = nt + ntr(c)
-      enddo
-   enddo
-   map%nt = nt
+   call map_asm_tracks(ncell, ckind, ntr, map%first_track, nt, map%untrusted_cells, map%multi_track_cells)
+   map%tracks = reshape(ntr, [nx, ny]) ; map%nt = nt
    allocate(map%track_cell(2, nt), map%status(nt), map%old_start(nt + 1), map%new_start(nt + 1), map%old_piece(k0%np), &
             map%new_piece(k1%np), map%old_track(k0%np), map%new_track(k1%np), map%volume0(nt), map%volume1(nt), &
-            map%faces(4, nt), map%wall(2, nt), map%residual(nt), map%outflow(4, nt), oc(nt), nc(nt), fo(nt), fn(nt))
-   map%volume0 = 0._R8P ; map%volume1 = 0._R8P ; oc = 0_I4P ; nc = 0_I4P
-   do p = 1_I4P, k0%np ! pieces in order: volumes summed in piece order
-      t = map%first_track(k0%piece_cell(1, p), k0%piece_cell(2, p)) + otr(p) - 1_I4P
-      map%old_track(p) = t ; oc(t) = oc(t) + 1_I4P ; map%volume0(t) = map%volume0(t) + k0%piece_area(p)
+            map%faces(4, nt), map%wall(2, nt), map%residual(nt), map%outflow(4, nt))
+   call map_asm_pieces(ncell, ckind, ntr, map%first_track, k0%first_piece, k0%pieces, k0%np, otr, k0%piece_area, nt, &
+                       map%old_start, map%old_piece, map%old_track, map%volume0)
+   call map_asm_pieces(ncell, ckind, ntr, map%first_track, k1%first_piece, k1%pieces, k1%np, ntn, k1%piece_area, nt, &
+                       map%new_start, map%new_piece, map%new_track, map%volume1)
+   !$omp parallel do default(shared) private(c, i, j) schedule(static)
+   do c = 1_I4P, ncell
+      i = 1_I4P + mod(c - 1_I4P, nx) ; j = 1_I4P + (c - 1_I4P) / nx
+      call map_asm_status(2_I4P, [i, j], ckind(c) == -1_I4P, map%first_track(i, j), ntr(c), nt, map%old_start, &
+                          map%new_start, map%status, map%track_cell)
+      call map_asm_measures_2d(map%first_track(i, j), ntr(c), moff(c), size(meas, 2, kind=I4P), meas, &
+                               [sw%face_u(i, j), sw%face_u(i + 1, j), sw%face_v(i, j), sw%face_v(i, j + 1)], &
+                               [-fou(i, j), fou(i + 1, j), -fov(i, j), fov(i, j + 1)], sw%wall(:, i, j), sw%residual(i, j), &
+                               nt, map%volume0, map%volume1, map%faces, map%outflow, map%wall, map%residual)
    enddo
-   do p = 1_I4P, k1%np
-      t = map%first_track(k1%piece_cell(1, p), k1%piece_cell(2, p)) + ntn(p) - 1_I4P
-      map%new_track(p) = t ; nc(t) = nc(t) + 1_I4P ; map%volume1(t) = map%volume1(t) + k1%piece_area(p)
-   enddo
-   map%old_start(1) = 1_I4P ; map%new_start(1) = 1_I4P
+   !$omp end parallel do
    do t = 1_I4P, nt
-      map%old_start(t + 1) = map%old_start(t) + oc(t) ; map%new_start(t + 1) = map%new_start(t) + nc(t)
-      fo(t) = map%old_start(t) ; fn(t) = map%new_start(t)
-   enddo
-   do p = 1_I4P, k0%np
-      t = map%old_track(p) ; map%old_piece(fo(t)) = p ; fo(t) = fo(t) + 1_I4P
-   enddo
-   do p = 1_I4P, k1%np
-      t = map%new_track(p) ; map%new_piece(fn(t)) = p ; fn(t) = fn(t) + 1_I4P
-   enddo
-   do j = 1_I4P, ny
-      do i = 1_I4P, nx
-         c = i + (j - 1_I4P) * nx
-         do t = map%first_track(i, j), map%first_track(i, j) + ntr(c) - 1_I4P
-            map%track_cell(:, t) = [i, j]
-            if (ckind(c) == -1_I4P) then
-               map%status(t) = TRACK_UNTRUSTED
-            else
-               map%status(t) = track_status_of(oc(t), nc(t))
-            endif
-            map%n_status(map%status(t)) = map%n_status(map%status(t)) + 1_I4P
-            if (moff(c) > 0_I4P) then ! several tracks: integrated per track
-               p = moff(c) + t - map%first_track(i, j)
-               map%faces(:, t) = meas(1:4, p)
-               map%outflow(:, t) = [-meas(5, p), meas(6, p), -meas(7, p), meas(8, p)]
-               map%wall(:, t) = -[meas(2, p) - meas(1, p), meas(4, p) - meas(3, p)]
-               map%residual(t) = map%volume1(t) - map%volume0(t) + (meas(6, p) - meas(5, p) + meas(8, p) - meas(7, p))
-            else ! one track: the cell's values
-               map%faces(:, t) = [sw%face_u(i, j), sw%face_u(i + 1, j), sw%face_v(i, j), sw%face_v(i, j + 1)]
-               map%outflow(:, t) = [-fou(i, j), fou(i + 1, j), -fov(i, j), fov(i, j + 1)]
-               map%wall(:, t) = sw%wall(:, i, j)
-               map%residual(t) = sw%residual(i, j)
-            endif
-         enddo
-      enddo
+      map%n_status(map%status(t)) = map%n_status(map%status(t)) + 1_I4P
    enddo
    map%exact = mc%exact ; map%skipped_nodes = mc%skipped
    map%contact_cells = plan%contacts ; map%narrow_cells = plan%resolved
    endsubroutine piece_map_2d_build
+
+   subroutine map_asm_tracks(ncell, ckind, ntr, ft, nt, nun, nmul)
+   !< Assembly of the map (issue #105 step 1f), tracks per cell: an untrusted cell (ckind -1) gets one track with every
+   !< piece, then the exclusive scan of the counts gives every cell its first track (cell order); counts of the untrusted
+   !< and multi-track cells.
+   integer(I4P), intent(in)    :: ncell       !< Cells.
+   integer(I4P), intent(in)    :: ckind(ncell) !< Kind per cell (0 trivial, 1 evaluated, -1 untrusted).
+   integer(I4P), intent(inout) :: ntr(ncell)  !< Tracks per cell (untrusted: set to 1).
+   integer(I4P), intent(out)   :: ft(ncell)   !< First track of every cell.
+   integer(I4P), intent(out)   :: nt          !< Tracks.
+   integer(I4P), intent(inout) :: nun, nmul   !< Untrusted cells, multi-track cells.
+   integer(I4P), allocatable   :: w(:)        !< Counts -> starts [ncell + 1].
+   integer(I4P)                :: c, nu, nm   !< Work.
+
+   allocate(w(ncell + 1)) ; nu = 0_I4P ; nm = 0_I4P
+   !$omp parallel do default(shared) private(c) reduction(+:nu, nm) schedule(static)
+   do c = 1_I4P, ncell
+      if (ckind(c) == -1_I4P) then
+         ntr(c) = 1_I4P ; nu = nu + 1_I4P
+      endif
+      if (ntr(c) >= 2_I4P) nm = nm + 1_I4P
+      w(c) = ntr(c)
+   enddo
+   !$omp end parallel do
+   call csr_scan(w)
+   ft = w(1:ncell) ; nt = w(ncell + 1) - 1_I4P ; nun = nun + nu ; nmul = nmul + nm
+   endsubroutine map_asm_tracks
+
+   subroutine map_asm_pieces(ncell, ckind, ntr, ft, fp, pc, np, ltr, pv, nt, start, piece, trk, vol)
+   !< Assembly of the map (issue #105 step 1f), the pieces of one end (old or new) per track: the count pass per cell
+   !< (`map_asm_count`: every piece's track, every track's count), the scan of the counts into the CSR starts, the fill
+   !< pass per cell (`map_asm_fill`: the pieces of every track in increasing order, their volumes summed in that order).
+   !< A cell's pieces (fp(c) .. fp(c) + pc(c) - 1) and tracks are contiguous, so every pass writes only its cell's
+   !< entries, and the order of every sum is that of the former global loop over the pieces: the same bits.
+   integer(I4P), intent(in)    :: ncell          !< Cells.
+   integer(I4P), intent(in)    :: ckind(ncell)   !< Kind per cell (-1 untrusted: one track with every piece).
+   integer(I4P), intent(in)    :: ntr(ncell)     !< Tracks per cell.
+   integer(I4P), intent(in)    :: ft(ncell)      !< First track per cell.
+   integer(I4P), intent(in)    :: fp(ncell)      !< First piece per cell.
+   integer(I4P), intent(in)    :: pc(ncell)      !< Pieces per cell (-1: untrusted cut cell, no piece).
+   integer(I4P), intent(in)    :: np             !< Pieces.
+   integer(I4P), intent(in)    :: ltr(np)        !< Track in its cell of every piece (not read in untrusted cells).
+   real(R8P),    intent(in)    :: pv(np)         !< Volume (area) of every piece.
+   integer(I4P), intent(in)    :: nt             !< Tracks.
+   integer(I4P), intent(out)   :: start(nt + 1)  !< CSR starts of the pieces of every track.
+   integer(I4P), intent(out)   :: piece(np)      !< Pieces of every track.
+   integer(I4P), intent(out)   :: trk(np)        !< Track of every piece.
+   real(R8P),    intent(out)   :: vol(nt)        !< Volume of every track.
+   integer(I4P)                :: c              !< Work.
+
+   !$omp parallel do default(shared) private(c) schedule(static)
+   do c = 1_I4P, ncell
+      call map_asm_count(ckind(c) == -1_I4P, ft(c), ntr(c), fp(c), max(0_I4P, pc(c)), np, ltr, nt, trk, start)
+   enddo
+   !$omp end parallel do
+   call csr_scan(start)
+   !$omp parallel do default(shared) private(c) schedule(static)
+   do c = 1_I4P, ncell
+      call map_asm_fill(ft(c), ntr(c), fp(c), max(0_I4P, pc(c)), np, trk, pv, nt, start, piece, vol)
+   enddo
+   !$omp end parallel do
+   endsubroutine map_asm_pieces
+
+   pure subroutine map_asm_count(untrusted, ft, ntc, a0, na, np, ltr, nt, trk, cnt)
+   !< Kernel (issue #105 step 1f), count pass of one cell: the track of each of its pieces (its first track + its track in
+   !< the cell - 1; the first track for an untrusted cell) and the pieces of each of its tracks (cnt(t), before the scan).
+   !$acc routine seq
+   logical,      intent(in)    :: untrusted   !< Untrusted cell: one track with every piece.
+   integer(I4P), intent(in)    :: ft, ntc     !< First track, tracks of the cell.
+   integer(I4P), intent(in)    :: a0, na      !< First piece, pieces of the cell.
+   integer(I4P), intent(in)    :: np          !< Pieces.
+   integer(I4P), intent(in)    :: ltr(np)     !< Track in its cell of every piece.
+   integer(I4P), intent(in)    :: nt          !< Tracks.
+   integer(I4P), intent(inout) :: trk(np)     !< Track of every piece.
+   integer(I4P), intent(inout) :: cnt(nt + 1) !< Pieces of every track.
+   integer(I4P)                :: p, t        !< Work.
+
+   do t = ft, ft + ntc - 1_I4P
+      cnt(t) = 0_I4P
+   enddo
+   do p = a0, a0 + na - 1_I4P
+      if (untrusted) then
+         t = ft
+      else
+         t = ft + ltr(p) - 1_I4P
+      endif
+      trk(p) = t ; cnt(t) = cnt(t) + 1_I4P
+   enddo
+   endsubroutine map_asm_count
+
+   pure subroutine map_asm_fill(ft, ntc, a0, na, np, trk, pv, nt, start, piece, vol)
+   !< Kernel (issue #105 step 1f), fill pass of one cell: for each of its tracks, its pieces in increasing order into the
+   !< track's CSR slots and their volumes summed in that order (no cursor array: a cell has few tracks and pieces).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: ft, ntc       !< First track, tracks of the cell.
+   integer(I4P), intent(in)    :: a0, na        !< First piece, pieces of the cell.
+   integer(I4P), intent(in)    :: np            !< Pieces.
+   integer(I4P), intent(in)    :: trk(np)       !< Track of every piece.
+   real(R8P),    intent(in)    :: pv(np)        !< Volume of every piece.
+   integer(I4P), intent(in)    :: nt            !< Tracks.
+   integer(I4P), intent(in)    :: start(nt + 1) !< CSR starts.
+   integer(I4P), intent(inout) :: piece(np)     !< Pieces of every track.
+   real(R8P),    intent(inout) :: vol(nt)       !< Volume of every track.
+   integer(I4P)                :: p, t, q       !< Work.
+   real(R8P)                   :: v             !< Sum.
+
+   do t = ft, ft + ntc - 1_I4P
+      q = start(t) ; v = 0._R8P
+      do p = a0, a0 + na - 1_I4P
+         if (trk(p) /= t) cycle
+         piece(q) = p ; q = q + 1_I4P ; v = v + pv(p)
+      enddo
+      vol(t) = v
+   enddo
+   endsubroutine map_asm_fill
+
+   pure subroutine map_asm_status(dim, ijk, untrusted, ft, ntc, nt, ostart, nstart, status, track_cell)
+   !< Kernel (issue #105 step 1f): the status and cell of every track of one cell (TRACK_UNTRUSTED in an untrusted cell,
+   !< else `track_status_of` its old and new piece counts).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: dim                 !< 2 or 3.
+   integer(I4P), intent(in)    :: ijk(dim)            !< Cell.
+   logical,      intent(in)    :: untrusted           !< Untrusted cell.
+   integer(I4P), intent(in)    :: ft, ntc             !< First track, tracks of the cell.
+   integer(I4P), intent(in)    :: nt                  !< Tracks.
+   integer(I4P), intent(in)    :: ostart(nt + 1)      !< CSR starts of the old pieces.
+   integer(I4P), intent(in)    :: nstart(nt + 1)      !< CSR starts of the new pieces.
+   integer(I4P), intent(inout) :: status(nt)          !< Status of every track.
+   integer(I4P), intent(inout) :: track_cell(dim, nt) !< Cell of every track.
+   integer(I4P)                :: t, a                !< Work.
+
+   do t = ft, ft + ntc - 1_I4P
+      do a = 1_I4P, dim
+         track_cell(a, t) = ijk(a)
+      enddo
+      if (untrusted) then
+         status(t) = TRACK_UNTRUSTED
+      else
+         status(t) = track_status_of(ostart(t + 1) - ostart(t), nstart(t + 1) - nstart(t))
+      endif
+   enddo
+   endsubroutine map_asm_status
+
+   pure subroutine map_asm_measures_2d(ft, ntc, mo, nm, meas, cf, co, cw, cr, nt, v0, v1, faces, outflow, wall, residual)
+   !< Kernel (issue #105 step 1f): faces, outflows, wall and residual of every track of one 2-D cell, from the per-track
+   !< measures (mo > 0: meas(1:4) face lengths, meas(5:8) outflows in +axis of the faces -u, +u, -v, +v) or, one track,
+   !< from the cell's values (cf faces, co outward outflows, cw wall, cr residual of `sw`).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: ft, ntc        !< First track, tracks of the cell.
+   integer(I4P), intent(in)    :: mo             !< First measure of the cell's tracks (0: the cell's values).
+   integer(I4P), intent(in)    :: nm             !< Measured tracks.
+   real(R8P),    intent(in)    :: meas(8, nm)    !< Per-track measures.
+   real(R8P),    intent(in)    :: cf(4), co(4)   !< The cell's faces and outward outflows.
+   real(R8P),    intent(in)    :: cw(2), cr      !< The cell's wall and residual.
+   integer(I4P), intent(in)    :: nt             !< Tracks.
+   real(R8P),    intent(in)    :: v0(nt), v1(nt) !< Track volumes at pose0 and pose1.
+   real(R8P),    intent(inout) :: faces(4, nt), outflow(4, nt), wall(2, nt), residual(nt) !< Track values.
+   integer(I4P)                :: t, p, a        !< Work.
+
+   do t = ft, ft + ntc - 1_I4P
+      if (mo > 0_I4P) then ! several tracks: integrated per track
+         p = mo + t - ft
+         do a = 1_I4P, 4_I4P
+            faces(a, t) = meas(a, p)
+         enddo
+         outflow(1, t) = -meas(5, p) ; outflow(2, t) = meas(6, p) ; outflow(3, t) = -meas(7, p)
+         outflow(4, t) = meas(8, p)
+         wall(1, t) = -(meas(2, p) - meas(1, p)) ; wall(2, t) = -(meas(4, p) - meas(3, p))
+         residual(t) = v1(t) - v0(t) + (meas(6, p) - meas(5, p) + meas(8, p) - meas(7, p))
+      else ! one track: the cell's values
+         do a = 1_I4P, 4_I4P
+            faces(a, t) = cf(a) ; outflow(a, t) = co(a)
+         enddo
+         wall(1, t) = cw(1) ; wall(2, t) = cw(2) ; residual(t) = cr
+      endif
+   enddo
+   endsubroutine map_asm_measures_2d
+
+   pure subroutine map_asm_measures_3d(ft, ntc, mo, nm, meas, cf, co, cw, cr, nt, v0, v1, faces, outflow, wall, residual)
+   !< Kernel (issue #105 step 1f), the 3-D twin of `map_asm_measures_2d`: meas(1:6) face areas, meas(7:12) outward
+   !< outflows of the faces -x, +x, -y, +y, -z, +z.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: ft, ntc        !< First track, tracks of the cell.
+   integer(I4P), intent(in)    :: mo             !< First measure of the cell's tracks (0: the cell's values).
+   integer(I4P), intent(in)    :: nm             !< Measured tracks.
+   real(R8P),    intent(in)    :: meas(12, nm)   !< Per-track measures.
+   real(R8P),    intent(in)    :: cf(6), co(6)   !< The cell's faces and outward outflows.
+   real(R8P),    intent(in)    :: cw(3), cr      !< The cell's wall and residual.
+   integer(I4P), intent(in)    :: nt             !< Tracks.
+   real(R8P),    intent(in)    :: v0(nt), v1(nt) !< Track volumes at pose0 and pose1.
+   real(R8P),    intent(inout) :: faces(6, nt), outflow(6, nt), wall(3, nt), residual(nt) !< Track values.
+   integer(I4P)                :: t, p, a        !< Work.
+
+   do t = ft, ft + ntc - 1_I4P
+      if (mo > 0_I4P) then ! several tracks: integrated per track
+         p = mo + t - ft
+         do a = 1_I4P, 6_I4P
+            faces(a, t) = meas(a, p) ; outflow(a, t) = meas(6 + a, p)
+         enddo
+         wall(1, t) = -(meas(2, p) - meas(1, p)) ; wall(2, t) = -(meas(4, p) - meas(3, p))
+         wall(3, t) = -(meas(6, p) - meas(5, p))
+         residual(t) = v1(t) - v0(t) + (meas(7, p) + meas(8, p) + meas(9, p) + meas(10, p) + meas(11, p) + meas(12, p))
+      else ! one track: the cell's values
+         do a = 1_I4P, 6_I4P
+            faces(a, t) = cf(a) ; outflow(a, t) = co(a)
+         enddo
+         do a = 1_I4P, 3_I4P
+            wall(a, t) = cw(a)
+         enddo
+         residual(t) = cr
+      endif
+   enddo
+   endsubroutine map_asm_measures_3d
 
    subroutine refine_faces_2d(map, measured, nx, ny, fu, fv, fou, fov, ru, rv)
    !< The Gauss path's faces next to the wall integrated per event interval (issue #104, `refine`): every cell the map
@@ -3257,7 +3430,9 @@ contains
    !<    integral of the rigid field's flux in +axis through every grid face); several tracks integrate their face
    !<    parts on the cell's event intervals with the exact paths' rules, on the Gauss path too (`map_measures_3d`: by
    !<    rounds over flat (cell, interval, node) items, issue #105 step 1e).
-   !< 4. CSR fill in cell order.
+   !< 4. Assembly (issue #105 step 1f): tracks per cell and their scan (`map_asm_tracks`), the old and new pieces per
+   !<    track by count / scan / fill per cell (`map_asm_pieces`), the statuses and measures per cell (`map_asm_status`,
+   !<    `map_asm_measures_*`); the same bits as the former loops in cell and piece order.
    type(surface_stl_object), intent(in)  :: surface        !< Surface (body frame).
    type(surface_stl_object), intent(in)  :: s0             !< Copy at pose0 (`move`, the end-pose cut's).
    type(rigid_pose_t),       intent(in)  :: pose0, pose1   !< End poses.
@@ -3278,10 +3453,10 @@ contains
    integer(I4P), allocatable :: otr(:), ntn(:)             !< Track (in its cell) of every old and new piece.
    integer(I4P), allocatable :: comp(:)                    !< Track (in its cell) of every piece of every evaluation.
    integer(I4P), allocatable :: tw(:)                      !< Work of `map_tracks`.
-   integer(I4P), allocatable :: moff(:), oc(:), nc(:), fo(:), fn(:) !< Work.
+   integer(I4P), allocatable :: moff(:)                    !< First measure of every measured cell's tracks.
    real(R8P),    allocatable :: meas(:,:)                  !< Per-track measures of the measured cells.
    logical,      allocatable :: cok(:)                     !< Measured cells whose measures are assigned.
-   integer(I4P)              :: nx, ny, nz, ncell, c, i, j, k, nt, tot, t, p, a0, a1, b0, b1, v0, ne, p0, nn, q0, nk !< Work.
+   integer(I4P)              :: nx, ny, nz, ncell, c, i, j, k, nt, tot, t, a0, a1, b0, b1, v0, ne, p0, nn, q0, nk !< Work.
    logical                   :: allm                       !< all_meas.
 
    allm = .false. ; if (present(all_meas)) allm = all_meas
@@ -3343,78 +3518,32 @@ contains
       endif
    enddo
    if (present(measured)) measured = moff > 0_I4P
-   ! untrusted cells: one track with every piece
+   ! assembly (issue #105 step 1f): tracks per cell, scan; pieces per track, scan, fill; status; measures
    allocate(map%tracks(nx, ny, nz), map%first_track(nx, ny, nz))
-   nt = 0_I4P
-   do k = 1_I4P, nz
-      do j = 1_I4P, ny
-         do i = 1_I4P, nx
-            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
-            if (ckind(c) == -1_I4P) then
-               ntr(c) = 1_I4P
-               a0 = k0%first_piece(i, j, k) ; a1 = a0 + max(0_I4P, k0%pieces(i, j, k)) - 1_I4P
-               b0 = k1%first_piece(i, j, k) ; b1 = b0 + max(0_I4P, k1%pieces(i, j, k)) - 1_I4P
-               otr(a0:a1) = 1_I4P ; ntn(b0:b1) = 1_I4P
-               map%untrusted_cells = map%untrusted_cells + 1_I4P
-            endif
-            if (ntr(c) >= 2_I4P) map%multi_track_cells = map%multi_track_cells + 1_I4P
-            map%tracks(i, j, k) = ntr(c) ; map%first_track(i, j, k) = nt + 1_I4P ; nt = nt + ntr(c)
-         enddo
-      enddo
-   enddo
-   map%nt = nt
+   call map_asm_tracks(ncell, ckind, ntr, map%first_track, nt, map%untrusted_cells, map%multi_track_cells)
+   map%tracks = reshape(ntr, [nx, ny, nz]) ; map%nt = nt
    allocate(map%track_cell(3, nt), map%status(nt), map%old_start(nt + 1), map%new_start(nt + 1), map%old_piece(k0%np), &
             map%new_piece(k1%np), map%old_track(k0%np), map%new_track(k1%np), map%volume0(nt), map%volume1(nt), &
-            map%faces(6, nt), map%outflow(6, nt), map%wall(3, nt), map%residual(nt), oc(nt), nc(nt), fo(nt), fn(nt))
-   map%volume0 = 0._R8P ; map%volume1 = 0._R8P ; oc = 0_I4P ; nc = 0_I4P
-   do p = 1_I4P, k0%np ! pieces in order: volumes summed in piece order
-      t = map%first_track(k0%piece_cell(1, p), k0%piece_cell(2, p), k0%piece_cell(3, p)) + otr(p) - 1_I4P
-      map%old_track(p) = t ; oc(t) = oc(t) + 1_I4P ; map%volume0(t) = map%volume0(t) + k0%piece_volume(p)
+            map%faces(6, nt), map%outflow(6, nt), map%wall(3, nt), map%residual(nt))
+   call map_asm_pieces(ncell, ckind, ntr, map%first_track, k0%first_piece, k0%pieces, k0%np, otr, k0%piece_volume, nt, &
+                       map%old_start, map%old_piece, map%old_track, map%volume0)
+   call map_asm_pieces(ncell, ckind, ntr, map%first_track, k1%first_piece, k1%pieces, k1%np, ntn, k1%piece_volume, nt, &
+                       map%new_start, map%new_piece, map%new_track, map%volume1)
+   !$omp parallel do default(shared) private(c, i, j, k) schedule(static)
+   do c = 1_I4P, ncell
+      i = 1_I4P + mod(c - 1_I4P, nx) ; j = 1_I4P + mod((c - 1_I4P) / nx, ny) ; k = 1_I4P + (c - 1_I4P) / (nx * ny)
+      call map_asm_status(3_I4P, [i, j, k], ckind(c) == -1_I4P, map%first_track(i, j, k), ntr(c), nt, map%old_start, &
+                          map%new_start, map%status, map%track_cell)
+      call map_asm_measures_3d(map%first_track(i, j, k), ntr(c), moff(c), size(meas, 2, kind=I4P), meas, &
+                               [sw%face_x(i, j, k), sw%face_x(i + 1, j, k), sw%face_y(i, j, k), sw%face_y(i, j + 1, k), &
+                                sw%face_z(i, j, k), sw%face_z(i, j, k + 1)], &
+                               [-fox(i, j, k), fox(i + 1, j, k), -foy(i, j, k), foy(i, j + 1, k), -foz(i, j, k), &
+                                foz(i, j, k + 1)], sw%wall(:, i, j, k), sw%residual(i, j, k), &
+                               nt, map%volume0, map%volume1, map%faces, map%outflow, map%wall, map%residual)
    enddo
-   do p = 1_I4P, k1%np
-      t = map%first_track(k1%piece_cell(1, p), k1%piece_cell(2, p), k1%piece_cell(3, p)) + ntn(p) - 1_I4P
-      map%new_track(p) = t ; nc(t) = nc(t) + 1_I4P ; map%volume1(t) = map%volume1(t) + k1%piece_volume(p)
-   enddo
-   map%old_start(1) = 1_I4P ; map%new_start(1) = 1_I4P
+   !$omp end parallel do
    do t = 1_I4P, nt
-      map%old_start(t + 1) = map%old_start(t) + oc(t) ; map%new_start(t + 1) = map%new_start(t) + nc(t)
-      fo(t) = map%old_start(t) ; fn(t) = map%new_start(t)
-   enddo
-   do p = 1_I4P, k0%np
-      t = map%old_track(p) ; map%old_piece(fo(t)) = p ; fo(t) = fo(t) + 1_I4P
-   enddo
-   do p = 1_I4P, k1%np
-      t = map%new_track(p) ; map%new_piece(fn(t)) = p ; fn(t) = fn(t) + 1_I4P
-   enddo
-   do k = 1_I4P, nz
-      do j = 1_I4P, ny
-         do i = 1_I4P, nx
-            c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
-            do t = map%first_track(i, j, k), map%first_track(i, j, k) + ntr(c) - 1_I4P
-               map%track_cell(:, t) = [i, j, k]
-               if (ckind(c) == -1_I4P) then
-                  map%status(t) = TRACK_UNTRUSTED
-               else
-                  map%status(t) = track_status_of(oc(t), nc(t))
-               endif
-               map%n_status(map%status(t)) = map%n_status(map%status(t)) + 1_I4P
-               if (moff(c) > 0_I4P) then ! several tracks: integrated per track
-                  p = moff(c) + t - map%first_track(i, j, k)
-                  map%faces(:, t) = meas(1:6, p) ; map%outflow(:, t) = meas(7:12, p)
-                  map%wall(:, t) = -[meas(2, p) - meas(1, p), meas(4, p) - meas(3, p), meas(6, p) - meas(5, p)]
-                  map%residual(t) = map%volume1(t) - map%volume0(t) + (meas(7, p) + meas(8, p) + meas(9, p) + &
-                                    meas(10, p) + meas(11, p) + meas(12, p))
-               else ! one track: the cell's values
-                  map%faces(:, t) = [sw%face_x(i, j, k), sw%face_x(i + 1, j, k), sw%face_y(i, j, k), sw%face_y(i, j + 1, k), &
-                                     sw%face_z(i, j, k), sw%face_z(i, j, k + 1)]
-                  map%outflow(:, t) = [-fox(i, j, k), fox(i + 1, j, k), -foy(i, j, k), foy(i, j + 1, k), -foz(i, j, k), &
-                                       foz(i, j, k + 1)]
-                  map%wall(:, t) = sw%wall(:, i, j, k)
-                  map%residual(t) = sw%residual(i, j, k)
-               endif
-            enddo
-         enddo
-      enddo
+      map%n_status(map%status(t)) = map%n_status(map%status(t)) + 1_I4P
    enddo
    map%exact = mc%exact ; map%skipped_nodes = mc%skipped
    map%contact_cells = plan%contacts ; map%narrow_cells = plan%resolved
