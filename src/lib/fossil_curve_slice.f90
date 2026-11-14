@@ -40,6 +40,8 @@ public :: slice_surface
 public :: slice_planes_t, slice_planes_prepare, slice_surface_plane, slice_surface_planes
 ! the section of a few triangles, for one-cell evaluations (issue #102, the 3-D piece map)
 public :: slice_triangles
+! its kernel on a workspace, for the piece map on the device (issue #105)
+public :: slice_triangles_layout, slice_triangles_kernel
 
 type :: slice_planes_t
    !< Plane sweep over a set of parallel planes (issue #100 step 3c): the facets that can meet each plane.
@@ -318,36 +320,24 @@ contains
    !< on the plane counts as below, `on_plane_low`), as plain arrays (issue #102): the directed segments of
    !< `facet_segment` (canonical crossings: two triangles sharing an edge give the same bits) chained by `chain`, vertex
    !< k followed by vertex nxt(k) (0: the end of an open chain). The triangles are a few facets around one cell, so the
-   !< chains are open in general; the loops' order is the order of `chain`, not the order of the facets.
+   !< chains are open in general; the loops' order is the order of `chain`, not the order of the facets. Since issue #105
+   !< the device kernel `slice_triangles_kernel` on a host workspace (the same segments, order and chains).
    real(R8P),                 intent(in)  :: tri(:,:,:)   !< Triangles [3, 3, n].
    integer(I4P),              intent(in)  :: axis         !< Plane normal axis.
    real(R8P),                 intent(in)  :: level        !< Plane position.
    real(R8P),    allocatable, intent(out) :: u(:), v(:)   !< Section vertices (in-plane axes in cyclic order).
    integer(I4P), allocatable, intent(out) :: nxt(:)       !< Next vertex (0: none).
-   real(R8P),    allocatable :: s(:,:)                    !< Segments [su, sv, eu, ev; m].
-   integer(I4P), allocatable :: sp(:), lp(:), sizes(:)    !< Patches (unused), loop sizes.
-   logical,      allocatable :: closed(:)                 !< Loop closed flags.
-   real(R8P)                 :: pa(2), pb(2)              !< Segment.
-   integer(I4P)              :: n, m, f, l, k, k0, nopen  !< Work.
-   logical                   :: hit                       !< A segment.
+   real(R8P),    allocatable :: rw(:)                     !< Workspace.
+   integer(I4P), allocatable :: iw(:)                     !< Workspace.
+   integer(I4P)              :: n, nv, ru, rv, inx, nrw, niw !< Work.
 
+   ! the kernel of the device path (issue #105) on a host workspace
    n = size(tri, 3, kind=I4P)
-   allocate(s(4, max(1_I4P, n)), sp(max(1_I4P, n))) ; sp = 1_I4P ; m = 0_I4P
-   do f = 1_I4P, n
-      call facet_segment(tri(:, :, f), axis, level, .true., pa, pb, hit)
-      if (.not. hit) cycle
-      m = m + 1_I4P ; s(:, m) = [pa, pb]
-   enddo
-   call chain(s(:, 1:m), u, v, sizes, closed, nopen, sp(1:m), lp)
-   allocate(nxt(size(u)))
-   k0 = 0_I4P
-   do l = 1_I4P, size(sizes, kind=I4P)
-      do k = k0 + 1_I4P, k0 + sizes(l) - 1_I4P
-         nxt(k) = k + 1_I4P
-      enddo
-      nxt(k0 + sizes(l)) = merge(k0 + 1_I4P, 0_I4P, closed(l))
-      k0 = k0 + sizes(l)
-   enddo
+   call slice_triangles_layout(n, ru, rv, inx, nrw, niw)
+   allocate(rw(nrw), iw(niw))
+   call slice_triangles_kernel(n, tri, axis, level, nrw, rw, niw, iw, nv)
+   allocate(u(nv), v(nv), nxt(nv))
+   u = rw(ru:ru + nv - 1_I4P) ; v = rw(rv:rv + nv - 1_I4P) ; nxt = iw(inx:inx + nv - 1_I4P)
    endsubroutine slice_triangles
 
    ! private
@@ -360,25 +350,8 @@ contains
    logical,      intent(in)  :: low          !< A vertex on the plane counts as below.
    real(R8P),    intent(out) :: pa(2), pb(2) !< Segment start, end.
    logical,      intent(out) :: hit          !< A segment.
-   logical                   :: above(3)     !< Vertex sides.
-   integer(I4P)              :: e, en, ia, ib !< Work.
 
-   hit = .false. ; pa = 0._R8P ; pb = 0._R8P
-   if (low) then
-      above = x(normal_axis, :) > level  ! plane at level + eps (the cut-cell rule, issue #40)
-   else
-      above = x(normal_axis, :) >= level ! plane at level - eps
-   endif
-   if (all(above) .or. .not. any(above)) return
-   ia = 0_I4P ; ib = 0_I4P
-   do e = 1, 3
-      en = mod(e, 3_I4P) + 1_I4P
-      if (above(e) .and. .not. above(en)) ia = e ! edge e -> en goes above -> below
-      if (.not. above(e) .and. above(en)) ib = e ! edge e -> en goes below -> above
-   enddo
-   pa = crossing(x(:, ia), x(:, mod(ia, 3_I4P) + 1_I4P), normal_axis, level)
-   pb = crossing(x(:, ib), x(:, mod(ib, 3_I4P) + 1_I4P), normal_axis, level)
-   hit = .not. all(pa == pb) ! false: the facet touches the plane at a vertex
+   call facet_segment_dev(x, normal_axis, level, low, pa, pb, hit) ! one code path with the device kernels (issue #105)
    endsubroutine facet_segment
 
    subroutine finish_section(surface, normal_axis, s, sp, merge_, curve, nopen)
@@ -443,42 +416,6 @@ contains
       width = 2_I4P * width
    enddo
    endsubroutine sort_levels
-
-   pure function crossing(p, q, axis, level) result(c)
-   !< In-plane coordinates of the crossing of the edge pq with the plane (canonical).
-   !<
-   !< The endpoints are ordered lexicographically first, so (p, q) and (q, p) give the same bits;
-   !< a parameter of exactly 0 or 1 returns the endpoint itself.
-   real(R8P),    intent(in) :: p(3), q(3) !< Edge endpoints (one below, one at or above).
-   integer(I4P), intent(in) :: axis       !< Plane normal axis.
-   real(R8P),    intent(in) :: level      !< Plane position.
-   real(R8P)                :: c(2)       !< Crossing (u, v).
-   real(R8P)                :: a(3), b(3), t, x(3) !< Ordered endpoints, parameter, point.
-
-   if (lex_less(p, q)) then
-      a = p ; b = q
-   else
-      a = q ; b = p
-   endif
-   t = (level - a(axis)) / (b(axis) - a(axis))
-   if (t == 0._R8P) then
-      x = a
-   elseif (t == 1._R8P) then
-      x = b
-   else
-      x = a + t * (b - a)
-   endif
-   c = in_plane(x, axis)
-   endfunction crossing
-
-   pure function in_plane(x, axis) result(uv)
-   !< (u, v) of x in the plane normal to axis: (y, z), (z, x), (x, y) for axis 1, 2, 3.
-   real(R8P),    intent(in) :: x(3)  !< Point.
-   integer(I4P), intent(in) :: axis  !< Normal axis.
-   real(R8P)                :: uv(2) !< In-plane coordinates.
-
-   uv = [x(mod(axis, 3_I4P) + 1_I4P), x(mod(axis + 1_I4P, 3_I4P) + 1_I4P)]
-   endfunction in_plane
 
    pure function lex_less(a, b) result(less)
    !< Lexicographic a < b.
@@ -628,6 +565,256 @@ contains
       endif
       endfunction before
    endsubroutine sort_starts
+
+   pure subroutine slice_triangles_layout(n, ru, rv, inx, nrw, niw)
+   !< Workspace of `slice_triangles_kernel` for n triangles (issue #105): reals segments(4, n), u(2 n), v(2 n); integers
+   !< order(n), merge buffer(n), used(n), has a predecessor(n), loop sizes(n), loop closed(n), next(2 n). The section's
+   !< vertices are rw(ru:), rw(rv:), its next vertices iw(inx:) (nv of each). nrw = niw = 8 n + 1.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: n              !< Triangles.
+   integer(I4P), intent(out) :: ru, rv, inx    !< Starts of u, v, next.
+   integer(I4P), intent(out) :: nrw, niw       !< Sizes.
+
+   ru = 4_I4P * n + 1_I4P ; rv = 6_I4P * n + 1_I4P ; inx = 6_I4P * n + 1_I4P
+   nrw = 8_I4P * n + 1_I4P ; niw = 8_I4P * n + 1_I4P
+   endsubroutine slice_triangles_layout
+
+   pure subroutine slice_triangles_kernel(n, tri, axis, level, nrw, rw, niw, iw, nv)
+   !< Kernel (issue #105): `slice_triangles` on a workspace (`slice_triangles_layout`): the directed segments of
+   !< `facet_segment_dev` (the cut cells' on-plane rule) chained as `chain` does (starts sorted by `sort_starts`' total
+   !< order, start then index; successors by `find_start`'s first unused match; open chains first), so the same section
+   !< vertices in the same order. nv vertices: u at rw(4 n + 1), v at rw(6 n + 1), next at iw(6 n + 1) (0: none).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: n             !< Triangles.
+   real(R8P),    intent(in)    :: tri(3, 3, n)  !< Triangles.
+   integer(I4P), intent(in)    :: axis          !< Plane normal axis.
+   real(R8P),    intent(in)    :: level         !< Plane position.
+   integer(I4P), intent(in)    :: nrw, niw      !< Workspace sizes.
+   real(R8P),    intent(inout) :: rw(nrw)       !< Real workspace.
+   integer(I4P), intent(inout) :: iw(niw)       !< Integer workspace.
+   integer(I4P), intent(out)   :: nv            !< Section vertices.
+   real(R8P)    :: pa(2), pb(2)                 !< Segment.
+   integer(I4P) :: m, f, i, k, cur, nl, pass, start, k0, l, ru, rv, inx, mr, mi !< Work.
+   logical      :: hit, cl                      !< Work.
+
+   call slice_triangles_layout(n, ru, rv, inx, mr, mi)
+   m = 0_I4P
+   do f = 1_I4P, n
+      call facet_segment_dev(tri(1, 1, f), axis, level, .true., pa, pb, hit)
+      if (.not. hit) cycle
+      m = m + 1_I4P
+      rw(4_I4P * m - 3_I4P) = pa(1) ; rw(4_I4P * m - 2_I4P) = pa(2) ; rw(4_I4P * m - 1_I4P) = pb(1) ; rw(4_I4P * m) = pb(2)
+   enddo
+   ! chain: integers ord at 1, buffer at n + 1, used at 2 n + 1, has a predecessor at 3 n + 1, sizes at 4 n + 1, closed at
+   ! 5 n + 1, next at 6 n + 1
+   do i = 1_I4P, m
+      iw(i) = i ; iw(2_I4P * n + i) = 0_I4P ; iw(3_I4P * n + i) = 0_I4P
+   enddo
+   call sort_starts_dev(m, rw, iw(1), iw(n + 1))
+   do i = 1_I4P, m
+      k = find_start_dev(m, rw, iw(1), rw(4_I4P * i - 1_I4P), rw(4_I4P * i), iw(2_I4P * n + 1))
+      if (k > 0_I4P) iw(3_I4P * n + k) = 1_I4P
+   enddo
+   nv = 0_I4P ; nl = 0_I4P
+   do pass = 1_I4P, 2_I4P
+      do i = 1_I4P, m
+         start = iw(i)
+         if (iw(2_I4P * n + start) == 1_I4P) cycle
+         if (pass == 1_I4P .and. iw(3_I4P * n + start) == 1_I4P) cycle
+         nl = nl + 1_I4P ; iw(4_I4P * n + nl) = 0_I4P
+         cur = start
+         do
+            iw(2_I4P * n + cur) = 1_I4P
+            nv = nv + 1_I4P ; rw(ru + nv - 1_I4P) = rw(4_I4P * cur - 3_I4P) ; rw(rv + nv - 1_I4P) = rw(4_I4P * cur - 2_I4P)
+            iw(4_I4P * n + nl) = iw(4_I4P * n + nl) + 1_I4P
+            k = find_start_dev(m, rw, iw(1), rw(4_I4P * cur - 1_I4P), rw(4_I4P * cur), iw(2_I4P * n + 1))
+            if (k == 0_I4P) exit
+            cur = k
+         enddo
+         cl = rw(4_I4P * cur - 1_I4P) == rw(4_I4P * start - 3_I4P) .and. rw(4_I4P * cur) == rw(4_I4P * start - 2_I4P)
+         iw(5_I4P * n + nl) = merge(1_I4P, 0_I4P, cl)
+         if (.not. cl) then ! keep the final end point of an open chain
+            nv = nv + 1_I4P ; rw(ru + nv - 1_I4P) = rw(4_I4P * cur - 1_I4P) ; rw(rv + nv - 1_I4P) = rw(4_I4P * cur)
+            iw(4_I4P * n + nl) = iw(4_I4P * n + nl) + 1_I4P
+         endif
+      enddo
+   enddo
+   k0 = 0_I4P
+   do l = 1_I4P, nl
+      do k = k0 + 1_I4P, k0 + iw(4_I4P * n + l) - 1_I4P
+         iw(inx + k - 1_I4P) = k + 1_I4P
+      enddo
+      iw(inx + k0 + iw(4_I4P * n + l) - 1_I4P) = merge(k0 + 1_I4P, 0_I4P, iw(5_I4P * n + l) == 1_I4P)
+      k0 = k0 + iw(4_I4P * n + l)
+   enddo
+   endsubroutine slice_triangles_kernel
+
+   pure subroutine facet_segment_dev(x, normal_axis, level, low, pa, pb, hit)
+   !< `facet_segment` with explicit loops (issue #105, a device routine; the same classification and crossings).
+   !$acc routine seq
+   real(R8P),    intent(in)  :: x(3, 3)       !< Facet vertices.
+   integer(I4P), intent(in)  :: normal_axis   !< Plane normal axis.
+   real(R8P),    intent(in)  :: level         !< Plane position.
+   logical,      intent(in)  :: low           !< A vertex on the plane counts as below.
+   real(R8P),    intent(out) :: pa(2), pb(2)  !< Segment start, end.
+   logical,      intent(out) :: hit           !< A segment.
+   logical                   :: above(3), all_a, any_a !< Vertex sides.
+   integer(I4P)              :: e, en, ia, ib !< Work.
+
+   hit = .false. ; pa(1) = 0._R8P ; pa(2) = 0._R8P ; pb(1) = 0._R8P ; pb(2) = 0._R8P
+   all_a = .true. ; any_a = .false.
+   do e = 1_I4P, 3_I4P
+      if (low) then
+         above(e) = x(normal_axis, e) > level  ! plane at level + eps (the cut-cell rule, issue #40)
+      else
+         above(e) = x(normal_axis, e) >= level ! plane at level - eps
+      endif
+      all_a = all_a .and. above(e) ; any_a = any_a .or. above(e)
+   enddo
+   if (all_a .or. .not. any_a) return
+   ia = 0_I4P ; ib = 0_I4P
+   do e = 1_I4P, 3_I4P
+      en = mod(e, 3_I4P) + 1_I4P
+      if (above(e) .and. .not. above(en)) ia = e ! edge e -> en goes above -> below
+      if (.not. above(e) .and. above(en)) ib = e ! edge e -> en goes below -> above
+   enddo
+   call crossing_dev(x(1, ia), x(1, mod(ia, 3_I4P) + 1_I4P), normal_axis, level, pa)
+   call crossing_dev(x(1, ib), x(1, mod(ib, 3_I4P) + 1_I4P), normal_axis, level, pb)
+   hit = .not. (pa(1) == pb(1) .and. pa(2) == pb(2)) ! false: the facet touches the plane at a vertex
+   endsubroutine facet_segment_dev
+
+   pure subroutine crossing_dev(p, q, axis, level, c)
+   !< `crossing` with explicit loops (issue #105, a device routine; the same canonical construction).
+   !$acc routine seq
+   real(R8P),    intent(in)  :: p(3), q(3) !< Edge endpoints (one below, one at or above).
+   integer(I4P), intent(in)  :: axis       !< Plane normal axis.
+   real(R8P),    intent(in)  :: level      !< Plane position.
+   real(R8P),    intent(out) :: c(2)       !< Crossing (u, v).
+   real(R8P)                 :: a(3), b(3), t, x(3) !< Ordered endpoints, parameter, point.
+   integer(I4P)              :: k          !< Counter.
+   logical                   :: less       !< p < q lexicographically.
+
+   less = .false.
+   do k = 1_I4P, 3_I4P
+      if (p(k) < q(k)) then
+         less = .true. ; exit
+      elseif (p(k) > q(k)) then
+         exit
+      endif
+   enddo
+   do k = 1_I4P, 3_I4P
+      if (less) then
+         a(k) = p(k) ; b(k) = q(k)
+      else
+         a(k) = q(k) ; b(k) = p(k)
+      endif
+   enddo
+   t = (level - a(axis)) / (b(axis) - a(axis))
+   do k = 1_I4P, 3_I4P
+      if (t == 0._R8P) then
+         x(k) = a(k)
+      elseif (t == 1._R8P) then
+         x(k) = b(k)
+      else
+         x(k) = a(k) + t * (b(k) - a(k))
+      endif
+   enddo
+   c(1) = x(mod(axis, 3_I4P) + 1_I4P) ; c(2) = x(mod(axis + 1_I4P, 3_I4P) + 1_I4P)
+   endsubroutine crossing_dev
+
+   pure logical function start_before(s, a, b)
+   !< Segment a sorts strictly before segment b (start lexicographically, then index; `sort_starts`' order).
+   !$acc routine seq
+   real(R8P),    intent(in) :: s(*) !< Segments [su, sv, eu, ev; m], flat.
+   integer(I4P), intent(in) :: a, b !< Segments.
+   real(R8P)                :: au, av, bu, bv !< Starts.
+
+   au = s(4_I4P * a - 3_I4P) ; av = s(4_I4P * a - 2_I4P) ; bu = s(4_I4P * b - 3_I4P) ; bv = s(4_I4P * b - 2_I4P)
+   if (au < bu) then
+      start_before = .true.
+   elseif (au > bu) then
+      start_before = .false.
+   elseif (av < bv) then
+      start_before = .true.
+   elseif (av > bv) then
+      start_before = .false.
+   else
+      start_before = a < b
+   endif
+   endfunction start_before
+
+   pure subroutine sort_starts_dev(m, s, ord, tmp)
+   !< `sort_starts` on plain arrays (issue #105, a device routine): the same bottom-up merge sort, buffer tmp.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: m       !< Segments.
+   real(R8P),    intent(in)    :: s(*)    !< Segments [4, m], flat.
+   integer(I4P), intent(inout) :: ord(m)  !< Indices.
+   integer(I4P), intent(inout) :: tmp(m)  !< Buffer.
+   integer(I4P)                :: width, lo, mid, hi, i, j, k !< Work.
+
+   width = 1_I4P
+   do while (width < m)
+      lo = 1_I4P
+      do while (lo <= m)
+         mid = min(lo + width - 1_I4P, m) ; hi = min(lo + 2_I4P * width - 1_I4P, m)
+         i = lo ; j = mid + 1_I4P ; k = lo
+         do while (i <= mid .and. j <= hi)
+            if (start_before(s, ord(j), ord(i))) then
+               tmp(k) = ord(j) ; j = j + 1_I4P
+            else
+               tmp(k) = ord(i) ; i = i + 1_I4P
+            endif
+            k = k + 1_I4P
+         enddo
+         do while (i <= mid)
+            tmp(k) = ord(i) ; i = i + 1_I4P ; k = k + 1_I4P
+         enddo
+         do while (j <= hi)
+            tmp(k) = ord(j) ; j = j + 1_I4P ; k = k + 1_I4P
+         enddo
+         lo = lo + 2_I4P * width
+      enddo
+      do k = 1_I4P, m
+         ord(k) = tmp(k)
+      enddo
+      width = 2_I4P * width
+   enddo
+   endsubroutine sort_starts_dev
+
+   pure integer(I4P) function find_start_dev(m, s, ord, pu, pv, used) result(k)
+   !< `find_start` on plain arrays (issue #105, a device routine): the first unused segment, in sorted order, starting
+   !< exactly at (pu, pv), or 0.
+   !$acc routine seq
+   integer(I4P), intent(in) :: m        !< Segments.
+   real(R8P),    intent(in) :: s(*)     !< Segments [4, m], flat.
+   integer(I4P), intent(in) :: ord(m)   !< Segments sorted by start.
+   real(R8P),    intent(in) :: pu, pv   !< Point.
+   integer(I4P), intent(in) :: used(m)  !< Used flags (1 used).
+   integer(I4P)             :: lo, hi, mid !< Binary search.
+   real(R8P)                :: su, sv   !< Start.
+   logical                  :: less     !< Start < point.
+
+   k = 0_I4P
+   lo = 1_I4P ; hi = m
+   do while (lo < hi) ! first position whose start is not less than p
+      mid = (lo + hi) / 2_I4P
+      su = s(4_I4P * ord(mid) - 3_I4P) ; sv = s(4_I4P * ord(mid) - 2_I4P)
+      less = su < pu .or. (.not. su > pu .and. sv < pv)
+      if (less) then
+         lo = mid + 1_I4P
+      else
+         hi = mid
+      endif
+   enddo
+   do mid = lo, m
+      su = s(4_I4P * ord(mid) - 3_I4P) ; sv = s(4_I4P * ord(mid) - 2_I4P)
+      if (su /= pu .or. sv /= pv) exit
+      if (used(ord(mid)) == 0_I4P) then
+         k = ord(mid)
+         return
+      endif
+   enddo
+   endfunction find_start_dev
 
    pure subroutine drop_collinear(lu, lv, sizes, closed, lp)
    !< Remove vertices between two collinear segments running the same way (exact orient2d_xy);

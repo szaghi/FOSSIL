@@ -77,8 +77,9 @@ use fossil_aabb_tree_object,   only : facet_distance_payload, AABB_TREE_SAH_BVH
 use fossil_box_predicates,     only : box_triangle_overlap
 use fossil_box_query,          only : box_tolerance
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t, cut_cells_2d_blocks_t, cut_cells_device_many
-use fossil_curve_slice,        only : slice_planes_t, slice_planes_prepare, slice_surface_plane, slice_surface_planes
-use fossil_cut_cells_2d,       only : chunk_offsets_dev
+use fossil_curve_slice,        only : slice_planes_t, slice_planes_prepare, slice_surface_plane, slice_surface_planes, &
+                                     slice_triangles_layout, slice_triangles_kernel
+use fossil_cut_cells_2d,       only : chunk_offsets_dev, cut_cell_2d_walk, cut_cell_2d_one_sizes, cut_cell_2d_one_count
 use fossil_cut_graph,          only : cut_links_t, links_face_id, links_face_bases, links_piece_count_3d, &
                                       links_piece_fill_3d, cut_links_reset, links_take
 use fossil_cut_moments,        only : MOMENTS_MAX, mono_count, mono_exponents, triangle_moments, segment_green_moments, &
@@ -100,7 +101,10 @@ public :: cut_link_inputs_3d_t, cut_cells_3d_link_inputs_device, cut_cells_3d_li
 ! the piece links on the device (issue #100 step 5), the stage of `cut_cells_3d_device(..., links=)`, for the benches
 public :: cut_links_3d_device
 ! one cell at a pose with its pieces' boundary features, for the piece map of a time step (issue #102 step 2)
-public :: cut_cell_3d_pieces, cut_cell_3d_totals
+public :: cut_cell_3d_pieces, cut_cell_3d_totals, cut_cell_3d_face
+! their one-cell kernels on a workspace, for the piece map on the device (issue #105)
+public :: cut_cell_3d_one_sizes, cut_cell_3d_one_count, cut_cell_3d_one_pieces, cut_cell_3d_one_totals
+public :: cut_cell_3d_face_sizes, cut_cell_3d_face_count, cut_cell_3d_face_measures
 
 integer(I4P), parameter :: MONO2_MAX = 15_I4P !< mono_count(2, MOMENTS_MAX): moments per face, at most.
 integer(I4P), parameter :: MONO3_MAX = 35_I4P !< mono_count(3, MOMENTS_MAX): moments per piece, at most.
@@ -751,7 +755,8 @@ contains
    !< features).
    !< With `measures` and several pieces: pvol(np), the face fractions pfc(6, np) (-x, +x, -y, +y, -z, +z) and the face
    !< moments of order 1 pfm(3, 6, np) (int 1, X, Y over each face, in-face coordinates in cyclic order, X = (x - x_c) / h,
-   !< see `fossil_cut_moments`); one piece takes the cell totals (the caller's).
+   !< see `fossil_cut_moments`); one piece takes the cell totals (the caller's). Since issue #105 the device kernels
+   !< (`cut_cell_3d_one_count`, `cut_cell_3d_one_pieces`) on a host workspace, bit for bit.
    real(R8P),                 intent(in)  :: tl(:,:,:)              !< Triangles [3, 3, n].
    real(R8P),                 intent(in)  :: x0, x1, y0, y1, z0, z1 !< Cell.
    integer(I4P),              intent(in)  :: cs(8)                  !< Corner states (0 solid, 1 fluid).
@@ -761,46 +766,19 @@ contains
    integer(I4P), allocatable, intent(out) :: apiece(:)              !< Piece next to each triangle (0: none) [n].
    integer(I4P),              intent(out) :: cpiece(8)              !< Piece of each corner (0: solid).
    real(R8P),    allocatable, intent(out) :: pvol(:), pfc(:,:), pfm(:,:,:) !< Measures (measures, np > 1).
-   real(R8P),    allocatable :: tri(:,:,:), nrm(:,:), rw(:), pt(:), pcen_(:,:), pwa(:), pwc(:,:), pwn(:,:), pmom(:,:), &
-                                pwmom(:,:), ivl(:), ivh(:), qpt(:,:), qwt(:), wpt(:,:), wwt(:), secm(:,:) !< Work.
-   integer(I4P), allocatable :: lst(:), pce(:), pcq(:), pcen(:), iw(:), e2(:,:), e3(:,:), ivp(:), ive(:), qcnt(:), wcnt(:)
-   integer(I4P)              :: n, q, npc, nrw, niw, nm2, nm3, na, npo, nivc, nqc, nwc, qwn1, ro(14), io(20), c !< Work.
+   real(R8P),    allocatable :: rw(:)          !< Workspace.
+   integer(I4P), allocatable :: iw(:)          !< Workspace.
+   integer(I4P)              :: n, npc, nrw, niw, npo !< Work.
 
+   ! the kernels of the device path (issue #105): the count pass of the piercings, then the evaluation on a workspace
    n = size(tl, 3, kind=I4P)
-   allocate(tri(3, 3, max(1_I4P, n)), nrm(3, max(1_I4P, n)), lst(max(1_I4P, n)), apiece(n))
-   do q = 1_I4P, n
-      tri(:, :, q) = tl(:, :, q) ; lst(q) = q
-      nrm(:, q) = cross3(tri(:, 2, q) - tri(:, 1, q), tri(:, 3, q) - tri(:, 1, q))
-   enddo
-   apiece = 0_I4P ; cpiece = 0_I4P
-   allocate(pce(12 * max(1_I4P, n)), pcq(12 * max(1_I4P, n)), pcen(12 * max(1_I4P, n)), pt(12 * max(1_I4P, n)))
-   call cell_piercings(.true., max(1_I4P, n), tri, n, lst, [x0, y0, z0], [x1, y1, z1], size(pce, kind=I4P), npc, pce, pcq, &
-                       pt, pcen)
-   nm2 = 0_I4P ; nm3 = 0_I4P
-   if (measures) then
-      nm2 = mono_count(2_I4P, 1_I4P) ; nm3 = mono_count(3_I4P, 1_I4P)
-      e2 = mono_exponents(2_I4P, 1_I4P) ; e3 = mono_exponents(3_I4P, 1_I4P)
-   else
-      allocate(e2(2, 0), e3(3, 0))
-   endif
-   na = n + 20_I4P + npc ; npo = 0_I4P ; if (measures) npo = na
-   call cell_pieces_sizes(n, npc, nm2, nm3, .false., nrw, niw)
-   allocate(rw(nrw), iw(niw), secm(nm2, 6)) ; rw = 0._R8P ; iw = 0_I4P ; secm = 0._R8P
-   allocate(pvol(npo), pcen_(3, npo), pwa(npo), pwc(3, npo), pwn(3, npo), pfc(6, npo), pmom(nm3, npo), pwmom(nm3, npo), &
-            pfm(nm2, 6, npo), ivp(0), ive(0), ivl(0), ivh(0), qpt(3, 0), qwt(0), wpt(3, 0), wwt(0), qcnt(0), wcnt(0))
-   call cell_pieces_3d(measures, max(1_I4P, n), tri, nrm, n, lst, x0, x1, y0, y1, z0, z1, cs, alpha, faces, npc, pce, pcq, &
-                       pt, pcen, nm2, nm3, e2, e3, .false., .false., secm, nrw, rw, niw, iw, np, nivc, nqc, nwc, qwn1, &
-                       0_I4P, 0_I4P, 0_I4P, 0_I4P, npo, 0_I4P, 0_I4P, 0_I4P, 0_I4P, pvol, pcen_, pwa, pwc, pwn, pfc, pmom, &
-                       pwmom, pfm, ivp, ive, ivl, ivh, qpt, qwt, wpt, wwt, qcnt, wcnt)
-   if (np < 1_I4P) return
-   ! the features, from the kernel's workspace: vertex counts, union-find, inclusion targets, piece ids
-   call cell_pieces_layout(n, npc, nm2, nm3, .false., ro, io)
-   do q = 1_I4P, n
-      if (iw(io(2) + q - 1_I4P) > 0_I4P) apiece(q) = atom_piece(q, n, na, iw(io(6)), iw(io(10)), iw(io(11)))
-   enddo
-   do c = 1_I4P, 8_I4P
-      if (cs(c) == 1_I4P) cpiece(c) = atom_piece(n + c, n, na, iw(io(6)), iw(io(10)), iw(io(11)))
-   enddo
+   allocate(iw(max(1_I4P, n)))
+   call cut_cell_3d_one_count(n, tl, x0, x1, y0, y1, z0, z1, size(iw, kind=I4P), iw, npc)
+   call cut_cell_3d_one_sizes(n, npc, measures, nrw, niw, npo)
+   deallocate(iw)
+   allocate(rw(nrw), iw(niw), apiece(n), pvol(npo), pfc(6, npo), pfm(merge(3_I4P, 0_I4P, measures), 6, npo))
+   call cut_cell_3d_one_pieces(n, tl, x0, x1, y0, y1, z0, z1, cs, alpha, faces, measures, npc, nrw, rw, niw, iw, np, apiece, &
+                               cpiece, npo, pvol, pfc, pfm)
    endsubroutine cut_cell_3d_pieces
 
    pure integer(I4P) function atom_piece(a, nt, na, parent, tgt, pid) result(p)
@@ -823,24 +801,281 @@ contains
    !< The fluid fraction of the single cell [x0, x1] x [y0, y1] x [z0, z1] cut by the triangles tl(:, :, 1:n) (its
    !< candidates, increasing facet order), from the fluid fractions of its +x, +y, +z faces (`cell_totals_3d`; issue #102
    !< step 2: the trust test of a multi-piece split at an instant within the step). The faces are taken as closed.
+   !< Since issue #105 the device kernel `cut_cell_3d_one_totals` on a host workspace.
    real(R8P),    intent(in)  :: tl(:,:,:)              !< Triangles [3, 3, n].
    real(R8P),    intent(in)  :: x0, x1, y0, y1, z0, z1 !< Cell.
    real(R8P),    intent(in)  :: fx1, fy1, fz1          !< Fluid fractions of the +x, +y, +z faces.
    real(R8P),    intent(out) :: alpha                  !< Fluid fraction.
    logical,      intent(out) :: closed                 !< All faces closed.
-   real(R8P),    allocatable :: tri(:,:,:)             !< Triangles.
-   integer(I4P), allocatable :: lst(:)                 !< Candidates.
-   real(R8P)                 :: cen(3), wa, wc(3), wn(3) !< Other measures (unused).
-   integer(I4P)              :: n, q                   !< Work.
+   integer(I4P), allocatable :: iw(:)                  !< Workspace.
+   integer(I4P)              :: n                      !< Triangles.
+
+   ! the kernel of the device path (issue #105) on a host workspace
+   n = size(tl, 3, kind=I4P)
+   allocate(iw(max(1_I4P, n)))
+   call cut_cell_3d_one_totals(n, tl, x0, x1, y0, y1, z0, z1, fx1, fy1, fz1, size(iw, kind=I4P), iw, alpha, closed)
+   endsubroutine cut_cell_3d_totals
+
+   subroutine cut_cell_3d_face(tl, axis, level, u0, u1, v0, v1, flags, closed, alpha, centroid)
+   !< The fluid fraction and centroid of the face [u0, u1] x [v0, v1] (in-plane axes in cyclic order) of the plane
+   !< x(axis) = level cut by the triangles tl(:, :, 1:n), with the face's corner flags (issue #105: the face sections of
+   !< the 3-D piece map, `slice_triangles` + `cut_cell_2d_measures` bit for bit): the kernels `cut_cell_3d_face_count`
+   !< and `cut_cell_3d_face_measures` on a host workspace. closed false: the face does not close (no measures).
+   real(R8P),    intent(in)  :: tl(:,:,:)      !< Triangles [3, 3, n].
+   integer(I4P), intent(in)  :: axis           !< Face normal axis.
+   real(R8P),    intent(in)  :: level          !< Face plane.
+   real(R8P),    intent(in)  :: u0, u1, v0, v1 !< Face.
+   logical,      intent(in)  :: flags(4)       !< Corners inside the solid: (u0,v0), (u1,v0), (u1,v1), (u0,v1).
+   logical,      intent(out) :: closed         !< The face boundary closed.
+   real(R8P),    intent(out) :: alpha          !< Fluid fraction.
+   real(R8P),    intent(out) :: centroid(2)    !< Fluid centroid (the face centre without fluid).
+   real(R8P),    allocatable :: rw(:)          !< Workspace.
+   integer(I4P), allocatable :: iw(:)          !< Workspace.
+   integer(I4P)              :: n, nv, nxs, nps, nrw, niw !< Work.
 
    n = size(tl, 3, kind=I4P)
-   allocate(tri(3, 3, max(1_I4P, n)), lst(max(1_I4P, n)))
+   call cut_cell_3d_face_sizes(n, 0_I4P, 0_I4P, nrw, niw)
+   allocate(rw(nrw), iw(niw))
+   call cut_cell_3d_face_count(n, tl, axis, level, u0, u1, v0, v1, nrw, rw, niw, iw, nv, nxs, nps)
+   call cut_cell_3d_face_sizes(n, nxs, nps, nrw, niw)
+   deallocate(rw, iw) ; allocate(rw(nrw), iw(niw))
+   call cut_cell_3d_face_measures(n, tl, axis, level, u0, u1, v0, v1, flags(1), flags(2), flags(3), flags(4), nxs, nps, nrw, &
+                                  rw, niw, iw, closed, alpha, centroid)
+   endsubroutine cut_cell_3d_face
+
+   ! One-cell kernels (issue #105, the piece map on the device): `cut_cell_3d_pieces`, `cut_cell_3d_totals` and the face
+   ! sections of the map as routine-seq kernels on a workspace, each with its sizes and, where a bound from the
+   ! candidates would be wasteful, a count pass (the piercings, the face's crossings). No allocation, plain arrays.
+
+   pure subroutine cut_cell_3d_face_sizes(n, nxs, nps, nrw, niw)
+   !< Workspace of a face evaluation (`cut_cell_3d_face_count`, `cut_cell_3d_face_measures`) with n triangles, and nxs
+   !< crossings and nps wall pieces of the face's section (the count pass; 0, 0 for the count pass itself): the section
+   !< (`slice_triangles_layout`, 8 n + 1 reals and integers), then the one-cell workspace (`cut_cell_2d_one_sizes`).
+   !$acc routine seq
+   integer(I4P), intent(in)  :: n, nxs, nps   !< Triangles, crossings, wall pieces.
+   integer(I4P), intent(out) :: nrw, niw      !< Reals, integers.
+   integer(I4P)              :: ru, rv, inx, nrs, nis, nr2, ni2 !< Parts.
+
+   call slice_triangles_layout(n, ru, rv, inx, nrs, nis)
+   call cut_cell_2d_one_sizes(nxs, nps, nr2, ni2)
+   nrw = nrs + nr2 ; niw = nis + ni2
+   endsubroutine cut_cell_3d_face_sizes
+
+   subroutine cut_cell_3d_face_count(n, tri, axis, level, u0, u1, v0, v1, nrw, rw, niw, iw, nv, nxs, nps)
+   !< Kernel (issue #105), count pass of a face: the section of the triangles by the face plane x(axis) = level
+   !< (`slice_triangles_kernel`, the cut cells' on-plane rule) and the count pass of its walk over the face
+   !< [u0, u1] x [v0, v1] (in-plane axes in cyclic order): nv section vertices, nxs crossings, nps wall pieces.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: n               !< Triangles.
+   real(R8P),    intent(in)    :: tri(3, 3, n)    !< Triangles.
+   integer(I4P), intent(in)    :: axis            !< Face normal axis.
+   real(R8P),    intent(in)    :: level           !< Face plane.
+   real(R8P),    intent(in)    :: u0, u1, v0, v1  !< Face.
+   integer(I4P), intent(in)    :: nrw, niw        !< Workspace sizes (at least `cut_cell_3d_face_sizes(n, 0, 0)`).
+   real(R8P),    intent(inout) :: rw(nrw)         !< Real workspace.
+   integer(I4P), intent(inout) :: iw(niw)         !< Integer workspace.
+   integer(I4P), intent(out)   :: nv, nxs, nps    !< Section vertices, crossings, wall pieces.
+   integer(I4P) :: ru, rv, inx, nrs, nis, id1(1), id2(1), id3(1), id4(2, 1) !< Work.
+   real(R8P)    :: rd1(1), rd2(2, 1), rd3(4, 1)   !< Work.
+
+   call slice_triangles_layout(n, ru, rv, inx, nrs, nis)
+   call slice_triangles_kernel(n, tri, axis, level, nrs, rw, nis, iw, nv)
+   call cut_cell_2d_walk(nv, rw(ru), rw(rv), iw(inx), u0, u1, v0, v1, .false., 0_I4P, 0_I4P, nxs, nps, id1, rd1, id2, rd2, &
+                         id3, rd3, id4)
+   endsubroutine cut_cell_3d_face_count
+
+   subroutine cut_cell_3d_face_measures(n, tri, axis, level, u0, u1, v0, v1, f00, f10, f11, f01, nxs, nps, nrw, rw, niw, &
+                                        iw, closed, alpha, centroid)
+   !< Kernel (issue #105): the fluid fraction and centroid of the face [u0, u1] x [v0, v1] of the plane x(axis) = level
+   !< cut by the triangles, with its corner flags (inside the solid; corners (u0,v0), (u1,v0), (u1,v1), (u0,v1)): the
+   !< section (`slice_triangles_kernel`), then the one-cell evaluation (`cut_cell_2d_one_count`) with the counts nxs, nps
+   !< of `cut_cell_3d_face_count`. Bit for bit `slice_triangles` + `cut_cell_2d_measures`. closed false: no measures.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: n               !< Triangles.
+   real(R8P),    intent(in)    :: tri(3, 3, n)    !< Triangles.
+   integer(I4P), intent(in)    :: axis            !< Face normal axis.
+   real(R8P),    intent(in)    :: level           !< Face plane.
+   real(R8P),    intent(in)    :: u0, u1, v0, v1  !< Face.
+   logical,      intent(in)    :: f00, f10, f11, f01 !< Corners inside the solid.
+   integer(I4P), intent(in)    :: nxs, nps        !< Crossings, wall pieces (`cut_cell_3d_face_count`).
+   integer(I4P), intent(in)    :: nrw, niw        !< Workspace sizes (`cut_cell_3d_face_sizes(n, nxs, nps)`).
+   real(R8P),    intent(inout) :: rw(nrw)         !< Real workspace.
+   integer(I4P), intent(inout) :: iw(niw)         !< Integer workspace.
+   logical,      intent(out)   :: closed          !< The face boundary closed.
+   real(R8P),    intent(out)   :: alpha, centroid(2) !< Fluid fraction and centroid.
+   integer(I4P) :: ru, rv, inx, nrs, nis, nv, np  !< Work.
+
+   call slice_triangles_layout(n, ru, rv, inx, nrs, nis)
+   call slice_triangles_kernel(n, tri, axis, level, nrs, rw, nis, iw, nv)
+   call cut_cell_2d_one_count(nv, rw(ru), rw(rv), iw(inx), u0, u1, v0, v1, f00, f10, f11, f01, nxs, nps, nrw - nrs, &
+                              rw(nrs + 1_I4P), niw - nis, iw(nis + 1_I4P), closed, alpha, centroid, np)
+   endsubroutine cut_cell_3d_face_measures
+
+   pure subroutine cut_cell_3d_one_layout(n, npc, measures, ro, io, npo)
+   !< Start of each part of a one-cell evaluation's workspace (issue #105; sizes in `cut_cell_3d_one_sizes`), with
+   !< nm2 = 3, nm3 = 4 moments with measures (order 1), else 0, and npo = n + 20 + npc pieces with measures, else 0.
+   !< Reals: normals(3, n), piercing positions(npc), the kernel's unreturned piece outputs (centroids(3, npo), wetted
+   !< areas(npo), wetted centroids(3, npo), wall normals(3, npo), moments(nm3, npo), wall moments(nm3, npo)), section
+   !< moments(nm2, 6), then the kernel workspace (`cell_pieces_sizes`). Integers: candidates(n), piercing edges(npc),
+   !< triangles(npc), entering flags(npc), then the kernel workspace. ro(11), io(6): the total sizes + 1.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: n, npc        !< Triangles, piercings.
+   logical,      intent(in)  :: measures      !< Measures of several pieces.
+   integer(I4P), intent(out) :: ro(11), io(6) !< Starts.
+   integer(I4P), intent(out) :: npo           !< Piece capacity of the outputs.
+   integer(I4P)              :: nm2, nm3, nrc, nic !< Work.
+
+   nm2 = 0_I4P ; nm3 = 0_I4P ; npo = 0_I4P
+   if (measures) then
+      nm2 = 3_I4P ; nm3 = 4_I4P ; npo = n + 20_I4P + npc ! mono_count(2, 1), mono_count(3, 1)
+   endif
+   call cell_pieces_sizes(n, npc, nm2, nm3, .false., nrc, nic)
+   ro(1) = 1_I4P ; ro(2) = ro(1) + 3_I4P * n ; ro(3) = ro(2) + npc ; ro(4) = ro(3) + 3_I4P * npo ; ro(5) = ro(4) + npo
+   ro(6) = ro(5) + 3_I4P * npo ; ro(7) = ro(6) + 3_I4P * npo ; ro(8) = ro(7) + nm3 * npo ; ro(9) = ro(8) + nm3 * npo
+   ro(10) = ro(9) + 6_I4P * nm2 ; ro(11) = ro(10) + nrc
+   io(1) = 1_I4P ; io(2) = io(1) + n ; io(3) = io(2) + npc ; io(4) = io(3) + npc ; io(5) = io(4) + npc
+   io(6) = io(5) + nic
+   endsubroutine cut_cell_3d_one_layout
+
+   pure subroutine cut_cell_3d_one_sizes(n, npc, measures, nrw, niw, npo)
+   !< Workspace of `cut_cell_3d_one_pieces` for n triangles and npc piercings (`cut_cell_3d_one_count`), issue #105:
+   !<    nrw = 3 n + npc + npo (11 + 2 nm3) + 6 nm2 + nrw_k reals,  niw = n + 3 npc + niw_k integers
+   !< (nrw_k, niw_k of `cell_pieces_sizes`), and npo, the piece capacity of its outputs pvol, pfc, pfm.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: n, npc        !< Triangles, piercings.
+   logical,      intent(in)  :: measures      !< Measures of several pieces.
+   integer(I4P), intent(out) :: nrw, niw, npo !< Reals, integers, piece capacity.
+   integer(I4P)              :: ro(11), io(6) !< Layout.
+
+   call cut_cell_3d_one_layout(n, npc, measures, ro, io, npo)
+   nrw = ro(11) - 1_I4P ; niw = io(6) - 1_I4P
+   endsubroutine cut_cell_3d_one_sizes
+
+   subroutine cut_cell_3d_one_count(n, tri, x0, x1, y0, y1, z0, z1, niw, iw, npc)
+   !< Kernel (issue #105), count pass of a one-cell evaluation: the exact piercings of the cell's 12 edges by the
+   !< triangles (`cell_piercings` without fill; a bound from the triangles, 12 n, overshoots ~50 times). iw: at least n
+   !< integers of scratch (the candidate list).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: n                      !< Triangles.
+   real(R8P),    intent(in)    :: tri(3, 3, n)           !< Triangles.
+   real(R8P),    intent(in)    :: x0, x1, y0, y1, z0, z1 !< Cell.
+   integer(I4P), intent(in)    :: niw                    !< Scratch size (>= n).
+   integer(I4P), intent(inout) :: iw(niw)                !< Scratch.
+   integer(I4P), intent(out)   :: npc                    !< Piercings.
+   integer(I4P) :: q, id1(1), id2(1), id3(1)             !< Work.
+   real(R8P)    :: c0(3), c1(3), rd1(1)                  !< Work.
+
    do q = 1_I4P, n
-      tri(:, :, q) = tl(:, :, q) ; lst(q) = q
+      iw(q) = q
    enddo
-   call cell_totals_3d(max(1_I4P, n), tri, n, lst, x0, x1, y0, y1, z0, z1, fx1, fy1, fz1, .true., .true., .true., .true., &
-                       .true., .true., alpha, cen, wa, wc, wn, closed)
-   endsubroutine cut_cell_3d_totals
+   c0(1) = x0 ; c0(2) = y0 ; c0(3) = z0 ; c1(1) = x1 ; c1(2) = y1 ; c1(3) = z1
+   call cell_piercings(.false., n, tri, n, iw, c0, c1, 0_I4P, npc, id1, id2, rd1, id3)
+   endsubroutine cut_cell_3d_one_count
+
+   subroutine cut_cell_3d_one_pieces(n, tri, x0, x1, y0, y1, z0, z1, cs, alpha, faces, measures, npc, nrw, rw, niw, iw, &
+                                     np, apiece, cpiece, npo, pvol, pfc, pfm)
+   !< Kernel (issue #105): `cut_cell_3d_pieces` on a workspace (`cut_cell_3d_one_sizes` with the npc of
+   !< `cut_cell_3d_one_count`): the normals, the piercings (`cell_piercings`), the kernel (`cell_pieces_3d`, order-1
+   !< exponents as constants), then the features (`atom_piece`). Outputs as `cut_cell_3d_pieces`; pvol, pfc, pfm of
+   !< capacity npo (written with measures and several pieces). np = -1: the cell is not trusted.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: n                      !< Triangles.
+   real(R8P),    intent(in)    :: tri(3, 3, n)           !< Triangles (the candidates, increasing facet order).
+   real(R8P),    intent(in)    :: x0, x1, y0, y1, z0, z1 !< Cell.
+   integer(I4P), intent(in)    :: cs(8)                  !< Corner states (0 solid, 1 fluid).
+   real(R8P),    intent(in)    :: alpha, faces(6)        !< Cell and face fluid fractions (split test).
+   logical,      intent(in)    :: measures               !< Measures of several pieces.
+   integer(I4P), intent(in)    :: npc                    !< Piercings (`cut_cell_3d_one_count`).
+   integer(I4P), intent(in)    :: nrw, niw               !< Workspace sizes (`cut_cell_3d_one_sizes`).
+   real(R8P),    intent(inout) :: rw(nrw)                !< Real workspace.
+   integer(I4P), intent(inout) :: iw(niw)                !< Integer workspace.
+   integer(I4P), intent(out)   :: np                     !< Pieces (-1: not trusted).
+   integer(I4P), intent(out)   :: apiece(n)              !< Piece next to each triangle (0: none).
+   integer(I4P), intent(out)   :: cpiece(8)              !< Piece of each corner (0: solid).
+   integer(I4P), intent(in)    :: npo                    !< Piece capacity (`cut_cell_3d_one_sizes`).
+   real(R8P),    intent(inout) :: pvol(npo), pfc(6, npo), pfm(3, 6, npo) !< Measures (measures, np > 1).
+   integer(I4P) :: ro(11), io(6), cro(14), cio(20), mo, nm2, nm3, q, k, nc, na, nivc, nqc, nwc, qwn1, e2(2, 3), e3(3, 4), &
+                   id1(1), id2(1), id3(1), id4(1) !< Work.
+   real(R8P)    :: c0(3), c1(3), d1(3), d2(3), rd1(1), rd2(1), rd3(3, 1), rd4(1), rd5(3, 1), rd6(1) !< Work.
+
+   do k = 1_I4P, nrw
+      rw(k) = 0._R8P
+   enddo
+   do k = 1_I4P, niw
+      iw(k) = 0_I4P
+   enddo
+   do q = 1_I4P, n
+      apiece(q) = 0_I4P
+   enddo
+   do q = 1_I4P, 8_I4P
+      cpiece(q) = 0_I4P
+   enddo
+   call cut_cell_3d_one_layout(n, npc, measures, ro, io, mo)
+   do q = 1_I4P, n
+      iw(io(1) + q - 1_I4P) = q
+      do k = 1_I4P, 3_I4P
+         d1(k) = tri(k, 2, q) - tri(k, 1, q) ; d2(k) = tri(k, 3, q) - tri(k, 1, q)
+      enddo
+      rw(ro(1) + 3_I4P * q - 3_I4P) = d1(2) * d2(3) - d1(3) * d2(2) ! cross3
+      rw(ro(1) + 3_I4P * q - 2_I4P) = d1(3) * d2(1) - d1(1) * d2(3)
+      rw(ro(1) + 3_I4P * q - 1_I4P) = d1(1) * d2(2) - d1(2) * d2(1)
+   enddo
+   c0(1) = x0 ; c0(2) = y0 ; c0(3) = z0 ; c1(1) = x1 ; c1(2) = y1 ; c1(3) = z1
+   call cell_piercings(.true., n, tri, n, iw(io(1)), c0, c1, npc, k, iw(io(2)), iw(io(3)), rw(ro(2)), iw(io(4)))
+   if (k /= npc .or. mo /= npo) then ! cannot happen: the count pass of the same cell
+      np = -1_I4P ; return
+   endif
+   nm2 = 0_I4P ; nm3 = 0_I4P
+   do k = 1_I4P, 3_I4P ! mono_exponents(2, 1): 1, X, Y
+      e2(1, k) = 0_I4P ; e2(2, k) = 0_I4P
+   enddo
+   e2(1, 2) = 1_I4P ; e2(2, 3) = 1_I4P
+   do k = 1_I4P, 4_I4P ! mono_exponents(3, 1): 1, X, Y, Z
+      e3(1, k) = 0_I4P ; e3(2, k) = 0_I4P ; e3(3, k) = 0_I4P
+   enddo
+   e3(1, 2) = 1_I4P ; e3(2, 3) = 1_I4P ; e3(3, 4) = 1_I4P
+   if (measures) then
+      nm2 = 3_I4P ; nm3 = 4_I4P
+   endif
+   call cell_pieces_3d(measures, n, tri, rw(ro(1)), n, iw(io(1)), x0, x1, y0, y1, z0, z1, cs, alpha, faces, npc, iw(io(2)), &
+                       iw(io(3)), rw(ro(2)), iw(io(4)), nm2, nm3, e2, e3, .false., .false., rw(ro(9)), ro(11) - ro(10), &
+                       rw(ro(10)), io(6) - io(5), iw(io(5)), np, nivc, nqc, nwc, qwn1, 0_I4P, 0_I4P, 0_I4P, 0_I4P, npo, &
+                       0_I4P, 0_I4P, 0_I4P, 0_I4P, pvol, rw(ro(3)), rw(ro(4)), rw(ro(5)), rw(ro(6)), pfc, rw(ro(7)), &
+                       rw(ro(8)), pfm, id1, id2, rd1, rd2, rd3, rd4, rd5, rd6, id3, id4)
+   if (np < 1_I4P) return
+   ! the features, from the kernel's workspace: vertex counts, union-find, inclusion targets, piece ids
+   call cell_pieces_layout(n, npc, nm2, nm3, .false., cro, cio)
+   nc = io(5) - 1_I4P ; na = n + 20_I4P + npc
+   do q = 1_I4P, n
+      if (iw(nc + cio(2) + q - 1_I4P) > 0_I4P) apiece(q) = atom_piece(q, n, na, iw(nc + cio(6)), iw(nc + cio(10)), &
+                                                                      iw(nc + cio(11)))
+   enddo
+   do q = 1_I4P, 8_I4P
+      if (cs(q) == 1_I4P) cpiece(q) = atom_piece(n + q, n, na, iw(nc + cio(6)), iw(nc + cio(10)), iw(nc + cio(11)))
+   enddo
+   endsubroutine cut_cell_3d_one_pieces
+
+   subroutine cut_cell_3d_one_totals(n, tri, x0, x1, y0, y1, z0, z1, fx1, fy1, fz1, niw, iw, alpha, closed)
+   !< Kernel (issue #105): `cut_cell_3d_totals` on a workspace (iw: at least n integers, the candidate list): the cell's
+   !< fluid fraction from its +x, +y, +z face fractions (`cell_totals_3d`, faces taken as closed).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: n                      !< Triangles.
+   real(R8P),    intent(in)    :: tri(3, 3, n)           !< Triangles (the candidates, increasing facet order).
+   real(R8P),    intent(in)    :: x0, x1, y0, y1, z0, z1 !< Cell.
+   real(R8P),    intent(in)    :: fx1, fy1, fz1          !< Fluid fractions of the +x, +y, +z faces.
+   integer(I4P), intent(in)    :: niw                    !< Scratch size (>= n).
+   integer(I4P), intent(inout) :: iw(niw)                !< Scratch.
+   real(R8P),    intent(out)   :: alpha                  !< Fluid fraction.
+   logical,      intent(out)   :: closed                 !< All faces closed.
+   real(R8P)                   :: cen(3), wa, wc(3), wn(3) !< Other measures (unused).
+   integer(I4P)                :: q                      !< Work.
+
+   do q = 1_I4P, n
+      iw(q) = q
+   enddo
+   call cell_totals_3d(n, tri, n, iw, x0, x1, y0, y1, z0, z1, fx1, fy1, fz1, .true., .true., .true., .true., .true., &
+                       .true., alpha, cen, wa, wc, wn, closed)
+   endsubroutine cut_cell_3d_one_totals
 
    subroutine cell_piercings(fill, nf, tri, nt, lst, c0, c1, ncap, npc, pce, pcq, pct, pcen)
    !< Exact crossings of the 12 edges of the cell [c0, c1] by its candidates lst (issue #70): a crossing belongs to the

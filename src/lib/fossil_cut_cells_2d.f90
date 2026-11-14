@@ -48,6 +48,8 @@ public :: chunk_offsets_dev
 public :: cut_cell_2d_pieces, cut_cell_2d_labels
 ! one cell's fluid fraction and centroid, for the faces of the 3-D piece map (issue #102 step 2)
 public :: cut_cell_2d_measures
+! the one-cell kernels of those, for the piece map on the device (issue #105)
+public :: cut_cell_2d_walk, cut_cell_2d_index, cut_cell_2d_one_sizes, cut_cell_2d_one_count, cut_cell_2d_one_pieces
 
 type :: cut_cells_2d_t
    !< Cut-cell geometry of a block (fluid = outside the solid).
@@ -1944,7 +1946,8 @@ contains
    !< cell is walked as a one-cell block (`walk_all`, the crossing formulas of `fossil_line_query`) and counted by the
    !< kernel of `compute_cut_cells_2d` (`cut_cell_2d_count`), so with the flags of `node_flags` the pieces, their order
    !< and their areas are those of the block's cell, bit for bit. Then `cut_cell_2d_labels` reads the features off the
-   !< count's workspace. `closed` false (an open chain, or flags that disagree with the crossings): no pieces.
+   !< count's workspace. `closed` false (an open chain, or flags that disagree with the crossings): no pieces. Since
+   !< issue #105 the device kernels (`cut_cell_2d_walk`, `cut_cell_2d_one_pieces`) on a host workspace, bit for bit.
    real(R8P),                 intent(in)  :: u(:), v(:)     !< Vertices.
    integer(I4P),              intent(in)  :: next(:)        !< Next vertex (0: none).
    real(R8P),                 intent(in)  :: x0, x1, y0, y1 !< Cell.
@@ -1958,49 +1961,25 @@ contains
    integer(I4P),              intent(out) :: cpiece(4)      !< Piece of each corner (0: solid), corners as `flags`.
    real(R8P),    allocatable, intent(out) :: plen(:,:)      !< Fluid length of the faces (-u, +u, -v, +v) per piece [4, np].
    real(R8P),    allocatable, intent(out) :: pmom(:,:)      !< int (coordinate along the face) over it [4, np].
-   type(xing_t),  allocatable :: xs(:)                      !< Crossings.
-   type(piece_t), allocatable :: ps(:)                      !< Wall pieces.
-   integer(I4P),  allocatable :: xstart(:), xord(:), pstart(:), pord(:), ptg(:,:), iw(:), rix(:) !< Work.
-   real(R8P),     allocatable :: xp(:,:), pab(:,:), rw(:)   !< Work.
-   integer(I4P)               :: nxs, nps, k, nrw, niw, nivc, nbdc, eid(4), me(2, 0), ro(15), io(18), s !< Work.
-   real(R8P)                  :: alpha, aperture(4), centroid(2), wl, wc(2), wn(2) !< Cell measures (unused).
+   real(R8P),    allocatable :: rw(:), pa(:), pl(:,:), pm(:,:) !< Workspace, piece outputs.
+   integer(I4P), allocatable :: iw(:), ws(:), wp(:)          !< Workspace, wall piece outputs.
+   integer(I4P)              :: nu, nxs, nps, nrw, niw, mp, idum(2, 1) !< Work.
+   real(R8P)                 :: rdum(4, 1)                   !< Work.
 
-   call walk_all(u, v, next, [x0, x1], [y0, y1], xs, nxs, ps, nps)
-   call index_crossings(xs, nxs, 4_I4P, xstart, xord)
-   call index_pieces(ps, nps, 1_I4P, pstart, pord)
-   call cell_edge_ids(1_I4P, 1_I4P, 1_I4P, 1_I4P, eid)
-   allocate(xp(2, nxs), pab(4, nps), ptg(2, nps))
-   do k = 1_I4P, nxs
-      xp(:, k) = xs(k)%p
-   enddo
-   do k = 1_I4P, nps
-      pab(1:2, k) = ps(k)%a ; pab(3:4, k) = ps(k)%b ; ptg(1, k) = ps(k)%ta ; ptg(2, k) = ps(k)%tb
-   enddo
-   call cut_cell_2d_sizes(nxs, nps, 0_I4P, nrw, niw)
-   allocate(rw(nrw), iw(niw)) ; rw = 0._R8P ; iw = 0_I4P
-   call cut_cell_2d_count(x0, x1, y0, y1, flags(1), flags(2), flags(3), flags(4), eid, 4_I4P, nxs, xstart, xord, xp, nps, &
-                          0_I4P, nps, pord, pab, ptg, 0_I4P, me, .false., .false., nrw, rw, niw, iw, closed, alpha, &
-                          aperture, centroid, wl, wc, wn, np, nivc, nbdc)
+   ! the kernels of the device path (issue #105): the walk's count pass, then the evaluation on a workspace
+   nu = size(u, kind=I4P)
+   call cut_cell_2d_walk(nu, u, v, next, x0, x1, y0, y1, .false., 0_I4P, 0_I4P, nxs, nps, idum, rdum, idum, rdum, idum, &
+                         rdum, idum)
+   call cut_cell_2d_one_sizes(nxs, nps, nrw, niw)
+   mp = 4_I4P + nxs + nps
+   allocate(rw(nrw), iw(niw), pa(mp), pl(4, mp), pm(4, mp), ws(max(1_I4P, nps)), wp(max(1_I4P, nps)))
+   call cut_cell_2d_one_pieces(nu, u, v, next, x0, x1, y0, y1, flags(1), flags(2), flags(3), flags(4), nxs, nps, nrw, rw, &
+                               niw, iw, closed, np, mp, pa, ws, wp, cpiece, pl, pm)
    nw = nps
    allocate(wseg(nw), wpiece(nw), parea(np), plen(4, np), pmom(4, np))
-   do k = 1_I4P, nw
-      wseg(k) = ps(pord(k))%seg
-   enddo
-   wpiece = 0_I4P ; cpiece = 0_I4P
+   wseg = ws(1:nw) ; wpiece = wp(1:nw)
    if (.not. closed .or. np == 0_I4P) return
-   if (iw(1) == 2_I4P) then ! the whole cell fluid, no wall piece and no crossing
-      parea(1) = (x1 - x0) * (y1 - y0) ; cpiece = 1_I4P
-      plen(:, 1) = [y1 - y0, y1 - y0, x1 - x0, x1 - x0]
-      pmom(:, 1) = [0.5_R8P * (y1 - y0) * (y1 + y0), 0.5_R8P * (y1 - y0) * (y1 + y0), 0.5_R8P * (x1 - x0) * (x1 + x0), &
-                    0.5_R8P * (x1 - x0) * (x1 + x0)]
-      return
-   endif
-   call cut_cell_2d_layout(nxs, nps, 0_I4P, ro, io)
-   s = 4_I4P + nxs + nps
-   allocate(rix(s))
-   call cut_cell_2d_labels(nps, s, np, iw(1), rw(ro(1)), rw(ro(2)), rw(ro(3)), iw(io(1)), iw(io(2)), iw(io(3)), iw(io(4)), &
-                           iw(io(7)), iw(io(14)), iw(io(15)), iw(io(16)), iw(io(17)), iw(io(18)), rix, parea, wpiece, &
-                           cpiece, plen, pmom)
+   parea = pa(1:np) ; plen = pl(:, 1:np) ; pmom = pm(:, 1:np)
    endsubroutine cut_cell_2d_pieces
 
    subroutine cut_cell_2d_labels(nb, s, np, hdr, sa, sb, acc, sfl, sx, sed, par, loopp, tkind, tstart, tn, tslot, lt, rix, &
@@ -2084,6 +2063,7 @@ contains
    !< around it). As `cut_cell_2d_pieces`, the curve may be any part of a curve that holds every segment meeting the cell
    !< (open chains included) and the flags replace the parity of the far segments; the cell is walked as a one-cell
    !< block and measured by `cut_cell_2d_count`. `closed` false (flags that disagree with the crossings): no measures.
+   !< Since issue #105 the device kernels (`cut_cell_2d_walk`, `cut_cell_2d_one_count`) on a host workspace.
    real(R8P),    intent(in)  :: u(:), v(:)     !< Vertices.
    integer(I4P), intent(in)  :: next(:)        !< Next vertex (0: none).
    real(R8P),    intent(in)  :: x0, x1, y0, y1 !< Cell.
@@ -2091,30 +2071,331 @@ contains
    logical,      intent(out) :: closed         !< The cell boundary closed.
    real(R8P),    intent(out) :: alpha          !< Fluid fraction.
    real(R8P),    intent(out) :: centroid(2)    !< Fluid centroid (the cell centre without fluid).
-   type(xing_t),  allocatable :: xs(:)         !< Crossings.
-   type(piece_t), allocatable :: ps(:)         !< Wall pieces.
-   integer(I4P),  allocatable :: xstart(:), xord(:), pstart(:), pord(:), ptg(:,:), iw(:) !< Work.
-   real(R8P),     allocatable :: xp(:,:), pab(:,:), rw(:) !< Work.
-   integer(I4P)               :: nxs, nps, k, nrw, niw, nivc, nbdc, np, eid(4), me(2, 0) !< Work.
-   real(R8P)                  :: aperture(4), wl, wc(2), wn(2) !< Other measures (unused).
+   real(R8P),    allocatable :: rw(:)        !< Workspace.
+   integer(I4P), allocatable :: iw(:)        !< Workspace.
+   integer(I4P)              :: nu, nxs, nps, nrw, niw, np, idum(2, 1) !< Work.
+   real(R8P)                 :: rdum(4, 1)   !< Work.
 
-   call walk_all(u, v, next, [x0, x1], [y0, y1], xs, nxs, ps, nps)
-   call index_crossings(xs, nxs, 4_I4P, xstart, xord)
-   call index_pieces(ps, nps, 1_I4P, pstart, pord)
-   call cell_edge_ids(1_I4P, 1_I4P, 1_I4P, 1_I4P, eid)
-   allocate(xp(2, nxs), pab(4, nps), ptg(2, nps))
-   do k = 1_I4P, nxs
-      xp(:, k) = xs(k)%p
-   enddo
-   do k = 1_I4P, nps
-      pab(1:2, k) = ps(k)%a ; pab(3:4, k) = ps(k)%b ; ptg(1, k) = ps(k)%ta ; ptg(2, k) = ps(k)%tb
-   enddo
-   call cut_cell_2d_sizes(nxs, nps, 0_I4P, nrw, niw)
-   allocate(rw(nrw), iw(niw)) ; rw = 0._R8P ; iw = 0_I4P
-   call cut_cell_2d_count(x0, x1, y0, y1, flags(1), flags(2), flags(3), flags(4), eid, 4_I4P, nxs, xstart, xord, xp, nps, &
-                          0_I4P, nps, pord, pab, ptg, 0_I4P, me, .false., .false., nrw, rw, niw, iw, closed, alpha, &
-                          aperture, centroid, wl, wc, wn, np, nivc, nbdc)
+   ! the kernels of the device path (issue #105): the walk's count pass, then the evaluation on a workspace
+   nu = size(u, kind=I4P)
+   call cut_cell_2d_walk(nu, u, v, next, x0, x1, y0, y1, .false., 0_I4P, 0_I4P, nxs, nps, idum, rdum, idum, rdum, idum, &
+                         rdum, idum)
+   call cut_cell_2d_one_sizes(nxs, nps, nrw, niw)
+   allocate(rw(nrw), iw(niw))
+   call cut_cell_2d_one_count(nu, u, v, next, x0, x1, y0, y1, flags(1), flags(2), flags(3), flags(4), nxs, nps, nrw, rw, &
+                              niw, iw, closed, alpha, centroid, np)
    endsubroutine cut_cell_2d_measures
+
+   ! One-cell kernels (issue #105, the piece map on the device): the host wrappers above, as routine-seq kernels on a
+   ! workspace. The walk of the one-cell block, its crossing index, then the count kernel; no allocation, plain arrays.
+
+   pure integer(I4P) function col1(w, e0, e1)
+   !< `col_of` on the two edges of a one-cell block: 0 if w <= e0, 1 if e0 < w <= e1, 2 beyond.
+   !$acc routine seq
+   real(R8P), intent(in) :: w      !< Coordinate.
+   real(R8P), intent(in) :: e0, e1 !< Edges.
+
+   if (w <= e0) then
+      col1 = 0_I4P
+   elseif (w > e1) then
+      col1 = 2_I4P
+   else
+      col1 = 1_I4P
+   endif
+   endfunction col1
+
+   pure subroutine cut_cell_2d_walk(nu, u, v, next, x0, x1, y0, y1, fill, mx, mp, nxs, nps, xedge, xpos, xseg, xp, pseg, &
+                                    pab, ptg)
+   !< Kernel (issue #105): `walk_all` on the one-cell block [x0, x1] x [y0, y1], the same crossing expressions and the
+   !< same `corner_side` tie-break, so the same crossings and wall pieces in the same (walk) order with the same tags.
+   !< Edges of the one-cell block: 1 the line x0, 2 the line x1, 3 the line y0, 4 the line y1 (`cell_edge_ids`: bottom 3,
+   !< right 2, top 4, left 1). Count pass (fill false): nxs, nps only, the arrays (capacities mx, mp) are not touched.
+   !< Fill pass: also writes them, as far as the capacities go (a straight segment crosses each line once and lies in the
+   !< convex cell along one piece: nxs <= 4 and nps <= 1 per segment).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: nu                 !< Vertices.
+   real(R8P),    intent(in)    :: u(nu), v(nu)       !< Vertices.
+   integer(I4P), intent(in)    :: next(nu)           !< Next vertex (0: none).
+   real(R8P),    intent(in)    :: x0, x1, y0, y1     !< Cell.
+   logical,      intent(in)    :: fill               !< Write the crossings and pieces (else count them).
+   integer(I4P), intent(in)    :: mx, mp             !< Capacities.
+   integer(I4P), intent(out)   :: nxs, nps           !< Crossings, wall pieces.
+   integer(I4P), intent(inout) :: xedge(mx), xseg(mx) !< Crossings: edge, segment (its start vertex).
+   real(R8P),    intent(inout) :: xpos(mx), xp(2, mx) !< Crossings: position along the edge, point.
+   integer(I4P), intent(inout) :: pseg(mp)           !< Wall pieces: segment.
+   real(R8P),    intent(inout) :: pab(4, mp)         !< Wall pieces: end points.
+   integer(I4P), intent(inout) :: ptg(2, mp)         !< Wall pieces: end tags (> 0 crossing, < 0 minus the vertex).
+   integer(I4P) :: s, w, ci, cj, qi, qj, lv, lh, sd, ta, guard, last_id !< Work.
+   real(R8P)    :: pu, pv, qu, qv, du, dv, au, av, cu, cv, xx, yy     !< Work.
+   logical      :: vfirst, cb, hasv, hash                             !< Work.
+
+   nxs = 0_I4P ; nps = 0_I4P
+   do s = 1_I4P, nu
+      w = next(s)
+      if (w == 0_I4P) cycle
+      pu = u(s) ; pv = v(s) ; qu = u(w) ; qv = v(w) ; du = qu - pu ; dv = qv - pv
+      if (du == 0._R8P .and. dv == 0._R8P) cycle
+      if (max(pu, qu) < x0 .or. min(pu, qu) > x1 .or. max(pv, qv) < y0 .or. min(pv, qv) > y1) cycle
+      ci = col1(pu, x0, x1) ; cj = col1(pv, y0, y1) ; qi = col1(qu, x0, x1) ; qj = col1(qv, y0, y1)
+      au = pu ; av = pv ; ta = -s ; guard = 0_I4P ; last_id = 0_I4P
+      do
+         if (ci == qi .and. cj == qj) then
+            if (ci == 1_I4P .and. cj == 1_I4P) then
+               nps = nps + 1_I4P
+               if (fill .and. nps <= mp) then
+                  pseg(nps) = s ; pab(1, nps) = au ; pab(2, nps) = av ; pab(3, nps) = qu ; pab(4, nps) = qv
+                  ptg(1, nps) = ta ; ptg(2, nps) = -w
+               endif
+            endif
+            exit
+         endif
+         guard = guard + 1_I4P
+         if (guard > 16_I4P) exit ! 4 (nx + ny) + 8
+         hasv = .false. ; hash = .false. ; lv = 0_I4P ; lh = 0_I4P ; xx = 0._R8P ; yy = 0._R8P
+         if (du > 0._R8P .and. ci < qi) then
+            hasv = .true. ; lv = ci + 1_I4P
+         elseif (du < 0._R8P .and. ci > qi) then
+            hasv = .true. ; lv = ci
+         endif
+         if (hasv) xx = merge(x0, x1, lv == 1_I4P)
+         if (dv > 0._R8P .and. cj < qj) then
+            hash = .true. ; lh = cj + 1_I4P
+         elseif (dv < 0._R8P .and. cj > qj) then
+            hash = .true. ; lh = cj
+         endif
+         if (hash) yy = merge(y0, y1, lh == 1_I4P)
+         if (hasv .and. hash) then
+            sd = corner_side(pu, pv, qu, qv, xx, yy)
+            cb = (du > 0._R8P .and. sd < 0) .or. (du < 0._R8P .and. sd > 0) ! corner below the segment line
+            if (dv > 0._R8P) then
+               vfirst = .not. cb
+            else
+               vfirst = cb
+            endif
+         else
+            vfirst = hasv
+         endif
+         if (vfirst) then
+            cu = xx ; cv = pv + (xx - pu) * (qv - pv) / (qu - pu) ! fossil_line_query, axis 2
+            last_id = 0_I4P
+            if (cj == 1_I4P) then ! on the edge lv of the block
+               nxs = nxs + 1_I4P ; last_id = nxs
+               if (fill .and. nxs <= mx) then
+                  xedge(nxs) = lv ; xpos(nxs) = cv ; xseg(nxs) = s ; xp(1, nxs) = cu ; xp(2, nxs) = cv
+               endif
+            endif
+         else
+            cu = pu + (yy - pv) * (qu - pu) / (qv - pv) ; cv = yy ! fossil_line_query, axis 1
+            last_id = 0_I4P
+            if (ci == 1_I4P) then ! on the edge 2 + lh of the block
+               nxs = nxs + 1_I4P ; last_id = nxs
+               if (fill .and. nxs <= mx) then
+                  xedge(nxs) = 2_I4P + lh ; xpos(nxs) = cu ; xseg(nxs) = s ; xp(1, nxs) = cu ; xp(2, nxs) = cv
+               endif
+            endif
+         endif
+         if (ci == 1_I4P .and. cj == 1_I4P) then
+            nps = nps + 1_I4P
+            if (fill .and. nps <= mp) then
+               pseg(nps) = s ; pab(1, nps) = au ; pab(2, nps) = av ; pab(3, nps) = cu ; pab(4, nps) = cv
+               ptg(1, nps) = ta ; ptg(2, nps) = last_id
+            endif
+         endif
+         if (vfirst) then
+            if (du > 0._R8P) then
+               ci = ci + 1_I4P
+            else
+               ci = ci - 1_I4P
+            endif
+         else
+            if (dv > 0._R8P) then
+               cj = cj + 1_I4P
+            else
+               cj = cj - 1_I4P
+            endif
+         endif
+         au = cu ; av = cv ; ta = last_id
+      enddo
+   enddo
+   endsubroutine cut_cell_2d_walk
+
+   pure subroutine cut_cell_2d_index(nxs, xedge, xpos, xseg, xstart, xord)
+   !< Kernel (issue #105): `index_crossings` of a one-cell block (4 edges): the crossings by edge, then position, then
+   !< segment (a total order: a segment crosses a line once), xstart(e) the first of edge e.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: nxs                 !< Crossings.
+   integer(I4P), intent(in)  :: xedge(nxs), xseg(nxs) !< Edges, segments.
+   real(R8P),    intent(in)  :: xpos(nxs)           !< Positions.
+   integer(I4P), intent(out) :: xstart(5)           !< First crossing of each edge.
+   integer(I4P), intent(out) :: xord(nxs)           !< Crossings in order.
+   integer(I4P)              :: k, e, i, j, key, fl(4) !< Work.
+
+   do e = 1_I4P, 5_I4P
+      xstart(e) = 0_I4P
+   enddo
+   do k = 1_I4P, nxs
+      xstart(xedge(k)) = xstart(xedge(k)) + 1_I4P
+   enddo
+   key = 1_I4P
+   do e = 1_I4P, 4_I4P
+      i = xstart(e) ; xstart(e) = key ; key = key + i
+   enddo
+   xstart(5) = key
+   do e = 1_I4P, 4_I4P
+      fl(e) = 0_I4P
+   enddo
+   do k = 1_I4P, nxs
+      e = xedge(k)
+      xord(xstart(e) + fl(e)) = k ; fl(e) = fl(e) + 1_I4P
+   enddo
+   do e = 1_I4P, 4_I4P ! insertion sort inside each edge by position, then segment
+      do i = xstart(e) + 1_I4P, xstart(e + 1) - 1_I4P
+         key = xord(i) ; j = i - 1_I4P
+         do while (j >= xstart(e))
+            if (xpos(xord(j)) < xpos(key) .or. (xpos(xord(j)) == xpos(key) .and. xseg(xord(j)) <= xseg(key))) exit
+            xord(j + 1) = xord(j) ; j = j - 1_I4P
+         enddo
+         xord(j + 1) = key
+      enddo
+   enddo
+   endsubroutine cut_cell_2d_index
+
+   pure subroutine cut_cell_2d_one_layout(nxs, nps, ro, io)
+   !< Start of each part of a one-cell evaluation's workspace (issue #105; sizes in `cut_cell_2d_one_sizes`).
+   !< Reals: crossing points xp(2, nxs), positions(nxs), wall piece ends(4, nps), then the count workspace
+   !< (`cut_cell_2d_sizes`). Integers: crossing edges(nxs), segments(nxs), wall piece segments(nps), tags(2, nps), edge
+   !< starts(5), crossing order(nxs), piece order(nps), piece of each root(S), then the count workspace; S = 4 + nxs +
+   !< nps. ro(5), io(10): the total sizes.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: nxs, nps     !< Crossings, wall pieces (`cut_cell_2d_walk`).
+   integer(I4P), intent(out) :: ro(5), io(10) !< Starts.
+   integer(I4P)              :: nrc, nic     !< Count workspace.
+
+   call cut_cell_2d_sizes(nxs, nps, 0_I4P, nrc, nic)
+   ro(1) = 1_I4P ; ro(2) = ro(1) + 2_I4P * nxs ; ro(3) = ro(2) + nxs ; ro(4) = ro(3) + 4_I4P * nps ; ro(5) = ro(4) + nrc
+   io(1) = 1_I4P ; io(2) = io(1) + nxs ; io(3) = io(2) + nxs ; io(4) = io(3) + nps ; io(5) = io(4) + 2_I4P * nps
+   io(6) = io(5) + 5_I4P ; io(7) = io(6) + nxs ; io(8) = io(7) + nps ; io(9) = io(8) + 4_I4P + nxs + nps
+   io(10) = io(9) + nic
+   endsubroutine cut_cell_2d_one_layout
+
+   pure subroutine cut_cell_2d_one_sizes(nxs, nps, nrw, niw)
+   !< Workspace of a one-cell evaluation (`cut_cell_2d_one_count`, `cut_cell_2d_one_pieces`) with nxs crossings and nps
+   !< wall pieces (the count pass of `cut_cell_2d_walk`), issue #105:
+   !<    nrw = 3 nxs + 4 nps + nrc reals,  niw = 4 nxs + 4 nps + 9 + niw_c integers
+   !< with nrc, niw_c of `cut_cell_2d_sizes(nxs, nps, 0)`. Pieces: at most 4 + nxs + nps.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: nxs, nps     !< Crossings, wall pieces.
+   integer(I4P), intent(out) :: nrw, niw     !< Reals, integers.
+   integer(I4P)              :: ro(5), io(10) !< Layout.
+
+   call cut_cell_2d_one_layout(nxs, nps, ro, io)
+   nrw = ro(5) - 1_I4P ; niw = io(10) - 1_I4P
+   endsubroutine cut_cell_2d_one_sizes
+
+   subroutine cut_cell_2d_one_count(nu, u, v, next, x0, x1, y0, y1, f00, f10, f11, f01, nxs, nps, nrw, rw, niw, iw, &
+                                    closed, alpha, centroid, np)
+   !< Kernel (issue #105): the one-cell evaluation of `cut_cell_2d_measures` on a workspace: the walk of the cell
+   !< (`cut_cell_2d_walk`, fill pass with the counts nxs, nps of its count pass), the crossing index, then the count
+   !< kernel (`cut_cell_2d_count`, no moments, intervals or boundaries), whose workspace keeps the pieces for
+   !< `cut_cell_2d_one_pieces`. Bit for bit the host path of issue #102. closed false: the cell boundary does not close
+   !< (or the walk disagrees with the counts: cannot happen).
+   !$acc routine seq
+   integer(I4P), intent(in)    :: nu                  !< Vertices.
+   real(R8P),    intent(in)    :: u(nu), v(nu)        !< Vertices.
+   integer(I4P), intent(in)    :: next(nu)            !< Next vertex (0: none).
+   real(R8P),    intent(in)    :: x0, x1, y0, y1      !< Cell.
+   logical,      intent(in)    :: f00, f10, f11, f01  !< Corners inside the solid: (x0,y0), (x1,y0), (x1,y1), (x0,y1).
+   integer(I4P), intent(in)    :: nxs, nps            !< Crossings, wall pieces (count pass of the walk).
+   integer(I4P), intent(in)    :: nrw, niw            !< Workspace sizes (`cut_cell_2d_one_sizes`).
+   real(R8P),    intent(inout) :: rw(nrw)             !< Real workspace.
+   integer(I4P), intent(inout) :: iw(niw)             !< Integer workspace.
+   logical,      intent(out)   :: closed              !< The cell boundary closed.
+   real(R8P),    intent(out)   :: alpha, centroid(2)  !< Fluid fraction and centroid.
+   integer(I4P), intent(out)   :: np                  !< Pieces.
+   integer(I4P) :: ro(5), io(10), k, cx, cp, nivc, nbdc, eid(4), me(2, 1) !< Work.
+   real(R8P)    :: aperture(4), wl, wc(2), wn(2)       !< Other measures (unused).
+
+   do k = 1_I4P, nrw
+      rw(k) = 0._R8P
+   enddo
+   do k = 1_I4P, niw
+      iw(k) = 0_I4P
+   enddo
+   call cut_cell_2d_one_layout(nxs, nps, ro, io)
+   call cut_cell_2d_walk(nu, u, v, next, x0, x1, y0, y1, .true., nxs, nps, cx, cp, iw(io(1)), rw(ro(2)), iw(io(2)), &
+                         rw(ro(1)), iw(io(3)), rw(ro(3)), iw(io(4)))
+   if (cx /= nxs .or. cp /= nps) then
+      closed = .false. ; alpha = -1._R8P ; centroid(1) = 0.5_R8P * (x0 + x1) ; centroid(2) = 0.5_R8P * (y0 + y1)
+      np = 0_I4P
+      return
+   endif
+   call cut_cell_2d_index(nxs, iw(io(1)), rw(ro(2)), iw(io(2)), iw(io(5)), iw(io(6)))
+   do k = 1_I4P, nps
+      iw(io(7) + k - 1_I4P) = k
+   enddo
+   eid(1) = 3_I4P ; eid(2) = 2_I4P ; eid(3) = 4_I4P ; eid(4) = 1_I4P ! cell_edge_ids(1, 1, 1, 1)
+   me(1, 1) = 0_I4P ; me(2, 1) = 0_I4P
+   call cut_cell_2d_count(x0, x1, y0, y1, f00, f10, f11, f01, eid, 4_I4P, nxs, iw(io(5)), iw(io(6)), rw(ro(1)), nps, &
+                          0_I4P, nps, iw(io(7)), rw(ro(3)), iw(io(4)), 0_I4P, me, .false., .false., ro(5) - ro(4), &
+                          rw(ro(4)), io(10) - io(9), iw(io(9)), closed, alpha, aperture, centroid, wl, wc, wn, np, nivc, nbdc)
+   endsubroutine cut_cell_2d_one_count
+
+   subroutine cut_cell_2d_one_pieces(nu, u, v, next, x0, x1, y0, y1, f00, f10, f11, f01, nxs, nps, nrw, rw, niw, iw, &
+                                     closed, np, mp, parea, wseg, wpiece, cpiece, plen, pmom)
+   !< Kernel (issue #105): `cut_cell_2d_pieces` on a workspace: `cut_cell_2d_one_count`, then the features of its pieces
+   !< (`cut_cell_2d_labels`). Outputs as `cut_cell_2d_pieces`, in arrays of capacity mp >= 4 + nxs + nps pieces and nps
+   !< wall pieces (wseg, wpiece: one per wall piece, in walk order); with closed false or np = 0 only wseg is written.
+   !$acc routine seq
+   integer(I4P), intent(in)    :: nu                  !< Vertices.
+   real(R8P),    intent(in)    :: u(nu), v(nu)        !< Vertices.
+   integer(I4P), intent(in)    :: next(nu)            !< Next vertex (0: none).
+   real(R8P),    intent(in)    :: x0, x1, y0, y1      !< Cell.
+   logical,      intent(in)    :: f00, f10, f11, f01  !< Corners inside the solid: (x0,y0), (x1,y0), (x1,y1), (x0,y1).
+   integer(I4P), intent(in)    :: nxs, nps            !< Crossings, wall pieces (count pass of the walk).
+   integer(I4P), intent(in)    :: nrw, niw            !< Workspace sizes (`cut_cell_2d_one_sizes`).
+   real(R8P),    intent(inout) :: rw(nrw)             !< Real workspace.
+   integer(I4P), intent(inout) :: iw(niw)             !< Integer workspace.
+   logical,      intent(out)   :: closed              !< The cell boundary closed.
+   integer(I4P), intent(out)   :: np                  !< Pieces.
+   integer(I4P), intent(in)    :: mp                  !< Capacity of the piece outputs.
+   real(R8P),    intent(inout) :: parea(mp)           !< Piece areas.
+   integer(I4P), intent(inout) :: wseg(nps)           !< Segment (start vertex) of each wall piece.
+   integer(I4P), intent(inout) :: wpiece(nps)         !< Piece on the fluid side of each wall piece.
+   integer(I4P), intent(out)   :: cpiece(4)           !< Piece of each corner (0: solid).
+   real(R8P),    intent(inout) :: plen(4, mp), pmom(4, mp) !< Face lengths and first moments per piece.
+   integer(I4P) :: ro(5), io(10), k, s, ic, rc, cro(15), cio(18) !< Work.
+   real(R8P)    :: alpha, centroid(2), dx, dy                  !< Work.
+
+   call cut_cell_2d_one_count(nu, u, v, next, x0, x1, y0, y1, f00, f10, f11, f01, nxs, nps, nrw, rw, niw, iw, closed, &
+                              alpha, centroid, np)
+   call cut_cell_2d_one_layout(nxs, nps, ro, io)
+   do k = 1_I4P, nps
+      wseg(k) = iw(io(3) + k - 1_I4P) ; wpiece(k) = 0_I4P
+   enddo
+   do k = 1_I4P, 4_I4P
+      cpiece(k) = 0_I4P
+   enddo
+   if (.not. closed .or. np == 0_I4P) return
+   ic = io(9) ; rc = ro(4)
+   if (iw(ic) == 2_I4P) then ! the whole cell fluid, no wall piece and no crossing
+      dx = x1 - x0 ; dy = y1 - y0
+      parea(1) = dx * dy
+      do k = 1_I4P, 4_I4P
+         cpiece(k) = 1_I4P
+      enddo
+      plen(1, 1) = dy ; plen(2, 1) = dy ; plen(3, 1) = dx ; plen(4, 1) = dx
+      pmom(1, 1) = 0.5_R8P * dy * (y1 + y0) ; pmom(2, 1) = pmom(1, 1)
+      pmom(3, 1) = 0.5_R8P * dx * (x1 + x0) ; pmom(4, 1) = pmom(3, 1)
+      return
+   endif
+   call cut_cell_2d_layout(nxs, nps, 0_I4P, cro, cio)
+   s = 4_I4P + nxs + nps
+   call cut_cell_2d_labels(nps, s, np, iw(ic), rw(rc + cro(1) - 1_I4P), rw(rc + cro(2) - 1_I4P), rw(rc + cro(3) - 1_I4P), &
+                           iw(ic + cio(1) - 1_I4P), iw(ic + cio(2) - 1_I4P), iw(ic + cio(3) - 1_I4P), &
+                           iw(ic + cio(4) - 1_I4P), iw(ic + cio(7) - 1_I4P), iw(ic + cio(14) - 1_I4P), &
+                           iw(ic + cio(15) - 1_I4P), iw(ic + cio(16) - 1_I4P), iw(ic + cio(17) - 1_I4P), &
+                           iw(ic + cio(18) - 1_I4P), iw(io(8)), parea, wpiece, cpiece, plen, pmom)
+   endsubroutine cut_cell_2d_one_pieces
 
    pure subroutine open_cell(x0, x1, y0, y1, closed, alpha, aperture, centroid, npieces, wet_length, wet_normal)
    !< The cell boundary does not close: no measures, no pieces (the wetted centroid keeps the cell centre).

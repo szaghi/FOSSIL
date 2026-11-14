@@ -45,10 +45,10 @@ module fossil_swept_cells
 !< issue #44), or call `self_intersections` / `check_validity(check_self_intersections=.true.)`.
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t, cut_cells_2d_blocks_t, cut_cells_device_many, &
                                      place_for_crossings
-use fossil_curve_slice,        only : slice_surface, slice_planes_t, slice_planes_prepare, slice_surface_plane, slice_triangles
-use fossil_cut_cells_2d,       only : cut_cell_2d_pieces, cut_cell_2d_measures
+use fossil_curve_slice,        only : slice_surface, slice_planes_t, slice_planes_prepare, slice_surface_plane
+use fossil_cut_cells_2d,       only : cut_cell_2d_pieces
 use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_cells_3d_sections, &
-                                     cut_cell_3d_pieces, cut_cell_3d_totals
+                                     cut_cell_3d_pieces, cut_cell_3d_totals, cut_cell_3d_face
 use fossil_facet_object,       only : facet_object
 use fossil_piece_map,          only : piece_map_2d_t, piece_map_3d_t, TRACK_UNTRUSTED, track_components, track_status_of
 use fossil_rigid_pose,         only : rigid_pose_t, rigid_pose_2d_t, pose_interpolate, pose_angle_2d, pose_log_3d, to_world, &
@@ -3212,16 +3212,14 @@ contains
 
    subroutine map3_sections(tl, b0, b1, cs, ok, fa, fm)
    !< The fluid area and the first moments of the two in-face coordinates (cyclic) of the six faces of the cell [b0, b1]
-   !< cut by the facets tl: the section of each face plane (`slice_triangles`, the cut cells' on-plane rule) measured on
-   !< the face with the cell's corner states (`cut_cell_2d_measures`). ok false if a face does not close.
+   !< cut by the facets tl: the section of each face plane (the cut cells' on-plane rule) measured on the face with the
+   !< cell's corner states (`cut_cell_3d_face`, the device kernels of issue #105). ok false if a face does not close.
    real(R8P),    intent(in)  :: tl(:,:,:)    !< Facets.
    real(R8P),    intent(in)  :: b0(3), b1(3) !< Cell.
    integer(I4P), intent(in)  :: cs(8)        !< Corner states (0 solid, 1 fluid).
    logical,      intent(out) :: ok           !< Every face closed.
    real(R8P),    intent(out) :: fa(6)        !< Fluid areas (-x, +x, -y, +y, -z, +z).
    real(R8P),    intent(out) :: fm(2, 6)     !< int u, int v over them.
-   real(R8P),    allocatable :: u(:), v(:)   !< Section.
-   integer(I4P), allocatable :: nxt(:)       !< Next vertex.
    integer(I4P), parameter   :: BU(4) = [0_I4P, 1_I4P, 1_I4P, 0_I4P], BV(4) = [0_I4P, 0_I4P, 1_I4P, 1_I4P] !< Face corners.
    real(R8P)                 :: lev, al, cen(2), ar !< Work.
    integer(I4P)              :: f, a, bb, cc, q, bit(3) !< Work.
@@ -3235,8 +3233,7 @@ contains
          bit(a) = merge(1_I4P, 0_I4P, mod(f, 2_I4P) == 0_I4P) ; bit(bb) = BU(q) ; bit(cc) = BV(q)
          fl(q) = cs(1_I4P + bit(1) + 2_I4P * bit(2) + 4_I4P * bit(3)) == 0_I4P
       enddo
-      call slice_triangles(tl, a, lev, u, v, nxt)
-      call cut_cell_2d_measures(u, v, nxt, b0(bb), b1(bb), b0(cc), b1(cc), fl, cl, al, cen)
+      call cut_cell_3d_face(tl, a, lev, b0(bb), b1(bb), b0(cc), b1(cc), fl, cl, al, cen)
       if (.not. cl) then
          ok = .false. ; return
       endif
