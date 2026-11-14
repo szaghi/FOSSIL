@@ -111,6 +111,12 @@ real(R8P), parameter :: EVENT_GAP = 1e-10_R8P !< Piece map (issue #102): an inte
 real(R8P), parameter :: EVENT_RES = 64._R8P * epsilon(1._R8P) !< Piece map (issue #104): the round-off of an
                                                              !< explicit event instant, in units of its formula's magnitudes
                                                              !< over its denominator (see `node_breakpoints`).
+real(R8P), parameter :: IZ_GAP = 1e-10_R8P !< `isolate_zeros`: uncertified intervals stop at this width (see there).
+integer(I4P), parameter :: IZ_STACK = 40_I4P !< `isolate_zeros`: stack of intervals. An interval is halved only if it is
+                                             !< at least IZ_GAP wide; halves of [0, 1] are exact dyadic intervals of
+                                             !< width 2^-d, so a halved one has d <= 33 (2^-33 >= IZ_GAP > 2^-34). The
+                                             !< left half is examined first, so the stack holds at most one pending right
+                                             !< half per level 1..d plus the two new halves: d + 2 <= 35 entries.
 real(R8P), parameter :: FLOOR_H = 1e-6_R8P !< Pieces shorter than this converge to 64 eps of the measure times FLOOR_H
                                          !< (issue #69: slices within 1e-10 of a face carry ~1e-7 relative noise).
 ! A piece whose Gauss values miss that target at 64 nodes is still converged if the last change is within 64 eps of
@@ -815,16 +821,18 @@ contains
    !< co = [p0, p1, q0, q1, k0, k1] (issue #69). |g''| <= M = 2 |dphi| |(p1, q1)| + dphi^2 max|(p, q)| (the norm of
    !< an affine function is largest at an end): on [sa, sb] (h = sb - sa) with end values of one sign, both larger
    !< than M h^2/8 plus the evaluation error, g has no zero; otherwise the interval is halved. A sign change is
-   !< refined by bisection to one ulp. An interval narrower than GAP = 1e-10 without a certificate (a zero at an end of
-   !< the step, a tangency, g within round-off of zero) gives one breakpoint at its middle: a kink within GAP of a
-   !< breakpoint changes the Gauss value of its piece by ~slope GAP^2, far below round-off. Zeros within GAP of 0 or
+   !< refined by bisection to one ulp. An interval narrower than IZ_GAP = 1e-10 without a certificate (a zero at an end of
+   !< the step, a tangency, g within round-off of zero) gives one breakpoint at its middle: a kink within IZ_GAP of a
+   !< breakpoint changes the Gauss value of its piece by ~slope IZ_GAP^2, far below round-off. Zeros within IZ_GAP of 0 or
    !< 1, or of each other, are merged by the callers (`merge_close`). An interval on which |g| is at round-off
    !< throughout (end values and the curvature bound below `err`: a zero zone, e.g. a mesh face starting on a grid
    !< plane) gets breakpoints at its two ends only. A g with every coefficient at
    !< round-off of `scale` (identically zero: the element never leaves the face's line or plane) has no event. At most 4096
-   !< intervals are examined: beyond, `certified` is false and the caller must not claim exactness.
+   !< intervals are examined: beyond, `certified` is false and the caller must not claim exactness. Its helpers are the
+   !< module procedures `iz_g` (g) and `iz_add` (zeros grown by doubling, trimmed at the end; issue #105 step 1a); the
+   !< interval stack has IZ_STACK entries, its depth bound; were it full, the interval would give an uncertified middle.
    !< `uncertain` (issue #102, the piece map): per zero, true if no sign change certifies it (a zero zone's end, the
-   !< middle of an interval narrower than GAP, or of one the stack cannot split) and |g| exceeds 4 err on both sides of
+   !< middle of an interval narrower than IZ_GAP, or of one the stack cannot split) and |g| exceeds 4 err on both sides of
    !< it: a contact within the round-off of g inside the step (a tangency, or two crossings too close to separate),
    !< whose element may or may not change side. A zero with g at round-off all the way to an end of the step is a
    !< contact at the end pose, which the end cut decides.
@@ -839,23 +847,19 @@ contains
    logical,                intent(out) :: certified
    logical, allocatable, intent(out), optional :: uncertain(:) !< Per zero: not certified by a sign change [nz].
    real(R8P), allocatable, intent(out), optional :: width(:) !< Per zero: localisation half-width (issue #104) [nz].
-   integer(I4P), parameter             :: NSTACK = 4096, BUDGET = 4096
-   real(R8P),    parameter             :: GAP = 1e-10_R8P !< Uncertified intervals stop here (see above).
-   real(R8P)                           :: big_m, err, st(2, NSTACK), sa, sb, ga, gb, sm, gm, lo, hi, glo
+   integer(I4P), parameter             :: BUDGET = 4096
+   real(R8P)                           :: big_m, err, st(2, IZ_STACK), sa, sb, ga, gb, sm, gm, lo, hi, glo
    integer(I4P)                        :: top, used
-   logical,      allocatable           :: uf(:) !< Flags of the zeros (with `uncertain`; at most 2 per interval examined).
-   real(R8P),    allocatable           :: wf(:) !< Widths of the zeros (with `width`).
+   logical,      allocatable           :: uf(:) !< Flags of the zeros (capacity of z; returned with `uncertain`).
+   real(R8P),    allocatable           :: wf(:) !< Widths of the zeros (capacity of z; returned with `width`).
+   real(R8P),    allocatable           :: tz(:) !< Trim of z.
    real(R8P)                           :: slp   !< Slope of g over a bracket.
    integer(I4P)                        :: kz, j !< Work (`uncertain`).
    logical                             :: lft, rgt !< |g| above err before and after an uncertified zero.
 
-   allocate(z(0)) ; nz = 0_I4P ; certified = .true. ; used = 0_I4P
-   if (present(uncertain)) then
-      allocate(uf(2_I4P * BUDGET + 2_I4P), uncertain(0))
-   endif
-   if (present(width)) then
-      allocate(wf(2_I4P * BUDGET + 2_I4P), width(0))
-   endif
+   allocate(z(0), uf(0), wf(0)) ; nz = 0_I4P ; certified = .true. ; used = 0_I4P
+   if (present(uncertain)) allocate(uncertain(0))
+   if (present(width)) allocate(width(0))
    big_m = 2._R8P * abs(dphi) * norm2(co([2, 4])) + &
            dphi**2 * max(norm2([co(1), co(3)]), norm2([co(1) + co(2), co(3) + co(4)]))
    err = 32._R8P * epsilon(1._R8P) * max(scale, abs(co(1)) + abs(co(2)) + abs(co(3)) + abs(co(4)) + abs(co(5)) + &
@@ -868,14 +872,14 @@ contains
          certified = .false. ; exit
       endif
       sa = st(1, top) ; sb = st(2, top) ; top = top - 1_I4P
-      ga = g(sa) ; gb = g(sb)
+      ga = iz_g(co, phi0, dphi, sa) ; gb = iz_g(co, phi0, dphi, sb)
       if (ga * gb < 0._R8P .and. abs(ga) > err .and. abs(gb) > err .and. big_m * (sb - sa)**2 / 8._R8P < err) then
          ! one sign change, g nearly linear here: bisection to one ulp
          lo = sa ; hi = sb ; glo = ga ; slp = abs(gb - ga) / (sb - sa)
          do while (nearest(lo, 1._R8P) < hi)
             sm = 0.5_R8P * (lo + hi)
             if (sm <= lo .or. sm >= hi) exit
-            gm = g(sm)
+            gm = iz_g(co, phi0, dphi, sm)
             if (gm == 0._R8P) then
                lo = sm ; hi = sm ; exit
             endif
@@ -885,19 +889,20 @@ contains
                hi = sm
             endif
          enddo
-         call add(0.5_R8P * (lo + hi), .false., 0.5_R8P * (hi - lo) + err / max(slp, tiny(1._R8P)))
+         call iz_add(0.5_R8P * (lo + hi), .false., 0.5_R8P * (hi - lo) + err / max(slp, tiny(1._R8P)), z, uf, wf, &
+                     nz)
          cycle
       endif
       if (ga * gb > 0._R8P .and. min(abs(ga), abs(gb)) > big_m * (sb - sa)**2 / 8._R8P + err) cycle ! no zero
       if (abs(ga) <= err .and. abs(gb) <= err .and. big_m * (sb - sa)**2 / 8._R8P <= err) then
          ! a zero zone: |g| at round-off over the whole interval, the event undetermined in double precision
-         call add(sa, .true., sb - sa) ; call add(sb, .true., sb - sa) ; cycle
+         call iz_add(sa, .true., sb - sa, z, uf, wf, nz) ; call iz_add(sb, .true., sb - sa, z, uf, wf, nz) ; cycle
       endif
-      if (sb - sa < GAP) then
-         call add(0.5_R8P * (sa + sb), .true., 0.5_R8P * (sb - sa)) ; cycle
+      if (sb - sa < IZ_GAP) then
+         call iz_add(0.5_R8P * (sa + sb), .true., 0.5_R8P * (sb - sa), z, uf, wf, nz) ; cycle
       endif
-      if (top + 2_I4P > NSTACK) then ! cannot happen for |g''| bounded; keep a breakpoint rather than drop one
-         call add(0.5_R8P * (sa + sb), .true., 0.5_R8P * (sb - sa)) ; cycle
+      if (top + 2_I4P > IZ_STACK) then ! cannot happen (see IZ_STACK); keep a breakpoint rather than drop one
+         call iz_add(0.5_R8P * (sa + sb), .true., 0.5_R8P * (sb - sa), z, uf, wf, nz) ; cycle
       endif
       sm = 0.5_R8P * (sa + sb)
       top = top + 1_I4P ; st(:, top) = [sm, sb]
@@ -910,35 +915,56 @@ contains
          if (.not. uf(kz)) cycle
          lft = .false. ; rgt = .false.
          do j = 1_I4P, 30_I4P
-            if (abs(g(z(kz) * (1._R8P - 0.5_R8P**j))) > 4._R8P * err) lft = .true.
-            if (abs(g(z(kz) + (1._R8P - z(kz)) * (1._R8P - 0.5_R8P**j))) > 4._R8P * err) rgt = .true.
+            if (abs(iz_g(co, phi0, dphi, z(kz) * (1._R8P - 0.5_R8P**j))) > 4._R8P * err) lft = .true.
+            if (abs(iz_g(co, phi0, dphi, z(kz) + (1._R8P - z(kz)) * (1._R8P - 0.5_R8P**j))) > 4._R8P * err) &
+               rgt = .true.
          enddo
          uf(kz) = lft .and. rgt
       enddo
       uncertain = uf(1:nz)
    endif
    if (present(width)) width = wf(1:nz)
-   contains
-      function g(s) result(v)
-      real(R8P), intent(in) :: s
-      real(R8P)             :: v, ph
-
-      ph = phi0 + s * dphi
-      v = (co(1) + co(2) * s) * cos(ph) + (co(3) + co(4) * s) * sin(ph) + co(5) + co(6) * s
-      endfunction g
-
-      subroutine add(s, u, w)
-      real(R8P), intent(in) :: s
-      logical,   intent(in) :: u !< Not certified by a sign change.
-      real(R8P), intent(in) :: w !< Localisation half-width.
-
-      if (s > GAP .and. s < 1._R8P - GAP) then
-         z = [z, s] ; nz = nz + 1_I4P
-         if (allocated(uf)) uf(nz) = u
-         if (allocated(wf)) wf(nz) = w
-      endif
-      endsubroutine add
+   if (size(z, kind=I4P) /= nz) then
+      allocate(tz(nz)) ; tz = z(1:nz) ; call move_alloc(tz, z)
+   endif
    endsubroutine isolate_zeros
+
+   pure function iz_g(co, phi0, dphi, s) result(v)
+   !< The function of `isolate_zeros`: g(s) = (co(1) + co(2) s) cos phi + (co(3) + co(4) s) sin phi + co(5) + co(6) s,
+   !< phi = phi0 + s dphi.
+   real(R8P), intent(in) :: co(6)      !< Coefficients [p0, p1, q0, q1, k0, k1].
+   real(R8P), intent(in) :: phi0, dphi !< Angle at s = 0, its change over the step.
+   real(R8P), intent(in) :: s          !< Instant.
+   real(R8P)             :: v          !< g(s).
+   real(R8P)             :: ph         !< Angle.
+
+   ph = phi0 + s * dphi
+   v = (co(1) + co(2) * s) * cos(ph) + (co(3) + co(4) * s) * sin(ph) + co(5) + co(6) * s
+   endfunction iz_g
+
+   pure subroutine iz_add(s, u, w, z, uf, wf, nz)
+   !< Append a zero of `isolate_zeros` (kept only inside (IZ_GAP, 1 - IZ_GAP)) with its flag and width; z, uf and wf
+   !< share one capacity, doubled when full (at least 8; the caller trims z to nz).
+   real(R8P),              intent(in)    :: s     !< Zero.
+   logical,                intent(in)    :: u     !< Not certified by a sign change.
+   real(R8P),              intent(in)    :: w     !< Localisation half-width.
+   real(R8P), allocatable, intent(inout) :: z(:)  !< Zeros [capacity].
+   logical,   allocatable, intent(inout) :: uf(:) !< Flags [capacity].
+   real(R8P), allocatable, intent(inout) :: wf(:) !< Widths [capacity].
+   integer(I4P),           intent(inout) :: nz    !< Zeros so far.
+   real(R8P), allocatable                :: tz(:), tw(:) !< Grown z, wf.
+   logical,   allocatable                :: tu(:) !< Grown uf.
+   integer(I4P)                          :: cap   !< New capacity.
+
+   if (.not. (s > IZ_GAP .and. s < 1._R8P - IZ_GAP)) return
+   if (nz >= size(z, kind=I4P)) then
+      cap = max(8_I4P, 2_I4P * size(z, kind=I4P))
+      allocate(tz(cap), tu(cap), tw(cap))
+      tz(1:nz) = z(1:nz) ; tu(1:nz) = uf(1:nz) ; tw(1:nz) = wf(1:nz)
+      call move_alloc(tz, z) ; call move_alloc(tu, uf) ; call move_alloc(tw, wf)
+   endif
+   nz = nz + 1_I4P ; z(nz) = s ; uf(nz) = u ; wf(nz) = w
+   endsubroutine iz_add
 
    subroutine faces_translation_2d(c0, d, x, y, fu, fv, nev)
    !< Exact time-averaged fluid lengths of every face under the translation s d of the curve c0
