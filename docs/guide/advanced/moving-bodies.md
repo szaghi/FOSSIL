@@ -473,8 +473,11 @@ indicative. "Map" is the Gauss call
 - **On the 3-D Gauss path** the map gains 0.89–1.10× except on the sphere at 64³ (1.2–2.1× in the device chain,
   over 3 warm steps): the host plan dominates, above all the events of the rotation (`isolate_zeros`), which stay on
   the host for the trig reason above.
-- **In 2-D** the device map is about even with the host's: few cells are evaluated (about 3,000 of a million at
-  1024²), so there is little device work to gain from.
+- **In 2-D** the device map gains nothing: few cells are evaluated (about 3,000 of a million at 1024²), so there is
+  little device work to gain from, and the copies dominate. In `fossil_test_curve_bench` (ellipse) the Gauss map runs
+  at 0.74–0.77× the host's at 256² and 1024², the translation map at 0.48× at 1024²; in the device chain 0.8–1.2×.
+  The map is timed as the difference of two calls (with `map` and without), so where it is a small part of the call it
+  falls inside the timing noise: the bench then prints a negative map time (translation 256², Gauss + refine 1024²).
 
 The chain of a whole time step with the map is in
 [GPU queries](/guide/advanced/device-distance#a-moving-body-time-step).
