@@ -19,7 +19,8 @@ program fossil_test_curve_bench
 !< the multi-block cut cells with a grid per block, the translated planes of the swept geometry among them): all must
 !< be 0; `swept cells 2-D device vs serial mismatches` (issue #100 step 4: `swept_cells_2d_device` against
 !< `swept_cells_2d`, exact translation, exact rotation, Gauss and explicit node poses) too, and `cut links 2-D device
-!< vs serial mismatches` (issue #100 step 5: `cut_links_2d_device` against `cut_links_2d`).
+!< vs serial mismatches` (issue #100 step 5: `cut_links_2d_device` against `cut_links_2d`), and `piece map 2-D device vs
+!< serial mismatches` (issue #105 step 2: the map of `swept_cells_2d_device(map=)` against `swept_cells_2d(map=)`).
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
@@ -32,7 +33,9 @@ use fossil, only : curvilinear_block_2d_t, detect_topology_2d, topo_record_t, TO
 use fossil_overset, only : hole_flags_2d, block_logical_t, donor_set_t, donor_candidates_2d
 use vecfor, only : vector_R8P
 use fossil, only : pose_interpolate, gauss_legendre_01, swept_cells_2d_t, swept_cells_2d, swept_cells_2d_device
-use fossil_swept_compare, only : swept_twin_mismatches
+use fossil_swept_compare, only : swept_twin_mismatches, swept_cells_2d_mismatches
+use fossil, only : piece_map_2d_t
+use fossil_piece_map_compare, only : piece_map_2d_mismatches
 
 implicit none
 
@@ -73,6 +76,7 @@ call block_case
 call cut_cells_case
 call chain_case
 call swept_case
+call map_case
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
@@ -672,6 +676,107 @@ contains
       enddo
    enddo
    endsubroutine swept_case
+
+   subroutine map_case
+   !< The piece map on the device (issue #105 step 2): `swept_cells_2d_device(map=)` against `swept_cells_2d(map=)`, the
+   !< map, the swept geometry and the status bitwise (`piece map 2-D device vs serial mismatches`), on the bodies and
+   !< grids of `swept_case`: the ellipse translated by (1.7, 0.6) cells (exact), rotated by 2 degrees about the block
+   !< centre by Gauss-Legendre (nq = 4) and with `refine`, the NACA 0012 rotated (exact rotation) on its smaller grid.
+   !< With n >= 256 a timing table (ellipse; best of 3): per path and grid the host call without and with the map, the
+   !< device call without and with it, the map's share of each (with - without; with `refine` the map machinery is in
+   !< both calls, so the share is the map's assembly only) and the speed-up of the device map.
+   type(curve_object)        :: ce, cn                  !< Ellipse, NACA 0012.
+   type(rigid_pose_2d_t)     :: p0, pt, pr, rot         !< Poses.
+   type(swept_cells_2d_t)    :: sw                      !< Result.
+   type(piece_map_2d_t)      :: mp                      !< Map.
+   real(R8P),    allocatable :: uu(:), vv(:), x(:), y(:) !< Work.
+   real(R8P)                 :: lo(2), hi(2), cen(2), th, h, t(4, 3), tb(4) !< Work.
+   integer(I4P)              :: bad, k, g, p, r, m, ngrid(2), ne, nn, me, mn !< Work.
+   integer(I8P)              :: q0, q1, rate             !< Clock.
+   character(12), parameter  :: PNAME(3) = [character(12) :: 'translation', 'Gauss nq=4', 'Gauss+refine'] !< Paths.
+
+   ne = merge(1024_I4P, 128_I4P, n >= 256_I4P) ; nn = merge(511_I4P, 127_I4P, n >= 256_I4P) ! vertices
+   me = merge(n, max(8_I4P, n / 2_I4P), n >= 256_I4P) ; mn = merge(n / 4_I4P, 8_I4P, n >= 256_I4P) ! cells
+   allocate(uu(ne), vv(ne))
+   do k = 1, ne
+      th = 2._R8P * PI * (k - 1) / ne
+      uu(k) = 0.5_R8P + 0.4_R8P * cos(th) ; vv(k) = 0.5_R8P + 0.25_R8P * sin(th)
+   enddo
+   call ce%adopt_loops(u=uu, v=vv, loop_sizes=[ne])
+   deallocate(uu, vv) ; allocate(uu(2 * nn), vv(2 * nn))
+   call naca0012(nn, uu, vv)
+   uu = 0.15_R8P + 0.7_R8P * uu ; vv = 0.5_R8P + 0.7_R8P * vv
+   call cn%adopt_loops(u=uu, v=vv, loop_sizes=[2_I4P * nn])
+   lo = [0.0031_R8P, 0.0031_R8P] ; hi = [0.9969_R8P, 0.9969_R8P] ; cen = [0.5_R8P, 0.5_R8P]
+   p0 = pose_2d(0._R8P, [0._R8P, 0._R8P])
+   rot = pose_2d(PI / 90._R8P, [0._R8P, 0._R8P]) ; pr = pose_2d(PI / 90._R8P, cen - matmul(rot%r, cen))
+   call grid_edges(lo, hi, me, x, y) ; h = x(2) - x(1)
+   pt = pose_2d(0._R8P, [1.7_R8P * h, 0.6_R8P * h])
+   bad = map_twin(ce, p0, pt, x, y, .true., .false.)
+   bad = bad + map_twin(ce, p0, pr, x, y, .false., .false.)
+   bad = bad + map_twin(ce, p0, pr, x, y, .false., .true.)
+   call grid_edges(lo, hi, mn, x, y)
+   bad = bad + map_twin(cn, p0, pr, x, y, .true., .false.)
+   print '(A,I0)', 'piece map 2-D device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0
+   if (n < 256_I4P) return
+   print '(A)', 'piece map 2-D timing (ellipse; best of 3) [s]: path, cells, host call, host + map, device call, '// &
+                'device + map; map host, map device, speed-up'
+   call system_clock(count_rate=rate)
+   ngrid = [n, min(4_I4P * n, 1024_I4P)]
+   do p = 1, 3
+      do g = 1, 2
+         call grid_edges(lo, hi, ngrid(g), x, y) ; h = x(2) - x(1)
+         pt = pose_2d(0._R8P, [1.7_R8P * h, 0.6_R8P * h])
+         t = huge(1._R8P)
+         do r = 1, 3
+            do m = 1, 4
+               call system_clock(q0)
+               select case (p)
+               case (1)
+                  if (m == 1) call swept_cells_2d(ce, p0, pt, x, y, sw)
+                  if (m == 2) call swept_cells_2d(ce, p0, pt, x, y, sw, map=mp)
+                  if (m == 3) call swept_cells_2d_device(ce, p0, pt, x, y, sw)
+                  if (m == 4) call swept_cells_2d_device(ce, p0, pt, x, y, sw, map=mp)
+               case (2)
+                  if (m == 1) call swept_cells_2d(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false.)
+                  if (m == 2) call swept_cells_2d(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false., map=mp)
+                  if (m == 3) call swept_cells_2d_device(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false.)
+                  if (m == 4) call swept_cells_2d_device(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false., map=mp)
+               case default
+                  if (m == 1) call swept_cells_2d(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false., refine=.true.)
+                  if (m == 2) call swept_cells_2d(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false., refine=.true., map=mp)
+                  if (m == 3) call swept_cells_2d_device(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false., refine=.true.)
+                  if (m == 4) call swept_cells_2d_device(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false., refine=.true., &
+                                                         map=mp)
+               endselect
+               call system_clock(q1)
+               t(m, r) = real(q1 - q0, R8P) / rate
+            enddo
+         enddo
+         tb = minval(t, dim=2)
+         print '(3X,A12,1X,I4,A,4(2X,ES9.2),A,2(2X,ES9.2),A,F6.2,A)', PNAME(p), ngrid(g), '^2', tb, ' ;', &
+               tb(2) - tb(1), tb(4) - tb(3), '  (', (tb(2) - tb(1)) / max(tb(4) - tb(3), 1e-6_R8P), 'x)'
+      enddo
+   enddo
+   endsubroutine map_case
+
+   function map_twin(c, p0, p1, x, y, exact, refine) result(n)
+   !< Mismatches of `swept_cells_2d_device(map=)` against `swept_cells_2d(map=)` (nq = 4): map, swept geometry, status.
+   type(curve_object),    intent(in) :: c          !< Curve.
+   type(rigid_pose_2d_t), intent(in) :: p0, p1     !< End poses.
+   real(R8P),             intent(in) :: x(:), y(:) !< Cell edges.
+   logical,               intent(in) :: exact      !< Exact paths.
+   logical,               intent(in) :: refine     !< Gauss path refined per event interval.
+   integer(I4P)                      :: n          !< Mismatches.
+   type(piece_map_2d_t)              :: mh, md     !< Maps.
+   type(swept_cells_2d_t)            :: wh, wd     !< Swept geometry.
+   integer(I4P)                      :: sh, sd     !< Statuses.
+
+   call swept_cells_2d(c, p0, p1, x, y, wh, nq=4_I4P, exact=exact, status=sh, map=mh, refine=refine)
+   call swept_cells_2d_device(c, p0, p1, x, y, wd, nq=4_I4P, exact=exact, status=sd, map=md, refine=refine)
+   n = piece_map_2d_mismatches(mh, md) + swept_cells_2d_mismatches(wh, wd) + abs(sh - sd)
+   endfunction map_twin
 
    subroutine chain_case
    !< The 2-D per-step chain on the device (issue #100 step 6a): each time step moves the curve (`move`, a rotation about
