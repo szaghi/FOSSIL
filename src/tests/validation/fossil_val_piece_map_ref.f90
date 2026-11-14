@@ -15,10 +15,13 @@
 !<   fossil_val_piece_map_ref ref FILE [quick] [case=N ...] [note=TEXT]   write the lines to FILE (refused if it exists)
 !<   fossil_val_piece_map_ref check FILE [quick] [case=N ...]              recompute, fail on any difference (printed
 !<                                                                         field by field) or a case missing in FILE
-!<   fossil_val_piece_map_ref                                              = check perf/map-ref-f855194.txt quick
+!<   fossil_val_piece_map_ref                                              = check perf/map-ref-104rot.txt quick
 !< `quick` runs the 256^2 and 32^3 cases only (32 cases), `case=N` the N-th case of the matrix (repeatable). The
 !< reference `src/tests/validation/perf/map-ref-f855194.txt` was generated from the tree of f855194 (before any #105
-!< change); it is never overwritten: a deliberate change of the map writes a new named file.
+!< change); `map-ref-104rot.txt` (the default) differs from it only in the 8 rows of the 2-D exact rotation, whose maps
+!< come from the local integration since issue #104 decision 2 (every candidate cell evaluated and measured: the
+!< counters evaluated_cells, evaluations and the fields faces, outflow, wall, residual). References are never
+!< overwritten: a deliberate change of the map writes a new named file.
 module fossil_val_piece_map_ref_kit
 !< Cases, hash and lines of the piece-map reference.
 use fossil,                   only : surface_stl_object, curve_object, rigid_pose_t, rigid_pose_2d_t, &
@@ -412,7 +415,7 @@ use penf,                         only : I4P, R8P
 
 implicit none
 
-character(*), parameter     :: DEFAULT_FILE = 'src/tests/validation/perf/map-ref-f855194.txt' !< Committed reference.
+character(*), parameter     :: DEFAULT_FILE = 'src/tests/validation/perf/map-ref-104rot.txt' !< Committed reference.
 character(MAXLEN)           :: arg, mode, file, note        !< Arguments.
 character(MAXLEN), allocatable :: ref(:)                    !< Reference lines.
 character(:), allocatable   :: line                         !< Computed line.
