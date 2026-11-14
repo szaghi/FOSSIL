@@ -682,16 +682,22 @@ contains
    !< map, the swept geometry and the status bitwise (`piece map 2-D device vs serial mismatches`), on the bodies and
    !< grids of `swept_case`: the ellipse translated by (1.7, 0.6) cells (exact), rotated by 2 degrees about the block
    !< centre by Gauss-Legendre (nq = 4) and with `refine`, the NACA 0012 rotated (exact rotation) on its smaller grid.
-   !< With n >= 256 a timing table (ellipse; best of 3): per path and grid the host call without and with the map, the
-   !< device call without and with it, the map's share of each (with - without; with `refine` the map machinery is in
-   !< both calls, so the share is the map's assembly only) and the speed-up of the device map.
+   !< With n >= 256 a timing table (ellipse; 5 repetitions, the four calls interleaved in each, in reverse order in the
+   !< even ones): per path and grid the best host call without and with the map, the best device call without and with
+   !< it, the map's share of each (the median over the repetitions of with - without, paired within a repetition so that
+   !< slow drift of a shared machine cancels, and the reversal turns a first-call penalty into spread, not bias; with
+   !< `refine` the map machinery is in both calls, so the share is the map's assembly only), the spread of each (twice
+   !< the median absolute deviation of the paired differences, `pair_spread`) and the speed-up of the device map. A
+   !< share not above its spread is printed as not resolved, with no speed-up: a difference of two calls cannot
+   !< resolve it.
    type(curve_object)        :: ce, cn                  !< Ellipse, NACA 0012.
    type(rigid_pose_2d_t)     :: p0, pt, pr, rot         !< Poses.
    type(swept_cells_2d_t)    :: sw                      !< Result.
    type(piece_map_2d_t)      :: mp                      !< Map.
    real(R8P),    allocatable :: uu(:), vv(:), x(:), y(:) !< Work.
-   real(R8P)                 :: lo(2), hi(2), cen(2), th, h, t(4, 3), tb(4) !< Work.
-   integer(I4P)              :: bad, k, g, p, r, m, ngrid(2), ne, nn, me, mn !< Work.
+   integer(I4P), parameter   :: NREP = 5_I4P            !< Repetitions of the timing.
+   real(R8P)                 :: lo(2), hi(2), cen(2), th, h, t(4, NREP), tb(4), dm(2), dn(2) !< Work.
+   integer(I4P)              :: bad, k, g, p, r, m, mm, ngrid(2), ne, nn, me, mn !< Work.
    integer(I8P)              :: q0, q1, rate             !< Clock.
    character(12), parameter  :: PNAME(3) = [character(12) :: 'translation', 'Gauss nq=4', 'Gauss+refine'] !< Paths.
 
@@ -720,8 +726,8 @@ contains
    print '(A,I0)', 'piece map 2-D device vs serial mismatches: ', bad
    ok = ok .and. bad == 0
    if (n < 256_I4P) return
-   print '(A)', 'piece map 2-D timing (ellipse; best of 3) [s]: path, cells, host call, host + map, device call, '// &
-                'device + map; map host, map device, speed-up'
+   print '(A)', 'piece map 2-D timing (ellipse; best of 5) [s]: path, cells, host call, host + map, device call, '// &
+                'device + map; map host, map device (median of paired differences); their spread (2 MAD); speed-up'
    call system_clock(count_rate=rate)
    ngrid = [n, min(4_I4P * n, 1024_I4P)]
    do p = 1, 3
@@ -729,8 +735,9 @@ contains
          call grid_edges(lo, hi, ngrid(g), x, y) ; h = x(2) - x(1)
          pt = pose_2d(0._R8P, [1.7_R8P * h, 0.6_R8P * h])
          t = huge(1._R8P)
-         do r = 1, 3
-            do m = 1, 4
+         do r = 1, NREP
+            do mm = 1, 4
+               m = merge(mm, 5_I4P - mm, mod(r, 2_I4P) == 1_I4P) ! reversed in even repetitions
                call system_clock(q0)
                select case (p)
                case (1)
@@ -755,8 +762,16 @@ contains
             enddo
          enddo
          tb = minval(t, dim=2)
-         print '(3X,A12,1X,I4,A,4(2X,ES9.2),A,2(2X,ES9.2),A,F6.2,A)', PNAME(p), ngrid(g), '^2', tb, ' ;', &
-               tb(2) - tb(1), tb(4) - tb(3), '  (', (tb(2) - tb(1)) / max(tb(4) - tb(3), 1e-6_R8P), 'x)'
+         dm = [median5(t(2, :) - t(1, :)), median5(t(4, :) - t(3, :))]
+         dn = [pair_spread(t(2, :) - t(1, :)), pair_spread(t(4, :) - t(3, :))]
+         if (all(dm > dn)) then
+            print '(3X,A12,1X,I4,A,4(2X,ES9.2),A,2(2X,ES9.2),A,2(2X,ES9.2),A,F6.2,A)', PNAME(p), ngrid(g), '^2', tb, ' ;', &
+                  dm, ' ;', dn, '  (', dm(1) / dm(2), 'x)'
+         else
+            print '(3X,A12,1X,I4,A,4(2X,ES9.2),A,2(2X,ES9.2),A,2(2X,ES9.2),A,A,A)', PNAME(p), ngrid(g), '^2', tb, ' ;', &
+                  dm, ' ;', dn, '  (', trim(merge('host and device', merge('host           ', 'device         ', &
+                  dm(1) <= dn(1)), all(dm <= dn))), ' map not resolved)'
+         endif
       enddo
    enddo
    endsubroutine map_case
@@ -918,6 +933,31 @@ contains
    enddo
    m = w(3)
    endfunction median5
+
+   pure function pair_spread(d) result(w)
+   !< The spread of paired timing differences: twice their median absolute deviation from the median (about the
+   !< interquartile range for normal noise; one stalled repetition of 3, or two of 5, cannot inflate it).
+   real(R8P), intent(in) :: d(:)        !< Differences.
+   real(R8P)             :: w           !< Spread.
+   real(R8P)             :: b(size(d)), z, m !< Sorted copy, work, median.
+   integer(I4P)          :: a, c, n, k  !< Counters, size, pass.
+
+   b = d ; n = size(d, kind=I4P)
+   do k = 1, 2
+      do a = 2, n
+         z = b(a) ; c = a - 1
+         do while (c >= 1)
+            if (b(c) <= z) exit
+            b(c + 1) = b(c) ; c = c - 1
+         enddo
+         b(c + 1) = z
+      enddo
+      if (k == 1) then
+         m = b((n + 1) / 2) ; b = abs(b - m)
+      endif
+   enddo
+   w = 2._R8P * b((n + 1) / 2)
+   endfunction pair_spread
 
    subroutine grid_edges(lo, hi, n, x, y)
    !< n x n cells over the box [lo, hi] grown by 2 % (cell edges x(n+1), y(n+1)).
