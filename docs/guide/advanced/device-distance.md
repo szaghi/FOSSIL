@@ -273,13 +273,22 @@ cut-cell solver.
 3. **Cut** the cells and compute their piece links: `cut_cells_3d(_device)(..., links=)`, or in 2-D
    `cut_cells(_device)` with `cut_links_2d(_device)`.
 4. **Sweep:** the swept geometry between the two poses (`swept_cells_3d(_device)` / `swept_cells_2d(_device)`).
+5. **Map** (issue #105, Gauss motion only): the same swept call with `map=`, the
+   [piece map](/guide/advanced/moving-bodies#piece-map) of the step.
 
 **Three modes:**
 - the CPU;
 - the device with every output copied back;
 - the device with the cut and the links left resident.
 
-At every step each device output equals the CPU's bit for bit (`device chain vs serial mismatches: 0`).
+At every step each device output equals the CPU's bit for bit (`device chain vs serial mismatches: 0`), the map
+included (every field of `piece_map_3d_t` / `piece_map_2d_t`), and the swept geometry of the call with `map=` equals
+that of the call without.
+
+The map has its own GPU bench lines, which must be 0: `piece map 3-D device vs serial mismatches` in
+`fossil_test_distance_bench` (sphere and cone at 32³: exact translation, exact rotation, Gauss, Gauss + `refine`) and
+`piece map 2-D device vs serial mismatches` in `fossil_test_curve_bench` (ellipse: translation, Gauss, Gauss +
+`refine`; NACA 0012 rotating).
 
 Measured on an RTX 4070 (`full` run, 3 steps; the step-0 sizes of issue #100). Times are seconds per step, the best of 3. The swept
 geometry is Gauss-Legendre nq = 4 under a rotation of 2° plus a translation per step, unless the motion says
@@ -317,6 +326,30 @@ How to read these numbers:
 - **The exact translation** is bound by the host work of the swept geometry: 1.8–3.1× at 32³.
 - **Double work in the chain:** the swept routines recompute the cut cells at both end poses, which the chain already
   has (alpha0 and alpha1 equal the cut alphas bit for bit).
+
+**With the map.** The default run (the gate: 3 steps in 3-D, 5 in 2-D, Gauss motion) times the map at 32³ and 256²;
+`full` times it at every size. The map column is the swept call with `map=` less the call without (on the device the
+call with `map=` also cuts the end poses in full in 3-D, and on the host in 2-D). The step is move + tag + cut + links
++ the swept call with `map=`. Seconds per step, best of 3, RTX 4070 and CPU shared with other jobs (the medians run up
+to twice the best): indicative. The 64³ rows come from a run that timed the map at every size; the 2-D rows are the
+device copied back.
+
+| body | cells | swept, CPU | map, CPU | map, device | step, CPU | step, copied back | step, resident | speed-up |
+|---|---|---|---|---|---|---|---|---|
+| sphere (marching cubes) | 32³ | 0.722 | 0.355 | 0.168 | 1.73 | 0.491 | 0.486 | 3.5× |
+| sphere | 64³ | 2.19 | 1.02 | 0.577 | 7.96 | 1.72 | 1.75 | 4.6× |
+| cone | 32³ | 0.304 | 0.655 | 0.555 | 1.02 | 0.676 | 0.696 | 1.5× |
+| cone | 64³ | 1.57 | 4.82 | 4.03 | 6.81 | 4.45 | 4.46 | 1.5× |
+| ellipse (2-D) | 256² | 0.332 | 0.053 | 0.068 | 0.400 | 0.490 | – | 0.82× |
+| NACA 0012 (2-D) | 256² | 0.316 | 0.109 | 0.091 | 0.440 | 0.477 | – | 0.92× |
+
+- **The map is the largest device stage of the cone's step:** 82–91 % of it, against 34 % on the sphere. Its device
+  passes are a small part: the plan stays on the host (candidates, events, poses, Gauss nodes; the events of the
+  rotation were 24–85 % of the host map on this path when measured for issue #105), so the device map is 1.2–2.1× the
+  host's in 3-D, and the cone's step with the map gains 1.5× where it gained 1.8–5.7× without.
+- **In 2-D** the map is 13–25 % of the CPU step and about even on the device (0.8–1.2×): about a thousand of 65,536
+  cells are evaluated per step.
+- **What remains:** the host plan on the 3-D Gauss path ([the map on the device](/guide/advanced/moving-bodies#the-map-on-the-device)).
 
 ### Surface deviation
 

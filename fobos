@@ -212,10 +212,11 @@ build_dir = ./exe/
 
 [tests-nvidia-chain]
 # The per-step chain of a moving-body cut-cell solver (issue #100 step 6b): builds the validation program
-# fossil_val_device_chain only (move, tag, cut + links, swept; 3-D and 2-D), every stage's device output checked
-# against the CPU's bit for bit, and the per-step timing table. Manual, like tests-nvidia (clean build, local_nvf
-# varset). Run it on an idle GPU: CUDA_VISIBLE_DEVICES=1 ./exe/fossil_val_device_chain (the gate, about 5 min:
-# 32^3, 64^3, 256^2); add `full` for the step-0 table (128^3 and 1024^2 too, about 35 min).
+# fossil_val_device_chain only (move, tag, cut + links, swept, and the piece map on the Gauss path since issue #105;
+# 3-D and 2-D), every stage's device output checked against the CPU's bit for bit, and the per-step timing table.
+# Manual, like tests-nvidia (clean build, local_nvf varset). Run it on an idle GPU:
+# CUDA_VISIBLE_DEVICES=1 ./exe/fossil_val_device_chain (the gate, 7-10 min: 32^3, 64^3, 256^2); add `full` for the
+# step-0 table (128^3 and 1024^2 too, about 35 min before the map stage).
 target    = src/tests/validation/fossil_val_device_chain.f90
 template  = template-static-nvidia
 build_dir = ./exe/

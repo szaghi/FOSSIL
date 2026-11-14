@@ -12,38 +12,49 @@ program fossil_val_device_chain
 !<    rotation (2 degrees per step about an axis through the block centre) plus a translation per step, Gauss-Legendre
 !<    nq = 4 (`exact=.false.`, the solver path; it also computes the 8-node error estimate). Path "translation": a pure
 !<    translation per step, the exact translation path (3-D at the smallest size only: tens of seconds per host call).
+!< 5. map (issue #105 step 4, path "Gauss" only): the same swept call with `map=`, the piece map of the step
+!<    (`swept_cells_3d(_device)(map=)` / `swept_cells_2d(_device)(map=)`).
 !< Bodies: the step-0 bodies of issue #100, the marching-cubes sphere and the cone of the sign bench (3-D); the
 !< 1024-gon ellipse and the 1022-vertex NACA 0012 of the curve bench (2-D).
 !<
 !< Check (the first pass over the steps, which is also the warm-up of the device paths): at every step the device tags,
 !< the device cut and links copied back and resident (then `update_host`) and the device swept geometry equal the CPU's
-!< bit for bit (`fossil_cut_cells_compare`, `fossil_swept_3d_compare`, `fossil_swept_compare`): `device chain vs serial
-!< mismatches` must be 0. Also on the CPU: the swept alpha0 / alpha1 equal the cut alpha of the previous / current step
-!< bit for bit (`swept vs cut alpha mismatches`, 0).
+!< bit for bit (`fossil_cut_cells_compare`, `fossil_swept_3d_compare`, `fossil_swept_compare`), and on the Gauss path
+!< the device piece map equals the CPU's (`fossil_piece_map_compare`) and the swept geometry of the call with `map=`
+!< equals that of the call without (CPU and device): `device chain vs serial mismatches` must be 0. Also on the CPU:
+!< the swept alpha0 / alpha1 equal the cut alpha of the previous / current step bit for bit (`swept vs cut alpha
+!< mismatches`, 0).
 !<
-!< Timing: per step and per stage (move, tag, cut + links, swept) and the whole step, best and median of nrep runs of
-!< nstep steps, in three modes: the CPU; the device with every output copied back; the device with the cut and the
-!< links resident (the tags and the swept geometry have no resident form: copied back). Each device mode starts with
-!< one untimed step (the pageable-copy warm-up of issue #100 step 6a). The device modes map the moved surface (curve)
-!< with `enter_device` inside the move stage. Each table prints the load average (/proc/loadavg): the machine is shared.
+!< Timing: per step and per stage (move, tag, cut + links, swept, map) and the whole step, best and median of nrep runs
+!< of nstep steps, in three modes: the CPU; the device with every output copied back; the device with the cut and the
+!< links resident (the tags, the swept geometry and the map have no resident form: copied back). The map is timed on
+!< the Gauss path at the smallest size (every size with `full`): both swept calls, without and with `map=`, run in the
+!< step, and the map column is the best (median) of the call with `map=` less the best (median) of the call without (on
+!< the device the call with `map=` also cuts the end poses in full, 3-D, or on the host, 2-D: part of the map's cost).
+!< The step is move + tag + cut + links + the swept call with `map=` where the map is timed, else the swept call. Each
+!< device mode starts with one untimed step (the pageable-copy warm-up of issue #100 step 6a). The device modes map the
+!< moved surface (curve) with `enter_device` inside the move stage. Each table prints the load average (/proc/loadavg):
+!< the machine is shared.
 !<
 !< Sizes (3 repetitions everywhere). Built with OpenACC (`fobis build --mode tests-nvidia-chain --varset local_nvf`), the
-!< default run (the device gate, about 5 min on an RTX 4070): 3-D 32^3 and 64^3 (3 steps), the exact translation at
-!< 32^3 (2 steps, the cone), 2-D 256^2 (5 steps). `fossil_val_device_chain full` adds the step-0 sizes 128^3 and
-!< 1024^2 (3 steps, Gauss only) and the sphere's exact translation (about 35 min). Without OpenACC (gfortran, the
-!< validation tier) the device routines run their loops on the host: 3-D 8^3 (the translation 6^3, the cone), 2-D 48^2,
-!< 2 steps (seconds).
+!< default run (the device gate; 10 min measured on a shared RTX 4070 and CPU, about 7 min estimated idle): 3-D 32^3 and
+!< 64^3 (3 steps), the exact translation at 32^3 (2 steps, the cone), 2-D 256^2 (5 steps). `fossil_val_device_chain
+!< full` adds the step-0 sizes 128^3 and 1024^2 (3 steps, Gauss only) and the sphere's exact translation (about 35 min
+!< before the map stage; with it, longer: not measured). Without OpenACC (gfortran, the validation tier) the device
+!< routines run their loops on the host: 3-D 8^3 (the translation 6^3, the cone), 2-D 48^2, 2 steps (seconds).
 !< Usage: fossil_val_device_chain [full]
 use fossil,                   only : surface_stl_object, curve_object, cut_cells_2d_t, cut_cells_3d_t, cut_links_t, &
                                      cut_cells_3d, cut_cells_3d_device, cut_links_2d, cut_links_2d_device, rigid_pose_t, &
                                      rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_2d, swept_cells_2d_t, &
                                      swept_cells_3d_t, swept_cells_2d, swept_cells_2d_device, swept_cells_3d, swept_cells_3d_device
+use fossil,                   only : piece_map_2d_t, piece_map_3d_t
 use fossil,                   only : BOX_CUT
 use fossil_boolean_bodies,    only : BODY_SPHERE, mc_body
 use fossil_sign_bench_bodies, only : body_t, bench_bodies, to_surface
 use fossil_cut_cells_compare, only : cut_cells_2d_mismatches, cut_cells_3d_mismatches, cut_links_mismatches
 use fossil_swept_3d_compare,  only : swept_cells_3d_mismatches
 use fossil_swept_compare,     only : swept_cells_2d_mismatches
+use fossil_piece_map_compare, only : piece_map_2d_mismatches, piece_map_3d_mismatches
 use penf,                     only : I4P, I8P, R8P
 use vecfor,                   only : vector_R8P
 use, intrinsic :: iso_fortran_env, only : output_unit
@@ -84,7 +95,7 @@ elseif (full) then
 else
    sizes3 = [32_I4P, 64_I4P] ; sizes2 = [256_I4P]
 endif
-print '(A,L1,A,L1)', 'device chain (issue #100 step 6b); built with OpenACC: ', ON_DEVICE, ', full: ', full
+print '(A,L1,A,L1)', 'device chain (issue #100 step 6b, map #105); built with OpenACC: ', ON_DEVICE, ', full: ', full
 call mc_body(BODY_SPHERE, 24_I4P, sb(1))
 call bench_bodies(bb) ; call to_surface_centred(bb(7), sb(2))
 names3 = [character(12) :: 'mc sphere', 'cone']
@@ -134,12 +145,15 @@ contains
    type(rigid_pose_t),       allocatable   :: p(:)     !< Poses P_0..P_nstep.
    type(cut_cells_3d_t)                    :: ch, cd, cr !< Cut cells: CPU, copied back, resident.
    type(cut_links_t)                       :: lh, ld, lr !< Links: CPU, copied back, resident.
-   type(swept_cells_3d_t)                  :: wh, wd   !< Swept geometry: CPU, device.
+   type(swept_cells_3d_t)                  :: wh, wd, wm !< Swept geometry: CPU, device, with the map.
+   type(piece_map_3d_t)                    :: mh, md   !< Piece maps: CPU, device.
    real(R8P),                allocatable   :: gx(:), gy(:), gz(:), lo(:,:), hi(:,:), aprev(:,:,:) !< Grid, boxes, alpha.
    integer(I4P),             allocatable   :: th(:), td(:) !< Tags: CPU, device.
-   real(R8P)                               :: t(5, NREP, 3) !< Per-step times [stage, repetition, mode].
+   real(R8P)                               :: t(6, NREP, 3) !< Per-step times [stage, repetition, mode].
    integer(I4P)                            :: k, r, v, nb, st, st2, b0, a0 !< Work.
+   logical                                 :: tm       !< Time the map.
 
+   tm = path == PATH_GAUSS .and. (full .or. m == sizes3(1))
    call box_grid(body, m, gx, gy, gz)
    call cell_boxes_3d(gx, gy, gz, lo, hi)
    nb = size(lo, 2, kind=I4P) ; allocate(th(nb), td(nb))
@@ -161,43 +175,51 @@ contains
       call swept_3d(body, p(k - 1), p(k), gx, gy, gz, path, .false., wh, st)
       call swept_3d(body, p(k - 1), p(k), gx, gy, gz, path, .true., wd, st2)
       bad = bad + abs(st - st2) + abs(st) + swept_cells_3d_mismatches(wh, wd)
+      if (path == PATH_GAUSS) then
+         call swept_3d(body, p(k - 1), p(k), gx, gy, gz, path, .false., wm, st, mh)
+         bad = bad + abs(st) + swept_cells_3d_mismatches(wh, wm)
+         call swept_3d(body, p(k - 1), p(k), gx, gy, gz, path, .true., wm, st2, md)
+         bad = bad + abs(st2) + swept_cells_3d_mismatches(wh, wm) + piece_map_3d_mismatches(mh, md)
+      endif
       abad = abad + count(wh%alpha1 /= ch%alpha, kind=I4P)
       if (k > 1) abad = abad + count(wh%alpha0 /= aprev, kind=I4P)
       aprev = ch%alpha
    enddo
    call cr%exit_device ; call lr%exit_device
-   print '(A,A,1X,I0,A,A,A,I0,A,I0,A,I0,A,I0,A,I0)', '3-D ', trim(label), m, '^3, ', trim(path_name(path)), ': cells ', &
-         nb, ', cut ', count(th == BOX_CUT), ', pieces ', ch%np, ', links ', links_number(lh), ', mismatches ', &
-         bad - b0 + abad - a0
+   print '(A,A,1X,I0,A,A,A,I0,A,I0,A,I0,A,I0,A,A,I0)', '3-D ', trim(label), m, '^3, ', trim(path_name(path)), &
+         ': cells ', nb, ', cut ', count(th == BOX_CUT), ', pieces ', ch%np, ', links ', links_number(lh), &
+         trim(map_note(path == PATH_GAUSS, mh%nt, mh%evaluated_cells)), ', mismatches ', bad - b0 + abad - a0
    do v = 1, 3
-      if (v > 1) call step_3d(body, p, 1_I4P, v, gx, gy, gz, lo, hi, path, s, th, cd, ld, wd, t(:, 1, v)) ! warm-up
+      if (v > 1) call step_3d(body, p, 1_I4P, v, gx, gy, gz, lo, hi, path, tm, s, th, cd, ld, wd, md, t(:, 1, v)) ! warm-up
       call cd%exit_device ; call ld%exit_device
       do r = 1, NREP
          do k = 1, nstep
-            call step_3d(body, p, k, v, gx, gy, gz, lo, hi, path, s, th, ch, lh, wh, t(:, r, v))
+            call step_3d(body, p, k, v, gx, gy, gz, lo, hi, path, tm, s, th, ch, lh, wh, mh, t(:, r, v))
          enddo
          call s%exit_device
       enddo
       call ch%exit_device ; call lh%exit_device
    enddo
-   call print_table(t, nstep)
+   call print_table(t, nstep, tm)
    endsubroutine chain_3d
 
-   subroutine step_3d(body, p, k, v, gx, gy, gz, lo, hi, path, s, tags, cut, links, sw, t)
+   subroutine step_3d(body, p, k, v, gx, gy, gz, lo, hi, path, tm, s, tags, cut, links, sw, map, t)
    !< One timed 3-D step k in mode v (1 CPU, 2 device copied back, 3 device resident); adds the stage times to t
-   !< (move, tag, cut + links, swept, total; reset at k = 1).
+   !< (move, tag, cut + links, swept, the swept call with `map=` if tm, total; reset at k = 1).
    type(surface_stl_object), intent(in)    :: body     !< Body (body frame).
    type(rigid_pose_t),       intent(in)    :: p(0:)    !< Poses.
    integer(I4P),             intent(in)    :: k, v     !< Step, mode.
    real(R8P),                intent(in)    :: gx(:), gy(:), gz(:), lo(:,:), hi(:,:) !< Grid, cell boxes.
    integer(I4P),             intent(in)    :: path     !< Motion.
+   logical,                  intent(in)    :: tm       !< Time the swept call with `map=`.
    type(surface_stl_object), intent(inout) :: s        !< Moving surface.
    integer(I4P),             intent(inout) :: tags(:)  !< Tags.
    type(cut_cells_3d_t),     intent(inout) :: cut      !< Cut cells.
    type(cut_links_t),        intent(inout) :: links    !< Links.
    type(swept_cells_3d_t),   intent(inout) :: sw       !< Swept geometry.
-   real(R8P),                intent(inout) :: t(5)     !< Stage times (summed over the steps).
-   integer(I8P)                            :: c(0:4)   !< Clock.
+   type(piece_map_3d_t),     intent(inout) :: map      !< Piece map.
+   real(R8P),                intent(inout) :: t(6)     !< Stage times (summed over the steps).
+   integer(I8P)                            :: c(0:5)   !< Clock.
 
    if (k == 1_I4P) t = 0._R8P
    call tick(c(0))
@@ -222,11 +244,14 @@ contains
    call tick(c(3))
    call swept_3d(body, p(k - 1), p(k), gx, gy, gz, path, v > 1, sw)
    call tick(c(4))
-   call add_times(c, t)
+   if (tm) call swept_3d(body, p(k - 1), p(k), gx, gy, gz, path, v > 1, sw, map=map)
+   call tick(c(5))
+   call add_times(c, tm, t)
    endsubroutine step_3d
 
-   subroutine swept_3d(body, p0, p1, gx, gy, gz, path, dev, sw, status)
-   !< The swept geometry of the chain: Gauss nq = 4 (`exact=.false.`) on PATH_GAUSS, the exact translation else.
+   subroutine swept_3d(body, p0, p1, gx, gy, gz, path, dev, sw, status, map)
+   !< The swept geometry of the chain: Gauss nq = 4 (`exact=.false.`) on PATH_GAUSS, the exact translation else; the
+   !< piece map of the step if `map` is present.
    type(surface_stl_object), intent(in)            :: body   !< Body (body frame).
    type(rigid_pose_t),       intent(in)            :: p0, p1 !< End poses.
    real(R8P),                intent(in)            :: gx(:), gy(:), gz(:) !< Grid.
@@ -234,18 +259,19 @@ contains
    logical,                  intent(in)            :: dev    !< On the device.
    type(swept_cells_3d_t),   intent(inout)         :: sw     !< Swept geometry.
    integer(I4P),             intent(out), optional :: status !< Status.
+   type(piece_map_3d_t),     intent(inout), optional :: map  !< Piece map.
 
    if (path == PATH_GAUSS) then
       if (dev) then
-         call swept_cells_3d_device(body, p0, p1, gx, gy, gz, sw, nq=4_I4P, exact=.false., status=status)
+         call swept_cells_3d_device(body, p0, p1, gx, gy, gz, sw, nq=4_I4P, exact=.false., status=status, map=map)
       else
-         call swept_cells_3d(body, p0, p1, gx, gy, gz, sw, nq=4_I4P, exact=.false., status=status)
+         call swept_cells_3d(body, p0, p1, gx, gy, gz, sw, nq=4_I4P, exact=.false., status=status, map=map)
       endif
    else
       if (dev) then
-         call swept_cells_3d_device(body, p0, p1, gx, gy, gz, sw, status=status)
+         call swept_cells_3d_device(body, p0, p1, gx, gy, gz, sw, status=status, map=map)
       else
-         call swept_cells_3d(body, p0, p1, gx, gy, gz, sw, status=status)
+         call swept_cells_3d(body, p0, p1, gx, gy, gz, sw, status=status, map=map)
       endif
    endif
    endsubroutine swept_3d
@@ -263,12 +289,15 @@ contains
    type(rigid_pose_2d_t), allocatable :: p(:)    !< Poses P_0..P_nstep.
    type(cut_cells_2d_t)              :: ch, cr   !< Cut cells: CPU, device (resident, or copied back after it).
    type(cut_links_t)                 :: lh, ld, lr !< Links: CPU, copied back, resident.
-   type(swept_cells_2d_t)            :: wh, wd   !< Swept geometry: CPU, device.
+   type(swept_cells_2d_t)            :: wh, wd, wm !< Swept geometry: CPU, device, with the map.
+   type(piece_map_2d_t)              :: mh, md   !< Piece maps: CPU, device.
    real(R8P),          allocatable   :: x(:), y(:), lo(:,:), hi(:,:), aprev(:,:) !< Grid, boxes, alpha.
    integer(I4P),       allocatable   :: th(:), td(:) !< Tags: CPU, device.
-   real(R8P)                         :: t(5, NREP, 3) !< Per-step times [stage, repetition, mode].
+   real(R8P)                         :: t(6, NREP, 3) !< Per-step times [stage, repetition, mode].
    integer(I4P)                      :: k, r, v, nb, st, st2, b0, a0 !< Work.
+   logical                           :: tm       !< Time the map.
 
+   tm = path == PATH_GAUSS .and. (full .or. n == sizes2(1))
    call grid_edges([0.0031_R8P, 0.0031_R8P], [0.9969_R8P, 0.9969_R8P], n, x, y)
    call cell_boxes_2d(x, y, lo, hi)
    nb = size(lo, 2, kind=I4P) ; allocate(th(nb), td(nb))
@@ -290,43 +319,52 @@ contains
       call swept_2d(body, p(k - 1), p(k), x, y, path, .false., wh, st)
       call swept_2d(body, p(k - 1), p(k), x, y, path, .true., wd, st2)
       bad = bad + abs(st - st2) + abs(st) + swept_cells_2d_mismatches(wh, wd)
+      if (path == PATH_GAUSS) then
+         call swept_2d(body, p(k - 1), p(k), x, y, path, .false., wm, st, mh)
+         bad = bad + abs(st) + swept_cells_2d_mismatches(wh, wm)
+         call swept_2d(body, p(k - 1), p(k), x, y, path, .true., wm, st2, md)
+         bad = bad + abs(st2) + swept_cells_2d_mismatches(wh, wm) + piece_map_2d_mismatches(mh, md)
+      endif
       abad = abad + count(wh%alpha1 /= ch%alpha, kind=I4P)
       if (k > 1) abad = abad + count(wh%alpha0 /= aprev, kind=I4P)
       aprev = ch%alpha
    enddo
    call cr%exit_device ; call lr%exit_device
-   print '(A,A,1X,I0,A,A,A,I0,A,I0,A,I0,A,I0,A,I0)', '2-D ', trim(label), n, '^2, ', trim(path_name(path)), ': cells ', &
-         nb, ', cut ', count(th == BOX_CUT), ', pieces ', ch%np, ', links ', links_number(lh), ', mismatches ', &
-         bad - b0 + abad - a0
+   print '(A,A,1X,I0,A,A,A,I0,A,I0,A,I0,A,I0,A,A,I0)', '2-D ', trim(label), n, '^2, ', trim(path_name(path)), &
+         ': cells ', nb, ', cut ', count(th == BOX_CUT), ', pieces ', ch%np, ', links ', links_number(lh), &
+         trim(map_note(path == PATH_GAUSS, mh%nt, mh%evaluated_cells)), ', mismatches ', bad - b0 + abad - a0
    do v = 1, 3
-      if (v > 1) call step_2d(body, p, 1_I4P, v, x, y, lo, hi, path, c, th, cr, ld, wd, t(:, 1, v)) ! warm-up
+      if (v > 1) call step_2d(body, p, 1_I4P, v, x, y, lo, hi, path, tm, c, th, cr, ld, wd, md, t(:, 1, v)) ! warm-up
       call ld%exit_device
       do r = 1, NREP
          do k = 1, nstep
-            call step_2d(body, p, k, v, x, y, lo, hi, path, c, th, cr, lh, wh, t(:, r, v))
+            call step_2d(body, p, k, v, x, y, lo, hi, path, tm, c, th, cr, lh, wh, mh, t(:, r, v))
          enddo
          call c%exit_device
       enddo
       call cr%exit_device ; call lh%exit_device
    enddo
-   call print_table(t, nstep)
+   call print_table(t, nstep, tm)
    endsubroutine chain_2d
 
-   subroutine step_2d(body, p, k, v, x, y, lo, hi, path, c, tags, cut, links, sw, t)
+   subroutine step_2d(body, p, k, v, x, y, lo, hi, path, tm, c, tags, cut, links, sw, map, t)
    !< One timed 2-D step k in mode v (1 CPU, 2 device copied back: the cut resident, the links copied back, then the cut
    !< by `update_host` and released, the twin of the 3-D copied-back path; 3 device resident); adds the stage times to t.
+   !< The swept call with `map=` if tm.
    type(curve_object),     intent(in)    :: body     !< Body (body frame).
    type(rigid_pose_2d_t),  intent(in)    :: p(0:)    !< Poses.
    integer(I4P),           intent(in)    :: k, v     !< Step, mode.
    real(R8P),              intent(in)    :: x(:), y(:), lo(:,:), hi(:,:) !< Grid, cell boxes.
    integer(I4P),           intent(in)    :: path     !< Motion.
+   logical,                intent(in)    :: tm       !< Time the swept call with `map=`.
    type(curve_object),     intent(inout) :: c        !< Moving curve.
    integer(I4P),           intent(inout) :: tags(:)  !< Tags.
    type(cut_cells_2d_t),   intent(inout) :: cut      !< Cut cells.
    type(cut_links_t),      intent(inout) :: links    !< Links.
    type(swept_cells_2d_t), intent(inout) :: sw       !< Swept geometry.
-   real(R8P),              intent(inout) :: t(5)     !< Stage times (summed over the steps).
-   integer(I8P)                          :: q(0:4)   !< Clock.
+   type(piece_map_2d_t),   intent(inout) :: map      !< Piece map.
+   real(R8P),              intent(inout) :: t(6)     !< Stage times (summed over the steps).
+   integer(I8P)                          :: q(0:5)   !< Clock.
 
    if (k == 1_I4P) t = 0._R8P
    call tick(q(0))
@@ -352,11 +390,14 @@ contains
    call tick(q(3))
    call swept_2d(body, p(k - 1), p(k), x, y, path, v > 1, sw)
    call tick(q(4))
-   call add_times(q, t)
+   if (tm) call swept_2d(body, p(k - 1), p(k), x, y, path, v > 1, sw, map=map)
+   call tick(q(5))
+   call add_times(q, tm, t)
    endsubroutine step_2d
 
-   subroutine swept_2d(body, p0, p1, x, y, path, dev, sw, status)
-   !< The swept geometry of the chain: Gauss nq = 4 (`exact=.false.`) on PATH_GAUSS, the exact translation else.
+   subroutine swept_2d(body, p0, p1, x, y, path, dev, sw, status, map)
+   !< The swept geometry of the chain: Gauss nq = 4 (`exact=.false.`) on PATH_GAUSS, the exact translation else; the
+   !< piece map of the step if `map` is present.
    type(curve_object),     intent(in)            :: body   !< Body (body frame).
    type(rigid_pose_2d_t),  intent(in)            :: p0, p1 !< End poses.
    real(R8P),              intent(in)            :: x(:), y(:) !< Grid.
@@ -364,18 +405,19 @@ contains
    logical,                intent(in)            :: dev    !< On the device.
    type(swept_cells_2d_t), intent(inout)         :: sw     !< Swept geometry.
    integer(I4P),           intent(out), optional :: status !< Status.
+   type(piece_map_2d_t),   intent(inout), optional :: map  !< Piece map.
 
    if (path == PATH_GAUSS) then
       if (dev) then
-         call swept_cells_2d_device(body, p0, p1, x, y, sw, nq=4_I4P, exact=.false., status=status)
+         call swept_cells_2d_device(body, p0, p1, x, y, sw, nq=4_I4P, exact=.false., status=status, map=map)
       else
-         call swept_cells_2d(body, p0, p1, x, y, sw, nq=4_I4P, exact=.false., status=status)
+         call swept_cells_2d(body, p0, p1, x, y, sw, nq=4_I4P, exact=.false., status=status, map=map)
       endif
    else
       if (dev) then
-         call swept_cells_2d_device(body, p0, p1, x, y, sw, status=status)
+         call swept_cells_2d_device(body, p0, p1, x, y, sw, status=status, map=map)
       else
-         call swept_cells_2d(body, p0, p1, x, y, sw, status=status)
+         call swept_cells_2d(body, p0, p1, x, y, sw, status=status, map=map)
       endif
    endif
    endsubroutine swept_2d
@@ -435,43 +477,70 @@ contains
    call system_clock(c)
    endsubroutine tick
 
-   subroutine add_times(c, t)
-   !< Add the stage times between the clock counts c(0..4) and the total to t.
-   integer(I8P), intent(in)    :: c(0:4) !< Clock counts.
-   real(R8P),    intent(inout) :: t(5)   !< Stage times, total.
-   integer(I8P)                :: rate   !< Clock rate.
-   integer(I4P)                :: i      !< Counter.
+   subroutine add_times(c, with_map, t)
+   !< Add the stage times between the clock counts c(0..5) to t: move, tag, cut + links, swept (c(3)..c(4)), the swept
+   !< call with `map=` (c(4)..c(5); 0 without it) and the step (move + tag + cut + links + the swept call with `map=`, or
+   !< the swept call without it).
+   integer(I8P), intent(in)    :: c(0:5)   !< Clock counts.
+   logical,      intent(in)    :: with_map !< The swept call with `map=` was timed.
+   real(R8P),    intent(inout) :: t(6)     !< Stage times, total.
+   integer(I8P)                :: rate     !< Clock rate.
+   real(R8P)                   :: d(5)     !< Intervals.
+   integer(I4P)                :: i        !< Counter.
 
    call system_clock(count_rate=rate)
-   do i = 1, 4
-      t(i) = t(i) + real(c(i) - c(i - 1), R8P) / rate
+   do i = 1, 5
+      d(i) = real(c(i) - c(i - 1), R8P) / rate
    enddo
-   t(5) = t(5) + real(c(4) - c(0), R8P) / rate
+   t(1:4) = t(1:4) + d(1:4)
+   if (with_map) then
+      t(5) = t(5) + d(5)
+      t(6) = t(6) + d(1) + d(2) + d(3) + d(5)
+   else
+      t(6) = t(6) + d(1) + d(2) + d(3) + d(4)
+   endif
    endsubroutine add_times
 
-   subroutine print_table(t, nstep)
+   subroutine print_table(t, nstep, with_map)
    !< The timing table of one case: per mode, per stage the best / median per-step time over the repetitions, the
-   !< total and its speed-up against the CPU; the load average first.
-   real(R8P),    intent(in) :: t(5, NREP, 3) !< Times summed over the steps [stage, repetition, mode].
+   !< total and its speed-up against the CPU; the load average first. The map column is the best (median) of the swept
+   !< call with `map=` less the best (median) of the call without; it reads `-` without the map.
+   real(R8P),    intent(in) :: t(6, NREP, 3) !< Times summed over the steps [stage, repetition, mode].
    integer(I4P), intent(in) :: nstep         !< Steps.
+   logical,      intent(in) :: with_map      !< The map was timed.
    real(R8P)                :: w(NREP)       !< Work.
-   real(R8P)                :: best(5, 3), med(5, 3) !< Statistics per step.
+   real(R8P)                :: best(6, 3), med(6, 3) !< Statistics per step.
+   character(20)            :: col(6)        !< Columns.
    integer(I4P)             :: v, i          !< Counters.
 
    do v = 1, 3
-      do i = 1, 5
+      do i = 1, 6
          w = t(i, :, v) / nstep
          best(i, v) = minval(w) ; med(i, v) = median(w)
       enddo
+      best(5, v) = best(5, v) - best(4, v) ; med(5, v) = med(5, v) - med(4, v)
    enddo
    call print_load
-   print '(3X,A12,5(2X,A20),2X,A)', 'mode', 'move', 'tag', 'cut + links', 'swept', 'step', 'speed-up'
+   print '(3X,A12,6(2X,A20),2X,A)', 'mode', 'move', 'tag', 'cut + links', 'swept', 'map', 'step', 'speed-up'
    do v = 1, 3
-      print '(3X,A12,5(2X,ES9.2,A,ES9.2),2X,F7.2,A)', MODES(v), (best(i, v), ' /', med(i, v), i = 1, 5), &
-            best(5, 1) / best(5, v), 'x'
+      do i = 1, 6
+         write(col(i), '(ES9.2,A,ES9.2)') best(i, v), ' /', med(i, v)
+      enddo
+      if (.not. with_map) col(5) = '                   -'
+      print '(3X,A12,6(2X,A20),2X,F7.2,A)', MODES(v), col, best(6, 1) / best(6, v), 'x'
    enddo
    flush(output_unit)
    endsubroutine print_table
+
+   pure function map_note(with_map, nt, ne) result(note)
+   !< `, map tracks nt, evaluated cells ne` with the map, else empty.
+   logical,      intent(in) :: with_map !< The map was built.
+   integer(I4P), intent(in) :: nt, ne   !< Tracks, evaluated cells.
+   character(64)            :: note     !< Note.
+
+   note = ''
+   if (with_map) write(note, '(A,I0,A,I0)') ', map tracks ', nt, ', evaluated cells ', ne
+   endfunction map_note
 
    subroutine print_load
    !< The load average of the machine (/proc/loadavg), if readable.

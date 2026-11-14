@@ -123,7 +123,9 @@ batches.
 - `swept_cells_3d_device` / `swept_cells_2d_device` give the swept geometry of a step on the device, bit for bit
   that of `swept_cells_3d` / `swept_cells_2d`. In 3-D the faces are batched over all the sections of a step:
   1.7-4.7x on an RTX 4070 at 32³-64³. In 2-D only the end poses move, so there is no gain today (the
-  [moving bodies reference](/guide/advanced/moving-bodies#on-the-device) has the table).
+  [moving bodies reference](/guide/advanced/moving-bodies#on-the-device) has the table). With `map=` they also return
+  the piece map of the step, bit for bit the host's; its plan (events, poses) stays on the host
+  ([the map on the device](/guide/advanced/moving-bodies#the-map-on-the-device)).
 - The piece links of the cut cells run on the device too: `cut_cells_3d_device(..., links=)` and
   `cut_links_2d_device(cut, links)`, bit for bit the host's. On an RTX 4070, cut + links is 6.6-9.4x the CPU at 128³
   and 10.5-12x at 1024² with everything resident (the

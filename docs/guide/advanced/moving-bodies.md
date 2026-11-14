@@ -437,8 +437,47 @@ components, `outflow(6, nt)`.
 
 **Cost:** in 3-D, 3–13 % on top of a translating `swept_cells_3d` at 32³–64³ and 49–281 % on top of a Gauss rotation,
 where the swept call itself is cheap (0.15–1.7 s). In 2-D, 1–22 % on top of `swept_cells_2d` at 256²–1024², and 0 to 281 cells with several tracks per step (the
-NACA 0012 under a Gauss rotation at 1024²). The map is CPU-only and not combined with `poses=` (it needs the screw
-motion).
+NACA 0012 under a Gauss rotation at 1024²). The map is not combined with `poses=` (it needs the screw motion).
+
+### The map on the device
+
+`swept_cells_2d_device(..., map=)` and `swept_cells_3d_device(..., map=)` (issue #105) return the map of
+`swept_cells_2d(..., map=)` / `swept_cells_3d(..., map=)`, bit for bit. Every other output is that of the call without
+`map`.
+
+- **On the device:** the per-item passes. The one-cell evaluations, one item per (cell, evaluation), each with its own
+  workspace sized by a count pass; the tracks of every cell; the measure rounds, one item per (cell, interval, node),
+  summed in node order; the assembly by count, scan and fill. In 3-D the posed facets, the plan's facets and the
+  evaluations stay resident for the whole build.
+- **On the host:** the plan (candidate cells, events, the pose of every evaluation and node, the Gauss nodes), the
+  corner flags (2-D) or corner states (3-D), the scans and the convergence decisions of each round. The device `cos`,
+  `sin` and `atan2` differ from the host's by 1 ulp in 17 %, 14 % and 1.8 % of random arguments (RTX 4070, nvfortran
+  26.9, `-gpu=nofma`), so events and poses computed on the device would not be the host's bits. The device reads the
+  host's pose table.
+- **End poses:** with `map` they are cut in full, by `cut_cells_3d_device` without `alpha_only` in 3-D and on the host
+  in 2-D: the map needs their pieces.
+- **`chunk_bytes`** (default 2²⁸) caps the workspace of one launch set of items. No output depends on it.
+
+Measured by `fossil_test_distance_bench` on an RTX 4070 shared with other jobs, one call, best of 2, so the ratios are
+indicative. "Map" is the Gauss call
+(nq = 4) with `map` less the call without; "refine machinery" is the call with `refine=.true.` less the Gauss call:
+
+| body | cells | map, CPU [s] | map, device [s] | speed-up | refine machinery, CPU [s] | device [s] | speed-up |
+|---|---|---|---|---|---|---|---|
+| sphere (marching cubes) | 32³ | 0.373 | 0.396 | 0.94× | 6.00 | 0.958 | 6.3× |
+| sphere | 64³ | 0.635 | 0.116 | 5.5× | 18.7 | 1.75 | 10.7× |
+| cone | 32³ | 0.558 | 0.628 | 0.89× | 2.46 | 0.598 | 4.1× |
+| cone | 64³ | 3.93 | 3.58 | 1.10× | 17.0 | 4.66 | 3.7× |
+
+- **With `refine`** the per-item passes are most of the work, and they gain 3.7–10.7×.
+- **On the 3-D Gauss path** the map gains 0.89–1.10× except on the sphere at 64³ (1.2–2.1× in the device chain,
+  over 3 warm steps): the host plan dominates, above all the events of the rotation (`isolate_zeros`), which stay on
+  the host for the trig reason above.
+- **In 2-D** the device map is about even with the host's: few cells are evaluated (about 3,000 of a million at
+  1024²), so there is little device work to gain from.
+
+The chain of a whole time step with the map is in
+[GPU queries](/guide/advanced/device-distance#a-moving-body-time-step).
 
 ## Results
 
@@ -463,6 +502,7 @@ motion).
 | swept, 3-D: cube rotating about (1, 1, 1) while translating; nq = 2, 4, 8 | residual 1.1e-2 → 1.6e-3 |
 | swept: explicit node poses = screw poses | face apertures bit for bit |
 | swept on the device vs the host: every output of `swept_cells_3d_t` / `swept_cells_2d_t`, exact translation, exact rotation, Gauss, explicit poses; chunk boundaries (`chunk_cells`) | 0 mismatches (`swept cells 3-D` / `2-D device vs serial mismatches`, `fossil_test_swept_3d_device_twin`, `fossil_test_swept_2d_device_twin`) |
+| piece map on the device vs the host: every field of `piece_map_3d_t` / `piece_map_2d_t`; sphere and cone at 32³ (exact translation, exact rotation, Gauss, Gauss + `refine`); ellipse at 256² (translation, Gauss, Gauss + `refine`), NACA 0012 rotating at 64²; launch sets of 4 KB (`chunk_bytes`) | 0 mismatches (`piece map 3-D` / `2-D device vs serial mismatches`, `fossil_test_piece_map_3d_device_twin`, `fossil_test_piece_map_2d_device_twin`; the map stage of `fossil_val_device_chain`) |
 
 ## Limitations
 
