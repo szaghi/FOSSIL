@@ -1383,10 +1383,13 @@ contains
    !< `all_meas` (issue #104, `refine`): every evaluated cell integrates its tracks per event interval, one track included
    !< (a single-track cell whose integration fails keeps the `sw` values); `measured` flags those cells (cell order).
    !< `device` (issue #105 step 2): the per-item passes on the device, the same bits: the evaluations' sizes, count,
-   !< evaluation and fill (`map_count_2d_dev`, `map_eval_2d_dev`, `map_fill_2d_dev`), the tracks per cell
-   !< (`map_cells_2d_dev`), the nodes of every measure round with their sums and the round's test per pair
+   !< evaluation and fill (`map_count_2d_dev`, `map_eval_2d_dev`, `map_fill_dev`), the tracks per cell
+   !< (`map_cells_dev`), the nodes of every measure round with their sums and the round's test per pair
    !< (`map_node_2d_dev`, `map_round_test_dev`), the assembly (`map_asm_tracks_dev`, `map_asm_2d_dev`); the host keeps
    !< the plan, the corner flags (`map_flags_2d`, `map_corner_in`), the scans, the round decisions and the counters.
+   !< Resident since issue #105 step 3: the placed vertices and the plan's local curves are mapped once per build, the
+   !< evaluations from the pass that makes them, comp and the tracks per cell for the measures; the launch drivers find
+   !< them present and copy only their per-launch arrays.
    !< `chunk` bytes of workspace per launch set (default MAP_DEV_CHUNK_BYTES). Built without OpenACC it runs on the host.
    type(curve_object),     intent(in)  :: curve        !< Curve (body frame).
    type(curve_object),     intent(in)  :: c0, c1       !< Copies at pose0 and pose1 (`move`).
@@ -1431,14 +1434,17 @@ contains
    allocate(ntr(ncell), ckind(ncell), otr(max(1_I4P, k0%np)), ntn(max(1_I4P, k1%np)), moff(ncell))
    ! the evaluations of every evaluated cell, flat (issue #105 step 1d), then the tracks of every cell
    call map_flags_2d(mc, plan, curve, c0, x, y, k0, k1, ep)
-   dev = dev .and. ep%n > 0_I4P ! nothing to launch without an evaluated cell
+   dev = dev .and. ep%n > 0_I4P ! nothing to launch without an evaluated cell (whose vertices are listed)
+   ! the placed vertices and the plan's local curves, mapped once per build (issue #105 step 3)
+   !$acc enter data copyin(mc%u0, mc%v0, mc%u1, mc%v1, mc%bu, mc%bv, plan%lstart, plan%lel, plan%lnext) if(dev)
    call map_evals_2d(mc, plan, x, y, ep, dev, ck)
    allocate(comp(ep%pstart(ep%n + 1)), tw(map_tracks_work(plan, ep))) ! + 1: every slice start inside
-   if (dev) then ! the tracks per cell on the device (issue #105 step 2)
+   if (dev) then ! the tracks per cell on the device (issue #105 step 2); comp stays there for the measures (step 3)
+      !$acc enter data create(comp)
       allocate(ar0(k0%np + 1), ar1(k1%np + 1)) ; ar0 = 0._R8P ; ar1 = 0._R8P
       if (k0%np > 0_I4P) ar0(1:k0%np) = k0%piece_area(1:k0%np)
       if (k1%np > 0_I4P) ar1(1:k1%np) = k1%piece_area(1:k1%np)
-      call map_cells_2d_dev(ncell, plan%status, plan%vstart, k0%pieces, k0%first_piece, k1%pieces, k1%first_piece, &
+      call map_cells_dev(ncell, plan%status, plan%vstart, k0%pieces, k0%first_piece, k1%pieces, k1%first_piece, &
                             size(ar0, kind=I4P), ar0, size(ar1, kind=I4P), ar1, ep%n, ep%closed, ep%np, ep%mstart, &
                             size(ep%pm, kind=I4P), ep%pm, ep%pstart, ep%kstart, size(ep%key, kind=I4P), ep%key, ep%kpiece, &
                             size(comp, kind=I4P), comp, size(otr, kind=I4P), otr, size(ntn, kind=I4P), ntn, ckind, ntr)
@@ -1447,6 +1453,7 @@ contains
          map%evaluations = map%evaluations + plan%vstart(c + 1) - plan%vstart(c)
          map%evaluated_cells = map%evaluated_cells + 1_I4P
       enddo
+      !$acc enter data copyin(ntr)
    endif
    if (.not. dev) then
    do j = 1_I4P, ny
@@ -1485,6 +1492,8 @@ contains
    enddo
    allocate(meas(8, max(1_I4P, tot)), cok(ncell)) ; meas = 0._R8P ! (at least one column: device clauses)
    call map_measures_2d(mc, plan, ep, comp, curve, c0, x, y, ntr, moff, meas, cok, dev, ck)
+   !$acc exit data delete(mc%u0, mc%v0, mc%u1, mc%v1, mc%bu, mc%bv, plan%lstart, plan%lel, plan%lnext, ep%closed, ep%np, &
+   !$acc&                 ep%nk, ep%pm, ep%pstart, ep%kstart, ep%key, ep%kpiece, comp, ntr) if(dev)
    do c = 1_I4P, ncell
       if (moff(c) == 0_I4P .or. ntr(c) == 0_I4P) cycle ! not measured, or no track (solid throughout): measured
       if (cok(c)) cycle
@@ -2299,8 +2308,10 @@ contains
    !< evaluation pass (`map_item_2d_eval`) in chunks of at most MAP_CHUNK_BYTES of workspace, then the scans of the
    !< pieces and features and the fill of the features. Bit for bit the per-cell `map_eval` of issue #102 (the kernels of
    !< `cut_cell_2d_pieces`). dev (issue #105 step 2): the sizes pass, the evaluation pass and the fill on the device
-   !< (`map_count_2d_dev`, `map_eval_2d_dev`, `map_fill_2d_dev`; ck bytes of workspace per launch set), the scans on the
-   !< host; the features then have one padding element (every slice start inside).
+   !< (`map_count_2d_dev`, `map_eval_2d_dev`, `map_fill_dev`; ck bytes of workspace per launch set), the scans on the
+   !< host; the features then have one padding element (every slice start inside). Since issue #105 step 3 the outputs
+   !< stay on the device (closed, np, nk, pm, pstart, kstart, key, kpiece: mapped until `piece_map_2d_build` ends), the
+   !< host gets back the counts.
    type(map_ctx_t),   intent(in)    :: mc         !< State.
    type(map_plan_t),  intent(in)    :: plan       !< Host phase.
    real(R8P),         intent(in)    :: x(:), y(:) !< Cell edges.
@@ -2358,18 +2369,22 @@ contains
    call csr_scan(kcap) ; call csr_scan(ep%mstart)
    allocate(ep%closed(n), ep%np(n), ep%nk(n), keyc(kcap(n + 1) - 1_I4P), kpc(kcap(n + 1) - 1_I4P), &
             ep%pm(ep%mstart(n + 1))) ! + 1: every slot start inside
-   if (dev) then ! evaluation pass, scans (host), fill
+   if (dev) then ! evaluation pass, scans (host), fill; the outputs stay on the device (issue #105 step 3)
+      !$acc enter data create(ep%closed, ep%np, ep%nk, ep%pm, keyc, kpc)
       call map_eval_2d_dev(n, vc, plan%vkind, plan%vs, plan%vpose, size(qt, 2, kind=I4P), qr, qt, nx, size(y, kind=I4P) - 1_I4P, &
                            x, y, plan%ncell, plan%lstart, size(plan%lel, kind=I4P), plan%lel, plan%lnext, mc%nv, mc%u0, &
                            mc%v0, mc%u1, mc%v1, mc%bu, mc%bv, tr, mc%d, ep%fl, nxs, nps, wr, wi, ck, kcap, &
                            size(keyc, kind=I4P), ep%mstart, size(ep%pm, kind=I4P), ep%closed, ep%np, ep%nk, keyc, kpc, ep%pm)
+      !$acc update host(ep%np, ep%nk)
       allocate(ep%pstart(n + 1), ep%kstart(n + 1))
       ep%pstart(1:n) = ep%np ; ep%kstart(1:n) = ep%nk
       call csr_scan(ep%pstart) ; call csr_scan(ep%kstart)
       allocate(ep%key(ep%kstart(n + 1)), ep%kpiece(ep%kstart(n + 1)))
-      call map_fill_2d_dev(n, kcap, size(keyc, kind=I4P), keyc, kpc, ep%nk, ep%kstart, size(ep%key, kind=I4P), ep%key, &
-                           ep%kpiece)
       ep%key(ep%kstart(n + 1)) = 0_I4P ; ep%kpiece(ep%kstart(n + 1)) = 0_I4P
+      !$acc enter data copyin(ep%pstart, ep%kstart, ep%key, ep%kpiece)
+      call map_fill_dev(n, kcap, size(keyc, kind=I4P), keyc, kpc, ep%nk, ep%kstart, size(ep%key, kind=I4P), ep%key, &
+                        ep%kpiece)
+      !$acc exit data delete(keyc, kpc)
       return
    endif
    ! evaluation pass: one workspace per item
@@ -3036,11 +3051,11 @@ contains
    integer(I4P)                     :: jp, k, nt, c0      !< Work.
    logical                          :: conv, inexact, failed, dv !< Work.
 
-   dv = .false. ; if (present(dev)) dv = dev .and. round > 1_I4P .and. nf == 4_I4P
+   dv = .false. ; if (present(dev)) dv = dev .and. round > 1_I4P
    if (dv) then
       allocate(cv(pr%n), ix(pr%n))
-      call map_round_test_dev(pr%n, pr%state, pr%k, pr%sa, pr%sb, pr%col, pr%nk, pr%cell, size(ntr, kind=I4P), ntr, ksc, kso, &
-                              ksa, ksn, size(cur, 2, kind=I4P), prv, cur, cv, ix)
+      call map_round_test_dev(nf, pr%n, pr%state, pr%k, pr%sa, pr%sb, pr%col, pr%nk, pr%cell, size(ntr, kind=I4P), ntr, &
+                              ksc, kso, ksa, ksn, size(cur, 2, kind=I4P), prv, cur, cv, ix)
    endif
    do jp = 1_I4P, pr%n
       if (pr%state(jp) /= PAIR_ACTIVE) cycle
@@ -3656,7 +3671,7 @@ contains
    !$acc end data
    endsubroutine map_eval_2d_dev
 
-   subroutine map_fill_2d_dev(n, kcap, nkc, keyc, kpc, nk, kstart, nkey, key, kpiece)
+   subroutine map_fill_dev(n, kcap, nkc, keyc, kpc, nk, kstart, nkey, key, kpiece)
    !< Device driver (issue #105 step 2): the features of n items copied from their capacity slots (kcap) to their CSR
    !< slots (kstart, the host's scan), as `map_evals_fill`. Built without OpenACC the loop runs on the host.
    integer(I4P), intent(in)  :: n                   !< Items.
@@ -3676,7 +3691,7 @@ contains
          key(kstart(v) + k) = keyc(kcap(v) + k) ; kpiece(kstart(v) + k) = kpc(kcap(v) + k)
       enddo
    enddo
-   endsubroutine map_fill_2d_dev
+   endsubroutine map_fill_dev
 
    pure integer(I4P) function map_end_check_k(v0, ne, n, closed, enp, mstart, npm, pm, np0, a0, nar0, ar0, np1, b0, nar1, &
                                               ar1) result(kind)
@@ -3715,9 +3730,10 @@ contains
    endif
    endfunction map_end_check_k
 
-   subroutine map_cells_2d_dev(ncell, status, vstart, pc0, fp0, pc1, fp1, nar0, ar0, nar1, ar1, n, closed, enp, mstart, npm, &
-                               pm, pstart, kstart, nkey, key, kpiece, ncomp, comp, no, otr, nn, ntn, ckind, ntr)
-   !< The per-cell loop of `piece_map_2d_build` after the evaluations (issue #105 step 2): kind (untrusted, trivial with
+   subroutine map_cells_dev(ncell, status, vstart, pc0, fp0, pc1, fp1, nar0, ar0, nar1, ar1, n, closed, enp, mstart, npm, &
+                            pm, pstart, kstart, nkey, key, kpiece, ncomp, comp, no, otr, nn, ntn, ckind, ntr)
+   !< The per-cell loop of `piece_map_2d_build` and `piece_map_3d_build` after the evaluations (issue #105 steps 2, 3;
+   !< 2-D areas or 3-D volumes in ar0, ar1, cells numbered as the plan's): kind (untrusted, trivial with
    !< the end cut's pieces as tracks, or evaluated), tracks, the track of every old and new piece and of every piece of
    !< every evaluation (comp). The untrusted and trivial cells here; the evaluated ones on the device, one thread per
    !< cell (`map_end_check_k`, then `map_tracks` on a workspace per cell), on compact copies of their slices (pieces and
@@ -3819,7 +3835,7 @@ contains
          ntn(fp1(c) + k) = nc(on(e) + k)
       enddo
    enddo
-   endsubroutine map_cells_2d_dev
+   endsubroutine map_cells_dev
 
    subroutine map_node_2d_dev(nn, ncel, nj, ns, nw, pid, npz, qr, qt, fl, nxs, nps, wr, wi, budget, nx, ny, x, y, ncell, &
                               lstart, nlel, lel, lnext, nv, u0, v0, u1, v1, bu, bv, tr, d, t0, dth, npr, col, narrow, vr, va, &
@@ -3926,10 +3942,12 @@ contains
    !$acc end data
    endsubroutine map_node_2d_dev
 
-   subroutine map_round_test_dev(npr, state, prk, sa, sb, col, nkc, kcell, nct, ntr, ksc, kso, ksa, ksn, ncol, prv, cur, cv, ix)
-   !< Device driver (issue #105 step 2): the test of a doubling round for every active pair (`map_round_test`, 2-D: four
-   !< faces), one thread per pair; cv, ix (converged, inexact) copied back for `map_round_close`'s decisions. Built
-   !< without OpenACC the loop runs on the host.
+   subroutine map_round_test_dev(nf, npr, state, prk, sa, sb, col, nkc, kcell, nct, ntr, ksc, kso, ksa, ksn, ncol, prv, cur, &
+                                 cv, ix)
+   !< Device driver (issue #105 step 2): the test of a doubling round for every active pair (`map_round_test`, nf faces:
+   !< 4 in 2-D, 6 in 3-D since step 3), one thread per pair; cv, ix (converged, inexact) copied back for
+   !< `map_round_close`'s decisions. Built without OpenACC the loop runs on the host.
+   integer(I4P), intent(in)  :: nf                   !< Faces.
    integer(I4P), intent(in)  :: npr                  !< Pairs.
    integer(I4P), intent(in)  :: state(npr), prk(npr) !< State, measured cell of each pair.
    real(R8P),    intent(in)  :: sa(npr), sb(npr)     !< Interval of each pair.
@@ -3938,10 +3956,10 @@ contains
    integer(I4P), intent(in)  :: kcell(nkc)           !< Their cells.
    integer(I4P), intent(in)  :: nct                  !< Cells.
    integer(I4P), intent(in)  :: ntr(nct)             !< Tracks of every cell.
-   real(R8P),    intent(in)  :: ksc(4, nkc), kso(4, nkc) !< Face scales per measured cell.
+   real(R8P),    intent(in)  :: ksc(nf, nkc), kso(nf, nkc) !< Face scales per measured cell.
    real(R8P),    intent(in)  :: ksa(nkc), ksn(nkc)   !< Round-off scales per measured cell.
    integer(I4P), intent(in)  :: ncol                 !< Sum columns.
-   real(R8P),    intent(in)  :: prv(8, ncol), cur(8, ncol) !< Sums of the round before and of this one.
+   real(R8P),    intent(in)  :: prv(2 * nf, ncol), cur(2 * nf, ncol) !< Sums of the round before and of this one.
    logical,      intent(out) :: cv(npr), ix(npr)     !< Converged, inexact.
    integer(I4P)              :: jp, k, nt, c0        !< Work.
    logical                   :: conv, inexact        !< Work.
@@ -3952,8 +3970,8 @@ contains
       cv(jp) = .false. ; ix(jp) = .false.
       if (state(jp) == PAIR_ACTIVE) then
          k = prk(jp) ; nt = ntr(kcell(k)) ; c0 = col(jp)
-         call map_round_test(4_I4P, nt, prv(1, c0), cur(1, c0), sb(jp) - sa(jp), ksc(1, k), kso(1, k), ksa(k), ksn(k), &
-                             conv, inexact)
+         call map_round_test(nf, nt, prv(1, c0), cur(1, c0), sb(jp) - sa(jp), ksc(1, k), kso(1, k), ksa(k), ksn(k), conv, &
+                             inexact)
          cv(jp) = conv ; ix(jp) = inexact
       endif
    enddo
@@ -4069,7 +4087,8 @@ contains
    sb = 1._R8P ; if (m <= nb) sb = b(m)
    endsubroutine map_interval
 
-   subroutine piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, path, nq, map, all_meas, measured)
+   subroutine piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, path, nq, map, all_meas, measured, &
+                                 device, chunk)
    !< The 3-D piece map of the step (issue #102 step 2; `piece_map_3d_t`), from the end-pose cuts k0, k1 of the copies
    !< of `surface` moved to pose0 (s0) and pose1; the 3-D twin of `piece_map_2d_build`.
    !<
@@ -4093,6 +4112,15 @@ contains
    !< 4. Assembly (issue #105 step 1f): tracks per cell and their scan (`map_asm_tracks`), the old and new pieces per
    !<    track by count / scan / fill per cell (`map_asm_pieces`), the statuses and measures per cell (`map_asm_status`,
    !<    `map_asm_measures_*`); the same bits as the former loops in cell and piece order.
+   !< `device` (issue #105 step 3): the per-item passes on the device, the same bits, as `piece_map_2d_build(device=)`:
+   !< the evaluations' sizes, both evaluation passes and the fill (`map_evals_3d`), the tracks per cell
+   !< (`map_cells_dev`), the nodes of every measure round with their retries and sums and the round's test per pair
+   !< (`map_measures_3d`), the assembly (`map_asm_tracks_dev`, `map_asm_3d_dev`); the host keeps the plan (candidates,
+   !< events, poses, Gauss nodes), the corner states (the flip rule and the exact queries), the retry decisions, the
+   !< scans, the round decisions and the counters. Resident: the posed facets and the plan's facets are mapped once
+   !< per build, the evaluations from the pass that makes them, comp and the tracks per cell for the measures; the launch
+   !< drivers find them present and copy only their per-launch arrays. `chunk` bytes of workspace per launch set
+   !< (default MAP_DEV_CHUNK_BYTES). Built without OpenACC it runs on the host.
    type(surface_stl_object), intent(in)  :: surface        !< Surface (body frame).
    type(surface_stl_object), intent(in)  :: s0             !< Copy at pose0 (`move`, the end-pose cut's).
    type(rigid_pose_t),       intent(in)  :: pose0, pose1   !< End poses.
@@ -4105,6 +4133,8 @@ contains
    type(piece_map_3d_t),     intent(out) :: map            !< Piece map.
    logical,      optional,   intent(in)  :: all_meas     !< Integrate every evaluated cell (issue #104).
    logical, allocatable, optional, intent(out) :: measured(:) !< Cells integrated per event interval [nx ny nz].
+   logical,      optional,   intent(in)  :: device       !< Per-item passes on the device (issue #105 step 3).
+   integer(I8P), optional,   intent(in)  :: chunk        !< Workspace bytes per launch set (device).
    type(map3_ctx_t)          :: mc                         !< State.
    type(map_plan_t)          :: plan                       !< Host phase (issue #105 step 1c).
    type(map_evals_t)         :: ep                         !< Evaluations (issue #105 step 1d).
@@ -4116,10 +4146,14 @@ contains
    integer(I4P), allocatable :: moff(:)                    !< First measure of every measured cell's tracks.
    real(R8P),    allocatable :: meas(:,:)                  !< Per-track measures of the measured cells.
    logical,      allocatable :: cok(:)                     !< Measured cells whose measures are assigned.
+   real(R8P),    allocatable :: vl0(:), vl1(:)             !< Piece volumes of the end cuts (device, padded).
    integer(I4P)              :: nx, ny, nz, ncell, c, i, j, k, nt, tot, t, a0, a1, b0, b1, v0, ne, p0, nn, q0, nk !< Work.
-   logical                   :: allm                       !< all_meas.
+   integer(I8P)              :: ck                         !< Workspace bytes per launch set (device).
+   logical                   :: allm, dev                  !< all_meas, device.
 
    allm = .false. ; if (present(all_meas)) allm = all_meas
+   dev = .false. ; if (present(device)) dev = device
+   ck = MAP_DEV_CHUNK_BYTES ; if (present(chunk)) ck = max(1_I8P, chunk)
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
    ncell = nx * ny * nz
    map%nx = nx ; map%ny = ny ; map%nz = nz ; map%np0 = k0%np ; map%np1 = k1%np
@@ -4127,10 +4161,32 @@ contains
    call map3_candidates(mc, x, y, z, cstart, cfac)
    call map_plan_3d(mc, x, y, z, k0, k1, cstart, cfac, plan)
    deallocate(cstart, cfac)
-   allocate(ntr(ncell), ckind(ncell), otr(k0%np), ntn(k1%np), moff(ncell))
+   allocate(ntr(ncell), ckind(ncell), otr(max(1_I4P, k0%np)), ntn(max(1_I4P, k1%np)), moff(ncell))
+   dev = dev .and. plan%vstart(ncell + 1) > 1_I4P ! nothing to launch without an evaluated cell (whose facets are listed)
+   ! the posed facets and the plan's facets of the cells, mapped once per build (issue #105 step 3)
+   !$acc enter data copyin(mc%t0, mc%t1, mc%tb, plan%lstart, plan%lel) if(dev)
    ! the evaluations of every evaluated cell, flat (issue #105 step 1d), then the tracks of every cell
-   call map_evals_3d(mc, plan, surface, s0, x, y, z, k0, k1, ep)
-   allocate(comp(ep%pstart(ep%n + 1) - 1_I4P), tw(map_tracks_work(plan, ep)))
+   call map_evals_3d(mc, plan, surface, s0, x, y, z, k0, k1, ep, dev, ck)
+   if (dev) then ! the tracks per cell on the device (issue #105 step 3); comp stays there for the measures
+      allocate(comp(ep%pstart(ep%n + 1)), vl0(k0%np + 1), vl1(k1%np + 1)) ! + 1: every slice start inside
+      vl0 = 0._R8P ; vl1 = 0._R8P
+      if (k0%np > 0_I4P) vl0(1:k0%np) = k0%piece_volume(1:k0%np)
+      if (k1%np > 0_I4P) vl1(1:k1%np) = k1%piece_volume(1:k1%np)
+      !$acc enter data create(comp)
+      call map_cells_dev(ncell, plan%status, plan%vstart, k0%pieces, k0%first_piece, k1%pieces, k1%first_piece, &
+                         size(vl0, kind=I4P), vl0, size(vl1, kind=I4P), vl1, ep%n, ep%closed, ep%np, ep%mstart, &
+                         size(ep%pm, kind=I4P), ep%pm, ep%pstart, ep%kstart, size(ep%key, kind=I4P), ep%key, ep%kpiece, &
+                         size(comp, kind=I4P), comp, size(otr, kind=I4P), otr, size(ntn, kind=I4P), ntn, ckind, ntr)
+      do c = 1_I4P, ncell
+         if (plan%status(c) /= PLAN_EVAL) cycle
+         map%evaluations = map%evaluations + plan%vstart(c + 1) - plan%vstart(c)
+         map%evaluated_cells = map%evaluated_cells + 1_I4P
+      enddo
+      !$acc enter data copyin(ntr)
+   else
+      allocate(comp(ep%pstart(ep%n + 1) - 1_I4P), tw(map_tracks_work(plan, ep)))
+   endif
+   if (.not. dev) then
    do k = 1_I4P, nz
       do j = 1_I4P, ny
          do i = 1_I4P, nx
@@ -4159,6 +4215,7 @@ contains
          enddo
       enddo
    enddo
+   endif
    ! the per-track measures of the multi-track cells (all evaluated cells with all_meas), from the flat evaluations
    tot = 0_I4P ; moff = 0_I4P
    do c = 1_I4P, ncell
@@ -4166,8 +4223,10 @@ contains
          moff(c) = tot + 1_I4P ; tot = tot + ntr(c)
       endif
    enddo
-   allocate(meas(12, tot), cok(ncell)) ; meas = 0._R8P
-   call map_measures_3d(mc, plan, ep, comp, surface, s0, x, y, z, k0, k1, ntr, moff, meas, cok)
+   allocate(meas(12, max(1_I4P, tot)), cok(ncell)) ; meas = 0._R8P ! (at least one column: device clauses)
+   call map_measures_3d(mc, plan, ep, comp, surface, s0, x, y, z, k0, k1, ntr, moff, meas, cok, dev, ck)
+   !$acc exit data delete(mc%t0, mc%t1, mc%tb, plan%lstart, plan%lel, ep%closed, ep%np, ep%nk, ep%pm, ep%pstart, ep%kstart, &
+   !$acc&                 ep%key, ep%kpiece, comp, ntr) if(dev)
    do c = 1_I4P, ncell
       if (moff(c) == 0_I4P .or. ntr(c) == 0_I4P) cycle ! not measured, or no track (solid throughout): measured
       if (cok(c)) cycle
@@ -4180,11 +4239,22 @@ contains
    if (present(measured)) measured = moff > 0_I4P
    ! assembly (issue #105 step 1f): tracks per cell, scan; pieces per track, scan, fill; status; measures
    allocate(map%tracks(nx, ny, nz), map%first_track(nx, ny, nz))
-   call map_asm_tracks(ncell, ckind, ntr, map%first_track, nt, map%untrusted_cells, map%multi_track_cells)
+   if (dev) then
+      call map_asm_tracks_dev(ncell, ckind, ntr, map%first_track, nt, map%untrusted_cells, map%multi_track_cells)
+   else
+      call map_asm_tracks(ncell, ckind, ntr, map%first_track, nt, map%untrusted_cells, map%multi_track_cells)
+   endif
    map%tracks = reshape(ntr, [nx, ny, nz]) ; map%nt = nt
    allocate(map%track_cell(3, nt), map%status(nt), map%old_start(nt + 1), map%new_start(nt + 1), map%old_piece(k0%np), &
             map%new_piece(k1%np), map%old_track(k0%np), map%new_track(k1%np), map%volume0(nt), map%volume1(nt), &
             map%faces(6, nt), map%outflow(6, nt), map%wall(3, nt), map%residual(nt))
+   if (dev .and. nt > 0_I4P .and. k0%np > 0_I4P .and. k1%np > 0_I4P) then ! (else nothing worth a launch: the host)
+      call map_asm_3d_dev(nx, ny, nz, ckind, ntr, map%first_track, moff, size(meas, 2, kind=I4P), meas, sw%face_x, sw%face_y, &
+                          sw%face_z, fox, foy, foz, sw%wall, sw%residual, k0%np, k0%first_piece, k0%pieces, otr, &
+                          k0%piece_volume, k1%np, k1%first_piece, k1%pieces, ntn, k1%piece_volume, nt, map%old_start, &
+                          map%old_piece, map%old_track, map%volume0, map%new_start, map%new_piece, map%new_track, map%volume1, &
+                          map%status, map%track_cell, map%faces, map%outflow, map%wall, map%residual)
+   else
    call map_asm_pieces(ncell, ckind, ntr, map%first_track, k0%first_piece, k0%pieces, k0%np, otr, k0%piece_volume, nt, &
                        map%old_start, map%old_piece, map%old_track, map%volume0)
    call map_asm_pieces(ncell, ckind, ntr, map%first_track, k1%first_piece, k1%pieces, k1%np, ntn, k1%piece_volume, nt, &
@@ -4202,6 +4272,7 @@ contains
                                nt, map%volume0, map%volume1, map%faces, map%outflow, map%wall, map%residual)
    enddo
    !$omp end parallel do
+   endif
    do t = 1_I4P, nt
       map%n_status(map%status(t)) = map%n_status(map%status(t)) + 1_I4P
    enddo
@@ -4548,29 +4619,37 @@ contains
    enddo
    endsubroutine map_states_3d
 
-   subroutine map_evals_3d(mc, plan, surface, s0, x, y, z, k0, k1, ep)
+   subroutine map_evals_3d(mc, plan, surface, s0, x, y, z, k0, k1, ep, dev, ck)
    !< The evaluations of the 3-D map (issue #105 step 1d; `map_evals_t`, the twin of `map_evals_2d`): every item's
    !< pieces and features from its cell's facets placed at its instant (`map_place_3d`). Corner states by
    !< `map_states_3d`; sizes pass (`map_item_3d_count`: the piercings); the evaluation pass (`map_item_3d_eval`) in
    !< chunks; a middle evaluation that fails with a corner known by the flip rule is evaluated again with the exact
    !< corner states (the last retry of the per-cell `map3_eval` of issue #102); then the CSR. Bit for bit
-   !< that `map3_eval`.
+   !< that `map3_eval`. dev (issue #105 step 3): the sizes pass, both evaluation passes and the fill on the device
+   !< (`map_count_3d_dev`, `map_eval_3d_dev`, `map_fill_dev`; ck bytes of workspace per launch set), the plan's facets
+   !< and the posed facets present (`piece_map_3d_build`); the outputs stay there (closed, np, nk, pm, pstart, kstart,
+   !< key, kpiece: mapped until `piece_map_3d_build` ends), the host gets back the closed flags (retry list) and the
+   !< counts (scans); the corner states, the retry decisions, the workspace sizes and the scans stay here. The features
+   !< then have one padding element (every slice start inside).
    type(map3_ctx_t),         intent(in)    :: mc               !< State.
    type(map_plan_t),         intent(in)    :: plan             !< Host phase.
    type(surface_stl_object), intent(in)    :: surface, s0      !< Surface (body frame), copy at pose0.
    real(R8P),                intent(in)    :: x(:), y(:), z(:) !< Cell edges.
    type(cut_cells_3d_t),     intent(in)    :: k0, k1           !< End-pose cuts.
    type(map_evals_t),        intent(inout) :: ep               !< Evaluations.
+   logical,                  intent(in)    :: dev              !< On the device.
+   integer(I8P),             intent(in)    :: ck               !< Workspace bytes per launch set (device).
    integer(I4P), allocatable :: vc(:), npc(:), wr(:), wi(:), kcap(:), keyc(:), kpc(:), mode(:), ro(:), io(:) !< Work.
    integer(I4P), allocatable :: rl(:)                          !< Items to evaluate again.
    real(R8P),    allocatable :: rw(:), al(:), fr(:,:)          !< Workspace, end fractions.
    integer(I4P), allocatable :: iw(:)                          !< Workspace.
    logical,      allocatable :: anyk(:), vm(:)                 !< A corner known, piece measures.
+   real(R8P),    allocatable :: qr(:,:,:), qt(:,:)             !< Pose table (device, at least one pose).
    real(R8P)                 :: pr(3, 3), pt(3), c0(3), c1(3), b0(3), b1(3), s !< Work.
-   integer(I4P)              :: nx, ny, n, c, i, j, k, v, a, b, l0, nl, mk, nr, q, r, np0, np1 !< Work.
+   integer(I4P)              :: nx, ny, nz, n, c, i, j, k, v, a, b, l0, nl, mk, nr, q, r, np0, np1 !< Work.
    integer(I4P)              :: csz(8)                         !< Unused pose0 states (exact queries).
 
-   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
    call map_states_3d(mc, plan, surface, s0, x, y, z, k0, k1, ep, anyk)
    n = ep%n ; csz = 0_I4P
    allocate(vc(n), npc(n), wr(n), wi(n), kcap(n + 1), mode(n), ro(n + 1), io(n + 1), al(n), fr(6, n), vm(n))
@@ -4594,9 +4673,18 @@ contains
          endselect
       enddo
    enddo
+   if (dev) then ! the pose table, padded to one pose at least; the sizes pass
+      allocate(qr(3, 3, max(1_I4P, plan%npose)), qt(3, max(1_I4P, plan%npose))) ; qr = 0._R8P ; qt = 0._R8P
+      if (plan%npose > 0_I4P) then
+         qr(:, :, 1:plan%npose) = plan%pose_r ; qt(:, 1:plan%npose) = plan%pose_t
+      endif
+      call map_count_3d_dev(n, vc, plan%vkind, plan%vs, plan%vpose, size(qt, 2, kind=I4P), qr, qt, nx, ny, nz, x, y, z, &
+                            size(plan%lstart, kind=I4P), plan%lstart, size(plan%lel, kind=I4P), plan%lel, mc%nf, mc%t0, mc%t1, &
+                            mc%tb, mc%rot, mc%d, wr, wi, ck, npc)
+   endif
    ! sizes pass: the placed facets, the piercings
    a = 1_I4P
-   do while (a <= n)
+   do while (a <= n .and. .not. dev)
       call map_chunk(a, n, wr, wi, b, ro, io, rw, iw)
       !$omp parallel do default(shared) private(v, c, i, j, k, l0, nl, pr, pt, c0, c1) schedule(dynamic, 16)
       do v = a, b
@@ -4620,11 +4708,13 @@ contains
    call csr_scan(kcap) ; call csr_scan(ep%mstart)
    allocate(ep%closed(n), ep%np(n), ep%nk(n), keyc(kcap(n + 1) - 1_I4P), kpc(kcap(n + 1) - 1_I4P), &
             ep%pm(ep%mstart(n + 1))) ! + 1: every slot start inside
+   !$acc enter data create(ep%closed, ep%np, ep%nk, ep%pm, keyc, kpc) if(dev)
    ! evaluation pass, then the failed middle evaluations with a known corner again, with the exact corner states
    do r = 1_I4P, 2_I4P
       if (r == 1_I4P) then
          rl = [(v, v = 1_I4P, n)]
       else
+         !$acc update host(ep%closed) if(dev)
          nr = 0_I4P
          do v = 1_I4P, n
             if (mode(v) == 1_I4P .and. .not. ep%closed(v) .and. anyk(v)) nr = nr + 1_I4P
@@ -4646,9 +4736,30 @@ contains
             endif
          enddo
       endif
-      call map_evals_3d_pass(mc, plan, x, y, z, rl, vc, mode, al, fr, vm, npc, wr, wi, kcap, keyc, kpc, ep)
+      if (dev) then
+         call map_eval_3d_dev(n, size(rl, kind=I4P), rl, vc, plan%vkind, plan%vs, plan%vpose, size(qt, 2, kind=I4P), qr, qt, &
+                              nx, ny, nz, x, y, z, size(plan%lstart, kind=I4P), plan%lstart, size(plan%lel, kind=I4P), &
+                              plan%lel, mc%nf, mc%t0, mc%t1, mc%tb, mc%rot, mc%d, ep%cs, al, fr, vm, mode, npc, wr, wi, ck, &
+                              kcap, size(keyc, kind=I4P), ep%mstart, size(ep%pm, kind=I4P), ep%closed, ep%np, ep%nk, keyc, kpc, &
+                              ep%pm)
+      else
+         call map_evals_3d_pass(mc, plan, x, y, z, rl, vc, mode, al, fr, vm, npc, wr, wi, kcap, keyc, kpc, ep)
+      endif
    enddo
-   call map_evals_fill(ep, kcap, keyc, kpc)
+   if (dev) then ! the counts back, the scans here, the fill there; the features padded
+      !$acc update host(ep%np, ep%nk)
+      allocate(ep%pstart(n + 1), ep%kstart(n + 1))
+      ep%pstart(1:n) = ep%np ; ep%kstart(1:n) = ep%nk
+      call csr_scan(ep%pstart) ; call csr_scan(ep%kstart)
+      allocate(ep%key(ep%kstart(n + 1)), ep%kpiece(ep%kstart(n + 1)))
+      ep%key(ep%kstart(n + 1)) = 0_I4P ; ep%kpiece(ep%kstart(n + 1)) = 0_I4P
+      !$acc enter data copyin(ep%pstart, ep%kstart, ep%key, ep%kpiece)
+      call map_fill_dev(n, kcap, size(keyc, kind=I4P), keyc, kpc, ep%nk, ep%kstart, size(ep%key, kind=I4P), ep%key, &
+                        ep%kpiece)
+      !$acc exit data delete(keyc, kpc)
+   else
+      call map_evals_fill(ep, kcap, keyc, kpc)
+   endif
    endsubroutine map_evals_3d
 
    subroutine map_evals_3d_pass(mc, plan, x, y, z, rl, vc, mode, al, fr, vm, npc, wr, wi, kcap, keyc, kpc, ep)
@@ -5325,7 +5436,7 @@ contains
    endif
    endfunction map3_corner_state
 
-   subroutine map_measures_3d(mc, plan, ep, comp, surface, s0, x, y, z, k0, k1, ntr, moff, meas, cok)
+   subroutine map_measures_3d(mc, plan, ep, comp, surface, s0, x, y, z, k0, k1, ntr, moff, meas, cok, dev, ck)
    !< Per-track time integrals over the step of the fluid areas of the cell's six faces (meas(1:6)) and of the outward
    !< rigid-field outflows through them (meas(7:12)), for every measured cell (moff), interval by interval between the
    !< cell's events, on every path: without rotation two-point Gauss per interval (exact: the areas are quadratic in s),
@@ -5335,7 +5446,8 @@ contains
    !< weight (2-D, NACA 0012, nq = 4: a per-track residual of 0.39 of a cell where the cell's is 1e-6). On the Gauss path
    !< the sums over a cell's tracks therefore differ from the cell's Gauss values in `sw` by the quadrature error of
    !< these (the per-track values are the better ones). cok false if a piece at a node cannot be assigned.
-   !< By rounds over flat items (issue #105 step 1e), as `map_measures_2d`; the nodes by `map_nodes_3d`.
+   !< By rounds over flat items (issue #105 step 1e), as `map_measures_2d`; the nodes by `map_nodes_3d`. dev (issue #105
+   !< step 3): the nodes and their sums on the device (`map_nodes_3d`), and the round's test per pair (`map_round_close`).
    type(map3_ctx_t),         intent(inout) :: mc               !< State (skipped, exact).
    type(map_plan_t),         intent(in)    :: plan             !< Host phase.
    type(map_evals_t),        intent(in)    :: ep               !< Evaluations.
@@ -5347,6 +5459,8 @@ contains
    integer(I4P),             intent(in)    :: moff(:)          !< First column of every measured cell's measures (0: not).
    real(R8P),                intent(inout) :: meas(:,:)        !< Measures [12, *] (zero on input).
    logical,                  intent(out)   :: cok(:)           !< Measured cells ok [nx ny nz].
+   logical,                  intent(in)    :: dev              !< On the device.
+   integer(I8P),             intent(in)    :: ck               !< Workspace bytes per launch set (device).
    type(map_pairs_t)         :: pr                             !< Pairs.
    real(R8P),    allocatable :: cur(:,:), prv(:,:)             !< Sums of the pairs (rotation).
    real(R8P),    allocatable :: ksc(:,:), kso(:,:), ksa(:), ksn(:) !< Scales of the test per measured cell.
@@ -5360,8 +5474,8 @@ contains
 
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; rot = mc%rot ; cok = .true.
    call map_pairs_build(plan, ntr, moff, rot, pr, ncol)
-   allocate(cur(12, ncol), prv(12, ncol), ksc(6, pr%nk), kso(6, pr%nk), ksa(pr%nk), ksn(pr%nk), kcs0(8, pr%nk), &
-            kknown(8, pr%nk))
+   allocate(cur(12, max(1_I4P, ncol)), prv(12, max(1_I4P, ncol)), ksc(6, pr%nk), kso(6, pr%nk), ksa(pr%nk), ksn(pr%nk), &
+            kcs0(8, pr%nk), kknown(8, pr%nk)) ! (at least one column: device clauses)
    if (rot) vel = norm2(mc%om) * mc%xm + norm2(mc%d)
    do k = 1_I4P, pr%nk
       c = pr%cell(k) ; call cell_ijk(c, nx, ny, i, j, kk)
@@ -5380,22 +5494,27 @@ contains
       if (nn == 0_I4P) exit
       if (rot) then
          call map_round_zero(pr, ntr, cur)
-         call map_nodes_3d(mc, plan, ep, comp, surface, s0, x, y, z, ntr, kcs0, kknown, pr, nn, nj, ns, nw, cur)
-         call map_round_close(pr, ntr, round, ng, 6_I4P, cur, prv, ksc, kso, ksa, ksn)
+         call map_nodes_3d(mc, plan, ep, comp, surface, s0, x, y, z, ntr, kcs0, kknown, pr, nn, nj, ns, nw, cur, dev, ck)
+         call map_round_close(pr, ntr, round, ng, 6_I4P, cur, prv, ksc, kso, ksa, ksn, dev)
       else
-         call map_nodes_3d(mc, plan, ep, comp, surface, s0, x, y, z, ntr, kcs0, kknown, pr, nn, nj, ns, nw, meas)
+         call map_nodes_3d(mc, plan, ep, comp, surface, s0, x, y, z, ntr, kcs0, kknown, pr, nn, nj, ns, nw, meas, dev, ck)
       endif
    enddo
    call map_measures_finish(pr, rot, ntr, moff, cur, meas, cok, mc%skipped, mc%exact)
    endsubroutine map_measures_3d
 
-   subroutine map_nodes_3d(mc, plan, ep, comp, surface, s0, x, y, z, ntr, kcs0, kknown, pr, nn, nj, ns, nw, acc)
+   subroutine map_nodes_3d(mc, plan, ep, comp, surface, s0, x, y, z, ntr, kcs0, kknown, pr, nn, nj, ns, nw, acc, dev, ck)
    !< One round of 3-D nodes (issue #105 step 1e). Host: the poses at the round's distinct instants with a rotation
    !< (`pose_interpolate`, `node_instants`), the corner states of every node (`map3_corner_state`: the flip rule where
    !< it holds, else the exact query). Then the sizes pass (`map_item_3d_count`) and, in chunks of at most
    !< MAP_CHUNK_BYTES of workspace, the nodes (`map_node_3d_eval`); a node whose pieces failed with a corner of its cell
    !< known by the flip rule is evaluated again with the exact corner states (the per-cell `map3_eval`'s retry); then
    !< the chunk's sums into their pairs' columns of acc, node after node (`map_node_outcome`, `map_node_reduce`).
+   !< dev (issue #105 step 3): the sizes pass (`map_count_3d_dev`), and per launch set of at most ck bytes of workspace
+   !< the nodes (`map_node_3d_dev`), the retries (decided and given their exact corner states here, evaluated there) and
+   !< the sums (`map_reduce_3d_dev`: one thread per measured cell adds its pairs' nodes in node order); the round's
+   !< nodes and the set's workspace stay on the device between these launches; the poses, the corner states and the
+   !< workspace sizes stay here.
    type(map3_ctx_t),         intent(in)    :: mc               !< State.
    type(map_plan_t),         intent(in)    :: plan             !< Host phase.
    type(map_evals_t),        intent(in)    :: ep               !< Evaluations.
@@ -5410,6 +5529,10 @@ contains
    integer(I4P),             intent(in)    :: nj(:)            !< Pair of each node.
    real(R8P),                intent(in)    :: ns(:), nw(:)     !< Instants, weights.
    real(R8P),                intent(inout) :: acc(:,:)         !< Sums [12, *].
+   logical,                  intent(in)    :: dev              !< On the device.
+   integer(I8P),             intent(in)    :: ck               !< Workspace bytes per launch set (device).
+   integer(I4P), allocatable :: ncel(:), nknd(:), nfirst(:)    !< Device: node cells, kinds, first node of every pair.
+   real(R8P),    allocatable :: qrp(:,:,:), qtp(:,:)           !< Device: the round's pose table, padded to one pose at least.
    integer(I4P), allocatable :: cs(:,:), pid(:), npc(:), wr(:), wi(:), ro(:), io(:), np(:), nsk(:), iw(:), rl(:) !< Work.
    logical,      allocatable :: nf(:), rt(:)                   !< Failed, to retry.
    real(R8P),    allocatable :: us(:), qr(:,:,:), qt(:,:), rw(:) !< Pose table, workspace.
@@ -5448,6 +5571,11 @@ contains
       enddo
       nl = plan%lstart(c + 1) - plan%lstart(c) ; wr(v) = 9_I4P * nl ; wi(v) = nl
    enddo
+   if (dev) then
+      call map_nodes_3d_dev(mc, plan, ep, comp, surface, s0, x, y, z, ntr, kknown, pr, nn, nj, ns, nw, acc, ck, pid, &
+                            npose, qr, qt, cs, wr, wi)
+      return
+   endif
    ! sizes pass: the placed facets, the piercings
    a = 1_I4P
    do while (a <= nn)
@@ -5528,6 +5656,109 @@ contains
       a = b + 1_I4P
    enddo
    endsubroutine map_nodes_3d
+
+   subroutine map_nodes_3d_dev(mc, plan, ep, comp, surface, s0, x, y, z, ntr, kknown, pr, nn, nj, ns, nw, acc, ck, pid, npose, &
+                               qr, qt, cs, wr, wi)
+   !< One round of 3-D nodes on the device (issue #105 step 3; `map_nodes_3d` with dev, after its host part: the poses
+   !< qr, qt at the round's instants pid, the corner states cs, the initial workspaces wr, wi). The round's node arrays
+   !< are mapped for the round; the sizes pass (`map_count_3d_dev`) gives the piercings back for the workspace sizes
+   !< (here); then per launch set of at most ck bytes of workspace, the set's workspace mapped: its nodes
+   !< (`map_node_3d_dev`), the retry flags back, the retried nodes' exact corner states (here, as `map_nodes_3d`) and
+   !< their evaluation, the sums (`map_reduce_3d_dev`). The plan's facets, the posed facets, the evaluations and comp
+   !< are present (`piece_map_3d_build`). The same bits as the host loops of `map_nodes_3d`.
+   type(map3_ctx_t),         intent(in)    :: mc               !< State.
+   type(map_plan_t),         intent(in)    :: plan             !< Host phase.
+   type(map_evals_t),        intent(in)    :: ep               !< Evaluations.
+   integer(I4P),             intent(in)    :: comp(:)          !< Track of every piece of every evaluation.
+   type(surface_stl_object), intent(in)    :: surface, s0      !< Surface (body frame), copy at pose0.
+   real(R8P),                intent(in)    :: x(:), y(:), z(:) !< Cell edges.
+   integer(I4P),             intent(in)    :: ntr(:)           !< Tracks of every cell.
+   logical,                  intent(in)    :: kknown(:,:)      !< Corners known by the flip rule per measured cell.
+   type(map_pairs_t),        intent(inout) :: pr               !< Pairs.
+   integer(I4P),             intent(in)    :: nn               !< Nodes.
+   integer(I4P),             intent(in)    :: nj(:)            !< Pair of each node.
+   real(R8P),                intent(in)    :: ns(:), nw(:)     !< Instants, weights.
+   real(R8P),                intent(inout) :: acc(:,:)         !< Sums [12, *].
+   integer(I8P),             intent(in)    :: ck               !< Workspace bytes per launch set.
+   integer(I4P),             intent(in)    :: pid(:)           !< Pose of each node (0: none).
+   integer(I4P),             intent(in)    :: npose            !< Poses of the round.
+   real(R8P),                intent(in)    :: qr(:,:,:), qt(:,:) !< Their rotations, translations.
+   integer(I4P),             intent(inout) :: cs(:,:)          !< Corner states of each node (retries: exact).
+   integer(I4P),             intent(inout) :: wr(:), wi(:)     !< Workspace of each node (initial: the sizes pass's).
+   integer(I4P), allocatable :: ncel(:), nknd(:), nfirst(:), npc(:), np(:), nsk(:), ro(:), io(:), iw(:), rl(:) !< Work.
+   logical,      allocatable :: nf(:), rt(:)                   !< Failed, to retry.
+   real(R8P),    allocatable :: qrp(:,:,:), qtp(:,:), rw(:)    !< The pose table, padded to one pose at least; workspace.
+   type(rigid_pose_t)        :: ps                             !< Pose.
+   real(R8P)                 :: c0(3), c1(3), b0(3), b1(3)     !< Cell.
+   integer(I4P)              :: nx, ny, v, k, c, i, j, kk, q, a, b, h, m, pass, nrt, npo !< Work.
+   integer(I4P)              :: csz(8)                         !< Unused pose0 states (exact queries).
+
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; csz = 0_I4P
+   allocate(ncel(nn), nknd(nn), nfirst(pr%n), npc(nn), np(nn), nsk(nn), nf(nn), rt(nn), ro(nn + 1), io(nn + 1), rl(nn), &
+            qrp(3, 3, max(1_I4P, npose)), qtp(3, max(1_I4P, npose)))
+   nknd = 2_I4P ; nfirst = 0_I4P ; qrp = 0._R8P ; qtp = 0._R8P
+   if (npose > 0_I4P) then
+      qrp(:, :, 1:npose) = qr(:, :, 1:npose) ; qtp(:, 1:npose) = qt(:, 1:npose)
+   endif
+   do v = 1_I4P, nn
+      ncel(v) = pr%cell(pr%k(nj(v))) ; if (nfirst(nj(v)) == 0_I4P) nfirst(nj(v)) = v
+   enddo
+   !$acc data copyin(ncel, nknd, nj, ns, nw, pid, qrp, qtp, cs, wr, wi, pr%narrow, pr%vr, pr%va) create(npc, np, nf, nsk, rt)
+   call map_count_3d_dev(nn, ncel, nknd, ns, pid, size(qtp, 2, kind=I4P), qrp, qtp, nx, ny, size(z, kind=I4P) - 1_I4P, x, &
+                         y, z, size(plan%lstart, kind=I4P), plan%lstart, size(plan%lel, kind=I4P), plan%lel, mc%nf, mc%t0, &
+                         mc%t1, mc%tb, mc%rot, mc%d, wr, wi, ck, npc)
+   !$acc update host(npc)
+   do v = 1_I4P, nn
+      c = ncel(v)
+      call map_node_3d_sizes(plan%lstart(c + 1) - plan%lstart(c), npc(v), wr(v), wi(v), npo)
+   enddo
+   !$acc update device(wr, wi)
+   a = 1_I4P
+   do while (a <= nn)
+      call map_chunk(a, nn, wr, wi, b, ro, io, rw, iw, ck)
+      !$acc data copyin(ro, io) create(rw, iw)
+      do v = a, b
+         rl(v - a + 1_I4P) = v
+      enddo
+      nrt = b - a + 1_I4P
+      do pass = 1_I4P, 2_I4P
+         call map_node_3d_dev(nn, nrt, rl, ncel, nj, ns, nw, pid, size(qtp, 2, kind=I4P), qrp, qtp, cs, npc, wr, wi, ro, io, &
+                              size(rw, kind=I4P), rw, size(iw, kind=I4P), iw, nx, ny, size(z, kind=I4P) - 1_I4P, x, y, z, &
+                              size(plan%lstart, kind=I4P), plan%lstart, size(plan%lel, kind=I4P), plan%lel, mc%nf, mc%t0, &
+                              mc%t1, mc%tb, mc%rot, mc%d, mc%pose0%t, mc%om, pr%n, pr%narrow, pr%vr, pr%va, ep%n, ep%nk, &
+                              ep%kstart, size(ep%key, kind=I4P), ep%key, ep%kpiece, ep%np, ep%pstart, size(comp, kind=I4P), &
+                              comp, np, nf, nsk, rt)
+         if (pass == 2_I4P) exit
+         !$acc update host(rt(a:b))
+         m = nrt ; nrt = 0_I4P
+         do h = 1_I4P, m ! the pieces failed with a known corner: once more, with the exact corner states (host queries)
+            v = rl(h) ; k = pr%k(nj(v))
+            if (.not. (rt(v) .and. any(kknown(:, k)))) cycle
+            c = pr%cell(k) ; call cell_ijk(c, nx, ny, i, j, kk)
+            c0 = [x(i), y(j), z(kk)] ; c1 = [x(i + 1), y(j + 1), z(kk + 1)] ; b0 = c0 ; b1 = c1
+            if (.not. mc%rot) then
+               b0 = c0 - ns(v) * mc%d ; b1 = c1 - ns(v) * mc%d
+            endif
+            if (pid(v) > 0_I4P) then
+               ps%r = qr(:, :, pid(v)) ; ps%t = qt(:, pid(v))
+            endif
+            do q = 1_I4P, 8_I4P
+               cs(q, v) = map3_corner_state(mc, surface, s0, ns(v), ps, c0, c1, b0, b1, q, .false., csz, plan%cntime(1:0), &
+                                            plan%cncor(1:0))
+            enddo
+            !$acc update device(cs(:, v))
+            nrt = nrt + 1_I4P ; rl(nrt) = v
+         enddo
+         if (nrt == 0_I4P) exit
+      enddo
+      call map_reduce_3d_dev(nn, a, b, ncel, nj, npc, ro, io, size(rw, kind=I4P), rw, size(iw, kind=I4P), iw, np, nf, nsk, &
+                             size(plan%lstart, kind=I4P), plan%lstart, pr%n, pr%col, nfirst, pr%state, pr%skip, pr%nk, pr%cell, &
+                             pr%kstart, size(ntr, kind=I4P), ntr, size(acc, 2, kind=I4P), acc)
+      !$acc end data
+      a = b + 1_I4P
+   enddo
+   !$acc end data
+   endsubroutine map_nodes_3d_dev
 
    pure subroutine map_node_3d_sizes(n, npc, nrw, niw, npo)
    !< Workspace of a 3-D node (`map_node_3d_eval`, issue #105 step 1e): a middle evaluation's with measures
@@ -5670,6 +5901,356 @@ contains
    enddo
    endsubroutine map_node_3d_eval
 
+   pure subroutine pose_rt_3d_k(np, qr, qt, k, r, t)
+   !< Kernel (issue #105 step 3): rotation and translation of pose k of a 3-D pose table (the identity for k = 0), as
+   !< `plan_pose_rt` / `node_pose_rt` give them.
+   !$acc routine seq
+   integer(I4P), intent(in)  :: np                      !< Poses of the table.
+   real(R8P),    intent(in)  :: qr(3, 3, np), qt(3, np) !< Table.
+   integer(I4P), intent(in)  :: k                       !< Pose (0: none).
+   real(R8P),    intent(out) :: r(3, 3), t(3)           !< Rotation, translation.
+   integer(I4P)              :: a, b                    !< Work.
+
+   do b = 1_I4P, 3_I4P
+      do a = 1_I4P, 3_I4P
+         if (k > 0_I4P) then
+            r(a, b) = qr(a, b, k)
+         elseif (a == b) then
+            r(a, b) = 1._R8P
+         else
+            r(a, b) = 0._R8P
+         endif
+      enddo
+      if (k > 0_I4P) then
+         t(b) = qt(b, k)
+      else
+         t(b) = 0._R8P
+      endif
+   enddo
+   endsubroutine pose_rt_3d_k
+
+   subroutine map_count_3d_dev(n, cel, knd, sv, pid, npz, qr, qt, nx, ny, nz, x, y, z, nls, lstart, nlel, lel, nf, t0, t1, &
+                               tb, rot, d, wr, wi, budget, npc)
+   !< Device driver (issue #105 step 3): the sizes pass of n 3-D items (evaluations or nodes; `map_item_3d_count`): item v
+   !< on cell cel(v), of kind knd(v) at instant sv(v), placed by pose pid(v) of the table qr, qt (0: none), on its own
+   !< workspace of wr(v) reals and wi(v) integers; launch sets of at most budget bytes of workspace (`map_chunk`). The
+   !< plan's facets (lstart, lel) and the posed facets (t0, t1, tb) must be present (`piece_map_3d_build` maps them once
+   !< per build); the item arrays are copied in unless present, npc copied back unless present. Built without OpenACC
+   !< the loop runs on the host.
+   integer(I4P), intent(in)  :: n                    !< Items.
+   integer(I4P), intent(in)  :: cel(n), knd(n)       !< Cell, kind of each item.
+   real(R8P),    intent(in)  :: sv(n)                !< Instant of each item.
+   integer(I4P), intent(in)  :: pid(n)               !< Pose of each item (0: none).
+   integer(I4P), intent(in)  :: npz                  !< Poses of the table (>= 1).
+   real(R8P),    intent(in)  :: qr(3, 3, npz), qt(3, npz) !< Pose table.
+   integer(I4P), intent(in)  :: nx, ny, nz           !< Cells per direction.
+   real(R8P),    intent(in)  :: x(nx + 1), y(ny + 1), z(nz + 1) !< Cell edges.
+   integer(I4P), intent(in)  :: nls                  !< Cells + 1.
+   integer(I4P), intent(in)  :: lstart(nls)          !< Facets of every cell (plan).
+   integer(I4P), intent(in)  :: nlel                 !< Local facets.
+   integer(I4P), intent(in)  :: lel(nlel)            !< Their ids.
+   integer(I4P), intent(in)  :: nf                   !< Surface facets.
+   real(R8P),    intent(in)  :: t0(3, 3, nf), t1(3, 3, nf), tb(3, 3, nf) !< Pose0 copy, pose1 copy, body frame.
+   logical,      intent(in)  :: rot                  !< The step rotates.
+   real(R8P),    intent(in)  :: d(3)                 !< Translation over the step.
+   integer(I4P), intent(in)  :: wr(n), wi(n)         !< Workspace of each item.
+   integer(I8P), intent(in)  :: budget               !< Workspace bytes per launch set.
+   integer(I4P), intent(out) :: npc(n)               !< Piercings of each item.
+   integer(I4P), allocatable :: ro(:), io(:), iw(:)  !< Offsets, integer workspace of a launch set.
+   real(R8P),    allocatable :: rw(:)                !< Real workspace of a launch set.
+   real(R8P)                 :: pr(3, 3), pt(3), c0(3), c1(3) !< Pose of an item, its cell.
+   integer(I4P)              :: a, b, v, c, i, j, k, l0, nl !< Work.
+
+   allocate(ro(n + 1), io(n + 1))
+   !$acc data copyin(cel, knd, sv, pid, qr, qt, x, y, z, d, wr, wi) copyout(npc) present(lstart, lel, t0, t1, tb)
+   a = 1_I4P
+   do while (a <= n)
+      call map_chunk(a, n, wr, wi, b, ro, io, rw, iw, budget)
+      !$acc data copyin(ro, io) create(rw, iw)
+      !$acc parallel loop gang vector default(present) private(c, i, j, k, l0, nl, pr, pt, c0, c1) &
+      !$acc& present(cel, knd, sv, pid, qr, qt, x, y, z, lstart, lel, t0, t1, tb, d, wr, wi, ro, io, rw, iw, npc)
+      do v = a, b
+         c = cel(v) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = mod((c - 1_I4P) / nx, ny) + 1_I4P
+         k = (c - 1_I4P) / (nx * ny) + 1_I4P
+         c0(1) = x(i) ; c0(2) = y(j) ; c0(3) = z(k) ; c1(1) = x(i + 1) ; c1(2) = y(j + 1) ; c1(3) = z(k + 1)
+         l0 = lstart(c) ; nl = lstart(c + 1) - l0
+         call pose_rt_3d_k(npz, qr, qt, pid(v), pr, pt)
+         call map_item_3d_count(nl, lel(l0), nf, t0, t1, tb, knd(v), rot, sv(v), d, pr, pt, c0, c1, wr(v), rw(ro(v)), wi(v), &
+                                iw(io(v)), npc(v))
+      enddo
+      !$acc end data
+      a = b + 1_I4P
+   enddo
+   !$acc end data
+   endsubroutine map_count_3d_dev
+
+   subroutine map_eval_3d_dev(n, m, rl, cel, knd, sv, pid, npz, qr, qt, nx, ny, nz, x, y, z, nls, lstart, nlel, lel, nf, t0, &
+                              t1, tb, rot, d, cs, al, fr, vm, mode, npc, wr, wi, budget, kcap, nkc, mstart, npm, closed, np, &
+                              nk, keyc, kpc, pm)
+   !< Device driver (issue #105 step 3): the evaluation pass of the 3-D items rl(1:m) (`map_item_3d_eval`; the inputs of
+   !< `map_count_3d_dev`, the corner states cs, the end fractions al, fr, the measures flag vm, the mode, the piercings),
+   !< each on its own workspace (wr reals, wi integers), launch sets of at most budget bytes. The outputs (closed, np,
+   !< nk, the features and their pieces in their capacity slots kcap, the end items' piece volumes in mstart's) must be
+   !< present: the caller keeps them on the device across its passes and brings back what the host reads. Built without
+   !< OpenACC the loop runs on the host.
+   integer(I4P), intent(in)    :: n                  !< Items.
+   integer(I4P), intent(in)    :: m                  !< Items of this pass.
+   integer(I4P), intent(in)    :: rl(m)              !< Their indexes (increasing).
+   integer(I4P), intent(in)    :: cel(n), knd(n)     !< Cell, kind of each item.
+   real(R8P),    intent(in)    :: sv(n)              !< Instant of each item.
+   integer(I4P), intent(in)    :: pid(n)             !< Pose of each item (0: none).
+   integer(I4P), intent(in)    :: npz                !< Poses of the table (>= 1).
+   real(R8P),    intent(in)    :: qr(3, 3, npz), qt(3, npz) !< Pose table.
+   integer(I4P), intent(in)    :: nx, ny, nz         !< Cells per direction.
+   real(R8P),    intent(in)    :: x(nx + 1), y(ny + 1), z(nz + 1) !< Cell edges.
+   integer(I4P), intent(in)    :: nls                !< Cells + 1.
+   integer(I4P), intent(in)    :: lstart(nls)        !< Facets of every cell (plan).
+   integer(I4P), intent(in)    :: nlel               !< Local facets.
+   integer(I4P), intent(in)    :: lel(nlel)          !< Their ids.
+   integer(I4P), intent(in)    :: nf                 !< Surface facets.
+   real(R8P),    intent(in)    :: t0(3, 3, nf), t1(3, 3, nf), tb(3, 3, nf) !< Pose0 copy, pose1 copy, body frame.
+   logical,      intent(in)    :: rot                !< The step rotates.
+   real(R8P),    intent(in)    :: d(3)               !< Translation over the step.
+   integer(I4P), intent(in)    :: cs(8, n)           !< Corner states of each item.
+   real(R8P),    intent(in)    :: al(n), fr(6, n)    !< End fractions of each item.
+   logical,      intent(in)    :: vm(n)              !< Piece measures of each item.
+   integer(I4P), intent(in)    :: mode(n)            !< Mode of each item.
+   integer(I4P), intent(in)    :: npc(n)             !< Piercings of each item.
+   integer(I4P), intent(in)    :: wr(n), wi(n)       !< Workspace of each item.
+   integer(I8P), intent(in)    :: budget             !< Workspace bytes per launch set.
+   integer(I4P), intent(in)    :: kcap(n + 1)        !< Feature slots of each item.
+   integer(I4P), intent(in)    :: nkc                !< Feature slots.
+   integer(I4P), intent(in)    :: mstart(n + 1)      !< Piece volume slots of each item.
+   integer(I4P), intent(in)    :: npm                !< Piece volume slots.
+   logical,      intent(inout) :: closed(n)          !< Trusted.
+   integer(I4P), intent(inout) :: np(n), nk(n)       !< Pieces, features.
+   integer(I4P), intent(inout) :: keyc(nkc), kpc(nkc) !< Features, their pieces (slots).
+   real(R8P),    intent(inout) :: pm(npm)            !< Piece volumes (slots).
+   integer(I4P), allocatable   :: rr(:), ri(:), ro(:), io(:), iw(:) !< Workspace of the pass's items, offsets, work.
+   real(R8P),    allocatable   :: rw(:)              !< Real workspace of a launch set.
+   real(R8P)                   :: pr(3, 3), pt(3), c0(3), c1(3) !< Pose of an item, its cell.
+   integer(I4P)                :: a, b, h, v, c, i, j, k, l0, nl !< Work.
+
+   if (m < 1_I4P) return
+   allocate(rr(m), ri(m), ro(m + 1), io(m + 1))
+   do h = 1_I4P, m
+      rr(h) = wr(rl(h)) ; ri(h) = wi(rl(h))
+   enddo
+   !$acc data copyin(rl, cel, knd, sv, pid, qr, qt, x, y, z, d, cs, al, fr, vm, mode, npc, wr, wi, kcap, mstart) &
+   !$acc&     present(lstart, lel, t0, t1, tb, closed, np, nk, keyc, kpc, pm)
+   a = 1_I4P
+   do while (a <= m)
+      call map_chunk(a, m, rr, ri, b, ro, io, rw, iw, budget)
+      !$acc data copyin(ro, io) create(rw, iw)
+      !$acc parallel loop gang vector default(present) private(v, c, i, j, k, l0, nl, pr, pt, c0, c1) &
+      !$acc& present(rl, cel, knd, sv, pid, qr, qt, x, y, z, lstart, lel, t0, t1, tb, d, cs, al, fr, vm, mode, npc, wr, wi, &
+      !$acc&         kcap, mstart, closed, np, nk, keyc, kpc, pm, ro, io, rw, iw)
+      do h = a, b
+         v = rl(h) ; c = cel(v) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = mod((c - 1_I4P) / nx, ny) + 1_I4P
+         k = (c - 1_I4P) / (nx * ny) + 1_I4P
+         c0(1) = x(i) ; c0(2) = y(j) ; c0(3) = z(k) ; c1(1) = x(i + 1) ; c1(2) = y(j + 1) ; c1(3) = z(k + 1)
+         l0 = lstart(c) ; nl = lstart(c + 1) - l0
+         call pose_rt_3d_k(npz, qr, qt, pid(v), pr, pt)
+         call map_item_3d_eval(nl, lel(l0), nf, t0, t1, tb, knd(v), rot, sv(v), d, pr, pt, c0, c1, cs(1, v), al(v), fr(1, v), &
+                               vm(v), mode(v), npc(v), wr(v), rw(ro(h)), wi(v), iw(io(h)), closed(v), np(v), nk(v), &
+                               kcap(v + 1) - kcap(v), keyc(kcap(v)), kpc(kcap(v)), mstart(v + 1) - mstart(v), pm(mstart(v)))
+      enddo
+      !$acc end data
+      a = b + 1_I4P
+   enddo
+   !$acc end data
+   endsubroutine map_eval_3d_dev
+
+   subroutine map_node_3d_dev(nn, m, rl, ncel, nj, ns, nw, pid, npz, qr, qt, cs, npc, wr, wi, ro, io, nrw, rw, niw, iw, nx, ny, &
+                              nz, x, y, z, nls, lstart, nlel, lel, nf, t0, t1, tb, rot, d, tp0, om, npr, narrow, vr, va, ne, &
+                              enk, ekst, nkey, key, kpiece, enp, epst, ncomp, comp, npn, nfl, nsk, rt)
+   !< Device driver (issue #105 step 3): the 3-D nodes rl(1:m) of a launch set of a measure round (`map_node_3d_eval`,
+   !< one thread per node) on the set's workspace (rw, iw at the offsets ro, io of the set's first node). Every array but
+   !< rl, the cell edges and the motion vectors must be present (`map_nodes_3d_dev` maps the round's nodes and the set's
+   !< workspace, `piece_map_3d_build` the plan, the posed facets and the evaluations): the set is evaluated, its failures
+   !< retried on the host's exact corner states and its sums taken (`map_reduce_3d_dev`) without a copy. Built without
+   !< OpenACC the loop runs on the host.
+   integer(I4P), intent(in)    :: nn                   !< Nodes of the round.
+   integer(I4P), intent(in)    :: m                    !< Nodes of this pass.
+   integer(I4P), intent(in)    :: rl(m)                !< Their indexes.
+   integer(I4P), intent(in)    :: ncel(nn), nj(nn)     !< Cell, pair of each node.
+   real(R8P),    intent(in)    :: ns(nn), nw(nn)       !< Instant, weight of each node.
+   integer(I4P), intent(in)    :: pid(nn)              !< Pose of each node (0: none).
+   integer(I4P), intent(in)    :: npz                  !< Poses of the table (>= 1).
+   real(R8P),    intent(in)    :: qr(3, 3, npz), qt(3, npz) !< Pose table.
+   integer(I4P), intent(in)    :: cs(8, nn)            !< Corner states of each node.
+   integer(I4P), intent(in)    :: npc(nn)              !< Piercings of each node.
+   integer(I4P), intent(in)    :: wr(nn), wi(nn)       !< Workspace of each node.
+   integer(I4P), intent(in)    :: ro(nn + 1), io(nn + 1) !< Workspace offsets (the set's nodes).
+   integer(I4P), intent(in)    :: nrw, niw             !< Workspace of the set.
+   real(R8P),    intent(inout) :: rw(nrw)              !< Real workspace of the set.
+   integer(I4P), intent(inout) :: iw(niw)              !< Integer workspace of the set.
+   integer(I4P), intent(in)    :: nx, ny, nz           !< Cells per direction.
+   real(R8P),    intent(in)    :: x(nx + 1), y(ny + 1), z(nz + 1) !< Cell edges.
+   integer(I4P), intent(in)    :: nls                  !< Cells + 1.
+   integer(I4P), intent(in)    :: lstart(nls)          !< Facets of every cell (plan).
+   integer(I4P), intent(in)    :: nlel                 !< Local facets.
+   integer(I4P), intent(in)    :: lel(nlel)            !< Their ids.
+   integer(I4P), intent(in)    :: nf                   !< Surface facets.
+   real(R8P),    intent(in)    :: t0(3, 3, nf), t1(3, 3, nf), tb(3, 3, nf) !< Pose0 copy, pose1 copy, body frame.
+   logical,      intent(in)    :: rot                  !< The step rotates.
+   real(R8P),    intent(in)    :: d(3), tp0(3), om(3)  !< Translation over the step, at pose0; rotation vector.
+   integer(I4P), intent(in)    :: npr                  !< Pairs.
+   logical,      intent(in)    :: narrow(npr)          !< Narrow pair.
+   integer(I4P), intent(in)    :: vr(npr), va(npr)     !< Its evaluation and the one after it.
+   integer(I4P), intent(in)    :: ne                   !< Evaluations.
+   integer(I4P), intent(in)    :: enk(ne), ekst(ne + 1) !< Features of every evaluation.
+   integer(I4P), intent(in)    :: nkey                 !< Features (+ padding).
+   integer(I4P), intent(in)    :: key(nkey), kpiece(nkey) !< Features, their pieces.
+   integer(I4P), intent(in)    :: enp(ne), epst(ne + 1) !< Pieces of every evaluation.
+   integer(I4P), intent(in)    :: ncomp                !< Pieces of all evaluations (+ padding).
+   integer(I4P), intent(in)    :: comp(ncomp)          !< Their tracks.
+   integer(I4P), intent(inout) :: npn(nn)              !< Pieces of each node.
+   logical,      intent(inout) :: nfl(nn)              !< Node failed.
+   integer(I4P), intent(inout) :: nsk(nn)              !< Node skips.
+   logical,      intent(inout) :: rt(nn)               !< Node to retry with the exact corner states.
+   real(R8P)                   :: prr(3, 3), ptt(3), tq(3), c0(3), c1(3) !< Pose, translation at a node, cell.
+   integer(I4P)                :: h, v, jp, c, i, j, k, l0, nl, vrr, vaa !< Work.
+
+   if (m < 1_I4P) return
+   !$acc parallel loop gang vector default(present) private(v, jp, c, i, j, k, l0, nl, vrr, vaa, prr, ptt, tq, c0, c1) &
+   !$acc& copyin(rl, x, y, z, d, tp0, om) present(ncel, nj, ns, nw, pid, qr, qt, cs, npc, wr, wi, ro, io, rw, iw, lstart, lel, &
+   !$acc&         t0, t1, tb, narrow, vr, va, enk, ekst, key, kpiece, enp, epst, comp, npn, nfl, nsk, rt)
+   do h = 1_I4P, m
+      v = rl(h) ; jp = nj(v) ; c = ncel(v) ; i = mod(c - 1_I4P, nx) + 1_I4P ; j = mod((c - 1_I4P) / nx, ny) + 1_I4P
+      k = (c - 1_I4P) / (nx * ny) + 1_I4P
+      c0(1) = x(i) ; c0(2) = y(j) ; c0(3) = z(k) ; c1(1) = x(i + 1) ; c1(2) = y(j + 1) ; c1(3) = z(k + 1)
+      l0 = lstart(c) ; nl = lstart(c + 1) - l0 ; vrr = vr(jp) ; vaa = va(jp)
+      call pose_rt_3d_k(npz, qr, qt, pid(v), prr, ptt)
+      tq(1) = tp0(1) + ns(v) * d(1) ; tq(2) = tp0(2) + ns(v) * d(2) ; tq(3) = tp0(3) + ns(v) * d(3)
+      call map_node_3d_eval(nl, lel(l0), nf, t0, t1, tb, rot, ns(v), d, prr, ptt, c0, c1, cs(1, v), npc(v), nw(v), tq, om, &
+                            narrow(jp), enk(vrr), key(ekst(vrr)), kpiece(ekst(vrr)), enp(vrr), comp(epst(vrr)), enk(vaa), &
+                            key(ekst(vaa)), kpiece(ekst(vaa)), enp(vaa), comp(epst(vaa)), wr(v), rw(ro(v)), wi(v), &
+                            iw(io(v)), npn(v), nfl(v), nsk(v), rt(v))
+   enddo
+   endsubroutine map_node_3d_dev
+
+   subroutine map_reduce_3d_dev(nn, a, b, ncel, nj, npc, ro, io, nrw, rw, niw, iw, npn, nfl, nsk, nls, lstart, npr, col, nfirst, &
+                                state, skip, nkc, kcell, kst, nct, ntr, nacc, acc)
+   !< Device driver (issue #105 step 3): the sums of the 3-D nodes a .. b of a launch set (one thread per measured cell:
+   !< its pairs in order, each pair's nodes of the set in node order, `map_nodes_3d`'s outcome rule and
+   !< `map_node_reduce`: the summation order of the host). The nodes' outputs and the set's workspace must be present;
+   !< state, skip and acc are copied in and back. Built without OpenACC the loop runs on the host.
+   integer(I4P), intent(in)    :: nn                   !< Nodes of the round.
+   integer(I4P), intent(in)    :: a, b                 !< Nodes of the set.
+   integer(I4P), intent(in)    :: ncel(nn), nj(nn)     !< Cell, pair of each node.
+   integer(I4P), intent(in)    :: npc(nn)              !< Piercings of each node.
+   integer(I4P), intent(in)    :: ro(nn + 1), io(nn + 1) !< Workspace offsets (the set's nodes).
+   integer(I4P), intent(in)    :: nrw, niw             !< Workspace of the set.
+   real(R8P),    intent(in)    :: rw(nrw)              !< Real workspace of the set.
+   integer(I4P), intent(in)    :: iw(niw)              !< Integer workspace of the set.
+   integer(I4P), intent(in)    :: npn(nn)              !< Pieces of each node.
+   logical,      intent(in)    :: nfl(nn)              !< Node failed.
+   integer(I4P), intent(in)    :: nsk(nn)              !< Node skips.
+   integer(I4P), intent(in)    :: nls                  !< Cells + 1.
+   integer(I4P), intent(in)    :: lstart(nls)          !< Facets of every cell (plan).
+   integer(I4P), intent(in)    :: npr                  !< Pairs.
+   integer(I4P), intent(in)    :: col(npr)             !< First sum column of each pair.
+   integer(I4P), intent(in)    :: nfirst(npr)          !< First node of each pair in the round (0: none).
+   integer(I4P), intent(inout) :: state(npr), skip(npr) !< State, skips of each pair.
+   integer(I4P), intent(in)    :: nkc                  !< Measured cells.
+   integer(I4P), intent(in)    :: kcell(nkc), kst(nkc + 1) !< Cell, pairs of each measured cell.
+   integer(I4P), intent(in)    :: nct                  !< Cells (ntr).
+   integer(I4P), intent(in)    :: ntr(nct)             !< Tracks of every cell.
+   integer(I4P), intent(in)    :: nacc                 !< Sum columns.
+   real(R8P),    intent(inout) :: acc(12, nacc)        !< Sums.
+   integer(I4P)                :: k, c, nl, jp, v, nr, ni, mk, npo !< Work.
+
+   !$acc parallel loop gang vector default(present) private(c, nl, jp, v, nr, ni, mk, npo) copyin(col, nfirst, kcell, kst, ntr) &
+   !$acc& copy(state, skip, acc) present(ncel, nj, npc, ro, io, rw, iw, npn, nfl, nsk, lstart)
+   do k = 1_I4P, nkc
+      c = kcell(k) ; nl = lstart(c + 1) - lstart(c)
+      !$acc loop seq
+      do jp = kst(k), kst(k + 1) - 1_I4P
+         if (nfirst(jp) == 0_I4P) cycle
+         v = max(nfirst(jp), a)
+         do while (v <= b)
+            if (nj(v) /= jp) exit
+            if (state(jp) == PAIR_ACTIVE) then
+               if (nfl(v)) then
+                  state(jp) = PAIR_FAILED
+               else
+                  skip(jp) = skip(jp) + nsk(v)
+                  call map_item_3d_sizes(nl, npc(v), 2_I4P, .true., nr, ni, mk, npo)
+                  call map_node_reduce(12_I4P, npn(v), iw(io(v) + ni + 2_I4P * mk), rw(ro(v) + nr), ntr(c), acc(1, col(jp)))
+               endif
+            endif
+            v = v + 1_I4P
+         enddo
+      enddo
+   enddo
+   endsubroutine map_reduce_3d_dev
+
+   subroutine map_asm_3d_dev(nx, ny, nz, ckind, ntr, ft, moff, nm, meas, fx, fy, fz, fox, foy, foz, wl, res, np0, fp0, pc0, otr, &
+                             vl0, np1, fp1, pc1, ntn, vl1, nt, ostart, opiece, otrk, vol0, nstart, npiece, ntrk, vol1, status, &
+                             tcell, faces, outflow, wall, residual)
+   !< The assembly of `piece_map_3d_build` (issue #105 step 3) on the device, the 3-D twin of `map_asm_2d_dev`: the
+   !< pieces of each end per track (`map_asm_count`, scan on the host, `map_asm_fill`), then the statuses and the
+   !< measures of every cell's tracks (`map_asm_status`, `map_asm_measures_3d`), one thread per cell. The same bits as
+   !< the host loops. nt, np0, np1 >= 1. Built without OpenACC the loops run on the host.
+   integer(I4P), intent(in)  :: nx, ny, nz         !< Cells per direction.
+   integer(I4P), intent(in)  :: ckind(nx * ny * nz), ntr(nx * ny * nz), ft(nx * ny * nz), moff(nx * ny * nz) !< Kind,
+                                                   !< tracks, first track, first measure of every cell.
+   integer(I4P), intent(in)  :: nm                 !< Measured tracks.
+   real(R8P),    intent(in)  :: meas(12, nm)       !< Per-track measures.
+   real(R8P),    intent(in)  :: fx(nx + 1, ny, nz), fy(nx, ny + 1, nz), fz(nx, ny, nz + 1) !< Faces of `sw`.
+   real(R8P),    intent(in)  :: fox(nx + 1, ny, nz), foy(nx, ny + 1, nz), foz(nx, ny, nz + 1) !< Face outflows.
+   real(R8P),    intent(in)  :: wl(3, nx, ny, nz), res(nx, ny, nz) !< Wall, residual of `sw`.
+   integer(I4P), intent(in)  :: np0, np1           !< Pieces of the end cuts.
+   integer(I4P), intent(in)  :: fp0(nx * ny * nz), pc0(nx * ny * nz), fp1(nx * ny * nz), pc1(nx * ny * nz) !< First
+                                                   !< piece, pieces per cell.
+   integer(I4P), intent(in)  :: otr(np0), ntn(np1) !< Track in its cell of every old and new piece.
+   real(R8P),    intent(in)  :: vl0(np0), vl1(np1) !< Piece volumes.
+   integer(I4P), intent(in)  :: nt                 !< Tracks.
+   integer(I4P), intent(out) :: ostart(nt + 1), opiece(np0), otrk(np0) !< Old pieces per track, track of every one.
+   real(R8P),    intent(out) :: vol0(nt)           !< Old volume of every track.
+   integer(I4P), intent(out) :: nstart(nt + 1), npiece(np1), ntrk(np1) !< New pieces per track, track of every one.
+   real(R8P),    intent(out) :: vol1(nt)           !< New volume of every track.
+   integer(I4P), intent(out) :: status(nt), tcell(3, nt) !< Status, cell of every track.
+   real(R8P),    intent(out) :: faces(6, nt), outflow(6, nt), wall(3, nt), residual(nt) !< Measures of every track.
+   real(R8P)                 :: cf(6), co(6), cw(3) !< A cell's faces, outflows, wall.
+   integer(I4P)              :: ijk(3), c, i, j, k, ncell !< Work.
+
+   ncell = nx * ny * nz
+   !$acc data copyin(ckind, ntr, ft, moff, meas, fx, fy, fz, fox, foy, foz, wl, res, fp0, pc0, fp1, pc1, otr, ntn, vl0, vl1) &
+   !$acc&     copyout(ostart, opiece, otrk, vol0, nstart, npiece, ntrk, vol1, status, tcell, faces, outflow, wall, residual)
+   !$acc parallel loop gang vector default(present) present(ckind, ntr, ft, fp0, pc0, fp1, pc1, otr, ntn, otrk, ostart, ntrk, &
+   !$acc& nstart)
+   do c = 1_I4P, ncell
+      call map_asm_count(ckind(c) == -1_I4P, ft(c), ntr(c), fp0(c), max(0_I4P, pc0(c)), np0, otr, nt, otrk, ostart)
+      call map_asm_count(ckind(c) == -1_I4P, ft(c), ntr(c), fp1(c), max(0_I4P, pc1(c)), np1, ntn, nt, ntrk, nstart)
+   enddo
+   !$acc update host(ostart, nstart)
+   call csr_scan(ostart) ; call csr_scan(nstart)
+   !$acc update device(ostart, nstart)
+   !$acc parallel loop gang vector default(present) present(ft, ntr, fp0, pc0, fp1, pc1, otrk, vl0, ostart, opiece, vol0, &
+   !$acc& ntrk, vl1, nstart, npiece, vol1)
+   do c = 1_I4P, ncell
+      call map_asm_fill(ft(c), ntr(c), fp0(c), max(0_I4P, pc0(c)), np0, otrk, vl0, nt, ostart, opiece, vol0)
+      call map_asm_fill(ft(c), ntr(c), fp1(c), max(0_I4P, pc1(c)), np1, ntrk, vl1, nt, nstart, npiece, vol1)
+   enddo
+   !$acc parallel loop gang vector default(present) private(ijk, i, j, k, cf, co, cw) present(ckind, ft, ntr, ostart, nstart, &
+   !$acc& status, tcell, moff, meas, fx, fy, fz, fox, foy, foz, wl, res, vol0, vol1, faces, outflow, wall, residual)
+   do c = 1_I4P, ncell
+      i = 1_I4P + mod(c - 1_I4P, nx) ; j = 1_I4P + mod((c - 1_I4P) / nx, ny) ; k = 1_I4P + (c - 1_I4P) / (nx * ny)
+      ijk(1) = i ; ijk(2) = j ; ijk(3) = k
+      call map_asm_status(3_I4P, ijk, ckind(c) == -1_I4P, ft(c), ntr(c), nt, ostart, nstart, status, tcell)
+      cf(1) = fx(i, j, k) ; cf(2) = fx(i + 1, j, k) ; cf(3) = fy(i, j, k) ; cf(4) = fy(i, j + 1, k) ; cf(5) = fz(i, j, k)
+      cf(6) = fz(i, j, k + 1)
+      co(1) = -fox(i, j, k) ; co(2) = fox(i + 1, j, k) ; co(3) = -foy(i, j, k) ; co(4) = foy(i, j + 1, k)
+      co(5) = -foz(i, j, k) ; co(6) = foz(i, j, k + 1)
+      cw(1) = wl(1, i, j, k) ; cw(2) = wl(2, i, j, k) ; cw(3) = wl(3, i, j, k)
+      call map_asm_measures_3d(ft(c), ntr(c), moff(c), nm, meas, cf, co, cw, res(i, j, k), nt, vol0, vol1, faces, outflow, &
+                               wall, residual)
+   enddo
+   !$acc end data
+   endsubroutine map_asm_3d_dev
+
    subroutine swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, check_input, map, refine)
    !< Swept geometry of `surface` between `pose0` and `pose1` on the block with cell edges x(nx+1),
    !< y(ny+1), z(nz+1) (issue #41 step 5): volumes from `cut_cells_3d` at the two poses; face apertures
@@ -5702,7 +6283,8 @@ contains
                      map, refine)
    endsubroutine swept_cells_3d
 
-   subroutine swept_cells_3d_device(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, chunk_cells, refine)
+   subroutine swept_cells_3d_device(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status, chunk_cells, refine, map, &
+                                    chunk_bytes)
    !< `swept_cells_3d` on the device (OpenACC, issue #100 step 4): the same `sw`, bit for bit, on every path.
    !< - End poses: `cut_cells_3d_device(..., alpha_only=.true.)` on the moved copies `swept_cells_3d` cuts.
    !< - Exact translation: per axis, the host computes every plane's breakpoints (`plane_breakpoints`, unchanged) and
@@ -5722,8 +6304,13 @@ contains
    !< cells refuse it. No `check_input` (call `swept_cells_3d` or `find_self_intersections` for that).
    !< `chunk_cells` (default 2^22) bounds the section cells of one device launch set and the face sums of one plane
    !< group of the rotation held on the host: smaller uses less memory (and more launches), with the same bits.
-   !< `refine` (issue #104): the end poses' full cuts (`cut_cells_3d_device` without `alpha_only`), then the host
-   !< refinement of `swept_cells_3d`.
+   !< `refine` (issue #104): the end poses' full cuts (`cut_cells_3d_device` without `alpha_only`), then the refinement of
+   !< `swept_cells_3d`, its map passes on the device since issue #105 step 3 (see `map`).
+   !< `map` (issue #105 step 3): the piece map of `swept_cells_3d(map=)`, bit for bit, from the end poses' full cuts, its
+   !< per-item passes on the device (`piece_map_3d_build(device=)`: the evaluations, the tracks, the measure rounds, the
+   !< assembly; the posed facets, the plan's facets and the evaluations resident for the build); the host keeps the plan
+   !< (candidates, events, poses, Gauss nodes) and the corner states. `chunk_bytes` (default 2^28) caps the workspace of
+   !< one launch set of the map's items; no output depends on it. Every other output is that of the call without `map`.
    type(surface_stl_object), intent(in)            :: surface  !< Surface (body frame).
    type(rigid_pose_t),       intent(in)            :: pose0    !< Pose at the start.
    type(rigid_pose_t),       intent(in)            :: pose1    !< Pose at the end.
@@ -5735,17 +6322,21 @@ contains
    integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    integer(I4P),             intent(in),  optional :: chunk_cells !< Section cells per launch set (default 2^22).
    logical,                  intent(in),  optional :: refine   !< Gauss path: event cells per event interval (#104).
+   type(piece_map_3d_t),     intent(out), optional :: map      !< Piece map of the step (issue #105 step 3).
+   integer(I8P),             intent(in),  optional :: chunk_bytes !< Workspace bytes per launch set of the map's items.
    integer(I4P)                                    :: ck       !< Chunk.
 
    ck = SWEPT_CHUNK_CELLS ; if (present(chunk_cells)) ck = max(1_I4P, chunk_cells)
-   call swept_3d_run(surface, pose0, pose1, x, y, z, sw, .true., ck, nq, poses, exact, status, refine=refine)
+   call swept_3d_run(surface, pose0, pose1, x, y, z, sw, .true., ck, nq, poses, exact, status, map=map, refine=refine, &
+                     chunk_bytes=chunk_bytes)
    endsubroutine swept_cells_3d_device
 
    subroutine swept_3d_run(surface, pose0, pose1, x, y, z, sw, dev, chunk, nq, poses, exact, status, check_input, map, &
-                           refine)
+                           refine, chunk_bytes)
    !< The work of `swept_cells_3d` (dev = .false.) and `swept_cells_3d_device` (dev = .true.): the same operations in
-   !< the same order, the cut cells and face sums on the device with dev. The piece map (`map`, host path only) is built
-   !< last, from the end-pose cuts and the face outflows (an extra output of the face routines, their arithmetic as is).
+   !< the same order, the cut cells and face sums on the device with dev. The piece map (`map`) is built last, from the
+   !< end-pose cuts and the face outflows (an extra output of the face routines, their arithmetic as is), its per-item
+   !< passes on the device with dev (issue #105 step 3; `chunk_bytes` bytes of workspace per launch set).
    type(surface_stl_object), intent(in)            :: surface  !< Surface (body frame).
    type(rigid_pose_t),       intent(in)            :: pose0    !< Pose at the start.
    type(rigid_pose_t),       intent(in)            :: pose1    !< Pose at the end.
@@ -5760,6 +6351,7 @@ contains
    integer(I4P),             intent(out), optional :: status   !< STATUS_OK or STATUS_INVALID_INPUT.
    type(piece_map_3d_t),     intent(out), optional :: map      !< Piece map of the step (issue #102 step 2).
    logical,                  intent(in),  optional :: refine   !< Gauss path: event cells per event interval (#104).
+   integer(I8P),             intent(in),  optional :: chunk_bytes !< Workspace bytes per launch set of the map (dev).
    type(surface_stl_object) :: s0                 !< Moved copy.
    type(piece_map_3d_t)     :: mp                 !< Piece map of the refinement (issue #104).
    logical,     allocatable :: meas_c(:), rx(:,:,:), ry(:,:,:), rz(:,:,:) !< Cells integrated, faces replaced.
@@ -5773,7 +6365,7 @@ contains
    real(R8P), allocatable   :: fx2(:,:,:), fy2(:,:,:), fz2(:,:,:), flux(:,:,:), fl2(:,:,:) !< Work.
    real(R8P), allocatable   :: fox(:,:,:), foy(:,:,:), foz(:,:,:) !< Face outflows in +axis (map).
    integer(I4P)             :: nx, ny, nz, n, i, j, k, st !< Work.
-   logical                  :: want_map           !< The piece map asked (host path).
+   logical                  :: want_map           !< The piece map asked.
 
    if (present(status)) status = STATUS_OK
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
@@ -5793,7 +6385,7 @@ contains
          return
       endif
    endif
-   want_map = present(map) .and. .not. dev
+   want_map = present(map)
    sw%nx = nx ; sw%ny = ny ; sw%nz = nz
    allocate(sw%swept(nx, ny, nz), sw%face_x(nx + 1, ny, nz), sw%face_y(nx, ny + 1, nz), sw%face_z(nx, ny, nz + 1), &
             sw%wall(3, nx, ny, nz), sw%residual(nx, ny, nz), flux(nx, ny, nz))
@@ -5805,10 +6397,12 @@ contains
                                                              size(pairs), ' facet pairs): residuals around them are not round-off'
       endif
    endif
-   if (dev) then ! alpha alone (issue #100 step 4), the same copies
-      s0 = surface ; call s0%move(pose1) ; call cut_cells_3d_device(s0, x, y, z, k1, st, alpha_only=.not. rfn)
+   if (dev) then ! alpha alone (issue #100 step 4; the full cuts for the refinement and the map), the same copies
+      s0 = surface ; call s0%move(pose1)
+      call cut_cells_3d_device(s0, x, y, z, k1, st, alpha_only=.not. (rfn .or. want_map))
       if (st == STATUS_OK) then
-         s0 = surface ; call s0%move(pose0) ; call cut_cells_3d_device(s0, x, y, z, k0, st, alpha_only=.not. rfn)
+         s0 = surface ; call s0%move(pose0)
+         call cut_cells_3d_device(s0, x, y, z, k0, st, alpha_only=.not. (rfn .or. want_map))
       endif
       if (st /= STATUS_OK) then
          if (present(status)) status = STATUS_INVALID_INPUT
@@ -5877,9 +6471,9 @@ contains
    if (.not. present(poses) .and. .not. translation .and. .not. rotation_exact) then
       allocate(fx2(nx + 1, ny, nz), fy2(nx, ny + 1, nz), fz2(nx, ny, nz + 1), fl2(nx, ny, nz))
       call faces_gauss_3d(surface, pose0, pose1, x, y, z, 2_I4P * n, fx2, fy2, fz2, fl2, dev)
-      if (rfn) then ! event cells per event interval (issue #104), on the host for both paths
+      if (rfn) then ! event cells per event interval (issue #104), the map's passes on the device with dev (#105)
          call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_GAUSS, n, mp, &
-                                 all_meas=.true., measured=meas_c)
+                                 all_meas=.true., measured=meas_c, device=dev, chunk=chunk_bytes)
          allocate(rx(nx + 1, ny, nz), ry(nx, ny + 1, nz), rz(nx, ny, nz + 1))
          call refine_faces_3d(mp, meas_c, nx, ny, nz, sw%face_x, sw%face_y, sw%face_z, fox, foy, foz, rx, ry, rz)
          do k = 1_I4P, nz
@@ -5917,11 +6511,14 @@ contains
       map = mp
    elseif (want_map) then
       if (translation) then
-         call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_TRANSLATION, n, map)
+         call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_TRANSLATION, n, map, &
+                                 device=dev, chunk=chunk_bytes)
       elseif (rotation_exact) then
-         call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_ROTATION, n, map)
+         call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_ROTATION, n, map, &
+                                 device=dev, chunk=chunk_bytes)
       else
-         call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_GAUSS, n, map)
+         call piece_map_3d_build(surface, s0, pose0, pose1, x, y, z, k0, k1, sw, fox, foy, foz, MAP_GAUSS, n, map, &
+                                 device=dev, chunk=chunk_bytes)
       endif
    endif
    endsubroutine swept_3d_run

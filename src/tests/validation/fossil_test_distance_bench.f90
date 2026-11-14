@@ -27,9 +27,10 @@
 !<      `line crossings device vs serial mismatches` (issue #40) must be 0, and so must every later device line
 !<      (`orient3d device vs serial mismatches`, issue #100 step 3c, among them; `swept cells 3-D device vs serial
 !<      mismatches`, issue #100 step 4; `cut cells 3-D link inputs device vs serial mismatches` and `cut links 3-D
-!<      device vs serial mismatches`, step 5).
+!<      device vs serial mismatches`, step 5; `piece map 3-D device vs serial mismatches`, issue #105 step 3).
 !<
-!<   6. Timing tables of the 3-D device kernels (sections, cut cells, link inputs, links, swept; best / median of 5):
+!<   6. Timing tables of the 3-D device kernels (sections, cut cells, link inputs, links, swept; best / median of 5;
+!<      the piece map, best of 2):
 !<      only when built with OpenACC, where they compare the CPU with the GPU. Built without it the `device` routines
 !<      are host twins, so the tables would time the CPU twice (gfortran -O2, dragon-fine 40^3: 1375 s with them,
 !<      384 s without); the environment variable FOSSIL_BENCH_TIMING=1 prints them anyway, FOSSIL_BENCH_TIMING=0
@@ -69,6 +70,8 @@ use fossil_line_query,   only : line_crossing_before
 use fossil,              only : swept_cells_3d_t, swept_cells_3d, swept_cells_3d_device, pose_identity, pose_interpolate, &
                                gauss_legendre_01
 use fossil_swept_3d_compare, only : swept_cells_3d_mismatches
+use fossil,              only : piece_map_3d_t
+use fossil_piece_map_compare, only : piece_map_3d_mismatches
 
 implicit none
 
@@ -114,6 +117,7 @@ integer                       :: orient3d_mismatch         !< orient3d, line_cro
 integer                       :: nodes_mismatch            !< 3-D cut-cell node states, edge fractions: device vs CPU (3c).
 integer                       :: cells_mismatch            !< 3-D cut cells: device vs CPU mismatches (#100 step 3c).
 integer                       :: swept_mismatch            !< 3-D swept cells: device vs CPU mismatches (#100 step 4).
+integer                       :: map_mismatch              !< 3-D piece map: device vs CPU mismatches (#105 step 3).
 integer                       :: link_inputs_mismatch      !< 3-D link inputs: device vs CPU mismatches (#100 step 5).
 integer                       :: links_mismatch            !< 3-D piece links: device vs CPU mismatches (#100 step 5).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
@@ -305,6 +309,8 @@ call links_case(mismatch=links_mismatch)
 rich_ok = rich_ok .and. links_mismatch == 0
 call swept_case(mismatch=swept_mismatch)
 rich_ok = rich_ok .and. swept_mismatch == 0
+call map_case(mismatch=map_mismatch)
+rich_ok = rich_ok .and. map_mismatch == 0
 
 fwn_device_abs_err = 0._R8P
 fwn_sign_mismatch  = 0_I4P
@@ -407,6 +413,7 @@ print '(A,I0)',      '   cut cells 3-D device vs serial mismatches: ', cells_mis
 print '(A,I0)',      '   cut cells 3-D link inputs device vs serial mismatches: ', link_inputs_mismatch
 print '(A,I0)',      '   cut links 3-D device vs serial mismatches: ', links_mismatch
 print '(A,I0)',      '   swept cells 3-D device vs serial mismatches: ', swept_mismatch
+print '(A,I0)',      '   piece map 3-D device vs serial mismatches: ', map_mismatch
 print '(A)',         ''
 print '(A,I0,A,ES10.3)', 'correctness (BVH vs brute force, ', s, ' samples): max |d_tree - d_brute| = ', max_abs_err
 print '(A)',         ''
@@ -1187,6 +1194,114 @@ contains
    print '(3X,A12,I4,A,2X,A11,2(2X,ES9.2,A,ES9.2),A,F6.2,A)', label, m, '^3', PATHS(path), minval(t(1, :)), ' /', &
          median_of5(t(1, :)), minval(t(2, :)), ' /', median_of5(t(2, :)), '  (', minval(t(1, :)) / minval(t(2, :)), 'x)'
    endsubroutine swept_timing
+
+   subroutine map_case(mismatch)
+   !< The 3-D piece map on the device (issue #105 step 3): `swept_cells_3d_device(map=)` against `swept_cells_3d(map=)`,
+   !< the map, the swept geometry and the status bitwise (`piece map 3-D device vs serial mismatches`), on the step-0
+   !< bodies (marching-cubes sphere, cone) at 32^3 (8^3 with grid_n < 32) on four paths of `swept_motion`: the exact
+   !< translation, the exact rotation, Gauss (nq = 4) and Gauss with `refine`. With timing and grid_n >= 32 a table
+   !< (best of 2) per body at 32^3 and 64^3: the host and device Gauss calls without the map, with it and with
+   !< `refine` (the map machinery inside); the map's share of each Gauss call (with - without), the refine machinery
+   !< (refine - Gauss), and the device speed-ups of both.
+   integer, intent(out)      :: mismatch               !< Mismatches.
+   type(surface_stl_object)  :: sb(2)                  !< Step-0 bodies.
+   type(body_t), allocatable :: bb(:)                  !< Bench bodies.
+   character(12), parameter  :: NAMES(2) = [character(12) :: 'mc sphere', 'cone'] !< Their names.
+   real(R8P),    allocatable :: gx(:), gy(:), gz(:)    !< Cell edges.
+   integer(I4P)              :: b, k, m                !< Work.
+
+   mismatch = 0
+   m = merge(32_I4P, 8_I4P, grid_n >= 32_I4P)
+   call mc_body(BODY_SPHERE, 24_I4P, sb(1))
+   call bench_bodies(bb) ; call to_surface_bench(bb(7), sb(2))
+   do b = 1, 2
+      call box_grid(sb(b), m, gx, gy, gz)
+      do k = 1, 5
+         if (k == 4) cycle
+         mismatch = mismatch + map_compare(sb(b), gx, gy, gz, k)
+      enddo
+   enddo
+   if (.not. timing .or. grid_n < 32_I4P) return
+   print '(A)', 'piece map 3-D timing (best of 2) [s]: body, cells; host Gauss, + map, refine; device Gauss, + map, '// &
+                'refine; map host, map device (speed-up); refine machinery host, device (speed-up)'
+   do b = 1, 2
+      do k = 1, 2
+         call box_grid(sb(b), 32_I4P * k, gx, gy, gz)
+         call map_timing(NAMES(b), sb(b), 32_I4P * k, gx, gy, gz)
+      enddo
+   enddo
+   endsubroutine map_case
+
+   function map_compare(s, gx, gy, gz, path) result(mismatch)
+   !< `swept_cells_3d_device(map=)` against `swept_cells_3d(map=)` on one path of `swept_compare` (1, 2, 3, 5): map,
+   !< swept geometry, statuses.
+   type(surface_stl_object), intent(in) :: s            !< Body.
+   real(R8P),                intent(in) :: gx(:), gy(:), gz(:) !< Cell edges.
+   integer(I4P),             intent(in) :: path         !< Path.
+   integer                              :: mismatch     !< Mismatches.
+   type(swept_cells_3d_t)               :: sh, sd       !< Host, device.
+   type(piece_map_3d_t)                 :: mh, md       !< Maps.
+   type(rigid_pose_t)                   :: p0, p1       !< End poses.
+   integer(I4P)                         :: st, st2      !< Statuses.
+
+   call swept_motion(s, gx, gy, gz, path, p0, p1)
+   select case (path)
+   case (1_I4P, 2_I4P)
+      call swept_cells_3d(s, p0, p1, gx, gy, gz, sh, status=st, map=mh)
+      call swept_cells_3d_device(s, p0, p1, gx, gy, gz, sd, status=st2, map=md)
+   case (3_I4P)
+      call swept_cells_3d(s, p0, p1, gx, gy, gz, sh, nq=4_I4P, exact=.false., status=st, map=mh)
+      call swept_cells_3d_device(s, p0, p1, gx, gy, gz, sd, nq=4_I4P, exact=.false., status=st2, map=md)
+   case default
+      call swept_cells_3d(s, p0, p1, gx, gy, gz, sh, nq=4_I4P, exact=.false., status=st, refine=.true., map=mh)
+      call swept_cells_3d_device(s, p0, p1, gx, gy, gz, sd, nq=4_I4P, exact=.false., status=st2, refine=.true., map=md)
+   endselect
+   mismatch = piece_map_3d_mismatches(mh, md) + swept_cells_3d_mismatches(sh, sd) + abs(st - st2) + abs(st)
+   endfunction map_compare
+
+   subroutine map_timing(label, s, m, gx, gy, gz)
+   !< One row of the timing table of `map_case` (the Gauss motion of `swept_motion`): one device warm-up call, then
+   !< twice the six calls.
+   character(*),             intent(in) :: label        !< Body.
+   type(surface_stl_object), intent(in) :: s            !< Body.
+   integer(I4P),             intent(in) :: m            !< Cells per axis.
+   real(R8P),                intent(in) :: gx(:), gy(:), gz(:) !< Cell edges.
+   type(swept_cells_3d_t)               :: sw           !< Swept geometry.
+   type(piece_map_3d_t)                 :: mp           !< Map.
+   type(rigid_pose_t)                   :: p0, p1       !< End poses.
+   real(R8P)                            :: t(6, 2), tb(6) !< Times.
+   integer(I8P)                         :: c0, c1, rate !< Clock.
+   integer(I4P)                         :: r, q         !< Counters.
+
+   call system_clock(count_rate=rate)
+   call swept_motion(s, gx, gy, gz, 3_I4P, p0, p1)
+   call swept_cells_3d_device(s, p0, p1, gx, gy, gz, sw, exact=.false., map=mp)
+   do r = 1, 2
+      do q = 1, 6
+         call system_clock(c0)
+         select case (q)
+         case (1)
+            call swept_cells_3d(s, p0, p1, gx, gy, gz, sw, exact=.false.)
+         case (2)
+            call swept_cells_3d(s, p0, p1, gx, gy, gz, sw, exact=.false., map=mp)
+         case (3)
+            call swept_cells_3d(s, p0, p1, gx, gy, gz, sw, exact=.false., refine=.true.)
+         case (4)
+            call swept_cells_3d_device(s, p0, p1, gx, gy, gz, sw, exact=.false.)
+         case (5)
+            call swept_cells_3d_device(s, p0, p1, gx, gy, gz, sw, exact=.false., map=mp)
+         case default
+            call swept_cells_3d_device(s, p0, p1, gx, gy, gz, sw, exact=.false., refine=.true.)
+         endselect
+         call system_clock(c1)
+         t(q, r) = real(c1 - c0, R8P) / rate
+      enddo
+   enddo
+   tb = minval(t, dim=2)
+   print '(3X,A12,I4,A,6(1X,ES9.2),A,2(1X,ES9.2),A,F6.2,A,2(1X,ES9.2),A,F6.2,A)', label, m, '^3', tb, ' ;', tb(2) - tb(1), &
+         tb(5) - tb(4), ' (', (tb(2) - tb(1)) / max(tb(5) - tb(4), 1e-6_R8P), 'x) ;', tb(3) - tb(1), tb(6) - tb(4), ' (', &
+         (tb(3) - tb(1)) / max(tb(6) - tb(4), 1e-6_R8P), 'x)'
+   endsubroutine map_timing
 
    subroutine box_grid(s, m, gx, gy, gz)
    !< m^3 uniform cells over the box of s grown by 10 % (the grid of the perf bench's 3-D cut cells).
