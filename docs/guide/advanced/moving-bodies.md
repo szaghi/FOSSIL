@@ -458,26 +458,35 @@ NACA 0012 under a Gauss rotation at 1024²). The map is not combined with `poses
   in 2-D: the map needs their pieces.
 - **`chunk_bytes`** (default 2²⁸) caps the workspace of one launch set of items. No output depends on it.
 
-Measured by `fossil_test_distance_bench` on an RTX 4070 shared with other jobs, one call, best of 2, so the ratios are
-indicative. "Map" is the Gauss call
-(nq = 4) with `map` less the call without; "refine machinery" is the call with `refine=.true.` less the Gauss call:
+**How the map is timed.** The map has no timer of its own: its cost is the call with `map` less the same call without
+it. A difference of two calls is noisy where the map is a small part of the call, so the benches pair them: each
+repetition runs both calls back to back (in reverse order every other repetition, so that a first-call penalty
+widens the spread instead of biasing the result), the share is the median of the paired differences, and its spread
+is twice their median absolute deviation. A share not above its spread is reported as *not resolved*, with no
+speed-up. The same holds for the refine machinery (the call with `refine=.true.` less the Gauss call).
+
+Measured by `fossil_test_distance_bench` (dragon-fine run, Gauss nq = 4, 3 repetitions) on an RTX 4070 and a CPU
+shared with other jobs, so the ratios are indicative; every share below is resolved (spreads up to 22 % of the
+share for the map, up to 37 % for the refine machinery, largest on the device side):
 
 | body | cells | map, CPU [s] | map, device [s] | speed-up | refine machinery, CPU [s] | device [s] | speed-up |
 |---|---|---|---|---|---|---|---|
-| sphere (marching cubes) | 32³ | 0.373 | 0.396 | 0.94× | 6.00 | 0.958 | 6.3× |
-| sphere | 64³ | 0.635 | 0.116 | 5.5× | 18.7 | 1.75 | 10.7× |
-| cone | 32³ | 0.558 | 0.628 | 0.89× | 2.46 | 0.598 | 4.1× |
-| cone | 64³ | 3.93 | 3.58 | 1.10× | 17.0 | 4.66 | 3.7× |
+| sphere (marching cubes) | 32³ | 0.238 | 0.600 | 0.40× | 3.42 | 0.886 | 3.9× |
+| sphere | 64³ | 0.863 | 0.235 | 3.7× | 18.1 | 2.99 | 6.1× |
+| cone | 32³ | 0.559 | 0.746 | 0.75× | 2.40 | 1.06 | 2.3× |
+| cone | 64³ | 3.77 | 4.22 | 0.89× | 19.4 | 9.32 | 2.1× |
 
-- **With `refine`** the per-item passes are most of the work, and they gain 3.7–10.7×.
-- **On the 3-D Gauss path** the map gains 0.89–1.10× except on the sphere at 64³ (1.2–2.1× in the device chain,
-  over 3 warm steps): the host plan dominates, above all the events of the rotation (`isolate_zeros`), which stay on
-  the host for the trig reason above.
+- **With `refine`** the per-item passes are most of the work, and they gain 2.1–6.1× (3.7–10.7× in an earlier run on
+  the same shared machine, best of 2 without pairing: the device side varies most).
+- **On the 3-D Gauss path** the map gains nothing at 32³ (0.40–0.75×) and on the cone at 64³ (0.89×); only the
+  sphere at 64³ gains (3.7×). In the device chain, over warm steps, the device map is 1.2–1.9× the host's at 32³ and
+  64³ (the sphere's host map at 64³ is not resolved there). Either way the host plan dominates, above all the events
+  of the rotation (`isolate_zeros`), which stay on the host for the trig reason above.
 - **In 2-D** the device map gains nothing: few cells are evaluated (about 3,000 of a million at 1024²), so there is
-  little device work to gain from, and the copies dominate. In `fossil_test_curve_bench` (ellipse) the Gauss map runs
-  at 0.74–0.77× the host's at 256² and 1024², the translation map at 0.48× at 1024²; in the device chain 0.8–1.2×.
-  The map is timed as the difference of two calls (with `map` and without), so where it is a small part of the call it
-  falls inside the timing noise: the bench then prints a negative map time (translation 256², Gauss + refine 1024²).
+  little device work to gain from, and the copies dominate. In `fossil_test_curve_bench` (ellipse, 5 repetitions) the
+  Gauss map runs at 0.89× the host's at 256² and 0.67× at 1024², the translation map at 0.82× and 0.34×; with
+  `refine` the map's share (its assembly only: the machinery is in both calls) is not resolved. In the device chain
+  the 2-D map is 0.64–0.77× the host's.
 
 The chain of a whole time step with the map is in
 [GPU queries](/guide/advanced/device-distance#a-moving-body-time-step).

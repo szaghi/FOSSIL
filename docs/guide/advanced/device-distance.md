@@ -328,27 +328,31 @@ How to read these numbers:
   has (alpha0 and alpha1 equal the cut alphas bit for bit).
 
 **With the map.** The default run (the gate: 3 steps in 3-D, 5 in 2-D, Gauss motion) times the map at 32³ and 256²;
-`full` times it at every size. The map column is the swept call with `map=` less the call without (on the device the
-call with `map=` also cuts the end poses in full in 3-D, and on the host in 2-D). The step is move + tag + cut + links
-+ the swept call with `map=`. Seconds per step, best of 3, RTX 4070 and CPU shared with other jobs (the medians run up
-to twice the best): indicative. The 64³ rows come from a run that timed the map at every size; the 2-D rows are the
-device copied back.
+`full` times it at every size. Both swept calls, without and with `map=`, run in every step, so the map column is the
+median over the repetitions of their difference (paired: the same steps), with the spread of those differences (twice
+their median absolute deviation); a median not above its spread is printed `unresolved` (see
+[how the map is timed](/guide/advanced/moving-bodies#the-map-on-the-device)). On the device the call with `map=` also
+cuts the end poses in full in 3-D, and on the host in 2-D. The step is move + tag + cut + links + the swept call with
+`map=`. Seconds per step, 3 repetitions (the other columns are the best), RTX 4070 and CPU shared with other jobs:
+indicative. The 3-D rows come from a run that timed the map at every size, the 2-D rows from the default run; the map
+on the device is the copied-back mode (the map has no resident form), and the 2-D speed-up is the copied-back step's.
 
 | body | cells | swept, CPU | map, CPU | map, device | step, CPU | step, copied back | step, resident | speed-up |
 |---|---|---|---|---|---|---|---|---|
-| sphere (marching cubes) | 32³ | 0.722 | 0.355 | 0.168 | 1.73 | 0.491 | 0.486 | 3.5× |
-| sphere | 64³ | 2.19 | 1.02 | 0.577 | 7.96 | 1.72 | 1.75 | 4.6× |
-| cone | 32³ | 0.304 | 0.655 | 0.555 | 1.02 | 0.676 | 0.696 | 1.5× |
-| cone | 64³ | 1.57 | 4.82 | 4.03 | 6.81 | 4.45 | 4.46 | 1.5× |
-| ellipse (2-D) | 256² | 0.332 | 0.053 | 0.068 | 0.400 | 0.490 | – | 0.82× |
-| NACA 0012 (2-D) | 256² | 0.316 | 0.109 | 0.091 | 0.440 | 0.477 | – | 0.92× |
+| sphere (marching cubes) | 32³ | 0.667 | 0.327 | 0.168 | 1.56 | 0.484 | 0.482 | 3.2× |
+| sphere | 64³ | 2.14 | unresolved | 0.578 | 7.57 | 1.68 | 1.65 | 4.6× |
+| cone | 32³ | 0.301 | 0.643 | 0.556 | 0.995 | 0.655 | 0.682 | 1.5× |
+| cone | 64³ | 1.52 | 5.54 | 3.89 | 6.55 | 4.27 | 4.30 | 1.5× |
+| ellipse (2-D) | 256² | 0.320 | 0.053 | 0.083 | 0.392 | 0.469 | – | 0.84× |
+| NACA 0012 (2-D) | 256² | 0.313 | 0.109 | 0.141 | 0.437 | 0.454 | – | 0.96× |
 
-- **The map is the largest device stage of the cone's step:** 82–91 % of it, against 34 % on the sphere. Its device
-  passes are a small part: the plan stays on the host (candidates, events, poses, Gauss nodes; the events of the
-  rotation were 24–85 % of the host map on this path when measured for issue #105), so the device map is 1.2–2.1× the
-  host's in 3-D, and the cone's step with the map gains 1.5× where it gained 1.8–5.7× without.
-- **In 2-D** the map is 13–25 % of the CPU step and about even on the device (0.8–1.2×): about a thousand of 65,536
-  cells are evaluated per step.
+- **The map is the largest device stage of the cone's step:** 85–91 % of it, against 34–35 % on the sphere. Its
+  device passes are a small part: the plan stays on the host (candidates, events, poses, Gauss nodes; the events of the
+  rotation were 24–85 % of the host map on this path when measured for issue #105), so the device map is 1.2–1.9× the
+  host's in 3-D (the sphere's host map at 64³ is not resolved: its paired differences spread by 2 s), and the cone's
+  step with the map gains 1.5× where it gained 1.8–5.7× without.
+- **In 2-D** the map is 14–25 % of the CPU step and slower on the device (0.64–0.77×): about a thousand of 65,536
+  cells are evaluated per step, too few to pay for the copies.
 - **What remains:** the host plan on the 3-D Gauss path ([the map on the device](/guide/advanced/moving-bodies#the-map-on-the-device)).
 
 ### Surface deviation
