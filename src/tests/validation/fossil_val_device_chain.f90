@@ -29,8 +29,10 @@ program fossil_val_device_chain
 !< of nstep steps, in three modes: the CPU; the device with every output copied back; the device with the cut and the
 !< links resident (the tags, the swept geometry and the map have no resident form: copied back). The map is timed on
 !< the Gauss path at the smallest size (every size with `full`): both swept calls, without and with `map=`, run in the
-!< step, and the map column is the best (median) of the call with `map=` less the best (median) of the call without (on
-!< the device the call with `map=` also cuts the end poses in full, 3-D, or on the host, 2-D: part of the map's cost).
+!< step, and the map column is the median over the repetitions of (call with `map=` - call without), the two summed over
+!< the same steps (paired, so slow drift of a shared machine cancels), with the spread of those differences (twice
+!< their median absolute deviation) in brackets; `unresolved` when the median is not above the spread (on the device
+!< the call with `map=` also cuts the end poses in full, 3-D, or on the host, 2-D: part of the map's cost).
 !< The step is move + tag + cut + links + the swept call with `map=` where the map is timed, else the swept call. Each
 !< device mode starts with one untimed step (the pageable-copy warm-up of issue #100 step 6a). The device modes map the
 !< moved surface (curve) with `enter_device` inside the move stage. Each table prints the load average (/proc/loadavg):
@@ -503,14 +505,16 @@ contains
 
    subroutine print_table(t, nstep, with_map)
    !< The timing table of one case: per mode, per stage the best / median per-step time over the repetitions, the
-   !< total and its speed-up against the CPU; the load average first. The map column is the best (median) of the swept
-   !< call with `map=` less the best (median) of the call without; it reads `-` without the map.
+   !< total and its speed-up against the CPU; the load average first. The map column is the median over the repetitions
+   !< of the swept call with `map=` less the call without (paired: the same steps), then the spread of those differences
+   !< in brackets (`pair_spread`); `unresolved` when the median is not above the spread; `-` without the map.
    real(R8P),    intent(in) :: t(6, NREP, 3) !< Times summed over the steps [stage, repetition, mode].
    integer(I4P), intent(in) :: nstep         !< Steps.
    logical,      intent(in) :: with_map      !< The map was timed.
    real(R8P)                :: w(NREP)       !< Work.
    real(R8P)                :: best(6, 3), med(6, 3) !< Statistics per step.
-   character(20)            :: col(6)        !< Columns.
+   real(R8P)                :: dm(3), dn(3)  !< Map share per mode: median and spread of the paired differences.
+   character(21)            :: col(6)        !< Columns.
    integer(I4P)             :: v, i          !< Counters.
 
    do v = 1, 3
@@ -518,16 +522,22 @@ contains
          w = t(i, :, v) / nstep
          best(i, v) = minval(w) ; med(i, v) = median(w)
       enddo
-      best(5, v) = best(5, v) - best(4, v) ; med(5, v) = med(5, v) - med(4, v)
+      w = (t(5, :, v) - t(4, :, v)) / nstep
+      dm(v) = median(w) ; dn(v) = pair_spread(w)
    enddo
    call print_load
-   print '(3X,A12,6(2X,A20),2X,A)', 'mode', 'move', 'tag', 'cut + links', 'swept', 'map', 'step', 'speed-up'
+   print '(3X,A12,6(2X,A21),2X,A)', 'mode', 'move', 'tag', 'cut + links', 'swept', 'map (spread)', 'step', 'speed-up'
    do v = 1, 3
       do i = 1, 6
          write(col(i), '(ES9.2,A,ES9.2)') best(i, v), ' /', med(i, v)
       enddo
-      if (.not. with_map) col(5) = '                   -'
-      print '(3X,A12,6(2X,A20),2X,F7.2,A)', MODES(v), col, best(6, 1) / best(6, v), 'x'
+      if (dm(v) > dn(v)) then
+         write(col(5), '(ES9.2,A,ES8.1,A)') dm(v), ' (', dn(v), ')'
+      else
+         write(col(5), '(A,ES8.1,A)') 'unresolved (', dn(v), ')'
+      endif
+      if (.not. with_map) col(5) = '                    -'
+      print '(3X,A12,6(2X,A21),2X,F7.2,A)', MODES(v), col, best(6, 1) / best(6, v), 'x'
    enddo
    flush(output_unit)
    endsubroutine print_table
@@ -553,6 +563,15 @@ contains
    close(u)
    if (ios == 0) print '(3X,A,A)', 'load average: ', trim(line)
    endsubroutine print_load
+
+   function pair_spread(d) result(w)
+   !< The spread of paired timing differences: twice their median absolute deviation from the median (about the
+   !< interquartile range for normal noise; one stalled repetition of 3 cannot inflate it).
+   real(R8P), intent(in) :: d(:) !< Differences.
+   real(R8P)             :: w    !< Spread.
+
+   w = 2._R8P * median(abs(d - median(d)))
+   endfunction pair_spread
 
    function median(a) result(m)
    !< The median of a (the lower middle value for an even size).
