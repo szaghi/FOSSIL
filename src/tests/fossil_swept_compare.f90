@@ -3,10 +3,12 @@ module fossil_swept_compare
 !< FOSSIL test support: bitwise comparison of two 2-D swept-geometry results (issue #100 step 4).
 !<
 !< `swept_cells_2d_mismatches(a, b)` counts the differing elements of every output of `swept_cells_2d`: the scalars nx,
-!< ny, exact, error_estimate (bits), evaluations, self_intersecting, and the arrays alpha0, alpha1, swept, face_u,
-!< face_v, wall, residual (reals by their bits: `transfer` to a 64-bit integer), cleared, covered. An array of another
-!< shape, or allocated in one result only, counts as max(1, its size). `swept_twin_mismatches(c, p0, p1, x, y, ...)` runs
-!< `swept_cells_2d` and `swept_cells_2d_device` with the same arguments and compares them. Used by
+!< ny, exact, error_estimate (bits), evaluations, fallback_faces (issue #104), self_intersecting, and the arrays alpha0,
+!< alpha1, swept, face_u, face_v, wall, residual (reals by their bits: `transfer` to a 64-bit integer), cleared, covered.
+!< An array of another shape, or allocated in one result only, counts as max(1, its size).
+!< `swept_twin_mismatches(c, p0, p1, x, y, ...)` runs `swept_cells_2d` and `swept_cells_2d_device` with the same
+!< arguments and compares them; with `outflows` (issue #104) also the face outflows `outflow_u`, `outflow_v` by their
+!< bits; `fallback` returns the host call's `fallback_faces`. Used by
 !< `fossil_test_swept_2d_device_twin` (CI, host) and by the curve bench (device vs serial).
 use fossil, only : curve_object, rigid_pose_2d_t, swept_cells_2d_t, swept_cells_2d, swept_cells_2d_device
 use penf,   only : I4P, I8P, R8P
@@ -16,7 +18,7 @@ private
 public :: swept_cells_2d_mismatches, swept_twin_mismatches
 
 contains
-   function swept_twin_mismatches(c, p0, p1, x, y, nq, poses, exact, refine) result(n)
+   function swept_twin_mismatches(c, p0, p1, x, y, nq, poses, exact, refine, outflows, fallback) result(n)
    !< Mismatches of `swept_cells_2d_device` against `swept_cells_2d` (same arguments), statuses included.
    type(curve_object),    intent(in)           :: c          !< Curve.
    type(rigid_pose_2d_t), intent(in)           :: p0, p1     !< End poses.
@@ -25,13 +27,28 @@ contains
    type(rigid_pose_2d_t), intent(in), optional :: poses(:)   !< Node poses.
    logical,               intent(in), optional :: exact      !< Exact paths.
    logical,               intent(in), optional :: refine     !< Gauss path refined per event interval (issue #104).
+   logical,               intent(in), optional :: outflows   !< Compare the face outflows too (issue #104).
+   integer(I4P),          intent(out), optional :: fallback  !< Fallback faces of the host call.
    integer(I4P)                                :: n          !< Mismatches.
    type(swept_cells_2d_t)                      :: h, d       !< Host, device.
    integer(I4P)                                :: sh, sd     !< Statuses.
+   real(R8P),    allocatable                   :: hu(:,:), hv(:,:), du(:,:), dv(:,:) !< Outflows.
+   logical                                     :: outs       !< outflows.
 
-   call swept_cells_2d(c, p0, p1, x, y, h, nq=nq, poses=poses, exact=exact, status=sh, refine=refine)
-   call swept_cells_2d_device(c, p0, p1, x, y, d, nq=nq, poses=poses, exact=exact, status=sd, refine=refine)
+   outs = .false. ; if (present(outflows)) outs = outflows
+   if (outs) then
+      allocate(hu(size(x), size(y) - 1), hv(size(x) - 1, size(y)), du(size(x), size(y) - 1), dv(size(x) - 1, size(y)))
+      call swept_cells_2d(c, p0, p1, x, y, h, nq=nq, poses=poses, exact=exact, status=sh, refine=refine, outflow_u=hu, &
+                          outflow_v=hv)
+      call swept_cells_2d_device(c, p0, p1, x, y, d, nq=nq, poses=poses, exact=exact, status=sd, refine=refine, &
+                                 outflow_u=du, outflow_v=dv)
+   else
+      call swept_cells_2d(c, p0, p1, x, y, h, nq=nq, poses=poses, exact=exact, status=sh, refine=refine)
+      call swept_cells_2d_device(c, p0, p1, x, y, d, nq=nq, poses=poses, exact=exact, status=sd, refine=refine)
+   endif
    n = swept_cells_2d_mismatches(h, d) + abs(sh - sd)
+   if (outs) n = n + r2(hu, du) + r2(hv, dv)
+   if (present(fallback)) fallback = h%fallback_faces
    endfunction swept_twin_mismatches
 
    function swept_cells_2d_mismatches(a, b) result(n)
@@ -45,6 +62,7 @@ contains
    if (a%exact .neqv. b%exact) n = n + 1_I4P
    if (transfer(a%error_estimate, 0_I8P) /= transfer(b%error_estimate, 0_I8P)) n = n + 1_I4P
    if (a%evaluations /= b%evaluations) n = n + 1_I4P
+   if (a%fallback_faces /= b%fallback_faces) n = n + 1_I4P
    if (a%self_intersecting .neqv. b%self_intersecting) n = n + 1_I4P
    n = n + r2(a%alpha0, b%alpha0) + r2(a%alpha1, b%alpha1) + r2(a%swept, b%swept) + r2(a%face_u, b%face_u) + &
        r2(a%face_v, b%face_v) + r2(a%residual, b%residual) + r3(a%wall, b%wall) + l2(a%cleared, b%cleared) + &

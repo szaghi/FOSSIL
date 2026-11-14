@@ -8,7 +8,10 @@ program fossil_test_swept_2d_device_twin
 !< bits (`swept_twin_mismatches`):
 !< - exact translation: an ellipse on a stretched grid, a square moving by exactly one cell (its sides on grid lines at
 !<   both poses: ties), a heptagon translating at a rotated pose;
-!< - exact rotation: the ellipse about an off-centre point, the square about a grid node;
+!< - exact rotation (issue #104: the local integration, the map's per-item passes on the device; the face outflows
+!<   compared too): the ellipse about an off-centre point, the square about a grid node, a screw step of the heptagon,
+!<   and a block's face grazing a grid node at the turning point of the rotation (an exact tangential contact: the cell
+!<   untrusted, its faces by the per-face fallback; fallback faces > 0 asserted);
 !< - Gauss-Legendre (`exact=.false.`, nq = 3) on a rotation, and explicit node poses; the Gauss path with `refine`
 !<   (issue #104: the end cuts on the host, the event cells per event interval) on the rotation and a translation;
 !< - an empty curve, and the refusals (decreasing edges, nq = 0, a poses size other than nq): the same statuses;
@@ -21,10 +24,10 @@ use penf,   only : I4P, R8P
 implicit none
 
 real(R8P), parameter  :: PI = acos(-1._R8P)
-type(curve_object)    :: ce, sq, hp, em
+type(curve_object)    :: ce, sq, hp, em, gb
 type(rigid_pose_2d_t) :: p0, p1, pr, pq(3)
 type(swept_cells_2d_t) :: a, b
-real(R8P)             :: x(25), y(21), xu(9), u(32), v(32), xd(9)
+real(R8P)             :: x(25), y(21), xu(9), u(32), v(32), xd(9), x3(4)
 real(R8P), allocatable :: sn(:), wn(:)
 integer(I4P)          :: k, m, total
 logical               :: ok
@@ -57,9 +60,17 @@ call check('heptagon, translation at a rotated pose', swept_twin_mismatches(hp, 
                                                                             x, y))
 ! exact rotation
 pr = pose_2d(0.15_R8P, [0._R8P, 0._R8P]) ; pr%t = [0.6_R8P, 0.4_R8P] - matmul(pr%r, [0.6_R8P, 0.4_R8P])
-call check('ellipse, rotation about an off-centre point', swept_twin_mismatches(ce, p0, pr, x, y))
+call check('ellipse, rotation about an off-centre point', swept_twin_mismatches(ce, p0, pr, x, y, outflows=.true.))
+call check('heptagon, screw step', swept_twin_mismatches(hp, pose_2d(0.4_R8P, [0.1_R8P, -0.2_R8P]), &
+                                                         pose_2d(0.7_R8P, [0.17_R8P, -0.24_R8P]), x, y, outflows=.true.))
+call gb%adopt_loops(u=[-22._R8P, -2._R8P, -2._R8P, -22._R8P], v=[-10._R8P, -10._R8P, 13._R8P, 13._R8P], loop_sizes=[4_I4P])
+x3 = [-1._R8P, 0._R8P, 1._R8P, 2._R8P]
+call check('block face grazing a node (fallback)', swept_twin_mismatches(gb, graze_pose(-1._R8P), graze_pose(1._R8P), x3, &
+                                                                         x3, outflows=.true., fallback=m))
+print '(A,I0)', '   fallback faces ', m
+ok = ok .and. m > 0_I4P
 pr = pose_2d(0.2_R8P, [0._R8P, 0._R8P]) ; pr%t = [0.5_R8P, 0.5_R8P] - matmul(pr%r, [0.5_R8P, 0.5_R8P])
-call check('square, rotation about a grid node', swept_twin_mismatches(sq, p0, pr, xu, xu))
+call check('square, rotation about a grid node', swept_twin_mismatches(sq, p0, pr, xu, xu, outflows=.true.))
 ! Gauss-Legendre, explicit poses
 call check('ellipse, Gauss nq = 3', swept_twin_mismatches(ce, p0, pr, x, y, nq=3_I4P, exact=.false.))
 call gauss_legendre_01(3_I4P, sn, wn)
@@ -95,4 +106,13 @@ contains
    print '(A,I0)', label//': mismatches ', n
    total = total + n ; ok = ok .and. n == 0_I4P
    endsubroutine check
+
+   function graze_pose(sgn) result(p)
+   !< The body origin on the pivot (1, 1) + 2 (1, 1) / sqrt(2), its +u axis along the diagonal turned by sgn 0.3: the
+   !< block's face u = -2 passes the node (1, 1) at the middle of the step, touching it (`fossil_test_swept_rotation_2d_local`).
+   real(R8P), intent(in) :: sgn !< -1 (pose0) or 1 (pose1).
+   type(rigid_pose_2d_t) :: p   !< Pose.
+
+   p = pose_2d(PI / 4._R8P + sgn * 0.3_R8P, [1._R8P, 1._R8P] + sqrt(2._R8P) * [1._R8P, 1._R8P])
+   endfunction graze_pose
 endprogram fossil_test_swept_2d_device_twin

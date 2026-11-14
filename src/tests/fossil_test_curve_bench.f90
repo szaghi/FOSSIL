@@ -18,9 +18,11 @@ program fossil_test_curve_bench
 !< 64^2 block, medial thickness and gap), `cut cells 2-D blocks grids device vs serial mismatches` (issue #100 step 4.1:
 !< the multi-block cut cells with a grid per block, the translated planes of the swept geometry among them): all must
 !< be 0; `swept cells 2-D device vs serial mismatches` (issue #100 step 4: `swept_cells_2d_device` against
-!< `swept_cells_2d`, exact translation, exact rotation, Gauss and explicit node poses) too, and `cut links 2-D device
+!< `swept_cells_2d`, exact translation, exact rotation, Gauss and explicit node poses; the exact rotation by the local
+!< integration of issue #104, its map passes on the device, outflows compared too) too, and `cut links 2-D device
 !< vs serial mismatches` (issue #100 step 5: `cut_links_2d_device` against `cut_links_2d`), and `piece map 2-D device vs
-!< serial mismatches` (issue #105 step 2: the map of `swept_cells_2d_device(map=)` against `swept_cells_2d(map=)`).
+!< serial mismatches` (issue #105 step 2: the map of `swept_cells_2d_device(map=)` against `swept_cells_2d(map=)`; the
+!< exact rotation's map from the local integration since issue #104).
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
@@ -607,12 +609,13 @@ contains
    subroutine swept_case
    !< `swept_cells_2d_device` (issue #100 step 4: the end-pose cut cells on the device) against `swept_cells_2d`, every
    !< output bitwise (`swept_twin_mismatches`): with n >= 256 the 1024-gon ellipse of `chain_case` on n^2 cells,
-   !< translated by (1.7, 0.6) cells (exact), rotated by 2 degrees about the block centre by Gauss-Legendre
+   !< translated by (1.7, 0.6) cells (exact), rotated by 2 degrees about the block centre by the exact rotation (issue
+   !< #104: the local integration, the map's per-item passes on the device; outflows compared too), by Gauss-Legendre
    !< (`exact=.false.`, nq = 4; also with `refine`, issue #104) and with the node poses given, and the NACA 0012 (1022
-   !< vertices) rotated on (n/4)^2 cells
-   !< (exact rotation, the costly path); below (the regression run, within its budget) a 128-gon on (n/2)^2 cells and a
-   !< 254-vertex NACA 0012 on 8^2. With n >= 256 a timing table: host and device calls, best of 3, translation and
-   !< Gauss at n^2 and (4n)^2 (at most 1024^2).
+   !< vertices) rotated on (n/4)^2 cells (exact rotation); below (the regression run, within its budget) a 128-gon on
+   !< (n/2)^2 cells and a 254-vertex NACA 0012 on 8^2. With n >= 256 a timing table: host and device calls, best of 3,
+   !< translation, Gauss and exact rotation (2 degrees: 3.6 cells per step at the ellipse's tip on 256^2, 14 on
+   !< 1024^2) at n^2 and (4n)^2 (at most 1024^2).
    type(curve_object)        :: ce, cn                  !< Ellipse, NACA 0012.
    type(rigid_pose_2d_t)     :: p0, pt, pr, rot, pq(4)  !< Poses.
    type(swept_cells_2d_t)    :: sw                      !< Result.
@@ -621,6 +624,7 @@ contains
    real(R8P)                 :: lo(2), hi(2), cen(2), th, h, t(2, 3) !< Work.
    integer(I4P)              :: bad, k, g, p, r, m, ngrid(2), ne, nn, me, mn !< Work.
    integer(I8P)              :: q0, q1, rate             !< Clock.
+   character(12), parameter  :: SNAME(3) = [character(12) :: 'translation', 'Gauss nq=4', 'exact rot'] !< Paths.
 
    ne = merge(1024_I4P, 128_I4P, n >= 256_I4P) ; nn = merge(511_I4P, 127_I4P, n >= 256_I4P) ! vertices
    me = merge(n, max(8_I4P, n / 2_I4P), n >= 256_I4P) ; mn = merge(n / 4_I4P, 8_I4P, n >= 256_I4P) ! cells
@@ -644,18 +648,19 @@ contains
    call grid_edges(lo, hi, me, x, y) ; h = x(2) - x(1)
    pt = pose_2d(0._R8P, [1.7_R8P * h, 0.6_R8P * h])
    bad = swept_twin_mismatches(ce, p0, pt, x, y)
+   bad = bad + swept_twin_mismatches(ce, p0, pr, x, y, outflows=.true.)
    bad = bad + swept_twin_mismatches(ce, p0, pr, x, y, nq=4_I4P, exact=.false.)
    bad = bad + swept_twin_mismatches(ce, p0, pr, x, y, nq=4_I4P, exact=.false., refine=.true.)
    bad = bad + swept_twin_mismatches(ce, p0, pr, x, y, nq=4_I4P, poses=pq)
    call grid_edges(lo, hi, mn, x, y)
-   bad = bad + swept_twin_mismatches(cn, p0, pr, x, y)
+   bad = bad + swept_twin_mismatches(cn, p0, pr, x, y, outflows=.true.)
    print '(A,I0)', 'swept cells 2-D device vs serial mismatches: ', bad
    ok = ok .and. bad == 0
    if (n < 256_I4P) return
    print '(A)', 'swept cells 2-D timing (ellipse; best of 3) [s]: path, cells, host, device, speed-up'
    call system_clock(count_rate=rate)
    ngrid = [n, min(4_I4P * n, 1024_I4P)]
-   do p = 1, 2
+   do p = 1, 3
       do g = 1, 2
          call grid_edges(lo, hi, ngrid(g), x, y) ; h = x(2) - x(1)
          pt = pose_2d(0._R8P, [1.7_R8P * h, 0.6_R8P * h])
@@ -667,11 +672,13 @@ contains
                if (p == 1 .and. m == 2) call swept_cells_2d_device(ce, p0, pt, x, y, sw)
                if (p == 2 .and. m == 1) call swept_cells_2d(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false.)
                if (p == 2 .and. m == 2) call swept_cells_2d_device(ce, p0, pr, x, y, sw, nq=4_I4P, exact=.false.)
+               if (p == 3 .and. m == 1) call swept_cells_2d(ce, p0, pr, x, y, sw)
+               if (p == 3 .and. m == 2) call swept_cells_2d_device(ce, p0, pr, x, y, sw)
                call system_clock(q1)
                t(m, r) = real(q1 - q0, R8P) / rate
             enddo
          enddo
-         print '(3X,A12,1X,I4,A,2(2X,ES9.2),A,F6.2,A)', merge('translation', 'Gauss nq=4 ', p == 1), ngrid(g), '^2', &
+         print '(3X,A12,1X,I4,A,2(2X,ES9.2),A,F6.2,A)', SNAME(p), ngrid(g), '^2', &
                minval(t(1, :)), minval(t(2, :)), '  (', minval(t(1, :)) / minval(t(2, :)), 'x)'
       enddo
    enddo
@@ -681,7 +688,8 @@ contains
    !< The piece map on the device (issue #105 step 2): `swept_cells_2d_device(map=)` against `swept_cells_2d(map=)`, the
    !< map, the swept geometry and the status bitwise (`piece map 2-D device vs serial mismatches`), on the bodies and
    !< grids of `swept_case`: the ellipse translated by (1.7, 0.6) cells (exact), rotated by 2 degrees about the block
-   !< centre by Gauss-Legendre (nq = 4) and with `refine`, the NACA 0012 rotated (exact rotation) on its smaller grid.
+   !< centre by the exact rotation (issue #104: the local integration's map), by Gauss-Legendre (nq = 4) and with
+   !< `refine`, the NACA 0012 rotated (exact rotation) on its smaller grid.
    !< With n >= 256 a timing table (ellipse; 5 repetitions, the four calls interleaved in each, in reverse order in the
    !< even ones): per path and grid the best host call without and with the map, the best device call without and with
    !< it, the map's share of each (the median over the repetitions of with - without, paired within a repetition so that
@@ -719,6 +727,7 @@ contains
    call grid_edges(lo, hi, me, x, y) ; h = x(2) - x(1)
    pt = pose_2d(0._R8P, [1.7_R8P * h, 0.6_R8P * h])
    bad = map_twin(ce, p0, pt, x, y, .true., .false.)
+   bad = bad + map_twin(ce, p0, pr, x, y, .true., .false.)
    bad = bad + map_twin(ce, p0, pr, x, y, .false., .false.)
    bad = bad + map_twin(ce, p0, pr, x, y, .false., .true.)
    call grid_edges(lo, hi, mn, x, y)

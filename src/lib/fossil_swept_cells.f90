@@ -413,7 +413,7 @@ contains
    endsubroutine swept_cells_2d_reference
 
    subroutine swept_cells_2d_device(curve, pose0, pose1, x, y, sw, nq, poses, exact, status, check_input, refine, map, &
-                                    chunk_bytes)
+                                    chunk_bytes, outflow_u, outflow_v)
    !< `swept_cells_2d` with the cut cells of the two end poses on the device (issue #100 step 4): the same `sw`, bit for
    !< bit. Both moved copies go as the two blocks of one `cut_cells_device_many` call (one grid, cell arrays only, no
    !< pieces or intervals), left resident; only `alpha` comes back (`update host`), then the device copies are
@@ -427,10 +427,11 @@ contains
    !< (`piece_map_2d_build(device=)`: the evaluations, the tracks, the measure rounds, the assembly); the host keeps the
    !< plan (candidates, events, poses, Gauss nodes) and the corner queries. `refine` takes the same device passes. With
    !< `map` the end-pose cuts are made on the host, as with `refine`.
-   !< The exact rotation path (issue #104, local integration) runs on the host, its end-pose cuts included, map or not:
-   !< the same bits as `swept_cells_2d`.
+   !< The exact rotation path (issue #104, local integration): the end-pose cuts on the host (as with `map`), the map's
+   !< per-item passes on the device (`faces_rotation_local_2d`), map or not; the closed-form faces, the fallback faces
+   !< and the face merge on the host; the same bits as `swept_cells_2d`.
    !< `chunk_bytes` (default 2^28) caps the workspace of one launch set of the map's items; no output depends on it.
-   !< Every other output is that of the call without `map`.
+   !< Every other output is that of the call without `map`. `outflow_u`, `outflow_v` as `swept_cells_2d`'s, bit for bit.
    type(curve_object),     intent(in)            :: curve    !< Curve (body frame).
    type(rigid_pose_2d_t),  intent(in)            :: pose0    !< Pose at the start.
    type(rigid_pose_2d_t),  intent(in)            :: pose1    !< Pose at the end.
@@ -444,9 +445,11 @@ contains
    logical,                intent(in),  optional :: refine   !< Gauss path: event cells per event interval (#104).
    type(piece_map_2d_t),   intent(out), optional :: map      !< Piece map of the step (issue #105 step 2).
    integer(I8P),           intent(in),  optional :: chunk_bytes !< Workspace bytes per launch set of the map's items.
+   real(R8P),              intent(out), optional :: outflow_u(:,:) !< Time-integrated outflow of the faces u = x_i (+u).
+   real(R8P),              intent(out), optional :: outflow_v(:,:) !< Time-integrated outflow of the faces v = y_j (+v).
 
    call swept_cells_2d_core(curve, pose0, pose1, x, y, sw, .true., nq, poses, exact, status, check_input, map, refine, &
-                            chunk_bytes)
+                            chunk_bytes, outflow_u=outflow_u, outflow_v=outflow_v)
    endsubroutine swept_cells_2d_device
 
    subroutine swept_cells_2d_core(curve, pose0, pose1, x, y, sw, device, nq, poses, exact, status, check_input, map, &
@@ -591,7 +594,7 @@ contains
    elseif (screw .and. rotation_exact .and. dth /= 0._R8P) then
       if (local) then ! issue #104: every cell the wall can meet integrated per event interval, the rest closed form
          call faces_rotation_local_2d(curve, ce(1), ce(2), pose0, pose1, x, y, k0, k1, sw, fou, fov, present(map), mp, &
-                                      meas_c)
+                                      meas_c, device, chunk_bytes)
          do j = 1_I4P, ny
             do i = 1_I4P, nx
                res(i, j) = fou(i + 1, j) - fou(i, j) + fov(i, j + 1) - fov(i, j)
@@ -759,7 +762,8 @@ contains
    if (present(fov)) fov = ov
    endsubroutine faces_rotation_2d
 
-   subroutine faces_rotation_local_2d(curve, c0, c1, pose0, pose1, x, y, k0, k1, sw, fou, fov, want_map, mp, meas_c)
+   subroutine faces_rotation_local_2d(curve, c0, c1, pose0, pose1, x, y, k0, k1, sw, fou, fov, want_map, mp, meas_c, &
+                                      device, chunk)
    !< The exact rotation's faces by local integration (issue #104 decision 2), the same certification as
    !< `faces_rotation_2d` (every event certified, every integral doubled to round-off) on far fewer evaluations:
    !< 1. The piece map's MAP_ROTATION plan with every candidate cell evaluated (`all_cand`: none trivial) and integrated
@@ -778,6 +782,9 @@ contains
    !< converged pieces). sw%evaluations: the largest number of quadrature nodes of one measured cell, or of one fallback
    !< face if larger. sw%fallback_faces: the faces of 3. The map is assembled into mp only with `want_map` (its
    !< unmeasured cells still hold zeros: `refine_map_2d` then gives them the final values).
+   !< `device` (`swept_cells_2d_device`, issue #104 step 3): step 1 runs the map's per-item passes on the device
+   !< (`piece_map_2d_build(device=)`: the evaluations, the tracks, the measure rounds, the assembly with `want_map`), the
+   !< same bits; steps 2 and 3 (O(faces) loops; the fallback reached by untrusted cells only) stay on the host.
    type(curve_object),     intent(in)    :: curve        !< Curve (body frame).
    type(curve_object),     intent(in)    :: c0, c1       !< Copies at the end poses.
    type(rigid_pose_2d_t),  intent(in)    :: pose0, pose1 !< End poses.
@@ -788,6 +795,8 @@ contains
    logical,                intent(in)    :: want_map     !< Assemble the map.
    type(piece_map_2d_t),   intent(out)   :: mp           !< Piece map (all candidates evaluated).
    logical, allocatable,   intent(out)   :: meas_c(:)    !< Measured cells.
+   logical,                intent(in)    :: device       !< The map's per-item passes on the device.
+   integer(I8P), optional, intent(in)    :: chunk        !< Workspace bytes per launch set (device).
    logical,      allocatable :: cand(:), ru(:,:), rv(:,:), fbu(:,:), fbv(:,:) !< Candidates, measured faces, fallback.
    real(R8P),    allocatable :: tu(:,:), tv(:,:), tou(:,:), tov(:,:), tfl(:,:) !< Fallback results.
    real(R8P),    allocatable :: meas(:,:)            !< Per-track measures of the measured cells.
@@ -802,7 +811,7 @@ contains
    sw%face_u = 0._R8P ; sw%face_v = 0._R8P ; sw%wall = 0._R8P ; sw%residual = 0._R8P ; fou = 0._R8P ; fov = 0._R8P
    call piece_map_2d_build(curve, c0, c1, pose0, pose1, x, y, k0, k1, sw, fou, fov, MAP_ROTATION, 4_I4P, mp, &
                            all_meas=.true., measured=meas_c, all_cand=.true., candidate=cand, assemble=want_map, &
-                           cell_meas=meas, cell_moff=moff, cell_tracks=ntr, node_evals=nnod)
+                           cell_meas=meas, cell_moff=moff, cell_tracks=ntr, node_evals=nnod, device=device, chunk=chunk)
    allocate(ru(nx + 1, ny), rv(nx, ny + 1), fbu(nx + 1, ny), fbv(nx, ny + 1))
    call local_faces_2d(nx, ny, meas_c, moff, ntr, meas, sw%face_u, sw%face_v, fou, fov, ru, rv)
    fbu = .false. ; fbv = .false.

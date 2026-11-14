@@ -10,8 +10,9 @@ program fossil_test_piece_map_2d_device_twin
 !< (`piece_map_2d_mismatches`), the swept geometry and the status too:
 !< - exact translation: an ellipse on 24^2 cells; the NACA 0012's thin aft region moving 2 cells across (multi-track
 !<   cells measured per event interval); a plate 2e-11 wide crossing a cell (states between events 1e-11 apart);
-!< - exact rotation: the ellipse, a lattice of squares and bars on 12^2 cells (many multi-track cells, doubling rounds),
-!<   a plate crossing a cell about a far pivot;
+!< - exact rotation (issue #104: the local integration, its map from the same device passes): the ellipse, a lattice of
+!<   squares and bars on 12^2 cells (many multi-track cells, doubling rounds), a plate crossing a cell about a far pivot,
+!<   a block's face grazing a grid node at the turning point (an exact tangential contact: the fallback faces);
 !< - the Gauss path (nq = 4) of the lattice rotating, and with `refine` (every evaluated cell measured);
 !< - the lattice cases again in launch sets of 4 KB of workspace (`chunk_bytes`: many sets per pass);
 !< - an empty curve, and the refusal of a map with node poses: the same statuses;
@@ -58,6 +59,8 @@ call check('lattice, rotation', twin(cl, about(0._R8P), about(0.35_R8P), xl, .tr
 call rect(cp, [-0.05_R8P, 0.05_R8P, 3._R8P, 8._R8P])
 call check('plate crossing, rotation about a far pivot', twin(cp, pose_2d(0.2_R8P, [0.5_R8P, -5._R8P]), &
                                                               pose_2d(-0.2_R8P, [0.5_R8P, -5._R8P]), x3, .true.))
+call cp%adopt_loops(u=[-22._R8P, -2._R8P, -2._R8P, -22._R8P], v=[-10._R8P, -10._R8P, 13._R8P, 13._R8P], loop_sizes=[4_I4P])
+call check('block face grazing a node (fallback)', twin(cp, graze_pose(-1._R8P), graze_pose(1._R8P), x3, .true.))
 ! Gauss path, refine
 call check('lattice, rotation, Gauss', twin(cl, about(0._R8P), about(0.35_R8P), xl, .false.))
 call check('lattice, rotation, Gauss + refine', twin(cl, about(0._R8P), about(0.35_R8P), xl, .false., refine=.true.))
@@ -121,6 +124,15 @@ contains
    p = pose_2d(angle)
    p%t = [0.5_R8P, 0.5_R8P] - matmul(p%r, [0.5_R8P, 0.5_R8P])
    endfunction about
+
+   function graze_pose(sgn) result(p)
+   !< The body origin on the pivot (1, 1) + 2 (1, 1) / sqrt(2), its +u axis along the diagonal turned by sgn 0.3: the
+   !< block's face u = -2 passes the node (1, 1) at the middle of the step, touching it.
+   real(R8P), intent(in) :: sgn !< -1 (pose0) or 1 (pose1).
+   type(rigid_pose_2d_t) :: p   !< Pose.
+
+   p = pose_2d(PI / 4._R8P + sgn * 0.3_R8P, [1._R8P, 1._R8P] + sqrt(2._R8P) * [1._R8P, 1._R8P])
+   endfunction graze_pose
 
    subroutine rect(cv, b)
    !< The rectangle [b(1), b(2)] x [b(3), b(4)], counter-clockwise.
