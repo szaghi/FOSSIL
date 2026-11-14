@@ -1200,9 +1200,13 @@ contains
    !< the map, the swept geometry and the status bitwise (`piece map 3-D device vs serial mismatches`), on the step-0
    !< bodies (marching-cubes sphere, cone) at 32^3 (8^3 with grid_n < 32) on four paths of `swept_motion`: the exact
    !< translation, the exact rotation, Gauss (nq = 4) and Gauss with `refine`. With timing and grid_n >= 32 a table
-   !< (best of 2) per body at 32^3 and 64^3: the host and device Gauss calls without the map, with it and with
-   !< `refine` (the map machinery inside); the map's share of each Gauss call (with - without), the refine machinery
-   !< (refine - Gauss), and the device speed-ups of both.
+   !< (3 repetitions, the six calls interleaved in each, reversed in the second) per body at 32^3 and 64^3: the best host
+   !< and device Gauss calls
+   !< without the map, with it and with `refine` (the map machinery inside); the map's share of each Gauss call and the
+   !< refine machinery (refine - Gauss), each the median of the differences paired within a repetition (slow drift of a
+   !< shared machine cancels; the reversal turns a first-call penalty into spread, not bias), with their spread
+   !< (`pair_spread`); the device speed-up of each, or which side is not resolved (a difference of two calls cannot
+   !< resolve a share not above its spread).
    integer, intent(out)      :: mismatch               !< Mismatches.
    type(surface_stl_object)  :: sb(2)                  !< Step-0 bodies.
    type(body_t), allocatable :: bb(:)                  !< Bench bodies.
@@ -1222,8 +1226,9 @@ contains
       enddo
    enddo
    if (.not. timing .or. grid_n < 32_I4P) return
-   print '(A)', 'piece map 3-D timing (best of 2) [s]: body, cells; host Gauss, + map, refine; device Gauss, + map, '// &
-                'refine; map host, map device (speed-up); refine machinery host, device (speed-up)'
+   print '(A)', 'piece map 3-D timing (best of 3) [s]: body, cells; host Gauss, + map, refine; device Gauss, + map, '// &
+                'refine; map host, map device, their spreads (speed-up); refine machinery host, device, their spreads '// &
+                '(speed-up); shares = medians of paired differences, spread = 2 MAD'
    do b = 1, 2
       do k = 1, 2
          call box_grid(sb(b), 32_I4P * k, gx, gy, gz)
@@ -1261,7 +1266,7 @@ contains
 
    subroutine map_timing(label, s, m, gx, gy, gz)
    !< One row of the timing table of `map_case` (the Gauss motion of `swept_motion`): one device warm-up call, then
-   !< twice the six calls.
+   !< NREP times the six calls (in reverse order in the even repetitions).
    character(*),             intent(in) :: label        !< Body.
    type(surface_stl_object), intent(in) :: s            !< Body.
    integer(I4P),             intent(in) :: m            !< Cells per axis.
@@ -1269,15 +1274,17 @@ contains
    type(swept_cells_3d_t)               :: sw           !< Swept geometry.
    type(piece_map_3d_t)                 :: mp           !< Map.
    type(rigid_pose_t)                   :: p0, p1       !< End poses.
-   real(R8P)                            :: t(6, 2), tb(6) !< Times.
+   integer(I4P), parameter              :: NREP = 3_I4P !< Repetitions.
+   real(R8P)                            :: t(6, NREP), tb(6), dm(4), dn(4) !< Times, paired medians, spreads.
    integer(I8P)                         :: c0, c1, rate !< Clock.
-   integer(I4P)                         :: r, q         !< Counters.
+   integer(I4P)                         :: r, q, qq     !< Counters.
 
    call system_clock(count_rate=rate)
    call swept_motion(s, gx, gy, gz, 3_I4P, p0, p1)
    call swept_cells_3d_device(s, p0, p1, gx, gy, gz, sw, exact=.false., map=mp)
-   do r = 1, 2
-      do q = 1, 6
+   do r = 1, NREP
+      do qq = 1, 6
+         q = merge(qq, 7_I4P - qq, mod(r, 2_I4P) == 1_I4P) ! reversed in even repetitions
          call system_clock(c0)
          select case (q)
          case (1)
@@ -1298,10 +1305,69 @@ contains
       enddo
    enddo
    tb = minval(t, dim=2)
-   print '(3X,A12,I4,A,6(1X,ES9.2),A,2(1X,ES9.2),A,F6.2,A,2(1X,ES9.2),A,F6.2,A)', label, m, '^3', tb, ' ;', tb(2) - tb(1), &
-         tb(5) - tb(4), ' (', (tb(2) - tb(1)) / max(tb(5) - tb(4), 1e-6_R8P), 'x) ;', tb(3) - tb(1), tb(6) - tb(4), ' (', &
-         (tb(3) - tb(1)) / max(tb(6) - tb(4), 1e-6_R8P), 'x)'
+   dm = [pair_median(t(2, :) - t(1, :)), pair_median(t(5, :) - t(4, :)), pair_median(t(3, :) - t(1, :)), &
+         pair_median(t(6, :) - t(4, :))]
+   dn = [pair_spread(t(2, :) - t(1, :)), pair_spread(t(5, :) - t(4, :)), pair_spread(t(3, :) - t(1, :)), &
+         pair_spread(t(6, :) - t(4, :))]
+   print '(3X,A12,I4,A,6(1X,ES9.2),A,4(1X,ES9.2),1X,A,A,4(1X,ES9.2),1X,A)', label, m, '^3', tb, ' ;', dm(1:2), dn(1:2), &
+         trim(share_note(dm(1:2), dn(1:2))), ' ;', dm(3:4), dn(3:4), trim(share_note(dm(3:4), dn(3:4)))
    endsubroutine map_timing
+
+   pure function pair_median(d) result(w)
+   !< The median of paired timing differences (the lower middle value for an even size).
+   real(R8P), intent(in) :: d(:) !< Differences.
+   real(R8P)             :: w    !< Median.
+   real(R8P)             :: b(size(d)) !< Sorted copy.
+
+   call sort_times(d, b)
+   w = b((size(d) + 1_I4P) / 2_I4P)
+   endfunction pair_median
+
+   pure function pair_spread(d) result(w)
+   !< The spread of paired timing differences: twice their median absolute deviation from the median (about the
+   !< interquartile range for normal noise; one stalled repetition of 3 cannot inflate it).
+   real(R8P), intent(in) :: d(:) !< Differences.
+   real(R8P)             :: w    !< Spread.
+   real(R8P)             :: b(size(d)) !< Sorted copy.
+
+   call sort_times(abs(d - pair_median(d)), b)
+   w = 2._R8P * b((size(d) + 1_I4P) / 2_I4P)
+   endfunction pair_spread
+
+   pure subroutine sort_times(a, b)
+   !< b = a sorted increasingly (insertion sort).
+   real(R8P), intent(in)  :: a(:) !< Values.
+   real(R8P), intent(out) :: b(:) !< Sorted values.
+   real(R8P)              :: z    !< Work.
+   integer(I4P)           :: i, j !< Counters.
+
+   b = a
+   do i = 2, size(b)
+      z = b(i) ; j = i - 1
+      do while (j >= 1)
+         if (b(j) <= z) exit
+         b(j + 1) = b(j) ; j = j - 1
+      enddo
+      b(j + 1) = z
+   enddo
+   endsubroutine sort_times
+
+   pure function share_note(dm, dn) result(note)
+   !< `(r.rrx)`, the host share over the device share, when both shares exceed their spreads; else which is not resolved.
+   real(R8P), intent(in) :: dm(2) !< Shares: host, device.
+   real(R8P), intent(in) :: dn(2) !< Spreads: host, device.
+   character(32)         :: note  !< Note.
+
+   if (all(dm > dn)) then
+      write(note, '(A,F6.2,A)') '(', dm(1) / dm(2), 'x)'
+   elseif (all(dm <= dn)) then
+      note = '(host and device not resolved)'
+   elseif (dm(1) <= dn(1)) then
+      note = '(host not resolved)'
+   else
+      note = '(device not resolved)'
+   endif
+   endfunction share_note
 
    subroutine box_grid(s, m, gx, gy, gz)
    !< m^3 uniform cells over the box of s grown by 10 % (the grid of the perf bench's 3-D cut cells).
