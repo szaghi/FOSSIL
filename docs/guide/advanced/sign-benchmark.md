@@ -16,7 +16,7 @@ Every inside/outside decision in FOSSIL goes through a sign algorithm:
 Near sharp edges and vertices the literature disagrees on what is safe:
 - Seshadri & De reject signs from the distance and use ray tracing.
 - Mittal et al. use the normal of the closest element and report no
-  misclassification.
+  misclassification (general knowledge of the paper, not checked against its text).
 - Neither paper measures error rates.
 
 This benchmark measures them (issue #39). It covers every 3-D algorithm,
