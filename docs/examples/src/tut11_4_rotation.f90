@@ -30,7 +30,7 @@ print '(A,I0,A,I0)', 'section z = -0.2: ', section%get_vertices_number(), ' segm
 x = [(-0.6_R8P + 0.025_R8P * i, i = 0, 48)]
 call swept_cells_2d(section, pose_2d(angle=0._R8P), pose_2d(angle=pi / 18._R8P), x, x, sw)   ! 10 degrees
 print '(A,L1,A,I0,A,I0)', 'rotation: exact ', sw%exact, ', cells swept ', count(sw%swept /= 0._R8P), &
-                          ', largest evaluations per face ', sw%evaluations
+                          ', largest quadrature nodes per cell ', sw%evaluations
 print '(A,ES9.2,A,ES9.2)', '  sum of the swept areas ', sum(sw%swept), ', largest |residual| ', maxval(abs(sw%residual))
 !endregion rotation
 call solid

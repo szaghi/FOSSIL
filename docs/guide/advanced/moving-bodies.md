@@ -192,10 +192,11 @@ call swept_cells_3d(surface, pose0, pose1, x, y, z, sw, nq, poses, exact, status
   how many aperture evaluations it took (per face in 2-D, per plane in
   3-D).
 - **2-D rotation: exact** (issue #69, see *Exact rotation* below). The screw motion with a rotation takes
-  certified breakpoints per face and Gauss–Legendre doubled to round-off on every piece; the residual
-  falls to round-off (1.7e-16 to 6.3e-16 on the cases below, where 4-node Gauss left 1.7e-4 to
-  1.4e-2). `sw%evaluations` is the largest number of evaluations per face (92 for the square, 1838
-  for the 200-vertex NACA 0012).
+  certified breakpoints and Gauss–Legendre doubled to round-off on every piece; the residual falls to
+  round-off (1.7e-16 to 6.3e-16 on the cases below, where 4-node Gauss left 1.7e-4 to 1.4e-2). Since
+  issue #104 it integrates cell by cell on each cell's own wall (*2-D, cell by cell* below), 36–286 times
+  faster than the per-face integration it replaced and cheaper than the Gauss call up to 2 cells per step;
+  `sw%evaluations` is then the largest number of quadrature nodes of one cell.
 - **3-D rotation: exact** (issue #69). The same scheme one grid plane at a time: a plane's breakpoints
   are a mesh vertex on it, a mesh edge meeting one of its grid lines, one of its grid nodes on a
   triangle; one evaluation slices a moved copy and gives every face of the plane. Residual 1.4e-16 to
@@ -260,6 +261,20 @@ removes them, as the translation path does, and is built as follows.
   (Falcovitz's requirement). The exact path makes the time-averaged apertures exact under rotation too,
   and with them the rigid-field `residual`, which falls to round-off. Explicit node poses (`poses=`)
   keep the Gauss path; `exact=.false.` forces it.
+- *2-D, cell by cell (issue #104).* Each Gauss node above places the whole curve, so a face cost O(curve)
+  per node, and every face inside the box swept by the bounding circle was integrated, fully fluid ones
+  included. The 2-D path now runs the piece map's machinery on every *candidate* cell (every cell the
+  wall can meet during the step, from the paths of the segments' endpoints): the cell's events on its own
+  local wall, then its faces per event interval by the same doubling to round-off, an event-free cell on
+  the one interval [0, 1]. A face between two such cells takes the low cell's value. A face of no
+  candidate cell is fluid or solid throughout the step (both its cells fluid, or both solid, at both
+  poses): its value is closed form. Everything else (a cell the map marks untrusted or that fails its
+  end check, an anomaly) falls back to the per-face integration above, which also takes every face of
+  an open curve; `sw%fallback_faces` counts them. Against the per-face path (`swept_cells_2d_reference`,
+  kept for tests) the faces agree within 1.5·10⁻¹⁶ and the residuals to round-off, on the ellipse and the
+  NACA 0012 at 256² and 1024², from 0.5 to 2 cells per step and at 20 degrees; it is 36–286 times faster
+  up to 2 cells per step (0.07–0.65 of a Gauss call) and 7.5–9 times at 20 degrees
+  (`fossil_val_rotation_2d_local`).
 
 **Check.** `residual` is the volume balance of the body's rigid velocity
 field: swept volume plus the time integral of the field's outflow through
@@ -286,8 +301,12 @@ bit, on every path: exact translation, exact rotation, Gauss and explicit poses.
 - Each face then adds over its nodes in node order on one device thread: the same additions in the same order.
 - The optional `chunk_cells` caps the device memory of a launch set without changing a bit.
 
-**In 2-D** only the end poses move to the device. The faces, measured at 94–99.9 % of a call, stay on the host, so the
-twin gains nothing measurable today.
+**In 2-D** only the end poses move to the device on the translation and Gauss paths. The faces, measured at 94–99.9 %
+of a call, stay on the host, so the twin gains nothing measurable there. The exact rotation (issue #104) integrates
+every cell the wall can meet on the piece map's machinery, whose per-item passes (evaluations, tracks, measure rounds)
+run on the device as with `map=`; the end-pose cuts, the plan, the closed-form faces and the fallback faces stay on the
+host. The ellipse turning 2 degrees (3.6 cells per step at its tip on 256², 14 on 1024²) runs 1.5× and 1.9× faster than
+the host call (RTX 4070, shared machine, best of 3).
 
 Measured on an RTX 4070, best of 5 after a warm-up:
 
@@ -524,9 +543,10 @@ The chain of a whole time step with the map is in
   - Measured (issue #104; ellipse and NACA 0012 at 256², sphere and cone at 32³; 0.5, 1 and 2 cells per step): the
     largest per-cell residual is 7·10⁻⁴ to 0.45 of a cell at nq = 4, and still 2·10⁻⁴ to 0.15 at nq = 8.
   - `error_estimate` includes the residual since issue #104; the face change alone understated it a hundredfold.
-  - `refine=.true.` makes the residual round-off: 1.1–2.2 times the Gauss call in 2-D (the exact rotation path takes
-    15–45 times), 2.7–22 times in 3-D, about the exact path's cost there. It is off by default, and the default is
-    an open decision. The exact path stays the reference.
+  - `refine=.true.` makes the residual round-off: 1.1–2.2 times the Gauss call in 2-D, 2.7–22 times in 3-D, about
+    the exact path's cost there. It stays off by default (the owner's decision on #104: too slow in 3-D for a
+    default). In 2-D the exact rotation path is now cheaper than both up to 2 cells per step (0.07–0.65 of a Gauss
+    call, issue #104), so there the exact path is also the fast one.
   - The piece map's multi-track cells do not inherit the error: they integrate per event interval on every path.
 - **Spurious force oscillations are not addressed.** Exact swept volumes remove the fresh/dead volume source that
   Seo & Mittal (2011, §2) call their primary cause. Schneiders et al. (2013, §4-§5) show oscillations in a

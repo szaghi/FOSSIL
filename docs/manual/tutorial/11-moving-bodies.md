@@ -123,7 +123,7 @@ axis.
 <<< @/examples/output/tut11-rotation.ansi{ansi}
 
 The section has 229 segments and no crossing pair, so both paths are exact. Turning it by 10 degrees sweeps 225 cells,
-and one face needed at most 190 evaluations. The swept areas sum to 5.3e-17 and the largest residual is 7.0e-18. The
+and one cell needed at most 466 quadrature nodes. The swept areas sum to 5.3e-17 and the largest residual is 7.0e-18. The
 animation turns it through nine steps of 10 degrees, every one exact, with residuals of at most 2.4e-17. The
 cube turned by 15 degrees sweeps 327 cells and clears 48, with the swept volumes summing to 1.4e-16 and the largest
 residual 4.7e-17.
