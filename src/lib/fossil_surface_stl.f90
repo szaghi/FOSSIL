@@ -4014,9 +4014,9 @@ contains
    !<
    !< Status (BOOL_STATUS_*), `self` unchanged unless OK:
    !<   - OK: no self-intersection (nothing to do), or the self-union is closed (no boundary edge);
-   !<   - CDT_FAILED: a facet's triangulation failed (a cut along a coplanar facet's edge crossing another cut inside
-   !<     it); cuts of three facets meeting at a point inside a facet are split at their three-plane point (IPK_TPI,
-   !<     issue #91). See the Known limitations of the reference page;
+   !<   - CDT_FAILED: a facet's triangulation failed (no known case: two cuts crossing inside a facet are split at
+   !<     their crossing point, a three-plane point (IPK_TPI, issue #91), or for a cut along a coplanar facet's edge a
+   !<     line-plane or edge-edge point (roadmap #92 WP5)). See the Known limitations of the reference page;
    !<   - NOT_CLOSED: the selection is not closed (an input that is not closed has no well-defined winding number);
    !<   - INVALID_INPUT: an exactly degenerate (zero-area) facet meets a self-intersecting facet, or a cut point of its
    !<     neighbours lies on it (issue #99): `sanitize` first. A degenerate facet away from the cuts passes through;

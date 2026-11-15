@@ -16,6 +16,8 @@ module fossil_arrangement
 !<    distinct points get distinct rounded coordinates (`separate_rounded`). Two cuts of one facet made by two
 !<    transversal facets that cross inside it (exactly, `ip_orient2d`) meet at the point of the three planes
 !<    (IPK_TPI, issue #91): it joins the three facets as an isolated point, and the triangulator splits both cuts there.
+!<    A cut along a coplanar partner's edge crossing another cut (roadmap #92 WP5) gets its point the same way: the
+!<    edge's line meets the transversal facet's plane (IPK_LPI), or the two partners' edges meet (IPK_EEI).
 !<    Points inside a facet edge go to the facet across it (T-junctions, exact collinearity).
 !< 3. `arrangement_retriangulate`: each cut facet is triangulated by `cdt_facet` (exact orient2d on implicit points),
 !<    with its cuts as constraints; sub-triangles keep the parent's orientation and carry their registry vertices and
@@ -35,7 +37,7 @@ use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_cdt_implicit,     only : cdt_facet, CDTI_OK
 use fossil_facet_object,     only : facet_object
 use fossil_implicit_points,  only : implicit_point_t, ip_explicit, ip_approx, ip_orient2d, ip_lex_compare, &
-                                    ip_identity_compare, ip_rank, ip_compare, ip_tpi
+                                    ip_identity_compare, ip_rank, ip_compare, ip_tpi, ip_lpi, ip_eei
 use fossil_list_id_object,   only : list_id_object
 use fossil_tritri_exact,     only : pair_cut, coplanar_cut, facet_drop, degenerate_pair_meet, PAIR_CROSSING, &
                                     PAIR_COPLANAR
@@ -413,15 +415,23 @@ contains
    endsubroutine merge_registry
 
    subroutine add_triple_points(arr)
-   !< Cuts of one facet that cross (issue #91). A facet gi cut by two facets g, h transversal to it (not coplanar
-   !< partners) has two cuts on the lines gi ^ g and gi ^ h; when they cross at a point inside both (exact: the ends of
-   !< each strictly on either side of the other in gi's projection, `ip_orient2d`) that point is the meeting point of
-   !< the three planes, which no pair of facets constructs: an IPK_TPI. It joins gi, g and h as an isolated point
-   !< (the triangulator splits every cut through it) and the registry is merged again, so the three facets share it,
-   !< and a TPI equal to a point of the registry (an LPI where the crossing is on a facet edge) takes that point. No
-   !< crossing: nothing changes.
+   !< Cuts of one facet that cross (issues #91, #92 WP5). Two cuts of a facet gi made by distinct facets g, h cross at
+   !< a point inside both (exact: the ends of each strictly on either side of the other in gi's projection,
+   !< `ip_orient2d`) that no pair of facets constructs in gi, so it is made here:
+   !< - g and h transversal to gi: the cuts lie on the lines gi ^ g and gi ^ h, the point is the meeting point of the
+   !<   three planes (IPK_TPI, issue #91);
+   !< - g a coplanar partner of gi (its cut lies on an edge (u, v) of g), h transversal: the line (u, v) meets h's plane
+   !<   (IPK_LPI, the construction of `pair_cut` for the end of the cut g ^ h on g's edge);
+   !< - g and h coplanar partners: their edges (u, v) and (w, x), exactly coplanar, meet (IPK_EEI, the construction of
+   !<   `coplanar_cut` where one partner's edge leaves the other).
+   !< The point joins gi, g and h as an isolated point (it lies in the three closed facets; the triangulator splits
+   !< every cut through it) and the registry is merged again, so the facets share it, and a point equal to one of the
+   !< registry (an LPI where a TPI lies on a facet edge, the end of a partner's cut) takes that point. No crossing:
+   !< nothing changes.
    type(arrangement_t), intent(inout) :: arr
-   integer(I4P)                       :: gi, k, l, drop, a, b, c, d, g, h, id, n_added
+   integer(I4P)                       :: gi, k, l, drop, a, b, c, d, g, h, id, n_added, eg, eh
+   logical                            :: pg, ph
+   type(implicit_point_t)             :: x
 
    n_added = 0_I4P
    do gi = 1, arr%n_a + arr%n_b
@@ -430,20 +440,38 @@ contains
       if (drop == 0_I4P) cycle
       do k = 1, arr%cut(gi)%n_segments - 1
          g = arr%cut(gi)%src(k)
-         if (is_partner(arr, gi, g)) cycle
+         pg = is_partner(arr, gi, g)
          a = arr%cut(gi)%seg(1, k) ; b = arr%cut(gi)%seg(2, k)
          if (a == b) cycle
          do l = k + 1, arr%cut(gi)%n_segments
             h = arr%cut(gi)%src(l)
             if (h == g) cycle
-            if (is_partner(arr, gi, h)) cycle
+            ph = is_partner(arr, gi, h)
             c = arr%cut(gi)%seg(1, l) ; d = arr%cut(gi)%seg(2, l)
             if (c == d .or. c == a .or. c == b .or. d == a .or. d == b) cycle
             if (ip_orient2d(arr%pts(a), arr%pts(b), arr%pts(c), drop) * &
                 ip_orient2d(arr%pts(a), arr%pts(b), arr%pts(d), drop) >= 0_I4P) cycle
             if (ip_orient2d(arr%pts(c), arr%pts(d), arr%pts(a), drop) * &
                 ip_orient2d(arr%pts(c), arr%pts(d), arr%pts(b), drop) >= 0_I4P) cycle
-            call register_point(arr, ip_tpi(plane_of(arr, gi), plane_of(arr, g), plane_of(arr, h)), id)
+            if (.not. pg .and. .not. ph) then
+               x = ip_tpi(plane_of(arr, gi), plane_of(arr, g), plane_of(arr, h))
+            elseif (pg .and. ph) then
+               eg = partner_edge(arr, g, a, b, drop) ; eh = partner_edge(arr, h, c, d, drop)
+               if (eg == 0_I4P .or. eh == 0_I4P) cycle
+               x = ip_eei(edge_end(arr, g, eg, 0_I4P), edge_end(arr, g, eg, 1_I4P), &
+                          edge_end(arr, h, eh, 0_I4P), edge_end(arr, h, eh, 1_I4P))
+            elseif (pg) then
+               eg = partner_edge(arr, g, a, b, drop)
+               if (eg == 0_I4P) cycle
+               x = ip_lpi(edge_end(arr, g, eg, 0_I4P), edge_end(arr, g, eg, 1_I4P), &
+                          xyz_of(arr%facet(h)%vertex(1)), xyz_of(arr%facet(h)%vertex(2)), xyz_of(arr%facet(h)%vertex(3)))
+            else
+               eh = partner_edge(arr, h, c, d, drop)
+               if (eh == 0_I4P) cycle
+               x = ip_lpi(edge_end(arr, h, eh, 0_I4P), edge_end(arr, h, eh, 1_I4P), &
+                          xyz_of(arr%facet(g)%vertex(1)), xyz_of(arr%facet(g)%vertex(2)), xyz_of(arr%facet(g)%vertex(3)))
+            endif
+            call register_point(arr, x, id)
             call append_steiner(cut=arr%cut(gi), id=id)
             call append_steiner(cut=arr%cut(g), id=id)
             call append_steiner(cut=arr%cut(h), id=id)
@@ -453,6 +481,32 @@ contains
    enddo
    if (n_added > 0_I4P) call merge_registry(arr)
    endsubroutine add_triple_points
+
+   function partner_edge(arr, g, a, b, drop) result(e)
+   !< The edge of facet g (a coplanar partner of the facet whose projection drops axis `drop`) carrying the cut with
+   !< registry ends a, b: both exactly collinear with it (`ip_orient2d`), 0 if none (not a cut made by g's edges).
+   type(arrangement_t), intent(in) :: arr  !< Arrangement.
+   integer(I4P),        intent(in) :: g    !< Partner facet.
+   integer(I4P),        intent(in) :: a, b !< Cut ends (registry indices).
+   integer(I4P),        intent(in) :: drop !< Dropped axis of the cut facet's projection.
+   integer(I4P)                    :: e    !< Edge (u, v) = (vertex e, vertex e + 1), 1..3, or 0.
+   type(implicit_point_t)          :: u, v
+
+   do e = 1, 3
+      u = ip_explicit(edge_end(arr, g, e, 0_I4P)) ; v = ip_explicit(edge_end(arr, g, e, 1_I4P))
+      if (ip_orient2d(u, v, arr%pts(a), drop) == 0_I4P .and. ip_orient2d(u, v, arr%pts(b), drop) == 0_I4P) return
+   enddo
+   e = 0_I4P
+   endfunction partner_edge
+
+   pure function edge_end(arr, g, e, j) result(r)
+   !< Coordinates of end j (0: vertex e, 1: vertex e + 1) of edge e of facet g.
+   type(arrangement_t), intent(in) :: arr     !< Arrangement.
+   integer(I4P),        intent(in) :: g, e, j !< Facet, edge, end.
+   real(R8P)                       :: r(3)    !< Coordinates.
+
+   r = xyz_of(arr%facet(g)%vertex(mod(e - 1_I4P + j, 3_I4P) + 1_I4P))
+   endfunction edge_end
 
    pure function is_partner(arr, f, o) result(yes)
    !< Facet o is a coplanar partner of facet f (its cuts in f lie on o's edges, not on a plane through f).
