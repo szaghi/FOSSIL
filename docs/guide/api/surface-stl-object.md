@@ -172,14 +172,15 @@ end program ex_save_into_file
 
 ```fortran
 call surface%distance_to(other, distance, point_self, point_other, facet_self, facet_other, intersecting, status, &
-                         pose_self, pose_other)
+                         pose_self, pose_other, pairs)
 ```
 
 Distance between the surface and `other` (issue #67): the minimum over their facet pairs, by a best-first descent of
 the two trees, bit-identical to the brute-force minimum; the closest facets (ties: the smallest pair), the witness
 points, and `intersecting` when the bodies touch or cross (exact classification). `STATUS_INVALID_INPUT` for an empty
 surface. `pose_self` / `pose_other` (`rigid_pose_t`) place the bodies as `move` would, without refitting the trees,
-with the same bits. See [body–body distance](/guide/advanced/body-distance).
+with the same bits. `pairs` (out, optional) counts the facet pairs evaluated by the triangle-triangle distance, the
+cost of the call. See [body–body distance](/guide/advanced/body-distance).
 
 ### `proximity_pairs`
 
@@ -2068,7 +2069,7 @@ Conceptual overview on the [§1.3 feature page](/guide/advanced/decimate).
 | Argument        | Intent       | Type           | Notes                                                                                            |
 | --------------- | ------------ | -------------- | ------------------------------------------------------------------------------------------------ |
 | `target_facets` | `in`         | `integer(I4P)` | (required) Upper bound on the output facet count.                                                |
-| `max_error`     | `in`, opt.   | `real(R8P)`    | Cost ceiling, a distance: stop with `_NO_PROGRESS` when the cheapest collapse moves its vertex farther than this from an input plane it carries. Default: none. |
+| `max_error`     | `in`, opt.   | `real(R8P)`    | Certified bound of the distance from the result to the input: a collapse whose new facets would leave the input farther is skipped; the loop stops with `_NO_PROGRESS` when the cheapest collapse moves its vertex farther than this from an input plane it carries. Default: none. |
 | `rim_collapses` | `in`, opt.   | `logical`      | Default `.true.`: patch rims coarsen along themselves (corners kept); `.false.` locks them.      |
 | `status`        | `out`, opt.  | `integer(I4P)` | `DEC_STATUS_OK` (reached target), `_NO_PROGRESS` (couldn't reach, or `max_error` reached), or `_BAD_INPUT`. |
 
@@ -2261,7 +2262,7 @@ vertex lock. Conceptual overview on the
 | -------------------- | ------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `target_length`      | `in`, opt.   | `real(R8P)`    | Target uniform edge length. `≤ 0` (default) → use the median input edge length.                                                        |
 | `iterations`         | `in`, opt.   | `integer(I4P)` | Outer-loop count. Default `5`. Convergence is typical at 3-5; more iterations smooth distribution further but also accumulate volume drift. |
-| `preserve_features`  | `in`, opt.   | `logical`      | Lock vertices on edges with dihedral > 30°. Default `.false.`. Set to `.true.` for mechanical CAD inputs.                              |
+| `preserve_features`  | `in`, opt.   | `logical`      | Keep the edges with dihedral > 30°: their corners and curved runs locked, their straight runs coarsened along their line. Default `.false.`. Set to `.true.` for mechanical CAD inputs. |
 | `status`             | `out`, opt.  | `integer(I4P)` | `REM_STATUS_OK` or `REM_STATUS_BAD_INPUT`.                                                                                             |
 
 Mutates `self` in place.

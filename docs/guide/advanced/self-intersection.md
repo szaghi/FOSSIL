@@ -188,9 +188,10 @@ and leaves it unchanged otherwise:
 
 - `BOOL_STATUS_OK` — no self-intersection (nothing to do), or the
   self-union is closed;
-- `BOOL_STATUS_CDT_FAILED` — the exact triangulation of a facet failed:
-  a cut along the edge of a coplanar facet crosses another cut inside it
-  (see [Known limitations](#known-limitations));
+- `BOOL_STATUS_CDT_FAILED` — the exact triangulation of a facet failed;
+  no case is known since roadmap
+  [#92](https://github.com/szaghi/FOSSIL/issues/92) WP5 (see
+  [Known limitations](#known-limitations));
 - `BOOL_STATUS_NOT_CLOSED` — the selection has boundary edges: the
   input is not closed, so its winding number is not an integer;
 - `BOOL_STATUS_INVALID_INPUT` — a zero-area facet meets a
@@ -266,12 +267,22 @@ inspection and that `is_watertight()` doesn't catch.
   boundary edges after `sanitize` removes 62 duplicates), so its winding
   number is not an integer and the self-union is not defined. Wrap such
   inputs with [`alpha_wrap`](/guide/advanced/alpha-wrap).
-- **A coplanar cut crossing another cut.** A facet exactly coplanar with
-  another is cut along the portions of the other's edges inside it; if
-  such a cut crosses a cut by a transversal facet (or another coplanar
-  cut) inside the facet, the crossing point (a line-plane or edge-edge
-  point) is not constructed there, and the call returns
-  `BOOL_STATUS_CDT_FAILED` with the surface unchanged.
+- **A coplanar cut crossing another cut** (resolved, roadmap
+  [#92](https://github.com/szaghi/FOSSIL/issues/92) WP5). A facet
+  exactly coplanar with another is cut along the portions of the other's
+  edges inside it. Such a cut can cross a cut by a transversal facet, or
+  another coplanar cut, inside the facet: two unit boxes sharing a bottom
+  plane, each bottom split along a diagonal, and a third box crossing
+  that plane. Until WP5 the arrangement built no point at that crossing,
+  and the call returned `BOOL_STATUS_CDT_FAILED`. Every crossing of two
+  cuts of a facet by distinct facets is now split at its point, built
+  with the identity the pair of those two facets gives it, so the
+  registry merges them: a three-plane point (`IPK_TPI`) for two
+  transversal cuts; for a coplanar partner's edge against a transversal
+  cut, the point where that edge meets the transversal plane (`IPK_LPI`);
+  for two partners' edges, their edge-edge point (`IPK_EEI`). Four box
+  configurations resolve to their union, watertight, volume within
+  1e-12 of the exact union (`fossil_test_boolean_coplanar_cross`).
 - **Closed inputs only.** The selection reads the winding number,
   defined for a closed surface. On an open one the selection keeps its
   boundary edges and the call returns `BOOL_STATUS_NOT_CLOSED`.

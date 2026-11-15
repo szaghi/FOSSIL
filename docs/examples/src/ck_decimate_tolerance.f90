@@ -15,7 +15,7 @@ tol = 1.e-3_R8P * diagonal%normL2()                                    ! 0.1 % o
 coarse = wing
 call coarse%decimate(target_facets=1_I4P, max_error=tol, status=status) ! as few facets as the tolerance allows
 if (status /= DEC_STATUS_NO_PROGRESS) error stop 'decimate failed'
-call coarse%hausdorff(wing, upper=h, tolerance=tol / 4, status=status)  ! check it: max_error is no certificate
+call coarse%hausdorff(wing, upper=h, tolerance=tol / 4, status=status)  ! both sides: only result -> input is certified
 if (status /= DEV_STATUS_OK) error stop 'hausdorff failed'
 print '(A,I0,A,I0,A)', 'decimated: ', wing%get_facets_number(), ' -> ', coarse%get_facets_number(), ' facets'
 print '(A,ES9.2,A,ES9.2)', 'max_error ', tol, ', certified Hausdorff distance <= ', h

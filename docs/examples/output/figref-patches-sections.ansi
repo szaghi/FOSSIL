@@ -4,8 +4,8 @@ dragon-patches.stl read back: 3 solid blocks, 6588 facets
   patch middle (2296)
   patch tail (2054)
 fill_holes: 2 holes; the new facets take the inlet or the patch "filled"
-  new facet 345: patch filled
-  new facet 346: patch inlet
+  new facet 735: patch filled
+  new facet 736: patch inlet
 block minus sphere: 2292 facets, the dimple in patch "sphere"
   patch block (40)
   patch lid (102)

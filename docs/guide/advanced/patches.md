@@ -148,8 +148,11 @@ every patch):
 - **Boolean.** The union's patches are the four input ones, merged into one table by name. Each keeps the area of its
   parent patch outside the other body: `low` and `b_high` lie wholly outside (area 3 each), while `high` and `b_low`
   lose the three quarter-faces inside the other box (3 − 0.75 = 2.25). The four sum to the union's area, 10.5.
-- **Remesh.** 84 facets become 610, but each patch keeps its area to the printed digits: the patch boundaries, the
-  mid-height lines and the intersection curve, are locked, so no facet crosses them.
+- **Remesh.** 84 facets become 1278, but each patch keeps its area to the printed digits: the patch boundaries, the
+  mid-height lines and the intersection curve, are locked, so no facet crosses them. Equilateral facets of edge 0.15
+  would take about 1080 for the area 10.5; the three iterations reach that density since each splits every long edge
+  in rounds (roadmap [#92](https://github.com/szaghi/FOSSIL/issues/92) WP5: 610 facets before, the long faces
+  under-refined).
 - **Section.** The curve's segments take the patch of the facet they are cut from, and the curve takes the surface's
   names. At z = 0.75 the section meets `high` (A's upper half) and `b_low` (B's lower half), 3 each: the perimeter of
   each square outside the other.

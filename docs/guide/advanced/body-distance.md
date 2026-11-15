@@ -32,6 +32,19 @@ facets that realize it, 583 on the dragon and 45 on the cube (ember). The figure
   is dropped when its box distance exceeds the best found; leaf pairs are evaluated in a fixed order. Facet pairs at
   equal distance are tie-broken by the smaller (facet_self, facet_other), so the result, facets and points included,
   is **bit-identical to the brute-force loop** over all pairs (`body_distance_brute`).
+- **Inside a leaf pair** (roadmap [#92](https://github.com/szaghi/FOSSIL/issues/92) WP5): the facet pair of least box
+  gap is evaluated first (the first in loop order on ties), so the pruning bound tightens sooner, then the others in
+  loop order. The result does not depend on that order: the running best never drops below the final minimum, and an
+  equal distance keeps the smaller pair. Once the best is 0 (contact), a pair after it in (facet_self, facet_other)
+  order is not evaluated: its distance is ≥ 0 and it loses the tie rule. Before, every later pair with overlapping
+  boxes was still classified exactly, though it could not win.
+- **Cost.** `pairs=` returns the number of facet pairs the call evaluated. Two 12-facet cubes (one tree leaf each,
+  the `distance_to.cubes` line of `fossil_val_perf`): 27.3 evaluations per call apart (of 144; the box gaps allow no
+  fewer than 26.7 in any order) and 3.4 in contact, 14.8 µs per call (35.9 µs before WP5); the dragon (fine) against a
+  posed copy, 1.26 ms per call (3.3 ms). Part of the gain is the exact core: `pair_cut` orders the section points of
+  two triangles with `ip_compare`, whose exact stage axis-aligned faces reached on every tie; a coordinate fixed by
+  the construction is now compared directly (see [booleans](/guide/advanced/booleans#performance)). What is left of a
+  call is the arithmetic of the 15 sub-distances of each evaluated pair.
 - **Poses** (`pose_self=`, `pose_other=`): the bodies are taken where `move` would put them, without refitting either
   tree. Each facet is moved by `to_world` (the bits `move` writes), and each tree node is bounded by the box of its
   eight moved corners, a conservative bound. The result equals the one after `move`, bit for bit.
@@ -127,6 +140,10 @@ to 1e-8, peaks at 1.3e7 ε L at 1e-8, and falls back below it at most of the sma
 
 ## Validation
 
+`src/tests/fossil_test_body_distance_small.f90`: the bench's two cubes under 2000 poses (53 in contact), a grid of 128
+facets on both tree kinds (200 poses), exact ties at contact (face, edge, vertex, overlap, plain and under an exact
+quarter turn) and degenerate facets, every output equal to `body_distance_brute`, the pair counts bounded (≤ 30 per
+call apart, ≤ 5 in contact; 37.06 and 35.51 before WP5).
 `src/tests/fossil_test_body_distance.f90`: cubes apart (exact distance), touching at a vertex, an edge, a face, and
 overlapping (0, intersecting), faces 1e-12 apart, and a sphere against a torus at six rigid motions, bit-identical to
 brute force. `src/tests/fossil_test_body_distance_degenerate.f90`: segment and point facets against a face (apart,
@@ -141,3 +158,17 @@ result after `move`.
 
 See [`distance_to`](/guide/api/surface-stl-object#distance-to) and the curve's
 [queries](/guide/api/curve-object#queries).
+
+| Argument | Intent | Notes |
+|---|---|---|
+| `other` | `in` | The other body (`surface_stl_object`). |
+| `distance` | `out` | The least distance over the facet pairs; 0 when the bodies touch or cross. |
+| `point_self`, `point_other` | `out`, opt. | The witness points. |
+| `facet_self`, `facet_other` | `out`, opt. | The closest facets (ties: the smallest pair). |
+| `intersecting` | `out`, opt. | The bodies touch or cross (exact). |
+| `status` | `out`, opt. | `STATUS_OK`, `STATUS_INVALID_INPUT` (empty surface). |
+| `pose_self`, `pose_other` | `in`, opt. | `rigid_pose_t`: the bodies where `move` would put them, trees not refitted; same bits. |
+| `pairs` | `out`, opt. | The facet pairs evaluated by the triangle-triangle distance: the cost of the call (roadmap #92 WP5). |
+
+The free routines `body_distance` and `body_distance_brute` of `fossil_body_distance` take the same optional
+`pairs`.

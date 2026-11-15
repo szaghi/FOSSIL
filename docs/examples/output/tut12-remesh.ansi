@@ -1,7 +1,7 @@
 $ tut12_b_remesh
 boolean result:   524 facets, edges from  0.0038 to 1.1180
-iterations 1:   980 facets, edges from  0.0038 to 1.1180, watertight T
-iterations 2:  1142 facets, edges from  0.0038 to 1.0308, watertight T
-iterations 4:  1158 facets, edges from  0.0038 to 0.5590, watertight T
-iterations 6:   990 facets, edges from  0.0038 to 0.3352, watertight T
-target 0.4 on the remeshed part: 990 -> 620 facets
+iterations 1:  1450 facets, edges from  0.0038 to 0.3476, watertight T
+iterations 2:  1122 facets, edges from  0.0038 to 0.2966, watertight T
+iterations 4:   902 facets, edges from  0.0038 to 0.2676, watertight T
+iterations 6:   898 facets, edges from  0.0038 to 0.2723, watertight T
+target 0.4 on the remeshed part: 898 -> 610 facets

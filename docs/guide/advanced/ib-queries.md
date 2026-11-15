@@ -79,8 +79,10 @@ bodies, a stencil that reaches through the other wall, and a point with two foot
   cube's face, x = 1. At x = 1.05 the first cube is closer by 0.1 and the point is not flagged.
 - `wall_distance_many` with cutoff 0.3: the cube centre is 0.5 from every wall and the point (1.7, 0.5, 1.6) is 0.6
   above the second cube, so both get the cutoff and body 0. The point at x = 1.3 is 0.1 from the second cube, body 2.
-- `surface_markers` on one cube: 256 markers whose areas sum to the cube's area, 6, with 60.5 % of the
-  nearest-neighbour spacings in [0.8, 1.2] Δx.
+- `surface_markers` on one cube: 334 markers whose areas sum to the cube's area, 6, with 74.0 % of the
+  nearest-neighbour spacings in [0.8, 1.2] Δx (256 markers and 60.5 % before
+  [roadmap #92](https://github.com/szaghi/FOSSIL/issues/92) WP5, when the crease vertices kept the spacing of the
+  splits).
 - The vector level set, `distance_field_object%compute(store_closest=.true.)`, stores the same closest point and
   normal on the band cells of a [distance field](/guide/advanced/distance-field).
 
@@ -215,13 +217,25 @@ forcing needs a spacing of 0.8–1.2 Δx (Cheylan et al. 2023).
     spacing, because the remesher's edges come out short.
   - `spacing_fraction` reports the fraction of nearest-neighbour spacings
     inside the window.
-  - Pass `preserve_features=.true.` on bodies with sharp edges.
+  - Pass `preserve_features=.true.` on bodies with sharp edges. The
+    remesh then keeps the creases and moves the vertices of their straight
+    runs along them (see
+    [isotropic remeshing](/guide/advanced/isotropic-remesh)), so the
+    markers on the faces are spaced like the grid up to the creases.
+  - Across a sharp crease the spacing is the distance in space between
+    two centroids: two equilateral facets of edge √3 Δx on a 90° crease
+    edge have centroids 0.707 Δx apart, below the window, by construction.
+    They are a share of about 3 Δx of the facets of a unit cube, so even an
+    ideal marker set (equilateral, rows along the creases) has a fraction
+    of about 1 − 3 Δx, 0.70 at Δx = 0.1. The fraction on a body with
+    creases measures the faces and the creases together; the markers next
+    to a crease sit at 0.6–0.9 Δx.
 - **`curve%curve_markers(dx, centroids, lengths, normals, spacing_fraction,
   spacings)`** resamples every loop exactly along the polyline into
   nint(L/Δx) pieces of equal arc length. The markers sit at the piece
   midpoints, on the polyline.
 
-![the unit cube with the 256 markers of surface_markers at dx = 0.1 with features kept, about 43 per face, evenly spaced up to the edges](../../examples/images/ref-ib-queries-markers.svg){.fossil-figure}
+![the unit cube with the 334 markers of surface_markers at dx = 0.1 with features kept, about 56 per face, evenly spaced up to the edges](../../examples/images/ref-ib-queries-markers.svg){.fossil-figure}
 
 ## Placement rules from the literature
 
@@ -250,7 +264,8 @@ All of them are lengths for `probe_many`:
 | foot curvature, flat faces | 0 exactly |
 | foot curvature, regular N-gons R = 1 | (π/N)/sin(π/N) exactly: the error against 1/R falls by 4.0 per halving of h |
 | markers, unit icosphere, Δx = 0.06 | 2030 markers, area within 0.5 %, 97 % of spacings in [0.8, 1.2] Δx |
-| markers, unit cube, Δx = 0.1, features kept | area 6 to round-off, 53 % of spacings in the window |
+| markers, unit cube, Δx = 0.1, features kept | area 6 to round-off, 73 % of spacings in the window (53 % before roadmap #92 WP5) |
+| remesh of that cube at L = √3 Δx, features kept | every cube edge 7 or 8 vertices, every crease spacing in [4L/5, 4L/3] (0.807 L to 1.019 L); before, 9 vertices at 0.722 L |
 | curve markers, square and 64-gon | on the polyline (distance ≤ 6.6e-17), equal lengths summing to the perimeter |
 
 ## Limitations

@@ -203,8 +203,8 @@ One shell can pass through itself: here the unit cube with its corner (1, 1, 1) 
 its own bottom face. It is watertight and one shell, so only `find_self_intersections` sees the defect, and there are
 no separate bodies to unite. `resolve_self_intersections` keeps the faces with winding number 0 in front and 1 behind:
 the pocket below the bottom face, wound −1, goes, and the dent opens through the bottom face. Check the status: on
-`BOOL_STATUS_NOT_CLOSED` (an input that is not closed, as `dragon.stl`) or `BOOL_STATUS_CDT_FAILED` (a cut along a
-coplanar facet's edge crosses another cut) the surface is left unchanged; [`alpha_wrap`](/guide/advanced/alpha-wrap) is the fallback.
+`BOOL_STATUS_NOT_CLOSED` (an input that is not closed, as `dragon.stl`) or `BOOL_STATUS_CDT_FAILED` (a failed
+triangulation of a facet: no case is known) the surface is left unchanged; [`alpha_wrap`](/guide/advanced/alpha-wrap) is the fallback.
 See [self-intersection](/guide/advanced/self-intersection#known-limitations).
 
 ### Wrap a triangle soup into a closed surface
@@ -461,9 +461,10 @@ visible, next to a thin wall or a narrow gap some are not. `surface_stl_object` 
 ![the unit cube's edges and the markers surface_markers places on its three faces in view for a grid of spacing 0.1, evenly spread over each face, each with its unit normal](../examples/images/ck-markers.svg){.fossil-figure}
 
 `surface_markers` remeshes a copy of the surface to an edge length of sqrt(3) dx and returns the facet centroids,
-areas and normals. The 256 areas add up to 6.000000, the cube's area. Direct forcing wants the markers dx apart:
-0.6055 of the spacings lie within [0.8, 1.2] dx (the locked edges of the cube keep the spacing of their splits, so
-the markers next to them are farther apart; on a smooth body the fraction is higher). `curve_markers` is the 2-D twin, exact along the arc length. See
+areas and normals. The 334 areas add up to 6.000000, the cube's area. Direct forcing wants the markers dx apart:
+0.7395 of the spacings lie within [0.8, 1.2] dx, about 0.8 of those away from the edges and fewer next to them: two
+facets on either side of a 90-degree crease have centroids about 0.71 dx apart in space, so
+even an ideal marker set of the unit cube gets about 1 - 3 dx = 0.70 (on a smooth body the fraction is higher). `curve_markers` is the 2-D twin, exact along the arc length. See
 [grid-adapted markers](/guide/advanced/ib-queries#grid-adapted-markers).
 
 ### Place markers on a curve
@@ -1007,11 +1008,12 @@ See [decimation](/guide/advanced/decimate).
 
 <<< @/examples/output/ck_decimate_tolerance.ansi{ansi}
 
-With `max_error`, the loop stops (`DEC_STATUS_NO_PROGRESS`) at the first collapse that would move its vertex farther
-than `max_error` from an input plane it carries; a target of 1 asks for as few facets as that allows. The open edges of
-the wing (its two ends) are held by constraint planes, so they do not slide along the span. `max_error` is a quadric
-bound, not a certificate: check the result with `hausdorff` when the bound matters. See
-[decimation](/guide/advanced/decimate#a-cost-ceiling).
+With `max_error`, every point of the result is within `max_error` of the input, certified: a collapse whose new
+facets would leave the input farther is skipped. The loop stops (`DEC_STATUS_NO_PROGRESS`) at the first collapse that
+would move its vertex farther than `max_error` from an input plane it carries; a target of 1 asks for as few facets as
+that allows. The open edges of the wing (its two ends) are held by constraint planes, so they do not slide along the
+span. The other side, the input close to the result, is not certified: `hausdorff` measures both sides. See
+[decimation](/guide/advanced/decimate#a-certified-tolerance).
 
 ### Unite two bodies
 
@@ -1034,12 +1036,13 @@ Two unit cubes overlapping on a cube of side 0.5 give 2 - 0.125 = 1.875. `BOOL_I
 
 ![the unit cube as loaded: 48 facets, edges from 0.5 to 0.71](../examples/images/ck-remesh-before.svg)
 
-![the same cube after isotropic_remesh with target length 0.1 and features preserved: 1336 facets, sharp edges kept](../examples/images/ck-remesh-after.svg)
+![the same cube after isotropic_remesh with target length 0.1 and features preserved: 1354 facets, sharp edges kept](../examples/images/ck-remesh-after.svg)
 
 </div>
 
-`preserve_features=.true.` keeps the twelve sharp edges of the cube, so the volume stays 1. After 10 iterations the
-edges are between 0.0639 and 0.1409 for a target of 0.1: the band (0.08, 0.133) except along the locked edges. See [isotropic remeshing](/guide/advanced/isotropic-remesh).
+`preserve_features=.true.` keeps the twelve sharp edges of the cube, so the volume stays 1; their vertices move
+along the edges (straight crease runs), the corners stay. After 10 iterations the edges are between 0.0714 and 0.1342
+for a target of 0.1: the band (0.08, 0.133) but for a few edges. See [isotropic remeshing](/guide/advanced/isotropic-remesh).
 
 ### Measure the curvature at a point
 

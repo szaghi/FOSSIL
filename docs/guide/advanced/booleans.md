@@ -376,6 +376,11 @@ The cost per facet is flat in N: the boolean is linear in practice. Since issue 
 per patch instead of one winding-number query per sub-triangle, and the exact arrangement costs less than those
 queries did: 1.5–5× faster than #63. The exact predicates run their filters first; the exact stage is reached only
 by near-degenerate configurations (near-coplanar facets), where `orient3d` uses error-free products (Dekker's, with a bit-mask split).
+Exact ties are settled without the exact stage where the construction allows: `ip_compare`, the coordinate order of two implicit
+points, compares a coordinate fixed by the construction as the input double it is (an input vertex; a point of an
+edge whose two ends share that coordinate; a line-plane point whose plane is normal to that axis); axis-aligned faces and edges reached the exact stage on every tie before (roadmap
+[#92](https://github.com/szaghi/FOSSIL/issues/92) WP5; same signs, `fossil_test_implicit_points_axis` checks 750 k
+compares against an exact integer oracle).
 
 ### Defects found by the harness
 
@@ -451,13 +456,19 @@ gates its case, the sphere translated by 1e-6.
   first if you suspect this is your case.
 
 - **CDT failures** (`BOOL_STATUS_CDT_FAILED`): the exact triangulation of
-  a facet cannot fail on cuts that meet only at their ends. Two cuts by
-  transversal facets that cross inside a facet (a self-intersecting input)
-  meet at a three-plane point, inserted since issue #91. It still fails on
-  a cut along the edge of a coplanar facet crossed by another cut inside
-  the facet (the arrangement constructs no point there). None in the
-  validation. A zero-area facet with cuts is `BOOL_STATUS_INVALID_INPUT`
-  since issue #99.
+  a facet cannot fail on cuts that meet only at their ends. Cuts that
+  cross inside a facet are split at their crossing point: a three-plane
+  point for two cuts by transversal facets (since issue #91); the point
+  where a coplanar facet's edge meets the transversal plane, or where two
+  coplanar facets' edges meet, when one or both cuts run along the edge
+  of a coplanar facet (roadmap
+  [#92](https://github.com/szaghi/FOSSIL/issues/92) WP5; before, the
+  arrangement built no point there and the triangulation failed). No
+  failing case is known. Crossing cuts need a self-intersecting input:
+  with two clean closed operands they cannot arise (a facet crossing
+  another inside it belongs to the other surface, whose facets meet only
+  at shared vertices and edges). A zero-area facet with cuts is
+  `BOOL_STATUS_INVALID_INPUT` since issue #99.
 
 ## See also
 

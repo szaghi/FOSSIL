@@ -63,8 +63,8 @@ triangles; the rounded edges and corners keep the small ones:
    optimum, a lower bound of the constrained cost, and an edge is
    re-costed when it reaches the top; on a surface with one patch
    nothing changes, bit for bit.
-6. **Optional cost ceiling** `max_error` (see
-   [A cost ceiling](#a-cost-ceiling)).
+6. **Optional certified tolerance** `max_error` (see
+   [A certified tolerance](#a-certified-tolerance)).
 
 Stages 1 and 2 computed on the rounded box above (by the figure program,
 from the facet planes and the vertex ids of the pool): each facet
@@ -88,7 +88,7 @@ the volume moves by 2e-14 down to 806 facets, by -1.1 % at 100:
 call surface%decimate(target_facets, max_error, rim_collapses, status)
    class(surface_stl_object), intent(inout)         :: self
    integer(I4P),              intent(in)            :: target_facets
-   real(R8P),                 intent(in),  optional :: max_error     ! cost ceiling, a distance
+   real(R8P),                 intent(in),  optional :: max_error     ! certified tolerance, a distance
    logical,                   intent(in),  optional :: rim_collapses ! default .true.
    integer(I4P),              intent(out), optional :: status        ! DEC_STATUS_*
 ```
@@ -102,10 +102,12 @@ call surface%decimate(target_facets, max_error, rim_collapses, status)
     one below: the dragon's 6588 / 4 = 1647 ends at 1646).
   - `DEC_STATUS_NO_PROGRESS` — couldn't reach the target; surface is
     at the smallest count the safety checks allowed, or the cheapest
-    collapse exceeded `max_error`.
-- **`max_error`** (optional, a distance): stop when the cheapest
+    collapse costs more than `max_error**2`.
+- **`max_error`** (optional, a distance): every point of the result
+  lies within `max_error` of the input, certified; a collapse that
+  would break it is skipped, and the loop stops when the cheapest
   admissible collapse costs more than `max_error**2` (see
-  [A cost ceiling](#a-cost-ceiling)). Absent: no ceiling.
+  [A certified tolerance](#a-certified-tolerance)). Absent: neither.
 - **`rim_collapses`** (optional, default `.true.`): patch rims coarsen
   along themselves; `.false.` locks them (see [Patches](#patches)).
   - `DEC_STATUS_BAD_INPUT` — the input surface has no facets, or
@@ -190,14 +192,55 @@ a patch per face to the 12-facet cube (8 corners kept, before:
 `NO_PROGRESS` at 36) and a 64-gon prism with three patches, every
 vertex on a rim, to 64 facets (before: no collapse at all).
 
-## A cost ceiling
+## A certified tolerance
 
-The cost of a collapse is the sum of the squared distances of the new
-vertex to the planes it carries (unit normals, weight 1): the facet
-planes merged into its two ends and the constraint planes. With
-`max_error`, the loop stops with `DEC_STATUS_NO_PROGRESS` when the
-cheapest admissible collapse has $\sqrt{\text{cost}} > $ `max_error`:
-no new vertex lies farther than `max_error` from any of those planes.
+With `max_error`, two rules act on the loop (roadmap
+[#92](https://github.com/szaghi/FOSSIL/issues/92) WP5 made the first one
+a certificate):
+
+- **Every collapse is certified.** A collapse is applied only if its
+  target and every new facet of its one-ring lie within `max_error` of
+  the input surface. Each new facet is checked by a branch and bound
+  against the input's AABB tree: a triangle is settled when the least of
+  three upper bounds of the distance over it is at most `max_error`, else
+  it is split in four at its edge midpoints. The bounds: the largest
+  corner distance plus the triangle's radius (the distance is
+  1-Lipschitz); the largest corner distance to one input facet F, among
+  the corners' closest ones (d(x, input) ≤ d(x, F), and d(x, F) is convex
+  in x, so its largest value over the triangle is at a corner); and the
+  same per part over a split of the triangle along the edge between two
+  of those facets, or into the wedges of the fan of an input vertex they
+  share, each part bounded by its own facet. A midpoint farther than `max_error` refuses the collapse; so
+  does a facet still undecided after 40 levels or 4096 triangles (never
+  reached in any measured run). A refused collapse is **skipped and the
+  loop goes on**: its edge stays alive and is queued again when a
+  neighbouring collapse moves one of its ends. The guarantee holds to
+  round-off: h(result, input) ≤ `max_error`.
+- **The plane cost still stops the loop.** The cost of a collapse is the
+  sum of the squared distances of the new vertex to the planes it
+  carries (unit normals, weight 1): the facet planes merged into its two
+  ends and the constraint planes. The loop stops with
+  `DEC_STATUS_NO_PROGRESS` when the cheapest admissible collapse has
+  $\sqrt{\text{cost}} > $ `max_error`. This bounds no distance of the
+  surface, but it is the only guard of the other side, the input close
+  to the result: cutting off a feature merges its planes into a vertex,
+  and that costs. Without the stop, with the certificate alone, the
+  dragon at 1e-2 of its diagonal goes to 1020 facets instead of 2960 and
+  the input lies up to 3 `max_error` from the result.
+
+Before the certificate the stop was the only rule, and a collapse could
+put a new edge across a concave patch: `dragon.stl` at `max_error` = 3e-4
+of its diagonal ended 1.70 to 1.74 `max_error` from the input (6534
+facets; in the collapse 6546 → 6544 the new vertex is 0.04 `max_error`
+from the input, the midpoint of a new edge 1.15), and is now 0.83 to 0.87
+`max_error` from it (6538 facets, 2 collapses refused). `bunny.stl` at
+3e-3 of its diagonal: 1.109 to 1.135 `max_error` before, 0.525 to 0.575
+now (10 905 facets, 1 refusal). On the bracket, the wing and the
+marching-cubes spheres the plane cost was already conservative and no
+collapse is refused: their counts and distances are the ones before. The cost of the certificate is +15 to
++60 % of a decimation of the dragon (0.09 to 0.22 s) and +6 % on the
+bunny; without `max_error` none of it runs.
+
 With `max_error`, the open edges of the input (one facet) get
 constraint planes too (through the edge, perpendicular to its facet):
 without them a vertex of an open edge slides along its plane for free
@@ -206,10 +249,10 @@ moved 1.65 along the span; now its Hausdorff distance is 1.03e-3 for a
 max_error of 1.42e-3). Without `max_error`, open edges stay
 unconstrained, as before.
 
-It is a bound on planes, not on the surface: see
+It certifies one side, the result close to the input: see
 [Known limitations](#known-limitations). The certified
-[Hausdorff distance](/guide/advanced/surface-deviation) measured below
-`max_error` on closed bodies:
+[Hausdorff distance](/guide/advanced/surface-deviation), both sides,
+measured below `max_error` on closed bodies:
 
 | Body | `max_error` | Facets | Certified Hausdorff ≤ |
 | --- | --- | --- | --- |
@@ -218,7 +261,7 @@ It is a bound on planes, not on the surface: see
 | marching-cubes sphere, 32³ (2252) | 1e-3, 3e-3, 1e-2, 3e-2 | 1804, 1604, 1260, 664 | 6.6e-4, 2.2e-3, 4.4e-3, 1.7e-2 |
 
 The bracket and its decimations with `max_error = 3e-3` and `1e-2` (target 4: as few facets as the
-ceiling allows), the Hausdorff distances certified to a quarter of `max_error`:
+tolerance allows), the Hausdorff distances certified to a quarter of `max_error`:
 
 ![three brackets side by side, coloured by patch: the input with 1868 facets, then the decimations with max_error 3e-3 and 1e-2, the flat faces of the box covered by a few large triangles, the prisms keeping their sides](../../examples/images/ref-decimate-ceiling.svg){.fossil-figure}
 
@@ -255,22 +298,24 @@ deliberately surfaced here so the user knows what they're getting:
   `cube-01.stl` (48 facets) decimated to 36 facets stays watertight,
   manifold and one shell with the unit volume; asked for 4 facets, it
   ends at a tetrahedron of volume 0.158.
-- **No cost ceiling by default.** Without `max_error` the loop
+- **No tolerance by default.** Without `max_error` the loop
   collapses the cheapest edge until the target is met or no edge
   passes the checks, whatever the cost: a target too low for the shape
   is met by distorting it (the bracket with locked rims above, 42 % of
   its volume gone). Pass `max_error`, or compare the volume before and
   after.
-- **`max_error` is not a certificate.** It bounds the distance of each
-  new vertex from the input planes it carries, not from the input
-  surface, and says nothing of the input points a collapse leaves
-  behind (a small spike flattened costs little against its own
-  planes). On the closed bodies of [A cost ceiling](#a-cost-ceiling)
-  the certified Hausdorff distance stays below it; on `bunny.stl` at
-  1e-3 of its diagonal (2.5e-4) the input lies up to 3.1e-4 to 3.7e-4
-  from the result, on `dragon.stl` at 2.67e-2 up to 0.11 (the result
-  lies within 2.2e-2 to 2.8e-2 of the input). Check with `hausdorff`
-  when the bound matters.
+- **`max_error` certifies one side.** Every point of the result is
+  within `max_error` of the input; the input points a collapse leaves
+  behind are not certified, only held by the plane-cost stop (a small
+  spike flattened costs little against its own planes). On the closed
+  bodies of [A certified tolerance](#a-certified-tolerance) both sides
+  stay below it; on `bunny.stl` at 1e-3 of its diagonal (2.5e-4) the
+  input lies up to 3.1e-4 to 3.7e-4 from the result, on `dragon.stl` at
+  2.67e-2 up to 0.11 (the result within 2.67e-2, certified). A fold, a
+  fin, a thin part of the input can go: the first collapse of
+  `dragon.stl` at 3e-4 of its diagonal removes a fold whose facets 399
+  and 2777 lie back to back, and leaves the input 5.0 `max_error` from
+  the result. Check with `hausdorff` when that side matters.
 - **No volume-preservation term.** Collapses pull vertices inward,
   so volume drifts down monotonically with iteration. The
   marching-cubes sphere of the [Example](#example) (6632 facets)
@@ -281,7 +326,7 @@ deliberately surfaced here so the user knows what they're getting:
   (open shells) are treated like interior edges; the boundary moves
   during collapse (the link condition keeps it one loop per hole).
   With `max_error` they get constraint planes (see
-  [A cost ceiling](#a-cost-ceiling)). Irrelevant for closed solids
+  [A certified tolerance](#a-certified-tolerance)). Irrelevant for closed solids
   (the typical CFD case).
 
 ## See also
@@ -299,6 +344,12 @@ deliberately surfaced here so the user knows what they're getting:
 - Dey, Edelsbrunner, Guha & Nekhayev, *Topology preserving edge
   contraction*, Publ. Inst. Math. (Beograd) 66, 1999. The link
   condition.
+- Klein, Liebich & Straßer, *Mesh reduction with error control*, IEEE
+  Visualization 1996; Cohen et al., *Simplification envelopes*,
+  SIGGRAPH 1996. Two-sided error control by tracking which input facets
+  each output facet replaces: not implemented (FOSSIL certifies the
+  result side only). Cited from general knowledge, not checked against
+  the papers.
 - Lindstrom & Turk, *Fast and memory efficient polygonal
   simplification*, IEEE Visualization 1998. Adds the volume-
   preservation term that addresses the documented sphere drift.

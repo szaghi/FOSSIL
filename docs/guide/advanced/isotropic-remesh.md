@@ -111,6 +111,38 @@ lost 10 % of its volume). This is what keeps the 12 edges of a cube sharp
 through remeshing, with volume and area unchanged to round-off; without
 it, the cube rounds out into a ball over a few iterations.
 
+Since [roadmap #92](https://github.com/szaghi/FOSSIL/issues/92) WP5, a
+crease is no longer frozen at the spacing of its splits. With
+`preserve_features`:
+
+- **Straight crease runs move along their line.** The feature lines
+  (sharp, boundary and non-manifold edges) are cut into runs between
+  fixed vertices: the corners, the ends of non-manifold edges and, on a
+  surface with [patches](/guide/advanced/patches), the patch-boundary
+  vertices. A run is straight when its interior vertices lie within
+  `1e-9` of its length from its chord and it has no non-manifold edge.
+  Its edges collapse in the usual window (shorter than `4L/5`, no edge
+  above `4L/3` made, with every check of the collapse pass and the error
+  bound): onto the fixed end when one end is fixed, else into the
+  midpoint, which lies on the line. Its interior vertices then relax along
+  the chord, towards the midpoint of their two run neighbours, clamped
+  between them: on an axis-aligned edge the fixed coordinates stay bit for
+  bit. The run ends stay where they are, and so do the vertices of curved
+  feature lines and of patch boundaries.
+- **Split rounds.** Each iteration splits every edge above `4L/3`, in up
+  to 8 rounds, the new facets appended after the last used slot. One
+  split pass leaves edges whose facets an earlier split consumed waiting
+  for the next pass, and the collapses of a run were refused because
+  their face neighbours were still too long (144 of 149 on the test cube).
+- **No slivers.** A collapse or a crease move is refused if a facet would
+  keep less than 10 % of its area vector. The flip test alone accepted a
+  facet folded flat onto three collinear crease vertices: the bracket of
+  [tutorial 12](/manual/tutorial/12-geometry) had two facets of area
+  5e-12, its smallest is now 1.96e-4.
+
+Without `preserve_features` none of this runs: the remesh is bit for bit
+the one before.
+
 ## API
 
 ```fortran
@@ -135,7 +167,8 @@ call surface%isotropic_remesh(target_length, iterations, preserve_features, stat
   typically visible after 3 passes; further iterations smooth the edge-
   length distribution further and cost a little volume each on curved
   bodies (see Limitations).
-- **`preserve_features`**: lock vertices on edges with dihedral > 30°.
+- **`preserve_features`**: lock vertices on edges with dihedral > 30°
+  (straight runs of them move along their line, see feature preservation).
   **Essential for mechanical CAD inputs**; should usually be `.true.`
   on anything that isn't an organic shape.
 
@@ -168,9 +201,13 @@ from call to call), then measured against the input by the certified
   than 0.07 L = 0.014 off the cube: the edges are chamfered only that
   much. Area 5.809 and volume 0.986 instead of 6 and 1 (4.833 and 0.872
   before [issue #91](https://github.com/szaghi/FOSSIL/issues/91)).
-- **Features on.** The 12 edges (dihedral 90°, above 30°) are locked,
-  the midpoints inserted on them too: area and volume stay 6 and 1 to
-  the printed digits.
+- **Features on.** The 12 edges (dihedral 90°, above 30°) are locked
+  to their lines and the 8 corners fixed: area and volume stay 6 and 1 to
+  the printed digits. The edges are straight runs, so their vertices
+  collapse and slide along them: 338 facets, edges 0.146 to 0.264 for a
+  window of 0.16 to 0.267 (406 facets, edges 0.095 to 0.335, when every
+  crease vertex was frozen at the spacing of its splits, before roadmap
+  #92 WP5).
 - **Sphere.** The splits raise the facet count from 2312 to 3654, then
   the collapses bring it down to 2880; the shortest edge rises from
   0.0173 to 0.058, the longest falls from 0.20 to 0.15. Each iteration
@@ -242,8 +279,9 @@ standard deviation 0.091, area −14 %, volume −2.1 %).
   add up: three calls of one iteration leave the cube at 40 facets, volume
   0.823. Before [issue #91](https://github.com/szaghi/FOSSIL/issues/91)
   the cube collapsed to a flat tetrahedron (volume 4e-4). With
-  `preserve_features` the edges and corners are locked: 36 facets, area 6,
-  volume 1.
+  `preserve_features` the corners are fixed and the edges keep their
+  lines: the edge midpoints collapse onto the corners, one segment per
+  cube edge, 20 facets, area 6, volume 1 (36 before roadmap #92 WP5).
 - **The error bound trades coarsening for fidelity.** Where the
   curvature radius is below about `1.8 L` (the sagitta of an edge `L` is
   then above `0.07 L`) the collapses stop short of the target: the dragon
@@ -251,9 +289,10 @@ standard deviation 0.091, area −14 %, volume −2.1 %).
   the bound). `REMESH_ERROR_TOL` is a named constant of `fossil_remesh`,
   not an argument.
 - **Locked vertices do not collapse into each other.** Edges between two
-  locked vertices (on a crease or a patch boundary) keep their length:
-  the bracket of [tutorial 12](/manual/tutorial/12-geometry) keeps its
-  0.0038 edges at the rims. A dirty input keeps short edges where its
+  locked vertices (on a curved crease or a patch boundary) keep their
+  length: the bracket of [tutorial 12](/manual/tutorial/12-geometry)
+  keeps its 0.0038 edges at the rims. Only the straight crease runs
+  coarsen, and their ends (corners) stay. A dirty input keeps short edges where its
   non-manifold edges block the collapses: the dragon at `L = 1.5`
   goes from 6588 to 2280 facets, with edges of 2e-4 left.
 - Before [issue #79](https://github.com/szaghi/FOSSIL/issues/79) the

@@ -1,6 +1,6 @@
 !run figref-decimate-ceiling fig_ref_decimate_ceiling
 !fig ref-decimate-ceiling
-!< Figure of the reference page "Mesh decimation", section "A cost ceiling": the bracket of tutorial 12 with 128-sided
+!< Figure of the reference page "Mesh decimation", section "A certified tolerance": the bracket of tutorial 12 with 128-sided
 !< prisms (1868 facets) and its decimations with target 4 and max_error = 3e-3 and 1e-2, side by side, coloured by
 !< patch (base sepia, boss teal, bore ember); the caption gives the facets and the certified Hausdorff distances.
 program fig_ref_decimate_ceiling

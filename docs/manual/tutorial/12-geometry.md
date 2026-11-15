@@ -61,8 +61,11 @@ rims, and the edges run from 0.0038 to 1.118. A solver wants edges of about one 
   split the edges longer than 4/3 of the target, collapse those shorter than 4/5, flip edges towards valence 6, and
   relax the vertices tangentially, projecting them back onto the input surface. A collapse, flip or move that would
   put a facet more than 0.07 of the target off the input is refused, so a coarse target does not eat the body.
-- `preserve_features=.true.` locks the vertices on creases sharper than 30 degrees, so the box edges and the rims
-  stay where they are. Patch boundaries are locked too.
+- `preserve_features=.true.` keeps the creases sharper than 30 degrees, so the box edges and the rims stay where they
+  are. The vertices of curved creases and of patch boundaries are locked. A straight crease between two corners, an
+  edge of the base, keeps its line, but its vertices collapse and slide along it towards the target spacing. Each
+  iteration also splits every edge longer than 4/3 of the target, in rounds, and refuses a change that would leave a
+  facet with less than a tenth of its area (a fold flat onto a crease).
 - The remesh works on a copy (`mesh = part`): the part stays as the reference for the checks of the next steps.
 
 Then the same remesh towards a longer target, 0.4, on the result:
@@ -71,18 +74,21 @@ Then the same remesh towards a longer target, 0.4, on the result:
 
 <<< @/examples/output/tut12-remesh.ansi{ansi}
 
-- The facets grow from 524 to 1158 in four iterations, as the long edges of the base are split, then fall to 990 as
-  the short ones collapse: the 32-gons of the boss and the bore have sides of 0.069, below 4/5 of the target (0.16).
-  The longest edge falls from 1.118 to 0.3352 over six iterations, still above 4/3 of the target (0.267): the long
-  edges of the base need more passes.
+- The first iteration splits the long edges of the base in rounds: 524 facets become 1450 and the longest edge falls
+  from 1.118 to 0.3476. The short ones then collapse, down to 898 facets: the 32-gons of the boss and the bore have
+  sides of 0.069, below 4/5 of the target (0.16). After two iterations the longest edge is 0.2966, after four
+  0.2676, at 4/3 of the target (0.267); the flips and the relaxation that follow the splits can stretch an edge just
+  above it again (0.2723 after six).
 - The shortest edge stays at 0.0038: both its ends lie on a rim, locked, and two locked vertices are never merged.
-- The remesh towards 0.4 coarsens: 990 facets to 620. (Before [issue #79](https://github.com/szaghi/FOSSIL/issues/79)
+- The remesh towards 0.4 coarsens: 898 facets to 610. (Before [issue #79](https://github.com/szaghi/FOSSIL/issues/79)
   the collapse test rejected almost every interior edge, and the remesh only refined: 2218 facets, then 2218.)
 
-![the boolean result on the left, 524 facets in long fans, and its remesh on the right, 990 facets: more even on the faces of the base and coarser on the walls of the boss and the bore, with short edges left along the locked rims](../../examples/images/tut12-remesh.svg){.fossil-figure}
+![the boolean result on the left, 524 facets in long fans, and its remesh on the right, 898 facets: more even on the faces of the base and coarser on the walls of the boss and the bore, with short edges left along the locked rims](../../examples/images/tut12-remesh.svg){.fossil-figure}
 
-The figure shows the limit of this remesh: short edges and thin facets remain along the rims and at the corners of
-the base, where the vertices are locked and cannot collapse into each other.
+The figure shows the limit of this remesh: short edges and thin facets remain along the rims, where the vertices are
+locked and cannot collapse into each other. (Before [roadmap #92](https://github.com/szaghi/FOSSIL/issues/92) WP5
+every crease vertex was locked, the edges of the base too: after six iterations 990 facets, the longest edge still
+0.3352, and two facets folded flat onto the crease, of area 5e-12.)
 
 ## Checking the change
 
@@ -103,22 +109,22 @@ A remeshed surface is a different surface. How far it moved is a number with a g
 
 <<< @/examples/output/tut12-deviation.ansi{ansi}
 
-- The vertices of the mesh lie on the part, 1.10e-14 at most: the remesh projects them onto it. The facets between
-  them stray by at most 1.22e-2 (certified), at least 9.92e-3 (sampled); the mean distance is 3.55e-4.
-- The part is at most 1.49e-2 from the mesh, at least 9.87e-3. The walls of the boss and the bore meet at 11.25
+- The vertices of the mesh lie on the part, 2.47e-14 at most: the remesh projects them onto it. The facets between
+  them stray by at most 1.24e-2 (certified), at least 1.00e-2 (sampled); the mean distance is 3.69e-4.
+- The part is at most 1.51e-2 from the mesh, at least 1.01e-2. The walls of the boss and the bore meet at 11.25
   degrees, below the 30-degree threshold, so they are not locked and the remesh coarsens them, but only as far as its
   error bound allows: a collapse, flip or move is refused when a facet it makes would stray more than 0.07 times the
   target, 1.4e-2, from the input (checked at the centroid and edge midpoints of the facet, so a facet can stray a
   little more between them). On the boss (r = 0.35) that allows chords up to about 0.2 across the 32-gon, of sagitta
   r(1 − cos(asin(0.2 / 2r))) = 1.4e-2. A smaller target, or a lower feature angle, keeps the walls closer. (Before
   [issue #91](https://github.com/szaghi/FOSSIL/issues/91) there was no bound: chords of 0.27, 2.78e-2 away.)
-- The volume changes by −1.09e-3 of itself.
+- The volume changes by −9.39e-4 of itself.
 
 The figure colours each facet of the mesh by the largest distance to the part at seven points of it. The distance is
 zero on the flat faces and largest on the coarsened wall of the boss, where the facets cut chords across the 32-gon;
-the largest value, 9.28e-3, is the largest at the seven points.
+the largest value, 9.50e-3, is the largest at the seven points.
 
-![the boss of the remeshed bracket, each facet coloured from cream (on the part) to ember (9.28e-3 away): the flat faces cream, the side wall of the boss ember where its facets cut chords across the 32-gon, the largest marked](../../examples/images/tut12-deviation.svg){.fossil-figure}
+![the boss of the remeshed bracket, each facet coloured from cream (on the part) to ember (9.50e-3 away): the flat faces cream, the side wall of the boss ember where its facets cut chords across the 32-gon, the largest marked](../../examples/images/tut12-deviation.svg){.fossil-figure}
 
 ## Patches and feature edges
 
@@ -143,12 +149,12 @@ A solver assigns boundary conditions by patch, and a grid generator keeps its li
 
 <<< @/examples/output/tut12-features.ansi{ansi}
 
-- The three patches came through both booleans and the remesh: base 606 facets, boss 178, bore 206.
+- The three patches came through both booleans and the remesh: base 534 facets, boss 174, bore 190.
 - The part has 260 feature edges, 8 corners and 16 polylines: 12 chains between corners, the edges of the base, and 4
   closed loops without a corner, the top and bottom rims of the boss and of the bore. Their facets meet at 11.25
   degrees, below the threshold, so the rims have no corners.
 - The mesh has more feature edges, 292, because the remesh split them, but the same 8 corners and 16 polylines, all
-  sharp: no crease was added or lost.
+  sharp: no crease was added or lost. Moving the vertices of the straight creases along them changes neither.
 
 ![the remeshed bracket coloured by patch, the base in sepia, the boss in teal, the bore in ember, its 292 feature edges in gold along the 12 edges of the base and the rims of the boss and the bore, and its 8 corners, the corners of the base](../../examples/images/tut12-part.svg){.fossil-figure}
 
@@ -169,15 +175,16 @@ The bore is 0.06 from the x = 0 end. On a grid of cells of 0.1, that web falls b
 
 <<< @/examples/output/tut12-thickness.ansi{ansi}
 
-- Both regions are on the web: the end face (10 facets) and the bore wall facing it (29 facets). Their thinnest
-  value, 0.0655, is the web of 0.06 seen through the cone: on a plate of thickness t the ray method gives 1.072 t
-  (see [Thickness](/guide/advanced/thickness)). No facet is invalid.
-- The ray method misreads slivers: the cone of rays from a small facet next to a crease can hit the wall just
-  across it. Before [issue #91](https://github.com/szaghi/FOSSIL/issues/91) the remesh left four such facets on the
-  top cap of the boss, at its rim, each a region of its own, 0.043 thick; `region_area` sorts such regions last, and a
-  solver can drop regions below a cell's area.
+- The two large regions are on the web: the end face (9 facets) and the bore wall facing it (25 facets). Their
+  thinnest value, 0.0655, is the web of 0.06 seen through the cone: on a plate of thickness t the ray method gives
+  1.072 t (see [Thickness](/guide/advanced/thickness)). No facet is invalid.
+- The ray method misreads small facets: the cone of rays from a small facet next to a crease can leave through the
+  wall just across it. Regions 3 to 5 are such facets, one each, of area 5e-4, on the top cap of the boss at its rim,
+  read 0.077 to 0.092 thick (the solid under the cap is 0.9 thick). Before [issue #91](https://github.com/szaghi/FOSSIL/issues/91)
+  the remesh left four such facets there, 0.043 thick. `region_area` sorts such regions last, and a solver can drop
+  regions below a cell's area.
 
-![the remeshed bracket seen from its x = 0 end, each facet coloured by its ray thickness from teal (thin) to ember (0.5 and more), the 39 facets thinner than h = 0.1 outlined in gold on the end face over the web left by the bore (the bore wall facing it is hidden inside the bore)](../../examples/images/tut12-thickness.svg){.fossil-figure}
+![the remeshed bracket seen from its x = 0 end, each facet coloured by its ray thickness from teal (thin) to ember (0.5 and more), the 37 facets thinner than h = 0.1 outlined in gold, most of them on the end face over the web left by the bore (the bore wall facing it is hidden inside the bore)](../../examples/images/tut12-thickness.svg){.fossil-figure}
 
 ## Mass properties
 
@@ -190,15 +197,15 @@ The bore is 0.06 from the x = 0 end. On a grid of cells of 0.1, that web falls b
 
 <<< @/examples/output/tut12-mass.ansi{ansi}
 
-- The bracket weighs 2705.05 kg. Its centre of mass is at x = 1.1692, towards the boss and away from the bore (the
-  base alone has it at x = 1), at y = 0.4999, on the plane of symmetry to 1e-4 (the remesh is not symmetric), and at
-  z = 0.3178, lifted by the boss.
-- The principal axes are y (to 1e-3) and two axes in the xz plane tilted by 0.093 rad (5.3 degrees) from x and z:
-  the part is symmetric about y = 0.5 only. The smallest moment, 345.495, is about the long axis.
-- The mass of the remesh differs from that of the part by −1.09e-3, the volume change of step 3: a uniform density
+- The bracket weighs 2705.46 kg. Its centre of mass is at x = 1.1691, towards the boss and away from the bore (the
+  base alone has it at x = 1), at y = 0.5000, on the plane of symmetry to the printed digits (the remesh is not
+  exactly symmetric), and at z = 0.3178, lifted by the boss.
+- The principal axes are y (to 1e-4) and two axes in the xz plane tilted by 0.093 rad (5.3 degrees) from x and z:
+  the part is symmetric about y = 0.5 only. The smallest moment, 345.504, is about the long axis.
+- The mass of the remesh differs from that of the part by −9.39e-4, the volume change of step 3: a uniform density
   scales the volume.
 
-![the remeshed bracket translucent, its centre of mass at (1.169, 0.500, 0.318) beside the centre of the base, and its three principal axes drawn over their radii of gyration sqrt(I / m), labelled with the moments 345, 891 and 1001](../../examples/images/tut12-mass.svg){.fossil-figure}
+![the remeshed bracket translucent, its centre of mass at (1.169, 0.500, 0.318) beside the centre of the base, and its three principal axes drawn over their radii of gyration sqrt(I / m), labelled with the moments 346, 891 and 1001](../../examples/images/tut12-mass.svg){.fossil-figure}
 
 ::: tip What you learned
 `boolean` builds a watertight part from closed primitives, exactly; `set_patch` names its faces; `isotropic_remesh`

@@ -38,7 +38,9 @@ threshold, so the hole wall itself has no features.
   next corner. The edges left form closed loops, and each loop starts and ends at the same vertex.
 - **Shared with the remesher.** `isotropic_remesh(preserve_features=.true.)` locks its features with the same sharp
   predicate and the same 30° threshold (`is_sharp_dihedral`, `feature_cos` in `fossil_feature_edges`), so the two
-  cannot drift apart. Its results are unchanged, bit for bit.
+  cannot drift apart. Its results are unchanged, bit for bit. Since roadmap
+  [#92](https://github.com/szaghi/FOSSIL/issues/92) WP5 the remesher also chains the feature edges into runs with
+  `find_feature_edges` and moves the vertices of the straight ones along their line.
 
 ![a D-shaped block, a rectangle closed by a half-disc of 8 chords and extruded: its 24 feature edges in ember along the two rims and the two vertical back edges, its 4 corners in gold at the back; the vertical edges of the round end drawn faint and labelled 22.5 deg: not sharp and 11.25 deg; a rim vertex on the round labelled turns 22.5 deg: no corner](../../examples/images/ref-feature-edges-method.svg){.fossil-figure}
 
