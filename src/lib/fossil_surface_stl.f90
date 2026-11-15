@@ -4149,16 +4149,20 @@ contains
    !<
    !< Patches (issues #66, #81): every facet keeps its patch; a patch rim coarsens as a curve (two rim vertices merge
    !< along their rim edge, onto one of its endpoints; corners where three or more patches meet stay), unless
-   !< `rim_collapses=.false.` locks the rims. `max_error` (a distance): the loop stops with DEC_STATUS_NO_PROGRESS when
+   !< `rim_collapses=.false.` locks the rims. `max_error` (a distance) is a guarantee (roadmap #92 WP5 b): the result is
+   !< within max_error of the input, h(result, input) <= max_error, certified to round-off: a collapse is accepted only if
+   !< every facet of its new one-ring is certified within max_error of the input by a branch and bound against the
+   !< input's AABB tree, else it is skipped and the loop goes on. The loop still stops with DEC_STATUS_NO_PROGRESS when
    !< the cheapest collapse moves its vertex farther than max_error from one of the input planes it carries (the square
-   !< root of the quadric error).
+   !< root of the quadric error): no bound itself, but the guard of the other side, the input within max_error of the
+   !< result, which is not certified (a fold or a thin fin of the input can go).
    !<
    !< Pre-condition: `self` must have been analyzed (i.e. `vertex_id` and
    !< `fcon_edge` populated). All public construction paths
    !< (`load_from_file`, `adopt_facets`, `analyze`) ensure this.
    class(surface_stl_object),     intent(inout)        :: self
    integer(I4P),                  intent(in)           :: target_facets
-   real(R8P),                     intent(in),  optional :: max_error     !< Cost ceiling, a distance.
+   real(R8P),                     intent(in),  optional :: max_error     !< Certified distance bound (result to input).
    logical,                       intent(in),  optional :: rim_collapses !< Patch rims coarsen (default .true.).
    integer(I4P),                  intent(out), optional :: status
    type(facet_object), allocatable                     :: working(:)
@@ -4176,7 +4180,7 @@ contains
    working(1:self%facets_number) = self%facet(1:self%facets_number)
 
    call compute_decimate(facet=working, target_facets=target_facets, max_error=max_error, rim_collapses=rim_collapses, &
-                         status=dec_status)
+                         reference_facet=self%facet(1:self%facets_number), reference_tree=self%aabb, status=dec_status)
    if (present(status)) status = dec_status
    if (dec_status == DEC_STATUS_BAD_INPUT) return
    ! Adopt regardless of NO_PROGRESS — the output is still a valid mesh,

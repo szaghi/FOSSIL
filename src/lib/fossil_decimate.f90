@@ -18,6 +18,9 @@ module fossil_decimate
 !<      condition, normal-flip), collapse if accepted. Update neighbor quadrics and re-cost.
 !<   5. Stop when facet count reaches `target_facets`, the heap is empty, or (optional `max_error`) the cheapest
 !<      collapse costs more than max_error**2.
+!<   6. With `max_error`, a collapse is accepted only if every facet of its new one-ring is certified within max_error of
+!<      the input (roadmap #92 WP5 b): the decimated surface is within max_error of the input, h(output, input) <=
+!<      max_error, to round-off (see `cert_triangle`, `cert_bound`).
 !<
 !< Safety checks implemented:
 !<   - **Link condition** (Dey, Edelsbrunner, Guha, Nekhayev 1999; issue #81):
@@ -52,9 +55,11 @@ module fossil_decimate
 !<   - `fcon_edge(:)` populated (run `analyze` first). The decimate driver
 !<     uses both for incidence queries.
 
-use fossil_facet_object, only : facet_object
-use penf,                only : I4P, R8P
-use vecfor,              only : vector_R8P
+use fossil_aabb_tree_object, only : aabb_tree_object
+use fossil_deviation,        only : triangle_rho
+use fossil_facet_object,     only : facet_object
+use penf,                    only : I4P, R8P
+use vecfor,                  only : vector_R8P
 
 implicit none
 private
@@ -83,9 +88,29 @@ integer(I4P), parameter :: MODE_AT_B   = 2_I4P !< vb on a rim, va interior: at v
 integer(I4P), parameter :: MODE_RIM    = 3_I4P !< A rim edge, no corner: at the cheaper endpoint.
 integer(I4P), parameter :: MODE_LOCKED = 4_I4P !< Two rim vertices otherwise: never.
 
+! Certified max_error (roadmap #92 WP5 b): the branch and bound of one new facet.
+integer(I4P), parameter :: CERT_MAX_DEPTH     = 40_I4P   !< Split levels before a facet is refused as undecided.
+integer(I4P), parameter :: CERT_MAX_TRIANGLES = 4096_I4P !< Triangles one facet check may create, else refused.
+
+type :: cert_t
+   !< The certified check of `max_error`: the input surface B and what the check reads of it.
+   logical                                :: on = .false.         !< max_error given.
+   real(R8P)                              :: eps = 0._R8P         !< max_error.
+   type(facet_object),     pointer        :: rfacet(:) => null()  !< Input facets.
+   type(aabb_tree_object), pointer        :: rtree => null()      !< Their AABB tree.
+   integer(I4P),           allocatable    :: idx(:)               !< Facet id -> index in rfacet.
+   integer(I4P),           allocatable    :: rf(:, :)             !< Pool ids of the input facets (3, nfr).
+   real(R8P),              allocatable    :: rv(:, :)             !< Input vertices (3, nvr).
+   integer(I4P),           allocatable    :: r2f_start(:), r2f(:) !< Input vertex -> facets (CSR).
+   integer(I4P),           allocatable    :: fan_state(:)         !< 0: not built, 1: wedges cover space, -1: not.
+   real(R8P),              allocatable    :: fan_n(:, :)          !< Axis of a fan.
+   real(R8P),              allocatable    :: vd(:)                !< Distance of a current vertex (-1: unknown).
+   integer(I4P),           allocatable    :: vg(:)                !< Its closest input facet.
+endtype cert_t
+
 contains
 
-   subroutine decimate(facet, target_facets, max_error, rim_collapses, status)
+   subroutine decimate(facet, target_facets, max_error, rim_collapses, reference_facet, reference_tree, status)
    !< Reduce `facet` to at most `target_facets` triangles via QEM edge collapse.
    !<
    !< Patches (issues #66, #81): facets keep their patch. A patch-boundary (rim) vertex stays where it is when an
@@ -97,11 +122,18 @@ contains
    !< quadrics the plane through it perpendicular to the mean normal of its two facets (Garland & Heckbert's boundary
    !< constraint), so a rim within a plane is not free to straighten.
    !<
-   !< `max_error` (a distance): the cost of a collapse is a sum of squared distances to planes of the input (unit
-   !< normals), so sqrt(cost) bounds the distance of the new vertex from each of those planes; when the cheapest
-   !< admissible collapse has sqrt(cost) > max_error, the loop stops with DEC_STATUS_NO_PROGRESS. With max_error the open
-   !< edges (one facet) get constraint planes too (through the edge, perpendicular to its facet), else a vertex of an
-   !< open edge slides along its plane for free. It bounds planes, not the surface: no certificate of the deviation.
+   !< `max_error` (a distance) is a guarantee (roadmap #92 WP5 b): every point of the result is within max_error of the
+   !< input surface, h(result, input) <= max_error, certified to round-off. A collapse is accepted only if each facet of
+   !< its new one-ring passes `cert_triangle` (a branch and bound against `reference_facet` through `reference_tree`, both
+   !< required with max_error, else DEC_STATUS_BAD_INPUT); a refused edge stays alive out of the heap, re-queued when a
+   !< collapse moves one of its ends, and the loop goes on. The plane cost still stops the loop: the cost of a collapse is
+   !< a sum of squared distances to planes of the input (unit normals), sqrt(cost) the distance of the new vertex from
+   !< each; when the cheapest admissible collapse has sqrt(cost) > max_error, the loop stops with DEC_STATUS_NO_PROGRESS.
+   !< That stop bounds no distance (a vertex near the planes of the merged facets can leave a facet whose interior is
+   !< far from the input: dragon.stl, 1.15 max_error, before the check), but it is what keeps the other side, the input
+   !< within max_error of the result, which is not certified (a fold, a fin or a thin part can go). With max_error the
+   !< open edges (one facet) get constraint planes too (through the edge, perpendicular to its facet), else a vertex of
+   !< an open edge slides along its plane for free.
    !<
    !< On success, `facet` is reallocated to the surviving (active) facets only,
    !< with their `compute_metrix` already invoked. On failure (`status /= 0`)
@@ -114,8 +146,10 @@ contains
    !< facet array from the surviving alive-facets and `move_alloc` it back.
    type(facet_object), allocatable, intent(inout)        :: facet(:)        !< Input facets; replaced by decimated set on success.
    integer(I4P),                    intent(in)           :: target_facets   !< Stop when active facet count reaches this.
-   real(R8P),                       intent(in),  optional :: max_error      !< Stop when the cheapest collapse exceeds it.
+   real(R8P),                       intent(in),  optional :: max_error      !< Certified bound of h(result, input).
    logical,                         intent(in),  optional :: rim_collapses  !< Rim vertices merge along rims (default).
+   type(facet_object),     target,  intent(in),  optional :: reference_facet(:) !< Input surface (for max_error).
+   type(aabb_tree_object), target,  intent(in),  optional :: reference_tree     !< Its AABB tree (for max_error).
    integer(I4P),                    intent(out), optional :: status         !< DEC_STATUS_*.
    integer(I4P)                                          :: nf_in           !< Input facet count.
    integer(I4P)                                          :: nv              !< Vertex count (max pool id).
@@ -153,6 +187,8 @@ contains
    integer(I4P),  allocatable                            :: p_live(:)       !< Live facets per patch.
    integer(I4P)                                          :: f, k, mode
    logical                                               :: rims            !< Rim collapses on.
+   type(cert_t)                                          :: cert            !< Certified max_error check.
+   logical                                               :: refused, ok     !< Refused by max_error, setup ok.
 
    if (present(status)) status = DEC_STATUS_OK
    if (.not. allocated(facet)) then
@@ -173,6 +209,15 @@ contains
       return
    endif
 
+   if (present(max_error)) then
+      ok = present(reference_facet) .and. present(reference_tree)
+      if (ok) call cert_setup(cert=cert, eps=max_error, reference_facet=reference_facet, reference_tree=reference_tree, &
+                              nv=nv, ok=ok)
+      if (.not. ok) then
+         if (present(status)) status = DEC_STATUS_BAD_INPUT
+         return
+      endif
+   endif
    allocate(vcoord(3, nv), source=0._R8P)
    allocate(vertex_alive(nv), source=.true.)
    call collect_vertex_coords(facet=facet, f_v=f_v, vcoord=vcoord)
@@ -270,6 +315,7 @@ contains
       endif
       ! Try the collapse; if rejected by safety checks, mark this edge dead
       ! and continue (its cost would not change, so no point re-queuing).
+      ! Refused by max_error: the edge stays alive out of the heap; a collapse at one of its ends re-costs and re-queues it.
       if (.not. try_collapse(va=va, vb=vb, target=tgt, &
                               f_v=f_v, vcoord=vcoord, vertex_alive=vertex_alive, &
                               facet_alive=facet_alive, &
@@ -279,8 +325,8 @@ contains
                               Q=Q, &
                               nf_alive=nf_alive, f_p=f_p, p_live=p_live, &
                               e_target=e_target, e_cost=e_cost, &
-                              heap=heap, e_heappos=e_heappos, heap_size=heap_size)) then
-         e_alive(e_top) = .false.
+                              heap=heap, e_heappos=e_heappos, heap_size=heap_size, cert=cert, refused=refused)) then
+         if (.not. refused) e_alive(e_top) = .false.
          cycle
       endif
       v_bnd(va) = v_bnd(va) .or. v_bnd(vb) ! va survives at the boundary vertex's place
@@ -821,7 +867,7 @@ contains
                           Q, &
                           nf_alive, f_p, p_live, &
                           e_target, e_cost, &
-                          heap, e_heappos, heap_size) result(accepted)
+                          heap, e_heappos, heap_size, cert, refused) result(accepted)
    !< Attempt to collapse edge (va, vb) to position `target`. Returns .true.
    !< if the collapse passes the safety checks and was applied; .false. if
    !< rejected.
@@ -847,6 +893,8 @@ contains
    real(R8P),                 intent(inout) :: e_cost(:)
    integer(I4P),              intent(inout) :: heap(:), e_heappos(:)
    integer(I4P),              intent(inout) :: heap_size
+   type(cert_t),              intent(inout) :: cert      !< Certified max_error check (cert%on: max_error given).
+   logical,                   intent(out)   :: refused   !< Refused by the max_error check (not by a safety check).
    logical                                  :: accepted
    integer(I4P), allocatable                :: facets_b(:)  !< Facets touching vb (will be rewritten or deleted).
    integer(I4P), allocatable                :: edges_b(:)   !< Edges touching vb (will be rewritten).
@@ -854,8 +902,11 @@ contains
    integer(I4P)                             :: shared_facets(2), n_shared
    real(R8P)                                :: old_xyz_a(3)
    logical                                  :: would_flip, would_dup
+   real(R8P)                                :: dt        !< Distance of the target from the input (max_error).
+   integer(I4P)                             :: gt        !< Its closest input facet.
 
    accepted = .false.
+   refused = .false.
 
    ! Collect vb's incidence lists into local copies (we'll mutate them below).
    call gather_incidence(head=v2f_head, count=v2f_count, val=v2f_val, vertex=vb, out=facets_b)
@@ -911,6 +962,14 @@ contains
    enddo
    if (would_dup) return
 
+   ! --- max_error (roadmap #92 WP5 b): every facet of the new one-ring within max_error of the input, certified. ---
+   if (cert%on) then
+      refused = .not. cert_collapse(cert=cert, va=va, vb=vb, target=target, facets_b=facets_b, &
+                                    shared_facets=shared_facets, n_shared=n_shared, f_v=f_v, vcoord=vcoord, &
+                                    facet_alive=facet_alive, v2f_head=v2f_head, v2f_count=v2f_count, v2f_val=v2f_val, &
+                                    dt=dt, gt=gt)
+      if (refused) return
+   endif
 
    ! --- Apply the collapse. ---
    ! 1. Move va to target.
@@ -937,6 +996,9 @@ contains
    enddo
    ! 5. Mark vb as not-alive.
    vertex_alive(vb) = .false.
+   if (cert%on) then ! va moved: its cached distance is the target's
+      cert%vd(va) = dt ; cert%vg(va) = gt
+   endif
    ! 6. Rewrite vb's edges → va, possibly merging with existing va-edges.
    do i = 1, size(edges_b)
       e = edges_b(i)
@@ -1465,5 +1527,435 @@ contains
    enddo
    call move_alloc(from=out, to=facet)
    endsubroutine materialize_output
+
+   ! ===========================================================================
+   ! Certified max_error (roadmap #92 WP5 b)
+   ! ===========================================================================
+
+   subroutine cert_setup(cert, eps, reference_facet, reference_tree, nv, ok)
+   !< The certified check of `max_error`: the input surface B (its facets, its tree, its vertex pool and vertex-facet
+   !< incidence), the vertex fans built on demand, the distances of the current vertices cached.
+   type(cert_t),                   intent(inout) :: cert               !< Check state.
+   real(R8P),                      intent(in)    :: eps                !< max_error.
+   type(facet_object),     target, intent(in)    :: reference_facet(:) !< Input surface (analyzed: vertex_id, id).
+   type(aabb_tree_object), target, intent(in)    :: reference_tree     !< Its AABB tree.
+   integer(I4P),                   intent(in)    :: nv                 !< Vertices of the working mesh.
+   logical,                        intent(out)   :: ok                 !< The input is usable.
+   integer(I4P)                                  :: nfr, nvr, f, k, v  !< Counters.
+   integer(I4P), allocatable                     :: fill(:)            !< CSR fill positions.
+
+   ok = .false.
+   cert%on = .true. ; cert%eps = eps
+   cert%rfacet => reference_facet ; cert%rtree => reference_tree
+   nfr = size(reference_facet, dim=1)
+   if (nfr == 0_I4P) return
+   allocate(cert%rf(3, nfr))
+   do f = 1, nfr
+      cert%rf(:, f) = reference_facet(f)%vertex_id
+      if (reference_facet(f)%id <= 0_I4P) return
+   enddo
+   if (any(cert%rf <= 0_I4P)) return
+   nvr = maxval(cert%rf)
+   allocate(cert%rv(3, nvr), source=0._R8P)
+   do f = 1, nfr
+      do k = 1, 3
+         cert%rv(:, cert%rf(k, f)) = [reference_facet(f)%vertex(k)%x, reference_facet(f)%vertex(k)%y, &
+                                      reference_facet(f)%vertex(k)%z]
+      enddo
+   enddo
+   allocate(cert%idx(maxval(reference_facet(:)%id)), source=0_I4P)
+   do f = 1, nfr
+      cert%idx(reference_facet(f)%id) = f
+   enddo
+   allocate(cert%r2f_start(nvr + 1), source=0_I4P)
+   do f = 1, nfr
+      do k = 1, 3
+         v = cert%rf(k, f) ; cert%r2f_start(v + 1) = cert%r2f_start(v + 1) + 1
+      enddo
+   enddo
+   cert%r2f_start(1) = 1
+   do v = 1, nvr
+      cert%r2f_start(v + 1) = cert%r2f_start(v + 1) + cert%r2f_start(v)
+   enddo
+   allocate(cert%r2f(cert%r2f_start(nvr + 1) - 1), fill(nvr))
+   fill = cert%r2f_start(1:nvr)
+   do f = 1, nfr
+      do k = 1, 3
+         v = cert%rf(k, f) ; cert%r2f(fill(v)) = f ; fill(v) = fill(v) + 1
+      enddo
+   enddo
+   allocate(cert%fan_state(nvr), source=0_I4P)
+   allocate(cert%fan_n(3, nvr), source=0._R8P)
+   allocate(cert%vd(nv), source=-1._R8P)
+   allocate(cert%vg(nv), source=0_I4P)
+   ok = .true.
+   endsubroutine cert_setup
+
+   function cert_point(cert, x, d, g) result(ok)
+   !< Distance d of x from the input and the input facet g holding its closest point; .false. if d > max_error.
+   type(cert_t), intent(in)  :: cert  !< Check state.
+   real(R8P),    intent(in)  :: x(3)  !< Point.
+   real(R8P),    intent(out) :: d     !< Distance.
+   integer(I4P), intent(out) :: g     !< Closest input facet (index in the reference facets).
+   logical                   :: ok    !< Within max_error.
+   real(R8P)                 :: d2    !< Squared distance.
+   integer(I4P)              :: cf, cr !< Closest facet id, region.
+
+   d = huge(1._R8P) ; g = 0_I4P
+   call cert%rtree%distance_tree_with_region(facet=cert%rfacet, point=vector_R8P(x(1), x(2), x(3)), distance=d2, &
+                                             closest_facet=cf, closest_region=cr, max_distance2=cert%eps**2)
+   ok = .false.
+   if (cf <= 0_I4P .or. cf > size(cert%idx, dim=1)) return
+   g = cert%idx(cf)
+   d = sqrt(d2)
+   ok = g > 0_I4P .and. d <= cert%eps
+   endfunction cert_point
+
+   function cert_vertex(cert, v, x, d, g) result(ok)
+   !< cert_point of the current vertex v at x, cached until v moves.
+   type(cert_t), intent(inout) :: cert !< Check state.
+   integer(I4P), intent(in)    :: v    !< Vertex.
+   real(R8P),    intent(in)    :: x(3) !< Its position.
+   real(R8P),    intent(out)   :: d    !< Distance.
+   integer(I4P), intent(out)   :: g    !< Closest input facet.
+   logical                     :: ok   !< Within max_error.
+
+   if (cert%vd(v) >= 0._R8P) then
+      d = cert%vd(v) ; g = cert%vg(v) ; ok = .true.
+      return
+   endif
+   ok = cert_point(cert, x, d, g)
+   if (ok) then
+      cert%vd(v) = d ; cert%vg(v) = g
+   endif
+   endfunction cert_vertex
+
+   function cert_collapse(cert, va, vb, target, facets_b, shared_facets, n_shared, f_v, vcoord, facet_alive, &
+                          v2f_head, v2f_count, v2f_val, dt, gt) result(ok)
+   !< Whether every facet of the one-ring after collapsing (va, vb) to `target` stays within max_error of the input,
+   !< certified (cert_triangle); dt, gt: the target's distance and closest input facet.
+   type(cert_t),              intent(inout) :: cert                    !< Check state.
+   integer(I4P),              intent(in)    :: va, vb                  !< Edge.
+   real(R8P),                 intent(in)    :: target(3)               !< Merged position.
+   integer(I4P),              intent(in)    :: facets_b(:)             !< Facets of vb.
+   integer(I4P),              intent(in)    :: shared_facets(2)        !< Facets of the edge.
+   integer(I4P),              intent(in)    :: n_shared                !< Their number.
+   integer(I4P),              intent(in)    :: f_v(:, :)               !< Facet vertices.
+   real(R8P),                 intent(in)    :: vcoord(:, :)            !< Vertex coordinates.
+   logical,                   intent(in)    :: facet_alive(:)          !< Live facets.
+   integer(I4P), allocatable, intent(in)    :: v2f_head(:), v2f_val(:) !< Vertex-facet incidence.
+   integer(I4P),              intent(in)    :: v2f_count(:)            !< Vertex-facet incidence counts.
+   real(R8P),                 intent(out)   :: dt                      !< Distance of the target.
+   integer(I4P),              intent(out)   :: gt                      !< Its closest input facet.
+   logical                                  :: ok                      !< Every new facet within max_error.
+   integer(I4P)                             :: i, f                    !< Counters.
+
+   ok = cert_point(cert, target, dt, gt)
+   if (.not. ok) return
+   do i = 1, size(facets_b, dim=1)
+      f = facets_b(i)
+      if (.not. facet_alive(f)) cycle
+      if (any(shared_facets(1:n_shared) == f)) cycle
+      ok = cert_new_facet(cert, f_v(:, f), va, vb, target, dt, gt, vcoord)
+      if (.not. ok) return
+   enddo
+   do i = 1, v2f_count(va)
+      f = v2f_val(v2f_head(va) + i - 1)
+      if (.not. facet_alive(f)) cycle
+      if (any(shared_facets(1:n_shared) == f)) cycle
+      if (any(f_v(:, f) == vb)) cycle ! checked above
+      ok = cert_new_facet(cert, f_v(:, f), va, vb, target, dt, gt, vcoord)
+      if (.not. ok) return
+   enddo
+   endfunction cert_collapse
+
+   function cert_new_facet(cert, fv, va, vb, target, dt, gt, vcoord) result(ok)
+   !< cert_triangle of facet fv with va and vb replaced by the target.
+   type(cert_t), intent(inout) :: cert         !< Check state.
+   integer(I4P), intent(in)    :: fv(3)        !< Facet vertices.
+   integer(I4P), intent(in)    :: va, vb       !< Edge.
+   real(R8P),    intent(in)    :: target(3)    !< Merged position.
+   real(R8P),    intent(in)    :: dt           !< Distance of the target.
+   integer(I4P), intent(in)    :: gt           !< Its closest input facet.
+   real(R8P),    intent(in)    :: vcoord(:, :) !< Vertex coordinates.
+   logical                     :: ok           !< Within max_error.
+   real(R8P)                   :: c(3, 3), d(3) !< Corners, their distances.
+   integer(I4P)                :: g(3), j      !< Corners' closest facets, counter.
+
+   do j = 1, 3
+      if (fv(j) == va .or. fv(j) == vb) then
+         c(:, j) = target ; d(j) = dt ; g(j) = gt
+      else
+         c(:, j) = vcoord(:, fv(j))
+         ok = cert_vertex(cert, fv(j), c(:, j), d(j), g(j))
+         if (.not. ok) return
+      endif
+   enddo
+   ok = cert_triangle(cert, c, d, g)
+   endfunction cert_new_facet
+
+   function cert_triangle(cert, c, d, g) result(ok)
+   !< Whether sup over the triangle c of d(x, input) <= max_error, by branch and bound (as `deviation_certified`): a
+   !< triangle whose bound (cert_bound) is <= max_error is settled, the others are split into four at their edge
+   !< midpoints. Refused (.false.) when a midpoint is farther than max_error (a violation), or when the split would
+   !< go beyond CERT_MAX_DEPTH levels or CERT_MAX_TRIANGLES triangles (undecided: refused, conservatively).
+   type(cert_t), intent(inout) :: cert                      !< Check state.
+   real(R8P),    intent(in)    :: c(3, 3)                   !< Corners (columns).
+   real(R8P),    intent(in)    :: d(3)                      !< Their distances.
+   integer(I4P), intent(in)    :: g(3)                      !< Their closest input facets.
+   logical                     :: ok                        !< Certified within max_error.
+   integer(I4P), parameter     :: STK = 3_I4P * CERT_MAX_DEPTH + 4_I4P !< Depth-first stack size.
+   integer(I4P), parameter     :: E(2, 3) = reshape([1, 2, 2, 3, 3, 1], [2, 3]) !< Edges (corner pairs).
+   real(R8P)                   :: sc(3, 3, STK), sd(3, STK) !< Stack: corners, distances.
+   integer(I4P)                :: sg(3, STK), sl(STK)       !< Stack: closest facets, levels.
+   real(R8P)                   :: cc(3, 3), dd(3), mc(3, 3), md(3) !< Popped triangle, midpoints.
+   integer(I4P)                :: gg(3), mg(3), lev, n, created, j !< Popped facets, midpoint facets, counters.
+
+   ok = .false.
+   n = 1 ; sc(:, :, 1) = c ; sd(:, 1) = d ; sg(:, 1) = g ; sl(1) = 0
+   created = 1
+   do while (n > 0)
+      cc = sc(:, :, n) ; dd = sd(:, n) ; gg = sg(:, n) ; lev = sl(n) ; n = n - 1
+      if (cert_bound(cert, cc, dd, gg) <= cert%eps) cycle
+      if (lev >= CERT_MAX_DEPTH .or. created + 4 > CERT_MAX_TRIANGLES) then
+         return
+      endif
+      do j = 1, 3
+         mc(:, j) = 0.5_R8P * (cc(:, E(1, j)) + cc(:, E(2, j)))
+         if (.not. cert_point(cert, mc(:, j), md(j), mg(j))) then
+               return
+         endif
+      enddo
+      ! the children of `split` in fossil_deviation: (c1, m12, m31), (m12, c2, m23), (m31, m23, c3), (m12, m23, m31)
+      sc(:, 1, n + 1) = cc(:, 1) ; sc(:, 2, n + 1) = mc(:, 1) ; sc(:, 3, n + 1) = mc(:, 3)
+      sd(:, n + 1) = [dd(1), md(1), md(3)] ; sg(:, n + 1) = [gg(1), mg(1), mg(3)]
+      sc(:, 1, n + 2) = mc(:, 1) ; sc(:, 2, n + 2) = cc(:, 2) ; sc(:, 3, n + 2) = mc(:, 2)
+      sd(:, n + 2) = [md(1), dd(2), md(2)] ; sg(:, n + 2) = [mg(1), gg(2), mg(2)]
+      sc(:, 1, n + 3) = mc(:, 3) ; sc(:, 2, n + 3) = mc(:, 2) ; sc(:, 3, n + 3) = cc(:, 3)
+      sd(:, n + 3) = [md(3), md(2), dd(3)] ; sg(:, n + 3) = [mg(3), mg(2), gg(3)]
+      sc(:, :, n + 4) = mc ; sd(:, n + 4) = md ; sg(:, n + 4) = mg
+      sl(n + 1:n + 4) = lev + 1
+      n = n + 4
+      created = created + 4
+   enddo
+   ok = .true.
+   endfunction cert_triangle
+
+   function cert_bound(cert, c, d, g) result(u)
+   !< An upper bound of d(x, input) over the triangle c (corners c_k, distances d_k, closest input facets g_k), the
+   !< least of:
+   !<   - max_k d_k + rho_T (d is 1-Lipschitz; rho_T: `triangle_rho`);
+   !<   - max_k d(c_k, F) for an input facet F among the g_k (d(x, input) <= d(x, F), convex in x: its largest value over
+   !<     the triangle is at a corner);
+   !<   - the same over a partition of the triangle into convex pieces, each bounded by its own input facet at its
+   !<     vertices: across the edge shared by two of the g_k (`edge_bound`), or around an input vertex common to all of
+   !<     them (`wedge_bound`). These settle a triangle that straddles the edges between input facets (on a flat face
+   !<     tiled by several facets every single-facet bound stays at the size of the triangle, and the split would go on
+   !<     to the scale of max_error).
+   type(cert_t), intent(inout) :: cert                      !< Check state.
+   real(R8P),    intent(in)    :: c(3, 3)                   !< Corners.
+   real(R8P),    intent(in)    :: d(3)                      !< Their distances.
+   integer(I4P), intent(in)    :: g(3)                      !< Their closest input facets.
+   real(R8P)                   :: u                         !< Bound.
+   integer(I4P)                :: s(3), ns, i, j, k, v, nsh !< Distinct facets, counters.
+
+   u = maxval(d) + triangle_rho(c(:, 1), c(:, 2), c(:, 3))
+   if (u <= cert%eps) return
+   ns = 0
+   do k = 1, 3
+      if (g(k) <= 0_I4P) cycle
+      if (any(s(1:ns) == g(k))) cycle
+      ns = ns + 1 ; s(ns) = g(k)
+   enddo
+   do i = 1, ns
+      u = min(u, piece_bound(cert, s(i), 3_I4P, c))
+      if (u <= cert%eps) return
+   enddo
+   if (ns < 2) return
+   do i = 1, ns - 1
+      do j = i + 1, ns
+         nsh = 0
+         do k = 1, 3
+            if (any(cert%rf(:, s(j)) == cert%rf(k, s(i)))) nsh = nsh + 1
+         enddo
+         if (nsh /= 2) cycle
+         u = min(u, edge_bound(cert, s(i), s(j), c))
+         if (u <= cert%eps) return
+      enddo
+   enddo
+   do k = 1, 3
+      v = cert%rf(k, s(1))
+      if (.not. all([(any(cert%rf(:, s(i)) == v), i = 2, ns)])) cycle
+      u = min(u, wedge_bound(cert, v, c))
+      if (u <= cert%eps) return
+   enddo
+   endfunction cert_bound
+
+   function piece_bound(cert, f, np, p) result(u)
+   !< max over the vertices of the convex polygon p of their distance to input facet f (0 for an empty polygon).
+   type(cert_t), intent(in) :: cert    !< Check state.
+   integer(I4P), intent(in) :: f       !< Input facet.
+   integer(I4P), intent(in) :: np      !< Polygon vertices.
+   real(R8P),    intent(in) :: p(:, :) !< Polygon (3, np).
+   real(R8P)                :: u       !< Bound.
+   real(R8P)                :: d2      !< Squared distance.
+   integer(I4P)             :: k       !< Counter.
+
+   u = 0._R8P
+   do k = 1, np
+      call cert%rfacet(f)%compute_distance(point=vector_R8P(p(1, k), p(2, k), p(3, k)), distance=d2)
+      u = max(u, sqrt(d2))
+   enddo
+   endfunction piece_bound
+
+   function edge_bound(cert, f1, f2, c) result(u)
+   !< The triangle c split by the plane through the common edge ab of input facets f1 and f2 that contains their mean
+   !< normal: the part on f1's side bounded by f1, the other by f2 (any split and any assignment is valid, since
+   !< d(x, input) <= d(x, F) for every input facet F; this one makes both parts small near the edge).
+   type(cert_t), intent(in) :: cert             !< Check state.
+   integer(I4P), intent(in) :: f1, f2           !< Input facets sharing an edge.
+   real(R8P),    intent(in) :: c(3, 3)          !< Corners.
+   real(R8P)                :: u                !< Bound.
+   real(R8P)                :: n(3), m(3)       !< Mean normal, plane normal.
+   real(R8P)                :: a(3), b(3), w(3) !< Edge ends, apex of f1.
+   real(R8P)                :: p(3, 4)          !< A part.
+   integer(I4P)             :: k, np, ia, ib    !< Counters, edge ends.
+
+   u = huge(1._R8P)
+   ia = 0 ; ib = 0
+   do k = 1, 3
+      if (.not. any(cert%rf(:, f2) == cert%rf(k, f1))) cycle
+      if (ia == 0) then
+         ia = cert%rf(k, f1)
+      else
+         ib = cert%rf(k, f1)
+      endif
+   enddo
+   if (ia == 0 .or. ib == 0) return
+   a = cert%rv(:, ia) ; b = cert%rv(:, ib)
+   do k = 1, 3
+      if (cert%rf(k, f1) /= ia .and. cert%rf(k, f1) /= ib) w = cert%rv(:, cert%rf(k, f1))
+   enddo
+   n = [cert%rfacet(f1)%normal%x + cert%rfacet(f2)%normal%x, cert%rfacet(f1)%normal%y + cert%rfacet(f2)%normal%y, &
+        cert%rfacet(f1)%normal%z + cert%rfacet(f2)%normal%z]
+   m = cross(n, b - a)
+   if (.not. norm2(m) > 0._R8P) m = cross(w - a, b - a) ! back to back: any plane through ab
+   if (dot_product(m, w - a) < 0._R8P) m = -m
+   call clip_polygon(3_I4P, c, m, a, np, p)
+   u = piece_bound(cert, f1, np, p)
+   call clip_polygon(3_I4P, c, -m, a, np, p)
+   u = max(u, piece_bound(cert, f2, np, p))
+   endfunction edge_bound
+
+   function wedge_bound(cert, v, c) result(u)
+   !< The triangle c split into the wedges of the fan of input vertex v about its axis (fan_build): the wedge of facet
+   !< (v, p, q) is the set of points seen from the axis between the half-planes through p and q; its part of the
+   !< triangle is bounded by that facet. Valid when the wedges cover space (fan_build: one closed fan around v once,
+   !< every facet positive about the axis); huge otherwise.
+   type(cert_t), intent(inout) :: cert       !< Check state.
+   integer(I4P), intent(in)    :: v          !< Input vertex.
+   real(R8P),    intent(in)    :: c(3, 3)    !< Corners.
+   real(R8P)                   :: u          !< Bound.
+   real(R8P)                   :: n(3), o(3), pp(3), qq(3) !< Axis, apex, the facet's other two vertices.
+   real(R8P)                   :: p1(3, 4), p2(3, 5) !< The parts after one and two cuts.
+   integer(I4P)                :: i, k, f, n1, n2 !< Counters.
+
+   u = huge(1._R8P)
+   if (cert%fan_state(v) == 0_I4P) call fan_build(cert, v)
+   if (cert%fan_state(v) < 0_I4P) return
+   n = cert%fan_n(:, v) ; o = cert%rv(:, v)
+   u = 0._R8P
+   do i = cert%r2f_start(v), cert%r2f_start(v + 1) - 1
+      f = cert%r2f(i)
+      do k = 1, 3
+         if (cert%rf(k, f) == v) exit
+      enddo
+      pp = cert%rv(:, cert%rf(mod(k, 3) + 1, f)) ; qq = cert%rv(:, cert%rf(mod(k + 1, 3) + 1, f))
+      call clip_polygon(3_I4P, c, cross(n, pp - o), o, n1, p1)
+      if (n1 == 0) cycle
+      call clip_polygon(n1, p1, cross(qq - o, n), o, n2, p2)
+      u = max(u, piece_bound(cert, f, n2, p2))
+      if (u > cert%eps) then ! this bound fails: the caller splits
+         u = huge(1._R8P)
+         return
+      endif
+   enddo
+   endfunction wedge_bound
+
+   subroutine fan_build(cert, v)
+   !< Whether the wedges of the fan of input vertex v cover space: about the axis through v along the sum of the fan's
+   !< area vectors, every facet (v, p, q) positive (so its wedge, between the half-planes through p and q, is below pi
+   !< and convex), one fan (each facet followed by the facet (v, q, .), all in one cycle) around v once (angle sum below
+   !< 3 pi). An open fan (v on an open boundary) or a non-manifold vertex: no.
+   type(cert_t), intent(inout) :: cert                        !< Check state.
+   integer(I4P), intent(in)    :: v                           !< Input vertex.
+   integer(I4P), allocatable   :: p(:), q(:), succ(:), pred(:) !< Fan facets (v, p, q), successors, predecessors.
+   real(R8P)                   :: n(3), ang, a(3), b(3), w(3) !< Axis, angle sum, vectors.
+   integer(I4P)                :: nt, i, j, k, f, cnt         !< Counters.
+
+   cert%fan_state(v) = -1_I4P
+   nt = cert%r2f_start(v + 1) - cert%r2f_start(v)
+   if (nt < 3) return
+   allocate(p(nt), q(nt), succ(nt), pred(nt))
+   n = 0._R8P
+   do i = 1, nt
+      f = cert%r2f(cert%r2f_start(v) + i - 1)
+      do k = 1, 3
+         if (cert%rf(k, f) == v) exit
+      enddo
+      p(i) = cert%rf(mod(k, 3) + 1, f) ; q(i) = cert%rf(mod(k + 1, 3) + 1, f)
+      n = n + cross(cert%rv(:, p(i)) - cert%rv(:, v), cert%rv(:, q(i)) - cert%rv(:, v))
+   enddo
+   if (.not. norm2(n) > 0._R8P) return
+   n = n / norm2(n)
+   ang = 0._R8P
+   do i = 1, nt
+      a = cert%rv(:, p(i)) - cert%rv(:, v) ; a = a - dot_product(n, a) * n
+      b = cert%rv(:, q(i)) - cert%rv(:, v) ; b = b - dot_product(n, b) * n
+      w = cross(a, b)
+      if (.not. dot_product(n, w) > 0._R8P) return
+      ang = ang + atan2(norm2(w), dot_product(a, b))
+   enddo
+   if (.not. ang < 3._R8P * acos(-1._R8P)) return
+   succ = 0 ; pred = 0
+   do i = 1, nt
+      do j = 1, nt
+         if (p(j) /= q(i)) cycle
+         if (succ(i) /= 0 .or. pred(j) /= 0) return ! not one fan
+         succ(i) = j ; pred(j) = i
+      enddo
+   enddo
+   if (any(succ == 0)) return ! open
+   cnt = 1 ; i = 1
+   do while (succ(i) /= 1 .and. cnt <= nt)
+      i = succ(i) ; cnt = cnt + 1
+   enddo
+   if (cnt /= nt) return
+   cert%fan_state(v) = 1_I4P
+   cert%fan_n(:, v) = n
+   endsubroutine fan_build
+
+   pure subroutine clip_polygon(np, p, m, o, nq, q)
+   !< The part of the convex polygon p on the side m . (x - o) >= 0 (Sutherland-Hodgman, one plane).
+   integer(I4P), intent(in)  :: np        !< Vertices of p.
+   real(R8P),    intent(in)  :: p(:, :)   !< Polygon (3, np).
+   real(R8P),    intent(in)  :: m(3), o(3) !< Plane normal, point.
+   integer(I4P), intent(out) :: nq        !< Vertices of the part (0: empty).
+   real(R8P),    intent(out) :: q(:, :)   !< The part (3, np + 1).
+   real(R8P)                 :: s0, s1    !< Signed distances of an edge's ends.
+   integer(I4P)              :: k, k1     !< Counters.
+
+   nq = 0
+   do k = 1, np
+      k1 = mod(k, np) + 1
+      s0 = dot_product(m, p(:, k) - o) ; s1 = dot_product(m, p(:, k1) - o)
+      if (s0 >= 0._R8P) then
+         nq = nq + 1 ; q(:, nq) = p(:, k)
+      endif
+      if ((s0 > 0._R8P .and. s1 < 0._R8P) .or. (s0 < 0._R8P .and. s1 > 0._R8P)) then
+         nq = nq + 1 ; q(:, nq) = p(:, k) + (s0 / (s0 - s1)) * (p(:, k1) - p(:, k))
+      endif
+   enddo
+   endsubroutine clip_polygon
 
 endmodule fossil_decimate
