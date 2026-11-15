@@ -116,6 +116,7 @@ contains
    if (allocated(a%piece_seg_start) .or. allocated(b%piece_seg_start)) n = n + 1_I4P
    if (allocated(a%piece_seg) .or. allocated(b%piece_seg)) n = n + 1_I4P
    if (allocated(a%piece_seg_wall) .or. allocated(b%piece_seg_wall)) n = n + 1_I4P
+   if (allocated(a%piece_seg_src) .or. allocated(b%piece_seg_src)) n = n + 1_I4P
    if (allocated(a%quad_start) .or. allocated(b%quad_start)) n = n + 1_I4P
    if (allocated(a%wall_quad_start) .or. allocated(b%wall_quad_start)) n = n + 1_I4P
    endfunction cut_cells_2d_mismatches

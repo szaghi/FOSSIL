@@ -48,6 +48,8 @@ use fossil_overset, only : wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2
                            FRINGE_INNER_2, FRINGE_OUTER_1, FRINGE_OUTER_2, wall_projection, wall_projection_2d, &
                            exposed_points, connectivity_t, build_connectivity, save_connectivity, &
                            cell_centre_block, cell_centre_block_2d
+use fossil_overset_patch, only : overset_patch_2d_t, overset_patch_2d, OVERSET_PATCH_OK, OVERSET_PATCH_BAD_INPUT, &
+                                 OVERSET_PATCH_NO_BOUNDARY, OVERSET_PATCH_OPEN, OVERSET_PATCH_OVERLAP, OVERSET_PATCH_NESTING
 use fossil_ccd, only : motion_bound_3d, motion_bound_2d, ccd_evaluator_t, ccd_advance, CCD_CONTACT, CCD_SEPARATE, &
                        CCD_INITIAL_CONTACT, CCD_NOT_CONVERGED, CCD_INVALID_INPUT, CCD_MAX_ITERATIONS, CCD_STALL_STEPS, &
                        CCD_STALL_FRACTION
@@ -98,6 +100,8 @@ public :: fringe_levels_2d, overlap_width, overlap_width_2d, ORPHAN_NONE, ORPHAN
 public :: ORPHAN_RECEPTOR_DONOR, ORPHAN_BOUNDARY, ORPHAN_WALL, FRINGE_INNER_1, FRINGE_INNER_2, FRINGE_OUTER_1, FRINGE_OUTER_2
 public :: wall_projection, wall_projection_2d, exposed_points, connectivity_t, build_connectivity, save_connectivity
 public :: cell_centre_block, cell_centre_block_2d
+public :: overset_patch_2d_t, overset_patch_2d, OVERSET_PATCH_OK, OVERSET_PATCH_BAD_INPUT, OVERSET_PATCH_NO_BOUNDARY
+public :: OVERSET_PATCH_OPEN, OVERSET_PATCH_OVERLAP, OVERSET_PATCH_NESTING
 public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose
 public :: pose_inverse, to_body, to_world, rotate, pose_interpolate
 public :: motion_bound_3d, motion_bound_2d, ccd_evaluator_t, ccd_advance, CCD_CONTACT, CCD_SEPARATE, CCD_INITIAL_CONTACT

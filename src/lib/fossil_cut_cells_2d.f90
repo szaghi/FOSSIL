@@ -74,7 +74,9 @@ type :: cut_cells_2d_t
    real(R8P),    allocatable :: centroid(:,:,:)     !< Fluid centroid [2, nx, ny] (cell centre if no fluid).
    real(R8P),    allocatable :: wet_length(:,:)     !< Wetted length [nx, ny].
    real(R8P),    allocatable :: wet_centroid(:,:,:) !< Wetted centroid [2, nx, ny].
-   real(R8P),    allocatable :: wet_normal(:,:,:)   !< Integral of the outward normal over the wall [2, nx, ny].
+   real(R8P),    allocatable :: wet_normal(:,:,:)   !< Integral over the wall of its normal pointing out of the solid,
+                                                    !< into the fluid [2, nx, ny] (= - the fluid's outward area vector
+                                                    !< of the wall; the cell closes as sum W_f S_f n_f - wet_normal = 0).
    integer(I4P), allocatable :: pieces(:,:)         !< Fluid pieces per cell [nx, ny].
    integer(I4P), allocatable :: first_piece(:,:)    !< Index of the first piece of the cell [nx, ny].
    logical,      allocatable :: closed(:,:)         !< The cell boundary closed [nx, ny].
@@ -83,7 +85,8 @@ type :: cut_cells_2d_t
    real(R8P),    allocatable :: piece_area(:)       !< Fluid area of each piece [np].
    real(R8P),    allocatable :: piece_centroid(:,:) !< Fluid centroid of each piece [2, np].
    real(R8P),    allocatable :: piece_wet_length(:) !< Wetted length of each piece [np].
-   real(R8P),    allocatable :: piece_wet_normal(:,:) !< Outward-normal integral of each piece [2, np].
+   real(R8P),    allocatable :: piece_wet_normal(:,:) !< Wall normal integral of each piece, out of the solid into the
+                                                      !< fluid [2, np].
    real(R8P),    allocatable :: piece_aperture(:,:) !< Fluid fraction of the cell edges per piece [4 (-u, +u, -v, +v), np].
    integer(I4P), allocatable :: piece_iv_start(:)   !< Fluid edge intervals of piece p: piece_iv_start(p) .. (p+1) - 1.
    integer(I4P), allocatable :: piece_iv_edge(:)    !< Edge of an interval: vertical edges (i, j) = i + (j - 1) (nx + 1),
@@ -97,6 +100,8 @@ type :: cut_cells_2d_t
    integer(I4P), allocatable :: piece_seg_start(:)  !< Oriented fluid boundary of piece p (issue #70, `boundaries`):
    real(R8P),    allocatable :: piece_seg(:,:)      !< segments piece_seg(1:4, start(p) .. start(p+1)-1) = (a, b), the fluid
    logical,      allocatable :: piece_seg_wall(:)   !< on the left (counter-clockwise); wall segments flagged.
+   integer(I4P), allocatable :: piece_seg_src(:)    !< Source segment of each boundary segment (issue #106): the curve
+                                                    !< segment (its first vertex) a wall segment lies on, 0 on cell edges.
    integer(I4P), allocatable :: quad_start(:)       !< Area rule of piece p (issue #70, `quadrature`): signed triangles
    real(R8P),    allocatable :: quad_point(:,:)     !< from the cell centre over its boundary, 7 points each (degree 5),
    real(R8P),    allocatable :: quad_weight(:)      !< a fluid cell the 3 x 3 Gauss rule.
@@ -131,7 +136,7 @@ type :: cut_cells_2d_blocks_t
    real(R8P),    allocatable :: centroid(:,:,:,:)    !< Fluid centroid [2, nx, ny, nb].
    real(R8P),    allocatable :: wet_length(:,:,:)    !< Wetted length [nx, ny, nb].
    real(R8P),    allocatable :: wet_centroid(:,:,:,:) !< Wetted centroid [2, nx, ny, nb].
-   real(R8P),    allocatable :: wet_normal(:,:,:,:)  !< Outward-normal integral over the wall [2, nx, ny, nb].
+   real(R8P),    allocatable :: wet_normal(:,:,:,:)  !< Wall normal integral, out of the solid into the fluid [2, nx, ny, nb].
    integer(I4P), allocatable :: pieces(:,:,:)        !< Fluid pieces per cell [nx, ny, nb].
    logical,      allocatable :: node_in(:,:,:)       !< Grid node inside the solid [nx+1, ny+1, nb].
    logical                   :: with_pieces = .false. !< The piece arrays below were computed.
@@ -143,7 +148,7 @@ type :: cut_cells_2d_blocks_t
    real(R8P),    allocatable :: piece_area(:)        !< Fluid area of each piece [np].
    real(R8P),    allocatable :: piece_centroid(:,:)  !< Fluid centroid of each piece [2, np].
    real(R8P),    allocatable :: piece_wet_length(:)  !< Wetted length of each piece [np].
-   real(R8P),    allocatable :: piece_wet_normal(:,:) !< Outward-normal integral of each piece [2, np].
+   real(R8P),    allocatable :: piece_wet_normal(:,:) !< Wall normal integral of each piece, solid to fluid [2, np].
    real(R8P),    allocatable :: piece_aperture(:,:)  !< Edge fluid fractions per piece [4, np].
    integer(I4P), allocatable :: piece_iv_start(:)    !< First interval of each piece [np + 1] (concatenated).
    integer(I4P), allocatable :: piece_iv_edge(:)     !< Interval edges (numbering of `cut_cells_2d_t`).
@@ -239,6 +244,8 @@ contains
    integer(I4P),  allocatable :: bstart(:)               !< Boundary segments of the pieces [np + 1].
    real(R8P),     allocatable :: bseg(:,:)               !< Boundary segments [4, nbd].
    logical,       allocatable :: bwall(:)                !< Wall flags [nbd].
+   integer(I4P),  allocatable :: pseg(:)                 !< Source segment of each wall piece [nps] (issue #106).
+   integer(I4P),  allocatable :: bsrc(:)                 !< Source segment of each boundary segment [nbd] (0: cell edge).
    integer(I4P) :: nx, ny, nxs, nps, ne, ncell, c, i, j, k, ncut, nm, np, niv, nbd, eid(4) !< Work.
    logical      :: wbnd                                  !< Record the boundaries.
 
@@ -251,7 +258,7 @@ contains
             cc%closed(nx, ny))
    call node_flags(u, v, next, x, y, node_in)
    cc%node_in = node_in
-   call cut_cells_2d_prepare(u, v, next, x, y, nx, ny, ne, ncell, nxs, nps, xstart, xord, pstart, pord, xp, pab, ptg)
+   call cut_cells_2d_prepare(u, v, next, x, y, nx, ny, ne, ncell, nxs, nps, xstart, xord, pstart, pord, xp, pab, ptg, pseg)
    nm = 0_I4P ; if (order > 0_I4P) nm = mono_count(2_I4P, order)
    cc%moments_order = max(0_I4P, order)
    if (order > 0_I4P) then
@@ -269,7 +276,7 @@ contains
       call cell_edge_ids(nx, ny, i, j, eid)
       call cut_cell_2d_count(x(i), x(i + 1), y(j), y(j + 1), node_in(i, j), node_in(i + 1, j), node_in(i + 1, j + 1), &
                              node_in(i, j + 1), eid, ne, nxs, xstart, xord, xp, pstart(c + 1) - pstart(c), pstart(c) - 1_I4P, &
-                             nps, pord, pab, ptg, nm, me, with_iv, wbnd, rwo(k + 1) - rwo(k), rw(rwo(k)), &
+                             nps, pord, pab, ptg, nps, pseg, nm, me, with_iv, wbnd, rwo(k + 1) - rwo(k), rw(rwo(k)), &
                              iwo(k + 1) - iwo(k), iw(iwo(k)), cc%closed(i, j), cc%alpha(i, j), cc%aperture(1, i, j), &
                              cc%centroid(1, i, j), cc%wet_length(i, j), cc%wet_centroid(1, i, j), cc%wet_normal(1, i, j), &
                              cnt(3, k), cnt(1, k), cnt(2, k))
@@ -282,7 +289,8 @@ contains
    cc%np = np
    allocate(cc%piece_cell(2, np), cc%piece_area(np), cc%piece_centroid(2, np), cc%piece_wet_length(np), &
             cc%piece_wet_normal(2, np), cc%piece_aperture(4, np), pmom(nm, np), pwmom(nm, np), cc%piece_iv_start(np + 1), &
-            cc%piece_iv_edge(niv), cc%piece_iv_lo(niv), cc%piece_iv_hi(niv), bstart(np + 1), bseg(4, nbd), bwall(nbd))
+            cc%piece_iv_edge(niv), cc%piece_iv_lo(niv), cc%piece_iv_hi(niv), bstart(np + 1), bseg(4, nbd), bwall(nbd), &
+            bsrc(nbd))
    do c = 1_I4P, ncell
       i = mod(c - 1_I4P, nx) + 1_I4P ; j = (c - 1_I4P) / nx + 1_I4P
       call cell_edge_ids(nx, ny, i, j, eid)
@@ -294,13 +302,13 @@ contains
                                    cc%first_piece(i, j) - 1_I4P, ivo(c), bdo(c), np, cc%piece_cell, cc%piece_area, &
                                    cc%piece_centroid, cc%piece_wet_length, cc%piece_wet_normal, cc%piece_aperture, pmom, &
                                    pwmom, cc%piece_iv_start, niv, cc%piece_iv_edge, cc%piece_iv_lo, cc%piece_iv_hi, bstart, &
-                                   nbd, bseg, bwall)
+                                   nbd, bseg, bwall, bsrc)
       else
          call cut_cell_2d_fill(x(i), x(i + 1), y(j), y(j + 1), i, j, eid, nm, me, with_iv, wbnd, rwo(k + 1) - rwo(k), &
                                rw(rwo(k)), iwo(k + 1) - iwo(k), iw(iwo(k)), cc%first_piece(i, j) - 1_I4P, ivo(c), bdo(c), &
                                np, cc%piece_cell, cc%piece_area, cc%piece_centroid, cc%piece_wet_length, &
                                cc%piece_wet_normal, cc%piece_aperture, pmom, pwmom, cc%piece_iv_start, niv, &
-                               cc%piece_iv_edge, cc%piece_iv_lo, cc%piece_iv_hi, bstart, nbd, bseg, bwall)
+                               cc%piece_iv_edge, cc%piece_iv_lo, cc%piece_iv_hi, bstart, nbd, bseg, bwall, bsrc)
       endif
    enddo
    cc%piece_iv_start(np + 1) = niv + 1_I4P ; bstart(np + 1) = nbd + 1_I4P
@@ -309,6 +317,7 @@ contains
    endif
    if (wbnd) then
       call move_alloc(bstart, cc%piece_seg_start) ; call move_alloc(bseg, cc%piece_seg) ; call move_alloc(bwall, cc%piece_seg_wall)
+      call move_alloc(bsrc, cc%piece_seg_src)
    endif
    if (with_quad) call quadrature_out(cc, x, y)
    endsubroutine compute_cut_cells_2d
@@ -365,6 +374,7 @@ contains
    integer(I4P) :: zme(2, 1)                             !< No moment exponents (nm = 0).
    real(R8P)    :: zmom(1, 1), zwmom(1, 1), zbseg(4, 1)  !< No moments, no wall moments, no boundary segments.
    logical      :: zbwall(1)                             !< No wall flags.
+   integer(I4P) :: zpseg(1), zbsrc(1)                    !< No wall piece sources, no boundary sources (issue #106).
    logical      :: res                                   !< Leave the outputs on the device.
    integer(I4P) :: nx, ny, nxs, nps, ne, ncell, nu, nr, c, i, j, k, ncut, np, niv, nbd, nrw, niw, eid(4) !< Work.
 
@@ -378,9 +388,9 @@ contains
    call node_rows(u, v, next, y, rstart, rseg)
    nr = size(rseg, kind=I4P)
    call cut_cells_2d_prepare(u, v, next, x, y, nx, ny, ne, ncell, nxs, nps, xstart, xord, pstart, pord, xp, pab, ptg)
-   zme = 0_I4P ; zmom = 0._R8P ; zwmom = 0._R8P ; zbseg = 0._R8P ; zbwall = .false.
+   zme = 0_I4P ; zmom = 0._R8P ; zwmom = 0._R8P ; zbseg = 0._R8P ; zbwall = .false. ; zpseg = 0_I4P ; zbsrc = 0_I4P
    call take(cc%node_in, node_in, nx + 1_I4P, ny + 1_I4P)
-   !$acc data copyin(x, y, zme, zmom, zwmom, zbseg, zbwall)
+   !$acc data copyin(x, y, zme, zmom, zwmom, zbseg, zbwall, zpseg, zbsrc)
    ! 1. node flags, one thread per node (an output: it stays on the device)
    !$acc enter data create(node_in)
    !$acc data copyin(u, v, next, rstart, rseg)
@@ -410,7 +420,8 @@ contains
       call cell_edge_ids(nx, ny, i, j, eid)
       call cut_cell_2d_count(x(i), x(i + 1), y(j), y(j + 1), node_in(i, j), node_in(i + 1, j), node_in(i + 1, j + 1), &
                              node_in(i, j + 1), eid, ne, nxs, xstart, xord, xp, pstart(c + 1) - pstart(c), pstart(c) - 1_I4P, &
-                             nps, pord, pab, ptg, 0_I4P, zme, with_iv, .false., rwo(k + 1) - rwo(k), rw(rwo(k)), &
+                             nps, pord, pab, ptg, 0_I4P, zpseg, 0_I4P, zme, with_iv, .false., rwo(k + 1) - rwo(k), &
+                             rw(rwo(k)), &
                              iwo(k + 1) - iwo(k), iw(iwo(k)), closed(i, j), alpha(i, j), aperture(1, i, j), &
                              centroid(1, i, j), wet_length(i, j), wet_centroid(1, i, j), wet_normal(1, i, j), &
                              cnt(3, k), cnt(1, k), cnt(2, k))
@@ -441,7 +452,7 @@ contains
                                 closed(i, j), alpha(i, j), aperture(1, i, j), centroid(1, i, j), wet_length(i, j), &
                                 wet_centroid(1, i, j), wet_normal(1, i, j), pieces(i, j), first_piece(i, j) - 1_I4P, ivo(c), &
                                 bdo(c), np, pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, ive, ivl, ivh, bds, &
-                                0_I4P, zbseg, zbwall)
+                                0_I4P, zbseg, zbwall, zbsrc)
    enddo
    !$acc parallel loop gang vector default(present) private(eid) &
    !$acc& present(cutc, rwo, iwo, pieces, first_piece, pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh)
@@ -451,7 +462,8 @@ contains
       pieces(i, j) = cnt(3, k)
       call cut_cell_2d_fill(x(i), x(i + 1), y(j), y(j + 1), i, j, eid, 0_I4P, zme, with_iv, .false., rwo(k + 1) - rwo(k), &
                             rw(rwo(k)), iwo(k + 1) - iwo(k), iw(iwo(k)), first_piece(i, j) - 1_I4P, ivo(c), bdo(c), np, &
-                            pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, ive, ivl, ivh, bds, 0_I4P, zbseg, zbwall)
+                            pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, ive, ivl, ivh, bds, 0_I4P, zbseg, zbwall, &
+                            zbsrc)
    enddo
    !$acc serial default(present) present(ivs)
    ivs(np + 1) = niv + 1_I4P
@@ -601,6 +613,7 @@ contains
    integer(I4P) :: zme(2, 1)                             !< No moment exponents (nm = 0).
    real(R8P)    :: zmom(1, 1), zwmom(1, 1), zbseg(4, 1)  !< No moments, no wall moments, no boundary segments.
    logical      :: zbwall(1)                             !< No wall flags.
+   integer(I4P) :: zpseg(1), zbsrc(1)                    !< No wall piece sources, no boundary sources (issue #106).
    logical      :: res                                   !< Leave the outputs on the device.
    integer(I4P) :: ne, ne1, ncell, nc1, ntot, nvt, b, v0, v1, g, c, i, j, k, ncut, nrw, niw, np, niv, nbd, gb !< Work.
    integer(I4P) :: eid(4)                                !< Edge ids.
@@ -636,12 +649,12 @@ contains
       enddo
    enddo
    deallocate(pp)
-   zme = 0_I4P ; zmom = 0._R8P ; zwmom = 0._R8P ; zbseg = 0._R8P ; zbwall = .false.
+   zme = 0_I4P ; zmom = 0._R8P ; zwmom = 0._R8P ; zbseg = 0._R8P ; zbwall = .false. ; zpseg = 0_I4P ; zbsrc = 0_I4P
    allocate(node_in(nx + 1, ny + 1, nbk), closed(nx, ny, nbk), alpha(nx, ny, nbk), aperture(4, nx, ny, nbk), &
             centroid(2, nx, ny, nbk), wet_length(nx, ny, nbk), wet_centroid(2, nx, ny, nbk), wet_normal(2, nx, ny, nbk), &
             pieces(nx, ny, nbk))
    !$acc data copyin(xg, yg, vstart, ua, va, na, rsa, rso, rsg, xsa, xo, xoa, xpa, psa, po, poa, paba, ptga, zme, zmom, &
-   !$acc&            zwmom, zbseg, zbwall)
+   !$acc&            zwmom, zbseg, zbwall, zpseg, zbsrc)
    !$acc enter data create(node_in, closed, alpha, aperture, centroid, wet_length, wet_centroid, wet_normal, pieces)
    ! 1. node flags, one thread per node of every block
    !$acc parallel loop gang vector collapse(3) default(present) present(node_in)
@@ -668,7 +681,8 @@ contains
       call cut_cell_2d_count(xg(i, gb), xg(i + 1, gb), yg(j, gb), yg(j + 1, gb), node_in(i, j, b), node_in(i + 1, j, b), &
                              node_in(i + 1, j + 1, b), node_in(i, j + 1, b), eid, ne, xo(b + 1) - xo(b), xsa(1, b), &
                              xoa(xo(b) + 1), xpa(1, xo(b) + 1), psa(c + 1, b) - psa(c, b), psa(c, b) - 1_I4P, &
-                             po(b + 1) - po(b), poa(po(b) + 1), paba(1, po(b) + 1), ptga(1, po(b) + 1), 0_I4P, zme, with_iv, &
+                             po(b + 1) - po(b), poa(po(b) + 1), paba(1, po(b) + 1), ptga(1, po(b) + 1), 0_I4P, zpseg, &
+                             0_I4P, zme, with_iv, &
                              .false., rwo(k + 1) - rwo(k), rw(rwo(k)), iwo(k + 1) - iwo(k), iw(iwo(k)), closed(i, j, b), &
                              alpha(i, j, b), aperture(1, i, j, b), centroid(1, i, j, b), wet_length(i, j, b), &
                              wet_centroid(1, i, j, b), wet_normal(1, i, j, b), cnt(3, k), cnt(1, k), cnt(2, k))
@@ -719,7 +733,7 @@ contains
                                    centroid(1, i, j, b), wet_length(i, j, b), wet_centroid(1, i, j, b), &
                                    wet_normal(1, i, j, b), pieces(i, j, b), first_piece(i, j, b) - 1_I4P, ivo(g), bdo(g), np, &
                                    pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, ive, ivl, ivh, bds, 0_I4P, zbseg, &
-                                   zbwall)
+                                   zbwall, zbsrc)
       enddo
       !$acc parallel loop gang vector default(present) private(eid) &
       !$acc& present(cutc, rwo, iwo, first_piece, ivo, bdo, pcell, parea, pcen, pwl, pwn, pap, ivs, ive, ivl, ivh, bds)
@@ -730,7 +744,7 @@ contains
          call cut_cell_2d_fill(xg(i, gb), xg(i + 1, gb), yg(j, gb), yg(j + 1, gb), i, j, eid, 0_I4P, zme, with_iv, .false., &
                                rwo(k + 1) - rwo(k), rw(rwo(k)), iwo(k + 1) - iwo(k), iw(iwo(k)), first_piece(i, j, b) - 1_I4P, &
                                ivo(g), bdo(g), np, pcell, parea, pcen, pwl, pwn, pap, zmom, zwmom, ivs, niv, &
-                               ive, ivl, ivh, bds, 0_I4P, zbseg, zbwall)
+                               ive, ivl, ivh, bds, 0_I4P, zbseg, zbwall, zbsrc)
       enddo
       !$acc serial default(present) present(ivs)
       ivs(np + 1) = niv + 1_I4P
@@ -1075,9 +1089,11 @@ contains
    endif
    endsubroutine cut_cells_2d_grid
 
-   subroutine cut_cells_2d_prepare(u, v, next, x, y, nx, ny, ne, ncell, nxs, nps, xstart, xord, pstart, pord, xp, pab, ptg)
+   subroutine cut_cells_2d_prepare(u, v, next, x, y, nx, ny, ne, ncell, nxs, nps, xstart, xord, pstart, pord, xp, pab, ptg, &
+                                   pseg)
    !< Host preparation of the kernels: the segments walked through the grid (`walk_all`), the crossings by edge and the
-   !< wall pieces by cell (`index_crossings`, `index_pieces`), as flat arrays.
+   !< wall pieces by cell (`index_crossings`, `index_pieces`), as flat arrays; `pseg` the source segment of every wall
+   !< piece (issue #106: the labels of `piece_seg_src`).
    real(R8P),                 intent(in)  :: u(:), v(:)         !< Vertices.
    integer(I4P),              intent(in)  :: next(:)            !< Next vertex.
    real(R8P),                 intent(in)  :: x(:), y(:)         !< Cell edges.
@@ -1089,6 +1105,7 @@ contains
    real(R8P),    allocatable, intent(out) :: xp(:,:)            !< Crossing points [2, nxs].
    real(R8P),    allocatable, intent(out) :: pab(:,:)           !< Wall piece end points (a, b) [4, nps].
    integer(I4P), allocatable, intent(out) :: ptg(:,:)           !< Wall piece end tags (ta, tb) [2, nps].
+   integer(I4P), allocatable, intent(out), optional :: pseg(:)  !< Source segment of each wall piece [nps].
    type(xing_t),  allocatable :: xs(:)                          !< Crossings.
    type(piece_t), allocatable :: ps(:)                          !< Wall pieces.
    integer(I4P) :: k                                            !< Counter.
@@ -1104,6 +1121,12 @@ contains
    do k = 1_I4P, nps
       pab(1:2, k) = ps(k)%a ; pab(3:4, k) = ps(k)%b ; ptg(1, k) = ps(k)%ta ; ptg(2, k) = ps(k)%tb
    enddo
+   if (present(pseg)) then
+      allocate(pseg(nps))
+      do k = 1_I4P, nps
+         pseg(k) = ps(k)%seg
+      enddo
+   endif
    endsubroutine cut_cells_2d_prepare
 
    subroutine cut_cells_2d_classify(nx, ny, ne, ncell, xstart, pstart, node_in, nm, ckind, ncut, cutc, rwo, iwo)
@@ -1404,7 +1427,7 @@ contains
    !<
    !< With S = 4 + nxc + nb, the most sub-intervals the cell can hold (nxc + 4 on its boundary, then one hole slot per
    !< closed loop, at most one loop per wall piece):
-   !<    nrw = S (12 + 2 nm) + nb (13 + 2 nm) + 2 nm + 1 reals,  niw = NHDR + 4 S + 2 nxc + 14 nb + 1 integers
+   !<    nrw = S (12 + 2 nm) + nb (13 + 2 nm) + 2 nm + 1 reals,  niw = NHDR + 4 S + 2 nxc + 15 nb + 1 integers
    !< (layout in `cut_cell_2d_layout`; the + 1 keeps every slice start inside the slice when the last parts are empty).
    !< Every count of the cell is bounded by its part (sub-intervals <= S, crossing slots <= nxc, loops, holes, islands,
    !< chains, loop pieces <= nb), so the overflow paths of the fixed 512-column arrays (issue #95) cannot occur.
@@ -1415,7 +1438,7 @@ contains
 
    s = 4_I4P + nxc + nb
    nrw = s * (12_I4P + 2_I4P * nm) + nb * (13_I4P + 2_I4P * nm) + 2_I4P * nm + 1_I4P
-   niw = NHDR + 4_I4P * s + 2_I4P * nxc + 14_I4P * nb + 1_I4P
+   niw = NHDR + 4_I4P * s + 2_I4P * nxc + 15_I4P * nb + 1_I4P
    endsubroutine cut_cell_2d_sizes
 
    pure subroutine cut_cell_2d_layout(nxc, nb, nm, ro, io)
@@ -1425,11 +1448,12 @@ contains
    !< pieces (4, nb), chain moments(nm), chain wall moments(nm).
    !< Integers (after the NHDR header): fluid flag(S), end crossing(S), edge(S), union-find parent(S), crossing slots
    !< (2, nxc), visited(nb), loop pieces(nb), hole root(nb), hole first(nb), hole length(nb), island first(nb), island
-   !< length(nb), island traversal(nb), traversal kind(nb), start(nb), length(nb), slot(nb), wall piece tags(2, nb).
+   !< length(nb), island traversal(nb), traversal kind(nb), start(nb), length(nb), slot(nb), wall piece tags(2, nb),
+   !< wall piece source segments(nb) (issue #106).
    !$acc routine seq
    integer(I4P), intent(in)  :: nxc, nb, nm  !< Crossings, wall pieces, moments.
    integer(I4P), intent(out) :: ro(15)       !< Real parts.
-   integer(I4P), intent(out) :: io(18)       !< Integer parts.
+   integer(I4P), intent(out) :: io(19)       !< Integer parts.
    integer(I4P)              :: s, k         !< Work.
 
    s = 4_I4P + nxc + nb
@@ -1446,11 +1470,12 @@ contains
    do k = 7, 18
       io(k) = io(k - 1) + nb
    enddo
+   io(19) = io(18) + 2_I4P * nb
    endsubroutine cut_cell_2d_layout
 
    subroutine cut_cell_2d_count(x0, x1, y0, y1, f00, f10, f11, f01, eid, ne, nxs, xstart, xord, xp, nb, pofs, nps, pord, &
-                                pab, ptg, nm, me, with_iv, with_bnd, nrw, rw, niw, iw, closed, alpha, aperture, centroid, &
-                                wet_length, wet_centroid, wet_normal, npieces, nivc, nbdc)
+                                pab, ptg, nsg, pseg, nm, me, with_iv, with_bnd, nrw, rw, niw, iw, closed, alpha, aperture, &
+                                centroid, wet_length, wet_centroid, wet_normal, npieces, nivc, nbdc)
    !< Kernel, count pass (issue #100): measures and pieces of the cut cell [x0, x1] x [y0, y1]; its cell outputs are
    !< written, its pieces stay in its workspace (rw, iw) for `cut_cell_2d_fill`; npieces, nivc, nbdc are the numbers
    !< of pieces, fluid edge intervals and boundary segments that the fill writes.
@@ -1466,6 +1491,8 @@ contains
    integer(I4P), intent(in)    :: pord(nps)              !< Wall pieces by cell.
    real(R8P),    intent(in)    :: pab(4, nps)            !< Wall piece end points.
    integer(I4P), intent(in)    :: ptg(2, nps)            !< Wall piece end tags.
+   integer(I4P), intent(in)    :: nsg                    !< Source segments given: nps, or 0 (none: the sources are 0).
+   integer(I4P), intent(in)    :: pseg(nsg)              !< Source segment of each wall piece (issue #106).
    integer(I4P), intent(in)    :: nm                     !< Moments.
    integer(I4P), intent(in)    :: me(2, nm)              !< Moment exponents.
    logical,      intent(in)    :: with_iv, with_bnd      !< Count the intervals, the boundary segments.
@@ -1475,7 +1502,7 @@ contains
    logical,      intent(out)   :: closed                 !< The cell boundary closed.
    real(R8P),    intent(out)   :: alpha, aperture(4), centroid(2), wet_length, wet_centroid(2), wet_normal(2) !< Measures.
    integer(I4P), intent(out)   :: npieces, nivc, nbdc    !< Pieces, intervals, boundary segments.
-   integer(I4P)                :: nxc, e, s, ro(15), io(18) !< Work.
+   integer(I4P)                :: nxc, e, s, ro(15), io(19) !< Work.
 
    nxc = 0_I4P
    do e = 1, 4
@@ -1484,17 +1511,17 @@ contains
    call cut_cell_2d_layout(nxc, nb, nm, ro, io)
    s = 4_I4P + nxc + nb
    call count_core(x0, x1, y0, y1, f00, f10, f11, f01, eid, ne, nxs, xstart, xord, xp, nb, pofs, nps, pord, pab, ptg, &
-                   nm, me, with_iv, with_bnd, s, nxc, rw(ro(1)), rw(ro(2)), rw(ro(3)), rw(ro(4)), rw(ro(5)), rw(ro(6)), &
-                   rw(ro(7)), rw(ro(8)), rw(ro(9)), rw(ro(10)), rw(ro(11)), rw(ro(12)), rw(ro(13)), rw(ro(14)), &
-                   rw(ro(15)), iw(1), iw(io(1)), iw(io(2)), iw(io(3)), iw(io(4)), iw(io(5)), iw(io(6)), iw(io(7)), &
-                   iw(io(8)), iw(io(9)), iw(io(10)), iw(io(11)), iw(io(12)), iw(io(13)), iw(io(14)), iw(io(15)), &
-                   iw(io(16)), iw(io(17)), iw(io(18)), closed, alpha, aperture, centroid, wet_length, wet_centroid, &
+                   nsg, pseg, iw(io(19)), nm, me, with_iv, with_bnd, s, nxc, rw(ro(1)), rw(ro(2)), rw(ro(3)), &
+                   rw(ro(4)), rw(ro(5)), rw(ro(6)), rw(ro(7)), rw(ro(8)), rw(ro(9)), rw(ro(10)), rw(ro(11)), rw(ro(12)), &
+                   rw(ro(13)), rw(ro(14)), rw(ro(15)), iw(1), iw(io(1)), iw(io(2)), iw(io(3)), iw(io(4)), iw(io(5)), &
+                   iw(io(6)), iw(io(7)), iw(io(8)), iw(io(9)), iw(io(10)), iw(io(11)), iw(io(12)), iw(io(13)), iw(io(14)), &
+                   iw(io(15)), iw(io(16)), iw(io(17)), iw(io(18)), closed, alpha, aperture, centroid, wet_length, wet_centroid, &
                    wet_normal, npieces, nivc, nbdc)
    endsubroutine cut_cell_2d_count
 
    subroutine cut_cell_2d_fill(x0, x1, y0, y1, i, j, eid, nm, me, with_iv, with_bnd, nrw, rw, niw, iw, p0, iv0, bd0, &
                                np, pcell, parea, pcen, pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, &
-                               bwall)
+                               bwall, bsrc)
    !< Kernel, fill pass (issue #100): the pieces of cut cell (i, j) kept in its workspace by `cut_cell_2d_count`, written
    !< as pieces p0 + 1.., fluid edge intervals iv0 + 1.. and boundary segments bd0 + 1.. of the block.
    !$acc routine seq
@@ -1518,12 +1545,13 @@ contains
    integer(I4P), intent(inout) :: bds(np + 1)          !< First boundary segment of each piece.
    real(R8P),    intent(inout) :: bseg(4, nbd)         !< Boundary segments.
    logical,      intent(inout) :: bwall(nbd)           !< Wall flags.
-   integer(I4P)                :: nxc, nb, s, ro(15), io(18) !< Work.
+   integer(I4P), intent(inout) :: bsrc(nbd)            !< Source segments (0: cell edge; issue #106).
+   integer(I4P)                :: nxc, nb, s, ro(15), io(19) !< Work.
 
    if (iw(1) == 0_I4P) return
    if (iw(1) == 2_I4P) then
       call quiet_piece_2d(x0, x1, y0, y1, i, j, eid, nm, me, with_iv, with_bnd, p0, iv0, bd0, np, pcell, parea, pcen, &
-                          pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+                          pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall, bsrc)
       return
    endif
    nxc = iw(6) ; nb = iw(7)
@@ -1531,8 +1559,8 @@ contains
    s = 4_I4P + nxc + nb
    call fill_core(x0, x1, y0, y1, i, j, eid, nb, nm, with_iv, with_bnd, s, rw(ro(1)), rw(ro(2)), rw(ro(3)), rw(ro(4)), &
                   rw(ro(5)), rw(ro(6)), rw(ro(13)), iw(1), iw(io(1)), iw(io(3)), iw(io(4)), iw(io(7)), iw(io(14)), &
-                  iw(io(15)), iw(io(16)), iw(io(17)), iw(io(18)), p0, iv0, bd0, np, pcell, parea, pcen, pwl, pwn, pap, &
-                  pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+                  iw(io(15)), iw(io(16)), iw(io(17)), iw(io(18)), iw(io(19)), p0, iv0, bd0, np, pcell, parea, pcen, pwl, &
+                  pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall, bsrc)
    endsubroutine cut_cell_2d_fill
 
    ! nvfortran 26.9 miscompiles this routine's device code at -O2 (issue #100 step 2: the loop `do k = 1, ns` ran once,
@@ -1540,9 +1568,9 @@ contains
    ! device alike (the two stay bit-identical). A comment to every other compiler.
 !pgi$r opt=1
    subroutine count_core(x0, x1, y0, y1, f00, f10, f11, f01, eid, ne, nxs, xstart, xord, xp, nb, pofs, nps, pord, pab, &
-                         ptg, nm, me, with_iv, with_bnd, s, nxm, sa, sb, acc, wn, accm, wallm, harea, ig, iwl, iwn, igm, &
-                         iwm, lp, cgm, cwm, hdr, sfl, sx, sed, par, xsub, pvis, loopp, hroot, hfirst, hn, ifirst, inn, it, &
-                         tkind, tstart, tn, tslot, lt, closed, alpha, aperture, centroid, wet_length, wet_centroid, &
+                         ptg, nsg, pseg, lsrc, nm, me, with_iv, with_bnd, s, nxm, sa, sb, acc, wn, accm, wallm, harea, ig, &
+                         iwl, iwn, igm, iwm, lp, cgm, cwm, hdr, sfl, sx, sed, par, xsub, pvis, loopp, hroot, hfirst, hn, ifirst, &
+                         inn, it, tkind, tstart, tn, tslot, lt, closed, alpha, aperture, centroid, wet_length, wet_centroid, &
                          wet_normal, npieces, nivc, nbdc)
    !< The count pass on the workspace parts (see `cut_cell_2d_layout`). Sub-intervals of the cell boundary
    !< counter-clockwise (1 bottom, 2 right, 3 top, 4 left), union-find over the fluid ones, the wall chains between
@@ -1559,6 +1587,9 @@ contains
    integer(I4P), intent(in)    :: pord(nps)              !< Wall pieces by cell.
    real(R8P),    intent(in)    :: pab(4, nps)            !< Wall piece end points.
    integer(I4P), intent(in)    :: ptg(2, nps)            !< Wall piece tags.
+   integer(I4P), intent(in)    :: nsg                    !< Source segments given (nps or 0).
+   integer(I4P), intent(in)    :: pseg(nsg)              !< Source segment of each wall piece.
+   integer(I4P), intent(inout) :: lsrc(nb)               !< The cell's wall piece sources (0 if not given).
    integer(I4P), intent(in)    :: nm                     !< Moments.
    integer(I4P), intent(in)    :: me(2, nm)              !< Exponents.
    logical,      intent(in)    :: with_iv, with_bnd      !< Count intervals, boundary segments.
@@ -1596,6 +1627,8 @@ contains
    hdr = 0_I4P ; hdr(6) = nxm ; hdr(7) = nb
    do q = 1, nb
       pid = pord(pofs + q) ; lp(:, q) = pab(:, pid) ; lt(:, q) = ptg(:, pid)
+      lsrc(q) = 0_I4P
+      if (nsg > 0_I4P) lsrc(q) = pseg(pid)
    enddo
    ! sub-intervals of the edges counter-clockwise: bottom (+u), right (+v), top (-u), left (-v)
    ns = 0 ; nxc = 0 ; ok = .true. ; flen = 0._R8P
@@ -1733,8 +1766,8 @@ contains
    endsubroutine count_core
 
    subroutine fill_core(x0, x1, y0, y1, i, j, eid, nb, nm, with_iv, with_bnd, s, sa, sb, acc, wn, accm, wallm, lp, hdr, &
-                        sfl, sed, par, loopp, tkind, tstart, tn, tslot, lt, p0, iv0, bd0, np, pcell, parea, pcen, pwl, pwn, &
-                        pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+                        sfl, sed, par, loopp, tkind, tstart, tn, tslot, lt, lsrc, p0, iv0, bd0, np, pcell, parea, pcen, pwl, &
+                        pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall, bsrc)
    !< The fill pass on the workspace parts left by `count_core`: per piece (root, in order) its measures, its fluid edge
    !< intervals in the order (-u, +u, -v, +v) and its oriented boundary (fluid sub-intervals, then the chains and loops
    !< charged to it, reversed so that the fluid is on the left, in the order they were followed).
@@ -1750,6 +1783,7 @@ contains
    integer(I4P), intent(in)    :: sfl(s), sed(s), par(s) !< Fluid, edge, parent.
    integer(I4P), intent(in)    :: loopp(nb), tkind(nb), tstart(nb), tn(nb), tslot(nb) !< Loops, traversals.
    integer(I4P), intent(in)    :: lt(2, nb)            !< Wall piece tags.
+   integer(I4P), intent(in)    :: lsrc(nb)             !< Wall piece sources.
    integer(I4P), intent(in)    :: p0, iv0, bd0         !< Offsets.
    integer(I4P), intent(in)    :: np, niv, nbd         !< Sizes.
    integer(I4P), intent(inout) :: pcell(2, np)         !< Cell of each piece.
@@ -1760,6 +1794,7 @@ contains
    integer(I4P), intent(inout) :: bds(np + 1)          !< Boundary segments of the pieces.
    real(R8P),    intent(inout) :: bseg(4, nbd)         !< Boundary segments.
    logical,      intent(inout) :: bwall(nbd)           !< Wall flags.
+   integer(I4P), intent(inout) :: bsrc(nbd)            !< Source segments (0: cell edge).
    real(R8P)    :: len(4)                              !< Edge lengths (-u, +u, -v, +v).
    integer(I4P) :: ns, nsb, nt, k, e, m, q, t, p, iv, bd, cur, guard !< Work.
 
@@ -1805,7 +1840,7 @@ contains
       do q = 1, nsb
          if (sfl(q) == 0) cycle
          if (find(q, s, par) /= k) cycle
-         bd = bd + 1_I4P ; bseg(1:2, bd) = sa(:, q) ; bseg(3:4, bd) = sb(:, q) ; bwall(bd) = .false.
+         bd = bd + 1_I4P ; bseg(1:2, bd) = sa(:, q) ; bseg(3:4, bd) = sb(:, q) ; bwall(bd) = .false. ; bsrc(bd) = 0_I4P
       enddo
       do t = 1, nt
          if (find(tslot(t), s, par) /= k) cycle
@@ -1813,6 +1848,7 @@ contains
             cur = tstart(t) ; guard = 0_I4P
             do
                bd = bd + 1_I4P ; bseg(1:2, bd) = lp(3:4, cur) ; bseg(3:4, bd) = lp(1:2, cur) ; bwall(bd) = .true.
+               bsrc(bd) = lsrc(cur)
                if (lt(2, cur) > 0) exit
                cur = local_start(-lt(2, cur), nb, lt)
                guard = guard + 1_I4P
@@ -1822,6 +1858,7 @@ contains
             do q = tstart(t), tstart(t) + tn(t) - 1_I4P
                cur = loopp(q)
                bd = bd + 1_I4P ; bseg(1:2, bd) = lp(3:4, cur) ; bseg(3:4, bd) = lp(1:2, cur) ; bwall(bd) = .true.
+               bsrc(bd) = lsrc(cur)
             enddo
          endif
       enddo
@@ -1830,7 +1867,7 @@ contains
 
    subroutine quiet_cell_2d_kernel(x0, x1, y0, y1, i, j, solid, eid, nm, me, with_iv, with_bnd, closed, alpha, aperture, &
                                    centroid, wet_length, wet_centroid, wet_normal, npieces, p0, iv0, bd0, np, pcell, parea, &
-                                   pcen, pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+                                   pcen, pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall, bsrc)
    !< Kernel of a quiet cell (no wall pieces or crossings): all solid, or all fluid as one piece written at p0 + 1.
    !$acc routine seq
    real(R8P),    intent(in)    :: x0, x1, y0, y1       !< Cell.
@@ -1853,12 +1890,13 @@ contains
    integer(I4P), intent(inout) :: bds(np + 1)          !< Boundary segments of the pieces.
    real(R8P),    intent(inout) :: bseg(4, nbd)         !< Boundary segments.
    logical,      intent(inout) :: bwall(nbd)           !< Wall flags.
+   integer(I4P), intent(inout) :: bsrc(nbd)            !< Source segments (0: cell edge).
 
    call quiet_cell_2d_measures(x0, x1, y0, y1, solid, closed, alpha, aperture, centroid, wet_length, wet_centroid, &
                                wet_normal, npieces)
    if (solid) return
    call quiet_piece_2d(x0, x1, y0, y1, i, j, eid, nm, me, with_iv, with_bnd, p0, iv0, bd0, np, pcell, parea, pcen, pwl, &
-                       pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+                       pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall, bsrc)
    endsubroutine quiet_cell_2d_kernel
 
    pure subroutine quiet_cell_2d_measures(x0, x1, y0, y1, solid, closed, alpha, aperture, centroid, wet_length, &
@@ -1883,7 +1921,7 @@ contains
    endsubroutine quiet_cell_2d_measures
 
    subroutine quiet_piece_2d(x0, x1, y0, y1, i, j, eid, nm, me, with_iv, with_bnd, p0, iv0, bd0, np, pcell, parea, pcen, &
-                             pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall)
+                             pwl, pwn, pap, pmom, pwmom, ivs, niv, ive, ivl, ivh, bds, nbd, bseg, bwall, bsrc)
    !< The piece of a fluid cell without walls, written at p0 + 1 (intervals at iv0 + 1.., boundary at bd0 + 1..).
    !$acc routine seq
    real(R8P),    intent(in)    :: x0, x1, y0, y1       !< Cell.
@@ -1901,6 +1939,7 @@ contains
    integer(I4P), intent(inout) :: bds(np + 1)          !< Boundary segments of the pieces.
    real(R8P),    intent(inout) :: bseg(4, nbd)         !< Boundary segments.
    logical,      intent(inout) :: bwall(nbd)           !< Wall flags.
+   integer(I4P), intent(inout) :: bsrc(nbd)            !< Source segments (0: cell edge).
    real(R8P)    :: area_c, mx, my                      !< Cell area, first moments.
    integer(I4P) :: p, k                                !< Work.
 
@@ -1931,7 +1970,7 @@ contains
       k = bd0
       bseg(:, k + 1) = [x0, y0, x1, y0] ; bseg(:, k + 2) = [x1, y0, x1, y1]
       bseg(:, k + 3) = [x1, y1, x0, y1] ; bseg(:, k + 4) = [x0, y1, x0, y0]
-      bwall(k + 1:k + 4) = .false.
+      bwall(k + 1:k + 4) = .false. ; bsrc(k + 1:k + 4) = 0_I4P
    endif
    endsubroutine quiet_piece_2d
 
@@ -2336,7 +2375,8 @@ contains
    eid(1) = 3_I4P ; eid(2) = 2_I4P ; eid(3) = 4_I4P ; eid(4) = 1_I4P ! cell_edge_ids(1, 1, 1, 1)
    me(1, 1) = 0_I4P ; me(2, 1) = 0_I4P
    call cut_cell_2d_count(x0, x1, y0, y1, f00, f10, f11, f01, eid, 4_I4P, nxs, iw(io(5)), iw(io(6)), rw(ro(1)), nps, &
-                          0_I4P, nps, iw(io(7)), rw(ro(3)), iw(io(4)), 0_I4P, me, .false., .false., ro(5) - ro(4), &
+                          0_I4P, nps, iw(io(7)), rw(ro(3)), iw(io(4)), 0_I4P, iw(io(3)), 0_I4P, me, .false., .false., &
+                          ro(5) - ro(4), &
                           rw(ro(4)), io(10) - io(9), iw(io(9)), closed, alpha, aperture, centroid, wl, wc, wn, np, nivc, nbdc)
    endsubroutine cut_cell_2d_one_count
 
@@ -2363,7 +2403,7 @@ contains
    integer(I4P), intent(inout) :: wpiece(nps)         !< Piece on the fluid side of each wall piece.
    integer(I4P), intent(out)   :: cpiece(4)           !< Piece of each corner (0: solid).
    real(R8P),    intent(inout) :: plen(4, mp), pmom(4, mp) !< Face lengths and first moments per piece.
-   integer(I4P) :: ro(5), io(10), k, s, ic, rc, cro(15), cio(18) !< Work.
+   integer(I4P) :: ro(5), io(10), k, s, ic, rc, cro(15), cio(19) !< Work.
    real(R8P)    :: alpha, centroid(2), dx, dy                  !< Work.
 
    call cut_cell_2d_one_count(nu, u, v, next, x0, x1, y0, y1, f00, f10, f11, f01, nxs, nps, nrw, rw, niw, iw, closed, &
