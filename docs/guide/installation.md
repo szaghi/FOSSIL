@@ -65,7 +65,7 @@ Fetched into `src/third_party/`:
 | [FLAP](https://github.com/szaghi/FLAP) | Fortran command-line argument parser (used by `fossilizer`) |
 | [FACE](https://github.com/szaghi/FACE) | ANSI terminal color/style support |
 | [BeFoR64](https://github.com/szaghi/BeFoR64) | Base64 encoding |
-| [FoXy](https://github.com/Fortran-FOSS-Programmers/FoXy) | XML/XDMF support |
+| [FoXy](https://github.com/szaghi/FoXy) | XML/XDMF support |
 | [StringiFor](https://github.com/szaghi/StringiFor) | String utilities |
 | [VTKFortran](https://github.com/szaghi/VTKFortran) | VTK file I/O |
 
