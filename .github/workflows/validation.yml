@@ -1,7 +1,11 @@
 name: Validation
 
-# The heavy tests (issue #45): benches, sweeps, convergence studies, large meshes in src/tests/validation/.
-# Not run per push (ci.yml runs the fast regression suite); run nightly, on demand, and before every release.
+# Project-owned workflow (not managed by `fobis scaffold`), issue #45: the validation suite (benches, large meshes,
+# sweeps, convergence studies) nightly and on demand, by the reusable matrix workflow of fortran-toolchains
+# (https://github.com/szaghi/fortran-toolchains) in its gnu-16.2 image: scripts/ci/validation.sh builds the programs
+# (mode validation-gnu) and runs them (scripts/run_validation.sh -j $(nproc)); their logs are the artifact
+# validation-logs-<toolchain>. The per-push regression suite is ci.yml.
+
 on:
   schedule:
     - cron: "17 2 * * *"   # nightly, 02:17 UTC
@@ -11,31 +15,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   validation:
-    runs-on: ubuntu-latest
-    container: ghcr.io/szaghi/fortran-toolchains:gnu-16.2
-    permissions:
-      contents: read
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Fetch dependencies
-      if: hashFiles('**/.deps_config.ini') != ''
-      run: FoBiS.py fetch
-
-    - name: Build the validation suite
-      run: FoBiS.py build --mode validation-gnu
-
-    # one program per core: they are single-threaded (validation-gnu has no OpenMP) and write no files
-    - name: Run the validation suite
-      run: ./scripts/run_validation.sh -j "$(nproc)"
-
-    - name: Upload the logs of the validation programs
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: validation-logs
-        path: exe-validation/*.log
-        retention-days: 14
+    uses: szaghi/fortran-toolchains/.github/workflows/matrix.yml@v1
+    with:
+      toolchains: linux-gnu
+      script: scripts/ci/validation.sh
+      artifacts: exe-validation/*.log
+      artifacts-name: validation-logs

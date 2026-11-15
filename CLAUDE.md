@@ -150,14 +150,15 @@ The memory-heavy programs (`SOLO` in the script: `fossil_test_distance_bench` 11
 
 `fossil_test_distance_bench` prints its five timing tables of the 3-D device kernels only when built with OpenACC (or
 with `FOSSIL_BENCH_TIMING=1`): without it they time the host twins against the CPU (gfortran, dragon-fine 40^3: 1375 s
-with them, 384 s without). The nightly `validation.yml` runs `-j $(nproc)` and uploads `exe-validation/*.log` as the
-artifact `validation-logs` when it fails.
+with them, 384 s without). The nightly `validation.yml` (project-owned) calls fortran-toolchains' `matrix.yml@v1` on
+`linux-gnu`: `scripts/ci/validation.sh` builds `validation-gnu` and runs `-j $(nproc)`; `exe-validation/*.log` is
+uploaded as the artifact `validation-logs-<toolchain>` on every run.
 
 CI toolchain: the scaffold workflows are thin callers of the reusable workflows of `szaghi/fortran-toolchains` pinned
 at `@v1` (repo `~/fortran/fortran-toolchains`), rendered from `[scaffold] toolchain = linux-gnu` in `fobos`: `ci.yml`
 (tests, coverage) and `docs.yml` run in its `gnu-16.2` image (gfortran 16.2 on the official `gcc` image, Open MPI
-5.0.11, HDF5 2.3.0, FoBiS, formal, gcovr; nothing is installed per job), as the project-owned `docs-snippets.yml` and
-`validation.yml`; `release.yml` publishes a tag's release, then `install.yml` installs it on a fresh runner (the
+5.0.11, HDF5 2.3.0, FoBiS, formal, gcovr; nothing is installed per job), as the project-owned `docs-snippets.yml`
+and `validation.yml` (through the reusable `matrix.yml`); `release.yml` publishes a tag's release, then `install.yml` installs it on a fresh runner (the
 linux-bare toolchain). The ubuntu-26.04 runners install amd64v3 packages: their gfortran emitted FMAs at
 -O2 and broke the bitwise device-twin checks of `fossil_val_device_chain` / `fossil_test_distance_bench` (run
 43194838880); the image's gfortran targets baseline x86-64 (no FMA), and `-ffp-contract=off` guards any other. Every `tests-*` mode excludes `src/tests/validation/`. `fobis clean` leaves stale executables of
