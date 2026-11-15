@@ -248,16 +248,28 @@ contains
    endfunction ip_orient2d
 
    recursive function ip_compare(p, q, axis) result(sg)
-   !< Exact sign of p_axis - q_axis.
-   type(implicit_point_t), intent(in) :: p, q !< Points.
-   integer(I4P),           intent(in) :: axis !< Axis (1..3).
-   integer(I4P)                       :: sg   !< -1, 0, 1.
+   !< Exact sign of p_axis - q_axis. A coordinate that a construction fixes to an input double (`exact_coordinate`) is
+   !< compared as that double (issue #92 WP5 d): the same sign, without the exact stage that ties on axis-aligned faces
+   !< and edges otherwise need.
+   type(implicit_point_t), intent(in) :: p, q   !< Points.
+   integer(I4P),           intent(in) :: axis   !< Axis (1..3).
+   integer(I4P)                       :: sg     !< -1, 0, 1.
    type(rerr_t)                       :: px(3), pw, qx(3), qw, d
    type(expn_t)                       :: ex(3), ew, fx(3), fw, e
    integer(I4P)                       :: s1, s2, s3
+   logical                            :: kp, kq !< p_axis, q_axis fixed to an input double.
+   real(R8P)                          :: cp, cq !< Those doubles.
 
    if (p%kind == IPK_EXPLICIT .and. q%kind == IPK_EXPLICIT) then
       sg = rsgn(p%v(axis, 1) - q%v(axis, 1)) ; return ! exact: the sign of a difference of doubles
+   endif
+   call exact_coordinate(p, axis, kp, cp) ; call exact_coordinate(q, axis, kq, cq)
+   if (kp .and. kq) then
+      sg = rsgn(cp - cq) ; return
+   elseif (kp .and. p%kind /= IPK_EXPLICIT) then
+      sg = ip_compare(ip_explicit([cp, cp, cp]), q, axis) ; return
+   elseif (kq .and. q%kind /= IPK_EXPLICIT) then
+      sg = ip_compare(p, ip_explicit([cq, cq, cq]), axis) ; return
    endif
    if (q%kind == IPK_EXPLICIT) then ! sign(X_p - x W_p) sign(W_p)
       call homog_r(p, px, pw)
@@ -279,6 +291,30 @@ contains
    e = ex(axis) * fw - fx(axis) * ew
    sg = x_sign(e) * x_sign(ew) * x_sign(fw)
    endfunction ip_compare
+
+   pure subroutine exact_coordinate(p, axis, known, c)
+   !< Coordinate `axis` of p when its construction fixes it to an input double: an input vertex; a point of the line
+   !< (v1, v2) of an LPI, SSI or EEI (X = W v1 + t (v2 - v1), W /= 0) whose two points share that coordinate; an LPI whose
+   !< plane points (v3, v4, v5) share it (the normal is along the axis: X_axis = W r_axis). Exact, no rounding.
+   type(implicit_point_t), intent(in)  :: p     !< Point.
+   integer(I4P),           intent(in)  :: axis  !< Axis (1..3).
+   logical,                intent(out) :: known !< The coordinate is an input double.
+   real(R8P),              intent(out) :: c     !< That double.
+
+   known = .false. ; c = 0._R8P
+   select case (p%kind)
+   case (IPK_EXPLICIT)
+      known = .true. ; c = p%v(axis, 1)
+   case (IPK_LPI, IPK_SSI, IPK_EEI)
+      if (p%v(axis, 1) == p%v(axis, 2)) then
+         known = .true. ; c = p%v(axis, 1)
+      elseif (p%kind == IPK_LPI) then
+         if (p%v(axis, 3) == p%v(axis, 4) .and. p%v(axis, 3) == p%v(axis, 5)) then
+            known = .true. ; c = p%v(axis, 3)
+         endif
+      endif
+   endselect
+   endsubroutine exact_coordinate
 
    function ip_lex_compare(p, q) result(sg)
    !< Exact lexicographic order of p and q (x, then y, then z): -1, 0 (the same point), 1. On a line it is monotone
