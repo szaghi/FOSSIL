@@ -14,7 +14,9 @@ module fossil_cut_cells_3d
 !< kernel. A face whose section does not close (an open surface) is flagged.
 !<
 !< Cells (step 5). Every triangle is clipped to every cell it overlaps (Sutherland-Hodgman with the
-!< same rule: a point on the plane x_i belongs to the cell below it, the crossing points canonical).
+!< same rule: a point on the plane x_i belongs to the cell below it, the crossing points canonical),
+!< by the x, y, z planes in turn, except a facet nearly parallel to a y or z plane (`flat_axis`), clipped
+!< along that axis first (issue #107: its rounded crossings fell onto the plane, against the section).
 !< The solid volume and first moments of S n C follow from the divergence theorem over the boundary
 !< of S n C: the clipped triangles (outward normal of the solid) and the solid parts of the six cell
 !< faces (outward normal of the cell, areas from the faces above): V = 1/3 oint x . n dA,
@@ -110,6 +112,7 @@ public :: cut_cell_3d_face_sizes, cut_cell_3d_face_count, cut_cell_3d_face_measu
 
 integer(I4P), parameter :: MONO2_MAX = 15_I4P !< mono_count(2, MOMENTS_MAX): moments per face, at most.
 integer(I4P), parameter :: MONO3_MAX = 35_I4P !< mono_count(3, MOMENTS_MAX): moments per piece, at most.
+real(R8P),    parameter :: FLAT_TAU = 1.e-3_R8P !< Slope below which a facet is clipped along its flat axis first (#107).
 integer(I4P), parameter :: SCAN_CHUNK = 64_I4P !< Entries per chunk of the device prefix sums (`scan_dev`, #100).
 integer(I4P), parameter :: CK_NONE = 0_I4P, CK_EMPTY = 1_I4P, CK_QUIET = 2_I4P, CK_CUT = 3_I4P !< Cell kinds (the
                                                      !< `K_*` of `cut_pieces_3d`), device path (#100 step 3c).
@@ -451,16 +454,14 @@ contains
    real(R8P),    intent(out) :: wet_centroid(3)        !< Wetted centroid.
    real(R8P),    intent(out) :: wet_normal(3)          !< Wall normal integral.
    logical,      intent(out) :: closed                 !< All six faces closed.
-   real(R8P)                 :: acc(11), poly(3, 16), c0(3), h(3), sq(3), vc, vs, ms(3), d1(3), d2(3), d3(3), s !< Work.
+   real(R8P)                 :: acc(11), poly(3, 16), c0(3), c1(3), h(3), sq(3), vc, vs, ms(3), d1(3), d2(3), d3(3), s !< Work.
    integer(I4P)              :: q, np, m, a            !< Work.
 
    acc = 0._R8P
-   c0(1) = x0 ; c0(2) = y0 ; c0(3) = z0
+   c0(1) = x0 ; c0(2) = y0 ; c0(3) = z0 ; c1(1) = x1 ; c1(2) = y1 ; c1(3) = z1
    do q = 1, nt
       poly(:, 1:3) = tri(:, :, lst(q)) ; np = 3_I4P
-      call clip_poly(poly, np, 1_I4P, x0, .true.) ; call clip_poly(poly, np, 1_I4P, x1, .false.)
-      call clip_poly(poly, np, 2_I4P, y0, .true.) ; call clip_poly(poly, np, 2_I4P, y1, .false.)
-      call clip_poly(poly, np, 3_I4P, z0, .true.) ; call clip_poly(poly, np, 3_I4P, z1, .false.)
+      call clip_cell(poly, np, c0, c1, flat_axis(tri(:, :, lst(q))))
       if (np < 3_I4P) cycle
       do m = 2, np - 1 ! fan, local coordinates
          d1 = poly(:, 1) - c0 ; d2 = poly(:, m) - c0 ; d3 = poly(:, m + 1) - c0
@@ -515,15 +516,13 @@ contains
    integer(I4P), intent(inout) :: nw                     !< Terms so far.
    integer(I4P), intent(inout) :: wpc(:), wfc(:)         !< Pieces, facets.
    real(R8P),    intent(inout) :: wav(:,:), wwa(:), wcen(:,:) !< Vector areas, areas, centroids.
-   real(R8P)                   :: poly(3, 16), c0(3)     !< Polygon, low corner.
+   real(R8P)                   :: poly(3, 16), c0(3), c1(3) !< Polygon, low and high corners.
    integer(I4P)                :: q, np                  !< Work.
 
-   c0(1) = x0 ; c0(2) = y0 ; c0(3) = z0
+   c0(1) = x0 ; c0(2) = y0 ; c0(3) = z0 ; c1(1) = x1 ; c1(2) = y1 ; c1(3) = z1
    do q = 1, nt
       poly(:, 1:3) = tri(:, :, lst(q)) ; np = 3_I4P
-      call clip_poly(poly, np, 1_I4P, x0, .true.) ; call clip_poly(poly, np, 1_I4P, x1, .false.)
-      call clip_poly(poly, np, 2_I4P, y0, .true.) ; call clip_poly(poly, np, 2_I4P, y1, .false.)
-      call clip_poly(poly, np, 3_I4P, z0, .true.) ; call clip_poly(poly, np, 3_I4P, z1, .false.)
+      call clip_cell(poly, np, c0, c1, flat_axis(tri(:, :, lst(q))))
       if (np < 3_I4P) cycle
       nw = nw + 1_I4P ; wpc(nw) = piece ; wfc(nw) = lst(q)
       call polygon_terms(np, poly, c0, wav(:, nw), wwa(nw), wcen(:, nw))
@@ -1438,10 +1437,7 @@ contains
    nivc = 0_I4P ; nqc = 0_I4P ; nwc = 0_I4P ; qwn1 = 0_I4P
    do q = 1, nt
       pv(:, 1:3, q) = tri(:, :, lst(q)) ; pfl(1:3, q) = 0_I4P ; npv = 3_I4P
-      do a = 1, 3
-         call clip_flags(pv(:, :, q), pfl(:, q), npv, a, c0(a), .true., 2_I4P * (a - 1_I4P))
-         call clip_flags(pv(:, :, q), pfl(:, q), npv, a, c1(a), .false., 2_I4P * (a - 1_I4P) + 1_I4P)
-      enddo
+      call clip_cell_flags(pv(:, :, q), pfl(:, q), npv, c0, c1, flat_axis(tri(:, :, lst(q))))
       pn(q) = npv ; if (npv < 3_I4P) pn(q) = 0_I4P
       ! on-plane flags from the coordinates (issue #70): a vertex made by one clip can lie exactly on a plane
       ! clipped before or after it (lattice bodies), and the traces and edge piercings need that flag too
@@ -4370,6 +4366,81 @@ contains
 
    c = [a(2) * b(3) - a(3) * b(2), a(3) * b(1) - a(1) * b(3), a(1) * b(2) - a(2) * b(1)]
    endfunction cross3
+
+   pure integer(I4P) function flat_axis(t)
+   !< The axis along which the facet t is nearly flat (issue #107): 3 if its z extent is not zero and max(|n_x|, |n_y|)
+   !< <= FLAT_TAU |n_z| with |n_z| > 0 (n = (t2 - t1) x (t3 - t1), the facet's own vertices), else 2 by the same rule
+   !< for y, else 0. Such a facet is clipped along that axis first (`clip_cell`): see there. Plain scalar arithmetic,
+   !< the same bits on the host and the device (nofma).
+   !$acc routine seq
+   real(R8P), intent(in) :: t(3, 3)           !< Vertices.
+   real(R8P)             :: e1(3), e2(3), n(3) !< Edges, normal.
+   integer(I4P)          :: a, b, c            !< Axes.
+
+   do a = 1, 3
+      e1(a) = t(a, 2) - t(a, 1) ; e2(a) = t(a, 3) - t(a, 1)
+   enddo
+   n(1) = e1(2) * e2(3) - e1(3) * e2(2)
+   n(2) = e1(3) * e2(1) - e1(1) * e2(3)
+   n(3) = e1(1) * e2(2) - e1(2) * e2(1)
+   flat_axis = 0_I4P
+   do a = 3, 2, -1
+      b = mod(a, 3_I4P) + 1_I4P ; c = mod(b, 3_I4P) + 1_I4P
+      if (max(t(a, 1), t(a, 2), t(a, 3)) > min(t(a, 1), t(a, 2), t(a, 3)) .and. abs(n(a)) > 0._R8P .and. &
+          abs(n(b)) <= FLAT_TAU * abs(n(a)) .and. abs(n(c)) <= FLAT_TAU * abs(n(a))) then
+         flat_axis = a
+         return
+      endif
+   enddo
+   endfunction flat_axis
+
+   pure subroutine clip_cell(p, n, c0, c1, first)
+   !< Clip the polygon p(:, 1:n) to the cell [c0, c1] (`clip_poly`: the low-side rule, canonical crossings): the planes
+   !< of axis `first` (`flat_axis` of the facet; 0: none) first, then the others in x, y, z order.
+   !<
+   !< Why (issue #107): a crossing made by one clip interpolates the other coordinates, and for a facet within a few ulps
+   !< of a grid plane of axis a its a coordinate rounds onto the plane; a later clip along a then puts that part in the
+   !< cell below, while the plane section (`facet_segment_dev`: the facet's own vertices) puts it above, and the region
+   !< is counted in both cells (up to 1/3 of a cell). Clipped first along a, the facet is split on its own vertices, as
+   !< the section splits it; the later clips cross it nearly perpendicularly (slope >= 1/FLAT_TAU), with O(ulp) errors.
+   !< A facet that crosses no plane of axis a in the cell gives the same polygon in either order, bit for bit.
+   !$acc routine seq
+   real(R8P),    intent(inout) :: p(3, 16)       !< Polygon.
+   integer(I4P), intent(inout) :: n              !< Vertices.
+   real(R8P),    intent(in)    :: c0(3), c1(3)   !< Cell corners.
+   integer(I4P), intent(in)    :: first          !< Axis clipped first (0: x, y, z).
+   integer(I4P)                :: a              !< Axis.
+
+   if (first > 0_I4P) then
+      call clip_poly(p, n, first, c0(first), .true.) ; call clip_poly(p, n, first, c1(first), .false.)
+   endif
+   do a = 1, 3
+      if (a == first) cycle
+      call clip_poly(p, n, a, c0(a), .true.) ; call clip_poly(p, n, a, c1(a), .false.)
+   enddo
+   endsubroutine clip_cell
+
+   pure subroutine clip_cell_flags(p, fl, n, c0, c1, first)
+   !< `clip_cell` carrying the on-plane flags of `clip_flags`: each plane keeps its bit (2 (a - 1) low, 2 (a - 1) + 1
+   !< high) whatever the order.
+   !$acc routine seq
+   real(R8P),    intent(inout) :: p(3, 16)       !< Polygon.
+   integer(I4P), intent(inout) :: fl(16)         !< Vertex flags.
+   integer(I4P), intent(inout) :: n              !< Vertices.
+   real(R8P),    intent(in)    :: c0(3), c1(3)   !< Cell corners.
+   integer(I4P), intent(in)    :: first          !< Axis clipped first (0: x, y, z).
+   integer(I4P)                :: a              !< Axis.
+
+   if (first > 0_I4P) then
+      call clip_flags(p, fl, n, first, c0(first), .true., 2_I4P * (first - 1_I4P))
+      call clip_flags(p, fl, n, first, c1(first), .false., 2_I4P * (first - 1_I4P) + 1_I4P)
+   endif
+   do a = 1, 3
+      if (a == first) cycle
+      call clip_flags(p, fl, n, a, c0(a), .true., 2_I4P * (a - 1_I4P))
+      call clip_flags(p, fl, n, a, c1(a), .false., 2_I4P * (a - 1_I4P) + 1_I4P)
+   enddo
+   endsubroutine clip_cell_flags
 
    pure subroutine clip_flags(p, fl, n, ax, level, keep_above, bit)
    !< `clip_poly` (same kept points and crossings) carrying on-plane flags: a crossing gets the bit of

@@ -728,37 +728,6 @@ contains
    endif
    endsubroutine receptor_weights_2d
 
-   pure real(R8P) function exact_shift(o, v, e) result(s)
-   !< The shift o of one axis if every vertex coordinate v and sub-grid edge e minus o is exact (Knuth's two-sum error
-   !< 0), else 0. An exact shift moves the receptor and the sub-grid rigidly: every vertex on or off a grid plane stays so.
-   !< An inexact one could round a facet within an ulp of a plane onto it, partly: the cut cells clip a facet after its
-   !< in-plane crossings were rounded but read the plane's section from its vertices, and the two disagree (issue #106
-   !< step 3: a receptor whose face lies 1e-16 above z = 0, shifted by 1.3, lost 0.9 % of its volume). The shift is
-   !< inexact only for coordinates of opposite sign or much smaller than o, i.e. near the origin, where |x| / h is small
-   !< and the unshifted cut is accurate.
-   real(R8P), intent(in) :: o     !< Shift.
-   real(R8P), intent(in) :: v(:)  !< Vertex coordinates.
-   real(R8P), intent(in) :: e(:)  !< Sub-grid edges.
-   integer(I4P)          :: k     !< Work.
-
-   s = o
-   do k = 1, size(v, kind=I4P)
-      if (two_diff_error(v(k), o) /= 0._R8P) s = 0._R8P
-   enddo
-   do k = 1, size(e, kind=I4P)
-      if (two_diff_error(e(k), o) /= 0._R8P) s = 0._R8P
-   enddo
-   endfunction exact_shift
-
-   pure real(R8P) function two_diff_error(a, b) result(err)
-   !< The rounding error of a - b (Knuth's two-sum on a + (-b)): 0 exactly when a - b is exact.
-   real(R8P), intent(in) :: a, b   !< Operands.
-   real(R8P)             :: d, bb  !< Work.
-
-   d = a - b ; bb = d - a
-   err = (a - (d - bb)) + (-b - bb)
-   endfunction two_diff_error
-
    pure integer(I4P) function edge_below(x, t) result(k)
    !< The last edge x(k) <= t (1 if none).
    real(R8P), intent(in) :: x(:) !< Edges, increasing.
@@ -1327,10 +1296,16 @@ contains
    !< no overlap); exactly collapsed triangles (a pole) are dropped. It is cut against the donor sub-grid around its
    !< bounding box as a hole in a solid box (`cut_cells_3d`, the direct variant), in coordinates shifted to the
    !< sub-grid's low corner (the cut cells' face sections sum Green's integrals about the origin: the shift keeps their
-   !< relative error at round-off), axis by axis where the shift is exact for every vertex and sub-grid edge
-   !< (`exact_shift`; else that axis is not shifted). V_c n V_c' is then the fluid of donor cell c': its volume and
-   !< centroid are the cut's cell totals (`alpha` x the shifted cell volume, `centroid` + the shift), never the per-piece
-   !< arrays (the cut may leave a donor cell untrusted, pieces = -1, whose totals are right and whose pieces are empty).
+   !< relative error at round-off), on every axis. Until issue #107 an axis was shifted only where the shift was exact
+   !< for every vertex and sub-grid edge (else not shifted): an inexact shift could leave a facet within an ulp of a grid
+   !< plane, which the cut cells double-counted (a receptor 1e-16 above z = 0, shifted by 1.3, lost 0.9 % of its
+   !< volume; up to 21 % in `fossil_test_overlap_weights_3d`). The cut is right for such facets since #107, so the
+   !< fallback is gone: without it the weights move by <= 1e-15 and receptor volumes by <= 1.3e-15 relative, and 17
+   !< zero-volume round-off donors leave the lists. It bought no accuracy either: the shift was inexact only near the
+   !< origin (coordinates of opposite sign or much smaller than the shift), where the unshifted sums are accurate too.
+   !< V_c n V_c' is then the fluid of donor cell c': its volume and centroid are the cut's cell totals (`alpha` x the
+   !< shifted cell volume, `centroid` + the shift), never the per-piece arrays (the cut may leave a donor cell untrusted,
+   !< pieces = -1, whose totals are right and whose pieces are empty).
    !<
    !< Donors: every donor cell of the exact cut with fluid (a piece, or untrusted with alpha > 0), in (k, j, i) order of
    !< the donor grid; a receptor face on an interior grid plane can leave a donor of zero or round-off volume (listed,
@@ -1446,10 +1421,8 @@ contains
    i0 = edge_below(x, lo(1)) ; i1 = edge_above(x, hi(1))
    j0 = edge_below(y, lo(2)) ; j1 = edge_above(y, hi(2))
    k0 = edge_below(z, lo(3)) ; k1 = edge_above(z, hi(3))
-   ! the receptor, shifted to the sub-grid's low corner where the shift is exact: its volume, then reversed as a hole in
-   ! a solid box around it
-   o(1) = exact_shift(x(i0), v(1, :), x(i0:i1)) ; o(2) = exact_shift(y(j0), v(2, :), y(j0:j1))
-   o(3) = exact_shift(z(k0), v(3, :), z(k0:k1))
+   ! the receptor, shifted to the sub-grid's low corner: its volume, then reversed as a hole in a solid box around it
+   o(1) = x(i0) ; o(2) = y(j0) ; o(3) = z(k0)
    do m = 1, nt
       do q = 1, 3
          tri(:, q, m) = tri(:, q, m) - o
