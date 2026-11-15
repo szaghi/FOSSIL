@@ -35,6 +35,16 @@ module fossil_body_distance
 !< `coplanar_meet` that is false. A degenerate triangle keeps the exact classification (`degenerate_pair_meet` since
 !< issue #96; the skip is not proved for it). Same bits.
 !<
+!< The order of the pairs of a leaf pair (issue #92 WP5 d): the pair of least box gap (the first in loop order on ties)
+!< is evaluated first, then the others in loop order. The result does not depend on the order, by the premise the tree
+!< descent already rests on (the margin of the pruning test: a pair whose distance ties the best is never dropped): the
+!< running best is never below the final minimum, so the winner is never pruned, and the update rule (closer, or as
+!< close with a smaller (i, j)) keeps the same winner in any order. The seed only tightens the bound sooner (two
+!< 12-facet cubes, one leaf each: 27.3 pair evaluations per call apart instead of 37.1). Once the best is 0 (contact)
+!< a pair after it in (i, j) order is not evaluated at all: its squared distance is >= 0, and the tie rule keeps the
+!< smaller pair (this drops the exact classification of the crossing pairs after the first one: 3.4 evaluations per
+!< call in contact instead of 35.5). `pairs` counts the evaluations of the pair function.
+!<
 !< `body_safe_step` (issue #73, the directional bound of C2A): over the facet pairs of two bodies moving along
 !< `pose_interpolate` (axis k, angle theta, translation dt per body), the largest step that keeps every pair at least
 !< tol / 2 apart, by the separating-plane bound of each pair (a triangle is convex): with the witness direction n from a
@@ -323,7 +333,7 @@ contains
       endsubroutine point_segment
    endsubroutine closest_segment_segment
 
-   subroutine body_distance(fa, ta, fb, tb, d2, ia, ib, pa, pb, meet, pose_a, pose_b)
+   subroutine body_distance(fa, ta, fb, tb, d2, ia, ib, pa, pb, meet, pose_a, pose_b, pairs)
    !< Minimum squared distance between the facets fa (tree ta) and fb (tree tb), the facets realizing it and the
    !< witness points; `meet` if they touch or intersect. Best-first descent of the two trees (see the module).
    type(facet_object),     intent(in)         :: fa(:), fb(:) !< Facets.
@@ -333,18 +343,22 @@ contains
    real(R8P),              intent(out)        :: pa(3), pb(3) !< Witness points.
    logical,                intent(out)        :: meet         !< Contact.
    type(rigid_pose_t),     intent(in), optional :: pose_a, pose_b !< Poses of the two bodies (default: as they are).
+   integer(I4P),           intent(out), optional :: pairs        !< Facet pairs evaluated by the pair function.
    real(R8P),    allocatable                  :: hb(:)        !< Heap: bounds.
    integer(I4P), allocatable                  :: hn(:, :)     !< Heap: node pairs.
    integer(I4P)                               :: hs, na, nb, ca(MAX_CHILDREN), cb(MAX_CHILDREN), nca, ncb, i, j
+   integer(I4P)                               :: np           !< Facet pairs evaluated.
    real(R8P)                                  :: bound
    type(aabb_node_object), pointer            :: nda, ndb
    type(posed_facets_t)                       :: xa, xb       !< Posed facets of the two bodies (filled on use).
 
    d2 = huge(1._R8P) ; ia = 0_I4P ; ib = 0_I4P ; pa = 0._R8P ; pb = 0._R8P ; meet = .false.
+   if (present(pairs)) pairs = 0_I4P
    if (size(fa) == 0 .or. size(fb) == 0) return
    if (ta%get_nodes_number() <= 0 .or. tb%get_nodes_number() <= 0) then
-      call body_distance_brute(fa, fb, d2, ia, ib, pa, pb, meet, pose_a, pose_b) ; return
+      call body_distance_brute(fa, fb, d2, ia, ib, pa, pb, meet, pose_a, pose_b, pairs) ; return
    endif
+   np = 0_I4P
    call posed_allocate(xa, size(fa, kind=I4P)) ; call posed_allocate(xb, size(fb, kind=I4P))
    allocate(hb(64), hn(2, 64)) ; hs = 0_I4P
    call push(node_bound(0_I4P, 0_I4P), 0_I4P, 0_I4P)
@@ -355,7 +369,7 @@ contains
       call ta%enumerate_children(n=na, out_idx=ca, nchild=nca)
       call tb%enumerate_children(n=nb, out_idx=cb, nchild=ncb)
       if (nca == 0 .and. ncb == 0) then
-         call leaf_pair(nda, ndb, fa, fb, xa, xb, d2, ia, ib, pa, pb, meet, pose_a, pose_b)
+         call leaf_pair(nda, ndb, fa, fb, xa, xb, d2, ia, ib, pa, pb, meet, np, pose_a, pose_b)
       elseif (ncb == 0 .or. (nca > 0 .and. volume(nda) >= volume(ndb))) then
          do i = 1, nca
             if (.not. live(ta, ca(i))) cycle
@@ -368,6 +382,7 @@ contains
          enddo
       endif
    enddo
+   if (present(pairs)) pairs = np
    contains
       function live(t, n) result(ok)
       type(aabb_tree_object), intent(in), target :: t
@@ -640,7 +655,7 @@ contains
    v = (hi%x - lo%x) * (hi%y - lo%y) * (hi%z - lo%z)
    endfunction node_box_volume
 
-   subroutine body_distance_brute(fa, fb, d2, ia, ib, pa, pb, meet, pose_a, pose_b)
+   subroutine body_distance_brute(fa, fb, d2, ia, ib, pa, pb, meet, pose_a, pose_b, pairs)
    !< The reference: every facet pair, the same pair function and tie rule as `body_distance`.
    type(facet_object), intent(in)  :: fa(:), fb(:)
    real(R8P),          intent(out) :: d2
@@ -648,20 +663,24 @@ contains
    real(R8P),          intent(out) :: pa(3), pb(3)
    logical,            intent(out) :: meet
    type(rigid_pose_t), intent(in), optional :: pose_a, pose_b
-   integer(I4P)                    :: i, j
+   integer(I4P),       intent(out), optional :: pairs !< Facet pairs evaluated by the pair function.
+   integer(I4P)                    :: i, j, np
 
-   d2 = huge(1._R8P) ; ia = 0_I4P ; ib = 0_I4P ; pa = 0._R8P ; pb = 0._R8P ; meet = .false.
+   d2 = huge(1._R8P) ; ia = 0_I4P ; ib = 0_I4P ; pa = 0._R8P ; pb = 0._R8P ; meet = .false. ; np = 0_I4P
    do i = 1, size(fa)
       do j = 1, size(fb)
-         call try_pair(fa, fb, i, j, d2, ia, ib, pa, pb, meet, pose_a, pose_b)
+         call try_pair(fa, fb, i, j, d2, ia, ib, pa, pb, meet, np, pose_a, pose_b)
       enddo
    enddo
+   if (present(pairs)) pairs = np
    endsubroutine body_distance_brute
 
-   subroutine leaf_pair(x, y, fa, fb, xa, xb, d2, ia, ib, pa, pb, meet, pose_a, pose_b)
-   !< Every facet pair of two leaves in order (row k of x, then column l of y), as `try_pair` would evaluate them, on the
-   !< facets posed once per call; a row is skipped when its facet box is farther than the pruning bound from the union of
-   !< y's facet boxes (every pair of the row would be pruned, see the module notes).
+   subroutine leaf_pair(x, y, fa, fb, xa, xb, d2, ia, ib, pa, pb, meet, np, pose_a, pose_b)
+   !< Every facet pair of two leaves (row k of x, then column l of y), as `try_pair` would evaluate them, on the facets
+   !< posed once per call; a row is skipped when its facet box is farther than the pruning bound from the union of y's
+   !< facet boxes (every pair of the row would be pruned, see the module notes). The pair of least box gap (the first in
+   !< loop order on ties) is evaluated first (issue #92 WP5 d): the result does not depend on the order (see the module
+   !< notes), the pruning bound only gets tighter sooner.
    type(aabb_node_object), intent(in)    :: x, y           !< Leaves of the trees of fa and fb.
    type(facet_object),     intent(in)    :: fa(:), fb(:)   !< Facets.
    type(posed_facets_t),   intent(inout) :: xa, xb         !< Posed facets of fa and fb.
@@ -669,20 +688,30 @@ contains
    integer(I4P),           intent(inout) :: ia, ib         !< Best pair.
    real(R8P),              intent(inout) :: pa(3), pb(3)   !< Its witness points.
    logical,                intent(inout) :: meet           !< Its contact.
+   integer(I4P),           intent(inout) :: np             !< Facet pairs evaluated.
    type(rigid_pose_t),     intent(in), optional :: pose_a, pose_b !< Poses.
-   type(list_id_object)                  :: la, lb         !< Facet lists of the leaves.
+   integer(I4P), allocatable             :: ida(:), idb(:) !< Facet ids of the leaves, in list order.
+   integer(I4P)                          :: nla, nlb       !< Their numbers.
    real(R8P)                             :: ub(6)          !< Union box of y's facets.
+   real(R8P)                             :: g, gs          !< Box gap, least box gap.
    logical                               :: finite_union   !< Every facet of y in range is finite.
-   integer(I4P)                          :: k, l, i, j
+   integer(I4P)                          :: k, l, i, j, ks, ls
 
    if (.not. x%has_facets() .or. .not. y%has_facets()) return
-   la = x%facet_id() ; lb = y%facet_id()
-   do k = 1, la%ids_number
-      call pose_facet(xa, fa, la%id(k), pose_a)
+   nla = x%facet_id_count() ; nlb = y%facet_id_count()
+   allocate(ida(nla), idb(nlb)) ! heap: an octree leaf can hold many facets
+   do k = 1, nla
+      ida(k) = x%facet_id_at(k)
+   enddo
+   do l = 1, nlb
+      idb(l) = y%facet_id_at(l)
+   enddo
+   do k = 1, nla
+      call pose_facet(xa, fa, ida(k), pose_a)
    enddo
    ub(1:3) = huge(1._R8P) ; ub(4:6) = -huge(1._R8P) ; finite_union = .true.
-   do l = 1, lb%ids_number
-      j = lb%id(l)
+   do l = 1, nlb
+      j = idb(l)
       if (j < 1 .or. j > size(fb)) cycle
       call pose_facet(xb, fb, j, pose_b)
       if (xb%state(j) == POSED_NONFINITE) then
@@ -691,30 +720,67 @@ contains
          ub(1:3) = min(ub(1:3), xb%box(1:3, j)) ; ub(4:6) = max(ub(4:6), xb%box(4:6, j))
       endif
    enddo
-   do k = 1, la%ids_number
-      i = la%id(k)
-      if (i < 1 .or. i > size(fa)) cycle ! try_pair returns at once for every pair of the row
-      if (finite_union .and. xa%state(i) /= POSED_NONFINITE) then
-         if (box_gap2(xa%box(:, i), ub) > d2 * (1._R8P + PRUNE_REL)) cycle ! every pair of the row is pruned
-      endif
-      do l = 1, lb%ids_number
-         call try_pair_posed(xa, xb, i, lb%id(l), d2, ia, ib, pa, pb, meet)
+   ks = 0_I4P ; ls = 0_I4P
+   if (d2 > 0._R8P) then ! the seed: least box gap over the rows not skipped (with d2 = 0 no pair can do better)
+      gs = huge(1._R8P)
+      do k = 1, nla
+         i = ida(k)
+         if (row_skipped(xa, i, size(fa, kind=I4P), ub, finite_union, d2)) cycle
+         do l = 1, nlb
+            j = idb(l)
+            if (j < 1 .or. j > size(fb)) cycle
+            g = box_gap2(xa%box(:, i), xb%box(:, j))
+            if (g < gs) then
+               gs = g ; ks = k ; ls = l
+            endif
+         enddo
+      enddo
+      if (ks > 0_I4P) call try_pair_posed(xa, xb, ida(ks), idb(ls), d2, ia, ib, pa, pb, meet, np)
+   endif
+   do k = 1, nla
+      i = ida(k)
+      if (row_skipped(xa, i, size(fa, kind=I4P), ub, finite_union, d2)) cycle
+      do l = 1, nlb
+         if (k == ks .and. l == ls) cycle ! evaluated first
+         call try_pair_posed(xa, xb, i, idb(l), d2, ia, ib, pa, pb, meet, np)
       enddo
    enddo
    endsubroutine leaf_pair
 
-   subroutine try_pair_posed(xa, xb, i, j, d2, ia, ib, pa, pb, meet)
+   function row_skipped(xa, i, n, ub, finite_union, d2) result(skip)
+   !< Row i of a leaf pair is out of range (`try_pair` returns at once for each of its pairs) or every pair of it is
+   !< pruned: its facet box is farther than the pruning bound from the union box of the other leaf's facets.
+   type(posed_facets_t), intent(in) :: xa           !< Posed facets of the rows (i posed when in range).
+   integer(I4P),         intent(in) :: i            !< Row facet.
+   integer(I4P),         intent(in) :: n            !< Facets of the rows' body.
+   real(R8P),            intent(in) :: ub(6)        !< Union box of the columns' facets.
+   logical,              intent(in) :: finite_union !< Every column facet in range is finite.
+   real(R8P),            intent(in) :: d2           !< Best squared distance.
+   logical                          :: skip         !< Skip the row.
+
+   skip = i < 1 .or. i > n
+   if (skip) return
+   if (finite_union .and. xa%state(i) /= POSED_NONFINITE) skip = box_gap2(xa%box(:, i), ub) > d2 * (1._R8P + PRUNE_REL)
+   endfunction row_skipped
+
+   subroutine try_pair_posed(xa, xb, i, j, d2, ia, ib, pa, pb, meet, np)
    !< `try_pair` on facets posed once per call (same pruning test, same pair function, same tie rule); the exact
-   !< classification is skipped for strictly disjoint boxes of two finite, non-degenerate triangles.
+   !< classification is skipped for strictly disjoint boxes of two finite, non-degenerate triangles. Once the best is 0
+   !< (contact) a pair after it in (i, j) order is not evaluated: its squared distance is >= 0, and the tie rule keeps
+   !< the smaller pair.
    type(posed_facets_t), intent(inout) :: xa, xb         !< Posed facets (i and j already posed when in range).
    integer(I4P),         intent(in)    :: i, j           !< Pair.
    real(R8P),            intent(inout) :: d2             !< Best squared distance.
    integer(I4P),         intent(inout) :: ia, ib         !< Best pair.
    real(R8P),            intent(inout) :: pa(3), pb(3)   !< Its witness points.
    logical,              intent(inout) :: meet           !< Its contact.
+   integer(I4P),         intent(inout) :: np             !< Facet pairs evaluated.
    real(R8P)                           :: dd, qa(3), qb(3)
    logical                             :: mt, apart
 
+   if (d2 == 0._R8P) then
+      if (i > ia .or. (i == ia .and. j >= ib)) return
+   endif
    if (i < 1 .or. i > size(xa%state) .or. j < 1 .or. j > size(xb%state)) return
    if (box_gap2(xa%box(:, i), xb%box(:, j)) > d2 * (1._R8P + PRUNE_REL)) return
    apart = xb%box(1, j) > xa%box(4, i) .or. xa%box(1, i) > xb%box(4, j) .or. &
@@ -722,6 +788,7 @@ contains
            xb%box(3, j) > xa%box(6, i) .or. xa%box(3, i) > xb%box(6, j)
    if (apart) apart = facet_regular(xa, i)
    if (apart) apart = facet_regular(xb, j)
+   np = np + 1_I4P
    call tri_tri_distance_core(xa%v(:, :, i), xb%v(:, :, j), apart, dd, qa, qb, mt)
    if (dd < d2 .or. (dd == d2 .and. (i < ia .or. (i == ia .and. j < ib)))) then
       d2 = dd ; ia = i ; ib = j ; pa = qa ; pb = qb ; meet = mt
@@ -794,7 +861,7 @@ contains
         max(0._R8P, q(3) - p(6), p(3) - q(6))**2
    endfunction box_gap2
 
-   subroutine try_pair(fa, fb, i, j, d2, ia, ib, pa, pb, meet, pose_a, pose_b)
+   subroutine try_pair(fa, fb, i, j, d2, ia, ib, pa, pb, meet, np, pose_a, pose_b)
    !< Evaluate facets i of fa and j of fb; keep them if closer, or as close with a smaller (i, j).
    type(facet_object), intent(in)    :: fa(:), fb(:)
    integer(I4P),       intent(in)    :: i, j
@@ -802,6 +869,7 @@ contains
    integer(I4P),       intent(inout) :: ia, ib
    real(R8P),          intent(inout) :: pa(3), pb(3)
    logical,            intent(inout) :: meet
+   integer(I4P),       intent(inout) :: np !< Facet pairs evaluated by the pair function.
    type(rigid_pose_t), intent(in), optional :: pose_a, pose_b
    real(R8P)                         :: a(3, 3), b(3, 3), dd, qa(3), qb(3)
    type(vector_R8P)                  :: l1, h1, l2, h2
@@ -820,6 +888,7 @@ contains
    l2 = vector_R8P(minval(b(1, :)), minval(b(2, :)), minval(b(3, :))) ; h2 = vector_R8P(maxval(b(1, :)), maxval(b(2, :)), &
                                                                                         maxval(b(3, :)))
    if (box_distance2(l1, h1, l2, h2) > d2 * (1._R8P + PRUNE_REL)) return
+   np = np + 1_I4P
    call tri_tri_distance(a, b, dd, qa, qb, mt)
    if (dd < d2 .or. (dd == d2 .and. (i < ia .or. (i == ia .and. j < ib)))) then
       d2 = dd ; ia = i ; ib = j ; pa = qa ; pb = qb ; meet = mt

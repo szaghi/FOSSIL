@@ -6754,11 +6754,12 @@ contains
    endsubroutine load_from_file
 
    subroutine distance_to(self, other, distance, point_self, point_other, facet_self, facet_other, intersecting, status, &
-                          pose_self, pose_other)
+                          pose_self, pose_other, pairs)
    !< Distance between this surface and `other` (issue #67): the minimum over their facet pairs, by a best-first descent
    !< of the two trees (`fossil_body_distance`), bit-identical to the brute-force minimum, with the closest facets
    !< (ties: the lexicographically smallest pair) and the witness points. 0 with `intersecting` when they touch or
    !< cross (exact classification). Both surfaces as they are (placed by `move` or a transform, trees current).
+   !< `pairs`: the facet pairs evaluated by the triangle-triangle distance (the cost of the call).
    class(surface_stl_object), intent(in)            :: self         !< Surface.
    class(surface_stl_object), intent(in)            :: other        !< Other body.
    real(R8P),                 intent(out)           :: distance     !< Distance.
@@ -6768,18 +6769,20 @@ contains
    integer(I4P),              intent(out), optional :: status       !< STATUS_OK, STATUS_INVALID_INPUT (empty surface).
    type(rigid_pose_t),        intent(in),  optional :: pose_self, pose_other !< Poses (step 2): the bodies where `move`
                                                                     !< would put them, trees not refitted; same bits.
+   integer(I4P),              intent(out), optional :: pairs        !< Facet pairs evaluated.
    real(R8P)                                        :: d2, pa(3), pb(3)
    integer(I4P)                                     :: ia, ib
    logical                                          :: meet
 
    if (present(status)) status = STATUS_OK
+   if (present(pairs)) pairs = 0_I4P
    distance = huge(1._R8P)
    if (self%facets_number == 0 .or. other%facets_number == 0) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
    call body_distance(self%facet(1:self%facets_number), self%aabb, other%facet(1:other%facets_number), other%aabb, &
-                      d2, ia, ib, pa, pb, meet, pose_a=pose_self, pose_b=pose_other)
+                      d2, ia, ib, pa, pb, meet, pose_a=pose_self, pose_b=pose_other, pairs=pairs)
    distance = sqrt(d2)
    if (present(point_self)) point_self = pa
    if (present(point_other)) point_other = pb
