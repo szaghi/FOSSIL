@@ -27,7 +27,7 @@ use fossil_marching_cubes, only : extract_isosurface, MC_STATUS_OK, MC_STATUS_BA
 use fossil_surface_stl_object
 use fossil_distance_field, only : distance_field_object, FAR_VALUE
 use fossil_curve_slice, only : slice_surface
-use fossil_cut_cells_3d, only : cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device
+use fossil_cut_cells_3d, only : cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_walls_3d_t
 use fossil_cut_coarsen, only : cut_coarsen_3d, cut_coarsen_2d
 use fossil_cut_moments, only : MOMENTS_MAX, mono_count, mono_exponents
 use fossil_cut_graph, only : cut_links_t, cut_links_2d, srd_t, srd_neighbourhoods, SRD_REGULAR, SRD_COMPLETE, SRD_INCOMPLETE, &
@@ -50,6 +50,7 @@ use fossil_overset, only : wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2
                            cell_centre_block, cell_centre_block_2d
 use fossil_overset_patch, only : overset_patch_2d_t, overset_patch_2d, OVERSET_PATCH_OK, OVERSET_PATCH_BAD_INPUT, &
                                  OVERSET_PATCH_NO_BOUNDARY, OVERSET_PATCH_OPEN, OVERSET_PATCH_OVERLAP, OVERSET_PATCH_NESTING, &
+                                 OVERSET_PATCH_UNTRUSTED, overset_patch_3d_t, overset_patch_3d, overlap_weights_3d, &
                                  overlap_weights_t, overlap_weights_2d, OVERLAP_WEIGHTS_OK, OVERLAP_WEIGHTS_BAD_INPUT, &
                                  OVERLAP_WEIGHTS_DEGENERATE, OVERLAP_WEIGHTS_OUTSIDE, OVERLAP_WEIGHTS_OPEN
 use fossil_ccd, only : motion_bound_3d, motion_bound_2d, ccd_evaluator_t, ccd_advance, CCD_CONTACT, CCD_SEPARATE, &
@@ -84,7 +85,7 @@ public :: facet_object
 public :: surface_stl_object, proximity_pairs_of, first_impact
 public :: distance_field_object, FAR_VALUE
 public :: slice_surface
-public :: cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device
+public :: cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_walls_3d_t
 public :: cut_coarsen_3d, cut_coarsen_2d, MOMENTS_MAX, mono_count, mono_exponents
 public :: cut_links_t, cut_links_2d, srd_t, srd_neighbourhoods, SRD_REGULAR, SRD_COMPLETE, SRD_INCOMPLETE, SRD_NO_VOLUME
 public :: frd_t, frd_neighbourhoods, merge_t, merge_targets, MERGE_NONE, MERGE_OK, MERGE_CHAIN, MERGE_CYCLE, MERGE_ALONE
@@ -103,7 +104,8 @@ public :: ORPHAN_RECEPTOR_DONOR, ORPHAN_BOUNDARY, ORPHAN_WALL, FRINGE_INNER_1, F
 public :: wall_projection, wall_projection_2d, exposed_points, connectivity_t, build_connectivity, save_connectivity
 public :: cell_centre_block, cell_centre_block_2d
 public :: overset_patch_2d_t, overset_patch_2d, OVERSET_PATCH_OK, OVERSET_PATCH_BAD_INPUT, OVERSET_PATCH_NO_BOUNDARY
-public :: OVERSET_PATCH_OPEN, OVERSET_PATCH_OVERLAP, OVERSET_PATCH_NESTING
+public :: OVERSET_PATCH_OPEN, OVERSET_PATCH_OVERLAP, OVERSET_PATCH_NESTING, OVERSET_PATCH_UNTRUSTED
+public :: overset_patch_3d_t, overset_patch_3d, overlap_weights_3d
 public :: overlap_weights_t, overlap_weights_2d, OVERLAP_WEIGHTS_OK, OVERLAP_WEIGHTS_BAD_INPUT, OVERLAP_WEIGHTS_DEGENERATE
 public :: OVERLAP_WEIGHTS_OUTSIDE, OVERLAP_WEIGHTS_OPEN
 public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose

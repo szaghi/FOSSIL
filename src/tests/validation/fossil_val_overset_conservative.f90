@@ -23,15 +23,41 @@ program fossil_val_overset_conservative
 !<    not fluxes: its composite mass (as I's) drifts too.
 !< The inner minor boundary is a wall (no flux). Exit status 0 if A conserves to 1e-12 relative and stays in [0, 1]
 !< (upwind within its CFL limit), and the defects of I and B exceed 1e-6.
+!<
+!< 3-D (issue #106 step 3): a sphere shell (r in [1, 2], poles collapsed) in a Cartesian [-3, 3]^3, the scalar advected
+!< by the potential flow past the unit sphere (inner face a wall), time step from the outflows at CFL 0.9:
+!< A. `overset_patch_3d`: first the geometry (closure per piece to 1e-12 h^2, face_covered = face_vector to 1e-13, the
+!<    pieces' volume = box - polyhedron to 1e-13, sum sf_area = - piece_wet_normal), then the scalar as in 2-D (links
+!<    of the cut, merge targets, smallest faces): mass to 1e-12;
+!< I. interpolation: holes at centre radius < 1.2, receptors below 1.6 (trilinear in the shell's index space of cell
+!<    centres), the shell's outer layer from the major cell centres (trilinear): its defect must exceed 1e-6.
+!< B. `overlap_weights_3d` with every shell cell a receptor: weights sum to 1 (2 eps), a constant field exact, a linear
+!<    one with Picard's gradient term at the receptor polyhedron's centroid (1e-13), and per donor cell the sum of its
+!<    intersections over the receptors = |V_c' n polyhedral shell| from `overset_patch_3d` of the shell's inner and outer
+!<    faces (1e-13 h^3): the receptors' splits agree with each other and with the boundary's.
 use fossil, only : curvilinear_block_2d_t, topo_record_t, TOPO_BOUNDARY, overset_patch_2d_t, overset_patch_2d, &
                    OVERSET_PATCH_OK, cut_links_t, cut_links_2d, merge_t, merge_targets, MERGE_OK, MERGE_CHAIN, &
-                   cell_centre_block_2d, LOC_OUTSIDE, overlap_weights_t, overlap_weights_2d, OVERLAP_WEIGHTS_OK
+                   cell_centre_block_2d, LOC_OUTSIDE, overlap_weights_t, overlap_weights_2d, OVERLAP_WEIGHTS_OK, &
+                   curvilinear_block_t, overset_patch_3d_t, overset_patch_3d, overlap_weights_3d
+use penf,   only : I8P
 use penf,   only : I4P, R8P
 
 implicit none
 
 real(R8P), parameter :: PI = acos(-1._R8P) !< Pi.
 real(R8P), parameter :: ANG = 0.2_R8P      !< Free-stream angle.
+real(R8P), parameter :: U3(3) = [cos(0.2_R8P) * cos(0.15_R8P), sin(0.2_R8P) * cos(0.15_R8P), sin(0.15_R8P)] !< 3-D free stream.
+type :: minor_3d_t
+   !< The cells and interior faces of the 3-D minor shell (the scalar's finite volumes).
+   real(R8P),    allocatable :: vol(:,:,:)    !< Cell volumes.
+   real(R8P),    allocatable :: cen(:,:,:,:)  !< Cell centres (vertex means) [3, ...].
+   real(R8P),    allocatable :: val0(:,:,:)   !< Initial values.
+   integer(I4P)              :: nf = 0_I4P    !< Interior faces.
+   integer(I4P), allocatable :: fa(:,:), fb(:,:) !< Their cells (from, to) [3, nf].
+   real(R8P),    allocatable :: fvec(:,:)     !< Face vector from fa to fb [3, nf].
+   real(R8P),    allocatable :: fmid(:,:)     !< Vertex mean [3, nf].
+endtype minor_3d_t
+type(curvilinear_block_t)    :: blk3(1)    !< 3-D minor block.
 type(curvilinear_block_2d_t) :: blk(1)     !< Minor block.
 real(R8P), allocatable       :: x(:), pu(:), pv(:) !< Major grid, square.
 real(R8P)                    :: da, db, di, mx, mn  !< Defects, extremes.
@@ -70,6 +96,18 @@ call ring_block(pu, pv, 3_I4P, blk(1))
 call patched(blk, x, 0._R8P, 0.008_R8P, 400_I4P, da, mx, mn)
 print '(A,ES10.2,A,2ES10.2)', '  square ring on grid lines (uniform flow): mass defect A ', da, '; min, max ', mn, mx
 ok = ok .and. da <= 1e-12_R8P .and. mx <= 1._R8P + 1e-12_R8P .and. mn >= -1e-12_R8P
+! 3-D: a sphere shell (r in [1, 2], 32 x 16 x 8 cells) in [-3, 3]^3 of 40^3 cells, potential flow past the unit sphere
+call shell(32_I4P, 8_I4P, blk3(1))
+x = grid_1d(-3._R8P, 3._R8P, 40_I4P)
+call patched_3d(blk3, x, da, mx, mn)
+call chimera_3d(blk3(1), x, di)
+print '(A,ES10.2,A,ES10.2,A,2ES10.2)', '  sphere shell (40^3): mass defect A (patched) ', da, ', I (interpolated) ', di, &
+      '; A min, max ', mn, mx
+ok = ok .and. da <= 1e-12_R8P .and. di > 1e-6_R8P .and. mx <= 1._R8P + 1e-12_R8P .and. mn >= -1e-12_R8P
+! 3-D B: the whole shell (24 x 12 x 4 cells) as receptors over [-2.6, 2.6]^3 of 24^3 cells
+call shell(24_I4P, 4_I4P, blk3(1))
+x = grid_1d(-2.6_R8P, 2.6_R8P, 24_I4P)
+call weights_3d(blk3(1), x, ok)
 print '(A,L1)', 'Are all tests passed? ', ok
 if (.not. ok) error stop 1
 
@@ -769,4 +807,667 @@ contains
    enddo
    x(n + 1) = b
    endfunction grid_1d
+   ! ------------------------------------------------------------------------------------------------------------- 3-D
+   subroutine patched_3d(blk, x, defect, vmax, vmin)
+   !< 3-D A: the interface geometry (closure per piece, face sums, total volume, sum sf = - wet_normal), then the scalar
+   !< through Wang's patched interface; defect = max over the steps of |M + out - M0| / M0.
+   type(curvilinear_block_t), intent(in)  :: blk(:)     !< Minor block.
+   real(R8P),                 intent(in)  :: x(:)       !< Major grid edges (all directions).
+   real(R8P),                 intent(out) :: defect     !< Mass defect.
+   real(R8P),                 intent(out) :: vmax, vmin !< Extreme values reached.
+   type(overset_patch_3d_t)  :: pt                      !< Interface.
+   type(merge_t)             :: mt                      !< Merge targets.
+   type(minor_3d_t)          :: mg                      !< Minor geometry.
+   integer(I4P), allocatable :: g(:)                    !< Group (root piece) of each piece (0: none).
+   real(R8P),    allocatable :: vg(:), phi(:), r(:), mgr(:), outp(:) !< Group volumes, values, residuals, masses, outflow.
+   real(R8P),    allocatable :: pm(:,:,:), rm(:,:,:), outm(:,:,:) !< Minor values, residuals, outflow.
+   real(R8P)    :: h, out, m0, mtot, fl, sw(3), pf(6), cmax, wmax, fmax, tot, comp, dt, cfl, tm, ex !< Work.
+   integer(I4P) :: st, np, p, k, step, nx, t, nsm, ndg, nal, nbit, nrnd, nsteps, ni, nj, nk !< Work.
+   integer(I8P) :: c0, c1, cr                                  !< Clock.
+
+   call system_clock(c0, cr)
+   call overset_patch_3d(blk, [1_I4P], x, x, x, pt, status=st)
+   call system_clock(c1)
+   if (st /= OVERSET_PATCH_OK) error stop 'overset_patch_3d'
+   np = pt%cut%np ; nx = pt%cut%nx ; h = x(2) - x(1)
+   ! the geometry: closure per piece, sum of a piece's smallest faces against its wet normal, faces, total volume
+   cmax = 0._R8P ; wmax = 0._R8P ; nbit = 0 ; nrnd = 0 ; tot = 0._R8P ; comp = 0._R8P
+   do p = 1, np
+      sw = 0._R8P
+      do k = pt%piece_sf_start(p), pt%piece_sf_start(p + 1) - 1
+         sw = sw + pt%sf_area(:, k)
+      enddo
+      pf = pt%cut%piece_face(:, p)
+      cmax = max(cmax, norm2(h * h * [pf(2) - pf(1), pf(4) - pf(3), pf(6) - pf(5)] + sw) / h ** 2)
+      if (all(sw == -pt%cut%piece_wet_normal(:, p))) then
+         nbit = nbit + 1
+      else
+         nrnd = nrnd + 1 ; wmax = max(wmax, norm2(sw + pt%cut%piece_wet_normal(:, p)) / h ** 2)
+      endif
+      call kahan(tot, comp, pt%cut%piece_volume(p))
+   enddo
+   fmax = 0._R8P
+   do k = 1, pt%nf
+      if (norm2(pt%face_vector(:, k)) > 0._R8P) &
+         fmax = max(fmax, norm2(pt%face_covered(:, k) - pt%face_vector(:, k)) / norm2(pt%face_vector(:, k)))
+   enddo
+   ex = (x(nx + 1) - x(1)) ** 3 - pt%boundary%get_volume()
+   print '(A,I0,A,I0,A,I0,A,I0,A,I0,A,I0,A,F7.3,A)', '    A: ', nx, '^3, minor faces ', pt%nf, ': holes ', count(pt%hole), &
+         ', pieces ', np, ', smallest faces ', pt%ns, ', degenerate ', count(pt%degenerate), '; overset_patch_3d ', &
+         real(c1 - c0, R8P) / cr, ' s'
+   print '(A,ES9.2,A,ES9.2,A,ES9.2,A,I0,A,I0,A,ES9.2,A)', '       closure / h^2 ', cmax, '; covered vs face ', fmax, &
+         '; volume vs box - polyhedron ', abs(tot - ex) / ex, '; sum sf = -wet_normal: bit ', nbit, ', round-off ', nrnd, &
+         ' (max / h^2 ', wmax, ')'
+   if (cmax > 1e-12_R8P .or. fmax > 1e-13_R8P .or. abs(tot - ex) > 1e-13_R8P * ex .or. wmax > 1e-13_R8P .or. pt%nuc > 0) &
+      error stop 'patched_3d: geometry'
+   ! groups: degenerate pieces into merge_into (then its final target), small pieces into their final target
+   call merge_targets(pt%links, pt%cut%piece_cell, pt%cut%piece_volume, pt%cut%piece_wet_normal, x, x, mt, z=x)
+   allocate(g(np), vg(np), phi(np), r(np), mgr(np), outp(np)) ; nsm = 0 ; ndg = 0 ; nal = 0
+   do p = 1, np
+      g(p) = p
+      if (pt%degenerate(p)) then
+         t = pt%merge_into(p) ; g(p) = 0
+         if (t > 0) then
+            ndg = ndg + 1 ; g(p) = t
+            if ((mt%status(t) == MERGE_OK .or. mt%status(t) == MERGE_CHAIN) .and. mt%final_target(t) > 0) &
+               g(p) = mt%final_target(t)
+         endif
+      elseif (mt%status(p) == MERGE_OK .or. mt%status(p) == MERGE_CHAIN) then
+         if (mt%final_target(p) > 0) then
+            nsm = nsm + 1 ; g(p) = mt%final_target(p)
+         else
+            nal = nal + 1
+         endif
+      elseif (mt%status(p) /= 0) then
+         nal = nal + 1
+      endif
+   enddo
+   vg = 0._R8P ; mgr = 0._R8P ; phi = 0._R8P
+   do p = 1, np
+      if (g(p) == 0) cycle
+      vg(g(p)) = vg(g(p)) + pt%cut%piece_volume(p)
+      mgr(g(p)) = mgr(g(p)) + pt%cut%piece_volume(p) * blob3(pt%cut%piece_centroid(:, p))
+   enddo
+   do p = 1, np
+      if (g(p) > 0) phi(p) = mgr(g(p)) / vg(g(p))
+   enddo
+   call minor_geometry(blk(1), mg)
+   ni = size(mg%vol, 1, kind=I4P) ; nj = size(mg%vol, 2, kind=I4P) ; nk = size(mg%vol, 3, kind=I4P)
+   allocate(pm(ni, nj, nk), rm(ni, nj, nk), outm(ni, nj, nk))
+   pm = mg%val0
+   ! the time step: the outflow of every group and minor cell (steady velocity) under CFL 0.9
+   outp = 0._R8P ; outm = 0._R8P
+   call residuals_3d(pt, mg, x, g, phi, pm, r, rm, out, outp, outm, .true.)
+   mgr = 0._R8P
+   do p = 1, np
+      if (g(p) > 0) mgr(g(p)) = mgr(g(p)) + outp(p)
+   enddo
+   cfl = 0._R8P
+   do p = 1, np
+      if (g(p) == p .and. vg(p) > 0._R8P) cfl = max(cfl, mgr(p) / vg(p))
+   enddo
+   cfl = max(cfl, maxval(outm / mg%vol))
+   tm = 1.6_R8P ; dt = 0.9_R8P / cfl ; nsteps = ceiling(tm / dt) ; dt = tm / nsteps
+   m0 = mass_3d(g, phi, vg, pm, mg%vol) ; out = 0._R8P ; defect = 0._R8P ; vmax = 0._R8P ; vmin = 0._R8P
+   do step = 1, nsteps
+      call residuals_3d(pt, mg, x, g, phi, pm, r, rm, fl, outp, outm, .false.)
+      out = out + dt * fl
+      mgr = 0._R8P
+      do p = 1, np
+         if (g(p) > 0) mgr(g(p)) = mgr(g(p)) + r(p)
+      enddo
+      do p = 1, np
+         if (g(p) == p) mgr(p) = phi(p) * vg(p) - dt * mgr(p)
+      enddo
+      do p = 1, np
+         if (g(p) > 0) phi(p) = mgr(g(p)) / vg(g(p))
+      enddo
+      pm = pm - dt * rm / mg%vol
+      mtot = mass_3d(g, phi, vg, pm, mg%vol)
+      defect = max(defect, abs(mtot + out - m0) / m0)
+      vmax = max(vmax, maxval(phi), maxval(pm)) ; vmin = min(vmin, minval(phi), minval(pm))
+   enddo
+   print '(A,I0,A,I0,A,I0,A,I0,A,ES10.3,A,ES12.5,A,ES12.5)', '       small merged ', nsm, ', degenerate folded ', ndg, &
+         ' (alone ', nal, '), steps ', nsteps, ' of ', dt, '; mass ', mtot, ', left the box ', out
+   endsubroutine patched_3d
+
+   subroutine residuals_3d(pt, mg, x, g, phi, pm, r, rm, out, outp, outm, cflpass)
+   !< The upwind residuals of A in 3-D (r: major pieces, rm: minor cells) and the outflow rate through the box; with
+   !< cflpass the outflow of every piece and minor cell (outp, outm) instead (values unused).
+   type(overset_patch_3d_t), intent(in)    :: pt          !< Interface.
+   type(minor_3d_t),         intent(in)    :: mg          !< Minor geometry.
+   real(R8P),                intent(in)    :: x(:)        !< Major grid.
+   integer(I4P),             intent(in)    :: g(:)        !< Groups.
+   real(R8P),                intent(in)    :: phi(:), pm(:,:,:) !< Values.
+   real(R8P),                intent(out)   :: r(:), rm(:,:,:) !< Residuals.
+   real(R8P),                intent(out)   :: out         !< Outflow rate through the box.
+   real(R8P),                intent(inout) :: outp(:), outm(:,:,:) !< Outflows (cflpass).
+   logical,                  intent(in)    :: cflpass     !< Outflows only.
+   real(R8P)    :: f, fl, mid(3), nrm(3), area !< Work.
+   integer(I4P) :: np, nx, p, q, k, t, c(3), m(3) !< Work.
+
+   np = pt%cut%np ; nx = pt%cut%nx ; r = 0._R8P ; rm = 0._R8P ; out = 0._R8P
+   ! major: across the cell faces (each linked pair once), the shared fluid area
+   do p = 1, np
+      do k = pt%links%start(p), pt%links%start(p + 1) - 1
+         q = pt%links%piece(k)
+         if (q <= p) cycle
+         call face_3d(pt%cut%piece_cell(:, p), pt%links%face(k), x, mid, nrm, area)
+         f = dot_product(vel3(mid), nrm) * pt%links%area(k)
+         if (cflpass) then
+            outp(p) = outp(p) + max(f, 0._R8P) ; outp(q) = outp(q) + max(-f, 0._R8P) ; cycle
+         endif
+         fl = f * merge(phi(p), phi(q), f > 0._R8P)
+         r(p) = r(p) + fl ; r(q) = r(q) - fl
+      enddo
+   enddo
+   ! major: the box boundary (inflow 0, outflow upwind)
+   do p = 1, np
+      c = pt%cut%piece_cell(:, p)
+      do t = 1, 6
+         if (.not. (c((t + 1) / 2) == merge(1_I4P, nx, mod(t, 2_I4P) == 1))) cycle
+         call face_3d(c, t, x, mid, nrm, area)
+         f = dot_product(vel3(mid), nrm) * pt%cut%piece_face(t, p) * area
+         if (f <= 0._R8P) cycle
+         if (cflpass) then
+            outp(p) = outp(p) + f ; cycle
+         endif
+         r(p) = r(p) + f * phi(p) ; out = out + f * phi(p)
+      enddo
+   enddo
+   ! the smallest faces: major piece <-> minor cell (sf_area points into the minor cell)
+   do k = 1, pt%ns
+      p = pt%sf_piece(k) ; m = pt%sf_minor(2:4, k)
+      f = dot_product(vel3(pt%sf_centroid(:, k)), pt%sf_area(:, k))
+      if (g(p) == 0 .and. f /= 0._R8P) error stop 'residuals_3d: a flux through a piece without a group'
+      if (cflpass) then
+         outp(p) = outp(p) + max(f, 0._R8P) ; outm(m(1), m(2), m(3)) = outm(m(1), m(2), m(3)) + max(-f, 0._R8P) ; cycle
+      endif
+      fl = f * merge(phi(p), pm(m(1), m(2), m(3)), f > 0._R8P)
+      r(p) = r(p) + fl ; rm(m(1), m(2), m(3)) = rm(m(1), m(2), m(3)) - fl
+   enddo
+   ! minor: its interior faces (periodic in i, the poles closed, the inner face a wall, the outer the smallest faces)
+   do k = 1, mg%nf
+      f = dot_product(vel3(mg%fmid(:, k)), mg%fvec(:, k))
+      c = mg%fa(:, k) ; m = mg%fb(:, k)
+      if (cflpass) then
+         outm(c(1), c(2), c(3)) = outm(c(1), c(2), c(3)) + max(f, 0._R8P)
+         outm(m(1), m(2), m(3)) = outm(m(1), m(2), m(3)) + max(-f, 0._R8P) ; cycle
+      endif
+      fl = f * merge(pm(c(1), c(2), c(3)), pm(m(1), m(2), m(3)), f > 0._R8P)
+      rm(c(1), c(2), c(3)) = rm(c(1), c(2), c(3)) + fl ; rm(m(1), m(2), m(3)) = rm(m(1), m(2), m(3)) - fl
+   enddo
+   endsubroutine residuals_3d
+
+   subroutine minor_geometry(blk, mg)
+   !< The minor shell's cells (volume from the face vectors, vertex-mean centre, the initial values) and its interior faces
+   !< (a -> b, the face vector 1/2 (c3 - c1) x (c4 - c2) from a to b, the vertex mean): i periodic, j between rows (the
+   !< pole faces are collapsed), k between layers (the inner face is a wall, the outer the smallest faces).
+   type(curvilinear_block_t), intent(in)    :: blk !< Shell block.
+   type(minor_3d_t),          intent(inout) :: mg  !< Geometry.
+   integer(I4P) :: ni, nj, nk, i, j, k, d, n, a(3), b(3), f, l !< Work.
+   real(R8P)    :: c(3, 4), s(3), cm(3), v                     !< Work.
+
+   ni = blk%ni - 1 ; nj = blk%nj - 1 ; nk = blk%nk - 1
+   allocate(mg%vol(ni, nj, nk), mg%cen(3, ni, nj, nk), mg%val0(ni, nj, nk))
+   do k = 1, nk
+      do j = 1, nj
+         do i = 1, ni
+            v = 0._R8P
+            do f = 1, 6
+               call cell_face(blk, [i, j, k], f, c)
+               s = 0.5_R8P * cross3(c(:, 3) - c(:, 1), c(:, 4) - c(:, 2)) ! along +e of the face's axis
+               v = v + merge(-1._R8P, 1._R8P, mod(f, 2_I4P) == 1) * dot_product(0.25_R8P * sum(c, dim=2), s) / 3._R8P
+            enddo
+            mg%vol(i, j, k) = abs(v)
+            cm = 0._R8P
+            do l = 0, 7
+               cm = cm + vtx(blk, [i + mod(l, 2_I4P), j + mod(l / 2_I4P, 2_I4P), k + l / 4_I4P])
+            enddo
+            mg%cen(:, i, j, k) = cm / 8._R8P ; mg%val0(i, j, k) = blob3(mg%cen(:, i, j, k))
+         enddo
+      enddo
+   enddo
+   mg%nf = ni * nj * nk + ni * (nj - 1) * nk + ni * nj * (nk - 1)
+   allocate(mg%fa(3, mg%nf), mg%fb(3, mg%nf), mg%fvec(3, mg%nf), mg%fmid(3, mg%nf)) ; n = 0
+   do k = 1, nk
+      do j = 1, nj
+         do i = 1, ni
+            do d = 1, 3
+               a = [i, j, k] ; b = a ; b(d) = b(d) + 1
+               if (d == 1) b(1) = mod(i, ni) + 1
+               if (d == 2 .and. j == nj) cycle
+               if (d == 3 .and. k == nk) cycle
+               call cell_face(blk, a, 2_I4P * d, c)
+               n = n + 1 ; mg%fa(:, n) = a ; mg%fb(:, n) = b ; mg%fmid(:, n) = 0.25_R8P * sum(c, dim=2)
+               mg%fvec(:, n) = 0.5_R8P * cross3(c(:, 3) - c(:, 1), c(:, 4) - c(:, 2))
+               if (dot_product(mg%fvec(:, n), mg%cen(:, b(1), b(2), b(3)) - mg%cen(:, i, j, k)) < 0._R8P) &
+                  mg%fvec(:, n) = -mg%fvec(:, n)
+            enddo
+         enddo
+      enddo
+   enddo
+   mg%nf = n
+   endsubroutine minor_geometry
+
+   subroutine cell_face(blk, c, f, q)
+   !< The corners of face f (1-6: -i, +i, -j, +j, -k, +k) of cell c, cyclic.
+   type(curvilinear_block_t), intent(in)  :: blk     !< Block.
+   integer(I4P),              intent(in)  :: c(3), f !< Cell, face.
+   real(R8P),                 intent(out) :: q(3, 4) !< Corners.
+   integer(I4P) :: nd, d1, d2, p(3), e1(3), e2(3)    !< Work.
+
+   nd = (f + 1) / 2 ; d1 = mod(nd, 3_I4P) + 1 ; d2 = mod(nd + 1_I4P, 3_I4P) + 1
+   p = c ; if (mod(f, 2_I4P) == 0) p(nd) = p(nd) + 1
+   e1 = 0 ; e1(d1) = 1 ; e2 = 0 ; e2(d2) = 1
+   q(:, 1) = vtx(blk, p) ; q(:, 2) = vtx(blk, p + e1) ; q(:, 3) = vtx(blk, p + e1 + e2) ; q(:, 4) = vtx(blk, p + e2)
+   endsubroutine cell_face
+
+   pure function vtx(blk, p) result(v)
+   !< Vertex p of a block.
+   type(curvilinear_block_t), intent(in) :: blk  !< Block.
+   integer(I4P),              intent(in) :: p(3) !< Vertex.
+   real(R8P)                             :: v(3) !< Coordinates.
+
+   v = [blk%x(p(1), p(2), p(3)), blk%y(p(1), p(2), p(3)), blk%z(p(1), p(2), p(3))]
+   endfunction vtx
+
+   subroutine chimera_3d(blk, x, defect)
+   !< 3-D I: the shell coupled by interpolation (module notes); defect as in A on the composite mass (the major cells with
+   !< centre at r >= 2, all minor cells), same time step rule.
+   type(curvilinear_block_t), intent(in)  :: blk    !< Minor block.
+   real(R8P),                 intent(in)  :: x(:)   !< Major grid.
+   real(R8P),                 intent(out) :: defect !< Mass defect.
+   type(minor_3d_t)          :: mg                  !< Minor geometry.
+   integer(I4P), allocatable :: kd(:,:,:)           !< Major kinds: 0 hole, 1 receptor, 2 field.
+   real(R8P),    allocatable :: phi(:,:,:), r(:,:,:), pm(:,:,:), rm(:,:,:) !< Values, residuals.
+   real(R8P)    :: h, out, m0, mtot, f, fl, c(3), dt, cfl, tm, s(3), w(3) !< Work.
+   integer(I4P) :: nx, ni, nj, nk, i, j, k, t, step, nsteps, nr, nbad, b(3), a(3), l, i0(3) !< Work.
+   real(R8P),    allocatable :: outc(:,:,:), outm(:,:,:) !< Outflows.
+
+   nx = size(x, kind=I4P) - 1 ; h = x(2) - x(1)
+   allocate(kd(nx, nx, nx), phi(nx, nx, nx), r(nx, nx, nx), outc(nx, nx, nx)) ; nr = 0
+   do k = 1, nx
+      do j = 1, nx
+         do i = 1, nx
+            c = 0.5_R8P * [x(i) + x(i + 1), x(j) + x(j + 1), x(k) + x(k + 1)]
+            kd(i, j, k) = 2 ; if (norm2(c) < 1.6_R8P) kd(i, j, k) = 1 ; if (norm2(c) < 1.2_R8P) kd(i, j, k) = 0
+            if (kd(i, j, k) == 1) nr = nr + 1
+            phi(i, j, k) = blob3(c)
+         enddo
+      enddo
+   enddo
+   nbad = 0 ! a field cell next to a hole: the fringe is too thin
+   do k = 1, nx
+      do j = 1, nx
+         do i = 1, nx
+            if (kd(i, j, k) /= 2) cycle
+            do t = 1, 6
+               b = [i, j, k] ; b((t + 1) / 2) = b((t + 1) / 2) + merge(-1, 1, mod(t, 2_I4P) == 1)
+               if (any(b < 1) .or. any(b > nx)) cycle
+               if (kd(b(1), b(2), b(3)) == 0) nbad = nbad + 1
+            enddo
+         enddo
+      enddo
+   enddo
+   if (nbad > 0) error stop 'chimera_3d: fringe too thin'
+   call minor_geometry(blk, mg)
+   ni = size(mg%vol, 1, kind=I4P) ; nj = size(mg%vol, 2, kind=I4P) ; nk = size(mg%vol, 3, kind=I4P)
+   allocate(pm(ni, nj, nk), rm(ni, nj, nk), outm(ni, nj, nk)) ; pm = mg%val0
+   do j = 1, nj ! the minor outer layer takes field cells only
+      do i = 1, ni
+         s = (mg%cen(:, i, j, nk) - (x(1) + 0.5_R8P * h)) / h ; i0 = int(s) + 1
+         if (any(kd(i0(1):i0(1) + 1, i0(2):i0(2) + 1, i0(3):i0(3) + 1) /= 2)) &
+            error stop 'chimera_3d: a minor receptor with a major non-field donor'
+      enddo
+   enddo
+   ! the time step from the outflows (field cells and minor field cells)
+   outc = 0._R8P ; outm = 0._R8P
+   call chimera_residuals(mg, x, kd, phi, pm, r, rm, out, outc, outm, .true.)
+   cfl = max(maxval(outc / h ** 3, mask=kd == 2), maxval(outm(:, :, 1:nk - 1) / mg%vol(:, :, 1:nk - 1)))
+   tm = 1.6_R8P ; dt = 0.9_R8P / cfl ; nsteps = ceiling(tm / dt) ; dt = tm / nsteps
+   m0 = mass_3d_b(x, phi, pm, mg%vol) ; out = 0._R8P ; defect = 0._R8P
+   do step = 1, nsteps
+      ! interpolation: major receptors from the minor cell centres (trilinear in the shell's index space), the minor
+      ! outer layer from the major cell centres (trilinear)
+      do k = 1, nx
+         do j = 1, nx
+            do i = 1, nx
+               if (kd(i, j, k) /= 1) cycle
+               phi(i, j, k) = shell_interp(pm, 0.5_R8P * [x(i) + x(i + 1), x(j) + x(j + 1), x(k) + x(k + 1)])
+            enddo
+         enddo
+      enddo
+      do j = 1, nj
+         do i = 1, ni
+            s = (mg%cen(:, i, j, nk) - (x(1) + 0.5_R8P * h)) / h ; i0 = int(s) + 1 ; w = s - (i0 - 1)
+            f = 0._R8P
+            do l = 0, 7
+               a = [mod(l, 2_I4P), mod(l / 2_I4P, 2_I4P), l / 4_I4P]
+               f = f + product(merge(w, 1._R8P - w, a == 1)) * phi(i0(1) + a(1), i0(2) + a(2), i0(3) + a(3))
+            enddo
+            pm(i, j, nk) = f
+         enddo
+      enddo
+      call chimera_residuals(mg, x, kd, phi, pm, r, rm, fl, outc, outm, .false.)
+      out = out + dt * fl
+      where (kd == 2) phi = phi - dt * r / h ** 3
+      pm(:, :, 1:nk - 1) = pm(:, :, 1:nk - 1) - dt * rm(:, :, 1:nk - 1) / mg%vol(:, :, 1:nk - 1)
+      mtot = mass_3d_b(x, phi, pm, mg%vol)
+      defect = max(defect, abs(mtot + out - m0) / m0)
+   enddo
+   print '(A,I0,A,I0,A,ES10.3,A,ES12.5,A,ES12.5)', '    I: major receptors ', nr, ', steps ', nsteps, ' of ', dt, &
+         '; mass ', mtot, ', left the box ', out
+   endsubroutine chimera_3d
+
+   subroutine chimera_residuals(mg, x, kd, phi, pm, r, rm, out, outc, outm, cflpass)
+   !< The upwind residuals of I in 3-D: major faces with a field cell on one side at least, the box, the minor faces of
+   !< its field cells (layers below the outer one); with cflpass the outflows instead.
+   type(minor_3d_t), intent(in)    :: mg          !< Minor geometry.
+   real(R8P),        intent(in)    :: x(:)        !< Major grid.
+   integer(I4P),     intent(in)    :: kd(:,:,:)   !< Major kinds.
+   real(R8P),        intent(in)    :: phi(:,:,:), pm(:,:,:) !< Values.
+   real(R8P),        intent(out)   :: r(:,:,:), rm(:,:,:) !< Residuals.
+   real(R8P),        intent(out)   :: out         !< Outflow rate through the box.
+   real(R8P),        intent(inout) :: outc(:,:,:), outm(:,:,:) !< Outflows (cflpass).
+   logical,          intent(in)    :: cflpass     !< Outflows only.
+   real(R8P)    :: f, fl, mid(3), nrm(3), area    !< Work.
+   integer(I4P) :: nx, nk, i, j, k, t, b(3), c(3), m(3) !< Work.
+
+   nx = size(kd, 1, kind=I4P) ; nk = size(pm, 3, kind=I4P) ; r = 0._R8P ; rm = 0._R8P ; out = 0._R8P
+   do k = 1, nx
+      do j = 1, nx
+         do i = 1, nx
+            do t = 1, 6
+               b = [i, j, k] ; b((t + 1) / 2) = b((t + 1) / 2) + merge(-1, 1, mod(t, 2_I4P) == 1)
+               call face_3d([i, j, k], t, x, mid, nrm, area)
+               f = dot_product(vel3(mid), nrm) * area
+               if (any(b < 1) .or. any(b > nx)) then ! the box
+                  if (f <= 0._R8P .or. kd(i, j, k) /= 2) cycle
+                  if (cflpass) then
+                     outc(i, j, k) = outc(i, j, k) + f ; cycle
+                  endif
+                  r(i, j, k) = r(i, j, k) + f * phi(i, j, k) ; out = out + f * phi(i, j, k) ; cycle
+               endif
+               if (mod(t, 2_I4P) == 1) cycle ! each interior face once, from its low cell
+               if (kd(i, j, k) /= 2 .and. kd(b(1), b(2), b(3)) /= 2) cycle
+               if (cflpass) then
+                  outc(i, j, k) = outc(i, j, k) + max(f, 0._R8P)
+                  outc(b(1), b(2), b(3)) = outc(b(1), b(2), b(3)) + max(-f, 0._R8P) ; cycle
+               endif
+               fl = f * merge(phi(i, j, k), phi(b(1), b(2), b(3)), f > 0._R8P)
+               r(i, j, k) = r(i, j, k) + fl ; r(b(1), b(2), b(3)) = r(b(1), b(2), b(3)) - fl
+            enddo
+         enddo
+      enddo
+   enddo
+   do k = 1, mg%nf
+      c = mg%fa(:, k) ; m = mg%fb(:, k)
+      if (c(3) == nk .and. m(3) == nk) cycle ! faces between two receptors
+      f = dot_product(vel3(mg%fmid(:, k)), mg%fvec(:, k))
+      if (cflpass) then
+         outm(c(1), c(2), c(3)) = outm(c(1), c(2), c(3)) + max(f, 0._R8P)
+         outm(m(1), m(2), m(3)) = outm(m(1), m(2), m(3)) + max(-f, 0._R8P) ; cycle
+      endif
+      fl = f * merge(pm(c(1), c(2), c(3)), pm(m(1), m(2), m(3)), f > 0._R8P)
+      rm(c(1), c(2), c(3)) = rm(c(1), c(2), c(3)) + fl ; rm(m(1), m(2), m(3)) = rm(m(1), m(2), m(3)) - fl
+   enddo
+   endsubroutine chimera_residuals
+
+   pure real(R8P) function shell_interp(pm, p) result(val)
+   !< The minor values at p, trilinear in the shell's index space of cell centres (theta periodic, phi clamped at the
+   !< poles, r over the layers below the outer one).
+   real(R8P), intent(in) :: pm(:,:,:) !< Minor values [na, np, nl].
+   real(R8P), intent(in) :: p(3)      !< Point.
+   real(R8P)    :: rr, th, ph, s(3), w(3) !< Work.
+   integer(I4P) :: na, np, nl, i0, j0, k0, l, a(3), ii !< Work.
+
+   na = size(pm, 1, kind=I4P) ; np = size(pm, 2, kind=I4P) ; nl = size(pm, 3, kind=I4P)
+   rr = norm2(p) ; ph = acos(max(-1._R8P, min(1._R8P, p(3) / rr))) ; th = atan2(p(2), p(1))
+   if (th < 0._R8P) th = th + 2 * PI
+   s = [th * na / (2 * PI) + 0.5_R8P, ph * np / PI + 0.5_R8P, (rr - 1._R8P) * nl + 0.5_R8P]
+   i0 = floor(s(1)) ; j0 = min(max(floor(s(2)), 1), np - 1) ; k0 = min(max(floor(s(3)), 1), nl - 2)
+   w = [s(1) - i0, s(2) - j0, s(3) - k0] ; w = min(max(w, 0._R8P), 1._R8P)
+   val = 0._R8P
+   do l = 0, 7
+      a = [mod(l, 2_I4P), mod(l / 2_I4P, 2_I4P), l / 4_I4P]
+      ii = modulo(i0 + a(1) - 1, na) + 1
+      val = val + product(merge(w, 1._R8P - w, a == 1)) * pm(ii, j0 + a(2), k0 + a(3))
+   enddo
+   endfunction shell_interp
+
+   pure subroutine face_3d(c, t, x, mid, nrm, area)
+   !< Face t (1-6: -x, +x, -y, +y, -z, +z) of the major cell c: centre, outward unit normal, area.
+   integer(I4P), intent(in)  :: c(3), t        !< Cell, face.
+   real(R8P),    intent(in)  :: x(:)           !< Grid edges (all directions).
+   real(R8P),    intent(out) :: mid(3), nrm(3), area !< Face.
+   integer(I4P)              :: a, d1, d2      !< Axes.
+
+   a = (t + 1) / 2 ; d1 = mod(a, 3_I4P) + 1 ; d2 = mod(a + 1_I4P, 3_I4P) + 1
+   mid = 0.5_R8P * [x(c(1)) + x(c(1) + 1), x(c(2)) + x(c(2) + 1), x(c(3)) + x(c(3) + 1)]
+   mid(a) = x(c(a) + merge(0, 1, mod(t, 2_I4P) == 1))
+   nrm = 0._R8P ; nrm(a) = merge(-1._R8P, 1._R8P, mod(t, 2_I4P) == 1)
+   area = (x(c(d1) + 1) - x(c(d1))) * (x(c(d2) + 1) - x(c(d2)))
+   endsubroutine face_3d
+
+   real(R8P) function mass_3d(g, phi, vg, pm, vm) result(tot)
+   !< Total mass of 3-D A (Kahan): the groups and the minor cells.
+   integer(I4P), intent(in) :: g(:)               !< Groups.
+   real(R8P),    intent(in) :: phi(:), vg(:)      !< Values, group volumes.
+   real(R8P),    intent(in) :: pm(:,:,:), vm(:,:,:) !< Minor values, volumes.
+   real(R8P)                :: comp               !< Compensation.
+   integer(I4P)             :: p, i, j, k         !< Counters.
+
+   tot = 0._R8P ; comp = 0._R8P
+   do p = 1, size(g, kind=I4P)
+      if (g(p) == p) call kahan(tot, comp, phi(p) * vg(p))
+   enddo
+   do k = 1, size(pm, 3, kind=I4P)
+      do j = 1, size(pm, 2, kind=I4P)
+         do i = 1, size(pm, 1, kind=I4P)
+            call kahan(tot, comp, pm(i, j, k) * vm(i, j, k))
+         enddo
+      enddo
+   enddo
+   endfunction mass_3d
+
+   real(R8P) function mass_3d_b(x, phi, pm, vm) result(tot)
+   !< Composite mass of 3-D I (Kahan): the major cells with centre at r >= 2, all minor cells.
+   real(R8P), intent(in) :: x(:)                 !< Major grid.
+   real(R8P), intent(in) :: phi(:,:,:)           !< Major values.
+   real(R8P), intent(in) :: pm(:,:,:), vm(:,:,:) !< Minor values, volumes.
+   real(R8P)             :: comp, c(3)           !< Work.
+   integer(I4P)          :: i, j, k              !< Counters.
+
+   tot = 0._R8P ; comp = 0._R8P
+   do k = 1, size(phi, 3, kind=I4P)
+      do j = 1, size(phi, 2, kind=I4P)
+         do i = 1, size(phi, 1, kind=I4P)
+            c = 0.5_R8P * [x(i) + x(i + 1), x(j) + x(j + 1), x(k) + x(k + 1)]
+            if (norm2(c) >= 2._R8P) call kahan(tot, comp, phi(i, j, k) * (x(2) - x(1)) ** 3)
+         enddo
+      enddo
+   enddo
+   do k = 1, size(pm, 3, kind=I4P)
+      do j = 1, size(pm, 2, kind=I4P)
+         do i = 1, size(pm, 1, kind=I4P)
+            call kahan(tot, comp, pm(i, j, k) * vm(i, j, k))
+         enddo
+      enddo
+   enddo
+   endfunction mass_3d_b
+
+   subroutine weights_3d(blk, x, ok)
+   !< 3-D B: every cell of the shell a receptor over the donor grid x^3 (`overlap_weights_3d`): weights sum to 1, constant
+   !< and linear fields (Picard's gradient term) exact, and per donor cell the sum of its intersections over all receptors
+   !< = |V_c' n the polyhedral shell| (the cut of the donor grid by the shell's inner and outer faces, `overset_patch_3d`
+   !< with the explicit faces: the same splits, so the receptors tile that polyhedron).
+   type(curvilinear_block_t), intent(in)    :: blk  !< Shell.
+   real(R8P),                 intent(in)    :: x(:) !< Donor grid (all directions).
+   logical,                   intent(inout) :: ok   !< Checks.
+   real(R8P), parameter      :: C0 = 3.7_R8P, B(3) = [0.7_R8P, -2.1_R8P, 1.3_R8P] !< Fields.
+   type(overlap_weights_t)   :: ow                  !< Weights.
+   type(overset_patch_3d_t)  :: pt                  !< The shell as a minor region.
+   integer(I4P), allocatable :: cells(:,:), faces(:,:) !< Receptors, the shell's faces.
+   real(R8P),    allocatable :: acc(:,:,:), cmp(:,:,:) !< Per donor cell sums.
+   real(R8P)    :: ws, wc, cs, cc, qs, qc, xc(3), e(4), h, ref, dv, tot, comp, vsh, vol, diam !< Work.
+   integer(I4P) :: ni, nj, nk, i, j, k, n, r, l, st, nx, d(3), nf !< Work.
+   integer(I8P) :: t0, t1, tr                       !< Clock.
+
+   ni = blk%ni - 1 ; nj = blk%nj - 1 ; nk = blk%nk - 1 ; nx = size(x, kind=I4P) - 1 ; h = x(2) - x(1)
+   allocate(cells(3, ni * nj * nk), faces(5, 2 * ni * nj)) ; n = 0 ; nf = 0
+   do k = 1, nk
+      do j = 1, nj
+         do i = 1, ni
+            n = n + 1 ; cells(:, n) = [i, j, k]
+            if (k == 1) then
+               nf = nf + 1 ; faces(:, nf) = [1_I4P, i, j, k, 5_I4P]
+            endif
+            if (k == nk) then
+               nf = nf + 1 ; faces(:, nf) = [1_I4P, i, j, k, 6_I4P]
+            endif
+         enddo
+      enddo
+   enddo
+   call system_clock(t0, tr)
+   call overlap_weights_3d(blk, cells, x, x, x, ow, status=st)
+   call system_clock(t1)
+   if (st /= OVERLAP_WEIGHTS_OK .or. any(ow%flag /= OVERLAP_WEIGHTS_OK) .or. any(ow%covered /= 1._R8P)) &
+      error stop 'weights_3d: overlap_weights_3d'
+   e = 0._R8P
+   do r = 1, ow%nr
+      ws = 0._R8P ; wc = 0._R8P ; cs = 0._R8P ; cc = 0._R8P ; qs = 0._R8P ; qc = 0._R8P
+      do l = ow%start(r), ow%start(r + 1) - 1
+         d = ow%donor(:, l)
+         xc = 0.5_R8P * [x(d(1)) + x(d(1) + 1), x(d(2)) + x(d(2) + 1), x(d(3)) + x(d(3) + 1)]
+         call kahan(ws, wc, ow%weight(l)) ; call kahan(cs, cc, ow%weight(l) * C0)
+         call kahan(qs, qc, ow%weight(l) * (C0 + dot_product(B, xc) + dot_product(B, ow%centroid(:, l) - xc)))
+      enddo
+      e(1) = max(e(1), abs(ws - 1._R8P)) ; e(2) = max(e(2), abs(cs - C0) / C0)
+      ! the linear field at the receptor's centroid (its polyhedron rebuilt here)
+      call receptor_polyhedron(blk, cells(:, r), vol, xc, diam)
+      ref = C0 + dot_product(B, xc)
+      e(3) = max(e(3), abs(qs - ref) / (norm2(B) * diam + abs(ref)))
+   enddo
+   ! per donor cell: the sum over the receptors against the cut of the polyhedral shell
+   call overset_patch_3d([blk], [1_I4P], x, x, x, pt, faces=faces(:, 1:nf), status=st)
+   if (st /= OVERSET_PATCH_OK) error stop 'weights_3d: overset_patch_3d of the shell'
+   allocate(acc(nx, nx, nx), cmp(nx, nx, nx)) ; acc = 0._R8P ; cmp = 0._R8P
+   do l = 1, ow%nw
+      d = ow%donor(:, l) ; call kahan(acc(d(1), d(2), d(3)), cmp(d(1), d(2), d(3)), ow%volume(l))
+   enddo
+   tot = 0._R8P ; comp = 0._R8P
+   do k = 1, nx
+      do j = 1, nx
+         do i = 1, nx
+            dv = (1._R8P - pt%cut%alpha(i, j, k)) * h ** 3
+            e(4) = max(e(4), abs(acc(i, j, k) - dv) / h ** 3)
+            call kahan(tot, comp, acc(i, j, k))
+         enddo
+      enddo
+   enddo
+   vsh = pt%boundary%get_volume()
+   print '(A,I0,A,I0,A,I0,A,F6.2,A,F7.3,A)', '    B: ', nx, '^3, ', ow%nr, ' receptors (the whole shell), ', ow%nw, &
+         ' intersections (', real(ow%nw, R8P) / ow%nr, ' each); overlap_weights_3d ', real(t1 - t0, R8P) / tr, ' s'
+   print '(A,4ES10.2,A,ES10.2)', '       |sum w - 1|, constant, linear, per donor |sum - |V_c'' n shell|| / h^3: ', e, &
+         '; total vs shell volume ', abs(tot - vsh) / vsh
+   ok = ok .and. e(1) <= 2 * epsilon(1._R8P) .and. e(2) <= 4 * epsilon(1._R8P) .and. e(3) <= 1e-13_R8P .and. &
+        e(4) <= 1e-13_R8P .and. abs(tot - vsh) <= 1e-13_R8P * vsh
+   endsubroutine weights_3d
+
+   subroutine receptor_polyhedron(blk, c, vol, cen, diam)
+   !< Volume, centroid and diameter of receptor cell c: 12 triangles, faces out of the cell by the block's handedness,
+   !< shorter diagonal, ties by the least global vertex index (built here, independently of the library).
+   type(curvilinear_block_t), intent(in)  :: blk  !< Block.
+   integer(I4P),              intent(in)  :: c(3) !< Cell.
+   real(R8P),                 intent(out) :: vol, cen(3), diam !< Volume, centroid, diameter.
+   integer(I4P), parameter :: FQ(4, 6) = reshape([1, 5, 7, 3,  2, 4, 8, 6,  1, 2, 6, 5,  3, 7, 8, 4,  1, 3, 4, 2, &
+                                                  5, 6, 8, 7], [4, 6]) !< Faces out of a right-handed cell.
+   real(R8P)    :: v(3, 8), q(3, 4), t(3, 3, 2), d13, d24, a(3), b(3), e(3), dv, o(3) !< Work.
+   integer(I4P) :: g(8), gq(4), m, f, ii, jj, kk               !< Work.
+   logical      :: use13                                       !< Diagonal.
+
+   do m = 1, 8
+      ii = c(1) + mod(m - 1, 2) ; jj = c(2) + mod((m - 1) / 2, 2) ; kk = c(3) + (m - 1) / 4
+      v(:, m) = vtx(blk, [ii, jj, kk]) ; g(m) = ii + blk%ni * ((jj - 1) + blk%nj * (kk - 1))
+   enddo
+   o = v(:, 1) ; vol = 0._R8P ; cen = 0._R8P ; diam = norm2(maxval(v, dim=2) - minval(v, dim=2))
+   do f = 1, 6
+      q = v(:, FQ(:, f)) ; gq = g(FQ(:, f))
+      if (blk%orientation() < 0._R8P) then
+         q = q(:, [1, 4, 3, 2]) ; gq = gq([1, 4, 3, 2])
+      endif
+      d13 = norm2(q(:, 3) - q(:, 1)) ; d24 = norm2(q(:, 4) - q(:, 2))
+      use13 = d13 < d24 .or. (d13 == d24 .and. min(gq(1), gq(3)) <= min(gq(2), gq(4)))
+      if (use13) then
+         t(:, :, 1) = q(:, [1, 2, 3]) ; t(:, :, 2) = q(:, [1, 3, 4])
+      else
+         t(:, :, 1) = q(:, [1, 2, 4]) ; t(:, :, 2) = q(:, [2, 3, 4])
+      endif
+      do m = 1, 2
+         a = t(:, 1, m) - o ; b = t(:, 2, m) - o ; e = t(:, 3, m) - o
+         dv = dot_product(a, cross3(b, e)) / 6._R8P
+         vol = vol + dv ; cen = cen + dv * (a + b + e) / 4._R8P
+      enddo
+   enddo
+   cen = o + cen / vol
+   endsubroutine receptor_polyhedron
+
+   pure real(R8P) function blob3(p)
+   !< The initial scalar in 3-D: a Gaussian upstream of the minor shell.
+   real(R8P), intent(in) :: p(3) !< Point.
+
+   blob3 = exp(-((p(1) + 2.2_R8P) ** 2 + (p(2) - 0.4_R8P) ** 2 + (p(3) - 0.2_R8P) ** 2) / 0.35_R8P ** 2)
+   endfunction blob3
+
+   pure function vel3(p) result(u)
+   !< The potential flow past the unit sphere at the origin, free stream U3 (unit).
+   real(R8P), intent(in) :: p(3) !< Point.
+   real(R8P)             :: u(3) !< Velocity.
+   real(R8P)             :: r    !< Radius.
+
+   r = norm2(p)
+   u = U3 + 0.5_R8P * (U3 / r ** 3 - 3._R8P * dot_product(U3, p) * p / r ** 5)
+   endfunction vel3
+
+   pure function cross3(a, b) result(c)
+   !< Cross product.
+   real(R8P), intent(in) :: a(3), b(3) !< Vectors.
+   real(R8P)             :: c(3)       !< a x b.
+
+   c = [a(2) * b(3) - a(3) * b(2), a(3) * b(1) - a(1) * b(3), a(1) * b(2) - a(2) * b(1)]
+   endfunction cross3
+
+   subroutine shell(na, nl, blk)
+   !< A sphere shell, r in [1, 2] over nl layers, na x na / 2 cells on each sphere (i around, j pole to pole, k outward:
+   !< left-handed), poles collapsed; its outer face (+k) named 'overlap'.
+   integer(I4P),              intent(in)    :: na, nl !< Cells around, radially.
+   type(curvilinear_block_t), intent(inout) :: blk    !< Block.
+   type(topo_record_t)    :: rec                      !< Record.
+   real(R8P), allocatable :: xx(:,:,:), yy(:,:,:), zz(:,:,:) !< Vertices.
+   real(R8P)              :: th, ph, rr               !< Work.
+   integer(I4P)           :: np, i, j, k              !< Counters.
+
+   np = na / 2
+   allocate(xx(na + 1, np + 1, nl + 1), yy(na + 1, np + 1, nl + 1), zz(na + 1, np + 1, nl + 1))
+   do k = 1, nl + 1
+      rr = 1._R8P + (k - 1._R8P) / nl
+      do j = 1, np + 1
+         ph = PI * (j - 1) / np
+         do i = 1, na + 1
+            th = 2 * PI * (i - 1) / na
+            xx(i, j, k) = rr * sin(ph) * cos(th) ; yy(i, j, k) = rr * sin(ph) * sin(th) ; zz(i, j, k) = rr * cos(ph)
+         enddo
+         if (j == 1 .or. j == np + 1) then
+            xx(:, j, k) = 0._R8P ; yy(:, j, k) = 0._R8P ; zz(:, j, k) = merge(rr, -rr, j == 1)
+         endif
+      enddo
+      xx(na + 1, :, k) = xx(1, :, k) ; yy(na + 1, :, k) = yy(1, :, k) ; zz(na + 1, :, k) = zz(1, :, k)
+   enddo
+   call blk%destroy
+   call blk%initialize(xx, yy, zz)
+   rec%kind = TOPO_BOUNDARY ; rec%face = 6 ; rec%lo = [1, 1, nl + 1] ; rec%hi = [na + 1, np + 1, nl + 1]
+   rec%name = 'overlap'
+   call blk%add_record(rec)
+   endsubroutine shell
 endprogram fossil_val_overset_conservative
