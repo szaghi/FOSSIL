@@ -1,25 +1,31 @@
-!< FOSSIL validation: a passive scalar through a conservative overset interface (issue #106 step 1, solver gate).
+!< FOSSIL validation: a passive scalar through a conservative overset interface (issue #106 steps 1-2, solver gate).
 program fossil_val_overset_conservative
-!< FOSSIL validation: a passive scalar through a conservative overset interface (issue #106 step 1, solver gate).
+!< FOSSIL validation: a passive scalar through a conservative overset interface (issue #106 steps 1-2, solver gate).
 !<
 !< A minor ring block (a cylinder O-grid, r in [1, 2]; or a square ring on grid lines, with degenerate pieces) in a
 !< Cartesian major grid on [-3, 3]^2. A scalar blob is advected by the potential flow around the cylinder (uniform flow
-!< for the square) with first-order upwind finite volumes and forward Euler, two ways:
+!< for the square) with first-order upwind finite volumes and forward Euler, three ways:
 !< A. Wang's patched interface (`overset_patch_2d`): the major grid is cut by the minor boundary (holes, cut pieces with
 !<    their apertures W_f), the minor cells keep their faces, and the two grids exchange the upwind fluxes through the
 !<    smallest faces, each flux added to one side and subtracted from the other. Small major pieces (area below half a
 !<    cell, `merge_targets`) and degenerate ones (`merge_into`) are merged into their targets: a group shares one value
 !<    and the sum of its members' fluxes. The total mass plus the mass that left through the box changes by round-off.
-!< B. The same assembly coupled by interpolation (Chimera): the major cells whose centre lies at r < 1.4 are holes, at
+!< I. The same assembly coupled by interpolation (Chimera): the major cells whose centre lies at r < 1.4 are holes, at
 !<    1.4 <= r < 1.6 receptors (bilinear from the minor cell centres, located by FOSSIL in the block of the cell centres,
 !<    `cell_centre_block_2d` + `locate_many`), the minor's outer row of cells receives from the major cell centres
 !<    (bilinear); each grid advances its own field cells. The composite mass (the major cells with centre at r >= 2, all
 !<    minor cells) plus the mass that left the box drifts by the interpolation.
+!< B. The assembly of I with Picard's intersection-weighted transfer (`overlap_weights_2d`, issue #106 step 2) in place
+!<    of the interpolation: a receptor takes q_c = sum w (q_c' + grad q_c' . (x_cc' - x_c')) over the cells c' it
+!<    intersects, w = |V_c n V_c'| / |V_c| and x_cc' the centroid of V_c n V_c' (the minor outer row from the major
+!<    cells; the major receptors from the minor cells, by the same intersections read the other way). Gradients: central
+!<    differences on the major grid (one-sided next to a hole), Green-Gauss on the minor cells. It transfers states,
+!<    not fluxes: its composite mass (as I's) drifts too.
 !< The inner minor boundary is a wall (no flux). Exit status 0 if A conserves to 1e-12 relative and stays in [0, 1]
-!< (upwind within its CFL limit), and B's defect exceeds 1e-6.
+!< (upwind within its CFL limit), and the defects of I and B exceed 1e-6.
 use fossil, only : curvilinear_block_2d_t, topo_record_t, TOPO_BOUNDARY, overset_patch_2d_t, overset_patch_2d, &
                    OVERSET_PATCH_OK, cut_links_t, cut_links_2d, merge_t, merge_targets, MERGE_OK, MERGE_CHAIN, &
-                   cell_centre_block_2d, LOC_OUTSIDE
+                   cell_centre_block_2d, LOC_OUTSIDE, overlap_weights_t, overlap_weights_2d, OVERLAP_WEIGHTS_OK
 use penf,   only : I4P, R8P
 
 implicit none
@@ -28,7 +34,7 @@ real(R8P), parameter :: PI = acos(-1._R8P) !< Pi.
 real(R8P), parameter :: ANG = 0.2_R8P      !< Free-stream angle.
 type(curvilinear_block_2d_t) :: blk(1)     !< Minor block.
 real(R8P), allocatable       :: x(:), pu(:), pv(:) !< Major grid, square.
-real(R8P)                    :: da, db, mx, mn  !< Defects, extremes.
+real(R8P)                    :: da, db, di, mx, mn  !< Defects, extremes.
 integer(I4P)                 :: m, k, n     !< Counters.
 logical                      :: ok          !< Checks.
 
@@ -37,10 +43,13 @@ do m = 1, 2
    call ogrid(m, blk(1))
    x = grid_1d(-3._R8P, 3._R8P, 60_I4P * m)
    call patched(blk, x, 1._R8P, 0.008_R8P / m, 400_I4P * m, da, mx, mn)
-   call chimera(blk(1), x, 1._R8P, 0.008_R8P / m, 400_I4P * m, db)
-   print '(A,I0,A,I0,A,ES10.2,A,ES10.2,A,2ES10.2)', '  cylinder, m = ', m, ' (', 60 * m, &
-         '^2): mass defect A (patched) ', da, ', B (interpolated) ', db, '; A min, max ', mn, mx
-   ok = ok .and. da <= 1e-12_R8P .and. db > 1e-6_R8P .and. mx <= 1._R8P + 1e-12_R8P .and. mn >= -1e-12_R8P
+   call chimera(blk(1), x, 1._R8P, 0.008_R8P / m, 400_I4P * m, .false., di)
+   call chimera(blk(1), x, 1._R8P, 0.008_R8P / m, 400_I4P * m, .true., db)
+   print '(A,I0,A,I0,A,ES10.2,A,ES10.2,A,ES10.2,A,2ES10.2)', '  cylinder, m = ', m, ' (', 60 * m, &
+         '^2): mass defect A (patched) ', da, ', B (Picard weights) ', db, ', I (interpolated) ', di, '; A min, max ', &
+         mn, mx
+   ok = ok .and. da <= 1e-12_R8P .and. di > 1e-6_R8P .and. db > 1e-6_R8P .and. mx <= 1._R8P + 1e-12_R8P .and. &
+        mn >= -1e-12_R8P
 enddo
 ! a square ring on grid lines: degenerate pieces along its sides, folded by merge_into
 x = grid_1d(-3._R8P, 3._R8P, 60_I4P)
@@ -216,14 +225,19 @@ contains
    enddo
    endfunction mass_a
 
-   subroutine chimera(blk, x, rc, dt, nsteps, defect)
-   !< B: the same assembly coupled by interpolation; defect as in A on the composite mass.
+   subroutine chimera(blk, x, rc, dt, nsteps, picard, defect)
+   !< I (interpolation) or B (Picard's weights, `picard`): the same overlapping assembly; defect as in A on the composite
+   !< mass.
    type(curvilinear_block_2d_t), intent(in)  :: blk    !< Minor block.
    real(R8P),                    intent(in)  :: x(:)   !< Major grid edges (both directions).
    real(R8P),                    intent(in)  :: rc     !< Cylinder radius of the flow.
    real(R8P),                    intent(in)  :: dt     !< Time step.
    integer(I4P),                 intent(in)  :: nsteps !< Steps.
+   logical,                      intent(in)  :: picard !< B: the intersection weights instead of the interpolation.
    real(R8P),                    intent(out) :: defect !< Mass defect.
+   type(overlap_weights_t)   :: ow                     !< Intersections of every minor cell with the major cells.
+   integer(I4P), allocatable :: tstart(:), tcell(:)    !< Major receptor -> its intersections in ow (CSR by cell).
+   real(R8P),    allocatable :: gx(:,:,:), gm(:,:,:), xm(:,:,:) !< Major, minor gradients; minor centroids.
    type(curvilinear_block_2d_t) :: dual                !< Block of the minor cell centres.
    integer(I4P), allocatable :: kd(:,:), cell(:,:), lst(:), rcv(:,:) !< Major kinds, donor cells, status, receptors.
    real(R8P),    allocatable :: phi(:,:), r(:,:), pm(:,:), rm(:,:), vm(:,:), xi(:,:), qx(:), qy(:) !< Work.
@@ -277,8 +291,13 @@ contains
    enddo
    call dual%locate_many(qx, qy, cell, xi, lst)
    if (any(lst == LOC_OUTSIDE)) error stop 'chimera: a major receptor outside the minor block'
+   if (picard) call picard_setup(blk, x, kd, ow, tstart, tcell, xm)
+   if (picard) allocate(gx(2, nx, nx), gm(2, ni - 1, nj - 1))
    m0 = mass_b(x, phi, pm, vm) ; out = 0._R8P ; defect = 0._R8P
    do step = 1, nsteps
+      if (picard) then
+         call picard_transfer(blk, x, kd, ow, tstart, tcell, xm, gx, gm, phi, pm)
+      else
       ! interpolation: major receptors from the minor cell centres, the minor outer row from the major cell centres
       do k = 1, nr
          i0 = cell(1, k) ; j0 = cell(2, k)
@@ -294,6 +313,7 @@ contains
          pm(i, nj - 1) = (1 - w(1)) * (1 - w(2)) * phi(i0, j0) + w(1) * (1 - w(2)) * phi(i0 + 1, j0) + &
                          w(1) * w(2) * phi(i0 + 1, j0 + 1) + (1 - w(1)) * w(2) * phi(i0, j0 + 1)
       enddo
+      endif
       ! major field cells: the faces with a field cell on one side at least
       r = 0._R8P
       do j = 1, nx
@@ -350,10 +370,224 @@ contains
       mtot = mass_b(x, phi, pm, vm)
       defect = max(defect, abs(mtot + out - m0) / m0)
    enddo
-   print '(A,I0,A,I0,A,ES12.5,A,ES12.5)', '    B: major receptors ', nr, ', field cells next to holes ', nbad, &
-         '; mass ', mtot, ', left the box ', out
+   print '(A,A,I0,A,I0,A,ES12.5,A,ES12.5,A,I0)', merge('    B', '    I', picard), ': major receptors ', nr, &
+         ', field cells next to holes ', nbad, '; mass ', mtot, ', left the box ', out, &
+         '; intersections ', merge(ow%nw, 0_I4P, picard)
    if (nbad > 0) error stop 'chimera: fringe too thin'
    endsubroutine chimera
+
+   subroutine picard_setup(blk, x, kd, ow, tstart, tcell, xm)
+   !< B: the intersections of every minor cell with the major cells (`overlap_weights_2d`), checked (the minor outer row
+   !< takes field cells only, the major receptors are fully covered by minor field cells), read the other way for the
+   !< major receptors (tcell: the intersections of major cell c in ow, tstart by linear cell index), and the minor cell
+   !< centroids.
+   type(curvilinear_block_2d_t), intent(in)  :: blk        !< Minor block.
+   real(R8P),                    intent(in)  :: x(:)       !< Major grid.
+   integer(I4P),                 intent(in)  :: kd(:,:)    !< Major kinds.
+   type(overlap_weights_t),      intent(out) :: ow         !< Intersections.
+   integer(I4P), allocatable,    intent(out) :: tstart(:), tcell(:) !< Major cell -> intersections.
+   real(R8P),    allocatable,    intent(out) :: xm(:,:,:)  !< Minor centroids [2, ni - 1, nj - 1].
+   integer(I4P), allocatable :: cells(:,:), pos(:)         !< Receptor cells, fill positions.
+   real(R8P)    :: ar, cv                                  !< Work.
+   integer(I4P) :: ni, nj, nx, i, j, k, r, c, st           !< Work.
+
+   ni = blk%ni ; nj = blk%nj ; nx = size(kd, 1, kind=I4P)
+   allocate(cells(2, (ni - 1) * (nj - 1)), xm(2, ni - 1, nj - 1))
+   do j = 1, nj - 1
+      do i = 1, ni - 1
+         cells(:, i + (j - 1) * (ni - 1)) = [i, j]
+         call polygon_centroid(blk, i, j, ar, xm(:, i, j))
+      enddo
+   enddo
+   call overlap_weights_2d(blk, cells, x, x, ow, status=st)
+   if (st /= OVERLAP_WEIGHTS_OK .or. any(ow%flag /= OVERLAP_WEIGHTS_OK)) error stop 'picard: overlap_weights_2d'
+   if (any(abs(ow%covered - 1._R8P) > 0._R8P)) error stop 'picard: a minor cell leaves the major box'
+   allocate(tstart(nx * nx + 1), pos(nx * nx)) ; tstart = 0
+   do r = 1, ow%nr
+      do k = ow%start(r), ow%start(r + 1) - 1
+         c = ow%donor(1, k) + (ow%donor(2, k) - 1) * nx
+         if (cells(2, r) == nj - 1 .and. ow%weight(k) > 0._R8P .and. kd(ow%donor(1, k), ow%donor(2, k)) /= 2) &
+            error stop 'picard: a minor receptor with a major non-field donor'
+         tstart(c + 1) = tstart(c + 1) + 1
+      enddo
+   enddo
+   tstart(1) = 1
+   do c = 1, nx * nx
+      tstart(c + 1) = tstart(c + 1) + tstart(c)
+   enddo
+   allocate(tcell(tstart(nx * nx + 1) - 1)) ; pos = tstart(1:nx * nx)
+   do r = 1, ow%nr
+      do k = ow%start(r), ow%start(r + 1) - 1
+         c = ow%donor(1, k) + (ow%donor(2, k) - 1) * nx
+         tcell(pos(c)) = k ; pos(c) = pos(c) + 1
+      enddo
+   enddo
+   do j = 1, nx ! a major receptor: covered by minor field cells
+      do i = 1, nx
+         if (kd(i, j) /= 1) cycle
+         c = i + (j - 1) * nx ; cv = 0._R8P
+         do k = tstart(c), tstart(c + 1) - 1
+            cv = cv + ow%volume(tcell(k))
+         enddo
+         if (abs(cv - (x(i + 1) - x(i)) * (x(j + 1) - x(j))) > 1e-13_R8P * (x(2) - x(1)) ** 2) &
+            error stop 'picard: a major receptor not covered by the minor block'
+      enddo
+   enddo
+   endsubroutine picard_setup
+
+   subroutine picard_transfer(blk, x, kd, ow, tstart, tcell, xm, gx, gm, phi, pm)
+   !< B: the major receptors from the minor cells, then the minor outer row from the major cells (the order of I),
+   !< q_c = sum w (q_c' + grad q_c' . (x_cc' - x_c')).
+   type(curvilinear_block_2d_t), intent(in)    :: blk       !< Minor block.
+   real(R8P),                    intent(in)    :: x(:)      !< Major grid.
+   integer(I4P),                 intent(in)    :: kd(:,:)   !< Major kinds.
+   type(overlap_weights_t),      intent(in)    :: ow        !< Intersections.
+   integer(I4P),                 intent(in)    :: tstart(:), tcell(:) !< Major cell -> intersections.
+   real(R8P),                    intent(in)    :: xm(:,:,:) !< Minor centroids.
+   real(R8P),                    intent(inout) :: gx(:,:,:), gm(:,:,:) !< Gradients (work).
+   real(R8P),                    intent(inout) :: phi(:,:), pm(:,:) !< Major, minor values.
+   real(R8P)    :: q, v, xc(2)                    !< Work.
+   integer(I4P) :: nx, ni, nj, i, j, k, l, r, c, a, b !< Work.
+
+   nx = size(phi, 1, kind=I4P) ; ni = blk%ni ; nj = blk%nj
+   call minor_gradients(blk, xm, pm, gm)
+   do j = 1, nx
+      do i = 1, nx
+         if (kd(i, j) /= 1) cycle
+         c = i + (j - 1) * nx ; q = 0._R8P ; v = 0._R8P
+         do l = tstart(c), tstart(c + 1) - 1
+            k = tcell(l)
+            call receptor_of(ow, k, r) ; a = mod(r - 1, ni - 1) + 1 ; b = (r - 1) / (ni - 1) + 1
+            q = q + ow%volume(k) * (pm(a, b) + dot_product(gm(:, a, b), ow%centroid(:, k) - xm(:, a, b)))
+            v = v + ow%volume(k)
+         enddo
+         phi(i, j) = q / v
+      enddo
+   enddo
+   call major_gradients(x, kd, phi, gx)
+   b = nj - 1
+   do a = 1, ni - 1
+      r = a + (b - 1) * (ni - 1) ; q = 0._R8P
+      do k = ow%start(r), ow%start(r + 1) - 1
+         i = ow%donor(1, k) ; j = ow%donor(2, k)
+         xc = [0.5_R8P * (x(i) + x(i + 1)), 0.5_R8P * (x(j) + x(j + 1))]
+         q = q + ow%weight(k) * (phi(i, j) + dot_product(gx(:, i, j), ow%centroid(:, k) - xc))
+      enddo
+      pm(a, b) = q
+   enddo
+   endsubroutine picard_transfer
+
+   pure subroutine receptor_of(ow, k, r)
+   !< The receptor of intersection k (bisection on ow%start).
+   type(overlap_weights_t), intent(in)  :: ow !< Intersections.
+   integer(I4P),            intent(in)  :: k  !< Intersection.
+   integer(I4P),            intent(out) :: r  !< Receptor.
+   integer(I4P)                         :: lo, hi, mid !< Bisection.
+
+   lo = 1 ; hi = ow%nr
+   do while (lo < hi) ! start(lo) <= k < start(hi + 1)
+      mid = (lo + hi + 1) / 2
+      if (ow%start(mid) <= k) then
+         lo = mid
+      else
+         hi = mid - 1
+      endif
+   enddo
+   r = lo
+   endsubroutine receptor_of
+
+   pure subroutine major_gradients(x, kd, phi, gx)
+   !< Central differences on the major cells that are not holes (one-sided next to a hole or the box, 0 if both sides
+   !< are missing).
+   real(R8P),    intent(in)  :: x(:)       !< Major grid.
+   integer(I4P), intent(in)  :: kd(:,:)    !< Major kinds.
+   real(R8P),    intent(in)  :: phi(:,:)   !< Values.
+   real(R8P),    intent(out) :: gx(:,:,:)  !< Gradients [2, nx, nx].
+   real(R8P)    :: h                       !< Cell size.
+   integer(I4P) :: nx, i, j                !< Work.
+   logical      :: lo, hi                  !< Neighbours available.
+
+   nx = size(phi, 1, kind=I4P) ; h = x(2) - x(1) ; gx = 0._R8P
+   do j = 1, nx
+      do i = 1, nx
+         if (kd(i, j) == 0) cycle
+         lo = i > 1 ; if (lo) lo = kd(i - 1, j) /= 0
+         hi = i < nx ; if (hi) hi = kd(i + 1, j) /= 0
+         if (lo .and. hi) then
+            gx(1, i, j) = (phi(i + 1, j) - phi(i - 1, j)) / (2 * h)
+         elseif (hi) then
+            gx(1, i, j) = (phi(i + 1, j) - phi(i, j)) / h
+         elseif (lo) then
+            gx(1, i, j) = (phi(i, j) - phi(i - 1, j)) / h
+         endif
+         lo = j > 1 ; if (lo) lo = kd(i, j - 1) /= 0
+         hi = j < nx ; if (hi) hi = kd(i, j + 1) /= 0
+         if (lo .and. hi) then
+            gx(2, i, j) = (phi(i, j + 1) - phi(i, j - 1)) / (2 * h)
+         elseif (hi) then
+            gx(2, i, j) = (phi(i, j + 1) - phi(i, j)) / h
+         elseif (lo) then
+            gx(2, i, j) = (phi(i, j) - phi(i, j - 1)) / h
+         endif
+      enddo
+   enddo
+   endsubroutine major_gradients
+
+   pure subroutine minor_gradients(blk, xm, pm, gm)
+   !< Green-Gauss on the minor cells: face values the mean of the two cells (periodic in i; the cell's own value on the
+   !< wall and the outer face).
+   type(curvilinear_block_2d_t), intent(in)  :: blk       !< Minor block.
+   real(R8P),                    intent(in)  :: xm(:,:,:) !< Centroids.
+   real(R8P),                    intent(in)  :: pm(:,:)   !< Values.
+   real(R8P),                    intent(out) :: gm(:,:,:) !< Gradients [2, ni - 1, nj - 1].
+   real(R8P)    :: mid(2), fm(2), nrm(2), ar, g(2) !< Work.
+   integer(I4P) :: ni, nj, i, j, t, ia, ja   !< Work.
+   integer(I4P) :: v0(2), v1(2)              !< Face vertices.
+
+   ni = blk%ni ; nj = blk%nj
+   do j = 1, nj - 1
+      do i = 1, ni - 1
+         g = 0._R8P
+         do t = 1, 4
+            select case(t)
+            case(1)
+               v0 = [i, j] ; v1 = [i, j + 1] ; ia = mod(i - 2 + ni - 1, ni - 1) + 1 ; ja = j
+            case(2)
+               v0 = [i + 1, j] ; v1 = [i + 1, j + 1] ; ia = mod(i, ni - 1) + 1 ; ja = j
+            case(3)
+               v0 = [i, j] ; v1 = [i + 1, j] ; ia = i ; ja = max(j - 1, 1)
+            case default
+               v0 = [i, j + 1] ; v1 = [i + 1, j + 1] ; ia = i ; ja = min(j + 1, nj - 1)
+            endselect
+            fm = 0.5_R8P * [blk%u(v0(1), v0(2)) + blk%u(v1(1), v1(2)), blk%v(v0(1), v0(2)) + blk%v(v1(1), v1(2))]
+            call minor_face(blk, v0, v1, xm(:, i, j), fm, mid, nrm) ! outward: from the centroid to the midpoint
+            g = g + 0.5_R8P * (pm(i, j) + pm(ia, ja)) * nrm
+         enddo
+         ar = abs(quad(blk, i, j))
+         gm(:, i, j) = g / ar
+      enddo
+   enddo
+   endsubroutine minor_gradients
+
+   pure subroutine polygon_centroid(blk, i, j, ar, c)
+   !< Area and centroid of minor cell (i, j) (about its first vertex).
+   type(curvilinear_block_2d_t), intent(in)  :: blk   !< Block.
+   integer(I4P),                 intent(in)  :: i, j  !< Cell.
+   real(R8P),                    intent(out) :: ar, c(2) !< Signed area, centroid.
+   real(R8P)    :: pu(4), pv(4), a(2), b(2), cr, mom(2) !< Work.
+   integer(I4P) :: k                                   !< Counter.
+
+   pu = [blk%u(i, j), blk%u(i + 1, j), blk%u(i + 1, j + 1), blk%u(i, j + 1)]
+   pv = [blk%v(i, j), blk%v(i + 1, j), blk%v(i + 1, j + 1), blk%v(i, j + 1)]
+   ar = 0._R8P ; mom = 0._R8P
+   do k = 2, 3
+      a = [pu(k) - pu(1), pv(k) - pv(1)] ; b = [pu(k + 1) - pu(1), pv(k + 1) - pv(1)]
+      cr = a(1) * b(2) - a(2) * b(1)
+      ar = ar + cr ; mom = mom + cr * (a + b)
+   enddo
+   c = mom / (3._R8P * ar) + [pu(1), pv(1)]
+   ar = 0.5_R8P * ar
+   endsubroutine polygon_centroid
 
    real(R8P) function mass_b(x, phi, pm, vm) result(tot)
    !< Composite mass of B (Kahan): the major cells with centre at r >= 2, all minor cells.

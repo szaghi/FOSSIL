@@ -49,7 +49,9 @@ use fossil_overset, only : wall_cutter, wall_cutter_2d, hole_flags, hole_flags_2
                            exposed_points, connectivity_t, build_connectivity, save_connectivity, &
                            cell_centre_block, cell_centre_block_2d
 use fossil_overset_patch, only : overset_patch_2d_t, overset_patch_2d, OVERSET_PATCH_OK, OVERSET_PATCH_BAD_INPUT, &
-                                 OVERSET_PATCH_NO_BOUNDARY, OVERSET_PATCH_OPEN, OVERSET_PATCH_OVERLAP, OVERSET_PATCH_NESTING
+                                 OVERSET_PATCH_NO_BOUNDARY, OVERSET_PATCH_OPEN, OVERSET_PATCH_OVERLAP, OVERSET_PATCH_NESTING, &
+                                 overlap_weights_t, overlap_weights_2d, OVERLAP_WEIGHTS_OK, OVERLAP_WEIGHTS_BAD_INPUT, &
+                                 OVERLAP_WEIGHTS_DEGENERATE, OVERLAP_WEIGHTS_OUTSIDE, OVERLAP_WEIGHTS_OPEN
 use fossil_ccd, only : motion_bound_3d, motion_bound_2d, ccd_evaluator_t, ccd_advance, CCD_CONTACT, CCD_SEPARATE, &
                        CCD_INITIAL_CONTACT, CCD_NOT_CONVERGED, CCD_INVALID_INPUT, CCD_MAX_ITERATIONS, CCD_STALL_STEPS, &
                        CCD_STALL_FRACTION
@@ -102,6 +104,8 @@ public :: wall_projection, wall_projection_2d, exposed_points, connectivity_t, b
 public :: cell_centre_block, cell_centre_block_2d
 public :: overset_patch_2d_t, overset_patch_2d, OVERSET_PATCH_OK, OVERSET_PATCH_BAD_INPUT, OVERSET_PATCH_NO_BOUNDARY
 public :: OVERSET_PATCH_OPEN, OVERSET_PATCH_OVERLAP, OVERSET_PATCH_NESTING
+public :: overlap_weights_t, overlap_weights_2d, OVERLAP_WEIGHTS_OK, OVERLAP_WEIGHTS_BAD_INPUT, OVERLAP_WEIGHTS_DEGENERATE
+public :: OVERLAP_WEIGHTS_OUTSIDE, OVERLAP_WEIGHTS_OPEN
 public :: rigid_pose_t, rigid_pose_2d_t, pose_identity, pose_from_axis_angle, pose_from_quaternion, pose_2d, pose_compose
 public :: pose_inverse, to_body, to_world, rotate, pose_interpolate
 public :: motion_bound_3d, motion_bound_2d, ccd_evaluator_t, ccd_advance, CCD_CONTACT, CCD_SEPARATE, CCD_INITIAL_CONTACT

@@ -40,6 +40,11 @@ module fossil_overset_patch
 !< face leaves the major box: the minor grid's own boundary condition applies to the rest).
 !<
 !< The major grid's own walls are not part of this step (issue #106 step 1). CPU only.
+!<
+!< `overlap_weights_2d` (issue #106 step 2) gives the intersection weights of Picard et al. (2021) instead: for every
+!< receptor cell V_c of a curvilinear block and every cell V_c' of a rectilinear donor grid, |V_c n V_c'|, the weight
+!< |V_c n V_c'| / |V_c| and the centroid of V_c n V_c' (a transfer q_c = sum w (q_c' + grad q_c' . (x_cc' - x_c')) is
+!< exact for linear fields). It transfers states, not fluxes: not globally conservative (the patched interface is).
 use penf,                     only : I4P, R8P
 use fossil_curvilinear_block, only : curvilinear_block_2d_t, TOPO_BOUNDARY
 use fossil_curve_object,      only : curve_object, cut_cells_2d_t, CURVE_VALID
@@ -50,6 +55,9 @@ private
 public :: overset_patch_2d_t, overset_patch_2d
 public :: OVERSET_PATCH_OK, OVERSET_PATCH_BAD_INPUT, OVERSET_PATCH_NO_BOUNDARY, OVERSET_PATCH_OPEN, &
           OVERSET_PATCH_OVERLAP, OVERSET_PATCH_NESTING
+public :: overlap_weights_t, overlap_weights_2d
+public :: OVERLAP_WEIGHTS_OK, OVERLAP_WEIGHTS_BAD_INPUT, OVERLAP_WEIGHTS_DEGENERATE, OVERLAP_WEIGHTS_OUTSIDE, &
+          OVERLAP_WEIGHTS_OPEN
 
 integer(I4P), parameter :: OVERSET_PATCH_OK          = 0_I4P !< Done.
 integer(I4P), parameter :: OVERSET_PATCH_BAD_INPUT   = 1_I4P !< A minor block or face out of range, or bad grid edges.
@@ -58,6 +66,12 @@ integer(I4P), parameter :: OVERSET_PATCH_OPEN        = 3_I4P !< The faces do not
 integer(I4P), parameter :: OVERSET_PATCH_OVERLAP     = 4_I4P !< Two loops (or one with itself) cross or touch.
 integer(I4P), parameter :: OVERSET_PATCH_NESTING     = 5_I4P !< A loop's orientation does not match its nesting (or is
                                                              !< degenerate: fewer than 3 vertices, zero area).
+integer(I4P), parameter :: OVERLAP_WEIGHTS_OK         = 0_I4P !< Done (receptor: intersections computed).
+integer(I4P), parameter :: OVERLAP_WEIGHTS_BAD_INPUT  = 1_I4P !< Bad donor grid edges or a receptor cell out of range.
+integer(I4P), parameter :: OVERLAP_WEIGHTS_DEGENERATE = 2_I4P !< A receptor of zero or negative area, or folded.
+integer(I4P), parameter :: OVERLAP_WEIGHTS_OUTSIDE    = 3_I4P !< A receptor with no intersection of positive area (it
+                                                              !< lies outside the donor box).
+integer(I4P), parameter :: OVERLAP_WEIGHTS_OPEN       = 4_I4P !< A donor cell of the receptor's cut did not close.
 
 type :: overset_patch_2d_t
    !< The patched interface of a minor grid in a rectilinear major grid (see the module notes).
@@ -83,6 +97,30 @@ type :: overset_patch_2d_t
    integer(I4P), allocatable :: face_sf_start(:)    !< Smallest faces of face f: face_sf(start(f) .. start(f + 1) - 1),
    integer(I4P), allocatable :: face_sf(:)          !< in order along the face (minor region on the left) [nf + 1], [ns].
 endtype overset_patch_2d_t
+
+type :: overlap_weights_t
+   !< Intersection weights of receptor cells against the cells of a rectilinear donor grid (Picard et al. 2021; see the
+   !< notes of `overlap_weights_2d`). Volumes are areas in 2-D.
+   integer(I4P)              :: nr = 0_I4P            !< Receptors.
+   integer(I4P)              :: nw = 0_I4P            !< Receptor-donor intersections.
+   integer(I4P), allocatable :: start(:)              !< Donors of receptor r: start(r) .. start(r + 1) - 1 [nr + 1].
+   integer(I4P), allocatable :: donor(:,:)            !< Donor cell (i, j) of the donor grid [2, nw].
+   real(R8P),    allocatable :: volume(:)             !< |V_c n V_c'| [nw].
+   real(R8P),    allocatable :: weight(:)             !< volume / receptor_volume [nw].
+   real(R8P),    allocatable :: centroid(:,:)         !< Centroid of V_c n V_c' [2, nw].
+   real(R8P),    allocatable :: receptor_volume(:)    !< Sum of the receptor's volumes (compensated) [nr].
+   real(R8P),    allocatable :: covered(:)            !< receptor_volume / the receptor polygon's area: 1 exactly when
+                                                      !< the receptor lies in the closed donor box, below 1 otherwise [nr].
+   integer(I4P), allocatable :: flag(:)               !< OVERLAP_WEIGHTS_* per receptor [nr].
+endtype overlap_weights_t
+
+type :: receptor_buffer_t
+   !< The intersections of one receptor, before the scan (`overlap_weights_2d`).
+   integer(I4P)              :: n = 0_I4P     !< Donors.
+   integer(I4P), allocatable :: donor(:,:)    !< Donor cells [2, n].
+   real(R8P),    allocatable :: volume(:)     !< Intersection volumes [n].
+   real(R8P),    allocatable :: centroid(:,:) !< Intersection centroids [2, n].
+endtype receptor_buffer_t
 
 contains
    subroutine overset_patch_2d(blocks, minor, x, y, patch, boundary_name, faces, status)
@@ -450,4 +488,249 @@ contains
       enddo
    enddo
    endsubroutine faces_csr
+   subroutine overlap_weights_2d(block, cells, x, y, w, status)
+   !< The intersection weights (Picard et al. 2021) of the receptor cells `cells(:, r)` = (i, j) of a curvilinear block
+   !< against the cells of the rectilinear donor grid of cell edges x(nx+1), y(ny+1) (issue #106 step 2).
+   !<
+   !< Each receptor is the closed polygon of its 4 vertices (consecutive coincident vertices merged: a collapsed edge
+   !< gives a triangle), counter-clockwise by the block's handedness. It is cut against the donor sub-grid around its
+   !< bounding box as a clockwise hole in a solid box (`curve%cut_cells`, the "direct" variant of the step-0 report),
+   !< in coordinates shifted to the sub-grid's low corner: the cut cells sum Green's integrals about the origin, and the
+   !< shift keeps their relative error at round-off (1e-15) where unshifted it grows with |x| / h (1e-12 at 100). The
+   !< fluid of donor cell c' is then V_c n V_c'. Its area and centroid are the cut's cell totals (`alpha` x the shifted
+   !< cell area, `centroid` + the shift), never the per-piece arrays.
+   !<
+   !< The donor list is the exact cut's: every donor cell with a fluid piece, in (j, i) order of the donor grid. Under
+   !< the cut's symbolic perturbation (a point on a grid line belongs to the low side) a receptor side lying on an
+   !< interior grid line, or through a grid node, can leave a donor whose intersection has zero area: it is listed with
+   !< a volume of zero or round-off (a sliver whose Green sum comes out negative counts 0, so every weight lies in
+   !< [0, 1]). The sub-grid starts at the last edge <= the receptor's low bound and ends at the first edge >= its high
+   !< bound, so a side on the bounding box adds no such donor.
+   !<
+   !< `receptor_volume` is the compensated sum of the receptor's volumes, so its weights sum to 1 to round-off;
+   !< `covered` is 1 when the receptor lies in the closed donor box (decided exactly on its vertices), else
+   !< receptor_volume over the polygon's area (shoelace in the shifted coordinates), held below 1.
+   !<
+   !< Per receptor `flag`: OVERLAP_WEIGHTS_DEGENERATE (fewer than 3 distinct vertices, zero or negative area in the
+   !< block's handedness, sides crossing or folding back: `check_validity` with self-intersections, exact) and
+   !< OVERLAP_WEIGHTS_OUTSIDE (no intersection of positive volume) have no donors, receptor_volume and covered 0;
+   !< OVERLAP_WEIGHTS_OPEN (a donor cell did not close: not expected) has no donors either. `status` is
+   !< OVERLAP_WEIGHTS_BAD_INPUT (nothing computed) for donor edges that are not finite and strictly increasing (at least
+   !< one cell) or a receptor out of range, OVERLAP_WEIGHTS_DEGENERATE or OVERLAP_WEIGHTS_OPEN if a receptor has that
+   !< flag (the others computed), else OVERLAP_WEIGHTS_OK. Serial, CPU only.
+   type(curvilinear_block_2d_t), intent(in)            :: block      !< Receptor block.
+   integer(I4P),                 intent(in)            :: cells(:,:) !< Receptor cells (i, j) [2, nr].
+   real(R8P),                    intent(in)            :: x(:), y(:) !< Donor grid edges, strictly increasing.
+   type(overlap_weights_t),      intent(inout)         :: w          !< Weights (reset first).
+   integer(I4P),                 intent(out), optional :: status     !< OVERLAP_WEIGHTS_*.
+   type(overlap_weights_t)              :: fresh  !< Default.
+   type(receptor_buffer_t), allocatable :: buf(:) !< Per receptor intersections.
+   real(R8P)    :: orient                         !< Block handedness.
+   integer(I4P) :: st, nr, r, k, n                !< Work.
+
+   w = fresh
+   st = OVERLAP_WEIGHTS_OK
+   if (size(cells, 1) /= 2 .or. size(x) < 2 .or. size(y) < 2) then
+      st = OVERLAP_WEIGHTS_BAD_INPUT
+   elseif (.not. (all(abs(x) <= huge(1._R8P)) .and. all(abs(y) <= huge(1._R8P)))) then
+      st = OVERLAP_WEIGHTS_BAD_INPUT
+   elseif (any(x(2:) <= x(:size(x) - 1)) .or. any(y(2:) <= y(:size(y) - 1))) then
+      st = OVERLAP_WEIGHTS_BAD_INPUT
+   elseif (size(cells, 2) > 0) then
+      if (any(cells(1, :) < 1_I4P) .or. any(cells(1, :) > block%ni - 1_I4P) .or. any(cells(2, :) < 1_I4P) .or. &
+          any(cells(2, :) > block%nj - 1_I4P)) st = OVERLAP_WEIGHTS_BAD_INPUT
+   endif
+   if (st /= OVERLAP_WEIGHTS_OK) then
+      call put_status(st, status) ; return
+   endif
+   nr = size(cells, 2, kind=I4P) ; w%nr = nr
+   orient = 1._R8P ; if (nr > 0_I4P) orient = block%orientation()
+   allocate(buf(nr), w%start(nr + 1), w%receptor_volume(nr), w%covered(nr), w%flag(nr))
+   do r = 1, nr
+      call receptor_weights_2d(block, cells(1, r), cells(2, r), orient, x, y, buf(r), w%receptor_volume(r), &
+                               w%covered(r), w%flag(r))
+   enddo
+   ! the scan, then the fill
+   w%start(1) = 1_I4P
+   do r = 1, nr
+      w%start(r + 1) = w%start(r) + buf(r)%n
+   enddo
+   w%nw = w%start(nr + 1) - 1_I4P
+   allocate(w%donor(2, w%nw), w%volume(w%nw), w%weight(w%nw), w%centroid(2, w%nw))
+   do r = 1, nr
+      n = buf(r)%n ; k = w%start(r)
+      if (n == 0_I4P) cycle
+      w%donor(:, k:k + n - 1) = buf(r)%donor(:, 1:n)
+      w%volume(k:k + n - 1) = buf(r)%volume(1:n)
+      w%centroid(:, k:k + n - 1) = buf(r)%centroid(:, 1:n)
+      if (w%receptor_volume(r) > 0._R8P) then
+         w%weight(k:k + n - 1) = buf(r)%volume(1:n) / w%receptor_volume(r)
+      else
+         w%weight(k:k + n - 1) = 0._R8P
+      endif
+   enddo
+   if (nr > 0_I4P) then
+      if (any(w%flag == OVERLAP_WEIGHTS_DEGENERATE)) then
+         st = OVERLAP_WEIGHTS_DEGENERATE
+      elseif (any(w%flag == OVERLAP_WEIGHTS_OPEN)) then
+         st = OVERLAP_WEIGHTS_OPEN
+      endif
+   endif
+   call put_status(st, status)
+   endsubroutine overlap_weights_2d
+
+   subroutine receptor_weights_2d(block, i, j, orient, x, y, b, rvol, cov, flag)
+   !< The intersections of receptor cell (i, j) with the donor cells (see `overlap_weights_2d`).
+   type(curvilinear_block_2d_t), intent(in)    :: block      !< Receptor block.
+   integer(I4P),                 intent(in)    :: i, j       !< Receptor cell.
+   real(R8P),                    intent(in)    :: orient     !< Block handedness.
+   real(R8P),                    intent(in)    :: x(:), y(:) !< Donor grid edges.
+   type(receptor_buffer_t),      intent(inout) :: b          !< Intersections.
+   real(R8P),                    intent(out)   :: rvol       !< Receptor volume (sum of the intersections).
+   real(R8P),                    intent(out)   :: cov        !< Covered fraction.
+   integer(I4P),                 intent(out)   :: flag       !< OVERLAP_WEIGHTS_*.
+   type(curve_object)     :: c                   !< Solid box with the receptor as a hole.
+   type(cut_cells_2d_t)   :: cut                 !< Its cut of the sub-grid.
+   real(R8P), allocatable :: xs(:), ys(:)        !< Shifted sub-grid edges.
+   real(R8P)    :: p(2, 4), q(2, 4), qs(2, 4)    !< Vertices, distinct ones, shifted.
+   real(R8P)    :: lo(2), hi(2), o(2), blo(2), bhi(2), d, area, comp !< Bounds, shift, box, work.
+   integer(I4P) :: n, k, nx, ny, i0, i1, j0, j1, ii, jj, st, m !< Work.
+   logical      :: inbox                         !< The receptor lies in the closed donor box.
+
+   b%n = 0_I4P ; rvol = 0._R8P ; cov = 0._R8P ; flag = OVERLAP_WEIGHTS_OK
+   p(:, 1) = [block%u(i, j), block%v(i, j)]
+   p(:, 2) = [block%u(i + 1, j), block%v(i + 1, j)]
+   p(:, 3) = [block%u(i + 1, j + 1), block%v(i + 1, j + 1)]
+   p(:, 4) = [block%u(i, j + 1), block%v(i, j + 1)]
+   if (orient < 0._R8P) p = p(:, [1, 4, 3, 2])
+   n = 0_I4P ! consecutive coincident vertices merged (a collapsed edge)
+   do k = 1, 4
+      if (n > 0_I4P) then
+         if (all(p(:, k) == q(:, n))) cycle
+      endif
+      n = n + 1_I4P ; q(:, n) = p(:, k)
+   enddo
+   if (n > 1_I4P) then
+      if (all(q(:, n) == q(:, 1))) n = n - 1_I4P
+   endif
+   if (n < 3_I4P) then
+      flag = OVERLAP_WEIGHTS_DEGENERATE ; return
+   endif
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
+   lo = minval(q(:, 1:n), dim=2) ; hi = maxval(q(:, 1:n), dim=2)
+   inbox = lo(1) >= x(1) .and. hi(1) <= x(nx + 1) .and. lo(2) >= y(1) .and. hi(2) <= y(ny + 1)
+   i0 = edge_below(x, lo(1)) ; i1 = edge_above(x, hi(1))
+   j0 = edge_below(y, lo(2)) ; j1 = edge_above(y, hi(2))
+   ! the receptor, shifted to the sub-grid's low corner, as a clockwise hole in a solid box around it and the sub-grid
+   o = [x(i0), y(j0)]
+   do k = 1, n
+      qs(:, k) = q(:, k) - o
+   enddo
+   xs = x(i0:i1) - o(1) ; ys = y(j0:j1) - o(2)
+   blo = [min(lo(1) - o(1), xs(1)), min(lo(2) - o(2), ys(1))]
+   bhi = [max(hi(1) - o(1), xs(size(xs))), max(hi(2) - o(2), ys(size(ys)))]
+   d = maxval(bhi - blo) ; blo = blo - d ; bhi = bhi + d
+   call c%adopt_loops(u=[blo(1), bhi(1), bhi(1), blo(1), qs(1, n:1:-1)], &
+                      v=[blo(2), blo(2), bhi(2), bhi(2), qs(2, n:1:-1)], loop_sizes=[4_I4P, n], status=st)
+   if (st /= 0_I4P) then
+      flag = OVERLAP_WEIGHTS_DEGENERATE ; return
+   endif
+   if (c%check_validity(check_self_intersections=.true.) /= CURVE_VALID) then
+      flag = OVERLAP_WEIGHTS_DEGENERATE ; return
+   endif
+   if (i1 <= i0 .or. j1 <= j0) then
+      flag = OVERLAP_WEIGHTS_OUTSIDE ; return
+   endif
+   call c%cut_cells(xs, ys, cut, status=st, intervals=.false.)
+   if (st /= 0_I4P) then
+      flag = OVERLAP_WEIGHTS_OPEN ; return
+   endif
+   if (.not. all(cut%closed)) then
+      flag = OVERLAP_WEIGHTS_OPEN ; return
+   endif
+   m = count(cut%pieces > 0_I4P, kind=I4P)
+   allocate(b%donor(2, m), b%volume(m), b%centroid(2, m))
+   comp = 0._R8P
+   do jj = 1, cut%ny
+      do ii = 1, cut%nx
+         if (cut%pieces(ii, jj) <= 0_I4P) cycle
+         b%n = b%n + 1_I4P
+         b%donor(:, b%n) = [i0 + ii - 1_I4P, j0 + jj - 1_I4P]
+         b%volume(b%n) = max(0._R8P, cut%alpha(ii, jj) * ((xs(ii + 1) - xs(ii)) * (ys(jj + 1) - ys(jj))))
+         b%centroid(:, b%n) = cut%centroid(:, ii, jj) + o
+         call neumaier(rvol, comp, b%volume(b%n))
+      enddo
+   enddo
+   rvol = rvol + comp
+   if (.not. (rvol > 0._R8P)) then
+      rvol = 0._R8P ; flag = OVERLAP_WEIGHTS_OUTSIDE ; b%n = 0_I4P ; return
+   endif
+   if (inbox) then
+      cov = 1._R8P
+   else
+      area = 0._R8P
+      do k = 2, n - 1
+         area = area + ((qs(1, k) - qs(1, 1)) * (qs(2, k + 1) - qs(2, 1)) - (qs(1, k + 1) - qs(1, 1)) * (qs(2, k) - qs(2, 1)))
+      enddo
+      area = 0.5_R8P * area
+      cov = min(rvol / area, nearest(1._R8P, -1._R8P))
+   endif
+   endsubroutine receptor_weights_2d
+
+   pure integer(I4P) function edge_below(x, t) result(k)
+   !< The last edge x(k) <= t (1 if none).
+   real(R8P), intent(in) :: x(:) !< Edges, increasing.
+   real(R8P), intent(in) :: t    !< Value.
+   integer(I4P)          :: lo, hi, mid !< Bisection.
+
+   lo = 1_I4P ; hi = size(x, kind=I4P)
+   if (x(1) > t) then
+      k = 1_I4P ; return
+   endif
+   do while (lo < hi) ! invariant: x(lo) <= t
+      mid = (lo + hi + 1_I4P) / 2_I4P
+      if (x(mid) <= t) then
+         lo = mid
+      else
+         hi = mid - 1_I4P
+      endif
+   enddo
+   k = lo
+   endfunction edge_below
+
+   pure integer(I4P) function edge_above(x, t) result(k)
+   !< The first edge x(k) >= t (size(x) if none).
+   real(R8P), intent(in) :: x(:) !< Edges, increasing.
+   real(R8P), intent(in) :: t    !< Value.
+   integer(I4P)          :: lo, hi, mid !< Bisection.
+
+   lo = 1_I4P ; hi = size(x, kind=I4P)
+   if (x(hi) < t) then
+      k = hi ; return
+   endif
+   do while (lo < hi) ! invariant: x(hi) >= t
+      mid = (lo + hi) / 2_I4P
+      if (x(mid) >= t) then
+         hi = mid
+      else
+         lo = mid + 1_I4P
+      endif
+   enddo
+   k = hi
+   endfunction edge_above
+
+   pure subroutine neumaier(s, comp, a)
+   !< s += a with Neumaier's compensation (the sum is s + comp).
+   real(R8P), intent(inout) :: s, comp !< Sum, compensation.
+   real(R8P), intent(in)    :: a       !< Term.
+   real(R8P)                :: t       !< Work.
+
+   t = s + a
+   if (abs(s) >= abs(a)) then
+      comp = comp + ((s - t) + a)
+   else
+      comp = comp + ((a - t) + s)
+   endif
+   s = t
+   endsubroutine neumaier
 endmodule fossil_overset_patch
