@@ -1,0 +1,17 @@
+$ ref_overset_conservative
+A: status 0, minor faces 32, holes 500, cut cells 108
+   pieces 1100, smallest faces 139, degenerate 0
+   closure / h  3.3E-15, faces  1.4E-16, fluid area  23.51421939, vs box - polygon  1.7E-14
+   minor face 1 (cell (1, 12), +j): 3 smallest faces
+     major cell  34  21, length 0.15073, sf_area -0.15000 -0.01477
+     major cell  34  22, length 0.15073, sf_area -0.15000 -0.01477
+     major cell  34  23, length 0.09062, sf_area -0.09018 -0.00888
+B: status 0, receptors 32, intersections 214, all covered T
+   max |sum w - 1|  2.2E-16, linear field error  7.2E-15
+   receptor 1, cell (1, 12): donors 6, area  0.031838
+     donor cell  33  21, weight 0.19185, centroid  1.92942  0.07954
+     donor cell  34  21, weight 0.20077, centroid  1.97152  0.07067
+     donor cell  33  22, weight 0.26145, centroid  1.92209  0.22833
+     donor cell  34  22, weight 0.13116, centroid  1.96425  0.21837
+     donor cell  33  23, weight 0.16983, centroid  1.91760  0.34134
+     donor cell  34  23, weight 0.04493, centroid  1.95825  0.34047

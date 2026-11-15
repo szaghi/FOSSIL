@@ -1,0 +1,4 @@
+$ fig_ref_overset_weights
+status 0, receptors 16, intersections 277, max |area - independent clip|  3.1E-16
+receptor 3: donors 19, area  0.17938
+zero-area donors of that receptor: 1

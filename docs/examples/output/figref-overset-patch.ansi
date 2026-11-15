@@ -1,0 +1,3 @@
+$ fig_ref_overset_patch
+status 0, holes 500, cut cells 108, smallest faces 139
+square on grid lines: status 0, holes 25, pieces 119, degenerate 11, with merge_into 11

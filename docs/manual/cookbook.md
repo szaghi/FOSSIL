@@ -798,6 +798,24 @@ plain text. The header gives each block's field, hole, receptor and orphan count
 one receptor: receptor block and vertex (linear index, i fastest), donor block, donor cell corner (i, j, k), local
 coordinates ξ, stencil widths, a low-order flag and the donor quality. See [connectivity output](/guide/advanced/overset#connectivity-output).
 
+### Couple an overset grid conservatively
+
+<<< @/examples/snippets/ck_overset_patch.f90
+
+<<< @/examples/output/ck_overset_patch.ansi{ansi}
+
+![the cylinder O-grid over the Cartesian background, twice: on the left the patched interface, the background cells inside the O-grid's outer boundary as holes in teal, the cells it crosses shaded by their solid fraction, and the boundary split into smallest faces in gold; on the right the overlap kept, the background cells under the O-grid's outer ring of receptors shaded by the share of them the ring covers](../examples/images/ck-overset-patch.svg){.fossil-figure}
+
+Interpolation does not conserve across the overlap. Two kinds of geometry help, both on a rectilinear background.
+`overset_patch_2d` cuts the background by the O-grid's outer boundary (the faces named `overlap`): 500 holes, the
+cut cells, and 139 smallest faces. A solver exchanges fluxes through the smallest faces: F · `sf_area` leaves the
+background piece `sf_piece` and enters the O-grid cell `sf_minor`. That keeps the composite conservative (Wang 1995).
+`overlap_weights_2d` instead keeps the overlap and gives each receptor of the O-grid's outer ring its intersections
+with the background cells, as weights that sum to 1: a transfer by Picard et al.'s formula is second order and
+conserves the donor's mass per transfer, but it carries states, not fluxes, so the composite still drifts. The 3-D
+twins are `overset_patch_3d` and `overlap_weights_3d`. See
+[conservative interface](/guide/advanced/overset#conservative-interface).
+
 ### Put a block face on a body with sharp edges
 
 <<< @/examples/snippets/ck_project_face.f90

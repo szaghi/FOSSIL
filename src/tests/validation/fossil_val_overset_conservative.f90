@@ -1,6 +1,6 @@
-!< FOSSIL validation: a passive scalar through a conservative overset interface (issue #106 steps 1-2, solver gate).
+!< FOSSIL validation: a passive scalar through a conservative overset interface (issue #106 steps 1-4, solver gate).
 program fossil_val_overset_conservative
-!< FOSSIL validation: a passive scalar through a conservative overset interface (issue #106 steps 1-2, solver gate).
+!< FOSSIL validation: a passive scalar through a conservative overset interface (issue #106 steps 1-4, solver gate).
 !<
 !< A minor ring block (a cylinder O-grid, r in [1, 2]; or a square ring on grid lines, with degenerate pieces) in a
 !< Cartesian major grid on [-3, 3]^2. A scalar blob is advected by the potential flow around the cylinder (uniform flow
@@ -21,8 +21,20 @@ program fossil_val_overset_conservative
 !<    cells; the major receptors from the minor cells, by the same intersections read the other way). Gradients: central
 !<    differences on the major grid (one-sided next to a hole), Green-Gauss on the minor cells. It transfers states,
 !<    not fluxes: its composite mass (as I's) drifts too.
-!< The inner minor boundary is a wall (no flux). Exit status 0 if A conserves to 1e-12 relative and stays in [0, 1]
-!< (upwind within its CFL limit), and the defects of I and B exceed 1e-6.
+!< The inner minor boundary is a wall (no flux). Three measures (issue #106 step 4) separate what each number says:
+!< - the composite defect: max over the steps of |M + out - M0| / M0, M the composite mass (A: its groups and the minor
+!<   cells, an exact partition of the box; I and B: the major cells with centre at r >= 2, counted whole or not at all,
+!<   and every minor cell, a bookkeeping that miscounts the cells straddling r = 2);
+!< - I and B on the exact partition: the major cells weighted by their fluid fraction outside the minor polygon (the
+!<   cut of `overset_patch_2d`), the minor cells: the coupling alone, without the bookkeeping;
+!< - one transfer of a smooth field (`transfer_once`, no time step): the mass the transfer puts in the receptors against
+!<   the donor-side mass over the same region (the donor's linear reconstruction integrated over the intersections),
+!<   and against the exact integral: B conserves the donor's mass per transfer to round-off, I does not; both are
+!<   second order. B's composite defect is then its coupling (states overwritten, not fluxes exchanged), not its
+!<   weights.
+!< Exit status 0 if A conserves to 1e-12 relative and stays in [0, 1] (upwind within its CFL limit), the defects of I
+!< and B exceed 1e-6 on both masses, B's transfer conserves the donor's mass to 1e-14 and I's misses it by more than
+!< 1e-6, and both transfers are within 1e-2 of the exact integral.
 !<
 !< 3-D (issue #106 step 3): a sphere shell (r in [1, 2], poles collapsed) in a Cartesian [-3, 3]^3, the scalar advected
 !< by the potential flow past the unit sphere (inner face a wall), time step from the outflows at CFL 0.9:
@@ -61,6 +73,7 @@ type(curvilinear_block_t)    :: blk3(1)    !< 3-D minor block.
 type(curvilinear_block_2d_t) :: blk(1)     !< Minor block.
 real(R8P), allocatable       :: x(:), pu(:), pv(:) !< Major grid, square.
 real(R8P)                    :: da, db, di, mx, mn  !< Defects, extremes.
+real(R8P)                    :: dbp, dip, cb, ci, ab, ai !< Defects on the exact partition; one transfer (B, I).
 integer(I4P)                 :: m, k, n     !< Counters.
 logical                      :: ok          !< Checks.
 
@@ -69,13 +82,19 @@ do m = 1, 2
    call ogrid(m, blk(1))
    x = grid_1d(-3._R8P, 3._R8P, 60_I4P * m)
    call patched(blk, x, 1._R8P, 0.008_R8P / m, 400_I4P * m, da, mx, mn)
-   call chimera(blk(1), x, 1._R8P, 0.008_R8P / m, 400_I4P * m, .false., di)
-   call chimera(blk(1), x, 1._R8P, 0.008_R8P / m, 400_I4P * m, .true., db)
+   call chimera(blk(1), x, 1._R8P, 0.008_R8P / m, 400_I4P * m, .false., di, dip)
+   call chimera(blk(1), x, 1._R8P, 0.008_R8P / m, 400_I4P * m, .true., db, dbp)
+   call transfer_once(blk(1), x, cb, ci, ab, ai)
    print '(A,I0,A,I0,A,ES10.2,A,ES10.2,A,ES10.2,A,2ES10.2)', '  cylinder, m = ', m, ' (', 60 * m, &
          '^2): mass defect A (patched) ', da, ', B (Picard weights) ', db, ', I (interpolated) ', di, '; A min, max ', &
          mn, mx
+   print '(A,ES10.2,A,ES10.2,A)', '    on the exact partition (no bookkeeping): B ', dbp, ', I ', dip, &
+         ' (A: as above, its pieces and minor cells are the partition)'
+   print '(A,ES10.2,A,ES10.2,A,ES10.2,A,ES10.2)', '    one transfer of a smooth field: mass vs donor side B ', cb, &
+         ', I ', ci, '; vs exact integral B ', ab, ', I ', ai
    ok = ok .and. da <= 1e-12_R8P .and. di > 1e-6_R8P .and. db > 1e-6_R8P .and. mx <= 1._R8P + 1e-12_R8P .and. &
-        mn >= -1e-12_R8P
+        mn >= -1e-12_R8P .and. dip > 1e-6_R8P .and. dbp > 1e-6_R8P .and. cb <= 1e-14_R8P .and. ci > 1e-6_R8P .and. &
+        ab <= 1e-2_R8P .and. ai <= 1e-2_R8P
 enddo
 ! a square ring on grid lines: degenerate pieces along its sides, folded by merge_into
 x = grid_1d(-3._R8P, 3._R8P, 60_I4P)
@@ -263,24 +282,28 @@ contains
    enddo
    endfunction mass_a
 
-   subroutine chimera(blk, x, rc, dt, nsteps, picard, defect)
+   subroutine chimera(blk, x, rc, dt, nsteps, picard, defect, defect_p)
    !< I (interpolation) or B (Picard's weights, `picard`): the same overlapping assembly; defect as in A on the composite
-   !< mass.
+   !< mass (major cells with centre at r >= 2 and every minor cell: a bookkeeping that counts a cell straddling the
+   !< interface whole or not at all), defect_p on an exact partition of the box (each major cell weighted by its fluid
+   !< fraction outside the minor polygon, the cut of `overset_patch_2d`, and every minor cell): the coupling alone.
    type(curvilinear_block_2d_t), intent(in)  :: blk    !< Minor block.
    real(R8P),                    intent(in)  :: x(:)   !< Major grid edges (both directions).
    real(R8P),                    intent(in)  :: rc     !< Cylinder radius of the flow.
    real(R8P),                    intent(in)  :: dt     !< Time step.
    integer(I4P),                 intent(in)  :: nsteps !< Steps.
    logical,                      intent(in)  :: picard !< B: the intersection weights instead of the interpolation.
-   real(R8P),                    intent(out) :: defect !< Mass defect.
+   real(R8P),                    intent(out) :: defect !< Mass defect (composite bookkeeping).
+   real(R8P),                    intent(out) :: defect_p !< Mass defect (exact partition).
    type(overlap_weights_t)   :: ow                     !< Intersections of every minor cell with the major cells.
+   type(overset_patch_2d_t)  :: pt                     !< The cut of the major grid by the minor polygon (alpha).
    integer(I4P), allocatable :: tstart(:), tcell(:)    !< Major receptor -> its intersections in ow (CSR by cell).
    real(R8P),    allocatable :: gx(:,:,:), gm(:,:,:), xm(:,:,:) !< Major, minor gradients; minor centroids.
    type(curvilinear_block_2d_t) :: dual                !< Block of the minor cell centres.
    integer(I4P), allocatable :: kd(:,:), cell(:,:), lst(:), rcv(:,:) !< Major kinds, donor cells, status, receptors.
    real(R8P),    allocatable :: phi(:,:), r(:,:), pm(:,:), rm(:,:), vm(:,:), xi(:,:), qx(:), qy(:) !< Work.
-   real(R8P)    :: h, out, m0, mtot, f, fl, mid(2), nrm(2), c(2), rr, s(2), w(2), len !< Work.
-   integer(I4P) :: nx, ni, nj, i, j, k, step, nr, t, ib, i0, j0, nbad !< Work.
+   real(R8P)    :: h, out, m0, mtot, f, fl, mid(2), nrm(2), c(2), rr, len, m0p, mtp !< Work.
+   integer(I4P) :: nx, ni, nj, i, j, k, step, nr, t, ib, nbad, st !< Work.
 
    nx = size(x, kind=I4P) - 1 ; h = x(2) - x(1) ; ni = blk%ni ; nj = blk%nj
    allocate(kd(nx, nx), phi(nx, nx), r(nx, nx), pm(ni - 1, nj - 1), rm(ni - 1, nj - 1), vm(ni - 1, nj - 1))
@@ -331,26 +354,15 @@ contains
    if (any(lst == LOC_OUTSIDE)) error stop 'chimera: a major receptor outside the minor block'
    if (picard) call picard_setup(blk, x, kd, ow, tstart, tcell, xm)
    if (picard) allocate(gx(2, nx, nx), gm(2, ni - 1, nj - 1))
-   m0 = mass_b(x, phi, pm, vm) ; out = 0._R8P ; defect = 0._R8P
+   call overset_patch_2d([blk], [1_I4P], x, x, pt, status=st)
+   if (st /= OVERSET_PATCH_OK) error stop 'chimera: overset_patch_2d'
+   m0 = mass_b(x, phi, pm, vm) ; m0p = mass_p(x, pt%cut%alpha, phi, pm, vm) ; out = 0._R8P ; defect = 0._R8P
+   defect_p = 0._R8P
    do step = 1, nsteps
       if (picard) then
          call picard_transfer(blk, x, kd, ow, tstart, tcell, xm, gx, gm, phi, pm)
       else
-      ! interpolation: major receptors from the minor cell centres, the minor outer row from the major cell centres
-      do k = 1, nr
-         i0 = cell(1, k) ; j0 = cell(2, k)
-         phi(rcv(1, k), rcv(2, k)) = (1 - xi(1, k)) * (1 - xi(2, k)) * dual_value(pm, i0, j0) + &
-                                     xi(1, k) * (1 - xi(2, k)) * dual_value(pm, i0 + 1_I4P, j0) + &
-                                     xi(1, k) * xi(2, k) * dual_value(pm, i0 + 1_I4P, j0 + 1_I4P) + &
-                                     (1 - xi(1, k)) * xi(2, k) * dual_value(pm, i0, j0 + 1_I4P)
-      enddo
-      do i = 1, ni - 1
-         c = centre(blk, i, nj - 1_I4P)
-         s = (c - (x(1) + 0.5_R8P * h)) / h ; i0 = int(s(1)) + 1 ; j0 = int(s(2)) + 1 ; w = s - [i0 - 1, j0 - 1]
-         if (any(kd(i0:i0 + 1, j0:j0 + 1) /= 2)) error stop 'chimera: a minor receptor with a major non-field donor'
-         pm(i, nj - 1) = (1 - w(1)) * (1 - w(2)) * phi(i0, j0) + w(1) * (1 - w(2)) * phi(i0 + 1, j0) + &
-                         w(1) * w(2) * phi(i0 + 1, j0 + 1) + (1 - w(1)) * w(2) * phi(i0, j0 + 1)
-      enddo
+         call interp_transfer(blk, x, kd, rcv, cell, xi, phi, pm)
       endif
       ! major field cells: the faces with a field cell on one side at least
       r = 0._R8P
@@ -405,12 +417,12 @@ contains
       enddo
       where (kd == 2) phi = phi - dt * r / h ** 2
       pm(:, 1:nj - 2) = pm(:, 1:nj - 2) - dt * rm(:, 1:nj - 2) / vm(:, 1:nj - 2)
-      mtot = mass_b(x, phi, pm, vm)
-      defect = max(defect, abs(mtot + out - m0) / m0)
+      mtot = mass_b(x, phi, pm, vm) ; mtp = mass_p(x, pt%cut%alpha, phi, pm, vm)
+      defect = max(defect, abs(mtot + out - m0) / m0) ; defect_p = max(defect_p, abs(mtp + out - m0p) / m0p)
    enddo
-   print '(A,A,I0,A,I0,A,ES12.5,A,ES12.5,A,I0)', merge('    B', '    I', picard), ': major receptors ', nr, &
+   print '(A,A,I0,A,I0,A,ES12.5,A,ES12.5,A,I0,A,ES10.2)', merge('    B', '    I', picard), ': major receptors ', nr, &
          ', field cells next to holes ', nbad, '; mass ', mtot, ', left the box ', out, &
-         '; intersections ', merge(ow%nw, 0_I4P, picard)
+         '; intersections ', merge(ow%nw, 0_I4P, picard), '; defect on the exact partition ', defect_p
    if (nbad > 0) error stop 'chimera: fringe too thin'
    endsubroutine chimera
 
@@ -648,6 +660,196 @@ contains
       enddo
    enddo
    endfunction mass_b
+
+   subroutine interp_transfer(blk, x, kd, rcv, cell, xi, phi, pm)
+   !< I: the major receptors bilinear from the minor cell centres (located in the block of the cell centres), then the
+   !< minor outer row bilinear from the major cell centres.
+   type(curvilinear_block_2d_t), intent(in)    :: blk       !< Minor block.
+   real(R8P),                    intent(in)    :: x(:)      !< Major grid.
+   integer(I4P),                 intent(in)    :: kd(:,:)   !< Major kinds.
+   integer(I4P),                 intent(in)    :: rcv(:,:)  !< Major receptors [2, nr].
+   integer(I4P),                 intent(in)    :: cell(:,:) !< Their cells in the block of the minor cell centres.
+   real(R8P),                    intent(in)    :: xi(:,:)   !< Their local coordinates.
+   real(R8P),                    intent(inout) :: phi(:,:), pm(:,:) !< Major, minor values.
+   real(R8P)    :: h, c(2), s(2), w(2)                      !< Work.
+   integer(I4P) :: ni, nj, i, k, i0, j0                     !< Work.
+
+   h = x(2) - x(1) ; ni = blk%ni ; nj = blk%nj
+   do k = 1, size(rcv, 2, kind=I4P)
+      i0 = cell(1, k) ; j0 = cell(2, k)
+      phi(rcv(1, k), rcv(2, k)) = (1 - xi(1, k)) * (1 - xi(2, k)) * dual_value(pm, i0, j0) + &
+                                  xi(1, k) * (1 - xi(2, k)) * dual_value(pm, i0 + 1_I4P, j0) + &
+                                  xi(1, k) * xi(2, k) * dual_value(pm, i0 + 1_I4P, j0 + 1_I4P) + &
+                                  (1 - xi(1, k)) * xi(2, k) * dual_value(pm, i0, j0 + 1_I4P)
+   enddo
+   do i = 1, ni - 1
+      c = centre(blk, i, nj - 1_I4P)
+      s = (c - (x(1) + 0.5_R8P * h)) / h ; i0 = int(s(1)) + 1 ; j0 = int(s(2)) + 1 ; w = s - [i0 - 1, j0 - 1]
+      if (any(kd(i0:i0 + 1, j0:j0 + 1) /= 2)) error stop 'interp_transfer: a minor receptor with a major non-field donor'
+      pm(i, nj - 1) = (1 - w(1)) * (1 - w(2)) * phi(i0, j0) + w(1) * (1 - w(2)) * phi(i0 + 1, j0) + &
+                      w(1) * w(2) * phi(i0 + 1, j0 + 1) + (1 - w(1)) * w(2) * phi(i0, j0 + 1)
+   enddo
+   endsubroutine interp_transfer
+
+   subroutine transfer_once(blk, x, cons_b, cons_i, acc_b, acc_i)
+   !< One transfer of a smooth field (`smooth`) through the assembly of I and B, both directions (the major receptors
+   !< from the minor cells, then the minor outer row from the major cells), with no time step: the transfer alone, free
+   !< of the composite-mass bookkeeping. Major cells hold `smooth` at their centres, minor cells at their centroids.
+   !< cons: |M - D| / D summed over the two directions, M the mass the transfer puts in the receptors (sum of
+   !< |V_c| q_c), D the donor-side mass over the same region (sum over the intersections of |V_c n V_c'| times the
+   !< donor's linear reconstruction, the one B uses, integrated over V_c n V_c': exact at the intersection centroid).
+   !< B conserves it by construction (to round-off); I, which interpolates point values, does not.
+   !< acc: |M - E| / E, E the exact integral of `smooth` over the receptors (7-point degree-5 rule on triangles): the
+   !< accuracy of each transfer, second order for both.
+   type(curvilinear_block_2d_t), intent(in)  :: blk                    !< Minor block.
+   real(R8P),                    intent(in)  :: x(:)                   !< Major grid.
+   real(R8P),                    intent(out) :: cons_b, cons_i, acc_b, acc_i !< Measures.
+   type(overlap_weights_t)      :: ow                                  !< Intersections.
+   type(curvilinear_block_2d_t) :: dual                                !< Block of the minor cell centres.
+   integer(I4P), allocatable    :: tstart(:), tcell(:), kd(:,:), cell(:,:), lst(:), rcv(:,:) !< Work.
+   real(R8P),    allocatable    :: xm(:,:,:), gx(:,:,:), gm(:,:,:), phi(:,:), pm(:,:), phi0(:,:), pm0(:,:), vm(:,:)
+   real(R8P),    allocatable    :: xi(:,:), qx(:), qy(:)               !< Work.
+   real(R8P)    :: h, c(2), rr, d(2), mm(2), e(2), ar, xc(2)           !< Work.
+   integer(I4P) :: nx, ni, nj, i, j, k, l, r, a, b, nr, pass          !< Work.
+
+   nx = size(x, kind=I4P) - 1 ; h = x(2) - x(1) ; ni = blk%ni ; nj = blk%nj
+   allocate(kd(nx, nx), phi0(nx, nx), pm0(ni - 1, nj - 1), vm(ni - 1, nj - 1))
+   nr = 0
+   do j = 1, nx
+      do i = 1, nx
+         c = [0.5_R8P * (x(i) + x(i + 1)), 0.5_R8P * (x(j) + x(j + 1))] ; rr = norm2(c)
+         kd(i, j) = 2 ; if (rr < 1.6_R8P) kd(i, j) = 1 ; if (rr < 1.4_R8P) kd(i, j) = 0
+         if (kd(i, j) == 1) nr = nr + 1
+         phi0(i, j) = smooth(c)
+      enddo
+   enddo
+   call picard_setup(blk, x, kd, ow, tstart, tcell, xm)
+   do j = 1, nj - 1
+      do i = 1, ni - 1
+         vm(i, j) = abs(quad(blk, i, j)) ; pm0(i, j) = smooth(xm(:, i, j))
+      enddo
+   enddo
+   call cell_centre_block_2d(blk, dual)
+   call dual%build_search
+   allocate(qx(nr), qy(nr), rcv(2, nr)) ; k = 0
+   do j = 1, nx
+      do i = 1, nx
+         if (kd(i, j) /= 1) cycle
+         k = k + 1 ; rcv(:, k) = [i, j] ; qx(k) = 0.5_R8P * (x(i) + x(i + 1)) ; qy(k) = 0.5_R8P * (x(j) + x(j + 1))
+      enddo
+   enddo
+   call dual%locate_many(qx, qy, cell, xi, lst)
+   if (any(lst == LOC_OUTSIDE)) error stop 'transfer_once: a major receptor outside the minor block'
+   allocate(gx(2, nx, nx), gm(2, ni - 1, nj - 1))
+   ! the exact integrals over the receptors: the major receptors (squares), the minor outer row (polygons)
+   e = 0._R8P
+   do k = 1, nr
+      i = rcv(1, k) ; j = rcv(2, k)
+      e(1) = e(1) + tri_integral([x(i), x(j)], [x(i + 1), x(j)], [x(i + 1), x(j + 1)]) + &
+                    tri_integral([x(i), x(j)], [x(i + 1), x(j + 1)], [x(i), x(j + 1)])
+   enddo
+   b = nj - 1
+   do a = 1, ni - 1
+      e(2) = e(2) + tri_integral(vx2(blk, a, b), vx2(blk, a + 1_I4P, b), vx2(blk, a + 1_I4P, b + 1_I4P)) + &
+                    tri_integral(vx2(blk, a, b), vx2(blk, a + 1_I4P, b + 1_I4P), vx2(blk, a, b + 1_I4P))
+   enddo
+   do pass = 1, 2 ! 1: B, 2: I
+      phi = phi0 ; pm = pm0
+      ! D(1): the minor donors' mass over the major receptors, before the transfer
+      call minor_gradients(blk, xm, pm, gm)
+      d = 0._R8P
+      do k = 1, nr
+         l = rcv(1, k) + (rcv(2, k) - 1) * nx
+         do r = tstart(l), tstart(l + 1) - 1
+            call receptor_of(ow, tcell(r), a) ; i = mod(a - 1, ni - 1) + 1 ; j = (a - 1) / (ni - 1) + 1
+            d(1) = d(1) + ow%volume(tcell(r)) * (pm(i, j) + dot_product(gm(:, i, j), ow%centroid(:, tcell(r)) - &
+                                                                        xm(:, i, j)))
+         enddo
+      enddo
+      if (pass == 1) then
+         call picard_transfer(blk, x, kd, ow, tstart, tcell, xm, gx, gm, phi, pm)
+      else
+         call interp_transfer(blk, x, kd, rcv, cell, xi, phi, pm)
+      endif
+      ! D(2): the major donors' mass over the minor outer row, with the major values the transfer used
+      call major_gradients(x, kd, phi, gx)
+      mm = 0._R8P
+      do k = 1, nr
+         mm(1) = mm(1) + h * h * phi(rcv(1, k), rcv(2, k))
+      enddo
+      do a = 1, ni - 1
+         r = a + (b - 1) * (ni - 1)
+         mm(2) = mm(2) + vm(a, b) * pm(a, b)
+         do l = ow%start(r), ow%start(r + 1) - 1
+            i = ow%donor(1, l) ; j = ow%donor(2, l)
+            xc = [0.5_R8P * (x(i) + x(i + 1)), 0.5_R8P * (x(j) + x(j + 1))]
+            d(2) = d(2) + ow%volume(l) * (phi(i, j) + dot_product(gx(:, i, j), ow%centroid(:, l) - xc))
+         enddo
+      enddo
+      ar = (abs(mm(1) - d(1)) + abs(mm(2) - d(2))) / (d(1) + d(2))
+      if (pass == 1) then
+         cons_b = ar ; acc_b = (abs(mm(1) - e(1)) + abs(mm(2) - e(2))) / (e(1) + e(2))
+      else
+         cons_i = ar ; acc_i = (abs(mm(1) - e(1)) + abs(mm(2) - e(2))) / (e(1) + e(2))
+      endif
+   enddo
+   endsubroutine transfer_once
+
+   pure function vx2(blk, i, j) result(p)
+   !< Vertex (i, j) of a 2-D block.
+   type(curvilinear_block_2d_t), intent(in) :: blk  !< Block.
+   integer(I4P),                 intent(in) :: i, j !< Vertex.
+   real(R8P)                                :: p(2) !< Coordinates.
+
+   p = [blk%u(i, j), blk%v(i, j)]
+   endfunction vx2
+
+   pure real(R8P) function tri_integral(p1, p2, p3) result(s)
+   !< The integral of `smooth` over the triangle p1 p2 p3 (7-point rule of degree 5).
+   real(R8P), intent(in) :: p1(2), p2(2), p3(2) !< Vertices.
+   real(R8P), parameter :: A1 = (6._R8P - sqrt(15._R8P)) / 21._R8P, A2 = (6._R8P + sqrt(15._R8P)) / 21._R8P
+   real(R8P), parameter :: W0 = 9._R8P / 40._R8P, W1 = (155._R8P - sqrt(15._R8P)) / 1200._R8P, &
+                           W2 = (155._R8P + sqrt(15._R8P)) / 1200._R8P
+   real(R8P) :: ar !< Area.
+
+   ar = 0.5_R8P * abs((p2(1) - p1(1)) * (p3(2) - p1(2)) - (p2(2) - p1(2)) * (p3(1) - p1(1)))
+   s = W0 * smooth((p1 + p2 + p3) / 3._R8P) + &
+       W1 * (smooth(A1 * p1 + A1 * p2 + (1 - 2 * A1) * p3) + smooth(A1 * p1 + (1 - 2 * A1) * p2 + A1 * p3) + &
+             smooth((1 - 2 * A1) * p1 + A1 * p2 + A1 * p3)) + &
+       W2 * (smooth(A2 * p1 + A2 * p2 + (1 - 2 * A2) * p3) + smooth(A2 * p1 + (1 - 2 * A2) * p2 + A2 * p3) + &
+             smooth((1 - 2 * A2) * p1 + A2 * p2 + A2 * p3))
+   s = s * ar
+   endfunction tri_integral
+
+   pure real(R8P) function smooth(p)
+   !< A smooth positive field for the one-transfer measure.
+   real(R8P), intent(in) :: p(2) !< Point.
+
+   smooth = 1._R8P + 0.5_R8P * sin(1.7_R8P * p(1) + 0.3_R8P) * cos(1.3_R8P * p(2) - 0.2_R8P)
+   endfunction smooth
+
+   real(R8P) function mass_p(x, alpha, phi, pm, vm) result(tot)
+   !< Composite mass on the exact partition (Kahan): the major cells by their fluid fraction outside the minor polygon,
+   !< all minor cells.
+   real(R8P), intent(in) :: x(:)             !< Major grid.
+   real(R8P), intent(in) :: alpha(:,:)       !< Major fluid fractions.
+   real(R8P), intent(in) :: phi(:,:)         !< Major values.
+   real(R8P), intent(in) :: pm(:,:), vm(:,:) !< Minor values, volumes.
+   real(R8P)             :: comp             !< Compensation.
+   integer(I4P)          :: i, j             !< Counters.
+
+   tot = 0._R8P ; comp = 0._R8P
+   do j = 1, size(phi, 2, kind=I4P)
+      do i = 1, size(phi, 1, kind=I4P)
+         if (alpha(i, j) > 0._R8P) call kahan(tot, comp, alpha(i, j) * phi(i, j) * (x(i + 1) - x(i)) * (x(j + 1) - x(j)))
+      enddo
+   enddo
+   do j = 1, size(pm, 2, kind=I4P)
+      do i = 1, size(pm, 1, kind=I4P)
+         call kahan(tot, comp, pm(i, j) * vm(i, j))
+      enddo
+   enddo
+   endfunction mass_p
 
    pure real(R8P) function dual_value(pm, i, j) result(val)
    !< The value at vertex (i, j) of the block of the cell centres: cell (i - 1, j - 1) inside; on its boundary layer the

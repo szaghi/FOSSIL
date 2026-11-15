@@ -1,0 +1,4 @@
+$ ck_overset_patch
+status 0: holes 500, pieces 1100, smallest faces 139
+smallest face 1: piece 258 of cell 18  7 -> O-grid cell 23 12, sf_area  0.0116  0.0381
+status 0: receptors 32, intersections 214, max |sum w - 1|  2.2E-16
