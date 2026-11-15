@@ -4,6 +4,63 @@ All notable changes to this project are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.3.0] — 2026-11-15
+### Added
+- **swept**: An honest Gauss error estimate and an opt-in exact refinement
+
+- **swept**: The 2-D piece map on the device
+
+- **swept**: The 3-D piece map on the device, resident
+
+- **swept**: The 2-D exact rotation's local integration on the device
+
+- **overset**: The 2-D patched interface of a conservative overset assembly
+
+- **overset**: 2-D intersection weights of donor and receptor cells
+
+- **overset**: The 3-D patched interface and intersection weights
+
+
+### Changed
+- **cut**: Device-ready one-cell kernels for the piece map's evaluations
+
+- **swept**: The piece map's host phase as a flat plan with a pose table
+
+- **swept**: The piece map's evaluations as flat items
+
+- **swept**: The piece map's measures by rounds over flat items
+
+- **swept**: The piece map's assembly by count, scan and fill
+
+
+### Documentation
+- The #104 follow-ups, checked against the moving-boundary literature
+
+- The piece map on the device, and its stage in the device chain
+
+- The 2-D device piece map gains nothing, with the measured ratios
+
+- How the piece map is timed, and the re-measured map numbers
+
+- Mark the Mittal et al. sign claim as general knowledge
+
+- The 2-D exact rotation integrated cell by cell
+
+- The conservative overset interface
+
+- The clip order of the 3-D cut cells
+
+
+### Fixed
+- **swept**: Evaluate a state between two events closer than 1e-10 but distinct
+
+- **cut**: Clip a near-flat facet along its flat axis first
+
+
+### Performance
+- **swept**: The 2-D exact rotation by local integration, 36-286x faster
+
+
 ## [3.2.0] — 2026-11-13
 ### Added
 - **swept**: The piece map of a 2-D time step
