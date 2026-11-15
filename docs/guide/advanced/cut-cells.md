@@ -267,6 +267,13 @@ of the diamond.
     the section is cut by the 2-D machinery, so the two cells sharing a face
     see the same fraction.
   - Every triangle is clipped to every cell it overlaps, with the same rule.
+    The planes are cut x, then y, then z, except for a triangle nearly
+    parallel to a y or z grid plane (its normal within 10⁻³ of that axis):
+    it is cut along that axis first, on its own vertices, as the plane's
+    section reads it (issue #107). Cut later, its crossings would come from
+    points the earlier cuts had rounded, a few ulps above the plane would
+    round onto it, and the region would be counted in both cells: up to a
+    third of a cell, and 2.7·10⁻⁴ of a cell still for a slope of 1000 ulps.
   - Volume and first moments come from the divergence theorem over the
     clipped triangles and the solid face parts, in coordinates local to each
     cell.
@@ -422,7 +429,13 @@ within 7.98·10⁻¹⁷ of the plate's area in every frame.
 - **Constructed points.** The 3-D sections and the clipping decide on the
   rounded crossing points, consistently across kernels. A body passing
   exactly through grid lines at non-representable points can then give a
-  face that does not close; it is flagged, never silently wrong.
+  face that does not close; it is flagged. Before issue #107 a triangle a
+  few ulps from a y or z plane was silently wrong (above); it is now cut
+  along that plane first. What is left: a triangle with a slope just above
+  10⁻³ carries a relative cell error of about 10⁻¹³, and a steep triangle
+  sharing a near-flat edge can leave its cell untrusted (`pieces = -1`,
+  the totals right). Exact predicates on every constructed point would
+  remove both, at the cost of every output's bits.
 - **Watertight input.** Cells whose boundary does not close (open curves or
   surfaces) are flagged in `closed` and get no measures.
 - **On the device: the 2-D and 3-D cut cells, without links.** `curve%cut_cells_device`, `cut_cells_3d_device`,
