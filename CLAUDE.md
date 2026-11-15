@@ -153,11 +153,12 @@ with `FOSSIL_BENCH_TIMING=1`): without it they time the host twins against the C
 with them, 384 s without). The nightly `validation.yml` runs `-j $(nproc)` and uploads `exe-validation/*.log` as the
 artifact `validation-logs` when it fails.
 
-CI toolchain: `ci.yml` (tests, coverage), `docs-snippets.yml`, `validation.yml` and the build job of `docs.yml` run in
-the container `ghcr.io/szaghi/fortran-toolchains:gnu-16.2` (repo `~/fortran/fortran-toolchains`: gfortran 16.2 on the
-official `gcc` image, Open MPI 5.0.11, HDF5 2.3.0, FoBiS, formal, gcovr; nothing is installed per job), set by
-`[scaffold] toolchain_image` in `fobos`. Only `install.yml` (the install script, gfortran 14 by `setup-build-env`) and
-`release.yml` stay on the bare runner. The ubuntu-26.04 runners install amd64v3 packages: their gfortran emitted FMAs at
+CI toolchain: the scaffold workflows are thin callers of the reusable workflows of `szaghi/fortran-toolchains` pinned
+at `@v1` (repo `~/fortran/fortran-toolchains`), rendered from `[scaffold] toolchain = linux-gnu` in `fobos`: `ci.yml`
+(tests, coverage) and `docs.yml` run in its `gnu-16.2` image (gfortran 16.2 on the official `gcc` image, Open MPI
+5.0.11, HDF5 2.3.0, FoBiS, formal, gcovr; nothing is installed per job), as the project-owned `docs-snippets.yml` and
+`validation.yml`; `release.yml` publishes a tag's release, then `install.yml` installs it on a fresh runner (the
+linux-bare toolchain). The ubuntu-26.04 runners install amd64v3 packages: their gfortran emitted FMAs at
 -O2 and broke the bitwise device-twin checks of `fossil_val_device_chain` / `fossil_test_distance_bench` (run
 43194838880); the image's gfortran targets baseline x86-64 (no FMA), and `-ffp-contract=off` guards any other. Every `tests-*` mode excludes `src/tests/validation/`. `fobis clean` leaves stale executables of
 moved sources in `exe/`: delete them by hand, or `run_tests.sh` runs them.
