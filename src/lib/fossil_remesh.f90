@@ -28,7 +28,8 @@ module fossil_remesh
 
 use fossil_aabb_tree_object, only : aabb_tree_object
 use fossil_facet_object,     only : facet_object
-use fossil_feature_edges,    only : FEATURE_EDGE_DEFAULT_ANGLE, feature_cos, is_sharp_dihedral
+use fossil_feature_edges,    only : FEATURE_EDGE_DEFAULT_ANGLE, FEATURE_EDGE_NONMANIFOLD, feature_cos, find_feature_edges, &
+                                    is_sharp_dihedral
 use penf,                    only : I4P, R8P
 use vecfor,                  only : vector_R8P
 
@@ -54,6 +55,11 @@ real(R8P),    parameter :: FEATURE_DIHEDRAL_DEG = FEATURE_EDGE_DEFAULT_ANGLE !< 
 !< midpoints) farther than REMESH_ERROR_TOL * L from the input surface. 0.07 from a sweep over 0.03..0.3 (cube-01 at
 !< L = 1 keeps 95 % of its volume, a unit sphere at L = 0.4 still coarsens 7-fold); see isotropic-remesh.md.
 real(R8P), parameter, public :: REMESH_ERROR_TOL = 0.07_R8P
+!< Straight feature runs (issue #92 WP5 c): a run is straight when its vertices lie within STRAIGHT_TOL times its length
+!< of its chord; a crease vertex sliding along it may not leave a facet less than SLIVER_FRACTION of its area vector.
+real(R8P), parameter :: STRAIGHT_TOL    = 1.e-9_R8P
+real(R8P), parameter :: SLIVER_FRACTION = 0.1_R8P
+integer(I4P), parameter :: SPLIT_ROUNDS = 8_I4P !< Split rounds per iteration with preserve_features (issue #92 WP5 c).
 integer(I4P), parameter :: REM_STATUS_OK        = 0_I4P
 integer(I4P), parameter :: REM_STATUS_BAD_INPUT = 1_I4P  !< Empty input or vertex_id unset.
 
@@ -85,6 +91,11 @@ contains
    logical,      allocatable                                        :: facet_alive(:)
    logical,      allocatable                                        :: vertex_locked(:)
    logical,      allocatable                                        :: new_lock(:)
+   logical,      allocatable                                        :: slide(:)     !< Crease vertices (WP5 c).
+   real(R8P),    allocatable                                        :: chord(:, :)  !< Their run chords.
+   integer(I4P), allocatable                                        :: redges(:, :) !< Straight run edges.
+   integer(I4P)                                                     :: nre          !< Their count.
+   integer(I4P)                                                     :: k, ns        !< Split rounds, splits.
    integer(I4P), allocatable                                        :: f_p(:)   !< Patch per facet slot (issue #66).
    logical                                                          :: patched  !< More than one patch.
    real(R8P)                                                        :: L
@@ -136,8 +147,19 @@ contains
    ! Stage 3: outer loop. Steps 3-6 wire split + collapse + flip + relax;
    ! step 7 threads vertex_locked into collapse / flip / relax.
    do it = 1, iterations
-      call apply_split_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
-                            nv=nv, nf_alive=nf_alive, f_p=f_p)
+      if (preserve_features .and. present(reference_facet) .and. present(reference_tree)) then
+         ! every edge above 4L/3 split (issue #92 WP5 c): one split pass leaves the edges whose facets an earlier split
+         ! consumed, and in the same order every pass, so the faces along a crease stayed coarse and refused the crease
+         ! collapses; the rounds append after the last slot used (no capacity doubling per round)
+         do k = 1, SPLIT_ROUNDS
+            call apply_split_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
+                                  nv=nv, nf_alive=nf_alive, f_p=f_p, nsplit=ns)
+            if (ns == 0_I4P) exit
+         enddo
+      else
+         call apply_split_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
+                               nv=nv, nf_alive=nf_alive, f_p=f_p)
+      endif
       ! Grow vertex_locked to match the new nv. Midpoints inserted on a sharp
       ! edge lie on the crease too: re-detect the features on the split mesh
       ! and lock them, or the relax pass pulls them off the crease and chamfers
@@ -148,7 +170,15 @@ contains
                                 vertex_locked=new_lock, alive=facet_alive, f_p=f_p)
          vertex_locked = vertex_locked .or. new_lock(1:size(vertex_locked))
       endif
-      if (present(reference_facet) .and. present(reference_tree)) then
+      if (present(reference_facet) .and. present(reference_tree) .and. preserve_features) then
+         ! straight crease runs (issue #92 WP5 c): their edges collapse along the run, their vertices slide along it
+         call crease_runs(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, nv=nv, patched=patched, f_p=f_p, &
+                          slide=slide, chord=chord, redges=redges, nre=nre)
+         call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
+                                  nf_alive=nf_alive, vertex_locked=vertex_locked, &
+                                  reference_facet=reference_facet, reference_tree=reference_tree, &
+                                  slide=slide, redges=redges, nre=nre)
+      elseif (present(reference_facet) .and. present(reference_tree)) then
          call apply_collapse_pass(L=L, f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                                   nf_alive=nf_alive, vertex_locked=vertex_locked, &
                                   reference_facet=reference_facet, reference_tree=reference_tree)
@@ -162,6 +192,13 @@ contains
       else
          call apply_flip_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
                               vertex_locked=vertex_locked)
+      endif
+      if (present(reference_facet) .and. present(reference_tree) .and. preserve_features) then
+         call crease_runs(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, nv=nv, patched=patched, f_p=f_p, &
+                          slide=slide, chord=chord, redges=redges, nre=nre)
+         call apply_crease_relax(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, slide=slide, chord=chord, &
+                                 redges=redges, nre=nre, reference_facet=reference_facet, &
+                                 reference_tree=reference_tree, tolerance=REMESH_ERROR_TOL * L)
       endif
       if (present(reference_facet) .and. present(reference_tree)) then
          call apply_relax_pass(f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
@@ -600,7 +637,242 @@ contains
    call move_alloc(from=new_lock, to=vertex_locked)
    endsubroutine grow_lock
 
-   subroutine apply_split_pass(L, f_v, vcoord, facet_alive, nv, nf_alive, f_p)
+   ! ===========================================================================
+   ! Straight crease runs (issue #92 WP5 c)
+   ! ===========================================================================
+
+   subroutine crease_runs(f_v, vcoord, facet_alive, nv, patched, f_p, slide, chord, redges, nre)
+   !< The straight runs of the feature lines (issue #92 WP5 c): a run is a stretch of a feature polyline
+   !< (`find_feature_edges`: sharp, boundary and non-manifold edges) between fixed vertices (corners, the ends of a
+   !< non-manifold edge, the vertices on a patch boundary when `patched`); it is straight when its interior vertices
+   !< lie within STRAIGHT_TOL of its length from its chord, and has no non-manifold edge. The interior vertices of a
+   !< straight run may slide along it (`slide`, with the chord's ends in `chord`), and its edges (`redges`, sorted by
+   !< (low, high)) may be collapsed: the collapse and relax passes then move the crease vertices along their line only.
+   !< A curved feature line keeps its vertices (its input vertices carry the curve), as before.
+   integer(I4P),              intent(in)  :: f_v(:, :)       !< Facet vertices.
+   real(R8P),                 intent(in)  :: vcoord(:, :)    !< Vertex coordinates.
+   logical,                   intent(in)  :: facet_alive(:)  !< Live facets.
+   integer(I4P),              intent(in)  :: nv              !< Vertices used.
+   logical,                   intent(in)  :: patched         !< More than one patch.
+   integer(I4P),              intent(in)  :: f_p(:)          !< Patch per facet slot.
+   logical,      allocatable, intent(out) :: slide(:)        !< Vertex may slide along its run [nv].
+   real(R8P),    allocatable, intent(out) :: chord(:, :)     !< Run chord ends of a sliding vertex [6, nv].
+   integer(I4P), allocatable, intent(out) :: redges(:, :)    !< Edges of the straight runs [2, nre], sorted.
+   integer(I4P),              intent(out) :: nre             !< Run edges.
+   integer(I4P), allocatable :: live(:), lf_v(:, :), fe(:, :), fk(:), cor(:), ps(:), pv(:), poly(:), tmp(:), order(:)
+   integer(I4P), allocatable :: lo(:), hi(:)
+   logical,      allocatable :: fixed(:), plock(:)
+   integer(I4P)              :: nfe, ndeg, p, m, j, jf, a, q, i, c
+   real(R8P)                 :: len, dev
+
+   allocate(slide(nv), source=.false.)
+   allocate(chord(6, nv), source=0._R8P)
+   nre = 0_I4P
+   allocate(redges(2, 0))
+   live = pack([(i, i = 1, size(facet_alive))], facet_alive)
+   lf_v = f_v(:, live)
+   call find_feature_edges(f_v=lf_v, vcoord=vcoord(:, 1:nv), angle=FEATURE_DIHEDRAL_DEG, corner_angle=FEATURE_DIHEDRAL_DEG, &
+                           include_boundary=.true., include_nonmanifold=.true., edges=fe, kinds=fk, corners=cor, &
+                           polyline_start=ps, polyline_vertices=pv, degenerate=ndeg)
+   nfe = size(fk)
+   if (nfe == 0_I4P) return
+   allocate(fixed(nv), source=.false.)
+   fixed(cor) = .true.
+   do j = 1, nfe
+      if (fk(j) == FEATURE_EDGE_NONMANIFOLD) fixed(fe(:, j)) = .true.
+   enddo
+   if (patched) then
+      call build_vertex_lock(f_v=f_v, vcoord=vcoord, nv=nv, preserve_features=.false., vertex_locked=plock, &
+                             alive=facet_alive, f_p=f_p)
+      fixed = fixed .or. plock(1:nv)
+   endif
+   allocate(lo(nfe), hi(nfe))
+   do p = 1, size(ps) - 1
+      poly = pv(ps(p):ps(p + 1) - 1)
+      m = size(poly) - 1
+      if (m < 2_I4P) cycle ! a single edge has no interior vertex
+      if (poly(1) == poly(m + 1) .and. .not. fixed(poly(1))) then ! a loop starts at a fixed vertex, or is curved
+         c = 0
+         do j = 2, m
+            if (fixed(poly(j))) then
+               c = j ; exit
+            endif
+         enddo
+         if (c == 0) cycle
+         tmp = [poly(c:m + 1), poly(2:c)] ; call move_alloc(from=tmp, to=poly)
+      endif
+      a = 1
+      do jf = 2, m + 1
+         if (jf <= m) then
+            if (.not. fixed(poly(jf))) cycle
+         endif
+         q = jf - a
+         if (q >= 2_I4P .and. poly(a) /= poly(jf)) then
+            len = norm2(vcoord(:, poly(jf)) - vcoord(:, poly(a)))
+            dev = 0._R8P ; c = 0
+            do i = 1, q - 1
+               dev = max(dev, distance_to_segment(vcoord(:, poly(a + i)), vcoord(:, poly(a)), vcoord(:, poly(jf))))
+            enddo
+            do i = 1, q
+               j = edge_index(fe, nfe, poly(a + i - 1), poly(a + i))
+               if (j > 0_I4P) then
+                  if (fk(j) == FEATURE_EDGE_NONMANIFOLD) c = 1
+               endif
+            enddo
+            if (c == 0 .and. len > 0._R8P .and. dev <= STRAIGHT_TOL * len) then
+               do i = 1, q - 1
+                  slide(poly(a + i)) = .true.
+                  chord(1:3, poly(a + i)) = vcoord(:, poly(a)) ; chord(4:6, poly(a + i)) = vcoord(:, poly(jf))
+               enddo
+               do i = 1, q ! a run edge is a feature edge: at most nfe of them
+                  nre = nre + 1
+                  lo(nre) = min(poly(a + i - 1), poly(a + i)) ; hi(nre) = max(poly(a + i - 1), poly(a + i))
+               enddo
+            endif
+         endif
+         a = jf
+      enddo
+   enddo
+   if (nre == 0_I4P) return
+   allocate(order(nre))
+   do i = 1, nre
+      order(i) = i
+   enddo
+   call qsort_he(he_lo=lo, he_hi=hi, order=order, lo=1_I4P, hi=nre)
+   deallocate(redges) ; allocate(redges(2, nre))
+   redges(1, :) = lo(order) ; redges(2, :) = hi(order)
+   endsubroutine crease_runs
+
+   subroutine apply_crease_relax(f_v, vcoord, facet_alive, slide, chord, redges, nre, reference_facet, reference_tree, &
+                                 tolerance)
+   !< Tangential relaxation of the crease vertices along their straight run (issue #92 WP5 c): a sliding vertex with
+   !< its two run neighbours p, q moves to the point of its chord nearest to (p + q) / 2, kept between p and q (on an
+   !< axis-aligned run the fixed coordinates stay bit for bit). The move is refused if a facet around the vertex would
+   !< flip or keep less than SLIVER_FRACTION of its area vector (no new slivers), or if its fan would leave the input by
+   !< more than `tolerance` (the error bound of the other passes).
+   integer(I4P),           intent(in)    :: f_v(:, :)          !< Facet vertices.
+   real(R8P),              intent(inout) :: vcoord(:, :)       !< Vertex coordinates.
+   logical,                intent(in)    :: facet_alive(:)     !< Live facets.
+   logical,                intent(in)    :: slide(:)           !< Sliding vertices.
+   real(R8P),              intent(in)    :: chord(:, :)        !< Their chord ends.
+   integer(I4P),           intent(in)    :: redges(:, :)       !< Run edges.
+   integer(I4P),           intent(in)    :: nre                !< Run edges count.
+   type(facet_object),     intent(in)    :: reference_facet(:) !< Input surface.
+   type(aabb_tree_object), intent(in)    :: reference_tree     !< Its AABB tree.
+   real(R8P),              intent(in)    :: tolerance          !< Error bound.
+   integer(I4P), allocatable             :: v2f(:, :), v2f_count(:), nb(:, :), cnt(:)
+   integer(I4P)                          :: nv, v, e, k, i, f
+   real(R8P)                             :: a(3), u(3), t, tp, tq, target(3)
+   logical                               :: bad
+
+   nv = size(vcoord, dim=2)
+   allocate(nb(2, nv), source=0_I4P)
+   allocate(cnt(nv), source=0_I4P)
+   do e = 1, nre
+      do k = 1, 2
+         v = redges(k, e)
+         if (v > size(slide)) cycle
+         if (.not. slide(v)) cycle
+         cnt(v) = cnt(v) + 1
+         if (cnt(v) <= 2) nb(cnt(v), v) = redges(3 - k, e)
+      enddo
+   enddo
+   allocate(v2f_count(nv), source=0_I4P)
+   allocate(v2f(MAX_VAL, nv), source=0_I4P)
+   call build_v2f(f_v=f_v, facet_alive=facet_alive, v2f=v2f, v2f_count=v2f_count)
+   do v = 1, min(nv, size(slide))
+      if (.not. slide(v) .or. cnt(v) /= 2) cycle
+      if (v2f_count(v) == 0_I4P .or. v2f_count(v) >= MAX_VAL) cycle
+      a = chord(1:3, v) ; u = chord(4:6, v) - a
+      if (.not. (dot_product(u, u) > 0._R8P)) cycle
+      tp = dot_product(vcoord(:, nb(1, v)) - a, u) / dot_product(u, u)
+      tq = dot_product(vcoord(:, nb(2, v)) - a, u) / dot_product(u, u)
+      t = dot_product(0.5_R8P * (vcoord(:, nb(1, v)) + vcoord(:, nb(2, v))) - a, u) / dot_product(u, u)
+      t = max(min(tp, tq), min(max(tp, tq), t))
+      target = a + t * u
+      bad = .false.
+      do i = 1, v2f_count(v)
+         f = v2f(i, v)
+         if (.not. facet_alive(f)) cycle
+         if (facet_shrinks(f_v=f_v, vcoord=vcoord, f=f, va=v, vb=v, target=target, fraction=SLIVER_FRACTION)) then
+            bad = .true. ; exit
+         endif
+      enddo
+      if (bad) cycle
+      if (fan_off_reference(va=v, vb=v, f1=0_I4P, f2=0_I4P, target=target, f_v=f_v, vcoord=vcoord, &
+                            facet_alive=facet_alive, v2f=v2f, v2f_count=v2f_count, reference_facet=reference_facet, &
+                            reference_tree=reference_tree, tolerance=tolerance)) cycle
+      vcoord(:, v) = target
+   enddo
+   endsubroutine apply_crease_relax
+
+   pure function facet_shrinks(f_v, vcoord, f, va, vb, target, fraction) result(yes)
+   !< Whether moving the vertices va and vb of facet f to `target` flips it or leaves it less than `fraction` of its
+   !< area vector (projected on the old one): the sliver test of the crease moves and of the collapses with
+   !< preserve_features (issue #92 WP5 c; `facet_would_flip` alone lets a facet fold flat).
+   integer(I4P), intent(in) :: f_v(:, :), f, va, vb !< Facets, facet, moved vertices.
+   real(R8P),    intent(in) :: vcoord(:, :)         !< Vertex coordinates.
+   real(R8P),    intent(in) :: target(3)            !< New position.
+   real(R8P),    intent(in) :: fraction             !< Smallest fraction kept.
+   logical                  :: yes                  !< Refused.
+   real(R8P)                :: p(3, 3), n_old(3), n_new(3)
+   integer(I4P)             :: j
+
+   p = vcoord(:, f_v(:, f))
+   n_old = cross(p(:, 2) - p(:, 1), p(:, 3) - p(:, 1))
+   do j = 1, 3
+      if (f_v(j, f) == va .or. f_v(j, f) == vb) p(:, j) = target
+   enddo
+   n_new = cross(p(:, 2) - p(:, 1), p(:, 3) - p(:, 1))
+   yes = dot_product(n_old, n_new) < fraction * dot_product(n_old, n_old)
+   endfunction facet_shrinks
+
+   pure function high_water(f_v) result(used)
+   !< The last facet slot ever used (dead or alive): the slots beyond it are empty capacity (f_v = 0).
+   integer(I4P), intent(in) :: f_v(:, :) !< Facet vertices.
+   integer(I4P)             :: used      !< High-water mark.
+
+   do used = size(f_v, 2), 1, -1
+      if (f_v(1, used) /= 0_I4P) return
+   enddo
+   used = 0_I4P
+   endfunction high_water
+
+   pure function distance_to_segment(p, a, b) result(d)
+   !< Distance from p to the segment [a, b].
+   real(R8P), intent(in) :: p(3), a(3), b(3) !< Point, segment ends.
+   real(R8P)             :: d                !< Distance.
+   real(R8P)             :: u(3), t          !< Direction, parameter.
+
+   u = b - a
+   t = 0._R8P
+   if (dot_product(u, u) > 0._R8P) t = max(0._R8P, min(1._R8P, dot_product(p - a, u) / dot_product(u, u)))
+   d = norm2(p - a - t * u)
+   endfunction distance_to_segment
+
+   pure function edge_index(e, ne, va, vb) result(j)
+   !< Index of the edge (min(va, vb), max(va, vb)) in the list e(2, ne) sorted by (low, high), 0 if absent.
+   integer(I4P), intent(in) :: e(:, :) !< Edges [2, ne], sorted.
+   integer(I4P), intent(in) :: ne      !< Edges used.
+   integer(I4P), intent(in) :: va, vb  !< End vertices.
+   integer(I4P)             :: j       !< Index.
+   integer(I4P)             :: lo, hi, l, r, md
+
+   lo = min(va, vb) ; hi = max(va, vb)
+   j = 0_I4P ; l = 1_I4P ; r = ne
+   do while (l <= r)
+      md = (l + r) / 2
+      if (e(1, md) == lo .and. e(2, md) == hi) then
+         j = md ; return
+      elseif (e(1, md) < lo .or. (e(1, md) == lo .and. e(2, md) < hi)) then
+         l = md + 1
+      else
+         r = md - 1
+      endif
+   enddo
+   endfunction edge_index
+
+   subroutine apply_split_pass(L, f_v, vcoord, facet_alive, nv, nf_alive, f_p, nsplit)
    !< Walk every alive facet's edges; for each edge longer than 4*L/3, split
    !< by inserting a midpoint vertex and replacing the (up to 2) incident
    !< facets with sub-facets.
@@ -622,6 +894,8 @@ contains
    integer(I4P),              intent(inout) :: nv
    integer(I4P),              intent(inout) :: nf_alive
    integer(I4P), allocatable, intent(inout), optional :: f_p(:) !< Patch per facet slot (issue #66).
+   integer(I4P),              intent(out),   optional :: nsplit       !< Splits made; when present, the new facets go
+                                                                      !< after the last slot used, not the capacity.
    integer(I4P), allocatable                :: e_v(:, :), e_facets(:, :)
    integer(I4P)                             :: ne, e, va, vb, f1, f2, w1, w2, vm, used
    real(R8P)                                :: thr, dx, dy, dz, len_e
@@ -632,6 +906,10 @@ contains
    ! starts at `size(facet_alive)` (= the input facet count) and grows as
    ! splits append new facets.
    used = size(facet_alive)
+   if (present(nsplit)) then
+      nsplit = 0_I4P
+      used = high_water(f_v)
+   endif
 
    call build_edges_with_facets(f_v=f_v, facet_alive=facet_alive, &
                                  e_v=e_v, e_facets=e_facets, ne=ne)
@@ -650,6 +928,7 @@ contains
       dz = vcoord(3, va) - vcoord(3, vb)
       len_e = sqrt(dx*dx + dy*dy + dz*dz)
       if (len_e <= thr) cycle
+      if (present(nsplit)) nsplit = nsplit + 1_I4P
       call append_vertex(vcoord=vcoord, nv=nv, &
                          x=0.5_R8P * (vcoord(1, va) + vcoord(1, vb)), &
                          y=0.5_R8P * (vcoord(2, va) + vcoord(2, vb)), &
@@ -672,7 +951,8 @@ contains
    ! Step 4: collapse pass
    ! ===========================================================================
 
-   subroutine apply_collapse_pass(L, f_v, vcoord, facet_alive, nf_alive, vertex_locked, reference_facet, reference_tree)
+   subroutine apply_collapse_pass(L, f_v, vcoord, facet_alive, nf_alive, vertex_locked, reference_facet, reference_tree, &
+                                  slide, redges, nre)
    !< Walk every alive edge; for each edge shorter than 4*L/5, attempt the
    !< collapse with normal-flip / duplicate-vertex / non-manifold safety
    !< checks. Vertex `va` (lower id) is kept and moved to the collapse
@@ -683,6 +963,11 @@ contains
    !< kept and the target is its position (so the feature stays put, and the
    !< lock stays with the vertex that carries it).
    !< Otherwise, target is the edge midpoint.
+   !<
+   !< With `slide`/`redges` (straight crease runs, issue #92 WP5 c), an edge of a straight run whose ends are both
+   !< locked collapses too when one end may slide: onto the fixed end, or to the midpoint of two sliding ends (on the
+   !< run's line), with every check below, and no facet of the new fan may keep less than SLIVER_FRACTION of its area
+   !< vector (`facet_would_flip` alone let facets fold flat between three crease vertices).
    !<
    !< With the reference surface, a collapse whose new fan leaves it by more
    !< than REMESH_ERROR_TOL * L is refused (issue #91).
@@ -698,15 +983,21 @@ contains
    logical,                   intent(in)    :: vertex_locked(:)
    type(facet_object),        intent(in), optional :: reference_facet(:) !< Input surface (error bound, issue #91).
    type(aabb_tree_object),    intent(in), optional :: reference_tree     !< Its AABB tree.
+   logical,                   intent(in), optional :: slide(:)           !< Crease vertices sliding along a run.
+   integer(I4P),              intent(in), optional :: redges(:, :)       !< Straight run edges, sorted.
+   integer(I4P),              intent(in), optional :: nre                !< Their count.
    integer(I4P), allocatable                :: e_v(:, :), e_facets(:, :)
    integer(I4P), allocatable                :: v2f_count(:), v2f(:, :)
+   integer(I4P)                             :: kr, k2
+   real(R8P), allocatable                   :: min_fraction !< Sliver bound, with preserve_features only (WP5 c).
    integer(I4P)                             :: ne, e, va, vb, f1, f2, nv
    real(R8P)                                :: thr, dx, dy, dz, len_e
    real(R8P)                                :: target(3)
-   logical                                  :: lock_va, lock_vb, collapsed
+   logical                                  :: lock_va, lock_vb, collapsed, slide_va, slide_vb
    logical,      allocatable                :: on_boundary(:), touched(:)
 
    thr = (4._R8P / 5._R8P) * L
+   if (present(slide)) min_fraction = SLIVER_FRACTION ! an unallocated allocatable is an absent optional actual
 
    nv = size(vcoord, dim=2)
    allocate(v2f_count(nv), source=0_I4P)
@@ -734,12 +1025,27 @@ contains
       dz = vcoord(3, va) - vcoord(3, vb)
       len_e = sqrt(dx*dx + dy*dy + dz*dz)
       if (len_e >= thr) cycle
+      kr = 0_I4P ; if (present(redges)) kr = edge_index(redges, nre, va, vb)
       ! Lock-aware target choice.
       lock_va = (va <= size(vertex_locked))
       if (lock_va) lock_va = vertex_locked(va)
       lock_vb = (vb <= size(vertex_locked))
       if (lock_vb) lock_vb = vertex_locked(vb)
-      if (lock_va .and. lock_vb) cycle  ! can't merge two distinct features
+      slide_va = .false. ; slide_vb = .false.
+      if (lock_va .and. lock_vb .and. present(slide)) then ! along a straight crease run (issue #92 WP5 c)
+         if (kr > 0_I4P) then
+            if (va <= size(slide)) slide_va = slide(va)
+            if (vb <= size(slide)) slide_vb = slide(vb)
+         endif
+      endif
+      if (lock_va .and. lock_vb .and. .not. (slide_va .or. slide_vb)) cycle  ! can't merge two distinct features
+      if (slide_va .and. slide_vb) then ! two crease vertices: the midpoint, on the run's line
+         lock_va = .false. ; lock_vb = .false.
+      elseif (slide_va) then            ! keep the fixed end
+         lock_va = .false.
+      elseif (slide_vb) then
+         lock_vb = .false.
+      endif
       if (lock_vb) then                 ! keep the locked endpoint
          va = e_v(2, e) ; vb = e_v(1, e)
          lock_va = .true.
@@ -756,7 +1062,21 @@ contains
                               v2f=v2f, v2f_count=v2f_count, nf_alive=nf_alive, &
                               on_boundary=on_boundary, high=(4._R8P / 3._R8P) * L, collapsed=collapsed, &
                               reference_facet=reference_facet, reference_tree=reference_tree, &
-                              tolerance=REMESH_ERROR_TOL * L)
+                              tolerance=REMESH_ERROR_TOL * L, min_fraction=min_fraction)
+      if (.not. collapsed .and. slide_va .and. slide_vb) then ! two crease vertices: either end, if not the midpoint
+         do k2 = 1, 2
+            if (k2 == 2) then
+               va = e_v(2, e) ; vb = e_v(1, e)
+            endif
+            call try_collapse_edge(va=va, vb=vb, f1=f1, f2=f2, target=vcoord(:, va), &
+                                   f_v=f_v, vcoord=vcoord, facet_alive=facet_alive, &
+                                   v2f=v2f, v2f_count=v2f_count, nf_alive=nf_alive, &
+                                   on_boundary=on_boundary, high=(4._R8P / 3._R8P) * L, collapsed=collapsed, &
+                                   reference_facet=reference_facet, reference_tree=reference_tree, &
+                                   tolerance=REMESH_ERROR_TOL * L, min_fraction=min_fraction)
+            if (collapsed) exit
+         enddo
+      endif
       if (collapsed) then
          touched(va) = .true. ; touched(vb) = .true.
       endif
@@ -794,7 +1114,7 @@ contains
 
    subroutine try_collapse_edge(va, vb, f1, f2, target, &
                                  f_v, vcoord, facet_alive, v2f, v2f_count, nf_alive, on_boundary, high, &
-                                 collapsed, reference_facet, reference_tree, tolerance)
+                                 collapsed, reference_facet, reference_tree, tolerance, min_fraction)
    !< Attempt to collapse edge (va, vb) to position `target`. Runs the
    !< topological checks (the edge has exactly its facets f1, f2; not an
    !< interior edge between two boundary vertices; not a tetrahedron; the
@@ -820,6 +1140,8 @@ contains
    type(facet_object),     intent(in), optional :: reference_facet(:) !< Input surface (error bound, issue #91).
    type(aabb_tree_object), intent(in), optional :: reference_tree     !< Its AABB tree.
    real(R8P),              intent(in), optional :: tolerance          !< Largest distance of the new fan from the input.
+   real(R8P),              intent(in), optional :: min_fraction       !< A facet of the new fan must keep this fraction
+                                                                      !< of its area vector (no slivers, WP5 c).
    integer(I4P)                        :: i, f, j, k, w, w1, w2, na, nb
    logical                             :: would_flip, would_dup, would_nonmanifold
 
@@ -877,6 +1199,11 @@ contains
       if (facet_would_flip(f_v=f_v, vcoord=vcoord, f=f, va=va, vb=vb, target=target)) then
          would_flip = .true. ; exit
       endif
+      if (present(min_fraction)) then
+         if (facet_shrinks(f_v=f_v, vcoord=vcoord, f=f, va=va, vb=vb, target=target, fraction=min_fraction)) then
+            would_flip = .true. ; exit
+         endif
+      endif
    enddo
    if (would_flip) return
    do i = 1, v2f_count(va)
@@ -887,6 +1214,11 @@ contains
       if (any(f_v(:, f) == vb)) cycle
       if (facet_would_flip(f_v=f_v, vcoord=vcoord, f=f, va=va, vb=vb, target=target)) then
          would_flip = .true. ; exit
+      endif
+      if (present(min_fraction)) then
+         if (facet_shrinks(f_v=f_v, vcoord=vcoord, f=f, va=va, vb=vb, target=target, fraction=min_fraction)) then
+            would_flip = .true. ; exit
+         endif
       endif
    enddo
    if (would_flip) return

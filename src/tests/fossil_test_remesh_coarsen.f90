@@ -3,8 +3,9 @@
 !< Before #79 the collapse pass rejected almost every collapse: its 1-ring check counted the two apexes of the edge's
 !< own facets, which neighbour both endpoints on every closed mesh, so a larger target length never reduced the facet
 !< count. The check is now the link condition (the endpoints share no neighbour but the two apexes).
-!< 1. cube-01 at L = 1, features on: the edges and corners are locked, the 6 face centres collapse onto them (36
-!<    facets, 48 before #79), area and volume stay 6 and 1.
+!< 1. cube-01 at L = 1, features on: the corners are locked, the 6 face centres collapse onto the edges (36 facets, 48
+!<    before #79), area and volume stay 6 and 1. Since issue #92 WP5 c the cube edges are straight crease runs whose
+!<    edges collapse along them: their midpoints (edges 0.5 < 4L/5) collapse onto the corners too (20 facets).
 !< 2. The dragon at L = 1.5, 3 iterations: far fewer than its 6588 facets (2280 since the error bound of issue #91, 1398
 !<    before), no new boundary or non-manifold edge.
 !< 3. A marching-cubes sphere (25^3, as on isotropic-remesh.md) at L = 0.1, one iteration per call: the number of edges
@@ -42,7 +43,7 @@ call s%load_from_file(file_name='src/tests/cube-01.stl', guess_format=.true.)
 call s%isotropic_remesh(target_length=1._R8P, iterations=3_I4P, preserve_features=.true., status=status)
 print '(A,I0,A,F12.9,A,F12.9,A,L1)', '1. cube L=1, features on: facets ', s%get_facets_number(), ', area ', s%get_area(), &
       ', volume ', s%get_volume(), ', watertight ', s%is_watertight()
-ok(1) = status == REM_STATUS_OK .and. s%get_facets_number() == 36_I4P .and. s%is_watertight() .and. s%is_manifold() .and. &
+ok(1) = status == REM_STATUS_OK .and. s%get_facets_number() == 20_I4P .and. s%is_watertight() .and. s%is_manifold() .and. &
         abs(s%get_area() - 6._R8P) < 1.e-12_R8P .and. abs(s%get_volume() - 1._R8P) < 1.e-12_R8P
 
 ! 2. dragon at L = 1.5
