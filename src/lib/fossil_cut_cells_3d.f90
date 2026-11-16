@@ -100,6 +100,8 @@ public :: cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_cells_3d_sectio
 public :: cut_walls_3d_t
 ! the device stages (issue #100 step 3c), public for the benches and the twin test (not re-exported by `fossil`)
 public :: cut_cells_3d_nodes_device
+! the node states alone on the host (the twin of `cut_cells_3d_nodes_device`), for the ghost points (#109 WP1 step 03)
+public :: cut_cells_3d_nodes
 ! the inputs of the piece links (issue #100 step 5), for the link stage and the benches (not re-exported by `fossil`)
 public :: cut_link_inputs_3d_t, cut_cells_3d_link_inputs_device, cut_cells_3d_link_inputs, link_inputs_reset
 ! the piece links on the device (issue #100 step 5), the stage of `cut_cells_3d_device(..., links=)`, for the benches
@@ -4010,6 +4012,33 @@ contains
    call self%sec_x%exit_device ; call self%sec_y%exit_device ; call self%sec_z%exit_device
    self%on_device = .false.
    endsubroutine link_inputs_exit_device
+
+   subroutine cut_cells_3d_nodes(surface, x, y, z, node_in, status)
+   !< The grid-node states of `cut_cells_3d` alone, on the host (#109 WP1 step 03, the ghost points): `node_in`
+   !< [nx+1, ny+1, nz+1], the exact perturbed parities of the z lines (`edge_fractions` without the edges), bit for bit
+   !< `cut_cells_3d`'s `cut%node_in` and `cut_cells_3d_nodes_device`'s. Any tree kind. `status = STATUS_INVALID_INPUT`
+   !< on bad edges (fewer than two per axis, or not strictly increasing; node_in then unallocated).
+   type(surface_stl_object), intent(in)            :: surface          !< Surface.
+   real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Grid nodes (strictly increasing).
+   logical,      allocatable, intent(out)          :: node_in(:,:,:)   !< Node inside flags [nx+1, ny+1, nz+1].
+   integer(I4P),             intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(cut_cells_3d_t) :: cut        !< Work: the node states (edge_fractions fills cut%node_in).
+   integer(I4P)         :: nx, ny, nz !< Cells.
+
+   if (present(status)) status = STATUS_OK
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   if (nx < 1 .or. ny < 1 .or. nz < 1) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (any(x(2:) <= x(:nx)) .or. any(y(2:) <= y(:ny)) .or. any(z(2:) <= z(:nz))) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   cut%nx = nx ; cut%ny = ny ; cut%nz = nz
+   call edge_fractions(surface, x, y, z, cut, .false.)
+   call move_alloc(cut%node_in, node_in)
+   endsubroutine cut_cells_3d_nodes
 
    subroutine cut_cells_3d_nodes_device(surface, x, y, z, node_in, edge_x, edge_y, edge_z, edges, status)
    !< The grid-node states and, with `edges`, the cell-edge fluid fractions of `cut_cells_3d` on the device (issue #100

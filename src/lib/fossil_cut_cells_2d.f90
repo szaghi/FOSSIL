@@ -42,6 +42,8 @@ public :: cut_cells_2d_blocks_t, compute_cut_cells_2d_blocks_device, compute_cut
 ! the stages of the two paths, public for the twin test (issue #100 step 6a; not re-exported by `fossil`)
 public :: node_flags, cut_cells_2d_prepare, cut_cells_2d_classify, cut_cells_2d_scan, cut_cells_2d_classify_dev, &
           cut_cells_2d_scan_dev
+! the node-flag stages (rows on the host, the per-node kernel), shared with the ghost points (#109 WP1 step 03)
+public :: node_rows, node_parity
 ! the device chunk scan, shared with the 3-D device path (issue #100 step 3c)
 public :: chunk_offsets_dev
 ! one cell with its pieces' boundary features, for the piece map of a time step (issue #102)

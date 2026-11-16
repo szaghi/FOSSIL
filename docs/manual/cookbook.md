@@ -467,6 +467,22 @@ An image line samples several points along the normal of each ghost point: `leng
 lines cross the island. This page is built without OpenACC, so the device routines run on the host here. See
 [IB queries](/guide/advanced/ib-queries#image-lines-and-probes-on-the-device).
 
+### Find the ghost points of a finite-difference stencil
+
+<<< @/examples/snippets/ck_ghost_points.f90
+
+<<< @/examples/output/ck_ghost_points.ansi{ansi}
+
+![the ellipse over its 20 x 20 cell centres of spacing 0.05: the ghost points of a stencil of half-width 2, the first layer next to the wall in teal, the second in gold, the other solid points in stone](../examples/images/ck-ghost-points.svg){.fossil-figure}
+
+`ghost_points_2d` takes the solver's own points (here the cell centres) and the stencil half-width per axis, and
+returns the solid points with a fluid point within that many steps along a grid line: 56 for the ellipse, in two
+layers. Each ghost carries its indexes, its coordinates, a mask of the directions that see the fluid and the steps to
+it (the first ghost has the fluid one step away in -u and in -v). `ghost_points_3d` is the 3-D twin; with
+`device=.true.` it runs on the device, with the same result. The inside test is the cut cells' exact one, so on the
+unit cube a point on the faces x = 0 is solid and on x = 1 fluid: the 56 ghosts span x = 0 to 0.75. See
+[finite-difference wall closure](/guide/advanced/fd-closure#definitions).
+
 ### Place Lagrangian markers for an IB method
 
 <<< @/examples/snippets/ck_markers.f90

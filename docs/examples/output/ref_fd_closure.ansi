@@ -1,0 +1,8 @@
+$ ref_fd_closure
+cell centres 1280, ghost points 304, reach 3
+  seeing fluid below (-v) 174, above (+v) 174
+  layers 1, 2, 3: 122, 104, 78
+ghost 1: ij  20   5  point -0.07031 -0.05469  mask 0101  steps 1 0 1 0
+sphere: points 15625, ghost points 1788
+  first layer 978, second only 810
+  device path = host path: T

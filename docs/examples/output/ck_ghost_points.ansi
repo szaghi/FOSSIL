@@ -1,0 +1,4 @@
+$ ck_ghost_points
+ellipse: ghost points 56, of them seeing fluid at -u 16
+ghost 1 at ij 10  7, steps to fluid (-u +u -v +v) 1 0 1 0
+cube: ghost points 56, x from  0.00 to  0.75

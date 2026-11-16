@@ -1,0 +1,5 @@
+$ fig_ref_fd_closure
+NACA 0012, reach 3: ghosts 304, layers 122, 104, 78
+unit square on its lines: solid points 16, ghosts (reach 1) 12
+circle, reach 1: ghosts on node lines 16, on cell-centre lines 16
+sphere, reach 2: ghosts 1788, lower half: layer 1 461, layer 2 381
