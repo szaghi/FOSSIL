@@ -225,8 +225,8 @@ links and its wall terms are bit for bit those of a copy moved and merged by han
   labels run on the host. In 2-D the device cut has no oriented boundaries, so the labels come from a host cut with
   boundaries. Moments and quadrature are host-only, as for one body.
 - **The merged surface.** `merged=` returns it, with `facet_body=` and `facet_sub_body=` (2-D `segment_*`): the
-  surface the loads need (`cut_loads_3d`, `cut_walls_gyration`). Swept cells and the piece map of several bodies are
-  not covered yet.
+  surface the loads need (`cut_loads_3d`, `cut_walls_gyration`). The swept cells of several bodies have the Gauss
+  path ([moving bodies](/guide/advanced/moving-bodies#several-bodies)); their piece map is not built.
 
 ![a turned ellipse and a circle 0.04 apart on 12 x 7 cells of 0.1 seen from above: the cells shaded by fluid fraction, cream in the solids to sepia in the fluid; the wall segments of the ellipse in gold and of the circle in teal; the two cells between them whose fluid piece is bounded by both bodies outlined in red](../../examples/images/ref-cut-cells-bodies.svg){.fossil-figure}
 

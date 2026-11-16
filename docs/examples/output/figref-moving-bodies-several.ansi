@@ -1,0 +1,6 @@
+$ fig_ref_moving_bodies_several
+Gauss nodes 4, cells with a swept area 59, sum of swept  9.54E-17
+largest residual  4.85E-04, error estimate  1.33E-02
+pieces bounded by both bodies: start 6, end 6, cells 8
+fossil swept_cells_2d_bodies: refused -- several bodies have the Gauss path only: pass exact=.false.
+exact path asked: status 5 (refused: several bodies have the Gauss path only)

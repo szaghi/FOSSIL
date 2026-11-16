@@ -43,11 +43,20 @@ module fossil_swept_cells
 !< not round-off (a dragon section crossing itself once: 5.3e-6, the knot removed: 7.8e-18). Pass
 !< `check_input=.true.` to have the input checked first (`sw%self_intersecting`, a warning on stderr;
 !< issue #44), or call `self_intersections` / `check_validity(check_self_intersections=.true.)`.
+!<
+!< Several bodies (#109 WP3 step 04): `swept_cells_2d_bodies` / `swept_cells_3d_bodies` give the Gauss path over the
+!< union of several rigid bodies, each on its own screw motion: volumes from the cut of the union at the end poses,
+!< face apertures by Gauss-Legendre on the union cut at each node with every body at its own pose. The residual takes,
+!< per cell and node, the face form of the one body whose walls the cell holds, or the wall form when it holds two
+!< bodies' walls (no single rigid field fits both). The exact paths and the piece map of several bodies are not built
+!< (asked for, they are refused); the moving-bodies page, section "Several bodies", says what they need.
 use fossil_curve_object,       only : curve_object, cut_cells_2d_t, cut_cells_2d_blocks_t, cut_cells_device_many, &
                                      place_for_crossings
 use fossil_curve_slice,        only : slice_surface, slice_planes_t, slice_planes_prepare, slice_surface_plane
+use fossil_cut_bodies,         only : cut_cells_2d_bodies, cut_cells_3d_bodies
+use fossil_cut_loads,          only : cut_walls_2d_t
 use fossil_cut_cells_2d,       only : cut_cell_2d_walk, cut_cell_2d_one_sizes, cut_cell_2d_one_pieces
-use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_cells_3d_sections, &
+use fossil_cut_cells_3d,       only : cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_cells_3d_sections, cut_walls_3d_t, &
                                      cut_cell_3d_one_sizes, cut_cell_3d_one_count, cut_cell_3d_one_pieces, cut_cell_3d_one_totals, &
                                      cut_cell_3d_face_sizes, cut_cell_3d_face_count, cut_cell_3d_face_measures
 use fossil_facet_object,       only : facet_object
@@ -66,6 +75,7 @@ public :: swept_cells_2d_t, swept_cells_3d_t, swept_cells_2d, swept_cells_3d, ga
 public :: swept_cells_2d_device
 public :: swept_cells_3d_device
 public :: swept_cells_2d_reference
+public :: swept_cells_2d_bodies, swept_cells_3d_bodies
 
 type :: swept_cells_2d_t
    !< Swept geometry of a curve between two poses on a 2-D block (fluid = outside the solid).
@@ -6820,6 +6830,412 @@ contains
       endif
    endif
    endsubroutine swept_3d_run
+
+   subroutine swept_cells_2d_bodies(curves, poses0, poses1, x, y, sw, nq, exact, status)
+   !< Swept geometry of several rigid bodies (#109 WP3 step 04), curve c moving from `poses0(c)` to `poses1(c)` by its own
+   !< screw motion, on the block with cell edges x(nx+1), y(ny+1): the Gauss path of `swept_cells_2d` (`exact=.false.`)
+   !< over the union of the bodies. Only that path: `exact` absent or .true. is refused (`status = STATUS_INVALID_INPUT`,
+   !< a message on stderr; the exact paths of several bodies are not built, see the module notes). No node poses, piece
+   !< map, refinement or device.
+   !< - Volumes: the cut cells of the union at the two end poses (`cut_cells_2d_bodies`): `swept` = (alpha1 - alpha0)
+   !<   |cell|, exact (the cut of the union, bit for bit).
+   !< - Faces: at each of the nq Gauss nodes every body at its own interpolated pose (`pose_interpolate`), the union cut by
+   !<   `cut_cells_2d_bodies` (its overlap check included: two bodies overlapping at a node refuse the call), the fluid
+   !<   length of every face from the merged curve's exact line crossings (`face_measure`, as `faces_gauss_2d`).
+   !< - Residual: the volume balance of the bodies' rigid fields. A cell whose walls at a node belong to one body b (or no
+   !<   wall) takes the outflow of b's rigid field through its fluid faces, the form of `swept_cells_2d`; a cell holding
+   !<   walls of two bodies at a node takes the wall form, sum over its wall segments of v_b(midpoint) . A (A the
+   !<   segment's vector area out of the solid, v_b the field of the segment's body), equal to the face form for one body
+   !<   by the closed-boundary identity (no single rigid field fits two bodies' walls). `error_estimate` as on the Gauss
+   !<   path of `swept_cells_2d`, the largest rigid-field speed over the bodies.
+   !< One curve gives `swept_cells_2d(..., exact=.false.)` bit for bit. `status = STATUS_INVALID_INPUT` also on no curve,
+   !< pose arrays not matching the curves, bad edges, nq < 1, or an overlap at an end pose or a Gauss node (the
+   !< results are then incomplete). Host only.
+   type(curve_object),     intent(in)            :: curves(:)  !< Bodies (body frame).
+   type(rigid_pose_2d_t),  intent(in)            :: poses0(:)  !< Pose of each curve at the start.
+   type(rigid_pose_2d_t),  intent(in)            :: poses1(:)  !< Pose of each curve at the end.
+   real(R8P),              intent(in)            :: x(:), y(:) !< Cell edges (strictly increasing).
+   type(swept_cells_2d_t), intent(out)           :: sw         !< Swept geometry.
+   integer(I4P),           intent(in),  optional :: nq         !< Gauss nodes (default 4).
+   logical,                intent(in),  optional :: exact      !< Must be .false. (the Gauss path).
+   integer(I4P),           intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(cut_cells_2d_t)     :: k0, k1                          !< Cut cells of the union at the end poses.
+   real(R8P), allocatable   :: fu2(:,:), fv2(:,:), fl2(:,:), res(:,:) !< 2 nq face lengths, work, outflow balance.
+   real(R8P)                :: vmax, d(2), dth                 !< Largest rigid-field speed, a body's motion.
+   integer(I4P)             :: nb, nx, ny, n, i, j, b, st      !< Work.
+   logical                  :: ex                              !< Exact asked.
+
+   if (present(status)) status = STATUS_OK
+   nb = size(curves, kind=I4P)
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
+   n = 4_I4P ; if (present(nq)) n = nq
+   ex = .true. ; if (present(exact)) ex = exact
+   if (ex) then
+      write(stderr, '(A)') 'fossil swept_cells_2d_bodies: refused -- several bodies have the Gauss path only: pass '// &
+                           'exact=.false.'
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   st = STATUS_OK
+   if (nb < 1_I4P .or. size(poses0, kind=I4P) /= nb .or. size(poses1, kind=I4P) /= nb) st = STATUS_INVALID_INPUT
+   if (nx < 1 .or. ny < 1 .or. n < 1) st = STATUS_INVALID_INPUT
+   if (st == STATUS_OK) then
+      if (any(x(2:) <= x(:nx)) .or. any(y(2:) <= y(:ny))) st = STATUS_INVALID_INPUT
+   endif
+   if (st /= STATUS_OK) then
+      write(stderr, '(A)') 'fossil swept_cells_2d_bodies: refused -- no curve, poses not matching the curves, bad edges '// &
+                           'or nq < 1'
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   sw%nx = nx ; sw%ny = ny
+   allocate(sw%swept(nx, ny), sw%face_u(nx + 1, ny), sw%face_v(nx, ny + 1), sw%wall(2, nx, ny), sw%residual(nx, ny), &
+            res(nx, ny))
+   ! the volumes: exact cut cells of the union at the two poses
+   call cut_cells_2d_bodies(curves, poses0, x, y, k0, status=st)
+   if (st == STATUS_OK) call cut_cells_2d_bodies(curves, poses1, x, y, k1, status=st)
+   if (st /= STATUS_OK) then
+      write(stderr, '(A)') 'fossil swept_cells_2d_bodies: refused -- the union cannot be cut at an end pose'
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   sw%alpha0 = k0%alpha ; sw%alpha1 = k1%alpha
+   do j = 1_I4P, ny
+      do i = 1_I4P, nx
+         sw%swept(i, j) = (sw%alpha1(i, j) - sw%alpha0(i, j)) * (x(i + 1) - x(i)) * (y(j + 1) - y(j))
+      enddo
+   enddo
+   sw%cleared = sw%alpha0 == 0._R8P .and. sw%alpha1 > 0._R8P
+   sw%covered = sw%alpha0 > 0._R8P .and. sw%alpha1 == 0._R8P
+   ! the face apertures: Gauss over the union, nq and 2 nq nodes
+   call faces_gauss_bodies_2d(curves, poses0, poses1, x, y, n, sw%face_u, sw%face_v, res, st)
+   if (st == STATUS_OK) then
+      allocate(fu2(nx + 1, ny), fv2(nx, ny + 1), fl2(nx, ny))
+      call faces_gauss_bodies_2d(curves, poses0, poses1, x, y, 2_I4P * n, fu2, fv2, fl2, st)
+   endif
+   if (st /= STATUS_OK) then
+      write(stderr, '(A)') 'fossil swept_cells_2d_bodies: refused -- the union cannot be cut at a Gauss node'
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   sw%evaluations = n
+   sw%error_estimate = max(maxval(abs(fu2 - sw%face_u)), maxval(abs(fv2 - sw%face_v)))
+   do j = 1_I4P, ny
+      do i = 1_I4P, nx
+         sw%wall(:, i, j) = -[sw%face_u(i + 1, j) - sw%face_u(i, j), sw%face_v(i, j + 1) - sw%face_v(i, j)]
+         sw%residual(i, j) = sw%swept(i, j) + res(i, j)
+      enddo
+   enddo
+   vmax = 0._R8P
+   do b = 1_I4P, nb
+      d = poses1(b)%t - poses0(b)%t
+      dth = pose_angle_2d(poses1(b)) - pose_angle_2d(poses0(b)) ; dth = atan2(sin(dth), cos(dth))
+      vmax = max(vmax, abs(dth) * (maxval(abs([x, y])) + norm2(poses0(b)%t) + norm2(d)) + norm2(d))
+   enddo
+   if (vmax > 0._R8P) sw%error_estimate = max(sw%error_estimate, maxval(abs(sw%residual)) / vmax)
+   endsubroutine swept_cells_2d_bodies
+
+   subroutine faces_gauss_bodies_2d(curves, poses0, poses1, x, y, n, fu, fv, flux, status)
+   !< `faces_gauss_2d` over several bodies (`swept_cells_2d_bodies`): at every node the union cut by
+   !< `cut_cells_2d_bodies` (with its wall segments, labelled by body), the fluid lengths of the merged curve, the outflow
+   !< balance per cell in the face form of the cell's one body, or the wall form when the cell holds two bodies' walls.
+   type(curve_object),    intent(in)  :: curves(:)        !< Bodies (body frame).
+   type(rigid_pose_2d_t), intent(in)  :: poses0(:)        !< Start poses.
+   type(rigid_pose_2d_t), intent(in)  :: poses1(:)        !< End poses.
+   real(R8P),             intent(in)  :: x(:), y(:)       !< Cell edges.
+   integer(I4P),          intent(in)  :: n                !< Nodes.
+   real(R8P),             intent(out) :: fu(:,:), fv(:,:) !< Fluid lengths.
+   real(R8P),             intent(out) :: flux(:,:)        !< Outflow balance [nx, ny].
+   integer(I4P),          intent(out) :: status           !< STATUS_OK, or the cut's status at a node.
+   type(curve_object)                 :: mg               !< Merged curve at a node.
+   type(cut_cells_2d_t)               :: kc               !< Its cut cells.
+   type(cut_walls_2d_t)               :: wl               !< Its wall segments.
+   type(rigid_pose_2d_t), allocatable :: pq(:)            !< Node poses.
+   integer(I4P),          allocatable :: sb(:), owner(:,:) !< Segment -> body; owner of every cell (0, b, -1 several).
+   real(R8P),             allocatable :: sq(:), wq(:), dd(:,:), dth(:), tq(:,:) !< Nodes, weights, motions.
+   real(R8P),             allocatable :: lu(:,:), mu(:,:), lv(:,:), mv(:,:), ou(:,:,:), ov(:,:,:) !< Faces, outflows.
+   real(R8P),             allocatable :: ws(:,:)          !< Wall sums of the cells with two bodies' walls.
+   real(R8P)                          :: v(2)             !< Work.
+   integer(I4P)                       :: nb, nx, ny, q, i, j, b, t, ic, jc !< Work.
+
+   status = STATUS_OK
+   nb = size(curves, kind=I4P)
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P
+   call gauss_legendre_01(n, sq, wq)
+   allocate(pq(nb), dd(2, nb), dth(nb), tq(2, nb), owner(nx, ny), lu(nx + 1, ny), mu(nx + 1, ny), lv(nx, ny + 1), &
+            mv(nx, ny + 1), ou(nx + 1, ny, nb), ov(nx, ny + 1, nb), ws(nx, ny))
+   fu = 0._R8P ; fv = 0._R8P ; flux = 0._R8P
+   do b = 1_I4P, nb
+      dd(:, b) = poses1(b)%t - poses0(b)%t
+      dth(b) = pose_angle_2d(poses1(b)) - pose_angle_2d(poses0(b)) ; dth(b) = atan2(sin(dth(b)), cos(dth(b)))
+   enddo
+   do q = 1_I4P, n
+      do b = 1_I4P, nb
+         pq(b) = pose_interpolate(poses0(b), poses1(b), sq(q))
+         tq(:, b) = poses0(b)%t + sq(q) * dd(:, b)
+      enddo
+      call cut_cells_2d_bodies(curves, pq, x, y, kc, status=status, intervals=.false., walls=wl, merged=mg, &
+                               segment_body=sb)
+      if (status /= STATUS_OK) return
+      owner = 0_I4P
+      do t = 1_I4P, wl%n
+         ic = kc%piece_cell(1, wl%piece(t)) ; jc = kc%piece_cell(2, wl%piece(t)) ; b = sb(wl%segment(t))
+         if (owner(ic, jc) == 0_I4P) then
+            owner(ic, jc) = b
+         elseif (owner(ic, jc) /= b) then
+            owner(ic, jc) = -1_I4P
+         endif
+      enddo
+      ! velocity of body b's screw motion: dth J (x - t(s)) + d, J = [[0, -1], [1, 0]] (as faces_gauss_2d)
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx + 1_I4P
+            call face_measure(mg, 2_I4P, x(i), y(j), y(j + 1), lu(i, j), mu(i, j))
+            fu(i, j) = fu(i, j) + wq(q) * lu(i, j)
+         enddo
+      enddo
+      do j = 1_I4P, ny + 1_I4P
+         do i = 1_I4P, nx
+            call face_measure(mg, 1_I4P, y(j), x(i), x(i + 1), lv(i, j), mv(i, j))
+            fv(i, j) = fv(i, j) + wq(q) * lv(i, j)
+         enddo
+      enddo
+      do b = 1_I4P, nb
+         ou(:, :, b) = -dth(b) * (mu - tq(2, b) * lu) + dd(1, b) * lu ! int u_x dl over the fluid part
+         ov(:, :, b) = dth(b) * (mv - tq(1, b) * lv) + dd(2, b) * lv  ! int u_y dl over the fluid part
+      enddo
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx
+            b = owner(i, j)
+            if (b >= 0_I4P) then ! one body (or none): its field's outflow through the fluid faces
+               b = max(b, 1_I4P)
+               flux(i, j) = flux(i, j) + wq(q) * (ou(i + 1, j, b) - ou(i, j, b) + ov(i, j + 1, b) - ov(i, j, b))
+            endif
+         enddo
+      enddo
+      if (any(owner < 0_I4P)) then ! two bodies' walls in a cell: the wall form, sum of v_b(midpoint) . A per segment
+         ws = 0._R8P
+         do t = 1_I4P, wl%n
+            ic = kc%piece_cell(1, wl%piece(t)) ; jc = kc%piece_cell(2, wl%piece(t))
+            if (owner(ic, jc) >= 0_I4P) cycle
+            b = sb(wl%segment(t))
+            v = [-dth(b) * (wl%centroid(2, t) - tq(2, b)) + dd(1, b), dth(b) * (wl%centroid(1, t) - tq(1, b)) + dd(2, b)]
+            ws(ic, jc) = ws(ic, jc) + (v(1) * wl%area(1, t) + v(2) * wl%area(2, t))
+         enddo
+         do j = 1_I4P, ny
+            do i = 1_I4P, nx
+               if (owner(i, j) >= 0_I4P) cycle
+               flux(i, j) = flux(i, j) + wq(q) * ws(i, j)
+            enddo
+         enddo
+      endif
+   enddo
+   endsubroutine faces_gauss_bodies_2d
+
+   subroutine swept_cells_3d_bodies(surfaces, poses0, poses1, x, y, z, sw, nq, exact, status)
+   !< Swept geometry of several rigid bodies (#109 WP3 step 04), surface b moving from `poses0(b)` to `poses1(b)` by its
+   !< own screw motion, on the block with cell edges x(nx+1), y(ny+1), z(nz+1): the Gauss path of `swept_cells_3d`
+   !< (`exact=.false.`) over the union of the bodies; the 3-D twin of `swept_cells_2d_bodies` (see there). Volumes from
+   !< `cut_cells_3d_bodies` at the end poses; at each Gauss node every body at its own interpolated pose, the union cut
+   !< by `cut_cells_3d_bodies` (overlap check included) with its wall terms labelled by body; the face areas and the
+   !< outflow of the one body's rigid field through the fluid faces at the face centroids (the arithmetic of
+   !< `faces_gauss_3d`), or the wall form sum v_b(centroid) . A over the wall terms of a cell holding two bodies' walls.
+   !< One surface gives `swept_cells_3d(..., exact=.false.)` bit for bit. `exact` absent or .true. is refused
+   !< (`status = STATUS_INVALID_INPUT`, a message on stderr), as are no surface, pose arrays not matching, bad edges,
+   !< nq < 1, an overlap at an end pose or a Gauss node. No node poses, piece map, refinement or device. Host only.
+   type(surface_stl_object), intent(in)            :: surfaces(:)      !< Bodies (body frame).
+   type(rigid_pose_t),       intent(in)            :: poses0(:)        !< Pose of each surface at the start.
+   type(rigid_pose_t),       intent(in)            :: poses1(:)        !< Pose of each surface at the end.
+   real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
+   type(swept_cells_3d_t),   intent(out)           :: sw               !< Swept geometry.
+   integer(I4P),             intent(in),  optional :: nq               !< Gauss nodes (default 4).
+   logical,                  intent(in),  optional :: exact            !< Must be .false. (the Gauss path).
+   integer(I4P),             intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(cut_cells_3d_t)     :: k0, k1                                  !< Cut cells of the union at the end poses.
+   real(R8P), allocatable   :: fx2(:,:,:), fy2(:,:,:), fz2(:,:,:), flux(:,:,:), fl2(:,:,:) !< Work.
+   real(R8P)                :: vmax, ax(3), ang, d(3)                  !< Largest rigid-field speed, a body's motion.
+   integer(I4P)             :: nb, nx, ny, nz, n, i, j, k, b, st       !< Work.
+   logical                  :: ex                                      !< Exact asked.
+
+   if (present(status)) status = STATUS_OK
+   nb = size(surfaces, kind=I4P)
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   n = 4_I4P ; if (present(nq)) n = nq
+   ex = .true. ; if (present(exact)) ex = exact
+   if (ex) then
+      write(stderr, '(A)') 'fossil swept_cells_3d_bodies: refused -- several bodies have the Gauss path only: pass '// &
+                           'exact=.false.'
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   st = STATUS_OK
+   if (nb < 1_I4P .or. size(poses0, kind=I4P) /= nb .or. size(poses1, kind=I4P) /= nb) st = STATUS_INVALID_INPUT
+   if (nx < 1 .or. ny < 1 .or. nz < 1 .or. n < 1) st = STATUS_INVALID_INPUT
+   if (st == STATUS_OK) then
+      if (any(x(2:) <= x(:nx)) .or. any(y(2:) <= y(:ny)) .or. any(z(2:) <= z(:nz))) st = STATUS_INVALID_INPUT
+   endif
+   if (st /= STATUS_OK) then
+      write(stderr, '(A)') 'fossil swept_cells_3d_bodies: refused -- no surface, poses not matching the surfaces, bad '// &
+                           'edges or nq < 1'
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   sw%nx = nx ; sw%ny = ny ; sw%nz = nz
+   allocate(sw%swept(nx, ny, nz), sw%face_x(nx + 1, ny, nz), sw%face_y(nx, ny + 1, nz), sw%face_z(nx, ny, nz + 1), &
+            sw%wall(3, nx, ny, nz), sw%residual(nx, ny, nz), flux(nx, ny, nz))
+   call cut_cells_3d_bodies(surfaces, poses1, x, y, z, k1, status=st)
+   if (st == STATUS_OK) call cut_cells_3d_bodies(surfaces, poses0, x, y, z, k0, status=st)
+   if (st /= STATUS_OK) then
+      write(stderr, '(A)') 'fossil swept_cells_3d_bodies: refused -- the union cannot be cut at an end pose'
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   sw%alpha0 = k0%alpha ; sw%alpha1 = k1%alpha
+   do k = 1_I4P, nz
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx
+            sw%swept(i, j, k) = (sw%alpha1(i, j, k) - sw%alpha0(i, j, k)) * (x(i + 1) - x(i)) * (y(j + 1) - y(j)) * &
+                                (z(k + 1) - z(k))
+         enddo
+      enddo
+   enddo
+   sw%cleared = sw%alpha0 == 0._R8P .and. sw%alpha1 > 0._R8P
+   sw%covered = sw%alpha0 > 0._R8P .and. sw%alpha1 == 0._R8P
+   call faces_gauss_bodies_3d(surfaces, poses0, poses1, x, y, z, n, sw%face_x, sw%face_y, sw%face_z, flux, st)
+   if (st == STATUS_OK) then
+      allocate(fx2(nx + 1, ny, nz), fy2(nx, ny + 1, nz), fz2(nx, ny, nz + 1), fl2(nx, ny, nz))
+      call faces_gauss_bodies_3d(surfaces, poses0, poses1, x, y, z, 2_I4P * n, fx2, fy2, fz2, fl2, st)
+   endif
+   if (st /= STATUS_OK) then
+      write(stderr, '(A)') 'fossil swept_cells_3d_bodies: refused -- the union cannot be cut at a Gauss node'
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   sw%evaluations = n
+   sw%error_estimate = max(maxval(abs(fx2 - sw%face_x)), maxval(abs(fy2 - sw%face_y)), maxval(abs(fz2 - sw%face_z)))
+   do k = 1_I4P, nz
+      do j = 1_I4P, ny
+         do i = 1_I4P, nx
+            sw%wall(:, i, j, k) = -[sw%face_x(i + 1, j, k) - sw%face_x(i, j, k), sw%face_y(i, j + 1, k) - sw%face_y(i, j, k), &
+                                    sw%face_z(i, j, k + 1) - sw%face_z(i, j, k)]
+            sw%residual(i, j, k) = sw%swept(i, j, k) + flux(i, j, k)
+         enddo
+      enddo
+   enddo
+   vmax = 0._R8P
+   do b = 1_I4P, nb
+      call pose_log_3d(poses0(b), poses1(b), ax, ang)
+      d = poses1(b)%t - poses0(b)%t
+      vmax = max(vmax, abs(ang) * (maxval(abs([x, y, z])) + norm2(poses0(b)%t) + norm2(d)) + norm2(d))
+   enddo
+   if (vmax > 0._R8P) sw%error_estimate = max(sw%error_estimate, maxval(abs(sw%residual)) / vmax)
+   endsubroutine swept_cells_3d_bodies
+
+   subroutine faces_gauss_bodies_3d(surfaces, poses0, poses1, x, y, z, n, fx, fy, fz, flux, status)
+   !< `faces_gauss_3d` over several bodies (`swept_cells_3d_bodies`): at every node the union cut by `cut_cells_3d_bodies`
+   !< (with its wall terms, labelled by body through the facet map), the face areas, the outflow balance per cell in the
+   !< face form of the cell's one body, or the wall form when the cell holds two bodies' wall terms.
+   type(surface_stl_object), intent(in)  :: surfaces(:)      !< Bodies (body frame).
+   type(rigid_pose_t),       intent(in)  :: poses0(:)        !< Start poses.
+   type(rigid_pose_t),       intent(in)  :: poses1(:)        !< End poses.
+   real(R8P),                intent(in)  :: x(:), y(:), z(:) !< Cell edges.
+   integer(I4P),             intent(in)  :: n                !< Nodes.
+   real(R8P),                intent(out) :: fx(:,:,:), fy(:,:,:), fz(:,:,:) !< Fluid areas.
+   real(R8P),                intent(out) :: flux(:,:,:)      !< Outflow balance.
+   integer(I4P),             intent(out) :: status           !< STATUS_OK, or the cut's status at a node.
+   type(cut_cells_3d_t)               :: kc                  !< Cut cells of the union at a node.
+   type(cut_walls_3d_t)               :: wl                  !< Its wall terms.
+   type(rigid_pose_t),    allocatable :: pq(:)               !< Node poses.
+   integer(I4P),          allocatable :: fb(:)               !< Facet -> body.
+   real(R8P),             allocatable :: sq(:), wq(:), dd(:,:), om(:,:), tq(:,:) !< Nodes, weights, motions.
+   real(R8P),             allocatable :: ox(:,:,:,:), oy(:,:,:,:), oz(:,:,:,:) !< Face outflows of every body's field.
+   real(R8P)                          :: axis(3), angle, a, v(3), s !< Work.
+   integer(I4P)                       :: nb, nx, ny, nz, q, i, j, k, b, c, t, ow !< Work.
+
+   status = STATUS_OK
+   nb = size(surfaces, kind=I4P)
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   call gauss_legendre_01(n, sq, wq)
+   allocate(pq(nb), dd(3, nb), om(3, nb), tq(3, nb), ox(nx + 1, ny, nz, nb), oy(nx, ny + 1, nz, nb), oz(nx, ny, nz + 1, nb))
+   fx = 0._R8P ; fy = 0._R8P ; fz = 0._R8P ; flux = 0._R8P
+   do b = 1_I4P, nb
+      dd(:, b) = poses1(b)%t - poses0(b)%t
+      call pose_log_3d(poses0(b), poses1(b), axis, angle) ; om(:, b) = angle * axis
+   enddo
+   do q = 1_I4P, n
+      do b = 1_I4P, nb
+         pq(b) = pose_interpolate(poses0(b), poses1(b), sq(q))
+         tq(:, b) = poses0(b)%t + sq(q) * dd(:, b)
+      enddo
+      call cut_cells_3d_bodies(surfaces, pq, x, y, z, kc, status=status, walls=wl, facet_body=fb)
+      if (status /= STATUS_OK) return
+      ! velocity of body b's screw motion: om x (x - t(s)) + d; a face flux is area * u(centroid) . n (as faces_gauss_3d)
+      do k = 1_I4P, nz
+         do j = 1_I4P, ny
+            do i = 1_I4P, nx + 1_I4P
+               a = kc%face_x(i, j, k) * (y(j + 1) - y(j)) * (z(k + 1) - z(k))
+               fx(i, j, k) = fx(i, j, k) + wq(q) * a
+               do b = 1_I4P, nb
+                  v = cross(om(:, b), kc%face_x_centroid(:, i, j, k) - tq(:, b)) + dd(:, b)
+                  ox(i, j, k, b) = a * v(1)
+               enddo
+            enddo
+         enddo
+      enddo
+      do k = 1_I4P, nz
+         do j = 1_I4P, ny + 1_I4P
+            do i = 1_I4P, nx
+               a = kc%face_y(i, j, k) * (z(k + 1) - z(k)) * (x(i + 1) - x(i))
+               fy(i, j, k) = fy(i, j, k) + wq(q) * a
+               do b = 1_I4P, nb
+                  v = cross(om(:, b), kc%face_y_centroid(:, i, j, k) - tq(:, b)) + dd(:, b)
+                  oy(i, j, k, b) = a * v(2)
+               enddo
+            enddo
+         enddo
+      enddo
+      do k = 1_I4P, nz + 1_I4P
+         do j = 1_I4P, ny
+            do i = 1_I4P, nx
+               a = kc%face_z(i, j, k) * (x(i + 1) - x(i)) * (y(j + 1) - y(j))
+               fz(i, j, k) = fz(i, j, k) + wq(q) * a
+               do b = 1_I4P, nb
+                  v = cross(om(:, b), kc%face_z_centroid(:, i, j, k) - tq(:, b)) + dd(:, b)
+                  oz(i, j, k, b) = a * v(3)
+               enddo
+            enddo
+         enddo
+      enddo
+      do k = 1_I4P, nz
+         do j = 1_I4P, ny
+            do i = 1_I4P, nx
+               c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+               ow = 0_I4P ! the owner: 0 no wall term, b the one body of its terms, -1 several
+               do t = wl%cell_start(c), wl%cell_start(c + 1) - 1_I4P
+                  b = fb(wl%facet(t))
+                  if (ow == 0_I4P) then
+                     ow = b
+                  elseif (ow /= b) then
+                     ow = -1_I4P ; exit
+                  endif
+               enddo
+               if (ow >= 0_I4P) then ! one body (or none): its field's outflow through the fluid faces
+                  b = max(ow, 1_I4P)
+                  flux(i, j, k) = flux(i, j, k) + wq(q) * (ox(i + 1, j, k, b) - ox(i, j, k, b) + oy(i, j + 1, k, b) - &
+                                                           oy(i, j, k, b) + oz(i, j, k + 1, b) - oz(i, j, k, b))
+               else ! two bodies' walls: the wall form, sum of v_b(centroid) . A over the cell's wall terms
+                  s = 0._R8P
+                  do t = wl%cell_start(c), wl%cell_start(c + 1) - 1_I4P
+                     b = fb(wl%facet(t))
+                     v = cross(om(:, b), wl%centroid(:, t) - tq(:, b)) + dd(:, b)
+                     s = s + (v(1) * wl%area(1, t) + v(2) * wl%area(2, t) + v(3) * wl%area(3, t))
+                  enddo
+                  flux(i, j, k) = flux(i, j, k) + wq(q) * s
+               endif
+            enddo
+         enddo
+      enddo
+   enddo
+   endsubroutine faces_gauss_bodies_3d
 
    subroutine faces_rotation_3d(surface, pose0, pose1, x, y, z, fx, fy, fz, flux, nev, exact, device, chunk, fox, foy, foz)
    !< Exact time-averaged fluid face areas and rigid-field outflows under the screw motion with a rotation (issue #69;

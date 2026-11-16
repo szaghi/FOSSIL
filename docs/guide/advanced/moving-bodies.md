@@ -510,6 +510,56 @@ share for the map, up to 37 % for the refine machinery, largest on the device si
 The chain of a whole time step with the map is in
 [GPU queries](/guide/advanced/device-distance#a-moving-body-time-step).
 
+## Several bodies
+
+`swept_cells_2d_bodies(curves, poses0, poses1, x, y, sw, nq=, exact=.false.)` and
+`swept_cells_3d_bodies(surfaces, poses0, poses1, x, y, z, sw, ...)` give the swept geometry of several rigid bodies over
+one step, each body on its own screw motion from `poses0(b)` to `poses1(b)` (#109 WP3). They fill the same
+`swept_cells_2d_t` / `swept_cells_3d_t`:
+- **Volumes.** `swept` is (α₁ − α₀) |cell| from the cut of the union at the two end poses
+  ([several bodies](/guide/advanced/cut-cells#several-bodies): `cut_cells_2d_bodies` / `cut_cells_3d_bodies`), so it
+  stays exact. An overlap at an end pose is refused.
+- **Apertures.** Gauss-Legendre over the step: at each of the nq nodes every body is placed at its own interpolated
+  pose and the union is cut (with the overlap check), then the face apertures are read as for one body; nq and 2 nq
+  nodes give `error_estimate`.
+- **Residual.** No single rigid field fits the walls of two bodies with different motions. A cell whose walls at a
+  node belong to one body takes the outflow of that body's field through its fluid faces, as for one body. A cell
+  holding the walls of two bodies takes the wall form instead, the sum over its wall terms of v_b(centroid) · A, A the
+  term's vector area and v_b the field of its body. For one body the two forms agree by the closed-boundary identity:
+  two cubes 0.2 apart on one motion give the merged surface's residual to 1.2e-17.
+- **Exact paths not built.** Only `exact=.false.` is accepted: `exact` absent or `.true.` returns
+  `STATUS_INVALID_INPUT`. There is no `map=`, `refine=`, `poses=` or device path. One body gives
+  `swept_cells_2d` / `swept_cells_3d` with `exact=.false.` bit for bit.
+
+What the exact paths need was measured first (#109 WP3 step 04: circles and spheres passing at gaps of 0.5–2 cells,
+translating or rolling; a circle orbiting another; a three-blade star and a NACA 0012 rotor in an annular casing, tip
+gaps of 0.5–2 cells; two bodies approaching to contact):
+- **No inter-body events while the bodies stay apart.** A vertex of one body crossing a wall of the other means the
+  bodies overlap, and the cut refuses that. Sampled densely, every case with a gap had 0 such crossings. The approach
+  case had them only in the step that runs past contact, where every later sample is refused. Bodies can meet inside
+  a cell only by touching: a double root, which needs contact detection over the step (`time_of_impact`), not a new
+  event type.
+- **Superposition.** While the solids stay disjoint, a face's fluid length (area) is the sum of each body's minus
+  (bodies − 1) times the face, at every instant. The exact time-averaged apertures of several bodies are therefore
+  the single-body exact apertures combined, and the residual is the sum of the bodies' residuals.
+- **Few cells see two bodies.** In 2-D 0.4–10 cells per step held walls of both bodies (at a gap of 0.5 cell; the
+  rotor in its casing the most), against 47–144 cells with an event of one body; in 3-D 1.7 per step against
+  1 200. At a gap of 2 cells none did, nor at a gap of 1 cell in the axis-aligned passings. Every such cell held one
+  fluid piece bounded by both walls.
+- **Piece map.** The union's piece count changed in those cells only at an event of one of the bodies (a NACA 0012
+  rotor at a gap of half a cell: 22 changes in 30 steps). The map of several bodies is the map of the union with each
+  body's own events, its local elements placed by their own body's pose, and contact made a reason for an untrusted
+  cell. It is not built.
+
+![a three-blade rotor turning 0.15 rad inside a fixed annular casing on 16 x 16 cells of 0.1 seen from above, a tip gap of half a cell: the cells shaded by their swept area over the cell area, ember where fluid is gained behind the blades, teal ahead of them; the rotor at the start in dark brown and at the end in yellow, the casing in grey; eight cells at the blade tips, where the fluid piece is bounded by both the rotor and the casing, outlined in red](../../examples/images/ref-moving-bodies-several.svg){.fossil-figure}
+
+A rotor in a casing, each body on its own motion, swept on the Gauss path. The swept areas add up to round-off, and
+eight cells at the blade tips hold a fluid piece bounded by both walls. Asked for the exact path, the call refuses.
+
+<<< @/examples/snippets/fig_ref_moving_bodies_several.f90
+
+<<< @/examples/output/figref-moving-bodies-several.ansi{ansi}
+
 ## Results
 
 | Case | Result |
@@ -533,6 +583,7 @@ The chain of a whole time step with the map is in
 | swept, 3-D: cube rotating about (1, 1, 1) while translating; nq = 2, 4, 8 | residual 1.1e-2 → 1.6e-3 |
 | swept: explicit node poses = screw poses | face apertures bit for bit |
 | swept on the device vs the host: every output of `swept_cells_3d_t` / `swept_cells_2d_t`, exact translation, exact rotation, Gauss, explicit poses; chunk boundaries (`chunk_cells`) | 0 mismatches (`swept cells 3-D` / `2-D device vs serial mismatches`, `fossil_test_swept_3d_device_twin`, `fossil_test_swept_2d_device_twin`) |
+| swept, several bodies (Gauss, `swept_cells_2d_bodies` / `swept_cells_3d_bodies`): one body vs `swept_cells_*(exact=.false.)`; two far-apart bodies vs each alone; two bodies on one motion vs their merged body | bit for bit; per side bit for bit, the residual to 1e-16; faces and volumes bit for bit, residual (wall form) to 1.2e-17 (3-D) and 1.7e-18 (2-D) (`fossil_test_swept_bodies`, `_2d`) |
 | piece map on the device vs the host: every field of `piece_map_3d_t` / `piece_map_2d_t`; sphere and cone at 32³ (exact translation, exact rotation, Gauss, Gauss + `refine`); ellipse at 256² (translation, Gauss, Gauss + `refine`), NACA 0012 rotating at 64²; launch sets of 4 KB (`chunk_bytes`) | 0 mismatches (`piece map 3-D` / `2-D device vs serial mismatches`, `fossil_test_piece_map_3d_device_twin`, `fossil_test_piece_map_2d_device_twin`; the map stage of `fossil_val_device_chain`) |
 
 ## Limitations
@@ -578,6 +629,9 @@ The chain of a whole time step with the map is in
   it expensive (`sw%evaluations` reports it). The Gauss paths cost one
   moved copy and one face pass per node, plus as many again for the
   error estimate.
+- **Several bodies: the Gauss path only.** `swept_cells_*_bodies` has no exact path, piece map, `refine` or device
+  path; the [several bodies](#several-bodies) section says what they need. Overlap between Gauss nodes is not
+  detected: check the step with `time_of_impact` / `first_impact` first.
 - **Rigid bodies only.** Deforming bodies, and refitting under deformation,
   are out of scope.
 - **Points near the surface.** `state_changes` decides states with the

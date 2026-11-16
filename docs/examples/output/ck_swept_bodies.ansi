@@ -1,0 +1,6 @@
+$ ck_swept_bodies
+cells with a swept volume 210, sum of swept  -1.60E-16, largest residual   9.51E-04
+cube 1 alone, its half of the block: largest face difference   0.00E+00
+fossil swept_cells_3d_bodies: refused -- several bodies have the Gauss path only: pass exact=.false.
+exact path asked: status 5
+2-D: status 0, sum of swept   3.47E-18, error estimate   2.66E-03

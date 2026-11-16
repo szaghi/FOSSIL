@@ -1401,3 +1401,16 @@ the fluid lost and the swept volumes add up to round-off (−8.23e-18); the volu
 6.88e-18 in every cell. 2 cells are cleared (no fluid at the start, fluid at the end). See
 [swept geometry](/guide/advanced/moving-bodies#swept-geometry).
 
+### Swept volume of several moving bodies
+
+<<< @/examples/snippets/ck_swept_bodies.f90
+
+<<< @/examples/output/ck_swept_bodies.ansi{ansi}
+
+`swept_cells_3d_bodies` sweeps two cubes, each on its own screw motion, over one step: the swept volumes come from
+the cut of the union at the two end poses and add up to round-off; the face apertures come from Gauss nodes, at each
+of which both cubes are placed at their own poses and cut together. On the first cube's half of the block the faces
+are those of the first cube alone, to the bit. Only the Gauss path exists for several bodies: without
+`exact=.false.` the call is refused (status 5, `STATUS_INVALID_INPUT`). 2-D: `swept_cells_2d_bodies` over curves. See
+[several bodies](/guide/advanced/moving-bodies#several-bodies).
+
