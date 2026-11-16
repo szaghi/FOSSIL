@@ -132,6 +132,21 @@ For interactive use without writing Fortran, the companion **`fossilizer`** CLI 
 
 Upgrading from 2.x: see [Upgrading to 3.0](https://szaghi.github.io/FOSSIL/guide/upgrading-3) for the changes in behaviour.
 
+### One-line install
+
+```bash
+curl -fsSL https://github.com/szaghi/FOSSIL/releases/latest/download/install.sh | bash
+```
+
+It installs the latest release into `~/.local` with the build system you choose among those FOSSIL ships
+(`--build fobis|fpm`: a menu asks when you do not say), the compiler you name (`--fc`, `--gnu`, `--intel`,
+`--nvidia`), one install per compiler (`lib/fossil/<compiler>-<version>/`, `include/fossil/<compiler>-<version>/`), and
+makes it usable through pkg-config (`pkg-config --cflags --libs fossil`, with `PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig`).
+The release carries FOSSIL's dependencies (BeFoR64, FACE, FLAP, FoXy, PENF, StringiFor, VTKFortran, VecFor). Pass
+options after `bash -s --`, e.g. `... | bash -s -- --build fpm --prefix /opt/fossil`; `--help` lists them all,
+`--uninstall` removes the install. The installer is FoBiS's
+([One-line installer](https://szaghi.github.io/FoBiS/cookbook/installer)).
+
 ### FoBiS
 
 **Standalone** — clone, fetch the dependencies into `src/third_party/`, and build:

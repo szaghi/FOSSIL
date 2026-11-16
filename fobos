@@ -10,6 +10,10 @@ authors    = Stefano Zaghi
 [scaffold]
 toolchain = linux-gnu
 
+# the one-line installer, scripts/install.sh (FoBiS#217): FOSSIL's nvfortran library mode for the fobis build
+[installer]
+mode_nvidia = static-nvidia
+
 [dependencies]
 deps_dir   = src/third_party
 BeFoR64    = https://github.com/szaghi/BeFoR64

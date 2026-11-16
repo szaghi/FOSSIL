@@ -41,6 +41,21 @@ path; `tests-nvidia` builds only the distance benchmark, not the full test suite
 
 FOSSIL is developed on GNU/Linux. Windows should work but is not officially tested.
 
+## One-line install
+
+```bash
+curl -fsSL https://github.com/szaghi/FOSSIL/releases/latest/download/install.sh | bash
+```
+
+It installs the latest release into `~/.local` with the build system you choose among those FOSSIL ships
+(`--build fobis|fpm`: a menu asks when you do not say), the compiler you name (`--fc`, `--gnu`, `--intel`,
+`--nvidia`), one install per compiler (`lib/fossil/<compiler>-<version>/`, `include/fossil/<compiler>-<version>/`), and
+makes it usable through pkg-config (`pkg-config --cflags --libs fossil`, with `PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig`).
+The release carries FOSSIL's dependencies (BeFoR64, FACE, FLAP, FoXy, PENF, StringiFor, VTKFortran, VecFor). Pass
+options after `bash -s --`, e.g. `... | bash -s -- --build fpm --prefix /opt/fossil`; `--help` lists them all,
+`--uninstall` removes the install. The installer is FoBiS's
+([One-line installer](https://szaghi.github.io/FoBiS/cookbook/installer)).
+
 ## Download
 
 ```bash
@@ -148,5 +163,4 @@ fpm build --profile release
 
 fpm resolves the dependencies declared in `fpm.toml`; no `fobis fetch` is needed.
 
-FOSSIL ships no CMake or Make build files: `scripts/install.sh --build cmake|make`
-skips the build with a warning. Use `--build fobis` or `--build fpm`.
+FOSSIL ships no CMake or Make build files.
