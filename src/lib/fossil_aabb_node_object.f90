@@ -27,6 +27,7 @@ public :: bvh_bmin_x_oac, bvh_bmin_y_oac, bvh_bmin_z_oac
 public :: bvh_bmax_x_oac, bvh_bmax_y_oac, bvh_bmax_z_oac
 public :: bvh_left_child_oac, bvh_right_child_oac
 public :: bvh_payload_first_oac, bvh_payload_count_oac
+public :: bvh_node_refit_oac
 public :: bvh_box_distance_sq_oac
 
 type :: aabb_node_object
@@ -241,6 +242,23 @@ contains
    integer(I4P)                       :: count !< Payload slice length.
    count = node%payload_count
    endfunction bvh_payload_count_oac
+
+   pure subroutine bvh_node_refit_oac(src, lox, loy, loz, hix, hiy, hiz, dst)
+   !< Kernel (#109 WP1 step 06): dst takes the children, the payload slice and the flag of src and the box [lo, hi], the
+   !< fields the device traversals read (the posed closure table refits a copy of the tree, as `refit` sets the box of a
+   !< moved tree). The facet list of dst is not touched (intent(inout): no deallocation on the device); the box components
+   !< are written one by one (no VecFor assignment in device code, #20).
+   !$acc routine seq
+   type(aabb_node_object), intent(in)    :: src                          !< Node of the tree refitted.
+   real(R8P),              intent(in)    :: lox, loy, loz, hix, hiy, hiz !< Box.
+   type(aabb_node_object), intent(inout) :: dst                          !< Refitted node.
+
+   dst%is_present = src%is_present
+   dst%left_child = src%left_child ; dst%right_child = src%right_child
+   dst%payload_first = src%payload_first ; dst%payload_count = src%payload_count
+   dst%aabb%bmin%x = lox ; dst%aabb%bmin%y = loy ; dst%aabb%bmin%z = loz
+   dst%aabb%bmax%x = hix ; dst%aabb%bmax%y = hiy ; dst%aabb%bmax%z = hiz
+   endsubroutine bvh_node_refit_oac
 
    pure function bvh_box_distance_sq_oac(node, px, py, pz) result(d2)
    !$acc routine seq

@@ -382,6 +382,17 @@ host's bit for bit. Their GPU bench line, `curvature device vs serial mismatches
 `fossil_test_curve_bench`, must be 0. See
 [principal curvatures and directions](/guide/advanced/curvature#principal-curvatures-and-directions).
 
+### The closure table
+
+`fd_closure_3d` / `fd_closure_2d` with `device=.true.` or `resident=.true.` (WP1 steps 04 and 06) run the whole closure
+table of a finite-difference wall closure on the device: the node states, the ghosts, the kernel of `query_many_device`
+on present arrays (`query_points_present`; curves `query_present`), the probe and visibility kernels, the curvature at
+the feet and the ILW crossings, without a round trip to the host between the stages. A posed surface is not moved: the
+call places the vertices and refits a copy of the SAH BVH on the device. Every field equals the host's bit for bit; the
+GPU bench lines `closure device vs serial mismatches` must be 0. On an RTX 4070 the resident table of 128³ lines
+(112 001 ghosts around dragon-fine) takes 0.18 s against 2.6 s on one CPU core, bound by double-precision kernels; at
+16³ the device is not faster. See [resident use on the device](/guide/advanced/fd-closure#resident-use-on-the-device).
+
 ## Known limitations
 
 - **SAH BVH only.** The octree is not supported on the device. The original

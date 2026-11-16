@@ -201,9 +201,12 @@ the exact velocity field of the rigid motion at that instant (in 2-D ω is a sca
 ![the ellipse at its pose, turned by 0.3 rad and moved along u, spinning at 2 rad per unit time about the pose's origin (the teal dot) and moving at 0.5 along u: the wall velocity at every second foot as an ember segment](../../examples/images/ref-fd-closure-velocity.svg){.fossil-figure}
 
 With a pose the ghosts and the ILW crossings are those of the body moved by the pose (the geometry the cut cells of
-the moved body see: in 3-D a moved copy of the surface, `move`; in 2-D the vertices placed by `to_world`), and every
-query (foot, normal, probes, visibility, curvature, the ILW normals) runs in the body frame and is mapped back, as
-`query_many(pose=)`. A pure rotation about the centre is tangent to the wall up to the facet's tilt from the smooth
+the moved body see), and every query (foot, normal, probes, visibility, curvature, the ILW normals) runs in the body
+frame and is mapped back, as `query_many(pose=)`. The surface is not moved: in 3-D the call places the facet vertices
+by `to_world` and refits a copy of the surface's SAH BVH to them, as `move` places and refits (on the device path both
+are built on the device, nothing is copied in); min and max are exact, so the node states and crossings are those of
+a moved copy bit for bit (`fossil_test_fd_closure_3d`). In 2-D the vertices are placed by `to_world`, as `curve%move`
+places them. A pure rotation about the centre is tangent to the wall up to the facet's tilt from the smooth
 normal (`fossil_test_fd_closure_3d`, `_2d`).
 
 ## Resident use on the device
@@ -224,6 +227,29 @@ releases the device copies, `enter_device` maps a host table; `ib_closure_reset`
 that writes a table takes it `intent(inout)` and releases it first. A copy `b = a` of a resident table is not mapped:
 `device_key` (the host address of `points`) tells, and `update_host` on the copy warns and drops the flag. Call
 `exit_device` (or `ib_closure_reset`) before a resident table goes out of scope.
+
+How long a table takes (`FOSSIL_CLOSURE_TIMING=N fossil_test_distance_bench`, `fossil_test_curve_bench`; reach 3, three
+probes, curvature, ILW; best of 5 after a warm-up, each path timed in a row; nvfortran 26.9 `-O2 -gpu=nofma`, one
+RTX 4070 that no other job was using, one core of an i9-13900KF; indicative, one machine):
+
+| Body, lines | Ghosts | CPU [s] | Device, copied back [s] | Device, resident [s] |
+|---|---:|---:|---:|---:|
+| dragon-fine (24k facets), 16³ | 535 | 0.026 | 0.030 (0.9×) | 0.027 (1.0×) |
+| dragon-fine, 32³ | 3 969 | 0.142 | 0.034 (4.1×) | 0.034 (4.2×) |
+| dragon-fine, 64³ | 23 039 | 0.645 | 0.072 (9.0×) | 0.069 (9.4×) |
+| dragon-fine, 128³ | 112 001 | 2.56 | 0.217 (11.8×) | 0.184 (13.9×) |
+| bunny, 128³ | 93 594 | 1.79 | 0.143 (12.5×) | 0.115 (15.6×) |
+| NACA 0012 (2000 vertices), 1024² | 3 112 | 0.016 | 0.0061 (2.6×) | 0.0056 (2.8×) |
+| disc with a hole (1100 vertices), 1024² | 7 524 | 0.035 | 0.0046 (7.6×) | 0.0039 (8.9×) |
+
+In 3-D the resident call is bound by its kernels: at 128³ the probes and their visibility take 39 % of it, the two
+closest-point queries (ghosts and ILW crossings) 28 %, the ILW crossings 23 % and the node states 9 % (Nsight
+Systems); everything else, the refitted tree of a posed body included, under 1 % (a posed call costs 0-7 % more, with
+other ghosts). These are double-precision traversals with exact predicates, and the RTX 4070 runs FP64 at 1/64 of its
+FP32 rate (data-centre GPUs at 1/2). Copying the table back (122 MB at 128³) adds about 30 ms. At 16³ the GPU is not
+faster: 535 ghosts give too few threads, and each one walks the tree alone. In 2-D the kernels take under 1 ms of a
+1024² call; the rest is host work and transfer latency, so the device wins from 256² lines (the disc, 2.6×) and is
+slower at 64².
 
 ## How a solver uses the table
 
@@ -345,9 +371,10 @@ The closure table runs the same way (`fossil_fd_closure`, free routines: the mod
 ghost-point and cut-cell modules). The host path calls `ghost_points_3d` / `_2d`, `query_many`, `probe_many`,
 `line_crossings` and the ILW selection kernel `ilw_select_oac`; the device path runs the ghost kernels, the kernel of
 `query_many_device` on present arrays (`query_points_present`; curves: `query_present`, `probes_present`,
-`curvature_present`), the probe kernel `bvh_segment_blocked_oac`, `foot_principal_oac` and the ILW kernels (one
-count, scan and sorted fill per direction slot, then a compacted query of the crossings): the same routines, so the
-same bits (`fossil_test_fd_closure_3d`, `_2d`; bench lines `closure device vs serial mismatches`).
+`curvature_present`), the probe kernel `bvh_segment_blocked_oac`, `foot_principal_oac` and the ILW kernels (3-D: one
+traversal per direction slot into a private buffer of 16 crossings, sorted and selected; a slot with more takes a
+count, scan and exact-size fill; 2-D: one walk of the row or column bucket; then a compacted query of the crossings):
+the same routines, so the same bits (`fossil_test_fd_closure_3d`, `_2d`; bench lines `closure device vs serial mismatches`).
 
 The ghost outputs are integers and copied coordinates, so the two paths agree bit for bit; built without OpenACC the device
 loops run on the host in order, and the tests compare the two (`fossil_test_ghost_points_3d`, `_2d`). The 3-D device
@@ -392,9 +419,9 @@ routines are free procedures of the module `fossil_ghost_points`, re-exported by
 
 - **Ghost points alone are not resident.** `ghost_points_3d(device=.true.)` returns its ghosts to the host (the 3-D
   node states go to the host and back between its stages); the closure table keeps everything on the device.
-- **A pose costs a moved copy in 3-D.** The ghosts and ILW crossings of a posed body are those of a moved copy of the
-  surface (built on the host, its tree copied in for the call on the device path): the exact node states of a posed
-  body without the copy are open.
+- **A pose costs O(facets) per call in 3-D.** The posed vertices and the refitted tree are built for each call (on
+  the device on the device path); a solver that calls the table several times per pose pays it each time. An octree
+  surface (host path only) still takes a moved copy (`move` rebuilds the octree).
 - **The ILW normal is the pseudo-normal of the crossing point** (a closest-point query of it): at a crossing within
   round-off of an edge it is the edge's pseudo-normal.
 - **One block.** A ghost needs its fluid point inside the block: across a block boundary the solver's halo exchange,

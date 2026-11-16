@@ -34,12 +34,14 @@
 !<      posed with velocities and ILW crossings too).
 !<
 !<   6. Timing tables of the 3-D device kernels (sections, cut cells, link inputs, links, swept; best / median of 5;
-!<      the piece map, best of 2; the closure table at the bench's grid size, best of 3, CPU / device copied back /
-!<      device resident):
+!<      the piece map, best of 2; the closure table at the bench's grid size, unposed and posed, best of 5 after a
+!<      warm-up, CPU / device copied back / device resident):
 !<      only when built with OpenACC, where they compare the CPU with the GPU. Built without it the `device` routines
 !<      are host twins, so the tables would time the CPU twice (gfortran -O2, dragon-fine 40^3: 1375 s with them,
 !<      384 s without); the environment variable FOSSIL_BENCH_TIMING=1 prints them anyway, FOSSIL_BENCH_TIMING=0
 !<      skips them. Every mismatch check runs either way.
+!<   7. FOSSIL_CLOSURE_TIMING=N1[,N2...] (#109 WP1 step 06): only the closure-table timing, on N^3 lines for each N
+!<      (unposed and posed, the tables compared by bits), then `closure device vs serial mismatches` and the verdict.
 !<
 !< Usage: fossil_test_distance_bench [<stl_path> [<grid_n>]]
 !<        default <stl_path> = src/tests/dragon-fine.stl
@@ -100,7 +102,7 @@ integer(I4P)                  :: i, j, k, q
 integer(I4P)                  :: argc, n_sample, s, stride
 integer(I4P)                  :: n_threads
 character(len=512)            :: stl_path, arg2
-character(len=8)              :: env_value                 !< FOSSIL_BENCH_TIMING.
+character(len=64)             :: env_value                 !< FOSSIL_BENCH_TIMING, FOSSIL_CLOSURE_TIMING.
 integer                       :: env_status                !< Its status (0: set).
 logical                       :: timing                    !< Print the timing tables of the 3-D device kernels.
 logical                       :: correctness_ok, batch_ok, device_ok, fwn_ok, refuse_ok, holed_ok, field_ok
@@ -116,6 +118,7 @@ integer                       :: probe_mismatch            !< Probes and images:
 integer                       :: curvature_mismatch        !< Shape operator at the feet: device vs CPU mismatches (step 03).
 integer                       :: closure_mismatch          !< Closure table: device vs CPU mismatches (WP1 step 04).
 integer                       :: closure_ghosts            !< Ghosts of the closure-table case.
+integer(I4P)                  :: n_sz                      !< Closure timing size (FOSSIL_CLOSURE_TIMING).
 integer                       :: deviation_mismatch        !< Surface deviation: device vs CPU mismatches (issue #60).
 integer                       :: feature_mismatch          !< Feature-edge boxes: device vs CPU mismatches (issue #61).
 integer                       :: thin_mismatch             !< Thin-facet boxes: device vs CPU mismatches (issue #62).
@@ -160,6 +163,26 @@ print '(A,L1)', 'timing tables of the 3-D device kernels (OpenACC builds; FOSSIL
 ! ---- load --------------------------------------------------------------------
 call surface%load_from_file(file_name=trim(stl_path), guess_format=.true.)
 nf = surface%get_facets_number()
+
+! ---- closure-table timing only (#109 WP1 step 06): FOSSIL_CLOSURE_TIMING=N1[,N2...] -------------------------------
+call get_environment_variable('FOSSIL_CLOSURE_TIMING', env_value, status=env_status)
+if (env_status == 0 .and. len_trim(env_value) > 0) then
+   call surface%build_curvature
+   closure_mismatch = 0
+   do
+      k = index(env_value, ',')
+      if (k == 0) then
+         read(env_value, *) n_sz
+      else
+         read(env_value(1:k - 1), *) n_sz ; env_value = env_value(k + 1:)
+      endif
+      call closure_timing(n_sz, closure_mismatch)
+      if (k == 0) exit
+   enddo
+   print '(A,I0)', '   closure device vs serial mismatches: ', closure_mismatch
+   print '(A,L1)', 'Are all tests passed? ', closure_mismatch == 0
+   stop
+endif
 
 ! ---- build the deterministic probe grid -------------------------------------
 bmin = surface%get_bmin()
@@ -583,30 +606,17 @@ contains
    !< fd_closure_3d on the device, copied back and resident (then update_host), against the host (WP1 step 04): cell-centre
    !< lines of grid_n points per axis over the surface box inflated by 10 %, reach 3, three probes, the curvature (built by
    !< `curvature_case`), ILW crossings; unposed, then posed (a rotation of 0.2 rad about the box centre and a shift of
-   !< two spacings) with velocities. Every field by bits (`ib_closure_mismatches`). With the timing tables: best of 3 of
-   !< the unposed call, CPU / device copied back / device resident (after a warm-up call).
+   !< two spacings) with velocities. Every field by bits (`ib_closure_mismatches`). With the timing tables:
+   !< `closure_timing` at the bench's grid size.
    integer, intent(out)     :: mismatch !< Mismatches.
    integer, intent(out)     :: ghosts   !< Ghosts of the unposed table.
    type(ib_closure_t)       :: ch, cd, cr !< Host, device, resident tables.
    type(rigid_pose_t)       :: pose     !< Pose.
-   type(vector_R8P)         :: lo, hi   !< Surface box.
    real(R8P), allocatable   :: x(:), y(:), z(:) !< Lines.
-   real(R8P)                :: c(3), ext(3), h, ax(3), t(3, 3) !< Box centre, extents, spacing, axis, times.
-   integer(I8P)             :: c0, c1, rate !< Clock.
-   integer(I4P)             :: m, k, r  !< Counters.
+   real(R8P)                :: h        !< Spacing.
+   integer(I4P)             :: k        !< Counter.
 
-   lo = surface%get_bmin() ; hi = surface%get_bmax()
-   c = 0.5_R8P * [lo%x + hi%x, lo%y + hi%y, lo%z + hi%z] ; ext = 1.1_R8P * [hi%x - lo%x, hi%y - lo%y, hi%z - lo%z]
-   allocate(x(grid_n), y(grid_n), z(grid_n))
-   do m = 1, grid_n
-      x(m) = c(1) + ext(1) * ((m - 0.5_R8P) / grid_n - 0.5_R8P)
-      y(m) = c(2) + ext(2) * ((m - 0.5_R8P) / grid_n - 0.5_R8P)
-      z(m) = c(3) + ext(3) * ((m - 0.5_R8P) / grid_n - 0.5_R8P)
-   enddo
-   h = maxval(ext) / grid_n
-   ax = [0.3_R8P, -1._R8P, 0.5_R8P]
-   pose = pose_from_axis_angle(ax, 0.2_R8P)
-   pose = pose_from_axis_angle(ax, 0.2_R8P, c - matmul(pose%r, c) + [2._R8P * h, -h, 0._R8P])
+   call closure_lines(grid_n, x, y, z, h, pose)
    mismatch = 0 ; ghosts = 0
    call surface%enter_device
    do k = 1, 2
@@ -632,31 +642,104 @@ contains
       if (ch%n == 0 .or. .not. cr%on_device .or. .not. ch%with_curvature) mismatch = mismatch + 1
       call ib_closure_reset(cr)
    enddo
-   if (timing) then
-      call system_clock(count_rate=rate)
-      call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], cr, lengths=[h, 2 * h, 3 * h], ilw=.true., resident=.true.)
-      do r = 1, 3
-         call system_clock(c0)
-         call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], ch, lengths=[h, 2 * h, 3 * h], ilw=.true.)
-         call system_clock(c1) ; t(1, r) = real(c1 - c0, R8P) / rate
-         call system_clock(c0)
-         call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], cd, lengths=[h, 2 * h, 3 * h], ilw=.true., &
-                            device=.true.)
-         call system_clock(c1) ; t(2, r) = real(c1 - c0, R8P) / rate
-         call system_clock(c0)
-         call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], cr, lengths=[h, 2 * h, 3 * h], ilw=.true., &
-                            resident=.true.)
-         call system_clock(c1) ; t(3, r) = real(c1 - c0, R8P) / rate
+   call surface%exit_device
+   if (timing) call closure_timing(grid_n, mismatch, x, y, z, h, pose)
+   endsubroutine closure_case
+
+   subroutine closure_lines(nn, x, y, z, h, pose)
+   !< The lines of the closure-table cases: nn cell-centre points per axis over the surface box inflated by 10 %, their
+   !< spacing h (largest), the pose (0.2 rad about the box centre, a shift of two spacings).
+   integer(I4P),           intent(in)  :: nn               !< Points per axis.
+   real(R8P), allocatable, intent(out) :: x(:), y(:), z(:) !< Lines.
+   real(R8P),              intent(out) :: h                !< Spacing.
+   type(rigid_pose_t),     intent(out) :: pose             !< Pose.
+   type(vector_R8P) :: lo, hi            !< Surface box.
+   real(R8P)        :: c(3), ext(3), ax(3) !< Box centre, extents, axis.
+   integer(I4P)     :: m                 !< Counter.
+
+   lo = surface%get_bmin() ; hi = surface%get_bmax()
+   c = 0.5_R8P * [lo%x + hi%x, lo%y + hi%y, lo%z + hi%z] ; ext = 1.1_R8P * [hi%x - lo%x, hi%y - lo%y, hi%z - lo%z]
+   allocate(x(nn), y(nn), z(nn))
+   do m = 1, nn
+      x(m) = c(1) + ext(1) * ((m - 0.5_R8P) / nn - 0.5_R8P)
+      y(m) = c(2) + ext(2) * ((m - 0.5_R8P) / nn - 0.5_R8P)
+      z(m) = c(3) + ext(3) * ((m - 0.5_R8P) / nn - 0.5_R8P)
+   enddo
+   h = maxval(ext) / nn
+   ax = [0.3_R8P, -1._R8P, 0.5_R8P]
+   pose = pose_from_axis_angle(ax, 0.2_R8P)
+   pose = pose_from_axis_angle(ax, 0.2_R8P, c - matmul(pose%r, c) + [2._R8P * h, -h, 0._R8P])
+   endsubroutine closure_lines
+
+   subroutine closure_timing(nn, mismatch, xi, yi, zi, hi, posei)
+   !< Closure-table timing (#109 WP1 step 06) on nn^3 cell-centre lines (`closure_lines`, or the given ones), reach 3, three
+   !< probes, the curvature, ILW: unposed, then posed with velocities; per row CPU / device copied back / device resident,
+   !< best of 5 after one warm-up call, path by path (wall clock, `!$acc wait` before each clock read). The tables of the timed
+   !< calls are compared by bits (added to mismatch). The surface is mapped for the call (curvature built first).
+   integer(I4P),       intent(in)           :: nn       !< Points per axis.
+   integer,            intent(inout)        :: mismatch !< Mismatches (added).
+   real(R8P),          intent(in), optional :: xi(:), yi(:), zi(:), hi !< Lines and spacing (else closure_lines).
+   type(rigid_pose_t), intent(in), optional :: posei    !< Pose (with the lines).
+   type(ib_closure_t)     :: ch, cd, cr !< Host, device, resident tables.
+   type(rigid_pose_t)     :: pose     !< Pose.
+   real(R8P), allocatable :: x(:), y(:), z(:) !< Lines.
+   real(R8P)              :: h, t(3, 5) !< Spacing, times.
+   integer(I8P)           :: c0, c1, rate !< Clock.
+   integer(I4P)           :: k, r, w, ng !< Counters.
+   character(8)           :: label  !< Row label.
+
+   if (present(xi)) then
+      x = xi ; y = yi ; z = zi ; h = hi ; pose = posei
+   else
+      call closure_lines(nn, x, y, z, h, pose)
+   endif
+   call system_clock(count_rate=rate)
+   call surface%enter_device
+   do k = 1, 2
+      do w = 1, 3 ! path by path, so a device call follows a device call (a GPU left idle clocks down)
+         do r = 0, 5
+            !$acc wait
+            call system_clock(c0)
+            if (k == 1) then
+               select case (w)
+               case (1) ; call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], ch, lengths=[h, 2 * h, 3 * h], ilw=.true.)
+               case (2) ; call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], cd, lengths=[h, 2 * h, 3 * h], &
+                                             ilw=.true., device=.true.)
+               case (3) ; call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], cr, lengths=[h, 2 * h, 3 * h], &
+                                             ilw=.true., resident=.true.)
+               endselect
+            else
+               select case (w)
+               case (1) ; call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], ch, lengths=[h, 2 * h, 3 * h], &
+                                             pose=pose, linear_velocity=[0.1_R8P, 0._R8P, -0.2_R8P], &
+                                             angular_velocity=[0._R8P, 1._R8P, 0.5_R8P], ilw=.true.)
+               case (2) ; call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], cd, lengths=[h, 2 * h, 3 * h], &
+                                             pose=pose, linear_velocity=[0.1_R8P, 0._R8P, -0.2_R8P], &
+                                             angular_velocity=[0._R8P, 1._R8P, 0.5_R8P], ilw=.true., device=.true.)
+               case (3) ; call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], cr, lengths=[h, 2 * h, 3 * h], &
+                                             pose=pose, linear_velocity=[0.1_R8P, 0._R8P, -0.2_R8P], &
+                                             angular_velocity=[0._R8P, 1._R8P, 0.5_R8P], ilw=.true., resident=.true.)
+               endselect
+            endif
+            !$acc wait
+            call system_clock(c1)
+            if (r > 0) t(w, r) = real(c1 - c0, R8P) / rate
+         enddo
       enddo
+      call cr%update_host
+      mismatch = mismatch + ib_closure_mismatches(ch, cd) + ib_closure_mismatches(ch, cr)
+      if (ch%n == 0 .or. .not. cr%on_device) mismatch = mismatch + 1
+      ng = ch%n
       call ib_closure_reset(cr)
-      print '(A,I0,A,I0,A)', 'closure table timing (fd_closure_3d, ', grid_n, '^3 lines, ', ghosts, &
-                             ' ghosts, reach 3, 3 probes, curvature, ILW; best of 3) [s]:'
+      label = 'unposed' ; if (k == 2) label = 'posed'
+      print '(A,I0,A,A,A,I0,A)', 'closure table timing (fd_closure_3d, ', nn, '^3 lines, ', trim(label), ', ', ng, &
+                                 ' ghosts, reach 3, 3 probes, curvature, ILW; best of 5 after a warm-up) [s]:'
       print '(A,3ES11.3,A,F6.2,A,F6.2,A)', '   CPU / device copied back / device resident: ', minval(t(1, :)), &
             minval(t(2, :)), minval(t(3, :)), '  (', minval(t(1, :)) / minval(t(2, :)), 'x, ', &
             minval(t(1, :)) / minval(t(3, :)), 'x)'
-   endif
+   enddo
    call surface%exit_device
-   endsubroutine closure_case
+   endsubroutine closure_timing
 
    subroutine deviation_case(mismatch)
    !< surface%deviation with device=.true. vs the CPU path (issue #60): a copy of the surface rotated by 2 degrees about

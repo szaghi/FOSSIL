@@ -11,7 +11,9 @@ program fossil_test_fd_closure_3d
 !< 2. ILW against the cut cells: on the cut-cell nodes, the crossing of every slot lies on the cell edge between the
 !<    slot's points and gives the edge's fluid fraction of `cut_cells_3d(edges=.true.)` bit for bit.
 !< 3. Twin: `device=.true.` (built without OpenACC its loops run on the host) equals the host path in every field, bit for
-!<    bit (`ib_closure_mismatches`): with curvature, probes, velocities and ILW; posed; without curvature and probes.
+!<    bit (`ib_closure_mismatches`): with curvature, probes, velocities and ILW; posed; without curvature and probes. The
+!<    posed ghosts and ILW crossings (refitted tree, no moved copy since step 06) equal those of a surface moved by
+!<    `move`, bit for bit.
 !< 4. Resident lifecycle: `resident=.true.` flags the table, `update_host` gives the host path's bits, a copy is not
 !<    mapped (its `update_host` warns and drops the flag), `exit_device` / `enter_device` / `exit_device`, a new call
 !<    into a resident table releases it first, `ib_closure_reset`.
@@ -20,18 +22,20 @@ program fossil_test_fd_closure_3d
 use fossil,              only : surface_stl_object, ib_closure_t, fd_closure_3d, ib_closure_reset, ib_closure_mismatches, &
                                 cut_cells_3d_t, cut_cells_3d, rigid_pose_t, pose_from_axis_angle, STATUS_OK, STATUS_INVALID_INPUT
 use fossil_facet_object, only : facet_object
+use fossil_thickness_bodies, only : make_boxes
+use iso_fortran_env,     only : int64
 use penf,                only : I4P, R8P
 use vecfor,              only : vector_R8P
 
 implicit none
 
 real(R8P), parameter            :: R = 0.5_R8P
-type(surface_stl_object)        :: sphere, plain, late, empty
+type(surface_stl_object)        :: sphere, plain, late, empty, moved, slabs
 type(facet_object), allocatable :: fc(:)
 type(ib_closure_t)              :: ch, cd, cr, cc
 type(cut_cells_3d_t)            :: cut
 type(rigid_pose_t)              :: pose
-real(R8P), allocatable          :: x(:), y(:)
+real(R8P), allocatable          :: x(:), y(:), xs(:), ys(:)
 real(R8P)                       :: e, ev, vx, vy, vz, rr, elo, ehi, frac, ef
 integer(I4P)                    :: i, g, k, d, a, st, nbad, nslot, lo, hi, s, sgn, idx(3)
 logical                         :: ok
@@ -155,6 +159,25 @@ do g = 1_I4P, ch%n
 enddo
 call check('posed: feet on the moved sphere, velocity about the pose''s origin', e < 0.01_R8P .and. &
            abs(ch%velocity(1, 1) - (0.1_R8P - (ch%foot(2, 1) - pose%t(2)))) < 1.e-15_R8P)
+! the posed ghosts and crossings are those of the moved surface (step 06: refitted tree, no moved copy), bit for bit
+call icosphere(3_I4P, R, fc) ; call moved%adopt_facets(facets=fc) ; call moved%move(pose)
+call fd_closure_3d(moved, x, x, x, [1_I4P, 2_I4P, 3_I4P], cc, status=st, ilw=.true.)
+call check('posed: ghosts and ILW crossings = those of a moved copy, bit for bit', cc%n == ch%n .and. &
+           all(cc%ijk == ch%ijk) .and. all(cc%mask == ch%mask) .and. all(cc%steps == ch%steps) .and. &
+           all(cc%ilw_element == ch%ilw_element) .and. &
+           all(transfer(cc%points, 1_int64, size(cc%points)) == transfer(ch%points, 1_int64, size(ch%points))) .and. &
+           all(transfer(cc%ilw_t, 1_int64, size(cc%ilw_t)) == transfer(ch%ilw_t, 1_int64, size(ch%ilw_t))))
+call ib_closure_reset(cc)
+! more crossings in an ILW window than the device's private buffer (16): twelve slabs 0.004 thick, 0.004 apart, nodes
+! inside the first; the overflowed slots take the exact-size device path (step 06), the same table bit for bit
+call make_boxes([0.4_R8P, -0.3_R8P, -0.3_R8P], [0.404_R8P, 0.3_R8P, 0.3_R8P], 12_I4P, 0.004_R8P, fc)
+call slabs%adopt_facets(facets=fc) ; call slabs%enter_device
+xs = [(0.002_R8P + 0.1_R8P * i, i = 0, 7)] ; ys = [(-0.25_R8P + 0.1_R8P * i, i = 0, 5)]
+call fd_closure_3d(slabs, xs, ys, ys, [1_I4P, 1_I4P, 1_I4P], ch, status=st, ilw=.true.)
+call fd_closure_3d(slabs, xs, ys, ys, [1_I4P, 1_I4P, 1_I4P], cd, status=st, ilw=.true., device=.true.)
+call check('ILW: 24 crossings in a window (buffer overflow), device = host, every field', st == STATUS_OK .and. &
+           ch%n == 36_I4P .and. all(ch%ilw_element(1:2, :) > 0_I4P) .and. ib_closure_mismatches(ch, cd) == 0_I4P)
+call slabs%exit_device
 call plain%enter_device
 call fd_closure_3d(plain, x, x, x, [2_I4P, 2_I4P, 2_I4P], ch, status=st, ilw=.true.)
 call fd_closure_3d(plain, x, x, x, [2_I4P, 2_I4P, 2_I4P], cd, status=st, ilw=.true., device=.true.)

@@ -104,6 +104,8 @@ public :: cut_cells_3d_nodes_device
 public :: cut_cells_3d_nodes
 ! the node states left on the device for the resident closure table (#109 WP1 step 04)
 public :: cut_cells_3d_nodes_present
+! the node states on a tree given as arrays, device and host (#109 WP1 step 06: the posed closure table)
+public :: cut_cells_3d_nodes_tree_present, cut_cells_3d_nodes_tree
 ! the inputs of the piece links (issue #100 step 5), for the link stage and the benches (not re-exported by `fossil`)
 public :: cut_link_inputs_3d_t, cut_cells_3d_link_inputs_device, cut_cells_3d_link_inputs, link_inputs_reset
 ! the piece links on the device (issue #100 step 5), the stage of `cut_cells_3d_device(..., links=)`, for the benches
@@ -4109,6 +4111,52 @@ contains
    call edge_fractions_dev(node_p, payload_p, tv_p, x, y, z, nx, ny, nz, .false., node_in, ex, ey, ez)
    !$acc end data
    endsubroutine cut_cells_3d_nodes_present
+
+   subroutine cut_cells_3d_nodes_tree_present(node, payload, tv, x, y, z, node_in)
+   !< `cut_cells_3d_nodes_present` on a SAH BVH given as arrays (#109 WP1 step 06: the posed closure table passes the tree
+   !< of the body-frame surface refitted to the moved vertices, which `move` would give): node, payload, tv, the lines
+   !< and node_in present on the device; node_in written there only, the bits of `cut_cells_3d_nodes_tree`.
+   type(aabb_node_object),       intent(in)    :: node(0:)         !< Tree nodes (present).
+   type(facet_distance_payload), intent(in)    :: payload(:)       !< Payload (present).
+   real(R8P),                    intent(in)    :: tv(:,:)          !< Exact vertices [9, facets] (present).
+   real(R8P),                    intent(in)    :: x(:), y(:), z(:) !< Lines (present).
+   logical,                      intent(inout) :: node_in(:,:,:)   !< Point inside flags (present).
+   real(R8P), allocatable :: ex(:,:,:), ey(:,:,:), ez(:,:,:)       !< Edge fractions (not asked).
+   integer(I4P) :: nx, ny, nz                                      !< Cells.
+
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   allocate(ex(1, 1, 1), ey(1, 1, 1), ez(1, 1, 1))
+   !$acc data create(ex, ey, ez)
+   call edge_fractions_dev(node, payload, tv, x, y, z, nx, ny, nz, .false., node_in, ex, ey, ez)
+   !$acc end data
+   endsubroutine cut_cells_3d_nodes_tree_present
+
+   subroutine cut_cells_3d_nodes_tree(node, payload, tv, x, y, z, node_in)
+   !< The host twin of `cut_cells_3d_nodes_tree_present` (#109 WP1 step 06): per z line its crossings counted
+   !< (`bvh_line_count_oac`) and placed (`line_fractions_oac`, the bits of `line_fractions`), node_in [size(x), size(y),
+   !< size(z)] on the host. On the tree and vertices of a surface it is `cut_cells_3d_nodes` bit for bit.
+   type(aabb_node_object),       intent(in)    :: node(0:)         !< Tree nodes.
+   type(facet_distance_payload), intent(in)    :: payload(:)       !< Payload.
+   real(R8P),                    intent(in)    :: tv(:,:)          !< Exact vertices [9, facets].
+   real(R8P),                    intent(in)    :: x(:), y(:), z(:) !< Lines (strictly increasing).
+   logical,                      intent(inout) :: node_in(:,:,:)   !< Point inside flags [size(x), size(y), size(z)].
+   real(R8P),    allocatable :: ts(:), fr(:)                       !< Crossings, fractions of one line.
+   integer(I4P), allocatable :: ids(:), seg(:)                     !< Facets, segments.
+   logical,      allocatable :: es(:), nd(:)                       !< Entering flags, node flags of one line.
+   integer(I4P) :: nz, i, j, nc                                    !< Work.
+
+   nz = size(z, kind=I4P) - 1_I4P
+   allocate(fr(nz), nd(nz + 1))
+   do j = 1, size(y, kind=I4P)
+      do i = 1, size(x, kind=I4P)
+         nc = bvh_line_count_oac(node, payload, tv, 3_I4P, x(i), y(j), -huge(1._R8P), huge(1._R8P))
+         allocate(ts(nc), ids(nc), es(nc), seg(nc))
+         call line_fractions_oac(node, payload, tv, 3_I4P, x(i), y(j), nz, z, nc, ts, ids, es, seg, fr, nd)
+         node_in(i, j, :) = nd
+         deallocate(ts, ids, es, seg)
+      enddo
+   enddo
+   endsubroutine cut_cells_3d_nodes_tree
 
    subroutine device_grid_check(surface, x, y, z, nx, ny, nz, status)
    !< The checks of the device paths (issue #100 step 3c): the edges (as `cut_cells_3d`) and a SAH BVH with facets

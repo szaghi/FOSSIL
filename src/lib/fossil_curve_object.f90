@@ -2344,20 +2344,34 @@ contains
    integer(I4P),        intent(inout)      :: vxl(n)    !< Closest vertices, 0 in a segment interior (present).
    real(R8P),           intent(inout)      :: nml(2, n) !< Pseudo-normals (present).
    integer(I4P),        intent(inout)      :: bdl(n)    !< Bodies (present).
-   real(R8P),    pointer :: lo_u(:), lo_v(:), hi_u(:), hi_v(:), a_u(:), a_v(:), d_u(:), d_v(:), len2(:) !< Aliases.
-   real(R8P),    pointer :: u(:), v(:), pn_u(:), pn_v(:), seg_nu(:), seg_nv(:) !< Aliases.
-   real(R8P),    pointer :: wn_cu(:), wn_cv(:), wn_du(:), wn_dv(:), wn_diag2(:), wn_c(:,:) !< Aliases.
-   integer(I4P), pointer :: left(:), right(:), first(:), last(:), seg_id(:), next(:), vbody(:) !< Aliases.
-   integer(I4P)          :: i                                                 !< Counter.
 
    if (n < 1_I4P) return
-   lo_u => self%bvh%lo_u ; lo_v => self%bvh%lo_v ; hi_u => self%bvh%hi_u ; hi_v => self%bvh%hi_v
-   left => self%bvh%left ; right => self%bvh%right ; first => self%bvh%first ; last => self%bvh%last
-   a_u => self%bvh%a_u ; a_v => self%bvh%a_v ; d_u => self%bvh%d_u ; d_v => self%bvh%d_v ; len2 => self%bvh%len2
-   seg_id => self%bvh%seg_id ; next => self%next ; u => self%u ; v => self%v ; pn_u => self%pn_u ; pn_v => self%pn_v
-   seg_nu => self%seg_nu ; seg_nv => self%seg_nv ; vbody => self%vertex_body
-   wn_cu => self%bvh%wn_cu ; wn_cv => self%bvh%wn_cv ; wn_du => self%bvh%wn_du ; wn_dv => self%bvh%wn_dv
-   wn_c => self%bvh%wn_c ; wn_diag2 => self%bvh%wn_diag2
+   call query_present_core(n, self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, self%bvh%right, &
+                           self%bvh%first, self%bvh%last, self%bvh%a_u, self%bvh%a_v, self%bvh%d_u, self%bvh%d_v, &
+                           self%bvh%len2, self%bvh%seg_id, self%next, self%u, self%v, self%pn_u, self%pn_v, self%seg_nu, &
+                           self%seg_nv, self%vertex_body, self%bvh%wn_cu, self%bvh%wn_cv, self%bvh%wn_du, self%bvh%wn_dv, &
+                           self%bvh%wn_c, self%bvh%wn_diag2, pts, signed_, fwn, dd, cpl, sgl, vxl, nml, bdl)
+   endsubroutine query_present
+
+   subroutine query_present_core(n, lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, len2, seg_id, &
+                                 next, u, v, pn_u, pn_v, seg_nu, seg_nv, vbody, wn_cu, wn_cv, wn_du, wn_dv, wn_c, wn_diag2, &
+                                 pts, signed_, fwn, dd, cpl, sgl, vxl, nml, bdl)
+   !< The loop of `query_present` on the curve's member arrays as dummies (#109 WP1 step 06): pointer aliases in a
+   !< `present` clause cost a descriptor upload and download each (28 per launch), dummies none. Every array present.
+   integer(I4P), intent(in)    :: n                                                  !< Points.
+   real(R8P),    intent(in)    :: lo_u(:), lo_v(:), hi_u(:), hi_v(:)                 !< Node boxes (present).
+   integer(I4P), intent(in)    :: left(:), right(:), first(:), last(:)               !< Children, leaf ranges (present).
+   real(R8P),    intent(in)    :: a_u(:), a_v(:), d_u(:), d_v(:), len2(:)            !< Segment payload (present).
+   integer(I4P), intent(in)    :: seg_id(:), next(:)                                 !< Payload segments, next (present).
+   real(R8P),    intent(in)    :: u(:), v(:), pn_u(:), pn_v(:), seg_nu(:), seg_nv(:) !< Vertices, normals (present).
+   integer(I4P), intent(in)    :: vbody(:)                                           !< Bodies (present).
+   real(R8P),    intent(in)    :: wn_cu(:), wn_cv(:), wn_du(:), wn_dv(:), wn_c(:,:), wn_diag2(:) !< Winding cache.
+   real(R8P),    intent(in)    :: pts(2, n)                                          !< Points (present).
+   logical,      intent(in)    :: signed_, fwn                                       !< Signed, by the FWN.
+   real(R8P),    intent(inout) :: dd(n), cpl(2, n), nml(2, n)                        !< Outputs (present).
+   integer(I4P), intent(inout) :: sgl(n), vxl(n), bdl(n)                             !< Outputs (present).
+   integer(I4P)                :: i                                                  !< Counter.
+
    !$acc parallel loop gang vector default(present) present(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, &
    !$acc&  d_u, d_v, len2, seg_id, next, u, v, pn_u, pn_v, seg_nu, seg_nv, vbody, wn_cu, wn_cv, wn_du, wn_dv, wn_c, wn_diag2, &
    !$acc&  pts, dd, cpl, sgl, vxl, nml, bdl)
@@ -2367,7 +2381,7 @@ contains
                            pts(1, i), pts(2, i), signed_, fwn, dd(i), cpl(1, i), cpl(2, i), sgl(i), vxl(i), &
                            nml(1, i), nml(2, i), bdl(i))
    enddo
-   endsubroutine query_present
+   endsubroutine query_present_core
 
    subroutine probes_present(self, n, m, cpl, nml, sgl, vxl, ll, ppl, vsl)
    !< The probe kernel of `probe_many_device` on arrays already present on the device (#109 WP1 step 04): probe k of
@@ -2383,16 +2397,30 @@ contains
    real(R8P),           intent(in)         :: ll(m)        !< Probe lengths, + outward (present).
    real(R8P),           intent(inout)      :: ppl(2, m, n) !< Probe points (present).
    logical,             intent(inout)      :: vsl(m, n)    !< The segment foot-probe crosses nothing (present).
-   real(R8P),    pointer :: lo_u(:), lo_v(:), hi_u(:), hi_v(:), a_u(:), a_v(:), d_u(:), d_v(:), u(:), v(:) !< Aliases.
-   integer(I4P), pointer :: left(:), right(:), first(:), last(:), seg_id(:), next(:) !< Aliases.
-   real(R8P)             :: cu, cv, nu, nv, pu, pv, lk  !< Per-probe work.
-   integer(I4P)          :: i, k, sgi, vxi              !< Work.
 
    if (n < 1_I4P .or. m < 1_I4P) return
-   lo_u => self%bvh%lo_u ; lo_v => self%bvh%lo_v ; hi_u => self%bvh%hi_u ; hi_v => self%bvh%hi_v
-   left => self%bvh%left ; right => self%bvh%right ; first => self%bvh%first ; last => self%bvh%last
-   a_u => self%bvh%a_u ; a_v => self%bvh%a_v ; d_u => self%bvh%d_u ; d_v => self%bvh%d_v
-   seg_id => self%bvh%seg_id ; next => self%next ; u => self%u ; v => self%v
+   call probes_present_core(n, m, self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, &
+                            self%bvh%right, self%bvh%first, self%bvh%last, self%bvh%a_u, self%bvh%a_v, self%bvh%d_u, &
+                            self%bvh%d_v, self%bvh%seg_id, self%next, self%u, self%v, cpl, nml, sgl, vxl, ll, ppl, vsl)
+   endsubroutine probes_present
+
+   subroutine probes_present_core(n, m, lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, seg_id, &
+                                  next, u, v, cpl, nml, sgl, vxl, ll, ppl, vsl)
+   !< The loop of `probes_present` on the curve's member arrays as dummies (#109 WP1 step 06; see `query_present_core`).
+   integer(I4P), intent(in)    :: n, m                                     !< Points, probes per point.
+   real(R8P),    intent(in)    :: lo_u(:), lo_v(:), hi_u(:), hi_v(:)       !< Node boxes (present).
+   integer(I4P), intent(in)    :: left(:), right(:), first(:), last(:)     !< Children, leaf ranges (present).
+   real(R8P),    intent(in)    :: a_u(:), a_v(:), d_u(:), d_v(:)           !< Segment payload (present).
+   integer(I4P), intent(in)    :: seg_id(:), next(:)                       !< Payload segments, next (present).
+   real(R8P),    intent(in)    :: u(:), v(:)                               !< Vertices (present).
+   real(R8P),    intent(in)    :: cpl(2, n), nml(2, n)                     !< Feet, normals (present).
+   integer(I4P), intent(in)    :: sgl(n), vxl(n)                           !< Foot segments, vertices (present).
+   real(R8P),    intent(in)    :: ll(m)                                    !< Probe lengths (present).
+   real(R8P),    intent(inout) :: ppl(2, m, n)                             !< Probe points (present).
+   logical,      intent(inout) :: vsl(m, n)                                !< Visibility (present).
+   real(R8P)                   :: cu, cv, nu, nv, pu, pv, lk               !< Per-probe work.
+   integer(I4P)                :: i, k, sgi, vxi                           !< Work.
+
    !$acc parallel loop gang vector collapse(2) default(present) present(lo_u, lo_v, hi_u, hi_v, left, right, first, last, &
    !$acc&  a_u, a_v, d_u, d_v, seg_id, next, u, v, cpl, nml, sgl, vxl, ll, ppl, vsl) private(cu, cv, nu, nv, pu, pv, lk, sgi, vxi)
    do i = 1_I4P, n
@@ -2405,7 +2433,7 @@ contains
                                                      seg_id, next, u, v, cu, cv, pu, pv, sgi, vxi)
       enddo
    enddo
-   endsubroutine probes_present
+   endsubroutine probes_present_core
 
    subroutine curvature_present(self, n, sgl, cpl, pkl)
    !< The foot curvature of `query_many_device(principal_curvatures=)` on arrays already present on the device (#109 WP1
@@ -2416,17 +2444,27 @@ contains
    integer(I4P),        intent(in)         :: sgl(n)    !< Foot segments (present).
    real(R8P),           intent(in)         :: cpl(2, n) !< Foot points (present).
    real(R8P),           intent(inout)      :: pkl(n)    !< Curvatures (present).
-   real(R8P),    pointer :: u(:), v(:), ck_p(:) !< Aliases.
-   integer(I4P), pointer :: next(:)             !< Alias.
-   integer(I4P)          :: i                   !< Counter.
 
    if (n < 1_I4P) return
-   u => self%u ; v => self%v ; next => self%next ; ck_p => self%curv_k
+   call curvature_present_core(n, self%u, self%v, self%next, self%curv_k, sgl, cpl, pkl)
+   endsubroutine curvature_present
+
+   subroutine curvature_present_core(n, u, v, next, ck_p, sgl, cpl, pkl)
+   !< The loop of `curvature_present` on the curve's member arrays as dummies (#109 WP1 step 06; see
+   !< `query_present_core`).
+   integer(I4P), intent(in)    :: n                  !< Points.
+   real(R8P),    intent(in)    :: u(:), v(:), ck_p(:) !< Vertices, vertex curvatures (present).
+   integer(I4P), intent(in)    :: next(:)            !< Next vertex (present).
+   integer(I4P), intent(in)    :: sgl(n)             !< Foot segments (present).
+   real(R8P),    intent(in)    :: cpl(2, n)          !< Foot points (present).
+   real(R8P),    intent(inout) :: pkl(n)             !< Curvatures (present).
+   integer(I4P)                :: i                  !< Counter.
+
    !$acc parallel loop gang vector default(present) present(u, v, next, ck_p, sgl, cpl, pkl)
    do i = 1_I4P, n
       pkl(i) = curve_foot_curvature_oac(u, v, next, ck_p, sgl(i), cpl(1, i), cpl(2, i))
    enddo
-   endsubroutine curvature_present
+   endsubroutine curvature_present_core
 
    subroutine probe_many_one(self, points, lengths, probe_points, visible, foot_points, normals, status, patches, pose)
    !< Probe points (issue #37): for each point (u, v), the point at distance lengths(i) along the

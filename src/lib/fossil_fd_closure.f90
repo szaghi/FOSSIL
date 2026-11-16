@@ -32,9 +32,12 @@ module fossil_fd_closure
 !<   with no crossing (steps 0, or an open wall) has element 0 and zeros.
 !<
 !< Poses (`pose=`): the body is at the pose, everything is in the world frame. The ghosts and the ILW crossings are those
-!< of the surface moved by the pose (3-D: a moved copy, `move`, the geometry the cut cells of the moved body see; 2-D:
-!< the vertices placed by `to_world`, as `curve%move` places them); every query (foot, normal, probes, visibility,
-!< curvature, the ILW normals) runs in the body frame on the given geometry and is mapped back, as `query_many(pose=)`.
+!< of the surface moved by the pose, the geometry the cut cells of the moved body see, without moving it (3-D, #109 WP1
+!< step 06: the facet vertices placed by `to_world` as `move` places them, and the SAH BVH of the given surface refitted
+!< to them as `move` refits it, both built for the call, on the device on the device path; 2-D: the vertices placed by
+!< `to_world`, as `curve%move` places them); every query (foot, normal, probes, visibility, curvature, the ILW normals)
+!< runs in the body frame on the given geometry and is mapped back, as `query_many(pose=)`. An octree surface (host path
+!< only) takes a moved copy, `move` (the octree is rebuilt there).
 !<
 !< Two paths, the same table bit for bit. Host: `ghost_points_3d/_2d`, `query_many`, `probe_many`, `line_crossings` and
 !< the ILW selection kernel. Device (`device=.true.`; the surface or curve mapped by `enter_device`, and its curvature if
@@ -43,14 +46,16 @@ module fossil_fd_closure
 !< stages. `resident=.true.` (implies the device path) leaves the table mapped: the resident pattern of the cut cells
 !< (`on_device`, `device_key`, `enter_device` / `update_host` / `exit_device`; `ib_closure_reset`; every writer takes the
 !< table intent(inout) and releases it first). Built without OpenACC the device loops run on the host in order.
-use fossil_aabb_node_object,   only : aabb_node_object
-use fossil_aabb_tree_object,   only : facet_distance_payload
+use fossil_aabb_node_object,   only : aabb_node_object, bvh_bmin_x_oac, bvh_bmin_y_oac, bvh_bmin_z_oac, bvh_bmax_x_oac, &
+                                      bvh_bmax_y_oac, bvh_bmax_z_oac, bvh_left_child_oac, bvh_right_child_oac, &
+                                      bvh_payload_first_oac, bvh_payload_count_oac, bvh_node_refit_oac
+use fossil_aabb_tree_object,   only : facet_distance_payload, AABB_TREE_SAH_BVH
 use fossil_curve_object,       only : curve_object
 use fossil_cut_cells_2d,       only : node_rows, node_parity
-use fossil_cut_cells_3d,       only : cut_cells_3d_nodes_present
+use fossil_cut_cells_3d,       only : cut_cells_3d_nodes_tree, cut_cells_3d_nodes_tree_present
 use fossil_cut_graph,          only : links_scan_dev
 use fossil_ghost_points,       only : ghost_points_t, ghost_points_3d, ghost_points_2d_flat, ghost_lines_check, &
-                                      ghost_mask_oac, ghost_fill_oac
+                                      ghost_mask_oac, ghost_fill_oac, ghost_points_nodes_3d
 use fossil_line_query,         only : bvh_line_count_oac, bvh_line_crossings_oac, line_crossing_before, &
                                       line_crossing_before_2d, seg_line_hit_oac
 use fossil_rigid_pose,         only : rigid_pose_t, rigid_pose_2d_t
@@ -113,6 +118,8 @@ type :: ib_closure_t
       procedure, pass(self) :: exit_device  !< Release the device copies.
 endtype ib_closure_t
 
+integer(I4P), parameter :: ILW_BUF = 16_I4P !< Private crossing buffer of an ILW slot (more: the exact-size path).
+
 interface mis_i
    module procedure mis_i1, mis_i2, mis_i3
 endinterface mis_i
@@ -144,13 +151,13 @@ contains
    logical,                  intent(in),  optional :: ilw                 !< ILW crossings (default .false.).
    logical,                  intent(in),  optional :: device              !< Device path (default .false.).
    logical,                  intent(in),  optional :: resident            !< Leave the table mapped (default .false.).
-   type(surface_stl_object), target  :: sm                    !< The surface moved by the pose.
+   type(surface_stl_object), target  :: sm                    !< The surface moved by the pose (octree only).
    type(surface_stl_object), pointer :: geo                   !< Geometry of the ghosts and crossings.
    real(R8P)                         :: lv(3), av(3), c(3)    !< Rigid velocity.
    real(R8P)                         :: pr(3, 3), pt(3)       !< Pose.
    real(R8P), allocatable            :: ll(:)                 !< Probe lengths.
    integer(I4P)                      :: st, m                 !< Status, probes.
-   logical                           :: dev, res, wv, wi, wc, posed !< Options.
+   logical                           :: dev, res, wv, wi, wc, posed, tree !< Options; posed SAH BVH refitted.
 
    call ib_closure_reset(closure)
    if (present(status)) status = STATUS_OK
@@ -185,14 +192,18 @@ contains
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
-   geo => surface
+   geo => surface ; tree = .false.
    if (posed .and. surface%get_facets_number() > 0_I4P) then
-      sm = surface ; sm%is_on_device = .false. ; call sm%move(pose) ; geo => sm
+      tree = surface%aabb%get_tree_kind() == AABB_TREE_SAH_BVH .and. allocated(surface%aabb%node) .and. &
+             allocated(surface%aabb%payload) .and. allocated(surface%tri_vertices)
+      if (.not. tree) then ! an octree: a moved copy (move rebuilds it)
+         sm = surface ; sm%is_on_device = .false. ; call sm%move(pose) ; geo => sm
+      endif
    endif
    if (dev .and. surface%get_facets_number() > 0_I4P) then
-      call closure_3d_device(surface, geo, x, y, z, reach, ll, posed, pr, pt, wc, wv, lv, av, c, wi, res, closure)
+      call closure_3d_device(surface, geo, tree, x, y, z, reach, ll, posed, pr, pt, wc, wv, lv, av, c, wi, res, closure)
    else
-      call closure_3d_host(surface, geo, x, y, z, reach, ll, pose, wc, wv, lv, av, c, wi, closure)
+      call closure_3d_host(surface, geo, tree, x, y, z, reach, ll, pose, pr, pt, wc, wv, lv, av, c, wi, closure)
    endif
    endsubroutine fd_closure_3d
 
@@ -377,19 +388,25 @@ contains
 
    ! private: the two paths
 
-   subroutine closure_3d_host(surface, geo, x, y, z, reach, ll, pose, wc, wv, lv, av, c, wi, cl)
-   !< The host path of `fd_closure_3d`: `ghost_points_3d` on geo, `query_many` and `probe_many` on the surface (pose=),
-   !< the ILW crossings by `line_crossings` on geo and `ilw_select_oac`, their queries by `query_many`.
-   type(surface_stl_object), intent(in)           :: surface          !< Surface (queries).
+   subroutine closure_3d_host(surface, geo, tree, x, y, z, reach, ll, pose, pr, pt, wc, wv, lv, av, c, wi, cl)
+   !< The host path of `fd_closure_3d`: `ghost_points_3d` on geo (posed SAH BVH: the node states on the refitted tree,
+   !< `posed_tree_3d`), `query_many` and `probe_many` on the surface (pose=), the ILW crossings by `line_crossings` on geo
+   !< (posed: the BVH kernel on the refitted tree) and `ilw_select_oac`, their queries by `query_many`.
+   type(surface_stl_object), intent(in), target   :: surface          !< Surface (queries).
    type(surface_stl_object), intent(in)           :: geo              !< Geometry of the ghosts and crossings.
+   logical,                  intent(in)           :: tree             !< Posed SAH BVH: ghosts and crossings on the refit.
    real(R8P),                intent(in)           :: x(:), y(:), z(:) !< Point lines.
    integer(I4P),             intent(in)           :: reach(:)         !< Reach.
    real(R8P),                intent(in)           :: ll(:)            !< Probe lengths.
    type(rigid_pose_t),       intent(in), optional :: pose             !< Pose.
+   real(R8P),                intent(in)           :: pr(3, 3), pt(3)  !< Pose (matrix, translation).
    logical,                  intent(in)           :: wc, wv, wi       !< Curvature, velocity, ILW.
    real(R8P),                intent(in)           :: lv(3), av(3), c(3) !< Rigid velocity.
    type(ib_closure_t),       intent(inout)        :: cl               !< Table.
    type(ghost_points_t)          :: gp                                !< Ghosts.
+   type(aabb_node_object), allocatable :: nodem(:)                    !< Refitted tree (posed).
+   real(R8P),        allocatable :: tvm(:,:)                          !< Moved vertices (posed).
+   logical,          allocatable :: nd(:,:,:)                         !< Point inside flags (posed).
    type(vector_R8P), allocatable :: pts(:)                            !< Query points.
    real(R8P),        allocatable :: lens(:,:), cp(:,:), qd(:), qn(:,:), qk(:,:), qdir(:,:,:) !< Work.
    real(R8P),        allocatable :: ts(:)                             !< Crossings.
@@ -398,7 +415,15 @@ contains
    real(R8P)                     :: apos, bpos, elo, ehi, t0, t1      !< Slot window.
    integer(I4P)                  :: n, m, g, k, a, d, nc, best, sgn, axis, nq, q !< Work.
 
-   call ghost_points_3d(geo, x, y, z, reach, gp)
+   if (tree) then
+      allocate(nodem(0:ubound(surface%aabb%node, 1)), tvm(9, surface%get_facets_number()))
+      call posed_tree_3d(surface, pr, pt, .false., nodem, tvm)
+      allocate(nd(size(x), size(y), size(z)))
+      call cut_cells_3d_nodes_tree(nodem, surface%aabb%payload, tvm, x, y, z, nd)
+      call ghost_points_nodes_3d(nd, x, y, z, reach, gp)
+   else
+      call ghost_points_3d(geo, x, y, z, reach, gp)
+   endif
    n = gp%n ; m = size(ll, kind=I4P)
    call closure_arrays(cl, 3_I4P, n, m, wc, wv, wi)
    cl%ni = size(x, kind=I4P) ; cl%nj = size(y, kind=I4P) ; cl%nk = size(z, kind=I4P) ; cl%reach = reach(1:3)
@@ -449,8 +474,13 @@ contains
          if (cl%steps(d, g) < 1_I4P) cycle
          call ilw_slot_3d_oac(cl%ni, cl%nj, cl%nk, x, y, z, cl%ijk(1, g), cl%ijk(2, g), cl%ijk(3, g), d, cl%steps(d, g), &
                               axis, apos, bpos, elo, ehi, sgn, t0, t1)
-         call geo%line_crossings(axis, apos, bpos, t0, t1, ts, ids, es, nc)
-         call ilw_select_oac(nc, ts, ids, es, geo%tri_vertices, axis, apos, bpos, elo, ehi, sgn, best)
+         if (tree) then
+            call tree_crossings(nodem, surface%aabb%payload, tvm, axis, apos, bpos, t0, t1, ts, ids, es, nc)
+            call ilw_select_oac(nc, ts, ids, es, tvm, axis, apos, bpos, elo, ehi, sgn, best)
+         else
+            call geo%line_crossings(axis, apos, bpos, t0, t1, ts, ids, es, nc)
+            call ilw_select_oac(nc, ts, ids, es, geo%tri_vertices, axis, apos, bpos, elo, ehi, sgn, best)
+         endif
          if (best < 1_I4P) cycle
          cl%ilw_t(d, g) = ts(best) ; cl%ilw_element(d, g) = ids(best)
          nq = nq + 1_I4P ; slot(1, nq) = d ; slot(2, nq) = g
@@ -481,10 +511,12 @@ contains
    enddo
    endsubroutine closure_3d_host
 
-   subroutine closure_3d_device(surface, geo, x, y, z, reach, ll, posed, pr, pt, wc, wv, lv, av, c, wi, res, cl)
-   !< The device path of `fd_closure_3d`: one pipeline, every stage on the device (see the module header).
+   subroutine closure_3d_device(surface, geo, tree, x, y, z, reach, ll, posed, pr, pt, wc, wv, lv, av, c, wi, res, cl)
+   !< The device path of `fd_closure_3d`: one pipeline, every stage on the device (see the module header). Posed (tree):
+   !< the moved vertices and the refitted tree are built on the device (`posed_tree_3d`), nothing is copied in.
    type(surface_stl_object), intent(in), target :: surface          !< Surface (queries; mapped).
    type(surface_stl_object), intent(in), target :: geo              !< Geometry of the ghosts and crossings.
+   logical,                  intent(in)         :: tree             !< Posed SAH BVH: ghosts and crossings on the refit.
    real(R8P),                intent(in)         :: x(:), y(:), z(:) !< Point lines.
    integer(I4P),             intent(in)         :: reach(:)         !< Reach.
    real(R8P),                intent(in)         :: ll(:)            !< Probe lengths.
@@ -497,6 +529,8 @@ contains
    type(aabb_node_object),       pointer :: gnode(:) !< Alias of geo%aabb%node.
    type(facet_distance_payload), pointer :: gpay(:)  !< Alias of geo%aabb%payload.
    real(R8P),                    pointer :: gtv(:,:) !< Alias of geo%tri_vertices.
+   type(aabb_node_object), allocatable, target :: nodem(:) !< Refitted tree (posed).
+   real(R8P),              allocatable, target :: tvm(:,:) !< Moved vertices (posed).
    logical,      allocatable :: nd(:,:,:)            !< Point inside flags.
    integer(I4P), allocatable :: cnt(:), off(:), fpatch(:), fidx(:) !< Ghost counts, offsets, facet patches, indexes.
    real(R8P),    allocatable :: qp(:,:), cpb(:,:), nmb(:,:) !< Body-frame points, feet, normals.
@@ -514,9 +548,15 @@ contains
       fpatch(f) = surface%facet_patch(f)
    enddo
    gnode => geo%aabb%node ; gpay => geo%aabb%payload ; gtv => geo%tri_vertices
+   if (tree) then ! the tree and vertices of the moved surface, built on the device
+      allocate(nodem(0:ubound(surface%aabb%node, 1)), tvm(9, nf))
+      !$acc enter data create(nodem, tvm)
+      call posed_tree_3d(surface, pr, pt, .true., nodem, tvm)
+      gnode => nodem ; gtv => tvm
+   endif
    allocate(nd(ni, nj, nk), cnt(np), off(np))
    !$acc data copyin(x, y, z, gnode, gpay, gtv, fpatch) create(nd, cnt, off)
-   call cut_cells_3d_nodes_present(geo, x, y, z, nd)
+   call cut_cells_3d_nodes_tree_present(gnode, gpay, gtv, x, y, z, nd)
    call ghost_count_dev(3_I4P, ni, nj, nk, nd, r, cnt)
    call links_scan_dev(np, cnt, off, n)
    call closure_arrays(w, 3_I4P, n, m, wc, wv, wi)
@@ -539,6 +579,9 @@ contains
       !$acc end data
    endif
    !$acc end data
+   if (tree) then
+      !$acc exit data delete(nodem, tvm)
+   endif
    call finish_device(w, res, cl)
    endsubroutine closure_3d_device
 
@@ -701,6 +744,123 @@ contains
    !$acc end data
    call finish_device(w, res, cl)
    endsubroutine closure_2d_device
+
+   subroutine posed_tree_3d(surface, pr, pt, dev, nodem, tvm)
+   !< The vertices and the SAH BVH of the surface moved by the pose, without moving the surface (#109 WP1 step 06): tvm the
+   !< facet vertices placed by `to_world` (the operations of `move`), nodem the tree of the surface with every box
+   !< refitted to tvm as `refit` does it (a leaf the min/max of its facets' vertices, an internal node the union of its
+   !< children's boxes, level by level from the deepest; children and payload slices kept). min and max are exact, so
+   !< these are the vertices and boxes of the moved copy `move` makes, bit for bit, and every traversal on them is the
+   !< traversal on that copy. dev: nodem and tvm present, written on the device (the surface mapped by `enter_device`);
+   !< else on the host. The node depths are computed on the host from the given tree (integers, O(nodes)).
+   type(surface_stl_object), intent(in), target :: surface         !< Surface (body frame).
+   real(R8P),                intent(in)         :: pr(3, 3), pt(3) !< Pose.
+   logical,                  intent(in)         :: dev             !< On the device.
+   type(aabb_node_object),   intent(inout)      :: nodem(0:)       !< Refitted tree (same size as the surface's).
+   real(R8P),                intent(inout)      :: tvm(:,:)        !< Moved vertices [9, facets].
+   type(aabb_node_object),       pointer :: node_p(:)              !< Alias of surface%aabb%node.
+   type(facet_distance_payload), pointer :: pay_p(:)               !< Alias of surface%aabb%payload.
+   real(R8P),                    pointer :: tv_p(:,:)              !< Alias of surface%tri_vertices.
+   integer(I4P), allocatable :: depth(:), lstart(:), lnode(:)      !< Node depths, internal nodes by depth (CSR).
+   real(R8P)    :: r(3, 3), t(3), lox, loy, loz, hix, hiy, hiz      !< Pose copies, box.
+   integer(I4P) :: nn, nf, n, lc, rc, f, k, maxd, lev, i, i0, i1    !< Work.
+
+   node_p => surface%aabb%node ; pay_p => surface%aabb%payload ; tv_p => surface%tri_vertices
+   nn = size(nodem, kind=I4P) ; nf = size(tvm, 2, kind=I4P) ; r = pr ; t = pt
+   allocate(depth(0:nn - 1_I4P)) ; depth = 0_I4P
+   do n = 0_I4P, nn - 1_I4P ! children have larger indices than their parent
+      lc = node_p(n)%get_left_child() ; rc = node_p(n)%get_right_child()
+      if (lc > 0_I4P) depth(lc) = depth(n) + 1_I4P
+      if (rc > 0_I4P) depth(rc) = depth(n) + 1_I4P
+   enddo
+   maxd = maxval(depth)
+   allocate(lstart(0:maxd + 1_I4P)) ; lstart = 0_I4P
+   do n = 0_I4P, nn - 1_I4P
+      if (node_p(n)%get_left_child() > 0_I4P .or. node_p(n)%get_right_child() > 0_I4P) &
+         lstart(depth(n) + 1_I4P) = lstart(depth(n) + 1_I4P) + 1_I4P
+   enddo
+   do lev = 1_I4P, maxd + 1_I4P
+      lstart(lev) = lstart(lev) + lstart(lev - 1_I4P)
+   enddo
+   allocate(lnode(max(1_I4P, lstart(maxd + 1_I4P))))
+   block
+      integer(I4P), allocatable :: cur(:) !< Cursor per depth.
+      allocate(cur(0:maxd)) ; cur = lstart(0:maxd)
+      do n = 0_I4P, nn - 1_I4P
+         if (node_p(n)%get_left_child() > 0_I4P .or. node_p(n)%get_right_child() > 0_I4P) then
+            cur(depth(n)) = cur(depth(n)) + 1_I4P ; lnode(cur(depth(n))) = n
+         endif
+      enddo
+   endblock
+   !$acc data copyin(r, t, lnode) if(dev)
+   !$acc parallel loop gang vector default(present) present(tv_p, tvm) if(dev)
+   do f = 1_I4P, nf
+      call to_world_3d_oac(r, t, tv_p(1, f), tv_p(2, f), tv_p(3, f), tvm(1, f), tvm(2, f), tvm(3, f))
+      call to_world_3d_oac(r, t, tv_p(4, f), tv_p(5, f), tv_p(6, f), tvm(4, f), tvm(5, f), tvm(6, f))
+      call to_world_3d_oac(r, t, tv_p(7, f), tv_p(8, f), tv_p(9, f), tvm(7, f), tvm(8, f), tvm(9, f))
+   enddo
+   ! every node: children and payload slice; a leaf its box (an internal node is boxed below)
+   !$acc parallel loop gang vector default(present) present(node_p, pay_p, tvm, nodem) &
+   !$acc&  private(lox, loy, loz, hix, hiy, hiz, k, f) if(dev)
+   do n = 0_I4P, nn - 1_I4P
+      lox = huge(1._R8P) ; loy = huge(1._R8P) ; loz = huge(1._R8P) ; hix = -lox ; hiy = -loy ; hiz = -loz
+      if (bvh_left_child_oac(node_p(n)) == 0_I4P .and. bvh_right_child_oac(node_p(n)) == 0_I4P) then
+         do k = 0_I4P, bvh_payload_count_oac(node_p(n)) - 1_I4P
+            f = pay_p(bvh_payload_first_oac(node_p(n)) + k)%facet_id
+            lox = min(lox, min(tvm(1, f), tvm(4, f), tvm(7, f)))
+            loy = min(loy, min(tvm(2, f), tvm(5, f), tvm(8, f)))
+            loz = min(loz, min(tvm(3, f), tvm(6, f), tvm(9, f)))
+            hix = max(hix, max(tvm(1, f), tvm(4, f), tvm(7, f)))
+            hiy = max(hiy, max(tvm(2, f), tvm(5, f), tvm(8, f)))
+            hiz = max(hiz, max(tvm(3, f), tvm(6, f), tvm(9, f)))
+         enddo
+      endif
+      call bvh_node_refit_oac(node_p(n), lox, loy, loz, hix, hiy, hiz, nodem(n))
+   enddo
+   do lev = maxd - 1_I4P, 0_I4P, -1_I4P ! the internal nodes of one depth: their children are boxed
+      i0 = lstart(lev) + 1_I4P ; i1 = lstart(lev + 1_I4P)
+      !$acc parallel loop gang vector default(present) present(node_p, nodem, lnode) &
+      !$acc&  private(n, lc, rc, lox, loy, loz, hix, hiy, hiz) if(dev)
+      do i = i0, i1
+         n = lnode(i) ; lc = bvh_left_child_oac(node_p(n)) ; rc = bvh_right_child_oac(node_p(n))
+         lox = min(bvh_bmin_x_oac(nodem(lc)), bvh_bmin_x_oac(nodem(rc)))
+         loy = min(bvh_bmin_y_oac(nodem(lc)), bvh_bmin_y_oac(nodem(rc)))
+         loz = min(bvh_bmin_z_oac(nodem(lc)), bvh_bmin_z_oac(nodem(rc)))
+         hix = max(bvh_bmax_x_oac(nodem(lc)), bvh_bmax_x_oac(nodem(rc)))
+         hiy = max(bvh_bmax_y_oac(nodem(lc)), bvh_bmax_y_oac(nodem(rc)))
+         hiz = max(bvh_bmax_z_oac(nodem(lc)), bvh_bmax_z_oac(nodem(rc)))
+         call bvh_node_refit_oac(node_p(n), lox, loy, loz, hix, hiy, hiz, nodem(n))
+      enddo
+   enddo
+   !$acc end data
+   endsubroutine posed_tree_3d
+
+   subroutine tree_crossings(node, payload, tv, axis, a, b, t0, t1, ts, ids, es, n)
+   !< The sorted crossings of an axis-aligned line with a SAH BVH given as arrays, `line_crossings` (its BVH branch: the
+   !< same kernel, the same growing buffer) on the refitted tree of the posed host path.
+   type(aabb_node_object),       intent(in)  :: node(0:)   !< Tree nodes.
+   type(facet_distance_payload), intent(in)  :: payload(:) !< Payload.
+   real(R8P),                    intent(in)  :: tv(:,:)    !< Exact vertices [9, facets].
+   integer(I4P),                 intent(in)  :: axis       !< Axis.
+   real(R8P),                    intent(in)  :: a, b       !< Line position.
+   real(R8P),                    intent(in)  :: t0, t1     !< Parameter range.
+   real(R8P),    allocatable,    intent(out) :: ts(:)      !< Parameters [n].
+   integer(I4P), allocatable,    intent(out) :: ids(:)     !< Facets [n].
+   logical,      allocatable,    intent(out) :: es(:)      !< Entering flags [n].
+   integer(I4P),                 intent(out) :: n          !< Crossings.
+   integer(I4P) :: nmax !< Buffer size.
+   logical      :: ovf  !< Overflow.
+
+   nmax = 64_I4P
+   do
+      if (allocated(ts)) deallocate(ts, ids, es)
+      allocate(ts(nmax), ids(nmax), es(nmax))
+      call bvh_line_crossings_oac(node, payload, tv, axis, a, b, t0, t1, ts, ids, es, n, ovf)
+      if (.not. ovf) exit
+      nmax = 4_I4P * nmax
+   enddo
+   ts = ts(1:n) ; ids = ids(1:n) ; es = es(1:n)
+   endsubroutine tree_crossings
 
    ! private: device stages (every array present; built without OpenACC the loops run on the host)
 
@@ -1045,11 +1205,67 @@ contains
    !$acc end data
    endsubroutine probes_2d_dev
 
+   subroutine ilw_3d_overflow_dev(n, ns, ni, nj, nk, x, y, z, ijk, steps, gnode, gpay, gtv, cnt, ilw_t, ilw_el)
+   !< The ILW slots whose crossings overflowed the private buffer of `ilw_3d_dev` (cnt = -1) on exact-size buffers: their
+   !< crossings counted (`bvh_line_count_oac`), a scan gives the buffers, `ilw_item_3d_oac` sorts and selects; cnt becomes
+   !< 1 where a crossing was found, else 0 (the other slots keep theirs). Every array present.
+   integer(I4P),                 intent(in)    :: n, ns, ni, nj, nk   !< Ghosts, slots, points per axis.
+   real(R8P),                    intent(in)    :: x(ni), y(nj), z(nk) !< Point lines (present).
+   integer(I4P),                 intent(in)    :: ijk(3, n)           !< Ghost indexes (present).
+   integer(I4P),                 intent(in)    :: steps(6, n)         !< Steps (present).
+   type(aabb_node_object),       intent(in)    :: gnode(0:)           !< Geometry tree (present).
+   type(facet_distance_payload), intent(in)    :: gpay(:)             !< Geometry payload (present).
+   real(R8P),                    intent(in)    :: gtv(:,:)            !< Geometry vertices (present).
+   integer(I4P),                 intent(inout) :: cnt(ns)             !< Slot flags (present).
+   real(R8P),                    intent(inout) :: ilw_t(6, n)         !< Crossing coordinates (present).
+   integer(I4P),                 intent(inout) :: ilw_el(6, n)        !< Crossing facets (present).
+   integer(I4P), allocatable :: oc(:), off(:), ids(:) !< Counts of the overflowed slots, offsets, buffer: facets.
+   real(R8P),    allocatable :: ts(:)                 !< Buffer: parameters.
+   logical,      allocatable :: es(:)                 !< Buffer: entering flags.
+   real(R8P)    :: apos, bpos, elo, ehi, t0, t1, bt   !< Work.
+   integer(I4P) :: l, g, d, s, axis, sgn, tot, bf     !< Work.
+
+   allocate(oc(ns), off(ns))
+   !$acc data create(oc, off)
+   !$acc parallel loop gang vector default(present) present(x, y, z, ijk, steps, gnode, gpay, gtv, cnt, oc) &
+   !$acc&  private(g, d, s, axis, apos, bpos, elo, ehi, sgn, t0, t1)
+   do l = 1_I4P, ns
+      oc(l) = 0_I4P
+      if (cnt(l) < 0_I4P) then
+         g = (l - 1_I4P) / 6_I4P + 1_I4P ; d = mod(l - 1_I4P, 6_I4P) + 1_I4P ; s = steps(d, g)
+         call ilw_slot_3d_oac(ni, nj, nk, x, y, z, ijk(1, g), ijk(2, g), ijk(3, g), d, s, axis, apos, bpos, elo, ehi, sgn, &
+                              t0, t1)
+         oc(l) = bvh_line_count_oac(gnode, gpay, gtv, axis, apos, bpos, t0, t1)
+      endif
+   enddo
+   call links_scan_dev(ns, oc, off, tot)
+   allocate(ts(tot + 1), ids(tot + 1), es(tot + 1))
+   !$acc data create(ts, ids, es)
+   !$acc parallel loop gang vector default(present) present(x, y, z, ijk, steps, gnode, gpay, gtv, cnt, oc, off, ts, ids, &
+   !$acc&  es, ilw_t, ilw_el) private(g, d, s, axis, apos, bpos, elo, ehi, sgn, t0, t1, bt, bf)
+   do l = 1_I4P, ns
+      if (cnt(l) < 0_I4P) then
+         g = (l - 1_I4P) / 6_I4P + 1_I4P ; d = mod(l - 1_I4P, 6_I4P) + 1_I4P ; s = steps(d, g)
+         call ilw_slot_3d_oac(ni, nj, nk, x, y, z, ijk(1, g), ijk(2, g), ijk(3, g), d, s, axis, apos, bpos, elo, ehi, sgn, &
+                              t0, t1)
+         call ilw_item_3d_oac(gnode, gpay, gtv, axis, apos, bpos, t0, t1, elo, ehi, sgn, oc(l), ts(off(l) + 1), &
+                              ids(off(l) + 1), es(off(l) + 1), bt, bf)
+         ilw_t(d, g) = bt ; ilw_el(d, g) = bf
+         cnt(l) = 0_I4P ; if (bf > 0_I4P) cnt(l) = 1_I4P
+      endif
+   enddo
+   !$acc end data
+   !$acc end data
+   endsubroutine ilw_3d_overflow_dev
+
    subroutine ilw_3d_dev(surface, n, ni, nj, nk, x, y, z, ijk, steps, gnode, gpay, gtv, posed, pr, pt, wc, ilw_t, ilw_el, &
                          ilw_n, nk_, ilw_k, ilw_d)
-   !< The ILW crossings on the device: per slot the crossings in its window counted (`bvh_line_count_oac`), a scan gives
-   !< the buffers, one thread per slot sorts them and selects (`ilw_item_3d_oac`), then the found crossings are compacted
-   !< (a second scan), queried in the body frame (`query_points_present`) and scattered back (normal, curvature).
+   !< The ILW crossings on the device: one thread per slot gathers the sorted crossings of its window into a private buffer
+   !< of ILW_BUF entries and selects (`bvh_line_crossings_oac`, `ilw_select_oac`: one traversal, #109 WP1 step 06); the
+   !< slots whose crossings overflow it are redone by the exact-size path (counted by `bvh_line_count_oac`, a scan gives
+   !< the buffers, `ilw_item_3d_oac`): either way the same crossings in the same order, so the same selection. Then the
+   !< found crossings are compacted (a scan), queried in the body frame (`query_points_present`) and scattered back
+   !< (normal, curvature).
    type(surface_stl_object),     intent(in), target :: surface         !< Surface (queries; mapped).
    integer(I4P),                 intent(in)         :: n, ni, nj, nk   !< Ghosts, points per axis.
    real(R8P),                    intent(in)         :: x(ni), y(nj), z(nk) !< Point lines (present).
@@ -1067,45 +1283,46 @@ contains
    real(R8P),                    intent(inout)      :: ilw_n(3, 6, n)  !< Normals (present).
    real(R8P),                    intent(inout)      :: ilw_k(2, 6, nk_) !< Curvatures (present if wc).
    real(R8P),                    intent(inout)      :: ilw_d(3, 2, 6, nk_) !< Directions (present if wc).
-   integer(I4P), allocatable :: cnt(:), off(:), ids(:), qf(:), qft(:), qfi(:), qb(:) !< Work.
-   real(R8P),    allocatable :: ts(:), cq(:,:), qd(:), qc(:,:), qn(:,:), qk(:,:), qdir(:,:,:) !< Work.
-   logical,      allocatable :: es(:)                  !< Entering flags.
+   integer(I4P), allocatable :: cnt(:), off(:), qf(:), qft(:), qfi(:), qb(:) !< Work.
+   real(R8P),    allocatable :: cq(:,:), qd(:), qc(:,:), qn(:,:), qk(:,:), qdir(:,:,:) !< Work.
    real(R8P)    :: r(3, 3), t(3), apos, bpos, elo, ehi, t0, t1, bt, cx, cy, cz !< Work.
-   integer(I4P) :: ns, l, g, d, s, axis, sgn, tot, nq, q, bf !< Work.
+   real(R8P)    :: tsl(ILW_BUF)                        !< Private buffer: parameters.
+   integer(I4P) :: idsl(ILW_BUF)                       !< Private buffer: facets.
+   logical      :: esl(ILW_BUF), ovf                   !< Private buffer: entering flags; overflow.
+   integer(I4P) :: ns, l, g, d, s, axis, sgn, nq, q, bf, nf, best, nov !< Work.
 
    r = pr ; t = pt ; ns = 6_I4P * n
    allocate(cnt(ns), off(ns))
    !$acc data create(cnt, off) copyin(r, t)
-   !$acc parallel loop gang vector default(present) present(x, y, z, ijk, steps, gnode, gpay, gtv, cnt) &
-   !$acc&  private(g, d, s, axis, apos, bpos, elo, ehi, sgn, t0, t1)
+   ! one traversal per slot into the private buffer; cnt = 1 if a crossing was found, -1 if the buffer overflowed
+   !$acc parallel loop gang vector default(present) present(x, y, z, ijk, steps, gnode, gpay, gtv, cnt, ilw_t, ilw_el, &
+   !$acc&  ilw_n) private(g, d, s, axis, apos, bpos, elo, ehi, sgn, t0, t1, bt, bf, tsl, idsl, esl, nf, ovf, best)
    do l = 1_I4P, ns
       g = (l - 1_I4P) / 6_I4P + 1_I4P ; d = mod(l - 1_I4P, 6_I4P) + 1_I4P ; s = steps(d, g)
-      cnt(l) = 0_I4P
+      bt = 0._R8P ; bf = 0_I4P ; cnt(l) = 0_I4P
       if (s > 0_I4P) then
          call ilw_slot_3d_oac(ni, nj, nk, x, y, z, ijk(1, g), ijk(2, g), ijk(3, g), d, s, axis, apos, bpos, elo, ehi, sgn, &
                               t0, t1)
-         cnt(l) = bvh_line_count_oac(gnode, gpay, gtv, axis, apos, bpos, t0, t1)
-      endif
-   enddo
-   call links_scan_dev(ns, cnt, off, tot)
-   allocate(ts(tot + 1), ids(tot + 1), es(tot + 1))
-   !$acc data create(ts, ids, es)
-   !$acc parallel loop gang vector default(present) present(x, y, z, ijk, steps, gnode, gpay, gtv, cnt, off, ts, ids, es, &
-   !$acc&  ilw_t, ilw_el, ilw_n) private(g, d, s, axis, apos, bpos, elo, ehi, sgn, t0, t1, bt, bf)
-   do l = 1_I4P, ns
-      g = (l - 1_I4P) / 6_I4P + 1_I4P ; d = mod(l - 1_I4P, 6_I4P) + 1_I4P ; s = steps(d, g)
-      bt = 0._R8P ; bf = 0_I4P
-      if (s > 0_I4P) then
-         call ilw_slot_3d_oac(ni, nj, nk, x, y, z, ijk(1, g), ijk(2, g), ijk(3, g), d, s, axis, apos, bpos, elo, ehi, sgn, &
-                              t0, t1)
-         call ilw_item_3d_oac(gnode, gpay, gtv, axis, apos, bpos, t0, t1, elo, ehi, sgn, cnt(l), ts(off(l) + 1), &
-                              ids(off(l) + 1), es(off(l) + 1), bt, bf)
+         call bvh_line_crossings_oac(gnode, gpay, gtv, axis, apos, bpos, t0, t1, tsl, idsl, esl, nf, ovf)
+         if (ovf) then
+            cnt(l) = -1_I4P
+         else
+            call ilw_select_oac(nf, tsl, idsl, esl, gtv, axis, apos, bpos, elo, ehi, sgn, best)
+            if (best > 0_I4P) then
+               bt = tsl(best) ; bf = idsl(best)
+            endif
+         endif
       endif
       ilw_t(d, g) = bt ; ilw_el(d, g) = bf
       ilw_n(1, d, g) = 0._R8P ; ilw_n(2, d, g) = 0._R8P ; ilw_n(3, d, g) = 0._R8P
-      cnt(l) = 0_I4P ; if (bf > 0_I4P) cnt(l) = 1_I4P
+      if (bf > 0_I4P) cnt(l) = 1_I4P
    enddo
-   !$acc end data
+   nov = 0_I4P
+   !$acc parallel loop gang vector default(present) present(cnt) reduction(+:nov)
+   do l = 1_I4P, ns
+      if (cnt(l) < 0_I4P) nov = nov + 1_I4P
+   enddo
+   if (nov > 0_I4P) call ilw_3d_overflow_dev(n, ns, ni, nj, nk, x, y, z, ijk, steps, gnode, gpay, gtv, cnt, ilw_t, ilw_el)
    if (wc) then
       !$acc parallel loop gang vector collapse(2) default(present) present(ilw_k, ilw_d)
       do g = 1_I4P, n

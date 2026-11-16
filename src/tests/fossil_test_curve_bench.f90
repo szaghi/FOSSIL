@@ -3,6 +3,8 @@ program fossil_test_curve_bench
 !< FOSSIL test/bench: 2-D batched distances, device against serial (issue #36 step 7).
 !<
 !< Usage: fossil_test_curve_bench [n]   (n x n query grid, default 64)
+!<        FOSSIL_CLOSURE_TIMING=N1[,N2...] fossil_test_curve_bench: only the closure-table timing on N^2 lines (#109 WP1
+!<        step 06; NACA 0012 and the disc with a hole, unposed and posed, the tables compared by bits).
 !<
 !< A procedural NACA 0012 (2000 vertices) and a 1000-gon circle with a clockwise hole, queried on
 !< an n x n grid around them: serial `compute_distance`, `distance_many` (CPU) and
@@ -51,7 +53,8 @@ real(R8P), parameter      :: PI = acos(-1._R8P)
 type(curve_object)        :: c
 real(R8P), allocatable    :: u(:), v(:)
 character(32)             :: arg
-integer(I4P)              :: n, k
+character(64)             :: env_value
+integer(I4P)              :: n, k, env_status, nt, kc
 logical                   :: ok
 
 n = 64
@@ -60,6 +63,36 @@ if (command_argument_count() >= 1) then
    read(arg, *) n
 endif
 ok = .true.
+
+call get_environment_variable('FOSSIL_CLOSURE_TIMING', env_value, status=env_status)
+if (env_status == 0 .and. len_trim(env_value) > 0) then ! closure-table timing only (#109 WP1 step 06)
+   do
+      kc = index(env_value, ',')
+      if (kc == 0) then
+         read(env_value, *) nt
+      else
+         read(env_value(1:kc - 1), *) nt ; env_value = env_value(kc + 1:)
+      endif
+      allocate(u(2000), v(2000))
+      call naca0012(1000_I4P, u, v)
+      call c%adopt_loops(u=u, v=v, loop_sizes=[2000_I4P])
+      call closure_timing(c, [-0.5_R8P, -0.5_R8P], [1.5_R8P, 0.5_R8P], nt, 'NACA 0012')
+      deallocate(u, v) ; allocate(u(1100), v(1100))
+      do k = 1, 1000
+         u(k) = cos(2._R8P * PI * (k - 1) / 1000) ; v(k) = sin(2._R8P * PI * (k - 1) / 1000)
+      enddo
+      do k = 1, 100
+         u(1000 + k) = 0.3_R8P * cos(-2._R8P * PI * (k - 1) / 100) ; v(1000 + k) = 0.3_R8P * sin(-2._R8P * PI * (k - 1) / 100)
+      enddo
+      call c%adopt_loops(u=u, v=v, loop_sizes=[1000_I4P, 100_I4P])
+      call closure_timing(c, [-1.5_R8P, -1.5_R8P], [1.5_R8P, 1.5_R8P], nt, 'disc with a hole')
+      deallocate(u, v)
+      if (kc == 0) exit
+   enddo
+   print '(A,L1)', 'Are all tests passed? ', ok
+   if (.not. ok) error stop 1
+   stop
+endif
 
 allocate(u(2000), v(2000))
 call naca0012(1000_I4P, u, v)
@@ -213,6 +246,76 @@ contains
    print '(A,I0)', '   curvature device vs serial mismatches: ', bad
    ok = ok .and. bad == 0
    endsubroutine curvature
+
+   subroutine closure_timing(cur, lo, hi, nn, label)
+   !< Closure-table timing (#109 WP1 step 06): fd_closure_2d on nn^2 cell-centre lines over the box, reach 3, three probes,
+   !< the curvature (built and mapped here), ILW; unposed, then posed with velocities; per row CPU / device copied back /
+   !< device resident, best of 5 after one warm-up call, path by path (wall clock, `!$acc wait` before each clock read). The
+   !< tables of the timed calls are compared by bits (`closure device vs serial mismatches`).
+   type(curve_object), intent(inout) :: cur          !< Curve.
+   real(R8P),          intent(in)    :: lo(2), hi(2) !< Box.
+   integer(I4P),       intent(in)    :: nn           !< Points per axis.
+   character(*),       intent(in)    :: label        !< Label.
+   type(rigid_pose_2d_t)     :: pose     !< Pose.
+   type(ib_closure_t)        :: ch, cd, cr !< Host, device, resident tables.
+   real(R8P),    allocatable :: x(:), y(:) !< Lines.
+   real(R8P)                 :: h, t(3, 5) !< Spacing, times.
+   integer(I8P)              :: c0, c1, rate !< Clock.
+   integer(I4P)              :: i, k, r, w, bad !< Work.
+
+   call cur%build_curvature ; call cur%enter_device
+   h = maxval(hi - lo) / real(max(nn, 1), R8P)
+   allocate(x(nn), y(nn))
+   do i = 1, nn
+      x(i) = lo(1) + (hi(1) - lo(1)) * (i - 0.5_R8P) / nn ; y(i) = lo(2) + (hi(2) - lo(2)) * (i - 0.5_R8P) / nn
+   enddo
+   pose = pose_2d(0.3_R8P, [0.02_R8P, -0.01_R8P])
+   call system_clock(count_rate=rate)
+   bad = 0
+   do k = 1, 2
+      do w = 1, 3 ! path by path, so a device call follows a device call (a GPU left idle clocks down)
+         do r = 0, 5
+            !$acc wait
+            call system_clock(c0)
+            if (k == 1) then
+               select case (w)
+               case (1) ; call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], ch, lengths=[h, 2 * h, 3 * h], ilw=.true.)
+               case (2) ; call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], cd, lengths=[h, 2 * h, 3 * h], ilw=.true., &
+                                             device=.true.)
+               case (3) ; call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], cr, lengths=[h, 2 * h, 3 * h], ilw=.true., &
+                                             resident=.true.)
+               endselect
+            else
+               select case (w)
+               case (1) ; call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], ch, lengths=[h, 2 * h, 3 * h], pose=pose, &
+                                             linear_velocity=[0.1_R8P, 0.2_R8P], angular_velocity=1.5_R8P, ilw=.true.)
+               case (2) ; call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], cd, lengths=[h, 2 * h, 3 * h], pose=pose, &
+                                             linear_velocity=[0.1_R8P, 0.2_R8P], angular_velocity=1.5_R8P, ilw=.true., &
+                                             device=.true.)
+               case (3) ; call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], cr, lengths=[h, 2 * h, 3 * h], pose=pose, &
+                                             linear_velocity=[0.1_R8P, 0.2_R8P], angular_velocity=1.5_R8P, ilw=.true., &
+                                             resident=.true.)
+               endselect
+            endif
+            !$acc wait
+            call system_clock(c1)
+            if (r > 0) t(w, r) = real(c1 - c0, R8P) / rate
+         enddo
+      enddo
+      call cr%update_host
+      bad = bad + ib_closure_mismatches(ch, cd) + ib_closure_mismatches(ch, cr)
+      if (ch%n == 0 .or. .not. cr%on_device) bad = bad + 1
+      print '(A,A,I0,A,A,A,I0,A)', label, ': closure table timing (fd_closure_2d, ', nn, '^2 lines, ', &
+            trim(merge('unposed', 'posed  ', k == 1)), ', ', ch%n, ' ghosts, reach 3, 3 probes, curvature, ILW; best of 5) [s]:'
+      print '(A,3ES11.3,A,F6.2,A,F6.2,A)', '   CPU / device copied back / device resident: ', minval(t(1, :)), &
+            minval(t(2, :)), minval(t(3, :)), '  (', minval(t(1, :)) / minval(t(2, :)), 'x, ', &
+            minval(t(1, :)) / minval(t(3, :)), 'x)'
+      call ib_closure_reset(cr)
+   enddo
+   call cur%exit_device
+   print '(A,I0)', '   closure device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0
+   endsubroutine closure_timing
 
    subroutine closure(cur, lo, hi)
    !< fd_closure_2d on the device (copied back, and resident then update_host) vs the host (WP1 step 04): cell-centre lines

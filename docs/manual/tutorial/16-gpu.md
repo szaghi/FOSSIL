@@ -102,7 +102,10 @@ The immersed-boundary queries of chapter 8 have device twins with the same argum
   [cookbook recipe](../cookbook#image-lines-and-probes-on-the-gpu)).
 - `fd_closure_3d(..., resident=.true.)` builds the whole closure table of chapter 8 on the device in one pipeline and
   leaves it there for a device solver (`update_host`, `exit_device`; see the
-  [cookbook recipe](../cookbook#build-the-closure-table-of-a-finite-difference-wall-closure)).
+  [cookbook recipe](../cookbook#build-the-closure-table-of-a-finite-difference-wall-closure)). A posed body is not
+  moved: its tree is refitted on the device for the call. On 128³ lines around the dragon (112 001 ghosts) the table
+  takes 0.18 s against 2.6 s on one CPU core (an RTX 4070, indicative); below about 32³ there are too few ghosts for
+  the GPU to win ([timings](/guide/advanced/fd-closure#resident-use-on-the-device)).
 
 <<< @/examples/output/tut16b.ansi{ansi}
 
