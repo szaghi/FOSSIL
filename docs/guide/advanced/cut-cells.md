@@ -156,9 +156,21 @@ back, best of 5):
 - cell fractions, centroids, wetted areas, centroids and normals;
 - face fractions, centroids, pieces and closed flags;
 - pieces and their measures;
-- `node_in`, and with `edges=.true.` the edge fractions.
+- `node_in`, and with `edges=.true.` the edge fractions;
+- with `links=`, the piece links ([cut-solver reference](/guide/advanced/cut-solver#on-the-device));
+- with `walls=`, the labelled wall terms of `cut_cells_3d(..., walls=)` (`cut_walls_3d_t`: one term per cell and
+  facet clipped to three vertices or more, with its piece, vector area, wet area and centroid, in cell then facet
+  order), every field bit for bit.
 
-Moments, quadrature and link intervals stay on the host.
+Moments and quadrature stay on the host.
+
+The wall terms are a stage after the pieces, on the host's own kernels: one thread per cell counts its terms, a prefix
+sum places them, one thread per cell writes them. A multi-piece cell reads its polygons and their pieces from the
+workspace slice its fill pass left, as the host path does; every other cell clips its candidates as the cell totals
+do. With `resident=.true.` the terms stay mapped like the cut (`walls%update_host`, `walls%exit_device`; every writer
+releases resident terms first). With `alpha_only=.true.` none are computed. On an RTX 4070 (best of 5) the terms add
+5-9 ms to a resident call at 128³ (sphere 0.150 -> 0.156 s, cone 0.208 -> 0.217 s), about 4 %, and a few ms or
+nothing measurable on the CPU path.
 
 How the work is split:
 - **Host:** the grid check, the candidate facets of each cell (bounding-box binning and the box-triangle filter), the
@@ -375,6 +387,7 @@ within 7.98·10⁻¹⁷ of the plate's area in every frame.
 | exact `orient3d` and `line_crossing_before` on the device vs the host: 31,576 quadruples (near-coplanar grids at 2^0 and 2^40, shared coordinate planes, coincident points, random) and 9,036 placements | 0 mismatches (`orient3d device vs serial mismatches`, `fossil_test_orient3d`) |
 | 3-D node states and edge fractions on the device vs `cut_cells_3d(..., edges=.true.)` | 0 mismatches (`cut cells 3-D nodes device vs serial mismatches`, `fossil_test_cut_cells_3d_device_twin`) |
 | `cut_cells_3d_device` vs `cut_cells_3d`, every output, with and without edges, copied back and resident: bunny, cube-01, dragon-fine at 32³; sphere, cone, cube-02 at 64³ and 128³ | 0 mismatches (`cut cells 3-D device vs serial mismatches`, `fossil_test_cut_cells_3d_device_twin`) |
+| `cut_cells_3d_device(..., walls=)` vs `cut_cells_3d(..., walls=)`, every field of the terms and the cut, without and with links, copied back and resident: the bench body at 32³; sphere and cone at 64³; on the host twin a thin plate (multi-piece cells), the open dragon and a grid off the body | 0 mismatches (`cut walls 3-D device vs serial mismatches`, `fossil_test_cut_walls_3d_device_twin`) |
 | 3-D pieces: cube-01, an octahedron and 40 lattice tetrahedra on grids of step 1/8, 1/4, 1/16 (1.57 million cells) | 19 cells untrusted (947 before issue #70), none outside [0, 1]; per-piece closure 3.5·10⁻¹⁴, piece sums 1.4·10⁻¹⁴, block volume 1.6·10⁻¹⁵ |
 | node parities along x, y, z on a grid-aligned cube, an octahedron, 20 lattice tetrahedra (2-D: square, diamond, 20 triangles) | 0 of 108 086 and 0 of 6358 disagree (108 and 45 before issue #69) |
 | centre inside flags within 3 ulp of a tilted face: tetrahedron (3-D), triangle (2-D), quadruple-precision reference | 0 of 3168 and 0 of 3200 wrong (249 and 295 before issue #69) |
@@ -438,6 +451,6 @@ within 7.98·10⁻¹⁷ of the plate's area in every frame.
   remove both, at the cost of every output's bits.
 - **Watertight input.** Cells whose boundary does not close (open curves or
   surfaces) are flagged in `closed` and get no measures.
-- **On the device: the 2-D and 3-D cut cells, without links.** `curve%cut_cells_device`, `cut_cells_3d_device`,
-  `cut_cells_3d(..., device_sections=.true.)` and the line crossings have device paths; moments, quadrature, the
-  swept geometry and the piece links are CPU only (issue #100 plans the last two).
+- **On the device: the 2-D and 3-D cut cells, their links and the 3-D wall terms.** `curve%cut_cells_device`,
+  `cut_cells_3d_device` (with `links=`, `walls=`), `cut_links_2d_device`, `cut_cells_3d(..., device_sections=.true.)`
+  and the line crossings have device paths; moments and quadrature are CPU only.

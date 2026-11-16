@@ -15,7 +15,9 @@ module fossil_cut_cells_compare
 !< `cut_cells_3d_alpha_mismatches(a, b)` (step 4) for its alpha-only mode. `link_inputs_mismatches` (step 5) compares the
 !< link inputs of `cut_cells_3d_link_inputs_device` against those of the host twin `cut_cells_3d_link_inputs`.
 !< `cut_links_mismatches(a, b)` (step 5) compares two `cut_links_t` (np, unmatched, start, piece, face, area bitwise).
-use fossil,              only : curve_object, cut_cells_2d_t, cut_cells_3d_t, cut_links_t
+!< `cut_walls_mismatches(a, b)` (#109 WP2 step 05) compares two `cut_walls_3d_t` (n, cell_start, piece, facet, area,
+!< wet_area, centroid bitwise).
+use fossil,              only : curve_object, cut_cells_2d_t, cut_cells_3d_t, cut_links_t, cut_walls_3d_t
 use fossil_curve_object, only : cut_cells_2d_blocks_t, cut_cells_device_many
 use fossil_cut_cells_3d, only : cut_link_inputs_3d_t
 use penf,                only : I4P, I8P, R8P
@@ -27,6 +29,7 @@ public :: cut_cells_many_grids_mismatches
 public :: cut_cells_3d_mismatches, cut_cells_3d_alpha_mismatches
 public :: link_inputs_mismatches
 public :: cut_links_mismatches
+public :: cut_walls_mismatches
 
 contains
    function cut_cells_twin_mismatches(c, x, y, status) result(n)
@@ -378,6 +381,29 @@ contains
    n = n + real_mismatches(allocated(a%area), allocated(b%area), shape_of1(a%area), shape_of1(b%area), flat_r1(a%area), &
                            flat_r1(b%area))
    endfunction cut_links_mismatches
+
+   function cut_walls_mismatches(a, b) result(n)
+   !< Mismatches of the wall terms b (device, copied back or after `update_host`) against a (host; #109 WP2 step 05): n
+   !< (1), cell_start, piece, facet element by element, area, wet_area, centroid by their bits; an array allocated in one
+   !< only, or of another shape, counts max(1, its size).
+   type(cut_walls_3d_t), intent(in) :: a, b !< Host terms, device terms (host copies valid).
+   integer(I4P)                     :: n    !< Mismatches.
+
+   n = 0_I4P
+   if (a%n /= b%n) n = n + 1_I4P
+   n = n + int_mismatches(allocated(a%cell_start), allocated(b%cell_start), shape_of_i1(a%cell_start), &
+                          shape_of_i1(b%cell_start), flat_i1(a%cell_start), flat_i1(b%cell_start))
+   n = n + int_mismatches(allocated(a%piece), allocated(b%piece), shape_of_i1(a%piece), shape_of_i1(b%piece), &
+                          flat_i1(a%piece), flat_i1(b%piece))
+   n = n + int_mismatches(allocated(a%facet), allocated(b%facet), shape_of_i1(a%facet), shape_of_i1(b%facet), &
+                          flat_i1(a%facet), flat_i1(b%facet))
+   n = n + real_mismatches(allocated(a%area), allocated(b%area), shape_of(a%area), shape_of(b%area), flat_r2(a%area), &
+                           flat_r2(b%area))
+   n = n + real_mismatches(allocated(a%wet_area), allocated(b%wet_area), shape_of1(a%wet_area), shape_of1(b%wet_area), &
+                           flat_r1(a%wet_area), flat_r1(b%wet_area))
+   n = n + real_mismatches(allocated(a%centroid), allocated(b%centroid), shape_of(a%centroid), shape_of(b%centroid), &
+                           flat_r2(a%centroid), flat_r2(b%centroid))
+   endfunction cut_walls_mismatches
 
    pure integer(I4P) function piece_cell_of(c3, p) result(c)
    !< Linear index of the cell of piece p.

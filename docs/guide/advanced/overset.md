@@ -250,7 +250,8 @@ or check that every directed edge has exactly one reverse (3-D), and cut the maj
 `boundary%cut_cells(boundaries=.true.)` in 2-D, `cut_cells_3d(..., links=, walls=)` in 3-D, bit for bit what those
 routines give. The cut labels its own wall pieces with the boundary element they lie on (2-D `piece_seg_src`, 3-D
 `walls=`: one term per cell and facet, with its piece), so each smallest face knows its minor face with no geometric
-matching. The outputs are:
+matching. The patch is CPU only; the cut and its wall terms also come from the device, bit for bit
+(`cut_cells_3d_device(..., links=, walls=)`). The outputs are:
 
 - `hole(i, j[, k])`: the major cells inside the minor region, with no fluid piece; `cut`, the full cut-cell result:
   fluid fractions, apertures W_f (`piece_aperture` in 2-D, `piece_face` in 3-D), piece areas or volumes and centroids;

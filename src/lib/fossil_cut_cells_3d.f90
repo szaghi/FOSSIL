@@ -71,7 +71,8 @@ module fossil_cut_cells_3d
 !< `cell_piercings` (exact orient3d). Moments, quadrature and the links' intervals take the same kernels.
 !< `cut_cells_3d_device` (WP2 step 3c) runs them on the device, with `cell_piercings`, the node states and edge
 !< fractions (`edge_fractions_dev`: one thread per grid line, the crossings sorted as `surface%line_crossings`) and the
-!< prefix sums there; the candidates, the open cells and the slicing stay on the host; no links, moments, quadrature.
+!< prefix sums there; the candidates, the open cells and the slicing stay on the host; no moments, quadrature (the links
+!< since step 5, the labelled wall terms since #109 WP2 step 05).
 use, intrinsic :: iso_c_binding,   only : c_intptr_t, c_loc
 use, intrinsic :: iso_fortran_env, only : stderr => error_unit
 use fossil_aabb_node_object,   only : aabb_node_object
@@ -97,7 +98,7 @@ implicit none
 private
 public :: cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_cells_3d_sections, cut_cells_3d_reset
 ! the wall terms of a cut, labelled by piece and facet (issue #106 step 3: the smallest faces of an overset interface)
-public :: cut_walls_3d_t
+public :: cut_walls_3d_t, cut_walls_reset
 ! the device stages (issue #100 step 3c), public for the benches and the twin test (not re-exported by `fossil`)
 public :: cut_cells_3d_nodes_device
 ! the node states alone on the host (the twin of `cut_cells_3d_nodes_device`), for the ghost points (#109 WP1 step 03)
@@ -225,7 +226,8 @@ type :: cut_link_inputs_3d_t
 endtype cut_link_inputs_3d_t
 
 type :: cut_walls_3d_t
-   !< The wall terms of a 3-D cut, labelled (issue #106 step 3; `cut_cells_3d(..., walls=)`, host path only).
+   !< The wall terms of a 3-D cut, labelled (issue #106 step 3; `cut_cells_3d(..., walls=)`; on the device
+   !< `cut_cells_3d_device(..., walls=)`, the same terms bit for bit, #109 WP2 step 05).
    !<
    !< One term per (cell, facet) whose clipped polygon in the cell has 3 vertices or more: the polygon the cut cells
    !< clip (Sutherland-Hodgman with the low-side rule, canonical crossings), its divergence-theorem terms added fan by
@@ -238,6 +240,16 @@ type :: cut_walls_3d_t
    !< (an inclusion's set: the set around it), read from the kernel's workspace after its fill pass; in a one-piece cell
    !< its piece; 0 in a cell without trusted pieces (pieces <= 0: untrusted, -1, or no fluid) or for a set the kernel
    !< counts in no piece (none known).
+   !<
+   !< Resident on the device (#109 WP2 step 05, the model of `cut_links_t`). `cut_cells_3d_device(..., walls=,
+   !< resident=.true.)` leaves cell_start, piece, facet, area, wet_area and centroid mapped (OpenACC unstructured data) and
+   !< never writes their host copies: until `update_host` they hold garbage (n is set). `on_device` says so. A device
+   !< consumer passes the member arrays to its stage routine (the #20 rule: member arrays, never the object).
+   !< `enter_device` maps a host result, `update_host` brings the device values back, `exit_device` releases the device
+   !< copies (call it before resident terms go out of scope or are deallocated). Every routine that writes the terms
+   !< (`cut_cells_3d`, `cut_cells_3d_device`) releases them first (`cut_walls_reset`). A copy `b = a` of resident terms is
+   !< not resident: the type-bound procedures recognise it (`device_key`, the host address of cell_start when mapped).
+   !< Built without OpenACC the procedures only set the flag.
    integer(I4P)              :: n = 0_I4P          !< Terms.
    integer(I4P), allocatable :: cell_start(:)      !< Terms of cell c: cell_start(c) .. cell_start(c + 1) - 1 [nx ny nz + 1].
    integer(I4P), allocatable :: piece(:)           !< Piece of each term (0: none) [n].
@@ -246,6 +258,12 @@ type :: cut_walls_3d_t
    real(R8P),    allocatable :: wet_area(:)        !< Area (the sum of the fans' areas) [n].
    real(R8P),    allocatable :: centroid(:,:)      !< Centroid (area-weighted fan centroids; the vertex mean if no area)
                                                    !< [3, n].
+   logical                   :: on_device = .false. !< The arrays are mapped on the device (#109 WP2 step 05).
+   integer(c_intptr_t)       :: device_key = 0     !< Host address of cell_start when mapped (a copy has another one).
+   contains
+      procedure, pass(self) :: enter_device => walls_enter_device !< Map the arrays to the device (copyin).
+      procedure, pass(self) :: update_host  => walls_update_host  !< Copy the mapped arrays back to the host.
+      procedure, pass(self) :: exit_device  => walls_exit_device  !< Release the device copies.
 endtype cut_walls_3d_t
 
 contains
@@ -260,7 +278,8 @@ contains
    !< `quadrature` (else the sections stay on the host).
    !<
    !< `walls` (issue #106 step 3) returns the wall terms labelled by piece and facet (`cut_walls_3d_t`); every other output
-   !< is the same, bit for bit (the terms are read beside the kernels, never fed back).
+   !< is the same, bit for bit (the terms are read beside the kernels, never fed back). Resident terms are released first
+   !< (`cut_walls_reset`).
    type(surface_stl_object), intent(in)            :: surface    !< Surface.
    real(R8P),                intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
    type(cut_cells_3d_t),     intent(inout)         :: cut        !< Cut cells (released from the device, reset).
@@ -270,7 +289,7 @@ contains
    integer(I4P),             intent(in),  optional :: moments_order !< Moments of the pieces up to this order (0-4, #70).
    logical,                  intent(in),  optional :: quadrature !< Quadrature rules on the pieces and their walls (#70).
    logical,                  intent(in),  optional :: device_sections !< The plane sections on the device (#100 step 3b).
-   type(cut_walls_3d_t),     intent(out), optional :: walls      !< The wall terms, labelled (#106 step 3).
+   type(cut_walls_3d_t),     intent(inout), optional :: walls    !< The wall terms, labelled (#106 step 3; released, reset).
    type(cut_cells_2d_t), allocatable :: px(:), py(:), pz(:) !< Plane sections kept for the links.
    logical              :: all_edges !< Edge fractions asked.
    integer(I4P)         :: mo, nm2   !< Moment order, 2-D moments per face.
@@ -285,6 +304,7 @@ contains
 
    call cut_cells_3d_reset(cut)
    if (present(links)) call cut_links_reset(links)
+   if (present(walls)) call cut_walls_reset(walls)
    if (present(status)) status = STATUS_OK
    nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
    if (nx < 1 .or. ny < 1 .or. nz < 1) then
@@ -510,35 +530,51 @@ contains
    endif
    endsubroutine cell_totals_3d
 
-   subroutine wall_terms_clip(nf, tri, nt, lst, x0, x1, y0, y1, z0, z1, piece, nw, wpc, wfc, wav, wwa, wcen)
-   !< The wall terms of one cell by the clip of `cell_totals_3d` (same calls, same order), each polygon's fans added from
-   !< zero (issue #106 step 3; see `cut_walls_3d_t`), appended at nw + 1.., all with the piece `piece`.
+   subroutine wall_terms_clip(fill, nf, tri, nt, lst, x0, x1, y0, y1, z0, z1, piece, ncap, nw, wpc, wfc, wav, wwa, wcen)
+   !< Kernel (issue #106 step 3; routine seq since #109 WP2 step 05, shared by the host and the device paths): the wall
+   !< terms of one cell by the clip of `cell_totals_3d` (same calls, same order), each polygon's fans added from zero (see
+   !< `cut_walls_3d_t`), all with the piece `piece`. nw = the cell's terms (polygons of 3 vertices or more); with fill
+   !< they are written at 1..nw of the slices (count pass: fill false, the slices are not touched; nw <= nt <= ncap).
+   !$acc routine seq
+   logical,      intent(in)    :: fill                   !< Write the terms (else count them).
    integer(I4P), intent(in)    :: nf                     !< Facets.
    real(R8P),    intent(in)    :: tri(3, 3, nf)          !< Triangles.
    integer(I4P), intent(in)    :: nt                     !< Facets of the cell.
    integer(I4P), intent(in)    :: lst(nt)                !< Their indexes (increasing).
    real(R8P),    intent(in)    :: x0, x1, y0, y1, z0, z1 !< Cell.
    integer(I4P), intent(in)    :: piece                  !< Piece of every term (0: none).
-   integer(I4P), intent(inout) :: nw                     !< Terms so far.
-   integer(I4P), intent(inout) :: wpc(:), wfc(:)         !< Pieces, facets.
-   real(R8P),    intent(inout) :: wav(:,:), wwa(:), wcen(:,:) !< Vector areas, areas, centroids.
+   integer(I4P), intent(in)    :: ncap                   !< Size of the slices.
+   integer(I4P), intent(out)   :: nw                     !< Terms of the cell.
+   integer(I4P), intent(inout) :: wpc(ncap), wfc(ncap)   !< Pieces, facets.
+   real(R8P),    intent(inout) :: wav(3, ncap), wwa(ncap), wcen(3, ncap) !< Vector areas, areas, centroids.
    real(R8P)                   :: poly(3, 16), c0(3), c1(3) !< Polygon, low and high corners.
-   integer(I4P)                :: q, np                  !< Work.
+   integer(I4P)                :: q, np, m, a            !< Work.
 
    c0(1) = x0 ; c0(2) = y0 ; c0(3) = z0 ; c1(1) = x1 ; c1(2) = y1 ; c1(3) = z1
+   nw = 0_I4P
    do q = 1, nt
-      poly(:, 1:3) = tri(:, :, lst(q)) ; np = 3_I4P
-      call clip_cell(poly, np, c0, c1, flat_axis(tri(:, :, lst(q))))
+      do m = 1, 3
+         do a = 1, 3
+            poly(a, m) = tri(a, m, lst(q))
+         enddo
+      enddo
+      np = 3_I4P
+      call clip_cell(poly, np, c0, c1, flat_axis(tri(1, 1, lst(q))))
       if (np < 3_I4P) cycle
-      nw = nw + 1_I4P ; wpc(nw) = piece ; wfc(nw) = lst(q)
-      call polygon_terms(np, poly, c0, wav(:, nw), wwa(nw), wcen(:, nw))
+      nw = nw + 1_I4P
+      if (.not. fill) cycle
+      wpc(nw) = piece ; wfc(nw) = lst(q)
+      call polygon_terms(np, poly, c0, wav(1, nw), wwa(nw), wcen(1, nw))
    enddo
    endsubroutine wall_terms_clip
 
-   subroutine wall_terms_sets(nt, lst, c0, pv, pn, na, parent, tgt, pid, p0, nw, wpc, wfc, wav, wwa, wcen)
-   !< The wall terms of a multi-piece cell from the workspace of its kernel after the fill pass (issue #106 step 3): the
-   !< polygons pv(:, 1:pn(q), q) clipped by `cell_pieces_core`, each with the piece of its set as `piece_measures` reads
-   !< it (the root, or the inclusion's target; pid 0: no piece), appended at nw + 1.. in polygon order.
+   subroutine wall_terms_sets(fill, nt, lst, c0, pv, pn, na, parent, tgt, pid, p0, ncap, nw, wpc, wfc, wav, wwa, wcen)
+   !< Kernel (issue #106 step 3; routine seq since #109 WP2 step 05): the wall terms of a multi-piece cell from the
+   !< workspace of its kernel after the fill pass: the polygons pv(:, 1:pn(q), q) clipped by `cell_pieces_core`, each
+   !< with the piece of its set as `piece_measures` reads it (the root, or the inclusion's target; pid 0: no piece), in
+   !< polygon order. nw = the cell's terms; with fill they are written at 1..nw of the slices (nw <= nt <= ncap).
+   !$acc routine seq
+   logical,      intent(in)    :: fill                   !< Write the terms (else count them).
    integer(I4P), intent(in)    :: nt                     !< Polygons.
    integer(I4P), intent(in)    :: lst(nt)                !< Their facets.
    real(R8P),    intent(in)    :: c0(3)                  !< Cell low corner.
@@ -547,40 +583,62 @@ contains
    integer(I4P), intent(in)    :: na                     !< Atoms.
    integer(I4P), intent(in)    :: parent(na), tgt(na), pid(na) !< Union-find, inclusion targets, piece ids.
    integer(I4P), intent(in)    :: p0                     !< Pieces before the cell's.
-   integer(I4P), intent(inout) :: nw                     !< Terms so far.
-   integer(I4P), intent(inout) :: wpc(:), wfc(:)         !< Pieces, facets.
-   real(R8P),    intent(inout) :: wav(:,:), wwa(:), wcen(:,:) !< Vector areas, areas, centroids.
+   integer(I4P), intent(in)    :: ncap                   !< Size of the slices.
+   integer(I4P), intent(out)   :: nw                     !< Terms of the cell.
+   integer(I4P), intent(inout) :: wpc(ncap), wfc(ncap)   !< Pieces, facets.
+   real(R8P),    intent(inout) :: wav(3, ncap), wwa(ncap), wcen(3, ncap) !< Vector areas, areas, centroids.
    integer(I4P)                :: q, r                   !< Work.
 
+   nw = 0_I4P
    do q = 1, nt
       if (pn(q) == 0_I4P) cycle
+      nw = nw + 1_I4P
+      if (.not. fill) cycle
       r = uf_find(na, parent, q) ; if (tgt(r) /= 0_I4P) r = tgt(r)
-      nw = nw + 1_I4P ; wfc(nw) = lst(q) ; wpc(nw) = 0_I4P
+      wfc(nw) = lst(q) ; wpc(nw) = 0_I4P
       if (pid(r) /= 0_I4P) wpc(nw) = p0 + pid(r)
-      call polygon_terms(pn(q), pv(:, :, q), c0, wav(:, nw), wwa(nw), wcen(:, nw))
+      call polygon_terms(pn(q), pv(1, 1, q), c0, wav(1, nw), wwa(nw), wcen(1, nw))
    enddo
    endsubroutine wall_terms_sets
 
    pure subroutine polygon_terms(np, poly, c0, av, ar, cen)
    !< A clipped polygon's divergence-theorem terms added fan by fan from zero in coordinates local to c0 (`tri_terms`, as
-   !< the kernels add them): vector area, area and centroid (the vertex mean if the area is 0).
+   !< the kernels add them): vector area, area and centroid (the vertex mean if the area is 0). Routine seq since #109
+   !< WP2 step 05: scalar loops, the operations of the former array expressions in their order (the vertex mean adds
+   !< from zero in vertex order, as gfortran's `sum(dim=2)`), so the host terms keep their bits.
+   !$acc routine seq
    integer(I4P), intent(in)  :: np          !< Vertices.
    real(R8P),    intent(in)  :: poly(3, 16) !< Polygon.
    real(R8P),    intent(in)  :: c0(3)       !< Local origin.
    real(R8P),    intent(out) :: av(3), ar, cen(3) !< Vector area, area, centroid.
-   real(R8P)                 :: acc(11), d1(3), d2(3), d3(3) !< Work.
-   integer(I4P)              :: m           !< Fan.
+   real(R8P)                 :: acc(11), d1(3), d2(3), d3(3), s !< Work.
+   integer(I4P)              :: m, a        !< Fan, axis.
 
-   acc = 0._R8P
+   do a = 1, 11
+      acc(a) = 0._R8P
+   enddo
    do m = 2, np - 1
-      d1 = poly(:, 1) - c0 ; d2 = poly(:, m) - c0 ; d3 = poly(:, m + 1) - c0
+      do a = 1, 3
+         d1(a) = poly(a, 1) - c0(a) ; d2(a) = poly(a, m) - c0(a) ; d3(a) = poly(a, m + 1) - c0(a)
+      enddo
       call tri_terms(d1, d2, d3, acc)
    enddo
-   av = acc(9:11) ; ar = acc(5)
+   do a = 1, 3
+      av(a) = acc(8 + a)
+   enddo
+   ar = acc(5)
    if (ar > 0._R8P) then
-      cen = c0 + acc(6:8) / ar
+      do a = 1, 3
+         cen(a) = c0(a) + acc(5 + a) / ar
+      enddo
    else
-      cen = sum(poly(:, 1:np), dim=2) / np
+      do a = 1, 3
+         s = 0._R8P
+         do m = 1, np
+            s = s + poly(a, m)
+         enddo
+         cen(a) = s / np
+      enddo
    endif
    endsubroutine polygon_terms
 
@@ -613,7 +671,7 @@ contains
    integer(I4P), allocatable, intent(out), optional :: piv_piece(:), piv_edge(:) !< Intervals: piece, cell edge.
    real(R8P),    allocatable, intent(out), optional :: piv_lo(:), piv_hi(:)      !< Intervals: range.
    type(cut_cells_2d_t),     intent(in),  optional :: px(:), py(:), pz(:) !< Plane sections (with boundaries, for qd).
-   type(cut_walls_3d_t),     intent(out), optional :: walls      !< Labelled wall terms (issue #106 step 3).
+   type(cut_walls_3d_t),     intent(inout), optional :: walls    !< Labelled wall terms (issue #106 step 3; reset).
    integer(I4P), parameter     :: K_NONE = 0_I4P, K_EMPTY = 1_I4P, K_QUIET = 2_I4P, K_CUT = 3_I4P !< Cell kinds.
    integer(I4P), allocatable   :: kind_(:)                !< Kind of each cell.
    integer(I4P), allocatable   :: civ(:), cq(:), cw(:), cq1(:), cns(:) !< Per cell: intervals, rule points, wall rule
@@ -639,7 +697,7 @@ contains
    integer(I4P)                :: cs(8)                   !< Corner states.
    logical                     :: want_iv                 !< Intervals asked.
    logical                     :: wl                      !< Wall terms asked.
-   integer(I4P)                :: nw, ro(14), io(20)      !< Wall terms so far, a cell's workspace layout.
+   integer(I4P)                :: nw, nwk, ro(14), io(20) !< Wall terms so far, of a cell, a cell's workspace layout.
    integer(I4P), allocatable   :: wcs(:), wpc(:), wfc(:)  !< Wall terms: cell starts, pieces, facets.
    real(R8P),    allocatable   :: wav(:,:), wwa(:), wcen(:,:) !< Wall terms: vector areas, areas, centroids.
 
@@ -754,9 +812,10 @@ contains
       allocate(qpt(3, 0), qwt(0), wpt(3, 0), wwt(0), qcnt(0), wcnt(0))
    endif
    wl = present(walls) ; nw = 0_I4P
-   if (wl) then ! at most one term per kept candidate
-      allocate(wcs(ncell + 1), wpc(kstart(ncell + 1) - 1), wfc(kstart(ncell + 1) - 1), wav(3, kstart(ncell + 1) - 1), &
-               wwa(kstart(ncell + 1) - 1), wcen(3, kstart(ncell + 1) - 1))
+   if (wl) then ! at most one term per kept candidate (+ 1: every slice start inside the arrays)
+      call cut_walls_reset(walls)
+      allocate(wcs(ncell + 1), wpc(kstart(ncell + 1)), wfc(kstart(ncell + 1)), wav(3, kstart(ncell + 1)), &
+               wwa(kstart(ncell + 1)), wcen(3, kstart(ncell + 1)))
    endif
    do k = 1, nz
       do j = 1, ny
@@ -765,10 +824,13 @@ contains
             np = cut%pieces(i, j, k)
             if (wl) then ! every cell but a multi-piece cut cell (after its fill pass, below): the clip of the totals
                wcs(c) = nw + 1_I4P
-               if (.not. (kind_(c) == K_CUT .and. np > 1_I4P)) &
-                  call wall_terms_clip(nf, tri, kstart(c + 1) - kstart(c), klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), &
-                                       z(k), z(k + 1), merge(cut%first_piece(i, j, k), 0_I4P, np == 1_I4P), nw, wpc, wfc, &
-                                       wav, wwa, wcen)
+               nt = kstart(c + 1) - kstart(c)
+               if (.not. (kind_(c) == K_CUT .and. np > 1_I4P) .and. nt > 0_I4P) then
+                  call wall_terms_clip(.true., nf, tri, nt, klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), z(k), z(k + 1), &
+                                       merge(cut%first_piece(i, j, k), 0_I4P, np == 1_I4P), nt, nwk, wpc(nw + 1), &
+                                       wfc(nw + 1), wav(1, nw + 1), wwa(nw + 1), wcen(1, nw + 1))
+                  nw = nw + nwk
+               endif
             endif
             if (np < 1_I4P) cycle
             p0 = cut%first_piece(i, j, k) - 1_I4P ; kd = kind_(c)
@@ -844,8 +906,10 @@ contains
                                    cut%piece_face, pmom, pwmom, pfmom, ivp, ive, ivl, ivh, qpt, qwt, wpt, wwt, qcnt, wcnt)
                if (wl .and. np > 1_I4P) then ! the kernel's polygons and sets, still in its workspace
                   call cell_pieces_layout(nt, npc, nm2, nm3, qd, ro, io)
-                  call wall_terms_sets(nt, klst(kstart(c)), c0, rw(ro(1)), iw(io(2)), nt + 20_I4P + npc, iw(io(6)), &
-                                       iw(io(10)), iw(io(11)), p0, nw, wpc, wfc, wav, wwa, wcen)
+                  call wall_terms_sets(.true., nt, klst(kstart(c)), c0, rw(ro(1)), iw(io(2)), nt + 20_I4P + npc, iw(io(6)), &
+                                       iw(io(10)), iw(io(11)), p0, nt, nwk, wpc(nw + 1), wfc(nw + 1), wav(1, nw + 1), &
+                                       wwa(nw + 1), wcen(1, nw + 1))
+                  nw = nw + nwk
                endif
             endif
          enddo
@@ -3257,7 +3321,7 @@ contains
    enddo
    endsubroutine line_fractions
 
-   subroutine cut_cells_3d_device(surface, x, y, z, cut, status, edges, resident, alpha_only, links)
+   subroutine cut_cells_3d_device(surface, x, y, z, cut, status, edges, resident, alpha_only, links, walls)
    !< `cut_cells_3d` on the device (OpenACC, issue #100 step 3c), without moments or quadrature: the same outputs
    !< bit for bit (cell fractions, centroids, wetted areas, centroids and normals; face fractions, centroids, pieces and
    !< closed flags; pieces and their measures; node_in; with `edges` the cell-edge fractions).
@@ -3267,6 +3331,13 @@ contains
    !< here). The link inputs come with the cut (`cut_cells_3d_link_inputs_device`, kept on the device), the links from
    !< them (`cut_links_3d_device`), the inputs are then released. With `resident` the links stay mapped like the cut;
    !< with `alpha_only` no links are computed (`links` is reset).
+   !<
+   !< `walls` (#109 WP2 step 05): also the labelled wall terms, those of `cut_cells_3d(..., walls=)` bit for bit
+   !< (`cut_walls_3d_t`: n, cell_start, piece, facet, area, wet_area, centroid), after the pieces (stage 7): one thread per
+   !< cell counts its terms (`wall_terms_sets` on the workspace slice the fill pass of a multi-piece cell left, else the
+   !< clip of the totals, `wall_terms_clip`: the host's kernels), a prefix sum (`scan_dev`; the total comes back), one
+   !< thread per cell writes its terms at its offset. With `resident` they stay mapped like the cut (see `cut_walls_3d_t`),
+   !< else they are copied back; with `alpha_only` none are computed (`walls` is reset).
    !<
    !< The host does the grid check, the candidate facets of the cells (`cell_candidates_3d`: binning and the box test),
    !< the cells a mesh boundary edge overlaps (`open_cells_3d`) and the slicing of the grid planes. The device runs:
@@ -3304,32 +3375,36 @@ contains
    logical,                  intent(in),  optional :: resident   !< Leave the outputs on the device (default .false.).
    logical,                  intent(in),  optional :: alpha_only !< alpha alone (default .false.).
    type(cut_links_t),        intent(inout), optional :: links    !< Links between the pieces (released and reset first).
+   type(cut_walls_3d_t),     intent(inout), optional :: walls    !< Labelled wall terms (released and reset first).
    type(cut_link_inputs_3d_t) :: li  !< Link inputs (resident for the link stage).
    integer(I4P)               :: st  !< Status.
    logical                    :: res, ao !< Options.
 
    if (.not. present(links)) then
-      call cut3_device_core(surface, x, y, z, cut, status, edges, resident, alpha_only)
+      call cut3_device_core(surface, x, y, z, cut, status, edges, resident, alpha_only, walls=walls)
       return
    endif
    call cut_links_reset(links)
    ao = .false. ; if (present(alpha_only)) ao = alpha_only
    if (ao) then
-      call cut3_device_core(surface, x, y, z, cut, status, edges, resident, alpha_only)
+      call cut3_device_core(surface, x, y, z, cut, status, edges, resident, alpha_only, walls=walls)
       return
    endif
    res = .false. ; if (present(resident)) res = resident
-   call cut3_device_core(surface, x, y, z, cut, st, edges, .true., .false., li)
+   call cut3_device_core(surface, x, y, z, cut, st, edges, .true., .false., li, walls)
    if (present(status)) status = st
    if (st /= STATUS_OK) return
    call cut_links_3d_device(cut, li, x, y, z, links, resident=res)
    call link_inputs_reset(li)
-   if (.not. res) then ! the cut comes back as without links (the same arrays, copied, then released)
+   if (.not. res) then ! the cut (and the wall terms) come back as without links (the same arrays, copied, then released)
       call cut%update_host ; call cut%exit_device
+      if (present(walls)) then
+         call walls%update_host ; call walls%exit_device
+      endif
    endif
    endsubroutine cut_cells_3d_device
 
-   subroutine cut3_device_core(surface, x, y, z, cut, status, edges, resident, alpha_only, li)
+   subroutine cut3_device_core(surface, x, y, z, cut, status, edges, resident, alpha_only, li, walls)
    !< The work of `cut_cells_3d_device` (see there). With li (issue #100 step 5; not with alpha_only) also the inputs of
    !< the piece links (`cut_link_inputs_3d_t`), on the device:
    !< - the sections are the blocks of `cut_cells_device_many` with pieces and intervals (`sections_axis_device` with
@@ -3339,7 +3414,8 @@ contains
    !<   prefix sums of the pieces scan them too (`pieces_scan_dev`), and the fill pass writes them at the cell offsets:
    !<   `cut_pieces_3d`'s piv_* (the same kernel, the same calls); cell_iv_start from the offsets.
    !< With `resident` li stays mapped, else it is copied back. Without li nothing changes but the extra (zero) column
-   !< of the pieces scan.
+   !< of the pieces scan. With walls (#109 WP2 step 05; not with alpha_only, where they are reset) also the labelled wall
+   !< terms (stage 7 of `cut_cells_3d_device`), mapped like the cut.
    type(surface_stl_object),   intent(in), target    :: surface    !< Surface.
    real(R8P),                  intent(in)            :: x(:), y(:), z(:) !< Cell edges (strictly increasing).
    type(cut_cells_3d_t),       intent(inout)         :: cut        !< Cut cells (released from the device and reset first).
@@ -3348,6 +3424,7 @@ contains
    logical,                    intent(in),  optional :: resident   !< Leave the outputs on the device (default .false.).
    logical,                    intent(in),  optional :: alpha_only !< alpha alone (default .false.).
    type(cut_link_inputs_3d_t), intent(inout), optional :: li     !< Inputs of the links (released and reset first).
+   type(cut_walls_3d_t),       intent(inout), optional :: walls  !< Labelled wall terms (released and reset first).
    type(aabb_node_object),       pointer :: node_p(:)    !< Alias of surface%aabb%node.
    type(facet_distance_payload), pointer :: payload_p(:) !< Alias of surface%aabb%payload.
    real(R8P),                    pointer :: tv_p(:,:)    !< Alias of surface%tri_vertices.
@@ -3383,9 +3460,16 @@ contains
    integer(I4P) :: nx, ny, nz, ncell, nf, i, j, k, c, f, m, q, nt, npc, nrw, niw, np, npt, nivc, nqc, nwc, qwn1, p0, st
    integer(I4P) :: nivt                                   !< Link intervals of the block.
    logical      :: all_edges, res, same, ao, wiv          !< Options, work.
+   logical      :: wl                                     !< Wall terms asked (#109 WP2 step 05).
+   integer(I4P) :: nwt, nwk, ro(14), io(20)               !< Wall terms of the block, of a cell; a cell's workspace layout.
+   integer(I4P), allocatable :: wcn(:), wof(:)            !< Wall terms per cell, before each cell.
+   integer(I4P), allocatable :: wcs(:), wpc(:), wfc(:)    !< Wall terms: cell starts, pieces, facets.
+   real(R8P),    allocatable :: wav(:,:), wwa(:), wcen(:,:) !< Wall terms: vector areas, areas, centroids.
 
    wiv = present(li)
    if (wiv) call link_inputs_reset(li)
+   wl = present(walls)
+   if (wl) call cut_walls_reset(walls)
    if (cut%on_device) call cut%exit_device
    call device_grid_check(surface, x, y, z, nx, ny, nz, st)
    if (present(status)) status = st
@@ -3396,6 +3480,7 @@ contains
    ao = .false. ; if (present(alpha_only)) ao = alpha_only
    if (ao) all_edges = .false.
    if (ao) wiv = .false.
+   if (ao) wl = .false.
    ncell = nx * ny * nz
    ! host: triangles, candidates, open cells (as `cut_cells_3d`)
    nf = surface%get_facets_number()
@@ -3595,6 +3680,64 @@ contains
       cis(ncell + 1) = nivt + 1_I4P
       !$acc end serial
    endif
+   if (wl) then ! 7. the labelled wall terms (#109 WP2 step 05): count, prefix sums, fill (the host's kernels)
+      allocate(wcn(ncell), wof(ncell))
+      !$acc data create(wcn, wof)
+      !$acc parallel loop gang vector collapse(3) default(present) private(c0, ro, io) &
+      !$acc& present(x, y, z, tri, kstart, klst, pcs, kd, cct, off, rw, iw, wcn, zr1, zr3, zi1)
+      do k = 1, nz
+         do j = 1, ny
+            do i = 1, nx
+               c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+               nt = kstart(c + 1) - kstart(c) ; nwk = 0_I4P
+               if (kd(c) == CK_CUT .and. pcs(i, j, k) > 1_I4P) then ! the polygons the fill pass left in the workspace
+                  c0(1) = x(i) ; c0(2) = y(j) ; c0(3) = z(k)
+                  call cell_pieces_layout(nt, cct(1, c), 0_I4P, 0_I4P, .false., ro, io)
+                  call wall_terms_sets(.false., nt, klst(kstart(c)), c0, rw(off(2, c) + ro(1)), iw(off(3, c) + io(2)), &
+                                       nt + 20_I4P + cct(1, c), iw(off(3, c) + io(6)), iw(off(3, c) + io(10)), &
+                                       iw(off(3, c) + io(11)), 0_I4P, 1_I4P, nwk, zi1, zi1, zr3, zr1, zr3)
+               elseif (nt > 0_I4P) then ! the clip of the totals
+                  call wall_terms_clip(.false., nf, tri, nt, klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), z(k), &
+                                       z(k + 1), 0_I4P, 1_I4P, nwk, zi1, zi1, zr3, zr1, zr3)
+               endif
+               wcn(c) = nwk
+            enddo
+         enddo
+      enddo
+      call scan_dev(ncell, wcn, wof, nwt)
+      allocate(wcs(ncell + 1), wpc(max(1_I4P, nwt)), wfc(max(1_I4P, nwt)), wav(3, max(1_I4P, nwt)), wwa(max(1_I4P, nwt)), &
+               wcen(3, max(1_I4P, nwt)))
+      !$acc enter data create(wcs, wpc, wfc, wav, wwa, wcen)
+      !$acc parallel loop gang vector collapse(3) default(present) private(c0, ro, io) &
+      !$acc& present(x, y, z, tri, kstart, klst, pcs, fpc, kd, cct, off, rw, iw, wcn, wof, wcs, wpc, wfc, wav, wwa, wcen)
+      do k = 1, nz
+         do j = 1, ny
+            do i = 1, nx
+               c = i + nx * ((j - 1_I4P) + ny * (k - 1_I4P))
+               wcs(c) = wof(c) + 1_I4P
+               if (wcn(c) == 0_I4P) cycle
+               nt = kstart(c + 1) - kstart(c) ; np = pcs(i, j, k)
+               if (kd(c) == CK_CUT .and. np > 1_I4P) then
+                  c0(1) = x(i) ; c0(2) = y(j) ; c0(3) = z(k)
+                  call cell_pieces_layout(nt, cct(1, c), 0_I4P, 0_I4P, .false., ro, io)
+                  call wall_terms_sets(.true., nt, klst(kstart(c)), c0, rw(off(2, c) + ro(1)), iw(off(3, c) + io(2)), &
+                                       nt + 20_I4P + cct(1, c), iw(off(3, c) + io(6)), iw(off(3, c) + io(10)), &
+                                       iw(off(3, c) + io(11)), fpc(i, j, k) - 1_I4P, wcn(c), nwk, wpc(wof(c) + 1), &
+                                       wfc(wof(c) + 1), wav(1, wof(c) + 1), wwa(wof(c) + 1), wcen(1, wof(c) + 1))
+               else
+                  p0 = 0_I4P ; if (np == 1_I4P) p0 = fpc(i, j, k)
+                  call wall_terms_clip(.true., nf, tri, nt, klst(kstart(c)), x(i), x(i + 1), y(j), y(j + 1), z(k), &
+                                       z(k + 1), p0, wcn(c), nwk, wpc(wof(c) + 1), wfc(wof(c) + 1), wav(1, wof(c) + 1), &
+                                       wwa(wof(c) + 1), wcen(1, wof(c) + 1))
+               endif
+            enddo
+         enddo
+      enddo
+      !$acc serial default(present) present(wcs)
+      wcs(ncell + 1) = nwt + 1_I4P
+      !$acc end serial
+      !$acc end data
+   endif
    !$acc end data
    !$acc end data
    endif ! .not. ao
@@ -3639,6 +3782,21 @@ contains
    call move_alloc(pwa, cut%piece_wet_area) ; call move_alloc(pwc, cut%piece_wet_centroid)
    call move_alloc(pwn, cut%piece_wet_normal) ; call move_alloc(pfc, cut%piece_face)
    if (res) call mark_resident(cut)
+   if (wl) then ! the wall terms (#109 WP2 step 05): copied back unless resident; none: empty arrays (the host's shapes)
+      if (nwt == 0_I4P) then
+         !$acc exit data delete(wpc, wfc, wav, wwa, wcen)
+         deallocate(wpc, wfc, wav, wwa, wcen)
+         allocate(wpc(0), wfc(0), wav(3, 0), wwa(0), wcen(3, 0))
+         if (res) then
+            !$acc enter data create(wpc, wfc, wav, wwa, wcen)
+         else
+            !$acc exit data copyout(wcs)
+         endif
+      elseif (.not. res) then
+         !$acc exit data copyout(wcs, wpc, wfc, wav, wwa, wcen)
+      endif
+      call walls_take(walls, nwt, wcs, wpc, wfc, wav, wwa, wcen, res)
+   endif
    ! the link inputs (issue #100 step 5): the intervals (exact size), the sections copied back unless resident
    if (.not. wiv) then
       !$acc exit data delete(ivp, ive, ivl, ivh)
@@ -3893,6 +4051,93 @@ contains
    endif
    self%on_device = .false. ; self%device_key = 0
    endsubroutine cut3_exit_device
+
+   subroutine walls_take(walls, nwt, wcs, wpc, wfc, wav, wwa, wcen, res)
+   !< Move the arrays of the device wall stage into `walls` (#109 WP2 step 05; move_alloc keeps the host addresses the
+   !< present table is keyed on) and flag them resident if `res`. The caller did the data clauses on its locals (no
+   !< `enter data` on an allocatable dummy: it leaks a descriptor mapping).
+   type(cut_walls_3d_t),      intent(inout) :: walls      !< Wall terms (reset).
+   integer(I4P),              intent(in)    :: nwt        !< Terms.
+   integer(I4P), allocatable, intent(inout) :: wcs(:), wpc(:), wfc(:) !< Cell starts, pieces, facets.
+   real(R8P),    allocatable, intent(inout) :: wav(:,:), wwa(:), wcen(:,:) !< Vector areas, areas, centroids.
+   logical,                   intent(in)    :: res        !< Mapped.
+
+   walls%n = nwt
+   call move_alloc(wcs, walls%cell_start) ; call move_alloc(wpc, walls%piece) ; call move_alloc(wfc, walls%facet)
+   call move_alloc(wav, walls%area) ; call move_alloc(wwa, walls%wet_area) ; call move_alloc(wcen, walls%centroid)
+   if (res) then
+      walls%on_device = .true. ; walls%device_key = walls_host_key(walls)
+   endif
+   endsubroutine walls_take
+
+   subroutine cut_walls_reset(walls)
+   !< Release resident wall terms from the device (`exit_device`), then reset them to the default (#109 WP2 step 05): what
+   !< `intent(out)` did, without freeing arrays that are still mapped.
+   type(cut_walls_3d_t), intent(inout) :: walls !< Wall terms.
+   type(cut_walls_3d_t)                :: fresh !< Default.
+
+   if (walls%on_device) call walls%exit_device
+   walls = fresh
+   endsubroutine cut_walls_reset
+
+   function walls_host_key(walls) result(key)
+   !< Host address of cell_start (the key of mapped wall terms; 0 if cell_start is not allocated).
+   type(cut_walls_3d_t), intent(in), target :: walls !< Wall terms.
+   integer(c_intptr_t)                      :: key   !< Address.
+
+   key = 0
+   if (allocated(walls%cell_start)) then
+      if (size(walls%cell_start) > 0) key = transfer(c_loc(walls%cell_start), key)
+   endif
+   endfunction walls_host_key
+
+   logical function walls_is_mapped(self)
+   !< The flag is set and the arrays are the ones mapped (not a copy of resident terms).
+   type(cut_walls_3d_t), intent(in) :: self !< Wall terms.
+
+   walls_is_mapped = .false.
+   if (self%on_device) walls_is_mapped = self%device_key == walls_host_key(self)
+   endfunction walls_is_mapped
+
+   subroutine walls_enter_device(self)
+   !< Map the arrays of host wall terms to the device (copyin; #109 WP2 step 05). Member arrays only, never `self` (#20).
+   !< No-op if already mapped or without terms (cell_start unallocated). A copy of resident terms is mapped as new terms.
+   class(cut_walls_3d_t), intent(inout) :: self !< Wall terms.
+
+   if (walls_is_mapped(self)) return
+   self%on_device = .false. ; self%device_key = 0
+   if (.not. (allocated(self%cell_start) .and. allocated(self%piece) .and. allocated(self%facet) .and. &
+              allocated(self%area) .and. allocated(self%wet_area) .and. allocated(self%centroid))) return
+   !$acc enter data copyin(self%cell_start, self%piece, self%facet, self%area, self%wet_area, self%centroid)
+   self%on_device = .true. ; self%device_key = walls_host_key(self)
+   endsubroutine walls_enter_device
+
+   subroutine walls_update_host(self)
+   !< Copy the mapped arrays back to the host (#109 WP2 step 05); they stay mapped. No-op if not mapped; on a copy of
+   !< resident terms a warning on stderr (its arrays are not on the device: update the original before copying it).
+   class(cut_walls_3d_t), intent(inout) :: self !< Wall terms.
+
+   if (.not. self%on_device) return
+   if (.not. walls_is_mapped(self)) then
+      write(stderr, '(A)') 'fossil cut_walls_3d_t%update_host: a copy of resident wall terms is not on the device; '// &
+                           'call update_host on the original before copying it'
+      self%on_device = .false. ; self%device_key = 0
+      return
+   endif
+   !$acc update host(self%cell_start, self%piece, self%facet, self%area, self%wet_area, self%centroid)
+   endsubroutine walls_update_host
+
+   subroutine walls_exit_device(self)
+   !< Release the device copies (#109 WP2 step 05); the host arrays are kept as they are (call `update_host` first to keep
+   !< the device values). No-op if not mapped; a copy of resident terms only drops the flag.
+   class(cut_walls_3d_t), intent(inout) :: self !< Wall terms.
+
+   if (.not. self%on_device) return
+   if (walls_is_mapped(self)) then
+      !$acc exit data delete(self%cell_start, self%piece, self%facet, self%area, self%wet_area, self%centroid)
+   endif
+   self%on_device = .false. ; self%device_key = 0
+   endsubroutine walls_exit_device
 
    subroutine cut_cells_3d_link_inputs_device(surface, x, y, z, cut, inputs, status, edges, resident)
    !< `cut_cells_3d_device` with the inputs of the piece links (issue #100 step 5): `cut` bit for bit the cut of

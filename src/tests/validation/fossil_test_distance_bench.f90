@@ -27,7 +27,8 @@
 !<      `line crossings device vs serial mismatches` (issue #40) must be 0, and so must every later device line
 !<      (`orient3d device vs serial mismatches`, issue #100 step 3c, among them; `swept cells 3-D device vs serial
 !<      mismatches`, issue #100 step 4; `cut cells 3-D link inputs device vs serial mismatches` and `cut links 3-D
-!<      device vs serial mismatches`, step 5; `piece map 3-D device vs serial mismatches`, issue #105 step 3;
+!<      device vs serial mismatches`, step 5; `cut walls 3-D device vs serial mismatches`, the labelled wall terms of
+!<      #109 WP2 step 05; `piece map 3-D device vs serial mismatches`, issue #105 step 3;
 !<      `probe device vs serial mismatches`, the probes and images of WP1 step 01; `curvature device vs serial
 !<      mismatches`, the principal curvatures and directions at the feet of WP1 step 03; `closure device vs serial
 !<      mismatches`, the closure table of `fd_closure_3d`, WP1 step 04, every field by bits, copied back and resident,
@@ -36,7 +37,7 @@
 !<      posed too; `loads device vs serial mismatches`, `integrate_loads` of WP2 step 02 on those samples, copied in,
 !<      resident and with p, tau mapped by the caller, every output by bits).
 !<
-!<   6. Timing tables of the 3-D device kernels (sections, cut cells, link inputs, links, swept; best / median of 5;
+!<   6. Timing tables of the 3-D device kernels (sections, cut cells, link inputs, links, wall terms, swept; best / median of 5;
 !<      the piece map, best of 2; the closure table at the bench's grid size, unposed and posed, best of 5 after a
 !<      warm-up, CPU / device copied back / device resident):
 !<      only when built with OpenACC, where they compare the CPU with the GPU. Built without it the `device` routines
@@ -77,6 +78,8 @@ use fossil,              only : cut_links_t
 use fossil,              only : cut_cells_2d_t
 use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_face_mismatches, cut_cells_3d_mismatches, &
                                      cut_cells_3d_alpha_mismatches, link_inputs_mismatches, cut_links_mismatches
+use fossil_cut_cells_compare, only : cut_walls_mismatches
+use fossil,              only : cut_walls_3d_t
 use fossil_orient3d_cases, only : orient3d_quadruples, lcb_cases, orient3d_many, lcb_many
 use fossil_predicates,   only : orient3d_xyz
 use fossil_line_query,   only : line_crossing_before
@@ -141,6 +144,7 @@ integer                       :: swept_mismatch            !< 3-D swept cells: d
 integer                       :: map_mismatch              !< 3-D piece map: device vs CPU mismatches (#105 step 3).
 integer                       :: link_inputs_mismatch      !< 3-D link inputs: device vs CPU mismatches (#100 step 5).
 integer                       :: links_mismatch            !< 3-D piece links: device vs CPU mismatches (#100 step 5).
+integer                       :: walls_mismatch            !< 3-D wall terms: device vs CPU mismatches (#109 WP2 step 05).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -356,6 +360,8 @@ call link_inputs_case(mismatch=link_inputs_mismatch)
 rich_ok = rich_ok .and. link_inputs_mismatch == 0
 call links_case(mismatch=links_mismatch)
 rich_ok = rich_ok .and. links_mismatch == 0
+call walls_case(mismatch=walls_mismatch)
+rich_ok = rich_ok .and. walls_mismatch == 0
 call swept_case(mismatch=swept_mismatch)
 rich_ok = rich_ok .and. swept_mismatch == 0
 call map_case(mismatch=map_mismatch)
@@ -466,6 +472,7 @@ print '(A,I0)',      '   cut cells 3-D nodes device vs serial mismatches: ', nod
 print '(A,I0)',      '   cut cells 3-D device vs serial mismatches: ', cells_mismatch
 print '(A,I0)',      '   cut cells 3-D link inputs device vs serial mismatches: ', link_inputs_mismatch
 print '(A,I0)',      '   cut links 3-D device vs serial mismatches: ', links_mismatch
+print '(A,I0)',      '   cut walls 3-D device vs serial mismatches: ', walls_mismatch
 print '(A,I0)',      '   swept cells 3-D device vs serial mismatches: ', swept_mismatch
 print '(A,I0)',      '   piece map 3-D device vs serial mismatches: ', map_mismatch
 print '(A)',         ''
@@ -1371,6 +1378,119 @@ contains
    print '(3X,A,A,I0,A,I0,A,I0,A,I0,A,I0)', label, ': cells ', size(ch%alpha), ', pieces ', ch%np, ', links ', &
          size(lh%piece), ', unmatched ', lh%unmatched, ', cut links 3-D mismatches ', mismatch
    endfunction links_compare
+
+   subroutine walls_case(mismatch)
+   !< The labelled wall terms on the device (#109 WP2 step 05): `cut_cells_3d_device(..., walls=)` against
+   !< `cut_cells_3d(..., walls=)`, the cut (`cut_cells_3d_mismatches`) and every field of the terms (`cut_walls_mismatches`:
+   !< n, cell_start, piece, facet, area, wet_area, centroid bitwise), copied back and resident (`update_host`), without
+   !< and with links: the bench body in its probe box at grid_n^3; with grid_n >= 32 also the sphere and the cone at 64^3
+   !< (the grids of `cells_case`), and a timing table at 64^3 and 128^3: best and median of 5 after a warm-up, the CPU cut
+   !< without and with the terms, the device cut resident without and with them (terms resident), copied back with them.
+   integer, intent(out)      :: mismatch               !< Mismatches.
+   type(surface_stl_object)  :: sb(2)                  !< Sphere, cone.
+   type(body_t), allocatable :: bb(:)                  !< Bench bodies.
+   character(12), parameter  :: NAMES(2) = [character(12) :: 'mc sphere', 'cone'] !< Their names.
+   real(R8P),    allocatable :: gx(:), gy(:), gz(:)    !< Cell edges.
+   integer(I4P)              :: b, g, m                !< Work.
+
+   mismatch = 0
+   call section_grid(grid_n, gx, gy, gz)
+   mismatch = mismatch + walls_compare('bench body', surface, gx, gy, gz)
+   if (grid_n < 32_I4P) return
+   call mc_body(BODY_SPHERE, 24_I4P, sb(1))
+   call bench_bodies(bb) ; call to_surface_bench(bb(7), sb(2))
+   do b = 1, 2
+      call box_grid(sb(b), 64_I4P, gx, gy, gz)
+      mismatch = mismatch + walls_compare(NAMES(b), sb(b), gx, gy, gz)
+   enddo
+   if (.not. timing) return
+   print '(A)', 'cut walls 3-D timing (best / median of 5) [s]: body, cells, CPU cut, CPU cut + walls, device resident '// &
+                'cut, device resident cut + walls, device cut + walls copied back; walls extra (CPU, device resident), '// &
+                'speed-up of cut + walls (copied back, resident; best)'
+   call section_grid(grid_n, gx, gy, gz)
+   call walls_timing('bench body', surface, grid_n, gx, gy, gz)
+   do b = 1, 2
+      do g = 1, 2
+         m = 64_I4P * g
+         call box_grid(sb(b), m, gx, gy, gz)
+         call walls_timing(NAMES(b), sb(b), m, gx, gy, gz)
+      enddo
+   enddo
+   endsubroutine walls_case
+
+   function walls_compare(label, s, gx, gy, gz) result(mismatch)
+   !< `cut_cells_3d_device(..., walls=)` against `cut_cells_3d(..., walls=)` on s and the grid gx, gy, gz: without and with
+   !< links, copied back and resident (then `update_host`; the next call releases them). Prints the case.
+   character(*),             intent(in) :: label        !< Case.
+   type(surface_stl_object), intent(in) :: s            !< Body.
+   real(R8P),                intent(in) :: gx(:), gy(:), gz(:) !< Cell edges.
+   integer                              :: mismatch     !< Mismatches.
+   type(cut_cells_3d_t)                 :: ch, cd       !< Host, device cut.
+   type(cut_walls_3d_t)                 :: wh, wd       !< Host, device wall terms.
+   type(cut_links_t)                    :: ld           !< Device links.
+   integer(I4P)                         :: st, st2, l, r !< Work.
+
+   mismatch = 0
+   call cut_cells_3d(s, gx, gy, gz, ch, status=st, walls=wh)
+   do l = 1, 2
+      do r = 1, 2
+         if (l == 1) then
+            call cut_cells_3d_device(s, gx, gy, gz, cd, status=st2, resident=r == 2, walls=wd)
+         else
+            call cut_cells_3d_device(s, gx, gy, gz, cd, status=st2, resident=r == 2, links=ld, walls=wd)
+         endif
+         if (r == 2) then
+            if (.not. (wd%on_device .and. cd%on_device)) mismatch = mismatch + 1
+            call cd%update_host ; call wd%update_host
+         endif
+         mismatch = mismatch + abs(st - st2) + cut_cells_3d_mismatches(ch, cd) + cut_walls_mismatches(wh, wd)
+      enddo
+   enddo
+   call wd%exit_device ; call ld%exit_device ; call cd%exit_device
+   print '(3X,A,A,I0,A,I0,A,I0,A,I0,A,I0)', label, ': cells ', size(ch%alpha), ', pieces ', ch%np, ', wall terms ', &
+         wh%n, ' (', count(wh%piece == 0), ' without piece), cut walls 3-D mismatches ', mismatch
+   endfunction walls_compare
+
+   subroutine walls_timing(label, s, m, gx, gy, gz)
+   !< One row of the timing table of `walls_case`.
+   character(*),             intent(in)    :: label        !< Body.
+   type(surface_stl_object), intent(inout) :: s            !< Body (mapped for the device runs, then released).
+   integer(I4P),             intent(in)    :: m            !< Cells per axis.
+   real(R8P),                intent(in)    :: gx(:), gy(:), gz(:) !< Cell edges.
+   type(cut_cells_3d_t)                    :: ch, cd       !< Host, device cut.
+   type(cut_walls_3d_t)                    :: wh, wd       !< Host, device wall terms.
+   real(R8P)                               :: t(5, 5)      !< Times.
+   integer(I8P)                            :: c0, c1, rate !< Clock.
+   integer(I4P)                            :: r            !< Counter.
+
+   call system_clock(count_rate=rate)
+   call s%enter_device
+   do r = 1, 3 ! warm-up
+      call cut_cells_3d_device(s, gx, gy, gz, cd, walls=wd)
+   enddo
+   do r = 1, 5
+      call system_clock(c0) ; call cut_cells_3d(s, gx, gy, gz, ch) ; call system_clock(c1)
+      t(1, r) = real(c1 - c0, R8P) / rate
+      call system_clock(c0) ; call cut_cells_3d(s, gx, gy, gz, ch, walls=wh) ; call system_clock(c1)
+      t(2, r) = real(c1 - c0, R8P) / rate
+   enddo
+   do r = 1, 5
+      call system_clock(c0) ; call cut_cells_3d_device(s, gx, gy, gz, cd, resident=.true.) ; call system_clock(c1)
+      t(3, r) = real(c1 - c0, R8P) / rate
+      call system_clock(c0) ; call cut_cells_3d_device(s, gx, gy, gz, cd, resident=.true., walls=wd) ; call system_clock(c1)
+      t(4, r) = real(c1 - c0, R8P) / rate
+      call system_clock(c0) ; call cut_cells_3d_device(s, gx, gy, gz, cd, walls=wd) ; call system_clock(c1)
+      t(5, r) = real(c1 - c0, R8P) / rate
+   enddo
+   call wd%exit_device ; call cd%exit_device
+   call s%exit_device
+   print '(3X,A12,I4,A,5(2X,ES9.2,A,ES9.2),A,ES9.2,A,ES9.2,A,F6.2,A,F6.2,A)', label, m, '^3', &
+         minval(t(1, :)), ' /', median_of5(t(1, :)), minval(t(2, :)), ' /', median_of5(t(2, :)), &
+         minval(t(3, :)), ' /', median_of5(t(3, :)), minval(t(4, :)), ' /', median_of5(t(4, :)), &
+         minval(t(5, :)), ' /', median_of5(t(5, :)), '  (', minval(t(2, :)) - minval(t(1, :)), ', ', &
+         minval(t(4, :)) - minval(t(3, :)), '; ', minval(t(2, :)) / minval(t(5, :)), 'x, ', &
+         minval(t(2, :)) / minval(t(4, :)), 'x)'
+   endsubroutine walls_timing
 
    subroutine links_timing(label, s, m, gx, gy, gz)
    !< One row of the timing table of `links_case`.

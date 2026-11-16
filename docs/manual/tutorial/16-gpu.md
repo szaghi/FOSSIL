@@ -143,7 +143,8 @@ batches.
   and 10.5-12x at 1024² with everything resident (the
   [cut-solver reference](/guide/advanced/cut-solver#on-the-device) has the table).
 - `cut_cells_3d_device(surface, x, y, z, cut)` computes the 3-D cut cells of a block on the device (with `links=`
-  also their piece links; no moments or quadrature), bit for bit those of `cut_cells_3d`, copied back or with `resident=.true.` left on the device.
+  also their piece links, with `walls=` the wall terms labelled by piece and facet; no moments or quadrature), bit for
+  bit those of `cut_cells_3d`, copied back or with `resident=.true.` left on the device.
   On an RTX 4070 at 128³ cells: 2.1-3.0x the CPU copied back, 2.7-3.8x resident (the
   [cut cells reference](/guide/advanced/cut-cells#on-the-device) has the table and what bounds it).
 - `curve%cut_cells_device(x, y, cut)` computes the 2-D cut cells of a block on the device, bit for bit those of
