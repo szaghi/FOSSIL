@@ -75,6 +75,9 @@ public :: fd_closure_3d_bodies, fd_closure_2d_bodies
 public :: fd_cell_index_oac, ilw_select_oac, ilw_item_2d_oac
 public :: to_world_3d_oac, rotate_3d_oac, to_world_2d_oac, rotate_2d_oac
 public :: to_body_3d_oac, to_body_2d_oac ! for `fossil_field_transfer`
+! the several-bodies stages, for the load samples of several bodies (`fossil_surface_loads`, #109 WP3 step 02)
+public :: blocked_3d, blocked_2d, merge_clear, body_points_3d_dev, body_points_2d_dev, world_points_3d_dev, &
+          world_points_2d_dev
 
 type :: ib_closure_t
    !< The closure table of a block (see the module header). dims = 3 or 2 (2-D: the curve's (u, v) plane, nk = 1). Every

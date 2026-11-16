@@ -45,10 +45,26 @@ module fossil_surface_loads
 !< summed on the host in sample order with Neumaier compensation, the same code for both paths: the totals agree bit for
 !< bit. A linear p = p0 + g . x is integrated exactly by every rule for the force (F = -g V); the moment's integrand is
 !< then quadratic, exact from order 2 (M = V (x_c - c) x (-g)).
+!<
+!< Several bodies (#109 WP3 step 02): `load_samples_3d_bodies(surfaces, ...)` / `load_samples_2d_bodies(curves, ...)`
+!< give one sample set of an array of bodies, each at its pose: the samples of every body as `load_samples_3d/_2d` gives
+!< them (the same kernels), concatenated in body order (element = the facet / segment of its own surface), `body` = the
+!< surface (curve) index and `sub_body` = the element's facet_body (loop body); a probe is visible when its segment
+!< crosses no element of ANY body (its own as the single-body set decides it, every other body by the closed segment
+!< point - probe in that body's frame: `blocked_3d` / `blocked_2d` of the closure of several bodies, the 3-D tolerance
+!< the sample's own body's); `clearance` the unsigned distance from the sample point to the nearest OTHER surface
+!< (huge if none; the shells of one surface are not separated), `second_body` that surface, `second_foot` its closest
+!< point (world). Ties keep the lower surface index. With one body the set equals `load_samples_3d/_2d` bit for bit in
+!< every single-body field when the surface has one facet_body (body = 1 = its facet_body). `integrate_loads` sums
+!< `per_body` by the `body` field: the facet_body of a single-body set, the surface of a bodies set (the per-shell
+!< totals of one surface: a single-body set of it). Both paths bit for bit (the merge kernels are copies and
+!< comparisons; the device runs one launch set per body, then the merges in body order).
 use fossil_aabb_node_object,   only : aabb_node_object
 use fossil_aabb_tree_object,   only : facet_distance_payload, AABB_TREE_SAH_BVH
 use fossil_curve_object,       only : curve_object
-use fossil_fd_closure,         only : fd_cell_index_oac, to_world_3d_oac, rotate_3d_oac, to_world_2d_oac, rotate_2d_oac
+use fossil_fd_closure,         only : fd_cell_index_oac, to_world_3d_oac, rotate_3d_oac, to_world_2d_oac, rotate_2d_oac, &
+                                      blocked_3d, blocked_2d, merge_clear, body_points_3d_dev, body_points_2d_dev, &
+                                      world_points_3d_dev, world_points_2d_dev
 use fossil_rigid_pose,         only : rigid_pose_t, rigid_pose_2d_t
 use fossil_segment_visibility, only : bvh_segment_blocked_oac
 use fossil_surface_stl_object, only : surface_stl_object, STATUS_OK, STATUS_INVALID_INPUT
@@ -60,6 +76,7 @@ use vecfor,                    only : vector_R8P
 implicit none
 private
 public :: load_samples_t, load_samples_3d, load_samples_2d, load_samples_reset, load_samples_mismatches, load_rule_size
+public :: load_samples_3d_bodies, load_samples_2d_bodies
 public :: integrate_loads
 ! the per-point kernels, shared by the two paths (public for the tests)
 public :: load_point_3d_oac, load_point_2d_oac, load_force_3d_oac, load_force_2d_oac
@@ -84,16 +101,23 @@ type :: load_samples_t
    integer(I4P)              :: nj = 0_I4P            !< Points of the y (v) line.
    integer(I4P)              :: nk = 0_I4P            !< Points of the z line (0 in 2-D).
    logical                   :: with_cells = .false.  !< probe_cell filled (lines given).
+   logical                   :: with_bodies = .false. !< The several-bodies fields filled (`load_samples_*_bodies`).
+   integer(I4P)              :: bodies = 0_I4P        !< Surfaces (curves) of a bodies set (0: single body).
    real(R8P),    allocatable :: points(:,:)           !< Sample points [dims, n].
    real(R8P),    allocatable :: weight(:)             !< Weights [n] (rule weight times area / length).
    real(R8P),    allocatable :: normal(:,:)           !< Element unit normal [dims, n] (outward; 0 if degenerate).
    integer(I4P), allocatable :: element(:)            !< Facet / segment [n].
    integer(I4P), allocatable :: patch(:)              !< Patch of the element [n].
-   integer(I4P), allocatable :: body(:)               !< Body of the element [n].
+   integer(I4P), allocatable :: body(:)               !< Body of the element [n] (bodies set: the surface index).
    real(R8P),    allocatable :: lengths(:)            !< Probe lengths [m] (+ outward, absolute).
    real(R8P),    allocatable :: probe(:,:,:)          !< Probe points [dims, m, n].
    logical,      allocatable :: visible(:,:)          !< The segment point-probe crosses no element [m, n].
    integer(I4P), allocatable :: probe_cell(:,:,:)     !< Enclosing cell per axis [dims, m, n] (0: outside).
+   ! several bodies (`load_samples_*_bodies`; zero-size in a single-body set): `body` is then the surface (curve) index
+   integer(I4P), allocatable :: sub_body(:)           !< The element's facet_body (2-D: loop body) [n].
+   real(R8P),    allocatable :: clearance(:)          !< Unsigned distance point - nearest other surface [n] (huge: none).
+   integer(I4P), allocatable :: second_body(:)        !< That nearest other surface [n] (0: none).
+   real(R8P),    allocatable :: second_foot(:,:)      !< Its closest point to the sample point [dims, n].
    logical                   :: on_device = .false.   !< The arrays are mapped on the device (resident).
    integer(c_intptr_t)       :: device_key = 0        !< Host address of points when mapped (a copy has another one).
    contains
@@ -237,6 +261,140 @@ contains
    call samples_2d_run(curve, ord, ll, present(pose), pr, pt, wl, xl, yl, dev .and. nv > 0_I4P, res, samples)
    endsubroutine load_samples_2d
 
+   subroutine load_samples_3d_bodies(surfaces, x, y, z, samples, status, poses, order, lengths, device, resident)
+   !< The load samples of several bodies (#109 WP3 step 02; see the module header, "Several bodies"): surfaces(b) at
+   !< poses(b) (absent: no body posed), the samples of every body concatenated in body order, body = b, sub_body = the
+   !< facet_body; the probes visible against every body; clearance, second_body, second_foot. The other arguments as
+   !< `load_samples_3d`. Every non-empty surface needs its SAH BVH (the default tree: the visibility and the clearance
+   !< against the other bodies traverse it) and (device path) to be mapped by `enter_device`. `status =
+   !< STATUS_INVALID_INPUT` as `load_samples_3d`, and on no surface, size(poses) /= size(surfaces), a surface with an
+   !< octree (a stderr message); the samples are then reset (n = 0). Empty surfaces give no sample.
+   type(surface_stl_object), intent(in), target    :: surfaces(:)      !< Surfaces (the bodies).
+   real(R8P),                intent(in),  optional :: x(:), y(:), z(:) !< The solver's lines (strictly increasing).
+   type(load_samples_t),     intent(inout)         :: samples          !< Samples (released and reset first).
+   integer(I4P),             intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_t),       intent(in),  optional :: poses(:)         !< Poses of the bodies [nb].
+   integer(I4P),             intent(in),  optional :: order            !< Rule order (default 2).
+   real(R8P),                intent(in),  optional :: lengths(:)       !< Probe lengths [m] (+ outward, absolute).
+   logical,                  intent(in),  optional :: device           !< Device path (default .false.).
+   logical,                  intent(in),  optional :: resident         !< Leave the samples mapped (default .false.).
+   real(R8P),    allocatable :: ll(:), xl(:), yl(:), zl(:)      !< Probe lengths, lines.
+   real(R8P),    allocatable :: prs(:,:,:), pts(:,:), tols(:)   !< Poses, visibility tolerances per body.
+   integer(I4P), allocatable :: nfs(:)                          !< Facets per body.
+   real(R8P)                 :: dbx, dby, dbz                   !< Box.
+   type(vector_R8P)          :: bmin, bmax                      !< Box.
+   integer(I4P)              :: st, ord, nb, b                  !< Work.
+   logical                   :: dev, res, wl, posed, some       !< Options.
+
+   call load_samples_reset(samples)
+   if (present(status)) status = STATUS_OK
+   res = .false. ; if (present(resident)) res = resident
+   dev = res ; if (present(device)) dev = dev .or. device
+   ord = 2_I4P ; if (present(order)) ord = order
+   posed = present(poses)
+   nb = size(surfaces, kind=I4P)
+   call resolve_inputs(3_I4P, ord, lengths, x, y, z, st, ll, wl, xl, yl, zl)
+   if (nb < 1_I4P) st = STATUS_INVALID_INPUT
+   if (posed) then
+      if (size(poses) /= nb) st = STATUS_INVALID_INPUT
+   endif
+   allocate(prs(3, 3, max(nb, 1_I4P)), pts(3, max(nb, 1_I4P)), tols(max(nb, 1_I4P)), nfs(max(nb, 1_I4P)))
+   some = .false.
+   do b = 1_I4P, nb
+      prs(:, :, b) = reshape([1._R8P, 0._R8P, 0._R8P, 0._R8P, 1._R8P, 0._R8P, 0._R8P, 0._R8P, 1._R8P], [3, 3])
+      pts(:, b) = 0._R8P
+      if (posed .and. st == STATUS_OK) then
+         prs(:, :, b) = poses(b)%r ; pts(:, b) = poses(b)%t
+      endif
+      nfs(b) = surfaces(b)%get_facets_number()
+      bmin = surfaces(b)%get_bmin() ; bmax = surfaces(b)%get_bmax()
+      dbx = bmax%x - bmin%x ; dby = bmax%y - bmin%y ; dbz = bmax%z - bmin%z
+      tols(b) = 1.e-9_R8P * sqrt(dbx * dbx + dby * dby + dbz * dbz) ! the tolerance of probe_many
+      if (nfs(b) < 1_I4P .or. st /= STATUS_OK) cycle
+      some = .true.
+      if (.not. (allocated(surfaces(b)%tri_vertices) .and. allocated(surfaces(b)%body_payload))) then
+         write(stderr, '(A,I0,A)') 'fossil load_samples_3d_bodies: refused -- surface ', b, ' is not analyzed'
+         st = STATUS_INVALID_INPUT
+      elseif (.not. (surfaces(b)%aabb%get_tree_kind() == AABB_TREE_SAH_BVH .and. allocated(surfaces(b)%aabb%node) .and. &
+                     allocated(surfaces(b)%aabb%payload))) then
+         write(stderr, '(A,I0,A)') 'fossil load_samples_3d_bodies: refused -- surface ', b, ' has no SAH BVH'
+         st = STATUS_INVALID_INPUT
+      elseif (dev .and. .not. surfaces(b)%is_on_device) then
+         write(stderr, '(A,I0,A)') 'fossil load_samples_3d_bodies: device path refused -- call surface%enter_device '// &
+                                   'first (surface ', b, ')'
+         st = STATUS_INVALID_INPUT
+      endif
+   enddo
+   if (st /= STATUS_OK) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (posed) then
+      call bodies_3d_run(surfaces, nfs, ord, ll, posed, prs, pts, tols, wl, xl, yl, zl, dev .and. some, res, samples, poses)
+   else
+      call bodies_3d_run(surfaces, nfs, ord, ll, posed, prs, pts, tols, wl, xl, yl, zl, dev .and. some, res, samples)
+   endif
+   endsubroutine load_samples_3d_bodies
+
+   subroutine load_samples_2d_bodies(curves, x, y, samples, status, poses, order, lengths, device, resident)
+   !< 2-D twin of `load_samples_3d_bodies` (#109 WP3 step 02): curves(b) at poses(b) in their common (u, v) plane, the
+   !< samples of `load_samples_2d` per curve, sub_body = the loop body. The device path needs every non-empty curve mapped
+   !< by `enter_device`. The other arguments and the statuses as `load_samples_3d_bodies` (no tree requirement: every
+   !< curve has its segment BVH).
+   type(curve_object),    intent(in), target    :: curves(:)  !< Curves (the bodies).
+   real(R8P),             intent(in),  optional :: x(:), y(:) !< The solver's lines (u, v; strictly increasing).
+   type(load_samples_t),  intent(inout)         :: samples    !< Samples (released and reset first).
+   integer(I4P),          intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_2d_t), intent(in),  optional :: poses(:)   !< Poses of the curves [nb].
+   integer(I4P),          intent(in),  optional :: order      !< Rule order (default 2).
+   real(R8P),             intent(in),  optional :: lengths(:) !< Probe lengths [m] (+ outward, absolute).
+   logical,               intent(in),  optional :: device     !< Device path (default .false.).
+   logical,               intent(in),  optional :: resident   !< Leave the samples mapped (default .false.).
+   real(R8P),    allocatable :: ll(:), xl(:), yl(:), zl(:)    !< Probe lengths, lines.
+   real(R8P),    allocatable :: prs(:,:,:), pts(:,:)          !< Poses per curve.
+   integer(I4P), allocatable :: nvs(:)                        !< Vertices per curve.
+   integer(I4P)              :: st, ord, nb, b                !< Work.
+   logical                   :: dev, res, wl, posed, some     !< Options.
+
+   call load_samples_reset(samples)
+   if (present(status)) status = STATUS_OK
+   res = .false. ; if (present(resident)) res = resident
+   dev = res ; if (present(device)) dev = dev .or. device
+   ord = 2_I4P ; if (present(order)) ord = order
+   posed = present(poses)
+   nb = size(curves, kind=I4P)
+   call resolve_inputs(2_I4P, ord, lengths, x, y, st=st, ll=ll, wl=wl, xl=xl, yl=yl, zl=zl)
+   if (nb < 1_I4P) st = STATUS_INVALID_INPUT
+   if (posed) then
+      if (size(poses) /= nb) st = STATUS_INVALID_INPUT
+   endif
+   allocate(prs(2, 2, max(nb, 1_I4P)), pts(2, max(nb, 1_I4P)), nvs(max(nb, 1_I4P)))
+   some = .false.
+   do b = 1_I4P, nb
+      prs(:, :, b) = reshape([1._R8P, 0._R8P, 0._R8P, 1._R8P], [2, 2]) ; pts(:, b) = 0._R8P
+      if (posed .and. st == STATUS_OK) then
+         prs(:, :, b) = poses(b)%r ; pts(:, b) = poses(b)%t
+      endif
+      nvs(b) = curves(b)%get_vertices_number()
+      if (nvs(b) < 1_I4P .or. st /= STATUS_OK) cycle
+      some = .true.
+      if (dev .and. .not. curves(b)%get_is_on_device()) then
+         write(stderr, '(A,I0,A)') 'fossil load_samples_2d_bodies: device path refused -- call curve%enter_device '// &
+                                   'first (curve ', b, ')'
+         st = STATUS_INVALID_INPUT
+      endif
+   enddo
+   if (st /= STATUS_OK) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (posed) then
+      call bodies_2d_run(curves, nvs, ord, ll, posed, prs, pts, wl, xl, yl, dev .and. some, res, samples, poses)
+   else
+      call bodies_2d_run(curves, nvs, ord, ll, posed, prs, pts, wl, xl, yl, dev .and. some, res, samples)
+   endif
+   endsubroutine load_samples_2d_bodies
+
    subroutine load_samples_reset(samples)
    !< Release resident samples from the device (`exit_device`), then reset them to the default (no sample, arrays
    !< released): what `intent(out)` did, without freeing arrays that are still mapped.
@@ -264,6 +422,9 @@ contains
    nmis = nmis + mis_i(a%element, b%element) + mis_i(a%patch, b%patch) + mis_i(a%body, b%body)
    nmis = nmis + mis_r(a%lengths, b%lengths) + mis_r(a%probe, b%probe) + mis_l(a%visible, b%visible)
    nmis = nmis + mis_i(a%probe_cell, b%probe_cell)
+   if ((a%with_bodies .neqv. b%with_bodies) .or. a%bodies /= b%bodies) nmis = nmis + 1_I4P
+   nmis = nmis + mis_i(a%sub_body, b%sub_body) + mis_r(a%clearance, b%clearance) + mis_i(a%second_body, b%second_body)
+   nmis = nmis + mis_r(a%second_foot, b%second_foot)
    endfunction load_samples_mismatches
 
    ! the loads
@@ -274,7 +435,8 @@ contains
    !< traction tau(3, n) at the samples (at least one), F = sum_s w_s (-p_s n_s + tau_s), M = sum_s (x_s - about) x f_s
    !< (`about` default the origin), in sample order with Neumaier compensation. Optional: the totals per patch
    !< `per_patch_force(3, np)`, `per_patch_moment(3, np)` and per body `per_body_force(3, nb)`, `per_body_moment(3, nb)`
-   !< (np, nb the largest patch and body ids of the samples; a sample with an id below 1 enters the totals only), the
+   !< (by the samples' `body`: the facet_body of `load_samples_3d`, the surface index of `load_samples_3d_bodies`; np, nb
+   !< the largest patch and body ids of the samples; a sample with an id below 1 enters the totals only), the
    !< wetted area sum_s w_s. `device` (default .false.): the contributions computed on the device, the samples and p, tau
    !< read on the device where they are mapped (resident samples, a pressure mapped by the caller), else copied in; the
    !< host path reads the host arrays (`update_host` resident samples first). Both paths give the same bits.
@@ -394,15 +556,16 @@ contains
    !< Map host samples to the device (copyin). Member arrays only, never `self` (#20). No-op if already mapped or if there
    !< is no sample; a copy of resident samples is mapped as new samples.
    class(load_samples_t), intent(inout) :: self !< Samples.
-   logical :: ga, gb, gc                        !< Non-empty groups.
+   logical :: ga, gb, gc, gd                    !< Non-empty groups.
 
    if (is_mapped(self)) return
    self%on_device = .false. ; self%device_key = 0
    if (self%n < 1_I4P .or. .not. allocated(self%points)) return
-   call groups(self, ga, gb, gc)
+   call groups(self, ga, gb, gc, gd)
    !$acc enter data copyin(self%points, self%weight, self%normal, self%element, self%patch, self%body) if(ga)
    !$acc enter data copyin(self%lengths, self%probe, self%visible) if(gb)
    !$acc enter data copyin(self%probe_cell) if(gc)
+   !$acc enter data copyin(self%sub_body, self%clearance, self%second_body, self%second_foot) if(gd)
    call mark_resident(self)
    endsubroutine enter_device
 
@@ -410,7 +573,7 @@ contains
    !< Copy the mapped samples back to the host; they stay mapped. No-op if not mapped; on a copy of resident samples a
    !< warning on stderr (its arrays are not on the device: update the original before copying it).
    class(load_samples_t), intent(inout) :: self !< Samples.
-   logical :: ga, gb, gc                        !< Non-empty groups.
+   logical :: ga, gb, gc, gd                    !< Non-empty groups.
 
    if (.not. self%on_device) return
    if (.not. is_mapped(self)) then
@@ -419,24 +582,26 @@ contains
       self%on_device = .false. ; self%device_key = 0
       return
    endif
-   call groups(self, ga, gb, gc)
+   call groups(self, ga, gb, gc, gd)
    !$acc update host(self%points, self%weight, self%normal, self%element, self%patch, self%body) if(ga)
    !$acc update host(self%lengths, self%probe, self%visible) if(gb)
    !$acc update host(self%probe_cell) if(gc)
+   !$acc update host(self%sub_body, self%clearance, self%second_body, self%second_foot) if(gd)
    endsubroutine update_host
 
    subroutine exit_device(self)
    !< Release the device copies; the host arrays are kept as they are (call `update_host` first to keep the device
    !< values). No-op if not mapped; a copy of resident samples only drops the flag.
    class(load_samples_t), intent(inout) :: self !< Samples.
-   logical :: ga, gb, gc                        !< Non-empty groups.
+   logical :: ga, gb, gc, gd                    !< Non-empty groups.
 
    if (.not. self%on_device) return
    if (is_mapped(self)) then
-      call groups(self, ga, gb, gc)
+      call groups(self, ga, gb, gc, gd)
       !$acc exit data delete(self%points, self%weight, self%normal, self%element, self%patch, self%body) if(ga)
       !$acc exit data delete(self%lengths, self%probe, self%visible) if(gb)
       !$acc exit data delete(self%probe_cell) if(gc)
+      !$acc exit data delete(self%sub_body, self%clearance, self%second_body, self%second_foot) if(gd)
    endif
    self%on_device = .false. ; self%device_key = 0
    endsubroutine exit_device
@@ -547,6 +712,237 @@ contains
    endif
    call finish(w, dev, res, s)
    endsubroutine samples_2d_run
+
+   ! private: several bodies (#109 WP3 step 02)
+
+   subroutine bodies_3d_run(surfaces, nfs, ord, ll, posed, prs, pts, tols, wl, xl, yl, zl, dev, res, s, poses)
+   !< `load_samples_3d_bodies` after the checks: per body the single-body samples (`samples_3d_run`, resident on the
+   !< device path), concatenated in body order (`concat_stage`); with two or more bodies per body b the clearance of
+   !< every sample point to b (host `query_many`, device `query_points_present` in b's frame; `merge_clear`, the samples
+   !< of b skipped) and the probes' visibility against b (`blocked_3d`). One set of loops for both paths.
+   type(surface_stl_object), intent(in), target   :: surfaces(:)          !< Surfaces (checked; mapped on the device path).
+   integer(I4P),             intent(in)           :: nfs(:)               !< Facets per body.
+   integer(I4P),             intent(in)           :: ord                  !< Rule order.
+   real(R8P),                intent(in)           :: ll(:)                !< Probe lengths.
+   logical,                  intent(in)           :: posed                !< Poses given.
+   real(R8P),                intent(in)           :: prs(:,:,:), pts(:,:) !< Poses [3, 3, nb], [3, nb].
+   real(R8P),                intent(in)           :: tols(:)              !< Visibility tolerances [nb].
+   logical,                  intent(in)           :: wl                   !< Lines given.
+   real(R8P),                intent(in)           :: xl(:), yl(:), zl(:)  !< Lines (one dummy point each without).
+   logical,                  intent(in)           :: dev, res             !< Device path, resident.
+   type(load_samples_t),     intent(inout)        :: s                    !< Samples.
+   type(rigid_pose_t),       intent(in), optional :: poses(:)             !< Poses (host queries).
+   type(load_samples_t), allocatable :: sb(:)                             !< Samples per body.
+   type(load_samples_t)              :: w                                 !< The samples being built.
+   type(vector_R8P),     allocatable :: fp(:)                             !< Sample points (host queries).
+   real(R8P),    allocatable :: tl(:), qp(:,:), qd(:), qc(:,:), qn(:,:), qw(:,:) !< Tolerances, queries.
+   integer(I4P), allocatable :: qf(:), qft(:), qfi(:), qb(:)              !< Queries.
+   integer(I4P)              :: nb, b, q, ne, n, m, off, ni, nj, nk, g    !< Work.
+
+   nb = size(nfs, kind=I4P) ; q = load_rule_size(ord, 3_I4P) ; m = size(ll, kind=I4P)
+   ni = 0_I4P ; nj = 0_I4P ; nk = 0_I4P
+   if (wl) then
+      ni = size(xl, kind=I4P) ; nj = size(yl, kind=I4P) ; nk = size(zl, kind=I4P)
+   endif
+   allocate(sb(nb), tl(nb)) ; tl = tols(1:nb)
+   ne = 0_I4P
+   do b = 1_I4P, nb
+      if (nfs(b) < 1_I4P) cycle
+      call samples_3d_run(surfaces(b), ord, ll, posed, prs(:, :, b), pts(:, b), wl, xl, yl, zl, dev, dev, sb(b))
+      ne = ne + nfs(b)
+   enddo
+   call samples_arrays(w, 3_I4P, ord, q, ne, m, wl, ni, nj, nk) ; call samples_arrays_bodies(w, nb)
+   w%lengths = ll ; n = w%n
+   if (dev) call map_create(w)
+   off = 0_I4P
+   do b = 1_I4P, nb
+      if (sb(b)%n < 1_I4P) cycle
+      call concat_stage(dev, 3_I4P, m, sb(b)%n, size(sb(b)%probe_cell, 3, kind=I4P), n, size(w%probe_cell, 3, kind=I4P), &
+                        off, b, sb(b)%points, sb(b)%weight, sb(b)%normal, sb(b)%element, sb(b)%patch, sb(b)%body, &
+                        sb(b)%probe, sb(b)%visible, sb(b)%probe_cell, w%points, w%weight, w%normal, w%element, w%patch, &
+                        w%body, w%sub_body, w%probe, w%visible, w%probe_cell)
+      off = off + sb(b)%n
+      call load_samples_reset(sb(b))
+   enddo
+   if (n > 0_I4P) then
+      !$acc data copyin(tl) if(dev)
+      call bodies_init_stage(dev, 3_I4P, n, w%clearance, w%second_body, w%second_foot)
+      if (nb > 1_I4P) then
+         allocate(qp(3, n), qd(n), qc(3, n), qn(3, n), qw(3, n), qf(n), qft(n), qfi(n), qb(n))
+         if (.not. dev) then
+            allocate(fp(n))
+            do g = 1_I4P, n
+               fp(g)%x = w%points(1, g) ; fp(g)%y = w%points(2, g) ; fp(g)%z = w%points(3, g)
+            enddo
+         endif
+         do b = 1_I4P, nb
+            if (nfs(b) < 1_I4P) cycle
+            if (dev) then
+               !$acc data create(qp, qd, qc, qn, qw, qf, qft, qfi, qb)
+               call body_points_3d_dev(n, w%points, posed, prs(:, :, b), pts(:, b), qp)
+               call surfaces(b)%query_points_present(n, qp, .true., .false., qd, qc, qn, qf, qft, qfi, qb)
+               call world_points_3d_dev(n, posed, prs(:, :, b), pts(:, b), qc, qw)
+               call merge_clear(.true., 3_I4P, n, b, qd, qw, w%body, w%clearance, w%second_body, w%second_foot)
+               !$acc end data
+            else
+               if (posed) then
+                  call surfaces(b)%query_many(points=fp, distances=qd, closest_points=qc, pose=poses(b))
+               else
+                  call surfaces(b)%query_many(points=fp, distances=qd, closest_points=qc)
+               endif
+               call merge_clear(.false., 3_I4P, n, b, qd, qc, w%body, w%clearance, w%second_body, w%second_foot)
+            endif
+            if (m > 0_I4P) call blocked_3d(dev, surfaces(b), b, n, m, posed, prs(:, :, b), pts(:, b), nb, tl, w%body, &
+                                           w%points, w%probe, w%visible)
+         enddo
+      endif
+      !$acc end data
+   endif
+   call finish(w, dev, res, s)
+   endsubroutine bodies_3d_run
+
+   subroutine bodies_2d_run(curves, nvs, ord, ll, posed, prs, pts, wl, xl, yl, dev, res, s, poses)
+   !< 2-D twin of `bodies_3d_run`: `samples_2d_run` per curve, the clearance by `query_many` / `query_present` in the
+   !< curve's frame, the visibility by `blocked_2d`.
+   type(curve_object),    intent(in), target   :: curves(:)            !< Curves (mapped on the device path).
+   integer(I4P),          intent(in)           :: nvs(:)               !< Vertices per curve.
+   integer(I4P),          intent(in)           :: ord                  !< Rule order.
+   real(R8P),             intent(in)           :: ll(:)                !< Probe lengths.
+   logical,               intent(in)           :: posed                !< Poses given.
+   real(R8P),             intent(in)           :: prs(:,:,:), pts(:,:) !< Poses [2, 2, nb], [2, nb].
+   logical,               intent(in)           :: wl                   !< Lines given.
+   real(R8P),             intent(in)           :: xl(:), yl(:)         !< Lines (one dummy point each without).
+   logical,               intent(in)           :: dev, res             !< Device path, resident.
+   type(load_samples_t),  intent(inout)        :: s                    !< Samples.
+   type(rigid_pose_2d_t), intent(in), optional :: poses(:)             !< Poses (host queries).
+   type(load_samples_t), allocatable :: sb(:)                          !< Samples per curve.
+   type(load_samples_t)              :: w                              !< The samples being built.
+   real(R8P),    allocatable :: qp(:,:), qd(:), qc(:,:), qn(:,:), qw(:,:) !< Queries.
+   integer(I4P), allocatable :: qs(:), qv(:), qb(:)                    !< Queries.
+   integer(I4P)              :: nb, b, q, ne, n, m, off, ni, nj         !< Work.
+
+   nb = size(nvs, kind=I4P) ; q = load_rule_size(ord, 2_I4P) ; m = size(ll, kind=I4P)
+   ni = 0_I4P ; nj = 0_I4P
+   if (wl) then
+      ni = size(xl, kind=I4P) ; nj = size(yl, kind=I4P)
+   endif
+   allocate(sb(nb))
+   ne = 0_I4P
+   do b = 1_I4P, nb
+      if (nvs(b) < 1_I4P) cycle
+      call samples_2d_run(curves(b), ord, ll, posed, prs(:, :, b), pts(:, b), wl, xl, yl, dev, dev, sb(b))
+      ne = ne + nvs(b)
+   enddo
+   call samples_arrays(w, 2_I4P, ord, q, ne, m, wl, ni, nj, 0_I4P) ; call samples_arrays_bodies(w, nb)
+   w%lengths = ll ; n = w%n
+   if (dev) call map_create(w)
+   off = 0_I4P
+   do b = 1_I4P, nb
+      if (sb(b)%n < 1_I4P) cycle
+      call concat_stage(dev, 2_I4P, m, sb(b)%n, size(sb(b)%probe_cell, 3, kind=I4P), n, size(w%probe_cell, 3, kind=I4P), &
+                        off, b, sb(b)%points, sb(b)%weight, sb(b)%normal, sb(b)%element, sb(b)%patch, sb(b)%body, &
+                        sb(b)%probe, sb(b)%visible, sb(b)%probe_cell, w%points, w%weight, w%normal, w%element, w%patch, &
+                        w%body, w%sub_body, w%probe, w%visible, w%probe_cell)
+      off = off + sb(b)%n
+      call load_samples_reset(sb(b))
+   enddo
+   if (n > 0_I4P) then
+      call bodies_init_stage(dev, 2_I4P, n, w%clearance, w%second_body, w%second_foot)
+      if (nb > 1_I4P) then
+         allocate(qp(2, n), qd(n), qc(2, n), qn(2, n), qw(2, n), qs(n), qv(n), qb(n))
+         do b = 1_I4P, nb
+            if (nvs(b) < 1_I4P) cycle
+            if (dev) then
+               !$acc data create(qp, qd, qc, qn, qw, qs, qv, qb)
+               call body_points_2d_dev(n, w%points, posed, prs(:, :, b), pts(:, b), qp)
+               call curves(b)%query_present(n, qp, .true., .false., qd, qc, qs, qv, qn, qb)
+               call world_points_2d_dev(n, posed, prs(:, :, b), pts(:, b), qc, qw)
+               call merge_clear(.true., 2_I4P, n, b, qd, qw, w%body, w%clearance, w%second_body, w%second_foot)
+               !$acc end data
+            else
+               if (posed) then
+                  call curves(b)%query_many(points=w%points, distances=qd, closest_points=qc, pose=poses(b))
+               else
+                  call curves(b)%query_many(points=w%points, distances=qd, closest_points=qc)
+               endif
+               call merge_clear(.false., 2_I4P, n, b, qd, qc, w%body, w%clearance, w%second_body, w%second_foot)
+            endif
+            if (m > 0_I4P) call blocked_2d(dev, curves(b), b, n, m, posed, prs(:, :, b), pts(:, b), w%body, w%points, &
+                                           w%probe, w%visible)
+         enddo
+      endif
+   endif
+   call finish(w, dev, res, s)
+   endsubroutine bodies_2d_run
+
+   subroutine concat_stage(dev, d, m, ns, ncs, n, nct, off, b, spts, swt, snrm, sel, spa, sbo, sprb, svis, spc, pts, wt, &
+                           nrm, el, pa, bo, sub, prb, vis, pc)
+   !< Copy one body's samples (ns, mapped on the device path) into the slots off+1 ... off+ns of the bodies set: every
+   !< field as it is, body = b, sub_body = the single-body set's body. Copies only (the same bits on both paths); one
+   !< kernel per non-empty group (zero-size arrays are never mapped).
+   logical,      intent(in)    :: dev                         !< On the device (arrays present).
+   integer(I4P), intent(in)    :: d, m, ns, ncs, n, nct, off, b !< Dims, probes, samples, cells extents, offset, body.
+   real(R8P),    intent(in)    :: spts(d, ns), swt(ns), snrm(d, ns) !< Body b: points, weights, normals.
+   integer(I4P), intent(in)    :: sel(ns), spa(ns), sbo(ns)   !< Body b: elements, patches, facet_bodies.
+   real(R8P),    intent(in)    :: sprb(d, m, ns)              !< Body b: probes.
+   logical,      intent(in)    :: svis(m, ns)                 !< Body b: visibility.
+   integer(I4P), intent(in)    :: spc(d, m, ncs)              !< Body b: probe cells.
+   real(R8P),    intent(inout) :: pts(d, n), wt(n), nrm(d, n) !< Points, weights, normals.
+   integer(I4P), intent(inout) :: el(n), pa(n), bo(n), sub(n) !< Elements, patches, bodies, sub-bodies.
+   real(R8P),    intent(inout) :: prb(d, m, n)                !< Probes.
+   logical,      intent(inout) :: vis(m, n)                   !< Visibility.
+   integer(I4P), intent(inout) :: pc(d, m, nct)               !< Probe cells.
+   integer(I4P) :: s, k, a, g                                 !< Counters.
+
+   !$acc parallel loop gang vector default(present) present(spts, swt, snrm, sel, spa, sbo, pts, wt, nrm, el, pa, bo, sub) &
+   !$acc&  private(a, g) if(dev)
+   do s = 1_I4P, ns
+      g = off + s
+      wt(g) = swt(s) ; el(g) = sel(s) ; pa(g) = spa(s) ; bo(g) = b ; sub(g) = sbo(s)
+      do a = 1_I4P, d
+         pts(a, g) = spts(a, s) ; nrm(a, g) = snrm(a, s)
+      enddo
+   enddo
+   if (m < 1_I4P) return
+   !$acc parallel loop gang vector collapse(2) default(present) present(sprb, svis, prb, vis) private(a, g) if(dev)
+   do s = 1_I4P, ns
+      do k = 1_I4P, m
+         g = off + s
+         vis(k, g) = svis(k, s)
+         do a = 1_I4P, d
+            prb(a, k, g) = sprb(a, k, s)
+         enddo
+      enddo
+   enddo
+   if (ncs < 1_I4P .or. nct < 1_I4P) return
+   !$acc parallel loop gang vector collapse(2) default(present) present(spc, pc) private(a, g) if(dev)
+   do s = 1_I4P, ns
+      do k = 1_I4P, m
+         g = off + s
+         do a = 1_I4P, d
+            pc(a, k, g) = spc(a, k, s)
+         enddo
+      enddo
+   enddo
+   endsubroutine concat_stage
+
+   subroutine bodies_init_stage(dev, d, n, clr, sb, sf)
+   !< Before the clearance merges: clearance huge, no second body, second foot 0 (arrays present if dev).
+   logical,      intent(in)    :: dev         !< On the device.
+   integer(I4P), intent(in)    :: d, n        !< Dimensions, samples.
+   real(R8P),    intent(inout) :: clr(n)      !< Clearances.
+   integer(I4P), intent(inout) :: sb(n)       !< Second bodies.
+   real(R8P),    intent(inout) :: sf(d, n)    !< Second feet.
+   integer(I4P) :: s, a                       !< Counters.
+
+   !$acc parallel loop gang vector default(present) present(clr, sb, sf) private(a) if(dev)
+   do s = 1_I4P, n
+      clr(s) = huge(1._R8P) ; sb(s) = 0_I4P
+      do a = 1_I4P, d
+         sf(a, s) = 0._R8P
+      enddo
+   enddo
+   endsubroutine bodies_init_stage
 
    ! private: the stages (every array present on the device path; on the host the loops run in order)
 
@@ -916,19 +1312,31 @@ contains
    nc = 0_I4P ; if (wl) nc = n
    allocate(w%points(dims, n), w%weight(n), w%normal(dims, n), w%element(n), w%patch(n), w%body(n), w%lengths(m), &
             w%probe(dims, m, n), w%visible(m, n), w%probe_cell(dims, m, nc))
+   allocate(w%sub_body(0), w%clearance(0), w%second_body(0), w%second_foot(dims, 0))
    endsubroutine samples_arrays
+
+   subroutine samples_arrays_bodies(w, nb)
+   !< The several-bodies arrays of samples allocated by `samples_arrays` (sized n) and their flags.
+   type(load_samples_t), intent(inout) :: w  !< Samples.
+   integer(I4P),         intent(in)    :: nb !< Bodies.
+
+   w%with_bodies = .true. ; w%bodies = nb
+   deallocate(w%sub_body, w%clearance, w%second_body, w%second_foot)
+   allocate(w%sub_body(w%n), w%clearance(w%n), w%second_body(w%n), w%second_foot(w%dims, w%n))
+   endsubroutine samples_arrays_bodies
 
    subroutine map_create(w)
    !< Create the device copies of the arrays of samples built on the device (unstructured data on a local set: its arrays
    !< are later moved into the caller's, the present table keyed on the unchanged host addresses).
    type(load_samples_t), intent(inout) :: w !< Samples.
-   logical :: ga, gb, gc                    !< Non-empty groups (zero-size arrays are never mapped).
+   logical :: ga, gb, gc, gd                !< Non-empty groups (zero-size arrays are never mapped).
 
-   call groups(w, ga, gb, gc)
+   call groups(w, ga, gb, gc, gd)
    !$acc enter data create(w%points, w%weight, w%normal, w%element, w%patch, w%body) if(ga)
    !$acc enter data create(w%lengths, w%probe, w%visible) if(gb)
    !$acc update device(w%lengths) if(gb)
    !$acc enter data create(w%probe_cell) if(gc)
+   !$acc enter data create(w%sub_body, w%clearance, w%second_body, w%second_foot) if(gd)
    endsubroutine map_create
 
    subroutine finish(w, dev, res, s)
@@ -937,16 +1345,20 @@ contains
    type(load_samples_t), intent(inout) :: w        !< Samples built.
    logical,              intent(in)    :: dev, res !< Device path, resident.
    type(load_samples_t), intent(inout) :: s        !< Caller's samples.
-   logical :: ga, gb, gc                           !< Non-empty groups.
+   logical :: ga, gb, gc, gd                       !< Non-empty groups.
 
    if (dev .and. (.not. res .or. w%n < 1_I4P)) then
-      call groups(w, ga, gb, gc)
+      call groups(w, ga, gb, gc, gd)
       !$acc exit data copyout(w%points, w%weight, w%normal, w%element, w%patch, w%body) if(ga)
       !$acc exit data copyout(w%lengths, w%probe, w%visible) if(gb)
       !$acc exit data copyout(w%probe_cell) if(gc)
+      !$acc exit data copyout(w%sub_body, w%clearance, w%second_body, w%second_foot) if(gd)
    endif
    s%n = w%n ; s%dims = w%dims ; s%order = w%order ; s%q = w%q ; s%ne = w%ne ; s%m = w%m
    s%ni = w%ni ; s%nj = w%nj ; s%nk = w%nk ; s%with_cells = w%with_cells
+   s%with_bodies = w%with_bodies ; s%bodies = w%bodies
+   call move_alloc(w%sub_body, s%sub_body) ; call move_alloc(w%clearance, s%clearance)
+   call move_alloc(w%second_body, s%second_body) ; call move_alloc(w%second_foot, s%second_foot)
    call move_alloc(w%points, s%points) ; call move_alloc(w%weight, s%weight) ; call move_alloc(w%normal, s%normal)
    call move_alloc(w%element, s%element) ; call move_alloc(w%patch, s%patch) ; call move_alloc(w%body, s%body)
    call move_alloc(w%lengths, s%lengths) ; call move_alloc(w%probe, s%probe) ; call move_alloc(w%visible, s%visible)
@@ -954,14 +1366,15 @@ contains
    if (dev .and. res .and. s%n > 0_I4P) call mark_resident(s)
    endsubroutine finish
 
-   subroutine groups(c, ga, gb, gc)
-   !< The non-empty array groups of samples (the device copies exist for these only): samples, probes, cells.
-   type(load_samples_t), intent(in)  :: c          !< Samples.
-   logical,              intent(out) :: ga, gb, gc !< Groups.
+   subroutine groups(c, ga, gb, gc, gd)
+   !< The non-empty array groups of samples (the device copies exist for these only): samples, probes, cells, bodies.
+   type(load_samples_t), intent(in)  :: c              !< Samples.
+   logical,              intent(out) :: ga, gb, gc, gd !< Groups.
 
    ga = c%n > 0_I4P
    gb = ga .and. c%m > 0_I4P
    gc = gb .and. c%with_cells
+   gd = ga .and. c%with_bodies
    endsubroutine groups
 
    function host_key(c) result(key)

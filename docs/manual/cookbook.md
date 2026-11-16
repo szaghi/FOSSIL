@@ -538,6 +538,20 @@ sums per patch and per body and the wetted area; with `device=.true.` the contri
 the totals keep their bits. In 2-D the moment is a scalar. See
 [surface loads](/guide/advanced/surface-loads#forces-and-moments).
 
+### Sample the walls of several bodies
+
+<<< @/examples/snippets/ck_loads_bodies.f90
+
+<<< @/examples/output/ck_loads_bodies.ansi{ansi}
+
+`load_samples_2d_bodies` samples an array of curves, each at its pose, into one set: the samples of each body in body
+order (`body` = its index), every probe visible only if no body blocks it (here 24 cross the 0.06 gap into the other
+circle), and per sample the clearance to the nearest other body (`second_body`, `second_foot`). `integrate_loads` then
+gives the force per body (`per_body_force`): the buoyancy of each circle in a fluid at rest is its area.
+`load_samples_3d_bodies` is the 3-D twin: two unit cubes 0.25 apart have clearance 0.25 on their facing faces, where
+the probe 0.5 out of each of the 48 samples enters the other cube. On the device, map the array's elements themselves.
+See [several bodies](/guide/advanced/surface-loads#several-bodies).
+
 ### Move a wall field to the closure and back
 
 <<< @/examples/snippets/ck_field_transfer.f90

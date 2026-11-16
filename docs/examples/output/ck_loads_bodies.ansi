@@ -1,0 +1,4 @@
+$ ck_loads_bodies
+two circles: samples 256, probes blocked by the other body 24, least clearance  0.0605
+  buoyancy (v) of body 1  0.28229, of body 2  0.28229, area  0.28229
+two cubes 0.25 apart: samples 288, probes blocked 48, least clearance  0.250

@@ -32,7 +32,9 @@ program fossil_test_curve_bench
 !< and ILW crossings too), and `closure bodies device vs serial mismatches` (#109 WP3 step 01: `fd_closure_2d_bodies`
 !< over two posed copies of the curve, 0.55 of the box width apart, device and resident against the host, every field by
 !< bits), and `load samples device vs serial mismatches` (#109 WP2 step 01: `load_samples_2d`, device
-!< and resident against the host, every field by bits, posed too), and `loads device vs serial mismatches` (step 02:
+!< and resident against the host, every field by bits, posed too), and `load samples bodies device vs serial mismatches`
+!< (#109 WP3 step 02: `load_samples_2d_bodies` over the two posed curves of the closure-bodies case, device and resident
+!< against the host, every field by bits), and `loads device vs serial mismatches` (step 02:
 !< `integrate_loads` on the device, copied-in, resident and caller-mapped p and tau, against the host, every output by
 !< bits), and `field transfer device vs serial mismatches` (step 04: a vertex and a segment field at the feet and ILW
 !< crossings of the posed closure table and at the load samples, `samples_to_vertices`; host and resident inputs, a
@@ -54,6 +56,7 @@ use fossil, only : piece_map_2d_t
 use fossil_piece_map_compare, only : piece_map_2d_mismatches
 use fossil, only : ib_closure_t, fd_closure_2d, ib_closure_reset, ib_closure_mismatches, fd_closure_2d_bodies
 use fossil, only : load_samples_t, load_samples_2d, load_samples_reset, load_samples_mismatches, integrate_loads
+use fossil, only : load_samples_2d_bodies
 use fossil, only : transfer_to_closure, transfer_to_samples, samples_to_vertices
 
 implicit none
@@ -179,6 +182,7 @@ contains
       if (a == 1) call closure(cur, lo, hi)
       if (a == 1) call closure_bodies(cur, lo, hi)
       if (a == 1) call loads(cur, lo, hi)
+      if (a == 1) call load_samples_bodies(cur, lo, hi)
       if (a == 1) call field_transfer(cur, lo, hi)
    enddo
    call cur%exit_device
@@ -378,6 +382,48 @@ contains
    call cv(1)%exit_device ; call cv(2)%exit_device
    call cur%enter_device
    endsubroutine closure_bodies
+
+   subroutine load_samples_bodies(cur, lo, hi)
+   !< load_samples_2d_bodies on the device (copied back, and resident then update_host) vs the host (#109 WP3 step 02):
+   !< the two posed curves of `closure_bodies` on its lines, order 2, probes h, 3h (the 2 s budget: `loads` has order 3);
+   !< every field by bits. The curve is unmapped for the call and mapped again after (the copies are mapped themselves).
+   type(curve_object), intent(inout) :: cur          !< Curve (on device).
+   real(R8P),          intent(in)    :: lo(2), hi(2) !< Grid box.
+   type(curve_object)        :: cv(2)      !< The two bodies.
+   type(rigid_pose_2d_t)     :: pp(2)      !< Poses.
+   type(load_samples_t)      :: sh, sd, sr !< Host, device, resident samples.
+   real(R8P),    allocatable :: x(:), y(:) !< Lines.
+   real(R8P)                 :: h, shx     !< Spacing, shift.
+   integer(I4P)              :: i, bad, nb !< Work, points per axis.
+
+   nb = max(16_I4P, n / 2_I4P)
+   shx = 0.55_R8P * (hi(1) - lo(1))
+   h = max(hi(1) - lo(1) + shx, hi(2) - lo(2)) / real(nb, R8P)
+   allocate(x(nb), y(nb))
+   do i = 1, nb
+      x(i) = lo(1) + (hi(1) - lo(1) + shx) * (i - 0.5_R8P) / nb ; y(i) = lo(2) + (hi(2) - lo(2)) * (i - 0.5_R8P) / nb
+   enddo
+   pp(1) = pose_2d(0.05_R8P, [0.01_R8P, -0.01_R8P]) ; pp(2) = pose_2d(-0.1_R8P, [shx, 0.02_R8P])
+   call cur%exit_device
+   cv(1) = cur ; cv(2) = cur
+   call cv(1)%enter_device ; call cv(2)%enter_device
+   call load_samples_2d_bodies(cv, x, y, sh, poses=pp, order=2_I4P, lengths=[h, 3 * h])
+   call load_samples_2d_bodies(cv, x, y, sd, poses=pp, order=2_I4P, lengths=[h, 3 * h], device=.true.)
+   call load_samples_2d_bodies(cv, x, y, sr, poses=pp, order=2_I4P, lengths=[h, 3 * h], resident=.true.)
+   call sr%update_host
+   if (allocated(sh%points) .and. allocated(sd%points) .and. allocated(sr%points)) then ! a refused call resets the set
+      bad = load_samples_mismatches(sh, sd) + load_samples_mismatches(sh, sr)
+   else
+      bad = 1
+   endif
+   if (sh%n == 0 .or. .not. sr%on_device .or. .not. sh%with_bodies) bad = bad + 1
+   print '(A,I0,A,I0,A,I0,A)', '   load samples bodies device vs serial mismatches: ', bad, '  (', sh%n, ' samples, ', &
+         count(.not. sh%visible), ' probes not visible)'
+   ok = ok .and. bad == 0
+   call load_samples_reset(sr)
+   call cv(1)%exit_device ; call cv(2)%exit_device
+   call cur%enter_device
+   endsubroutine load_samples_bodies
 
    subroutine closure(cur, lo, hi)
    !< fd_closure_2d on the device (copied back, and resident then update_host) vs the host (WP1 step 04): cell-centre lines

@@ -1,0 +1,9 @@
+$ ref_surface_loads_bodies
+two discs: samples 800, of body 1 400, of body 2 400
+  probes blocked: 44, disc 1 alone: 0
+  least clearance  0.0300, samples within 2 h of the other body 52, second body of sample 1: 2
+sample at  0.0150  0.0017: body 2, clearance 0.0300 to -0.0150  0.0012, visible T F
+  buoyancy per body (v)  0.19632  0.19632, area of a disc  0.19632
+two balls: samples 13872, probes blocked 175, least clearance  0.1018
+  buoyancy of ball 2 (z)  0.51874, its volume  0.51874
+  device path vs host path: mismatches 0

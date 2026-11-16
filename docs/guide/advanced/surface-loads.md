@@ -17,6 +17,7 @@ per patch and per body too, the same bits on the CPU and on the device.
 | Quadrature points, weights, normals, element, patch, body of every facet / segment | `load_samples_3d(surface, samples=s)` | `load_samples_2d(curve, samples=s)` |
 | Probes along the normal: points, visibility, enclosing cells on the solver's lines | `load_samples_3d(surface, x, y, z, s, lengths=)` | `load_samples_2d(curve, x, y, s, lengths=)` |
 | The body at a pose; the same on the device bit for bit, or left resident there | `pose=`, `device=.true.`, `resident=.true.` | same |
+| Several bodies at their poses: the samples of each in body order, probes visible against every body, the clearance to the nearest other body | `load_samples_3d_bodies(surfaces, samples=s, poses=)` | `load_samples_2d_bodies(curves, samples=s, poses=)` |
 | Force, moment (2-D: its z component), per patch and per body, wetted area, from the solver's p and τ | `integrate_loads(s, force, moment, pressure=, shear=)` | same, a scalar moment |
 | A wall field (per vertex or facet) at the closure's feet and ILW crossings, at the samples, at any point on a facet; values at the samples back to the vertices | `transfer_to_closure`, `transfer_to_samples`, `transfer_field_3d`, `samples_to_vertices` | the same generics, `transfer_field_2d` |
 
@@ -223,6 +224,60 @@ call samples_to_vertices(surface | curve, samples, values, field [, status] [, l
 or samples of the other dimension (or not of this surface or curve), `ilw_values` from a table without ILW. The
 [cookbook](/manual/cookbook#move-a-wall-field-to-the-closure-and-back) has the shortest program.
 
+## Several bodies
+
+Two bodies in one flow share its probes: an image line out of one wall may enter the other body, and a wall that faces
+another across a narrow gap carries a load that depends on the gap. `load_samples_3d_bodies(surfaces, x, y, z,
+samples)` and `load_samples_2d_bodies(curves, x, y, samples)` sample an array of bodies, body b at `poses(b)`, in one
+set:
+
+- **Each body as alone, in body order.** The samples of body b are those `load_samples_3d` (`_2d`) gives it at its
+  pose, the same kernels, placed after those of bodies 1 … b − 1; `element` is the facet (segment) of its own surface,
+  `body` the index of the surface in the array, `sub_body` the element's `facet_body` (loop body).
+- **Visibility is against every body.** A probe is visible when the segment sample–probe crosses no element of its own
+  body (as for one body) and no element of any other body, tested in that body's frame (the closure's test of
+  [several bodies](/guide/advanced/fd-closure#several-bodies)).
+- **Clearance.** `clearance(s)` is the unsigned distance from the sample point to the nearest other body
+  (`second_body`, `second_foot`: its closest point); huge without one. In a gap of width δ the facing samples have
+  clearance δ: a lubrication or wall model reads it there; FOSSIL decides nothing.
+- **Loads per body.** `integrate_loads` sums `per_body_force` and `per_body_moment` by the samples' `body`: the
+  surfaces of the array here, the `facet_body` shells of a single-body set.
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `body`, `sub_body` | `[n]` | The body's index in the array; the element's `facet_body` |
+| `clearance`, `second_body`, `second_foot` | `[n]`, `[n]`, `[d, n]` | Distance from the sample point to the nearest other body, that body, its closest point |
+| `with_bodies`, `bodies` | scalars | A bodies set; the number of bodies |
+
+A single-body set has these arrays with a zero last extent. With one body the bodies set equals the single-body set bit
+for bit in every other field (on a surface of one `facet_body`), and for bodies farther apart than the probes the
+samples of every body are its single-body set bit for bit (`fossil_test_load_samples_bodies_3d`, `_2d`).
+
+![two circles of radius 0.25, 0.03 apart, two probes 0.02 and 0.04 out of every sample: the samples in gold, the probes they see in teal, the probes that enter the other circle in ember, and grey segments from the samples of the gap to their nearest points on the other circle](../../examples/images/ref-surface-loads-bodies.svg){.fossil-figure}
+
+<<< @/examples/output/figref-surface-loads-bodies.ansi{ansi}
+
+<<< @/examples/snippets/ref_surface_loads_bodies-2d.f90
+
+<<< @/examples/snippets/ref_surface_loads_bodies-3d.f90
+
+<<< @/examples/output/ref_surface_loads_bodies.ansi{ansi}
+
+- The two discs, 0.03 apart, have 400 samples each (order 2). Their 44 blocked probes are the ones that cross the gap;
+  disc 1 alone blocks none (a convex body).
+- The least clearance is the gap, 0.0300; the sample of least clearance sees its first probe (0.02, inside the gap) and
+  not its second (0.04, across the other wall).
+- The buoyancy of each disc in p = −v is its area (F = −∮ p n dA = A ∇v): each body's integral is exact for a linear
+  pressure, whatever the other body.
+- The balls are 0.1 apart: the least clearance is 0.1018 (the marching-cubes facets lie inside the sphere), and the
+  device path returns the same samples.
+
+The device path runs the single-body pipeline once per body into a work set, copies the sets into one, then per other
+body the clearance query (the sample points in that body's frame) and the visibility test: copies, comparisons and the
+shared query kernels, so host and device agree bit for bit (bench lines `load samples bodies device vs serial
+mismatches`). Map the array's elements themselves (`call bodies(b)%enter_device`): a copy of a mapped surface is not
+mapped.
+
 ## Example
 
 The ellipse at a pose on cell-centred lines, three Gauss points per segment and two probes; then a sphere, the samples
@@ -253,6 +308,10 @@ The [cookbook](/manual/cookbook#sample-a-wall-for-the-surface-loads) has the sho
 - **Resident** (`resident=.true.`): the resident pattern of the closure table: `on_device`, `device_key`,
   `enter_device` / `update_host` / `exit_device`, `load_samples_reset`; every writer takes the samples
   `intent(inout)` and releases them first.
+- **Several bodies** (`load_samples_*_bodies`): each body's samples from the single-body run, then one query and one
+  segment test per sample (probe) and other body, the merges in body order with ties to the lower index; the
+  clearance and visibility stages are those of the closure of several bodies (`merge_clear`, `blocked_3d`,
+  `blocked_2d` of `fossil_fd_closure`). A body costs one single-body set plus one query of every other body's samples.
 - **Loads** (`integrate_loads`, a generic over the 3-D and the 2-D form, told apart by the moment's rank): one thread per
   sample writes its contribution (force, moment, weight) and its patch and body ids; the reduction stays on the host,
   in sample order, compensated, the same code for both paths. A sum in a fixed order on the host costs a copy of the
@@ -263,6 +322,8 @@ The [cookbook](/manual/cookbook#sample-a-wall-for-the-surface-loads) has the sho
 ```text
 call load_samples_3d(surface [, x, y, z], samples [, status] [, order] [, lengths] [, pose] [, device] [, resident])
 call load_samples_2d(curve [, x, y], samples [, status] [, order] [, lengths] [, pose] [, device] [, resident])
+call load_samples_3d_bodies(surfaces [, x, y, z], samples [, status] [, poses] [, order] [, lengths] [, device] [, resident])
+call load_samples_2d_bodies(curves [, x, y], samples [, status] [, poses] [, order] [, lengths] [, device] [, resident])
 call samples%enter_device ; call samples%update_host ; call samples%exit_device ; call load_samples_reset(samples)
 n = load_samples_mismatches(a, b) ; q = load_rule_size(order, dims)
 call integrate_loads(samples, force, moment [, status] [, pressure] [, shear] [, about] [, per_patch_force]
@@ -276,6 +337,7 @@ call integrate_loads(samples, force, moment [, status] [, pressure] [, shear] [,
 | `element`, `patch`, `body` | `[n]` | Facet (2-D segment, by its first vertex), its patch and body |
 | `lengths`, `probe`, `visible` | `[m]`, `[d, m, n]`, `[m, n]` | Probe lengths; probe points; the segment sample–probe crosses no element |
 | `ni`, `nj`, `nk`, `with_cells`, `probe_cell` | `[d, m, n]` | The lines' sizes (0 without lines); the enclosing cell per axis (0 outside) |
+| `with_bodies`, `bodies`, `sub_body`, `clearance`, `second_body`, `second_foot` | `[n]`, `[d, n]` | A bodies set ([Several bodies](#several-bodies)); zero-size in a single-body set |
 
 | Argument | Meaning |
 |---|---|
@@ -284,7 +346,8 @@ call integrate_loads(samples, force, moment [, status] [, pressure] [, shear] [,
 | `lengths(m)` | Probe lengths, absolute, + outward (default: no probe) |
 | `pose` | `rigid_pose_t` (2-D `rigid_pose_2d_t`): the body at the pose |
 | `device`, `resident` | Device path (the surface or curve mapped by `enter_device`); leave the samples mapped (implies `device`) |
-| `status` | `STATUS_OK`; `STATUS_INVALID_INPUT` (and no sample) on a bad order, lines in part, short or not increasing, probes on an octree surface, or on the device path a surface or curve not mapped (a stderr message) |
+| `surfaces(nb)`, `curves(nb)`, `poses(nb)` | The bodies and their poses ([Several bodies](#several-bodies); absent poses: no body posed); every non-empty surface needs its SAH BVH |
+| `status` | `STATUS_OK`; `STATUS_INVALID_INPUT` (and no sample) on a bad order, lines in part, short or not increasing, probes on an octree surface, or on the device path a surface or curve not mapped (a stderr message); `load_samples_*_bodies` also on no body, `size(poses)` other than the bodies', or (3-D) a surface with an octree |
 
 A surface without facets or a curve without vertices has no sample. The routines are free procedures of the module
 `fossil_surface_loads`, re-exported by `use fossil`.
@@ -296,7 +359,7 @@ A surface without facets or a curve without vertices has no sample. The routines
 | `pressure(n)`, `shear(d, n)` | The solver's p and τ at the samples; at least one |
 | `about(d)` | Point of the moments (default the origin) |
 | `per_patch_force(d, np)`, `per_patch_moment` | Per patch (allocatable; 3-D `(3, np)`, 2-D `(np)`); np the largest patch id |
-| `per_body_force(d, nb)`, `per_body_moment` | Per body, the same layout; a sample with an id below 1 enters the totals only |
+| `per_body_force(d, nb)`, `per_body_moment` | Per body, the same layout, by the samples' `body` (the `facet_body`; a bodies set: the surface index); a sample with an id below 1 enters the totals only |
 | `area` | Σ w: the wetted area (2-D length) |
 | `device` | Contributions on the device (the samples, p, τ read there when mapped); the same bits |
 | `status` | `STATUS_OK`; `STATUS_INVALID_INPUT` (zero outputs, per-patch / per-body arrays of size 0, a stderr message) if the samples are of the other dimension, neither p nor τ is given, or a size differs |
@@ -311,6 +374,10 @@ A surface without facets or a curve without vertices has no sample. The routines
   decides what to do with a probe that is not visible.
 - **All facets.** Every facet (segment) is sampled; a solver that wants some patches only selects the samples by
   `patch` (or reads `per_patch_force`).
+- **Several bodies: the shells of one surface are one body.** The clearance and the visibility against the other
+  bodies look at the other surfaces of the array, not at the other shells of a sample's own surface (whose visibility
+  is the single-body test): pass bodies that may come close as separate surfaces. Overlapping bodies are sampled as
+  they are (a sample inside the other body has the clearance to its wall; the closure's `overlap` flag tells).
 - **The moment of a linear pressure needs order 2.** The centroid rule integrates the force of a linear p exactly, not
   its moment.
 
