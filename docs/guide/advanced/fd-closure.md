@@ -251,6 +251,69 @@ faster: 535 ghosts give too few threads, and each one walks the tree alone. In 2
 1024² call; the rest is host work and transfer latency, so the device wins from 256² lines (the disc, 2.6×) and is
 slower at 64².
 
+## Several bodies
+
+Two bodies in one block share its points: a ghost of one may sit in a gap narrower than the stencil, an image line may
+enter the other body, and moving bodies may touch or interpenetrate. `fd_closure_3d_bodies(surfaces, x, y, z, reach,
+table)` and `fd_closure_2d_bodies(curves, x, y, reach, table)` build one table for an array of bodies, body b at
+`poses(b)` with its own rigid velocity: `linear_velocities(:, b)`, `angular_velocities(:, b)` (2-D the scalar
+`angular_velocities(b)`) and `centres(:, b)`. The rule:
+
+- **Solid is inside any body.** The node states of every body are computed exactly, as for one body, and a point is
+  solid if one of them says so; the ghosts are those of the union.
+- **The owner is the nearest wall.** Every body is queried at every ghost; the owner is the body of least |signed
+  distance|, ties to the lower index. Its foot, normal, element, feature, patch, curvature, velocity and probes fill the
+  table. For bodies that do not overlap, a ghost inside body A is nearer A's wall than any other wall, so the owner is
+  the body it lies in. `body(g)` is the index of the owner in the array, `sub_body(g)` its `facet_body` (a surface or
+  curve holding several shells keeps them).
+- **ILW crossings come from every body.** Per slot, of the crossings of every body between the slot's two points, the
+  one nearest the fluid point (`ilw_body` says whose; ties to the lower index): in a gap narrower than h the last solid
+  point of a walk can lie in another body than the ghost.
+- **Visibility is against every body.** A probe is visible when the segment foot–probe crosses no element of the owner
+  (as for one body) and no element of any other body.
+- **Clearance, and shared ghosts.** `clearance(g)` is the unsigned distance from the owner's foot to the nearest other
+  body (`second_body`, `second_foot`: its closest point); huge without one. A ghost is `shared` when its clearance is
+  below `shared_distance` (default: the largest reach(a) times the largest spacing along axis a): one stencil there sees
+  two walls. FOSSIL reports it and decides nothing: the solver chooses a one-sided closure, a shorter image line, a
+  merged condition.
+- **Overlap is reported, not refused.** `overlap(g)` flags a ghost inside two or more bodies; `overlap_points` counts
+  every point inside two or more. Its owner is still the nearest wall, which may be buried in the other body.
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `body`, `sub_body` | `[n]` | The owner's index in the array; its `facet_body` |
+| `clearance`, `second_body`, `second_foot` | `[n]`, `[n]`, `[d, n]` | Distance from the foot to the nearest other body, that body, its closest point |
+| `shared`, `overlap` | `[n]` | clearance < `shared_distance`; the ghost lies inside two or more bodies |
+| `ilw_body` | `[2d, n]` | The body of the ILW crossing (0: none) |
+| `with_bodies`, `bodies`, `shared_distance`, `overlap_points` | scalars | A bodies table; the number of bodies; the threshold used; points inside two or more |
+
+A single-body table has these arrays with a zero last extent. With one body the bodies table is the single-body table
+bit for bit in every other field, and for bodies farther apart than the stencil every ghost is the single-body table of
+its body bit for bit (`fossil_test_fd_closure_bodies_3d`, `_2d`).
+
+![two circles of radius 0.25, 0.03 apart, on cell-centred points of spacing 0.02 with a stencil of half-width 2: the ghosts in teal, the shared ghosts of the gap in ember, each with its foot in gold joined by a grey segment to the nearest point of the other circle](../../examples/images/ref-fd-closure-bodies.svg){.fossil-figure}
+
+<<< @/examples/snippets/ref_fd_closure_bodies-2d.f90
+
+<<< @/examples/snippets/ref_fd_closure_bodies-3d.f90
+
+<<< @/examples/output/ref_fd_closure_bodies.ansi{ansi}
+
+- The two discs, 0.03 = 1.5 h apart, have 132 ghosts each. The default shared distance is 2 h = 0.04: the 16 ghosts
+  whose feet face the gap see the other disc within it (least clearance 0.0305: the gap plus the sag of the polygons).
+- 56 probes enter the other disc and are not visible; disc 1 alone has none blocked (a convex body).
+- The ghost at (−0.03, 0.01) belongs to disc 1: its clearance to disc 2 is 0.0305, so its first probe (√2 h) stays in
+  the gap and the next two cross the other wall.
+- The two balls interpenetrate: 853 points lie inside both, 106 of them are ghosts (near the circle where the spheres
+  meet), and the device path returns the same table.
+
+The device path runs every stage of the single-body pipeline once per body (node states, then, at the union's ghosts,
+queries, wall data, probes, curvature, ILW crossings), each into a work table, and merges them in body order: the
+merges are copies and comparisons, the same kernels on both paths, so host and device agree bit for bit. The clearance
+is one query of the owners' feet per other body, the visibility one segment test per probe and other body. A body costs
+about one single-body table at the union's ghosts. The surfaces (curves) of the array are mapped themselves: a copy of
+a mapped surface is not mapped, so map the array's elements (`call bodies(b)%enter_device`), not the originals.
+
 ## How a solver uses the table
 
 ![one ghost of the ellipse (teal), its foot (gold) and its image line of three probes (ember), with the cells of the solver's points that enclose the probes shaded: the solver interpolates there](../../examples/images/ref-fd-closure-image-line.svg){.fossil-figure}
@@ -393,6 +456,10 @@ call fd_closure_3d(surface, x, y, z, reach, table [, status] [, lengths] [, pose
                    [, angular_velocity] [, centre] [, ilw] [, device] [, resident])
 call fd_closure_2d(curve, x, y, reach, table [, status] [, lengths] [, pose] [, linear_velocity] &
                    [, angular_velocity] [, centre] [, ilw] [, device] [, resident])
+call fd_closure_3d_bodies(surfaces, x, y, z, reach, table [, status] [, poses] [, lengths] [, linear_velocities] &
+                          [, angular_velocities] [, centres] [, ilw] [, shared_distance] [, device] [, resident])
+call fd_closure_2d_bodies(curves, x, y, reach, table [, status] [, poses] [, lengths] [, linear_velocities] &
+                          [, angular_velocities] [, centres] [, ilw] [, shared_distance] [, device] [, resident])
 call table%enter_device ; call table%update_host ; call table%exit_device ; call ib_closure_reset(table)
 n = ib_closure_mismatches(a, b)
 ```
@@ -410,10 +477,15 @@ n = ib_closure_mismatches(a, b)
 | `linear_velocity(d)`, `angular_velocity(3)` (2-D scalar), `centre(d)` | Rigid wall velocity ([Wall velocity](#wall-velocity)) |
 | `ilw` | ILW crossings (default `.false.`) |
 | `resident` | Leave the table mapped on the device (implies `device`) |
+| `surfaces(nb)`, `curves(nb)` | The bodies ([Several bodies](#several-bodies)); every non-empty surface needs its SAH BVH |
+| `poses(nb)` | Their poses (absent: no body posed) |
+| `linear_velocities(d, nb)`, `angular_velocities(3, nb)` (2-D `(nb)`), `centres(d, nb)` | Rigid velocity per body |
+| `shared_distance` | Clearance below which a ghost is shared (default: largest reach(a) × largest spacing along a) |
 
 `fd_closure_*` return `STATUS_INVALID_INPUT` (and an empty table) on bad lines or reach, a velocity or centre of the
 wrong size, or on the device path a surface or curve not mapped, or with its curvature built but not mapped (a stderr
-message).
+message). `fd_closure_*_bodies` also on no body, `size(poses)` or a velocity array of the wrong shape, or (3-D) a
+surface with an octree; curvature is filled when every non-empty body has it built.
 
 `ghost_points_reset(gp)` releases a set. A surface without facets or a curve without vertices has no ghost. The
 routines are free procedures of the module `fossil_ghost_points`, re-exported by `use fossil`.
@@ -429,5 +501,8 @@ routines are free procedures of the module `fossil_ghost_points`, re-exported by
   round-off of an edge it is the edge's pseudo-normal.
 - **One block.** A ghost needs its fluid point inside the block: across a block boundary the solver's halo exchange,
   not FOSSIL, decides. Points of other blocks are not seen.
+- **Several bodies: the shells of one surface are one body.** The clearance and the visibility look at the other
+  surfaces of the array, not at the other shells of the owner's surface: pass bodies that may come close as separate
+  surfaces. The host path of `fd_closure_3d_bodies` needs the SAH BVH (an octree surface is refused).
 - **Open surfaces.** The flags are parities of crossings; on an open surface they are as meaningful as the cut cells'
   (`pieces = -1` there): check `is_watertight` first.

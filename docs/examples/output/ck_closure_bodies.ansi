@@ -1,0 +1,4 @@
+$ ck_closure_bodies
+two circles: ghosts 116, shared 16, probes blocked by the other body 12, overlapping 0
+  shared below  0.100, least clearance  0.0626
+two cubes 0.25 apart: ghosts 128 (64 + 64), shared 25

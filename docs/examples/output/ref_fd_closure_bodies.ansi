@@ -1,0 +1,8 @@
+$ ref_fd_closure_bodies
+two discs: ghosts 264, of body 1 132, of body 2 132
+  shared distance  0.040, shared ghosts 16, least clearance  0.0305
+  probes blocked: 56, disc 1 alone: 0
+ghost at -0.0300  0.0100: body 1, distance -0.0148, foot -0.0153  0.0107
+  clearance 0.0305 to body 2 at  0.0152  0.0093, shared T, visible T F F
+two balls: ghosts 2946, points inside both 853, overlapping ghosts 106
+  device path vs host path: mismatches 0

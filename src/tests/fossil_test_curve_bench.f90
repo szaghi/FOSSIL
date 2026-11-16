@@ -29,7 +29,9 @@ program fossil_test_curve_bench
 !< `curvature device vs serial mismatches` (WP1 step 03: `principal_curvatures=` / `principal_directions=` of
 !< `query_many_device` against `query_many`, posed too), and `closure device vs serial mismatches` (WP1 step 04: the
 !< closure table of `fd_closure_2d`, device and resident against the host, every field by bits, posed with velocities
-!< and ILW crossings too), and `load samples device vs serial mismatches` (#109 WP2 step 01: `load_samples_2d`, device
+!< and ILW crossings too), and `closure bodies device vs serial mismatches` (#109 WP3 step 01: `fd_closure_2d_bodies`
+!< over two posed copies of the curve, 0.55 of the box width apart, device and resident against the host, every field by
+!< bits), and `load samples device vs serial mismatches` (#109 WP2 step 01: `load_samples_2d`, device
 !< and resident against the host, every field by bits, posed too), and `loads device vs serial mismatches` (step 02:
 !< `integrate_loads` on the device, copied-in, resident and caller-mapped p and tau, against the host, every output by
 !< bits), and `field transfer device vs serial mismatches` (step 04: a vertex and a segment field at the feet and ILW
@@ -50,7 +52,7 @@ use fossil, only : pose_interpolate, gauss_legendre_01, swept_cells_2d_t, swept_
 use fossil_swept_compare, only : swept_twin_mismatches, swept_cells_2d_mismatches
 use fossil, only : piece_map_2d_t
 use fossil_piece_map_compare, only : piece_map_2d_mismatches
-use fossil, only : ib_closure_t, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
+use fossil, only : ib_closure_t, fd_closure_2d, ib_closure_reset, ib_closure_mismatches, fd_closure_2d_bodies
 use fossil, only : load_samples_t, load_samples_2d, load_samples_reset, load_samples_mismatches, integrate_loads
 use fossil, only : transfer_to_closure, transfer_to_samples, samples_to_vertices
 
@@ -175,6 +177,7 @@ contains
       if (a == 1) call probe(cur, p(:, 1::3), maxval(hi - lo) / real(max(n, 1), R8P)) ! every third point: the test budget
       if (a == 1) call curvature(cur, p)
       if (a == 1) call closure(cur, lo, hi)
+      if (a == 1) call closure_bodies(cur, lo, hi)
       if (a == 1) call loads(cur, lo, hi)
       if (a == 1) call field_transfer(cur, lo, hi)
    enddo
@@ -325,6 +328,56 @@ contains
    print '(A,I0)', '   closure device vs serial mismatches: ', bad
    ok = ok .and. bad == 0
    endsubroutine closure_timing
+
+   subroutine closure_bodies(cur, lo, hi)
+   !< fd_closure_2d_bodies on the device (copied back, and resident then update_host) vs the host (#109 WP3 step 01): two
+   !< copies of the curve, the second rotated and shifted by 0.55 of the box width along u (a narrow gap, or an overlap,
+   !< depending on the curve), cell-centre lines of max(16, n/2) points per axis over both boxes, reach 3, three probes, velocities
+   !< and ILW crossings; every field of the table by bits. The curve is unmapped for the call and mapped again after (a
+   !< copy of a mapped curve is not mapped: the copies are mapped themselves).
+   type(curve_object), intent(inout) :: cur          !< Curve (on device).
+   real(R8P),          intent(in)    :: lo(2), hi(2) !< Grid box.
+   type(curve_object)        :: cv(2)      !< The two bodies.
+   type(rigid_pose_2d_t)     :: pp(2)      !< Poses.
+   type(ib_closure_t)        :: ch, cd, cr !< Host, device, resident tables.
+   real(R8P),    allocatable :: x(:), y(:) !< Lines.
+   real(R8P)                 :: h, sh      !< Spacing, shift.
+   integer(I4P)              :: i, bad, nb !< Work, points per axis.
+
+   nb = max(16_I4P, n / 2_I4P) ! half the lines: the regression run's 2 s budget
+   sh = 0.55_R8P * (hi(1) - lo(1))
+   h = max(hi(1) - lo(1) + sh, hi(2) - lo(2)) / real(nb, R8P)
+   allocate(x(nb), y(nb))
+   do i = 1, nb
+      x(i) = lo(1) + (hi(1) - lo(1) + sh) * (i - 0.5_R8P) / nb ; y(i) = lo(2) + (hi(2) - lo(2)) * (i - 0.5_R8P) / nb
+   enddo
+   pp(1) = pose_2d(0.05_R8P, [0.01_R8P, -0.01_R8P]) ; pp(2) = pose_2d(-0.1_R8P, [sh, 0.02_R8P])
+   call cur%exit_device
+   cv(1) = cur ; cv(2) = cur
+   call cv(1)%enter_device ; call cv(2)%enter_device
+   call fd_closure_2d_bodies(cv, x, y, [3_I4P, 3_I4P], ch, lengths=[h, 2 * h, 3 * h], poses=pp, &
+                             linear_velocities=reshape([0.1_R8P, 0.2_R8P, -0.1_R8P, 0._R8P], [2, 2]), &
+                             angular_velocities=[1.5_R8P, -0.5_R8P], ilw=.true.)
+   call fd_closure_2d_bodies(cv, x, y, [3_I4P, 3_I4P], cd, lengths=[h, 2 * h, 3 * h], poses=pp, &
+                             linear_velocities=reshape([0.1_R8P, 0.2_R8P, -0.1_R8P, 0._R8P], [2, 2]), &
+                             angular_velocities=[1.5_R8P, -0.5_R8P], ilw=.true., device=.true.)
+   call fd_closure_2d_bodies(cv, x, y, [3_I4P, 3_I4P], cr, lengths=[h, 2 * h, 3 * h], poses=pp, &
+                             linear_velocities=reshape([0.1_R8P, 0.2_R8P, -0.1_R8P, 0._R8P], [2, 2]), &
+                             angular_velocities=[1.5_R8P, -0.5_R8P], ilw=.true., resident=.true.)
+   call cr%update_host
+   if (allocated(ch%points) .and. allocated(cd%points) .and. allocated(cr%points)) then ! a refused call resets a table
+      bad = ib_closure_mismatches(ch, cd) + ib_closure_mismatches(ch, cr)
+   else
+      bad = 1
+   endif
+   if (ch%n == 0 .or. .not. cr%on_device .or. .not. ch%with_bodies) bad = bad + 1
+   print '(A,I0,A,I0,A,I0,A,I0,A)', '   closure bodies device vs serial mismatches: ', bad, '  (', ch%n, ' ghosts, ', &
+         count(ch%shared), ' shared, ', count(ch%overlap), ' overlapping)'
+   ok = ok .and. bad == 0
+   call ib_closure_reset(cr)
+   call cv(1)%exit_device ; call cv(2)%exit_device
+   call cur%enter_device
+   endsubroutine closure_bodies
 
    subroutine closure(cur, lo, hi)
    !< fd_closure_2d on the device (copied back, and resident then update_host) vs the host (WP1 step 04): cell-centre lines

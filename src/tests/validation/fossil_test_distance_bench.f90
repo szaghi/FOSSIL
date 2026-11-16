@@ -32,7 +32,9 @@
 !<      `probe device vs serial mismatches`, the probes and images of WP1 step 01; `curvature device vs serial
 !<      mismatches`, the principal curvatures and directions at the feet of WP1 step 03; `closure device vs serial
 !<      mismatches`, the closure table of `fd_closure_3d`, WP1 step 04, every field by bits, copied back and resident,
-!<      posed with velocities and ILW crossings too; `load samples device vs serial mismatches`, the load samples of
+!<      posed with velocities and ILW crossings too; `closure bodies device vs serial mismatches`, the table of
+!<      `fd_closure_3d_bodies` over two posed copies of the surface, #109 WP3 step 01, copied back and resident;
+!<      `load samples device vs serial mismatches`, the load samples of
 !<      `load_samples_3d`, #109 WP2 step 01, order 3 with three probes on the closure lines, copied back and resident,
 !<      posed too; `loads device vs serial mismatches`, `integrate_loads` of WP2 step 02 on those samples, copied in,
 !<      resident and with p, tau mapped by the caller, every output by bits; `field transfer device vs serial
@@ -70,7 +72,7 @@ use fossil_sign_bench_bodies, only : body_t, bench_bodies, device_sign_mismatche
 use fossil,              only : rigid_pose_t, pose_from_axis_angle, to_world
 use fossil,              only : curvilinear_block_t, detect_topology, topo_record_t, TOPO_BOUNDARY, wall_cutter
 use fossil_overset,      only : hole_flags, block_logical_t, donor_set_t, donor_candidates
-use fossil,              only : ib_closure_t, fd_closure_3d, ib_closure_reset, ib_closure_mismatches
+use fossil,              only : ib_closure_t, fd_closure_3d, ib_closure_reset, ib_closure_mismatches, fd_closure_3d_bodies
 use fossil,              only : load_samples_t, load_samples_3d, load_samples_reset, load_samples_mismatches, &
                                integrate_loads
 use fossil,              only : transfer_to_closure, transfer_to_samples, samples_to_vertices
@@ -131,6 +133,8 @@ integer                       :: probe_mismatch            !< Probes and images:
 integer                       :: curvature_mismatch        !< Shape operator at the feet: device vs CPU mismatches (step 03).
 integer                       :: closure_mismatch          !< Closure table: device vs CPU mismatches (WP1 step 04).
 integer                       :: closure_ghosts            !< Ghosts of the closure-table case.
+integer                       :: bodies_mismatch           !< Closure table of two bodies: device vs CPU (WP3 step 01).
+integer                       :: bodies_ghosts             !< Ghosts of the two-bodies case.
 integer                       :: loads_mismatch            !< Load samples: device vs CPU mismatches (WP2 step 01).
 integer                       :: loads_samples             !< Samples of the load-samples case.
 integer                       :: iloads_mismatch           !< Loads (integrate_loads): device vs CPU mismatches (step 02).
@@ -345,6 +349,8 @@ call curvature_case(mismatch=curvature_mismatch)
 rich_ok = rich_ok .and. curvature_mismatch == 0
 call closure_case(mismatch=closure_mismatch, ghosts=closure_ghosts)
 rich_ok = rich_ok .and. closure_mismatch == 0
+call closure_bodies_case(mismatch=bodies_mismatch, ghosts=bodies_ghosts)
+rich_ok = rich_ok .and. bodies_mismatch == 0
 call loads_case(mismatch=loads_mismatch, samples=loads_samples, lmismatch=iloads_mismatch)
 rich_ok = rich_ok .and. loads_mismatch == 0 .and. iloads_mismatch == 0
 call transfer_case(mismatch=transfer_mismatch, points=transfer_points)
@@ -467,6 +473,7 @@ print '(A,I0)',      '   posed device vs serial mismatches: ', posed_mismatch
 print '(A,I0)',      '   probe device vs serial mismatches: ', probe_mismatch
 print '(A,I0)',      '   curvature device vs serial mismatches: ', curvature_mismatch
 print '(A,I0,A,I0,A)', '   closure device vs serial mismatches: ', closure_mismatch, '  (', closure_ghosts, ' ghosts)'
+print '(A,I0,A,I0,A)', '   closure bodies device vs serial mismatches: ', bodies_mismatch, '  (', bodies_ghosts, ' ghosts)'
 print '(A,I0,A,I0,A)', '   load samples device vs serial mismatches: ', loads_mismatch, '  (', loads_samples, ' samples)'
 print '(A,I0,A)',      '   loads device vs serial mismatches: ', iloads_mismatch, '  (3 device paths)'
 print '(A,I0,A,I0,A)', '   field transfer device vs serial mismatches: ', transfer_mismatch, '  (', transfer_points, &
@@ -675,6 +682,63 @@ contains
    call surface%exit_device
    if (timing) call closure_timing(grid_n, mismatch, x, y, z, h, pose)
    endsubroutine closure_case
+
+   subroutine closure_bodies_case(mismatch, ghosts)
+   !< fd_closure_3d_bodies on the device, copied back and resident (then update_host), against the host (#109 WP3 step 01):
+   !< two copies of the surface, the second rotated and shifted by 0.55 of the box width along x (a narrow gap or an
+   !< overlap, depending on the body), grid_n cell-centre points per axis over the union box, reach 3, three probes, the
+   !< curvature, ILW, velocities per body. Every field by bits. The two bodies are loaded from the file (not assigned
+   !< from `surface`) and mapped themselves.
+   integer, intent(out)     :: mismatch !< Mismatches.
+   integer, intent(out)     :: ghosts   !< Ghosts.
+   type(surface_stl_object) :: sf(2)    !< The two bodies.
+   type(ib_closure_t)       :: ch, cd, cr !< Host, device, resident tables.
+   type(rigid_pose_t)       :: pp(2)    !< Poses.
+   type(vector_R8P)         :: lo, hi   !< Surface box.
+   real(R8P), allocatable   :: x(:), y(:), z(:) !< Lines.
+   real(R8P)                :: c(3), ext(3), sh, h, lv(3, 2), av(3, 2) !< Box, shift, spacing, velocities.
+   integer(I4P)             :: m        !< Counter.
+
+   lo = surface%get_bmin() ; hi = surface%get_bmax()
+   c = 0.5_R8P * [lo%x + hi%x, lo%y + hi%y, lo%z + hi%z] ; ext = 1.1_R8P * [hi%x - lo%x, hi%y - lo%y, hi%z - lo%z]
+   sh = 0.55_R8P * (hi%x - lo%x) ; c(1) = c(1) + 0.5_R8P * sh ; ext(1) = ext(1) + sh
+   allocate(x(grid_n), y(grid_n), z(grid_n))
+   do m = 1, grid_n
+      x(m) = c(1) + ext(1) * ((m - 0.5_R8P) / grid_n - 0.5_R8P)
+      y(m) = c(2) + ext(2) * ((m - 0.5_R8P) / grid_n - 0.5_R8P)
+      z(m) = c(3) + ext(3) * ((m - 0.5_R8P) / grid_n - 0.5_R8P)
+   enddo
+   h = maxval(ext) / grid_n
+   pp(1) = pose_from_axis_angle([0._R8P, 0._R8P, 1._R8P], 0._R8P, [0._R8P, 0._R8P, 0._R8P])
+   pp(2) = pose_from_axis_angle([0.2_R8P, 1._R8P, -0.3_R8P], 0.1_R8P)
+   c = 0.5_R8P * [lo%x + hi%x, lo%y + hi%y, lo%z + hi%z]
+   pp(2) = pose_from_axis_angle([0.2_R8P, 1._R8P, -0.3_R8P], 0.1_R8P, c - matmul(pp(2)%r, c) + [sh, 0.5_R8P * h, 0._R8P])
+   lv = reshape([0.1_R8P, 0._R8P, -0.2_R8P, -0.05_R8P, 0.1_R8P, 0._R8P], [3, 2])
+   av = reshape([0._R8P, 1._R8P, 0.5_R8P, 0.3_R8P, 0._R8P, -0.2_R8P], [3, 2])
+   do m = 1, 2 ! loaded, not assigned: nvfortran 26.9 loses sf(1)%aabb%node on sf(2) = surface (WP3 step 01 notes)
+      call sf(m)%load_from_file(file_name=trim(stl_path), guess_format=.true.)
+      if (surface%is_curvature_built()) call sf(m)%build_curvature
+      call sf(m)%enter_device
+   enddo
+   call fd_closure_3d_bodies(sf, x, y, z, [3_I4P, 3_I4P, 3_I4P], ch, lengths=[h, 2 * h, 3 * h], poses=pp, &
+                             linear_velocities=lv, angular_velocities=av, ilw=.true.)
+   call fd_closure_3d_bodies(sf, x, y, z, [3_I4P, 3_I4P, 3_I4P], cd, lengths=[h, 2 * h, 3 * h], poses=pp, &
+                             linear_velocities=lv, angular_velocities=av, ilw=.true., device=.true.)
+   call fd_closure_3d_bodies(sf, x, y, z, [3_I4P, 3_I4P, 3_I4P], cr, lengths=[h, 2 * h, 3 * h], poses=pp, &
+                             linear_velocities=lv, angular_velocities=av, ilw=.true., resident=.true.)
+   call cr%update_host
+   if (allocated(ch%points) .and. allocated(cd%points) .and. allocated(cr%points)) then ! a refused call resets a table
+      mismatch = ib_closure_mismatches(ch, cd) + ib_closure_mismatches(ch, cr)
+   else
+      mismatch = 1
+   endif
+   if (ch%n == 0 .or. .not. cr%on_device .or. .not. ch%with_bodies) mismatch = mismatch + 1
+   ghosts = ch%n
+   print '(A,I0,A,I0,A,I0,A)', '   closure bodies: ', ch%n, ' ghosts, ', count(ch%shared), ' shared, ', &
+         count(ch%overlap), ' overlapping'
+   call ib_closure_reset(cr)
+   call sf(1)%exit_device ; call sf(2)%exit_device
+   endsubroutine closure_bodies_case
 
    subroutine loads_case(mismatch, samples, lmismatch)
    !< load_samples_3d on the device, copied back and resident (then update_host), against the host (#109 WP2 step 01):

@@ -38,7 +38,7 @@ public :: ghost_side_oac, ghost_mask_oac, ghost_fill_oac
 ! the 2-D ghosts of flat vertex arrays and the input check, for the closure table (#109 WP1 step 04; not re-exported)
 public :: ghost_points_2d_flat, ghost_lines_check
 ! the 3-D ghosts of given node states, for the posed closure table (#109 WP1 step 06; not re-exported)
-public :: ghost_points_nodes_3d
+public :: ghost_points_nodes_3d, ghost_points_nodes_2d
 
 integer(I4P), parameter :: GHOST_XM = 1_I4P  !< Mask bit 0: fluid within reach on the -x side.
 integer(I4P), parameter :: GHOST_XP = 2_I4P  !< Mask bit 1: on the +x side.
@@ -195,6 +195,23 @@ contains
    gp%reach = reach(1:3)
    call ghost_core_host(3_I4P, gp%ni, gp%nj, gp%nk, node_in, x, y, z, gp%reach, gp)
    endsubroutine ghost_points_nodes_3d
+
+   subroutine ghost_points_nodes_2d(node_in, x, y, reach, gp)
+   !< 2-D twin of `ghost_points_nodes_3d` (#109 WP3 step 01: the closure over several curves passes the union of their
+   !< point states): the ghost points of given point states node_in [size(x), size(y)] on the host, what
+   !< `ghost_points_2d_flat` does after its node flags, the same output. The lines and reach are not checked.
+   logical,              intent(in)    :: node_in(:,:) !< Point inside flags.
+   real(R8P),            intent(in)    :: x(:), y(:)   !< Point lines.
+   integer(I4P),         intent(in)    :: reach(:)     !< Stencil half-width per axis [2].
+   type(ghost_points_t), intent(inout) :: gp           !< Ghost points (reset first).
+   real(R8P)                           :: z(1)         !< No z line.
+
+   call ghost_points_reset(gp)
+   z = 0._R8P
+   gp%dims = 2_I4P ; gp%ni = size(x, kind=I4P) ; gp%nj = size(y, kind=I4P) ; gp%nk = 1_I4P
+   gp%reach(1:2) = reach(1:2) ; gp%reach(3) = 0_I4P
+   call ghost_core_host(2_I4P, gp%ni, gp%nj, 1_I4P, node_in, x, y, z, gp%reach, gp)
+   endsubroutine ghost_points_nodes_2d
 
    integer(I4P) function ghost_lines_check(x, y, z, reach, nd) result(st)
    !< The input check of the ghost points (#109 WP1 step 04): STATUS_OK if every line has at least two strictly

@@ -74,7 +74,8 @@ use fossil_mass_properties, only : inertia_to_world, principal_frame
 use fossil_ghost_points, only : ghost_points_t, ghost_points_3d, ghost_points_2d, ghost_points_reset, GHOST_XM, GHOST_XP, &
                                GHOST_YM, GHOST_YP, GHOST_ZM, GHOST_ZP
 use fossil_shape_operator, only : normal_curvature
-use fossil_fd_closure, only : ib_closure_t, fd_closure_3d, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
+use fossil_fd_closure, only : ib_closure_t, fd_closure_3d, fd_closure_2d, ib_closure_reset, ib_closure_mismatches, &
+                             fd_closure_3d_bodies, fd_closure_2d_bodies
 use fossil_surface_loads, only : load_samples_t, load_samples_3d, load_samples_2d, load_samples_reset, &
                                 load_samples_mismatches, load_rule_size, integrate_loads
 use fossil_field_transfer, only : transfer_field_3d, transfer_field_2d, transfer_to_closure, transfer_to_samples, &
@@ -136,6 +137,7 @@ public :: inertia_to_world, principal_frame
 public :: ghost_points_t, ghost_points_3d, ghost_points_2d, ghost_points_reset, GHOST_XM, GHOST_XP, GHOST_YM, GHOST_YP
 public :: normal_curvature
 public :: ib_closure_t, fd_closure_3d, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
+public :: fd_closure_3d_bodies, fd_closure_2d_bodies
 public :: load_samples_t, load_samples_3d, load_samples_2d, load_samples_reset, load_samples_mismatches, load_rule_size
 public :: integrate_loads
 public :: transfer_field_3d, transfer_field_2d, transfer_to_closure, transfer_to_samples, samples_to_vertices

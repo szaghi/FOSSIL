@@ -497,6 +497,20 @@ crossing of every grid line with the wall between a ghost and its first fluid po
 `ib_closure_reset` releases it). On the unit cube the ILW crossings along x lie on the faces x = 0 and x = 1. See
 [finite-difference wall closure](/guide/advanced/fd-closure#the-closure-table).
 
+### Build the closure table of several bodies
+
+<<< @/examples/snippets/ck_closure_bodies.f90
+
+<<< @/examples/output/ck_closure_bodies.ansi{ansi}
+
+`fd_closure_2d_bodies` builds one closure table for an array of curves, each at its pose with its own velocity: the
+ghosts of the union, each owned by its nearest wall (`body`), with the clearance from its foot to the nearest other body
+and a `shared` flag where that clearance is below the stencil reach (here 2 h = 0.1: the 16 ghosts facing the 0.06 gap).
+The probes are visible only if no body blocks them: 12 enter the other circle. `fd_closure_3d_bodies` is the 3-D twin:
+two unit cubes 0.25 apart on lines of spacing 0.25 give the 64 ghosts of each and 25 shared. On the device, map the
+array's elements themselves (`call bodies(b)%enter_device`). See
+[several bodies](/guide/advanced/fd-closure#several-bodies).
+
 ### Sample a wall for the surface loads
 
 <<< @/examples/snippets/ck_load_samples.f90

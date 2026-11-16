@@ -193,6 +193,7 @@ type :: curve_object
       procedure, pass(self) :: probes_present       !< The probe_many_device kernel on present arrays (#109).
       procedure, pass(self) :: path_visible         !< The visibility kernel of the probes on the host (#109 WP2).
       procedure, pass(self) :: curvature_present    !< The foot curvature kernel on present arrays (#109).
+      procedure, pass(self) :: segments_blocked_present !< Segments meeting the curve, on present arrays (#109 WP3).
       procedure, pass(self) :: box_thin_many => curve_box_thin_many !< Boxes meeting a thin segment (issue #62).
       procedure, pass(self) :: box_thin_many_device => curve_box_thin_many_device !< box_thin_many on the device (#62).
       procedure, pass(self) :: nesting_depth        !< Nesting depth of a loop (exact).
@@ -2449,6 +2450,49 @@ contains
       enddo
    enddo
    endsubroutine probes_present_core
+
+   subroutine segments_blocked_present(self, n, au, av, bu, bv, act, blocked, dev)
+   !< The visibility kernel of the probes against a curve other than the foot's (#109 WP3 step 01, several bodies): for
+   !< every i with act(i), blocked(i) = the closed segment a-b shares a point with a segment of the curve
+   !< (`curve_segment_blocked_oac` with no segment excluded), in the curve's frame; blocked(i) = .false. where not act(i).
+   !< dev: on the device (the curve mapped, every array present); else on the host.
+   class(curve_object), intent(in), target :: self              !< Curve (target: device aliases).
+   integer(I4P),        intent(in)         :: n                 !< Segments.
+   real(R8P),           intent(in)         :: au(n), av(n)      !< Start points (present if dev).
+   real(R8P),           intent(in)         :: bu(n), bv(n)      !< End points (present if dev).
+   logical,             intent(in)         :: act(n)            !< Segments to test (present if dev).
+   logical,             intent(inout)      :: blocked(n)        !< Result (present if dev).
+   logical,             intent(in)         :: dev               !< On the device.
+
+   if (n < 1_I4P) return
+   call segments_blocked_core(n, self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, &
+                              self%bvh%right, self%bvh%first, self%bvh%last, self%bvh%a_u, self%bvh%a_v, self%bvh%d_u, &
+                              self%bvh%d_v, self%bvh%seg_id, self%next, self%u, self%v, au, av, bu, bv, act, blocked, dev)
+   endsubroutine segments_blocked_present
+
+   subroutine segments_blocked_core(n, lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, seg_id, &
+                                    next, u, v, au, av, bu, bv, act, blocked, dev)
+   !< The loop of `segments_blocked_present` on the curve's member arrays as dummies (see `query_present_core`).
+   integer(I4P), intent(in)    :: n                                 !< Segments.
+   real(R8P),    intent(in)    :: lo_u(:), lo_v(:), hi_u(:), hi_v(:) !< Node boxes.
+   integer(I4P), intent(in)    :: left(:), right(:), first(:), last(:) !< Children, leaf ranges.
+   real(R8P),    intent(in)    :: a_u(:), a_v(:), d_u(:), d_v(:)     !< Segment payload.
+   integer(I4P), intent(in)    :: seg_id(:), next(:)                 !< Payload segments, next.
+   real(R8P),    intent(in)    :: u(:), v(:)                         !< Vertices.
+   real(R8P),    intent(in)    :: au(n), av(n), bu(n), bv(n)         !< Segments.
+   logical,      intent(in)    :: act(n)                             !< Segments to test.
+   logical,      intent(inout) :: blocked(n)                         !< Result.
+   logical,      intent(in)    :: dev                                !< On the device.
+   integer(I4P)                :: i                                  !< Counter.
+
+   !$acc parallel loop gang vector default(present) present(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, &
+   !$acc&  d_u, d_v, seg_id, next, u, v, au, av, bu, bv, act, blocked) if(dev)
+   do i = 1_I4P, n
+      blocked(i) = .false.
+      if (act(i)) blocked(i) = curve_segment_blocked_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, &
+                                                         d_v, seg_id, next, u, v, au(i), av(i), bu(i), bv(i), 0_I4P, 0_I4P)
+   enddo
+   endsubroutine segments_blocked_core
 
    subroutine curvature_present(self, n, sgl, cpl, pkl)
    !< The foot curvature of `query_many_device(principal_curvatures=)` on arrays already present on the device (#109 WP1

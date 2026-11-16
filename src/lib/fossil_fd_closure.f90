@@ -51,11 +51,11 @@ use fossil_aabb_node_object,   only : aabb_node_object, bvh_bmin_x_oac, bvh_bmin
                                       bvh_payload_first_oac, bvh_payload_count_oac, bvh_node_refit_oac
 use fossil_aabb_tree_object,   only : facet_distance_payload, AABB_TREE_SAH_BVH
 use fossil_curve_object,       only : curve_object
-use fossil_cut_cells_2d,       only : node_rows, node_parity
-use fossil_cut_cells_3d,       only : cut_cells_3d_nodes_tree, cut_cells_3d_nodes_tree_present
+use fossil_cut_cells_2d,       only : node_rows, node_parity, node_flags
+use fossil_cut_cells_3d,       only : cut_cells_3d_nodes, cut_cells_3d_nodes_tree, cut_cells_3d_nodes_tree_present
 use fossil_cut_graph,          only : links_scan_dev
 use fossil_ghost_points,       only : ghost_points_t, ghost_points_3d, ghost_points_2d_flat, ghost_lines_check, &
-                                      ghost_mask_oac, ghost_fill_oac, ghost_points_nodes_3d
+                                      ghost_mask_oac, ghost_fill_oac, ghost_points_nodes_3d, ghost_points_nodes_2d
 use fossil_line_query,         only : bvh_line_count_oac, bvh_line_crossings_oac, line_crossing_before, &
                                       line_crossing_before_2d, seg_line_hit_oac
 use fossil_rigid_pose,         only : rigid_pose_t, rigid_pose_2d_t
@@ -70,6 +70,7 @@ use vecfor,                    only : vector_R8P
 implicit none
 private
 public :: ib_closure_t, fd_closure_3d, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
+public :: fd_closure_3d_bodies, fd_closure_2d_bodies
 ! the per-item kernels, shared by the two paths (public for the tests and for `fossil_surface_loads`)
 public :: fd_cell_index_oac, ilw_select_oac, ilw_item_2d_oac
 public :: to_world_3d_oac, rotate_3d_oac, to_world_2d_oac, rotate_2d_oac
@@ -89,6 +90,10 @@ type :: ib_closure_t
    logical                   :: with_curvature = .false. !< kappa and direction filled (build_curvature ran).
    logical                   :: with_velocity = .false.  !< velocity filled.
    logical                   :: with_ilw = .false.       !< ilw_* filled.
+   logical                   :: with_bodies = .false.    !< The several-bodies fields filled (`fd_closure_*_bodies`).
+   integer(I4P)              :: bodies = 0_I4P           !< Surfaces (curves) of a bodies table (0: single body).
+   integer(I4P)              :: overlap_points = 0_I4P   !< Points inside two or more surfaces (bodies table).
+   real(R8P)                 :: shared_distance = 0._R8P !< Clearance below which a ghost is shared (bodies table).
    integer(I4P), allocatable :: ijk(:,:)               !< Ghost indexes [dims, n], lexicographic order (i fastest).
    real(R8P),    allocatable :: points(:,:)            !< Ghost coordinates [dims, n].
    integer(I4P), allocatable :: mask(:)                !< Direction mask [n] (GHOST_* bits).
@@ -112,6 +117,14 @@ type :: ib_closure_t
    real(R8P),    allocatable :: ilw_normal(:,:,:)      !< Pseudo-normal at the crossing [dims, 2 dims, n].
    real(R8P),    allocatable :: ilw_kappa(:,:,:)       !< Curvature at the crossing [dims-1, 2 dims, n].
    real(R8P),    allocatable :: ilw_direction(:,:,:,:) !< Directions at the crossing [dims, dims-1, 2 dims, n].
+   ! several bodies (`fd_closure_*_bodies`; zero-size in a single-body table): `body` is then the surface (curve) index
+   integer(I4P), allocatable :: sub_body(:)            !< The owner's facet_body (shell) [n].
+   real(R8P),    allocatable :: clearance(:)           !< Unsigned distance foot - nearest other surface [n] (huge: none).
+   integer(I4P), allocatable :: second_body(:)         !< That nearest other surface [n] (0: none).
+   real(R8P),    allocatable :: second_foot(:,:)       !< Its closest point to the foot [dims, n].
+   logical,      allocatable :: shared(:)              !< clearance < shared_distance [n].
+   logical,      allocatable :: overlap(:)             !< The ghost point lies inside two or more surfaces [n].
+   integer(I4P), allocatable :: ilw_body(:,:)          !< Surface of the ILW crossing [2 dims, n] (0: none).
    logical                   :: on_device = .false.    !< The arrays are mapped on the device (resident).
    integer(c_intptr_t)       :: device_key = 0         !< Host address of points when mapped (a copy has another one).
    contains
@@ -121,6 +134,19 @@ type :: ib_closure_t
 endtype ib_closure_t
 
 integer(I4P), parameter :: ILW_BUF = 16_I4P !< Private crossing buffer of an ILW slot (more: the exact-size path).
+
+type :: posed_tree_t
+   !< One body's refitted tree and moved vertices (the several-bodies host path).
+   type(aabb_node_object), allocatable :: node(:) !< Refitted tree [0:].
+   real(R8P),              allocatable :: tv(:,:) !< Moved vertices [9, facets].
+endtype posed_tree_t
+
+type :: placed_curve_t
+   !< One curve's vertices placed by its pose, links and segment patches (the several-bodies 2-D paths).
+   real(R8P),    allocatable :: u(:), v(:)  !< Vertices (placed).
+   integer(I4P), allocatable :: nxt(:)      !< Next vertex.
+   integer(I4P), allocatable :: spatch(:)   !< Segment patches.
+endtype placed_curve_t
 
 interface mis_i
    module procedure mis_i1, mis_i2, mis_i3
@@ -289,6 +315,210 @@ contains
    endif
    endsubroutine fd_closure_2d
 
+   subroutine fd_closure_3d_bodies(surfaces, x, y, z, reach, closure, status, poses, lengths, linear_velocities, &
+                                   angular_velocities, centres, ilw, shared_distance, device, resident)
+   !< The closure table of several bodies (#109 WP3 step 01; see the module header, "Several bodies"): surfaces(b) at
+   !< poses(b) (absent: no body posed), body b's rigid velocity linear_velocities(:, b), angular_velocities(:, b) about
+   !< centres(:, b) ([3, nb] each; the centre defaults as in `fd_closure_3d`, per body). `shared_distance`: the clearance
+   !< below which a ghost is shared (default: the largest reach(a) times the largest spacing along axis a). The other
+   !< arguments as `fd_closure_3d`. Every non-empty surface needs its SAH BVH (the default tree); the device path every
+   !< non-empty surface mapped by `enter_device` (after `build_curvature` if built). Curvature is filled when every
+   !< non-empty surface has it built. `status = STATUS_INVALID_INPUT` on bad lines or reach, no surface, size(poses) /= nb,
+   !< a bad shape of a velocity array, a surface with an octree, or (device) an unmapped surface or curvature (a stderr
+   !< message); the table is then reset (n = 0).
+   type(surface_stl_object), intent(in), target    :: surfaces(:)             !< Surfaces (the bodies).
+   real(R8P),                intent(in)            :: x(:), y(:), z(:)        !< Point lines (strictly increasing).
+   integer(I4P),             intent(in)            :: reach(:)                !< Stencil half-width per axis [3], >= 1.
+   type(ib_closure_t),       intent(inout)         :: closure                 !< Table (released and reset first).
+   integer(I4P),             intent(out), optional :: status                  !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_t),       intent(in),  optional :: poses(:)                !< Poses of the bodies [nb].
+   real(R8P),                intent(in),  optional :: lengths(:)              !< Probe lengths [m] (+ outward, absolute).
+   real(R8P),                intent(in),  optional :: linear_velocities(:,:)  !< Velocities of the centres [3, nb].
+   real(R8P),                intent(in),  optional :: angular_velocities(:,:) !< Angular velocities [3, nb].
+   real(R8P),                intent(in),  optional :: centres(:,:)            !< Centres of the rotations [3, nb].
+   logical,                  intent(in),  optional :: ilw                     !< ILW crossings (default .false.).
+   real(R8P),                intent(in),  optional :: shared_distance         !< Shared clearance (default: see above).
+   logical,                  intent(in),  optional :: device                  !< Device path (default .false.).
+   logical,                  intent(in),  optional :: resident                !< Leave the table mapped (default .false.).
+   real(R8P),    allocatable :: ll(:), lvs(:,:), avs(:,:), cs(:,:), prs(:,:,:), pts(:,:), tols(:) !< Per-body inputs.
+   integer(I4P), allocatable :: nfs(:)                                       !< Facets per body.
+   real(R8P)                 :: sd, dbx, dby, dbz                            !< Shared distance, box.
+   type(vector_R8P)          :: bmin, bmax                                   !< Box.
+   integer(I4P)              :: st, nb, b                                    !< Work.
+   logical                   :: dev, res, wv, wi, wc, posed, some            !< Options.
+
+   call ib_closure_reset(closure)
+   if (present(status)) status = STATUS_OK
+   res = .false. ; if (present(resident)) res = resident
+   dev = res ; if (present(device)) dev = dev .or. device
+   wi = .false. ; if (present(ilw)) wi = ilw
+   posed = present(poses)
+   nb = size(surfaces, kind=I4P)
+   st = ghost_lines_check(x, y, z, reach, 3_I4P)
+   if (nb < 1_I4P) st = STATUS_INVALID_INPUT
+   if (posed) then
+      if (size(poses) /= nb) st = STATUS_INVALID_INPUT
+   endif
+   allocate(lvs(3, max(nb, 1_I4P)), avs(3, max(nb, 1_I4P)), cs(3, max(nb, 1_I4P)))
+   call bodies_velocities(3_I4P, nb, st, linear_velocities, angular_velocities, centres, lvs, avs, cs, wv)
+   if (present(lengths)) then
+      allocate(ll(size(lengths))) ; ll = lengths
+   else
+      allocate(ll(0))
+   endif
+   allocate(prs(3, 3, max(nb, 1_I4P)), pts(3, max(nb, 1_I4P)), tols(max(nb, 1_I4P)), nfs(max(nb, 1_I4P)))
+   wc = .true. ; some = .false.
+   do b = 1_I4P, nb
+      prs(:, :, b) = reshape([1._R8P, 0._R8P, 0._R8P, 0._R8P, 1._R8P, 0._R8P, 0._R8P, 0._R8P, 1._R8P], [3, 3])
+      pts(:, b) = 0._R8P
+      if (posed .and. st == STATUS_OK) then
+         prs(:, :, b) = poses(b)%r ; pts(:, b) = poses(b)%t
+         if (.not. present(centres)) cs(:, b) = poses(b)%t
+      endif
+      nfs(b) = surfaces(b)%get_facets_number()
+      bmin = surfaces(b)%get_bmin() ; bmax = surfaces(b)%get_bmax()
+      dbx = bmax%x - bmin%x ; dby = bmax%y - bmin%y ; dbz = bmax%z - bmin%z
+      tols(b) = 1.e-9_R8P * sqrt(dbx * dbx + dby * dby + dbz * dbz) ! the tolerance of probe_many
+      if (nfs(b) < 1_I4P) cycle
+      some = .true. ; wc = wc .and. surfaces(b)%is_curvature_built()
+   enddo
+   wc = wc .and. some
+   do b = 1_I4P, nb
+      if (nfs(b) < 1_I4P .or. st /= STATUS_OK) cycle
+      if (.not. (surfaces(b)%aabb%get_tree_kind() == AABB_TREE_SAH_BVH .and. allocated(surfaces(b)%aabb%node) .and. &
+                 allocated(surfaces(b)%aabb%payload) .and. allocated(surfaces(b)%tri_vertices))) then
+         write(stderr, '(A,I0,A)') 'fossil fd_closure_3d_bodies: refused -- surface ', b, ' has no SAH BVH'
+         st = STATUS_INVALID_INPUT
+      elseif (dev .and. .not. surfaces(b)%is_on_device) then
+         write(stderr, '(A,I0,A)') 'fossil fd_closure_3d_bodies: device path refused -- call surface%enter_device '// &
+                                   'first (surface ', b, ')'
+         st = STATUS_INVALID_INPUT
+      elseif (dev .and. wc .and. .not. surfaces(b)%is_curvature_on_device()) then
+         write(stderr, '(A,I0,A)') 'fossil fd_closure_3d_bodies: device path refused -- build_curvature, then '// &
+                                   'enter_device (surface ', b, ')'
+         st = STATUS_INVALID_INPUT
+      endif
+   enddo
+   if (st /= STATUS_OK) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   sd = default_shared(x, y, z, reach, 3_I4P) ; if (present(shared_distance)) sd = shared_distance
+   if (dev .and. some) then
+      call bodies_3d_device(surfaces, nfs, x, y, z, reach, ll, posed, prs, pts, tols, wc, wv, lvs, avs, cs, wi, sd, res, &
+                            closure)
+   elseif (posed) then
+      call bodies_3d_host(surfaces, nfs, x, y, z, reach, ll, posed, prs, pts, tols, wc, wv, lvs, avs, cs, wi, sd, closure, &
+                          poses)
+   else
+      call bodies_3d_host(surfaces, nfs, x, y, z, reach, ll, posed, prs, pts, tols, wc, wv, lvs, avs, cs, wi, sd, closure)
+   endif
+   endsubroutine fd_closure_3d_bodies
+
+   subroutine fd_closure_2d_bodies(curves, x, y, reach, closure, status, poses, lengths, linear_velocities, &
+                                   angular_velocities, centres, ilw, shared_distance, device, resident)
+   !< 2-D twin of `fd_closure_3d_bodies` (#109 WP3 step 01): curves(b) at poses(b), in the curves' common (u, v) plane;
+   !< `linear_velocities` [2, nb], `angular_velocities` [nb] (scalars, counter-clockwise), `centres` [2, nb]. The device
+   !< path needs every non-empty curve mapped by `enter_device` (after `build_curvature` if built). The other arguments
+   !< and the statuses as `fd_closure_3d_bodies` (no tree requirement: every curve has its segment BVH).
+   type(curve_object),    intent(in), target    :: curves(:)              !< Curves (the bodies).
+   real(R8P),             intent(in)            :: x(:), y(:)             !< Point lines (u, v; strictly increasing).
+   integer(I4P),          intent(in)            :: reach(:)               !< Stencil half-width per axis [2], >= 1.
+   type(ib_closure_t),    intent(inout)         :: closure                !< Table (released and reset first).
+   integer(I4P),          intent(out), optional :: status                 !< STATUS_OK or STATUS_INVALID_INPUT.
+   type(rigid_pose_2d_t), intent(in),  optional :: poses(:)               !< Poses of the curves [nb].
+   real(R8P),             intent(in),  optional :: lengths(:)             !< Probe lengths [m] (+ outward, absolute).
+   real(R8P),             intent(in),  optional :: linear_velocities(:,:) !< Velocities of the centres [2, nb].
+   real(R8P),             intent(in),  optional :: angular_velocities(:)  !< Angular velocities [nb] (scalars).
+   real(R8P),             intent(in),  optional :: centres(:,:)           !< Centres of the rotations [2, nb].
+   logical,               intent(in),  optional :: ilw                    !< ILW crossings (default .false.).
+   real(R8P),             intent(in),  optional :: shared_distance        !< Shared clearance (default: as 3-D).
+   logical,               intent(in),  optional :: device                 !< Device path (default .false.).
+   logical,               intent(in),  optional :: resident               !< Leave the table mapped (default .false.).
+   type(placed_curve_t), allocatable :: pc(:)                           !< Placed vertices per curve.
+   real(R8P),    allocatable :: ll(:), lvs(:,:), avs(:,:), cs(:,:), prs(:,:,:), pts(:,:), a3(:,:) !< Per-body inputs.
+   integer(I4P), allocatable :: nvs(:)                                  !< Vertices per curve.
+   real(R8P)                 :: sd, uv(2), w1, w2, z(1)                 !< Shared distance, a vertex, no z line.
+   integer(I4P)              :: st, nb, b, i                            !< Work.
+   logical                   :: dev, res, wv, wi, wc, posed, some       !< Options.
+
+   call ib_closure_reset(closure)
+   if (present(status)) status = STATUS_OK
+   res = .false. ; if (present(resident)) res = resident
+   dev = res ; if (present(device)) dev = dev .or. device
+   wi = .false. ; if (present(ilw)) wi = ilw
+   posed = present(poses)
+   nb = size(curves, kind=I4P)
+   z = 0._R8P
+   st = ghost_lines_check(x, y, z, reach, 2_I4P)
+   if (nb < 1_I4P) st = STATUS_INVALID_INPUT
+   if (posed) then
+      if (size(poses) /= nb) st = STATUS_INVALID_INPUT
+   endif
+   allocate(lvs(3, max(nb, 1_I4P)), avs(3, max(nb, 1_I4P)), cs(3, max(nb, 1_I4P)))
+   if (present(angular_velocities)) then
+      if (size(angular_velocities) /= nb) st = STATUS_INVALID_INPUT
+      allocate(a3(3, max(nb, 1_I4P))) ; a3 = 0._R8P
+      if (st == STATUS_OK) a3(3, 1:nb) = angular_velocities
+      call bodies_velocities(2_I4P, nb, st, linear_velocities, a3, centres, lvs, avs, cs, wv)
+   else
+      call bodies_velocities(2_I4P, nb, st, linear_velocities, centres=centres, lvs=lvs, avs=avs, cs=cs, wv=wv)
+   endif
+   if (present(lengths)) then
+      allocate(ll(size(lengths))) ; ll = lengths
+   else
+      allocate(ll(0))
+   endif
+   allocate(prs(2, 2, max(nb, 1_I4P)), pts(2, max(nb, 1_I4P)), nvs(max(nb, 1_I4P)), pc(max(nb, 1_I4P)))
+   wc = .true. ; some = .false.
+   do b = 1_I4P, nb
+      prs(:, :, b) = reshape([1._R8P, 0._R8P, 0._R8P, 1._R8P], [2, 2]) ; pts(:, b) = 0._R8P
+      if (posed .and. st == STATUS_OK) then
+         prs(:, :, b) = poses(b)%r ; pts(:, b) = poses(b)%t
+         if (.not. present(centres)) cs(1:2, b) = poses(b)%t
+      endif
+      nvs(b) = curves(b)%get_vertices_number()
+      if (nvs(b) < 1_I4P) cycle
+      some = .true. ; wc = wc .and. curves(b)%is_curvature_built()
+      if (dev .and. st == STATUS_OK .and. .not. curves(b)%get_is_on_device()) then
+         write(stderr, '(A,I0,A)') 'fossil fd_closure_2d_bodies: device path refused -- call curve%enter_device first '// &
+                                   '(curve ', b, ')'
+         st = STATUS_INVALID_INPUT
+      endif
+   enddo
+   wc = wc .and. some
+   do b = 1_I4P, nb
+      if (nvs(b) < 1_I4P .or. .not. (dev .and. wc) .or. st /= STATUS_OK) cycle
+      if (.not. curves(b)%is_curvature_on_device()) then
+         write(stderr, '(A,I0,A)') 'fossil fd_closure_2d_bodies: device path refused -- build_curvature, then '// &
+                                   'enter_device (curve ', b, ')'
+         st = STATUS_INVALID_INPUT
+      endif
+   enddo
+   if (st /= STATUS_OK) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   do b = 1_I4P, nb ! the vertices, placed by the pose as `curve%move` places them
+      allocate(pc(b)%u(nvs(b)), pc(b)%v(nvs(b)), pc(b)%nxt(nvs(b)), pc(b)%spatch(nvs(b)))
+      do i = 1_I4P, nvs(b)
+         uv = curves(b)%get_vertex(i) ; pc(b)%nxt(i) = curves(b)%get_next(i) ; pc(b)%spatch(i) = curves(b)%segment_patch(i)
+         if (posed) then
+            call to_world_2d_oac(prs(:, :, b), pts(:, b), uv(1), uv(2), w1, w2) ; uv(1) = w1 ; uv(2) = w2
+         endif
+         pc(b)%u(i) = uv(1) ; pc(b)%v(i) = uv(2)
+      enddo
+   enddo
+   sd = default_shared(x, y, z, reach, 2_I4P) ; if (present(shared_distance)) sd = shared_distance
+   if (dev .and. some) then
+      call bodies_2d_device(curves, nvs, pc, x, y, reach, ll, posed, prs, pts, wc, wv, lvs, avs, cs, wi, sd, res, closure)
+   elseif (posed) then
+      call bodies_2d_host(curves, nvs, pc, x, y, reach, ll, posed, prs, pts, wc, wv, lvs, avs, cs, wi, sd, closure, poses)
+   else
+      call bodies_2d_host(curves, nvs, pc, x, y, reach, ll, posed, prs, pts, wc, wv, lvs, avs, cs, wi, sd, closure)
+   endif
+   endsubroutine fd_closure_2d_bodies
+
    subroutine ib_closure_reset(closure)
    !< Release a resident table from the device (`exit_device`), then reset it to the default (no ghost, arrays released):
    !< what `intent(out)` did, without freeing arrays that are still mapped.
@@ -321,6 +551,11 @@ contains
    nmis = nmis + mis_r(a%direction, b%direction) + mis_r(a%velocity, b%velocity) + mis_r(a%ilw_t, b%ilw_t)
    nmis = nmis + mis_i(a%ilw_element, b%ilw_element) + mis_r(a%ilw_normal, b%ilw_normal)
    nmis = nmis + mis_r(a%ilw_kappa, b%ilw_kappa) + mis_r(a%ilw_direction, b%ilw_direction)
+   if ((a%with_bodies .neqv. b%with_bodies) .or. a%bodies /= b%bodies .or. a%overlap_points /= b%overlap_points .or. &
+       transfer(a%shared_distance, 0_int64) /= transfer(b%shared_distance, 0_int64)) nmis = nmis + 1_I4P
+   nmis = nmis + mis_i(a%sub_body, b%sub_body) + mis_r(a%clearance, b%clearance) + mis_i(a%second_body, b%second_body)
+   nmis = nmis + mis_r(a%second_foot, b%second_foot) + mis_l1(a%shared, b%shared) + mis_l1(a%overlap, b%overlap)
+   nmis = nmis + mis_i(a%ilw_body, b%ilw_body)
    endfunction ib_closure_mismatches
 
    ! the resident pattern
@@ -330,6 +565,7 @@ contains
    !< is no ghost; a copy of a resident table is mapped as a new table.
    class(ib_closure_t), intent(inout) :: self !< Table.
    logical :: ga, gb, gc, gv, gi, gk          !< Non-empty groups.
+   logical :: gs, gsi                         !< Non-empty bodies groups.
 
    if (is_mapped(self)) return
    self%on_device = .false. ; self%device_key = 0
@@ -342,6 +578,10 @@ contains
    !$acc enter data copyin(self%velocity) if(gv)
    !$acc enter data copyin(self%ilw_t, self%ilw_element, self%ilw_normal) if(gi)
    !$acc enter data copyin(self%ilw_kappa, self%ilw_direction) if(gk)
+   call groups_bodies(self, gs, gsi)
+   !$acc enter data copyin(self%sub_body, self%clearance, self%second_body, self%second_foot, self%shared, &
+   !$acc&                  self%overlap) if(gs)
+   !$acc enter data copyin(self%ilw_body) if(gsi)
    call mark_resident(self)
    endsubroutine enter_device
 
@@ -350,6 +590,7 @@ contains
    !< on stderr (its arrays are not on the device: update the original before copying it).
    class(ib_closure_t), intent(inout) :: self !< Table.
    logical :: ga, gb, gc, gv, gi, gk          !< Non-empty groups.
+   logical :: gs, gsi                         !< Non-empty bodies groups.
 
    if (.not. self%on_device) return
    if (.not. is_mapped(self)) then
@@ -366,6 +607,9 @@ contains
    !$acc update host(self%velocity) if(gv)
    !$acc update host(self%ilw_t, self%ilw_element, self%ilw_normal) if(gi)
    !$acc update host(self%ilw_kappa, self%ilw_direction) if(gk)
+   call groups_bodies(self, gs, gsi)
+   !$acc update host(self%sub_body, self%clearance, self%second_body, self%second_foot, self%shared, self%overlap) if(gs)
+   !$acc update host(self%ilw_body) if(gsi)
    endsubroutine update_host
 
    subroutine exit_device(self)
@@ -373,6 +617,7 @@ contains
    !< values). No-op if not mapped; a copy of a resident table only drops the flag.
    class(ib_closure_t), intent(inout) :: self !< Table.
    logical :: ga, gb, gc, gv, gi, gk          !< Non-empty groups.
+   logical :: gs, gsi                         !< Non-empty bodies groups.
 
    if (.not. self%on_device) return
    if (is_mapped(self)) then
@@ -384,6 +629,10 @@ contains
       !$acc exit data delete(self%velocity) if(gv)
       !$acc exit data delete(self%ilw_t, self%ilw_element, self%ilw_normal) if(gi)
       !$acc exit data delete(self%ilw_kappa, self%ilw_direction) if(gk)
+      call groups_bodies(self, gs, gsi)
+      !$acc exit data delete(self%sub_body, self%clearance, self%second_body, self%second_foot, self%shared, &
+      !$acc&                 self%overlap) if(gs)
+      !$acc exit data delete(self%ilw_body) if(gsi)
    endif
    self%on_device = .false. ; self%device_key = 0
    endsubroutine exit_device
@@ -405,17 +654,11 @@ contains
    logical,                  intent(in)           :: wc, wv, wi       !< Curvature, velocity, ILW.
    real(R8P),                intent(in)           :: lv(3), av(3), c(3) !< Rigid velocity.
    type(ib_closure_t),       intent(inout)        :: cl               !< Table.
-   type(ghost_points_t)          :: gp                                !< Ghosts.
+   type(ghost_points_t)                :: gp                          !< Ghosts.
    type(aabb_node_object), allocatable :: nodem(:)                    !< Refitted tree (posed).
-   real(R8P),        allocatable :: tvm(:,:)                          !< Moved vertices (posed).
-   logical,          allocatable :: nd(:,:,:)                         !< Point inside flags (posed).
-   type(vector_R8P), allocatable :: pts(:)                            !< Query points.
-   real(R8P),        allocatable :: lens(:,:), cp(:,:), qd(:), qn(:,:), qk(:,:), qdir(:,:,:) !< Work.
-   real(R8P),        allocatable :: ts(:)                             !< Crossings.
-   integer(I4P),     allocatable :: ids(:), slot(:,:)                 !< Crossing facets, slots of the ILW queries.
-   logical,          allocatable :: es(:)                             !< Entering flags.
-   real(R8P)                     :: apos, bpos, elo, ehi, t0, t1      !< Slot window.
-   integer(I4P)                  :: n, m, g, k, a, d, nc, best, sgn, axis, nq, q !< Work.
+   real(R8P),              allocatable :: tvm(:,:)                    !< Moved vertices (posed).
+   logical,                allocatable :: nd(:,:,:)                   !< Point inside flags (posed).
+   integer(I4P)                        :: n, m                        !< Ghosts, probes.
 
    if (tree) then
       allocate(nodem(0:ubound(surface%aabb%node, 1)), tvm(9, surface%get_facets_number()))
@@ -432,6 +675,33 @@ contains
    cl%lengths = ll
    if (n < 1_I4P) return
    cl%ijk = gp%ijk ; cl%points = gp%points ; cl%mask = gp%mask ; cl%steps = gp%steps
+   call fill_3d_host(surface, geo, tree, nodem, tvm, x, y, z, ll, pose, wc, wv, lv, av, c, wi, cl)
+   endsubroutine closure_3d_host
+
+   subroutine fill_3d_host(surface, geo, tree, nodem, tvm, x, y, z, ll, pose, wc, wv, lv, av, c, wi, cl)
+   !< The host path of the table at given ghosts (cl%n > 0, its ijk, points, mask and steps set; every array allocated by
+   !< `closure_arrays`): `query_many` and `probe_many` on the surface (pose=), the ILW crossings by `line_crossings` on
+   !< geo (posed: the BVH kernel on the refitted tree nodem, tvm) and `ilw_select_oac`, their queries by `query_many`.
+   type(surface_stl_object),            intent(in), target   :: surface          !< Surface (queries).
+   type(surface_stl_object),            intent(in)           :: geo              !< Geometry of the crossings.
+   logical,                             intent(in)           :: tree             !< Posed SAH BVH: crossings on nodem, tvm.
+   type(aabb_node_object), allocatable, intent(in)           :: nodem(:)         !< Refitted tree (tree).
+   real(R8P),              allocatable, intent(in)           :: tvm(:,:)         !< Moved vertices (tree).
+   real(R8P),                           intent(in)           :: x(:), y(:), z(:) !< Point lines.
+   real(R8P),                           intent(in)           :: ll(:)            !< Probe lengths.
+   type(rigid_pose_t),                  intent(in), optional :: pose             !< Pose.
+   logical,                             intent(in)           :: wc, wv, wi       !< Curvature, velocity, ILW.
+   real(R8P),                           intent(in)           :: lv(3), av(3), c(3) !< Rigid velocity.
+   type(ib_closure_t),                  intent(inout)        :: cl               !< Table.
+   type(vector_R8P), allocatable :: pts(:)                            !< Query points.
+   real(R8P),        allocatable :: lens(:,:), cp(:,:), qd(:), qn(:,:), qk(:,:), qdir(:,:,:) !< Work.
+   real(R8P),        allocatable :: ts(:)                             !< Crossings.
+   integer(I4P),     allocatable :: ids(:), slot(:,:)                 !< Crossing facets, slots of the ILW queries.
+   logical,          allocatable :: es(:)                             !< Entering flags.
+   real(R8P)                     :: apos, bpos, elo, ehi, t0, t1      !< Slot window.
+   integer(I4P)                  :: n, m, g, k, a, d, nc, best, sgn, axis, nq, q !< Work.
+
+   n = cl%n ; m = size(ll, kind=I4P)
    allocate(pts(n))
    do g = 1_I4P, n
       pts(g)%x = cl%points(1, g) ; pts(g)%y = cl%points(2, g) ; pts(g)%z = cl%points(3, g)
@@ -511,7 +781,7 @@ contains
          enddo
       endif
    enddo
-   endsubroutine closure_3d_host
+   endsubroutine fill_3d_host
 
    subroutine closure_3d_device(surface, geo, tree, x, y, z, reach, ll, posed, pr, pt, wc, wv, lv, av, c, wi, res, cl)
    !< The device path of `fd_closure_3d`: one pipeline, every stage on the device (see the module header). Posed (tree):
@@ -534,8 +804,7 @@ contains
    type(aabb_node_object), allocatable, target :: nodem(:) !< Refitted tree (posed).
    real(R8P),              allocatable, target :: tvm(:,:) !< Moved vertices (posed).
    logical,      allocatable :: nd(:,:,:)            !< Point inside flags.
-   integer(I4P), allocatable :: cnt(:), off(:), fpatch(:), fidx(:) !< Ghost counts, offsets, facet patches, indexes.
-   real(R8P),    allocatable :: qp(:,:), cpb(:,:), nmb(:,:) !< Body-frame points, feet, normals.
+   integer(I4P), allocatable :: cnt(:), off(:), fpatch(:) !< Ghost counts, offsets, facet patches.
    real(R8P)                 :: tol, dbx, dby, dbz   !< Visibility tolerance.
    type(vector_R8P)          :: bmin, bmax           !< Surface box.
    integer(I4P)              :: ni, nj, nk, np, n, m, f, r(3), nf !< Work.
@@ -566,19 +835,7 @@ contains
    call map_create(w)
    if (n > 0_I4P) then
       call ghost_fill_dev(3_I4P, ni, nj, nk, nd, x, y, z, r, cnt, off, n, w%ijk, w%points, w%mask, w%steps)
-      allocate(qp(3, n), cpb(3, n), nmb(3, n), fidx(n))
-      !$acc data create(qp, cpb, nmb, fidx)
-      call body_points_3d_dev(n, w%points, posed, pr, pt, qp)
-      call surface%query_points_present(n, qp, .true., .false., w%distance, cpb, nmb, w%element, w%feature, fidx, w%body)
-      call wall_3d_dev(n, nf, posed, pr, pt, cpb, nmb, w%element, fpatch, w%foot, w%normal, w%patch)
-      if (wv) call velocity_3d_dev(n, lv, av, c, w%foot, w%velocity)
-      if (wc) call curvature_3d_dev(surface, n, posed, pr, cpb, nmb, w%element, w%kappa, w%direction)
-      if (m > 0_I4P) call probes_3d_dev(surface, n, m, posed, pr, pt, cpb, nmb, w%lengths, tol, ni, nj, nk, x, y, z, &
-                                        w%probe, w%visible, w%probe_cell)
-      if (wi) call ilw_3d_dev(surface, n, ni, nj, nk, x, y, z, w%ijk, w%steps, gnode, gpay, gtv, posed, pr, pt, wc, &
-                              w%ilw_t, w%ilw_element, w%ilw_normal, size(w%ilw_kappa, 3, kind=I4P), w%ilw_kappa, &
-                              w%ilw_direction)
-      !$acc end data
+      call fill_3d_dev(surface, gnode, gpay, gtv, fpatch, tol, posed, pr, pt, wc, wv, lv, av, c, wi, x, y, z, w)
    endif
    !$acc end data
    if (tree) then
@@ -586,6 +843,43 @@ contains
    endif
    call finish_device(w, res, cl)
    endsubroutine closure_3d_device
+
+   subroutine fill_3d_dev(surface, gnode, gpay, gtv, fpatch, tol, posed, pr, pt, wc, wv, lv, av, c, wi, x, y, z, w)
+   !< The device path of the table at given ghosts: w%n > 0, its arrays mapped (`map_create`), ijk, points, mask and steps
+   !< filled on the device; x, y, z, gnode, gpay, gtv and fpatch present. The body-frame points, the queries, the wall
+   !< data, the velocity, the curvature, the probes and the ILW crossings, every stage on the device.
+   type(surface_stl_object),     intent(in), target :: surface          !< Surface (queries; mapped).
+   type(aabb_node_object),       intent(in)         :: gnode(0:)        !< Geometry tree (present).
+   type(facet_distance_payload), intent(in)         :: gpay(:)          !< Geometry payload (present).
+   real(R8P),                    intent(in)         :: gtv(:,:)         !< Geometry vertices (present).
+   integer(I4P),                 intent(in)         :: fpatch(:)        !< Facet patches (present).
+   real(R8P),                    intent(in)         :: tol              !< Visibility tolerance.
+   logical,                      intent(in)         :: posed            !< A pose.
+   real(R8P),                    intent(in)         :: pr(3, 3), pt(3)  !< Pose.
+   logical,                      intent(in)         :: wc, wv, wi       !< Curvature, velocity, ILW.
+   real(R8P),                    intent(in)         :: lv(3), av(3), c(3) !< Rigid velocity.
+   real(R8P),                    intent(in)         :: x(:), y(:), z(:) !< Point lines (present).
+   type(ib_closure_t),           intent(inout)      :: w                !< Table (mapped).
+   integer(I4P), allocatable :: fidx(:)              !< Local feature indexes.
+   real(R8P),    allocatable :: qp(:,:), cpb(:,:), nmb(:,:) !< Body-frame points, feet, normals.
+   integer(I4P)              :: ni, nj, nk, n, m, nf !< Work.
+
+   ni = size(x, kind=I4P) ; nj = size(y, kind=I4P) ; nk = size(z, kind=I4P)
+   n = w%n ; m = w%m ; nf = size(fpatch, kind=I4P)
+   allocate(qp(3, n), cpb(3, n), nmb(3, n), fidx(n))
+   !$acc data create(qp, cpb, nmb, fidx)
+   call body_points_3d_dev(n, w%points, posed, pr, pt, qp)
+   call surface%query_points_present(n, qp, .true., .false., w%distance, cpb, nmb, w%element, w%feature, fidx, w%body)
+   call wall_3d_dev(n, nf, posed, pr, pt, cpb, nmb, w%element, fpatch, w%foot, w%normal, w%patch)
+   if (wv) call velocity_3d_dev(n, lv, av, c, w%foot, w%velocity)
+   if (wc) call curvature_3d_dev(surface, n, posed, pr, cpb, nmb, w%element, w%kappa, w%direction)
+   if (m > 0_I4P) call probes_3d_dev(surface, n, m, posed, pr, pt, cpb, nmb, w%lengths, tol, ni, nj, nk, x, y, z, &
+                                     w%probe, w%visible, w%probe_cell)
+   if (wi) call ilw_3d_dev(surface, n, ni, nj, nk, x, y, z, w%ijk, w%steps, gnode, gpay, gtv, posed, pr, pt, wc, &
+                           w%ilw_t, w%ilw_element, w%ilw_normal, size(w%ilw_kappa, 3, kind=I4P), w%ilw_kappa, &
+                           w%ilw_direction)
+   !$acc end data
+   endsubroutine fill_3d_dev
 
    subroutine closure_2d_host(curve, u, v, nxt, x, y, reach, ll, pose, wc, wv, lv, aw, c, wi, cl)
    !< The host path of `fd_closure_2d`: `ghost_points_2d_flat` on the placed vertices, `query_many` and `probe_many` on
@@ -601,10 +895,7 @@ contains
    real(R8P),             intent(in)           :: lv(3), aw, c(3) !< Rigid velocity (angular: scalar).
    type(ib_closure_t),    intent(inout)        :: cl          !< Table.
    type(ghost_points_t)      :: gp                            !< Ghosts.
-   real(R8P),    allocatable :: lens(:,:), cp(:,:), qd(:), qn(:,:), qk(:,:), qdir(:,:,:) !< Work.
-   integer(I4P), allocatable :: rstart(:), rseg(:), cstart(:), cseg(:), slot(:,:) !< Row and column buckets, ILW slots.
-   real(R8P)                 :: apos, elo, ehi, bt    !< Slot window, crossing.
-   integer(I4P)              :: n, m, g, k, d, sgn, axis, nq, q, bs, nr, nc !< Work.
+   integer(I4P)              :: n, m                          !< Ghosts, probes.
 
    call ghost_points_2d_flat(u, v, nxt, x, y, reach, gp)
    n = gp%n ; m = size(ll, kind=I4P)
@@ -613,6 +904,27 @@ contains
    cl%lengths = ll
    if (n < 1_I4P) return
    cl%ijk = gp%ijk ; cl%points = gp%points ; cl%mask = gp%mask ; cl%steps = gp%steps
+   call fill_2d_host(curve, u, v, nxt, x, y, ll, pose, wc, wv, lv, aw, c, wi, cl)
+   endsubroutine closure_2d_host
+
+   subroutine fill_2d_host(curve, u, v, nxt, x, y, ll, pose, wc, wv, lv, aw, c, wi, cl)
+   !< 2-D twin of `fill_3d_host`: `query_many` and `probe_many` on the curve (pose=), the ILW crossings by
+   !< `ilw_item_2d_oac` on the placed vertices, their queries by `query_many`.
+   type(curve_object),    intent(in)           :: curve       !< Curve (queries).
+   real(R8P),             intent(in)           :: u(:), v(:)  !< Vertices (placed).
+   integer(I4P),          intent(in)           :: nxt(:)      !< Next vertex.
+   real(R8P),             intent(in)           :: x(:), y(:)  !< Point lines.
+   real(R8P),             intent(in)           :: ll(:)       !< Probe lengths.
+   type(rigid_pose_2d_t), intent(in), optional :: pose        !< Pose.
+   logical,               intent(in)           :: wc, wv, wi  !< Curvature, velocity, ILW.
+   real(R8P),             intent(in)           :: lv(3), aw, c(3) !< Rigid velocity (angular: scalar).
+   type(ib_closure_t),    intent(inout)        :: cl          !< Table.
+   real(R8P),    allocatable :: lens(:,:), cp(:,:), qd(:), qn(:,:), qk(:,:), qdir(:,:,:) !< Work.
+   integer(I4P), allocatable :: rstart(:), rseg(:), cstart(:), cseg(:), slot(:,:) !< Row and column buckets, ILW slots.
+   real(R8P)                 :: apos, elo, ehi, bt    !< Slot window, crossing.
+   integer(I4P)              :: n, m, g, k, d, sgn, axis, nq, q, bs, nr, nc !< Work.
+
+   n = cl%n ; m = size(ll, kind=I4P)
    if (wc) then
       call curve%query_many(points=cl%points, distances=cl%distance, closest_points=cl%foot, segments=cl%element, &
                             vertices=cl%feature, normals=cl%normal, bodies=cl%body, patches=cl%patch, &
@@ -682,7 +994,7 @@ contains
          cl%ilw_kappa(1, d, g) = qk(1, q) ; cl%ilw_direction(:, 1, d, g) = qdir(:, 1, q)
       endif
    enddo
-   endsubroutine closure_2d_host
+   endsubroutine fill_2d_host
 
    subroutine closure_2d_device(curve, u, v, nxt, x, y, reach, ll, posed, pr, pt, wc, wv, lv, aw, c, wi, res, cl)
    !< The device path of `fd_closure_2d`: one pipeline, every stage on the device (see the module header).
@@ -699,8 +1011,7 @@ contains
    type(ib_closure_t),  intent(inout)      :: cl             !< Table.
    type(ib_closure_t)        :: w                            !< The table built on the device.
    logical,      allocatable :: nd(:,:,:)                    !< Point inside flags.
-   integer(I4P), allocatable :: cnt(:), off(:), rstart(:), rseg(:), spatch(:), sgl(:), vxl(:) !< Work.
-   real(R8P),    allocatable :: qp(:,:), cpb(:,:), nmb(:,:), pk(:) !< Body-frame points, feet, normals, curvatures.
+   integer(I4P), allocatable :: cnt(:), off(:), rstart(:), rseg(:), spatch(:) !< Work.
    real(R8P)                 :: z(1)                         !< No z line.
    integer(I4P)              :: ni, nj, np, n, m, nr, nu, i, j, r(3) !< Work.
 
@@ -727,25 +1038,45 @@ contains
    call map_create(w)
    if (n > 0_I4P) then
       call ghost_fill_dev(2_I4P, ni, nj, 1_I4P, nd, x, y, z, r, cnt, off, n, w%ijk, w%points, w%mask, w%steps)
-      allocate(qp(2, n), cpb(2, n), nmb(2, n), sgl(n), vxl(n), pk(n))
-      !$acc data create(qp, cpb, nmb, sgl, vxl, pk)
-      call body_points_2d_dev(n, w%points, posed, pr, pt, qp)
-      call curve%query_present(n, qp, .true., .false., w%distance, cpb, sgl, vxl, nmb, w%body)
-      call wall_2d_dev(n, nu, posed, pr, pt, cpb, nmb, sgl, vxl, spatch, w%foot, w%normal, w%element, w%feature, w%patch)
-      if (wv) call velocity_2d_dev(n, lv, aw, c, w%foot, w%velocity)
-      if (wc) then
-         call curve%curvature_present(n, sgl, cpb, pk)
-         call curvature_2d_dev(n, posed, pr, nmb, pk, w%kappa, w%direction)
-      endif
-      if (m > 0_I4P) call probes_2d_dev(curve, n, m, posed, pr, pt, cpb, nmb, sgl, vxl, w%lengths, ni, nj, x, y, w%probe, &
-                                        w%visible, w%probe_cell)
-      if (wi) call ilw_2d_dev(curve, n, ni, nj, x, y, w%ijk, w%steps, u, v, nxt, posed, pr, pt, wc, w%ilw_t, &
-                              w%ilw_element, w%ilw_normal, size(w%ilw_kappa, 3, kind=I4P), w%ilw_kappa, w%ilw_direction)
-      !$acc end data
+      call fill_2d_dev(curve, u, v, nxt, spatch, posed, pr, pt, wc, wv, lv, aw, c, wi, x, y, w)
    endif
    !$acc end data
    call finish_device(w, res, cl)
    endsubroutine closure_2d_device
+
+   subroutine fill_2d_dev(curve, u, v, nxt, spatch, posed, pr, pt, wc, wv, lv, aw, c, wi, x, y, w)
+   !< 2-D twin of `fill_3d_dev`: w%n > 0, mapped, its ghosts filled on the device; u, v, nxt, spatch, x, y present.
+   type(curve_object), intent(in), target :: curve          !< Curve (queries; mapped).
+   real(R8P),          intent(in)         :: u(:), v(:)     !< Vertices, placed (present).
+   integer(I4P),       intent(in)         :: nxt(:)         !< Next vertex (present).
+   integer(I4P),       intent(in)         :: spatch(:)      !< Segment patches (present).
+   logical,            intent(in)         :: posed          !< A pose.
+   real(R8P),          intent(in)         :: pr(2, 2), pt(2) !< Pose.
+   logical,            intent(in)         :: wc, wv, wi     !< Curvature, velocity, ILW.
+   real(R8P),          intent(in)         :: lv(3), aw, c(3) !< Rigid velocity (angular: scalar).
+   real(R8P),          intent(in)         :: x(:), y(:)     !< Point lines (present).
+   type(ib_closure_t), intent(inout)      :: w              !< Table (mapped).
+   integer(I4P), allocatable :: sgl(:), vxl(:)              !< Foot segments, vertices.
+   real(R8P),    allocatable :: qp(:,:), cpb(:,:), nmb(:,:), pk(:) !< Body-frame points, feet, normals, curvatures.
+   integer(I4P)              :: ni, nj, n, m, nu            !< Work.
+
+   ni = size(x, kind=I4P) ; nj = size(y, kind=I4P) ; n = w%n ; m = w%m ; nu = size(u, kind=I4P)
+   allocate(qp(2, n), cpb(2, n), nmb(2, n), sgl(n), vxl(n), pk(n))
+   !$acc data create(qp, cpb, nmb, sgl, vxl, pk)
+   call body_points_2d_dev(n, w%points, posed, pr, pt, qp)
+   call curve%query_present(n, qp, .true., .false., w%distance, cpb, sgl, vxl, nmb, w%body)
+   call wall_2d_dev(n, nu, posed, pr, pt, cpb, nmb, sgl, vxl, spatch, w%foot, w%normal, w%element, w%feature, w%patch)
+   if (wv) call velocity_2d_dev(n, lv, aw, c, w%foot, w%velocity)
+   if (wc) then
+      call curve%curvature_present(n, sgl, cpb, pk)
+      call curvature_2d_dev(n, posed, pr, nmb, pk, w%kappa, w%direction)
+   endif
+   if (m > 0_I4P) call probes_2d_dev(curve, n, m, posed, pr, pt, cpb, nmb, sgl, vxl, w%lengths, ni, nj, x, y, w%probe, &
+                                     w%visible, w%probe_cell)
+   if (wi) call ilw_2d_dev(curve, n, ni, nj, x, y, w%ijk, w%steps, u, v, nxt, posed, pr, pt, wc, w%ilw_t, &
+                           w%ilw_element, w%ilw_normal, size(w%ilw_kappa, 3, kind=I4P), w%ilw_kappa, w%ilw_direction)
+   !$acc end data
+   endsubroutine fill_2d_dev
 
    subroutine posed_tree_3d(surface, pr, pt, dev, nodem, tvm)
    !< The vertices and the SAH BVH of the surface moved by the pose, without moving the surface (#109 WP1 step 06): tvm the
@@ -1491,6 +1822,950 @@ contains
    !$acc end data
    endsubroutine ilw_2d_dev
 
+   ! private: several bodies (#109 WP3 step 01)
+
+   subroutine bodies_3d_host(surfaces, nfs, x, y, z, reach, ll, posed, prs, pts, tols, wc, wv, lvs, avs, cs, wi, sd, cl, &
+                             poses)
+   !< The host path of `fd_closure_3d_bodies`: per body its node states (posed: on its refitted tree), their union and the
+   !< ghosts; per body the single-body table at those ghosts (`fill_3d_host`) merged in body order (`merge_ghosts`,
+   !< `merge_ilw`); the clearances (`query_many` of the owners' feet per other body, `merge_clear`), the probes' visibility
+   !< against the other bodies (`blocked_3d`), the flags. The merge and visibility kernels are the device path's.
+   type(surface_stl_object), intent(in), target   :: surfaces(:)        !< Surfaces.
+   integer(I4P),             intent(in)           :: nfs(:)             !< Facets per body.
+   real(R8P),                intent(in)           :: x(:), y(:), z(:)   !< Point lines.
+   integer(I4P),             intent(in)           :: reach(:)           !< Reach.
+   real(R8P),                intent(in)           :: ll(:)              !< Probe lengths.
+   logical,                  intent(in)           :: posed              !< Poses given.
+   real(R8P),                intent(in)           :: prs(:,:,:), pts(:,:) !< Poses [3, 3, nb], [3, nb].
+   real(R8P),                intent(in)           :: tols(:)            !< Visibility tolerances [nb].
+   logical,                  intent(in)           :: wc, wv, wi         !< Curvature, velocity, ILW.
+   real(R8P),                intent(in)           :: lvs(:,:), avs(:,:), cs(:,:) !< Rigid velocities [3, nb].
+   real(R8P),                intent(in)           :: sd                 !< Shared distance.
+   type(ib_closure_t),       intent(inout)        :: cl                 !< Table.
+   type(rigid_pose_t),       intent(in), optional :: poses(:)           !< Poses.
+   type(posed_tree_t), allocatable :: pg(:)                             !< Refitted trees (posed).
+   type(ghost_points_t)            :: gp                                !< Ghosts.
+   type(ib_closure_t)              :: tb                                !< One body's table at the ghosts.
+   logical,          allocatable   :: nd(:,:,:)                         !< Point inside flags.
+   integer(I4P),     allocatable   :: ncnt(:,:,:)                       !< Bodies containing each point.
+   type(vector_R8P), allocatable   :: fp(:)                             !< Owners' feet.
+   real(R8P),        allocatable   :: qd(:), qc(:,:)                    !< Clearance queries.
+   integer(I4P)                    :: nb, b, n, m, ni, nj, nk, g        !< Work.
+
+   nb = size(nfs, kind=I4P) ; ni = size(x, kind=I4P) ; nj = size(y, kind=I4P) ; nk = size(z, kind=I4P)
+   m = size(ll, kind=I4P)
+   allocate(pg(nb), ncnt(ni, nj, nk)) ; ncnt = 0_I4P
+   do b = 1_I4P, nb
+      if (nfs(b) < 1_I4P) cycle
+      if (posed) then
+         allocate(pg(b)%node(0:ubound(surfaces(b)%aabb%node, 1)), pg(b)%tv(9, nfs(b)), nd(ni, nj, nk))
+         call posed_tree_3d(surfaces(b), prs(:, :, b), pts(:, b), .false., pg(b)%node, pg(b)%tv)
+         call cut_cells_3d_nodes_tree(pg(b)%node, surfaces(b)%aabb%payload, pg(b)%tv, x, y, z, nd)
+      else
+         call cut_cells_3d_nodes(surfaces(b), x, y, z, nd)
+      endif
+      where (nd) ncnt = ncnt + 1_I4P
+      deallocate(nd)
+   enddo
+   allocate(nd(ni, nj, nk)) ; nd = ncnt > 0_I4P
+   call ghost_points_nodes_3d(nd, x, y, z, reach, gp)
+   n = gp%n
+   call closure_arrays(cl, 3_I4P, n, m, wc, wv, wi) ; call closure_arrays_bodies(cl, nb, sd)
+   cl%ni = ni ; cl%nj = nj ; cl%nk = nk ; cl%reach = reach(1:3) ; cl%lengths = ll
+   cl%overlap_points = count(ncnt >= 2_I4P, kind=I4P)
+   if (n < 1_I4P) return
+   cl%ijk = gp%ijk ; cl%points = gp%points ; cl%mask = gp%mask ; cl%steps = gp%steps
+   call bodies_init(.false., 3_I4P, n, size(cl%ilw_body, 2, kind=I4P), size(cl%ilw_kappa, 3, kind=I4P), cl%body, &
+                    cl%distance, cl%clearance, cl%second_body, cl%second_foot, cl%ilw_t, cl%ilw_element, cl%ilw_normal, &
+                    cl%ilw_body, cl%ilw_kappa, cl%ilw_direction)
+   do b = 1_I4P, nb
+      if (nfs(b) < 1_I4P) cycle
+      call closure_arrays(tb, 3_I4P, n, m, wc, wv, wi)
+      tb%ni = ni ; tb%nj = nj ; tb%nk = nk ; tb%reach = reach(1:3) ; tb%lengths = ll
+      tb%ijk = cl%ijk ; tb%points = cl%points ; tb%mask = cl%mask ; tb%steps = cl%steps
+      if (posed) then
+         call fill_3d_host(surfaces(b), surfaces(b), .true., pg(b)%node, pg(b)%tv, x, y, z, ll, poses(b), wc, wv, &
+                           lvs(:, b), avs(:, b), cs(:, b), wi, tb)
+      else
+         call fill_3d_host(surfaces(b), surfaces(b), .false., pg(b)%node, pg(b)%tv, x, y, z, ll, wc=wc, wv=wv, &
+                           lv=lvs(:, b), av=avs(:, b), c=cs(:, b), wi=wi, cl=tb)
+      endif
+      call merge_table(.false., b, tb, cl)
+      call ib_closure_reset(tb)
+   enddo
+   if (nb > 1_I4P) then
+      allocate(fp(n), qd(n), qc(3, n))
+      do g = 1_I4P, n
+         fp(g)%x = cl%foot(1, g) ; fp(g)%y = cl%foot(2, g) ; fp(g)%z = cl%foot(3, g)
+      enddo
+      do b = 1_I4P, nb
+         if (nfs(b) < 1_I4P) cycle
+         if (posed) then
+            call surfaces(b)%query_many(points=fp, distances=qd, closest_points=qc, pose=poses(b))
+         else
+            call surfaces(b)%query_many(points=fp, distances=qd, closest_points=qc)
+         endif
+         call merge_clear(.false., 3_I4P, n, b, qd, qc, cl%body, cl%clearance, cl%second_body, cl%second_foot)
+         if (m > 0_I4P) call blocked_3d(.false., surfaces(b), b, n, m, posed, prs(:, :, b), pts(:, b), nb, tols, cl%body, &
+                                        cl%foot, cl%probe, cl%visible)
+      enddo
+   endif
+   call bodies_flags(.false., 3_I4P, n, ni, nj, nk, cl%ijk, ncnt, cl%clearance, sd, cl%shared, cl%overlap)
+   endsubroutine bodies_3d_host
+
+   subroutine bodies_3d_device(surfaces, nfs, x, y, z, reach, ll, posed, prs, pts, tols, wc, wv, lvs, avs, cs, wi, sd, &
+                               res, cl)
+   !< The device path of `fd_closure_3d_bodies`: the stages of the host path with the device kernels of `fd_closure_3d`,
+   !< one launch set per body (`nodes_body_3d_dev`, `fill_body_3d_dev`, `clear_body_3d_dev`), merged in body order; no
+   !< round trip between the stages.
+   type(surface_stl_object), intent(in), target :: surfaces(:)          !< Surfaces (mapped).
+   integer(I4P),             intent(in)         :: nfs(:)               !< Facets per body.
+   real(R8P),                intent(in)         :: x(:), y(:), z(:)     !< Point lines.
+   integer(I4P),             intent(in)         :: reach(:)             !< Reach.
+   real(R8P),                intent(in)         :: ll(:)                !< Probe lengths.
+   logical,                  intent(in)         :: posed                !< Poses given.
+   real(R8P),                intent(in)         :: prs(:,:,:), pts(:,:) !< Poses.
+   real(R8P),                intent(in)         :: tols(:)              !< Visibility tolerances [nb].
+   logical,                  intent(in)         :: wc, wv, wi, res      !< Curvature, velocity, ILW, resident.
+   real(R8P),                intent(in)         :: lvs(:,:), avs(:,:), cs(:,:) !< Rigid velocities.
+   real(R8P),                intent(in)         :: sd                   !< Shared distance.
+   type(ib_closure_t),       intent(inout)      :: cl                   !< Table.
+   type(ib_closure_t)        :: w                                       !< The table built on the device.
+   logical,      allocatable :: nd(:,:,:)                               !< Point inside flags.
+   integer(I4P), allocatable :: ncnt(:,:,:), cnt(:), off(:)             !< Bodies per point, ghost counts, offsets.
+   real(R8P),    allocatable :: tl(:)                                   !< Tolerances.
+   integer(I4P)              :: nb, b, ni, nj, nk, np, n, m, r(3), op   !< Work.
+
+   nb = size(nfs, kind=I4P) ; ni = size(x, kind=I4P) ; nj = size(y, kind=I4P) ; nk = size(z, kind=I4P)
+   np = ni * nj * nk ; m = size(ll, kind=I4P) ; r = reach(1:3)
+   allocate(nd(ni, nj, nk), ncnt(ni, nj, nk), cnt(np), off(np), tl(nb)) ; tl = tols(1:nb)
+   !$acc data copyin(x, y, z, tl) create(nd, ncnt, cnt, off)
+   call zero_counts_dev(np, ncnt)
+   do b = 1_I4P, nb
+      if (nfs(b) < 1_I4P) cycle
+      call nodes_body_3d_dev(surfaces(b), posed, prs(:, :, b), pts(:, b), x, y, z, nd, ncnt)
+   enddo
+   call union_dev(np, ncnt, nd, op)
+   call ghost_count_dev(3_I4P, ni, nj, nk, nd, r, cnt)
+   call links_scan_dev(np, cnt, off, n)
+   call closure_arrays(w, 3_I4P, n, m, wc, wv, wi) ; call closure_arrays_bodies(w, nb, sd)
+   w%ni = ni ; w%nj = nj ; w%nk = nk ; w%reach = r ; w%lengths = ll ; w%overlap_points = op
+   call map_create(w)
+   if (n > 0_I4P) then
+      call ghost_fill_dev(3_I4P, ni, nj, nk, nd, x, y, z, r, cnt, off, n, w%ijk, w%points, w%mask, w%steps)
+      call bodies_init(.true., 3_I4P, n, size(w%ilw_body, 2, kind=I4P), size(w%ilw_kappa, 3, kind=I4P), w%body, &
+                       w%distance, w%clearance, w%second_body, w%second_foot, w%ilw_t, w%ilw_element, w%ilw_normal, &
+                       w%ilw_body, w%ilw_kappa, w%ilw_direction)
+      do b = 1_I4P, nb
+         if (nfs(b) < 1_I4P) cycle
+         call fill_body_3d_dev(surfaces(b), b, posed, prs(:, :, b), pts(:, b), tl(b), wc, wv, lvs(:, b), avs(:, b), &
+                               cs(:, b), wi, x, y, z, w)
+      enddo
+      if (nb > 1_I4P) then
+         do b = 1_I4P, nb
+            if (nfs(b) < 1_I4P) cycle
+            call clear_body_3d_dev(surfaces(b), b, posed, prs(:, :, b), pts(:, b), w)
+            if (m > 0_I4P) call blocked_3d(.true., surfaces(b), b, n, m, posed, prs(:, :, b), pts(:, b), nb, tl, w%body, &
+                                           w%foot, w%probe, w%visible)
+         enddo
+      endif
+      call bodies_flags(.true., 3_I4P, n, ni, nj, nk, w%ijk, ncnt, w%clearance, sd, w%shared, w%overlap)
+   endif
+   !$acc end data
+   call finish_device(w, res, cl)
+   endsubroutine bodies_3d_device
+
+   subroutine nodes_body_3d_dev(surface, posed, pr, pt, x, y, z, nd, ncnt)
+   !< One body's node states on the device (on its refitted tree if posed, built on the device), added to the counts.
+   type(surface_stl_object), intent(in), target :: surface          !< Surface (mapped).
+   logical,                  intent(in)         :: posed            !< A pose.
+   real(R8P),                intent(in)         :: pr(3, 3), pt(3)  !< Pose.
+   real(R8P),                intent(in)         :: x(:), y(:), z(:) !< Point lines (present).
+   logical,                  intent(inout)      :: nd(size(x), size(y), size(z))   !< Point inside flags (present).
+   integer(I4P),             intent(inout)      :: ncnt(size(x), size(y), size(z)) !< Bodies per point (present).
+   type(aabb_node_object),       pointer :: gnode(:)               !< Geometry tree.
+   type(facet_distance_payload), pointer :: gpay(:)                !< Geometry payload.
+   real(R8P),                    pointer :: gtv(:,:)               !< Geometry vertices.
+   type(aabb_node_object), allocatable, target :: nodem(:)         !< Refitted tree (posed).
+   real(R8P),              allocatable, target :: tvm(:,:)         !< Moved vertices (posed).
+   integer(I4P) :: i, j, k, ni, nj, nk                             !< Work.
+
+   ni = size(x, kind=I4P) ; nj = size(y, kind=I4P) ; nk = size(z, kind=I4P)
+   gnode => surface%aabb%node ; gpay => surface%aabb%payload ; gtv => surface%tri_vertices
+   if (posed) then
+      allocate(nodem(0:ubound(surface%aabb%node, 1)), tvm(9, surface%get_facets_number()))
+      !$acc enter data create(nodem, tvm)
+      call posed_tree_3d(surface, pr, pt, .true., nodem, tvm)
+      gnode => nodem ; gtv => tvm
+   endif
+   !$acc data copyin(gnode, gpay, gtv)
+   call cut_cells_3d_nodes_tree_present(gnode, gpay, gtv, x, y, z, nd)
+   !$acc parallel loop gang vector collapse(3) default(present) present(nd, ncnt)
+   do k = 1_I4P, nk
+      do j = 1_I4P, nj
+         do i = 1_I4P, ni
+            if (nd(i, j, k)) ncnt(i, j, k) = ncnt(i, j, k) + 1_I4P
+         enddo
+      enddo
+   enddo
+   !$acc end data
+   if (posed) then
+      !$acc exit data delete(nodem, tvm)
+   endif
+   endsubroutine nodes_body_3d_dev
+
+   subroutine fill_body_3d_dev(surface, b, posed, pr, pt, tol, wc, wv, lv, av, c, wi, x, y, z, w)
+   !< One body's table at the ghosts of w on the device (`fill_3d_dev` on a work table whose ghosts are copied on the
+   !< device; the refitted tree built on the device if posed), merged into w (`merge_table`), the work table released.
+   type(surface_stl_object), intent(in), target :: surface          !< Surface (mapped).
+   integer(I4P),             intent(in)         :: b                !< Body index.
+   logical,                  intent(in)         :: posed            !< A pose.
+   real(R8P),                intent(in)         :: pr(3, 3), pt(3)  !< Pose.
+   real(R8P),                intent(in)         :: tol              !< Visibility tolerance.
+   logical,                  intent(in)         :: wc, wv, wi       !< Curvature, velocity, ILW.
+   real(R8P),                intent(in)         :: lv(3), av(3), c(3) !< Rigid velocity.
+   real(R8P),                intent(in)         :: x(:), y(:), z(:) !< Point lines (present).
+   type(ib_closure_t),       intent(inout)      :: w                !< Table (mapped, ghosts filled).
+   type(ib_closure_t)                    :: tb                     !< The body's work table.
+   type(aabb_node_object),       pointer :: gnode(:)               !< Geometry tree.
+   type(facet_distance_payload), pointer :: gpay(:)                !< Geometry payload.
+   real(R8P),                    pointer :: gtv(:,:)               !< Geometry vertices.
+   type(aabb_node_object), allocatable, target :: nodem(:)         !< Refitted tree (posed).
+   real(R8P),              allocatable, target :: tvm(:,:)         !< Moved vertices (posed).
+   integer(I4P),           allocatable         :: fpatch(:)        !< Facet patches.
+   integer(I4P) :: nf, f                                           !< Work.
+
+   nf = surface%get_facets_number()
+   allocate(fpatch(nf))
+   do f = 1_I4P, nf
+      fpatch(f) = surface%facet_patch(f)
+   enddo
+   gnode => surface%aabb%node ; gpay => surface%aabb%payload ; gtv => surface%tri_vertices
+   if (posed) then
+      allocate(nodem(0:ubound(surface%aabb%node, 1)), tvm(9, nf))
+      !$acc enter data create(nodem, tvm)
+      call posed_tree_3d(surface, pr, pt, .true., nodem, tvm)
+      gnode => nodem ; gtv => tvm
+   endif
+   !$acc data copyin(gnode, gpay, gtv, fpatch)
+   call closure_arrays(tb, 3_I4P, w%n, w%m, wc, wv, wi)
+   tb%ni = w%ni ; tb%nj = w%nj ; tb%nk = w%nk ; tb%reach = w%reach ; tb%lengths = w%lengths
+   call map_create(tb)
+   call copy_ghosts(.true., 3_I4P, w%n, w%ijk, w%points, w%mask, w%steps, tb%ijk, tb%points, tb%mask, tb%steps)
+   call fill_3d_dev(surface, gnode, gpay, gtv, fpatch, tol, posed, pr, pt, wc, wv, lv, av, c, wi, x, y, z, tb)
+   call merge_table(.true., b, tb, w)
+   call map_delete(tb)
+   !$acc end data
+   if (posed) then
+      !$acc exit data delete(nodem, tvm)
+   endif
+   endsubroutine fill_body_3d_dev
+
+   subroutine clear_body_3d_dev(surface, b, posed, pr, pt, w)
+   !< The clearance of every ghost's foot to body b on the device: the feet in b's frame, `query_points_present`, the
+   !< closest points back in the world, `merge_clear` (the ghosts body b owns are skipped).
+   type(surface_stl_object), intent(in), target :: surface         !< Surface (mapped).
+   integer(I4P),             intent(in)         :: b               !< Body index.
+   logical,                  intent(in)         :: posed           !< A pose.
+   real(R8P),                intent(in)         :: pr(3, 3), pt(3) !< Pose.
+   type(ib_closure_t),       intent(inout)      :: w               !< Table (mapped).
+   real(R8P),    allocatable :: qp(:,:), qd(:), qc(:,:), qn(:,:), qw(:,:) !< Work.
+   integer(I4P), allocatable :: qf(:), qft(:), qfi(:), qb(:)        !< Work.
+   integer(I4P) :: n                                                !< Ghosts.
+
+   n = w%n
+   allocate(qp(3, n), qd(n), qc(3, n), qn(3, n), qw(3, n), qf(n), qft(n), qfi(n), qb(n))
+   !$acc data create(qp, qd, qc, qn, qw, qf, qft, qfi, qb)
+   call body_points_3d_dev(n, w%foot, posed, pr, pt, qp)
+   call surface%query_points_present(n, qp, .true., .false., qd, qc, qn, qf, qft, qfi, qb)
+   call world_points_3d_dev(n, posed, pr, pt, qc, qw)
+   call merge_clear(.true., 3_I4P, n, b, qd, qw, w%body, w%clearance, w%second_body, w%second_foot)
+   !$acc end data
+   endsubroutine clear_body_3d_dev
+
+   subroutine bodies_2d_host(curves, nvs, pc, x, y, reach, ll, posed, prs, pts, wc, wv, lvs, avs, cs, wi, sd, cl, poses)
+   !< The host path of `fd_closure_2d_bodies` (see `bodies_3d_host`): node flags per curve on its placed vertices, the
+   !< union, the ghosts, per curve `fill_2d_host` merged in curve order, the clearances, the visibility, the flags.
+   type(curve_object),    intent(in), target   :: curves(:)            !< Curves.
+   integer(I4P),          intent(in)           :: nvs(:)               !< Vertices per curve.
+   type(placed_curve_t),  intent(in)           :: pc(:)                !< Placed vertices.
+   real(R8P),             intent(in)           :: x(:), y(:)           !< Point lines.
+   integer(I4P),          intent(in)           :: reach(:)             !< Reach.
+   real(R8P),             intent(in)           :: ll(:)                !< Probe lengths.
+   logical,               intent(in)           :: posed                !< Poses given.
+   real(R8P),             intent(in)           :: prs(:,:,:), pts(:,:) !< Poses [2, 2, nb], [2, nb].
+   logical,               intent(in)           :: wc, wv, wi           !< Curvature, velocity, ILW.
+   real(R8P),             intent(in)           :: lvs(:,:), avs(:,:), cs(:,:) !< Rigid velocities [3, nb].
+   real(R8P),             intent(in)           :: sd                   !< Shared distance.
+   type(ib_closure_t),    intent(inout)        :: cl                   !< Table.
+   type(rigid_pose_2d_t), intent(in), optional :: poses(:)             !< Poses.
+   type(ghost_points_t)      :: gp                                     !< Ghosts.
+   type(ib_closure_t)        :: tb                                     !< One curve's table at the ghosts.
+   logical,      allocatable :: nd(:,:)                                !< Point inside flags.
+   integer(I4P), allocatable :: ncnt(:,:,:)                            !< Curves containing each point.
+   real(R8P),    allocatable :: qd(:), qc(:,:)                         !< Clearance queries.
+   integer(I4P)              :: nb, b, n, m, ni, nj                    !< Work.
+
+   nb = size(nvs, kind=I4P) ; ni = size(x, kind=I4P) ; nj = size(y, kind=I4P) ; m = size(ll, kind=I4P)
+   allocate(ncnt(ni, nj, 1)) ; ncnt = 0_I4P
+   do b = 1_I4P, nb
+      if (nvs(b) < 1_I4P) cycle
+      call node_flags(pc(b)%u, pc(b)%v, pc(b)%nxt, x, y, nd)
+      where (nd) ncnt(:, :, 1) = ncnt(:, :, 1) + 1_I4P
+      deallocate(nd)
+   enddo
+   allocate(nd(ni, nj)) ; nd = ncnt(:, :, 1) > 0_I4P
+   call ghost_points_nodes_2d(nd, x, y, reach, gp)
+   n = gp%n
+   call closure_arrays(cl, 2_I4P, n, m, wc, wv, wi) ; call closure_arrays_bodies(cl, nb, sd)
+   cl%ni = ni ; cl%nj = nj ; cl%nk = 1_I4P ; cl%reach(1:2) = reach(1:2) ; cl%lengths = ll
+   cl%overlap_points = count(ncnt >= 2_I4P, kind=I4P)
+   if (n < 1_I4P) return
+   cl%ijk = gp%ijk ; cl%points = gp%points ; cl%mask = gp%mask ; cl%steps = gp%steps
+   call bodies_init(.false., 2_I4P, n, size(cl%ilw_body, 2, kind=I4P), size(cl%ilw_kappa, 3, kind=I4P), cl%body, &
+                    cl%distance, cl%clearance, cl%second_body, cl%second_foot, cl%ilw_t, cl%ilw_element, cl%ilw_normal, &
+                    cl%ilw_body, cl%ilw_kappa, cl%ilw_direction)
+   do b = 1_I4P, nb
+      if (nvs(b) < 1_I4P) cycle
+      call closure_arrays(tb, 2_I4P, n, m, wc, wv, wi)
+      tb%ni = ni ; tb%nj = nj ; tb%nk = 1_I4P ; tb%reach(1:2) = reach(1:2) ; tb%lengths = ll
+      tb%ijk = cl%ijk ; tb%points = cl%points ; tb%mask = cl%mask ; tb%steps = cl%steps
+      if (posed) then
+         call fill_2d_host(curves(b), pc(b)%u, pc(b)%v, pc(b)%nxt, x, y, ll, poses(b), wc, wv, lvs(:, b), avs(3, b), &
+                           cs(:, b), wi, tb)
+      else
+         call fill_2d_host(curves(b), pc(b)%u, pc(b)%v, pc(b)%nxt, x, y, ll, wc=wc, wv=wv, lv=lvs(:, b), aw=avs(3, b), &
+                           c=cs(:, b), wi=wi, cl=tb)
+      endif
+      call merge_table(.false., b, tb, cl)
+      call ib_closure_reset(tb)
+   enddo
+   if (nb > 1_I4P) then
+      allocate(qd(n), qc(2, n))
+      do b = 1_I4P, nb
+         if (nvs(b) < 1_I4P) cycle
+         if (posed) then
+            call curves(b)%query_many(points=cl%foot, distances=qd, closest_points=qc, pose=poses(b))
+         else
+            call curves(b)%query_many(points=cl%foot, distances=qd, closest_points=qc)
+         endif
+         call merge_clear(.false., 2_I4P, n, b, qd, qc, cl%body, cl%clearance, cl%second_body, cl%second_foot)
+         if (m > 0_I4P) call blocked_2d(.false., curves(b), b, n, m, posed, prs(:, :, b), pts(:, b), cl%body, cl%foot, &
+                                        cl%probe, cl%visible)
+      enddo
+   endif
+   call bodies_flags(.false., 2_I4P, n, ni, nj, 1_I4P, cl%ijk, ncnt, cl%clearance, sd, cl%shared, cl%overlap)
+   endsubroutine bodies_2d_host
+
+   subroutine bodies_2d_device(curves, nvs, pc, x, y, reach, ll, posed, prs, pts, wc, wv, lvs, avs, cs, wi, sd, res, cl)
+   !< The device path of `fd_closure_2d_bodies` (see `bodies_3d_device`).
+   type(curve_object),   intent(in), target :: curves(:)            !< Curves (mapped).
+   integer(I4P),         intent(in)         :: nvs(:)               !< Vertices per curve.
+   type(placed_curve_t), intent(in)         :: pc(:)                !< Placed vertices.
+   real(R8P),            intent(in)         :: x(:), y(:)           !< Point lines.
+   integer(I4P),         intent(in)         :: reach(:)             !< Reach.
+   real(R8P),            intent(in)         :: ll(:)                !< Probe lengths.
+   logical,              intent(in)         :: posed                !< Poses given.
+   real(R8P),            intent(in)         :: prs(:,:,:), pts(:,:) !< Poses.
+   logical,              intent(in)         :: wc, wv, wi, res      !< Curvature, velocity, ILW, resident.
+   real(R8P),            intent(in)         :: lvs(:,:), avs(:,:), cs(:,:) !< Rigid velocities.
+   real(R8P),            intent(in)         :: sd                   !< Shared distance.
+   type(ib_closure_t),   intent(inout)      :: cl                   !< Table.
+   type(ib_closure_t)        :: w                                   !< The table built on the device.
+   logical,      allocatable :: nd(:,:,:)                           !< Point inside flags.
+   integer(I4P), allocatable :: ncnt(:,:,:), cnt(:), off(:)         !< Curves per point, ghost counts, offsets.
+   real(R8P)                 :: z(1)                                !< No z line.
+   integer(I4P)              :: nb, b, ni, nj, np, n, m, r(3), op   !< Work.
+
+   nb = size(nvs, kind=I4P) ; ni = size(x, kind=I4P) ; nj = size(y, kind=I4P) ; np = ni * nj ; z = 0._R8P
+   m = size(ll, kind=I4P) ; r(1:2) = reach(1:2) ; r(3) = 0_I4P
+   allocate(nd(ni, nj, 1), ncnt(ni, nj, 1), cnt(np), off(np))
+   !$acc data copyin(x, y, z) create(nd, ncnt, cnt, off)
+   call zero_counts_dev(np, ncnt)
+   do b = 1_I4P, nb
+      if (nvs(b) < 1_I4P) cycle
+      call nodes_body_2d_dev(pc(b)%u, pc(b)%v, pc(b)%nxt, x, y, ncnt)
+   enddo
+   call union_dev(np, ncnt, nd, op)
+   call ghost_count_dev(2_I4P, ni, nj, 1_I4P, nd, r, cnt)
+   call links_scan_dev(np, cnt, off, n)
+   call closure_arrays(w, 2_I4P, n, m, wc, wv, wi) ; call closure_arrays_bodies(w, nb, sd)
+   w%ni = ni ; w%nj = nj ; w%nk = 1_I4P ; w%reach = r ; w%lengths = ll ; w%overlap_points = op
+   call map_create(w)
+   if (n > 0_I4P) then
+      call ghost_fill_dev(2_I4P, ni, nj, 1_I4P, nd, x, y, z, r, cnt, off, n, w%ijk, w%points, w%mask, w%steps)
+      call bodies_init(.true., 2_I4P, n, size(w%ilw_body, 2, kind=I4P), size(w%ilw_kappa, 3, kind=I4P), w%body, &
+                       w%distance, w%clearance, w%second_body, w%second_foot, w%ilw_t, w%ilw_element, w%ilw_normal, &
+                       w%ilw_body, w%ilw_kappa, w%ilw_direction)
+      do b = 1_I4P, nb
+         if (nvs(b) < 1_I4P) cycle
+         call fill_body_2d_dev(curves(b), b, pc(b), posed, prs(:, :, b), pts(:, b), wc, wv, lvs(:, b), avs(3, b), &
+                               cs(:, b), wi, x, y, w)
+      enddo
+      if (nb > 1_I4P) then
+         do b = 1_I4P, nb
+            if (nvs(b) < 1_I4P) cycle
+            call clear_body_2d_dev(curves(b), b, posed, prs(:, :, b), pts(:, b), w)
+            if (m > 0_I4P) call blocked_2d(.true., curves(b), b, n, m, posed, prs(:, :, b), pts(:, b), w%body, w%foot, &
+                                           w%probe, w%visible)
+         enddo
+      endif
+      call bodies_flags(.true., 2_I4P, n, ni, nj, 1_I4P, w%ijk, ncnt, w%clearance, sd, w%shared, w%overlap)
+   endif
+   !$acc end data
+   call finish_device(w, res, cl)
+   endsubroutine bodies_2d_device
+
+   subroutine nodes_body_2d_dev(u, v, nxt, x, y, ncnt)
+   !< One curve's node flags on the device (`node_parity` per point over the rows of `node_rows`), added to the counts.
+   real(R8P),    intent(in)    :: u(:), v(:)  !< Vertices (placed).
+   integer(I4P), intent(in)    :: nxt(:)      !< Next vertex.
+   real(R8P),    intent(in)    :: x(:), y(:)  !< Point lines (present).
+   integer(I4P), intent(inout) :: ncnt(size(x), size(y), 1) !< Curves per point (present).
+   integer(I4P), allocatable :: rstart(:), rseg(:) !< Rows.
+   integer(I4P) :: i, j, ni, nj, nu, nr      !< Work.
+
+   ni = size(x, kind=I4P) ; nj = size(y, kind=I4P) ; nu = size(u, kind=I4P)
+   call node_rows(u, v, nxt, y, rstart, rseg)
+   nr = size(rseg, kind=I4P)
+   !$acc data copyin(u, v, nxt, rstart, rseg)
+   !$acc parallel loop gang vector collapse(2) default(present) present(u, v, nxt, rstart, rseg, x, y, ncnt)
+   do j = 1_I4P, nj
+      do i = 1_I4P, ni
+         if (node_parity(x(i), y(j), rstart(j), rstart(j + 1) - 1_I4P, nr, rseg, nu, u, v, nxt)) &
+            ncnt(i, j, 1) = ncnt(i, j, 1) + 1_I4P
+      enddo
+   enddo
+   !$acc end data
+   endsubroutine nodes_body_2d_dev
+
+   subroutine fill_body_2d_dev(curve, b, pc, posed, pr, pt, wc, wv, lv, aw, c, wi, x, y, w)
+   !< 2-D twin of `fill_body_3d_dev`.
+   type(curve_object),   intent(in), target :: curve           !< Curve (mapped).
+   integer(I4P),         intent(in)         :: b               !< Curve index.
+   type(placed_curve_t), intent(in)         :: pc              !< Placed vertices.
+   logical,              intent(in)         :: posed           !< A pose.
+   real(R8P),            intent(in)         :: pr(2, 2), pt(2) !< Pose.
+   logical,              intent(in)         :: wc, wv, wi      !< Curvature, velocity, ILW.
+   real(R8P),            intent(in)         :: lv(3), aw, c(3) !< Rigid velocity (angular: scalar).
+   real(R8P),            intent(in)         :: x(:), y(:)      !< Point lines (present).
+   type(ib_closure_t),   intent(inout)      :: w               !< Table (mapped, ghosts filled).
+   type(ib_closure_t) :: tb                                    !< The curve's work table.
+
+   !$acc data copyin(pc%u, pc%v, pc%nxt, pc%spatch)
+   call closure_arrays(tb, 2_I4P, w%n, w%m, wc, wv, wi)
+   tb%ni = w%ni ; tb%nj = w%nj ; tb%nk = w%nk ; tb%reach = w%reach ; tb%lengths = w%lengths
+   call map_create(tb)
+   call copy_ghosts(.true., 2_I4P, w%n, w%ijk, w%points, w%mask, w%steps, tb%ijk, tb%points, tb%mask, tb%steps)
+   call fill_2d_dev(curve, pc%u, pc%v, pc%nxt, pc%spatch, posed, pr, pt, wc, wv, lv, aw, c, wi, x, y, tb)
+   call merge_table(.true., b, tb, w)
+   call map_delete(tb)
+   !$acc end data
+   endsubroutine fill_body_2d_dev
+
+   subroutine clear_body_2d_dev(curve, b, posed, pr, pt, w)
+   !< 2-D twin of `clear_body_3d_dev`.
+   type(curve_object), intent(in), target :: curve           !< Curve (mapped).
+   integer(I4P),       intent(in)         :: b               !< Curve index.
+   logical,            intent(in)         :: posed           !< A pose.
+   real(R8P),          intent(in)         :: pr(2, 2), pt(2) !< Pose.
+   type(ib_closure_t), intent(inout)      :: w               !< Table (mapped).
+   real(R8P),    allocatable :: qp(:,:), qd(:), qc(:,:), qn(:,:), qw(:,:) !< Work.
+   integer(I4P), allocatable :: qs(:), qv(:), qb(:)                 !< Work.
+   integer(I4P) :: n                                                !< Ghosts.
+
+   n = w%n
+   allocate(qp(2, n), qd(n), qc(2, n), qn(2, n), qw(2, n), qs(n), qv(n), qb(n))
+   !$acc data create(qp, qd, qc, qn, qw, qs, qv, qb)
+   call body_points_2d_dev(n, w%foot, posed, pr, pt, qp)
+   call curve%query_present(n, qp, .true., .false., qd, qc, qs, qv, qn, qb)
+   call world_points_2d_dev(n, posed, pr, pt, qc, qw)
+   call merge_clear(.true., 2_I4P, n, b, qd, qw, w%body, w%clearance, w%second_body, w%second_foot)
+   !$acc end data
+   endsubroutine clear_body_2d_dev
+
+   subroutine merge_table(dev, b, tb, w)
+   !< Merge body b's table tb at the ghosts of w into w: `merge_ghosts`, and `merge_ilw` with ILW (arrays present if dev).
+   logical,            intent(in)    :: dev !< On the device.
+   integer(I4P),       intent(in)    :: b   !< Body index.
+   type(ib_closure_t), intent(in)    :: tb  !< Body b's table.
+   type(ib_closure_t), intent(inout) :: w   !< Table.
+
+   call merge_ghosts(dev, w%dims, w%n, w%m, size(w%kappa, 2, kind=I4P), size(w%velocity, 2, kind=I4P), b, tb%distance, &
+                     tb%foot, tb%normal, tb%element, tb%feature, tb%body, tb%patch, tb%probe, tb%visible, tb%probe_cell, &
+                     tb%kappa, tb%direction, tb%velocity, w%distance, w%foot, w%normal, w%element, w%feature, w%body, &
+                     w%sub_body, w%patch, w%probe, w%visible, w%probe_cell, w%kappa, w%direction, w%velocity)
+   if (w%with_ilw) call merge_ilw(dev, w%dims, w%n, size(w%ilw_kappa, 3, kind=I4P), b, tb%ilw_t, tb%ilw_element, &
+                                  tb%ilw_normal, tb%ilw_kappa, tb%ilw_direction, w%ilw_t, w%ilw_element, w%ilw_normal, &
+                                  w%ilw_kappa, w%ilw_direction, w%ilw_body)
+   endsubroutine merge_table
+
+   subroutine merge_ghosts(dev, dims, n, m, nc, nvl, b, td, tf, tn, te, tft, tbd, tp, tpr, tvi, tpc, tk, tdir, tvel, &
+                           d, f, nrm, e, ft, own, sub, p, pr, vi, pc, k, dir, vel)
+   !< Per ghost: body b becomes the owner when the ghost has none yet or |its distance| is below the owner's (strict: ties
+   !< keep the lower body index); then every per-ghost field of the owner is copied from b's table (body = b, sub_body =
+   !< b's facet_body). Copies and comparisons only, so the host and device merges are equal bit for bit. One kernel per
+   !< non-empty group (a zero-size array is never mapped), the owners and distances last: every kernel decides on the
+   !< same values.
+   logical,      intent(in)    :: dev                    !< On the device (arrays present).
+   integer(I4P), intent(in)    :: dims, n, m, nc, nvl, b !< Dimensions, ghosts, probes, curvature and velocity sizes, body.
+   real(R8P),    intent(in)    :: td(n), tf(dims, n), tn(dims, n) !< b: distances, feet, normals.
+   integer(I4P), intent(in)    :: te(n), tft(n), tbd(n), tp(n)    !< b: elements, features, facet_bodies, patches.
+   real(R8P),    intent(in)    :: tpr(dims, m, n)        !< b: probes.
+   logical,      intent(in)    :: tvi(m, n)              !< b: visibility.
+   integer(I4P), intent(in)    :: tpc(dims, m, n)        !< b: probe cells.
+   real(R8P),    intent(in)    :: tk(dims - 1, nc), tdir(dims, dims - 1, nc), tvel(dims, nvl) !< b: curvature, velocity.
+   real(R8P),    intent(inout) :: d(n), f(dims, n), nrm(dims, n) !< Distances, feet, normals.
+   integer(I4P), intent(inout) :: e(n), ft(n), own(n), sub(n), p(n) !< Elements, features, owners, sub-bodies, patches.
+   real(R8P),    intent(inout) :: pr(dims, m, n)         !< Probes.
+   logical,      intent(inout) :: vi(m, n)               !< Visibility.
+   integer(I4P), intent(inout) :: pc(dims, m, n)         !< Probe cells.
+   real(R8P),    intent(inout) :: k(dims - 1, nc), dir(dims, dims - 1, nc), vel(dims, nvl) !< Curvature, velocity.
+   integer(I4P) :: g, a, kk, q                           !< Counters.
+
+   if (m > 0_I4P) then
+      !$acc parallel loop gang vector default(present) present(td, own, d, tpr, tvi, tpc, pr, vi, pc) private(a, kk) if(dev)
+      do g = 1_I4P, n
+         if (own(g) == 0_I4P .or. abs(td(g)) < abs(d(g))) then
+            do kk = 1_I4P, m
+               vi(kk, g) = tvi(kk, g)
+               do a = 1_I4P, dims
+                  pr(a, kk, g) = tpr(a, kk, g) ; pc(a, kk, g) = tpc(a, kk, g)
+               enddo
+            enddo
+         endif
+      enddo
+   endif
+   if (nc > 0_I4P) then
+      !$acc parallel loop gang vector default(present) present(td, own, d, tk, tdir, k, dir) private(a, q) if(dev)
+      do g = 1_I4P, n
+         if (own(g) == 0_I4P .or. abs(td(g)) < abs(d(g))) then
+            do q = 1_I4P, dims - 1_I4P
+               k(q, g) = tk(q, g)
+               do a = 1_I4P, dims
+                  dir(a, q, g) = tdir(a, q, g)
+               enddo
+            enddo
+         endif
+      enddo
+   endif
+   if (nvl > 0_I4P) then
+      !$acc parallel loop gang vector default(present) present(td, own, d, tvel, vel) private(a) if(dev)
+      do g = 1_I4P, n
+         if (own(g) == 0_I4P .or. abs(td(g)) < abs(d(g))) then
+            do a = 1_I4P, dims
+               vel(a, g) = tvel(a, g)
+            enddo
+         endif
+      enddo
+   endif
+   !$acc parallel loop gang vector default(present) present(td, tf, tn, te, tft, tbd, tp, d, f, nrm, e, ft, own, sub, p) &
+   !$acc&  private(a) if(dev)
+   do g = 1_I4P, n
+      if (own(g) == 0_I4P .or. abs(td(g)) < abs(d(g))) then
+         own(g) = b ; d(g) = td(g) ; e(g) = te(g) ; ft(g) = tft(g) ; sub(g) = tbd(g) ; p(g) = tp(g)
+         do a = 1_I4P, dims
+            f(a, g) = tf(a, g) ; nrm(a, g) = tn(a, g)
+         enddo
+      endif
+   enddo
+   endsubroutine merge_ghosts
+
+   subroutine merge_ilw(dev, dims, n, nc, b, tt, tel, tnrm, tk, tdir, it, iel, inrm, ik, idir, ib)
+   !< Per ILW slot: body b's crossing replaces the slot's when the slot has none yet or b's lies strictly nearer the fluid
+   !< point (a larger coordinate on a + slot, a smaller one on a - slot; ties keep the lower body index); its element,
+   !< normal and curvature are copied, ilw_body = b. The curvature kernel first (it decides on the unchanged slots).
+   logical,      intent(in)    :: dev                     !< On the device (arrays present).
+   integer(I4P), intent(in)    :: dims, n, nc, b          !< Dimensions, ghosts, curvature size, body.
+   real(R8P),    intent(in)    :: tt(2 * dims, n)         !< b: crossing coordinates.
+   integer(I4P), intent(in)    :: tel(2 * dims, n)        !< b: crossing elements.
+   real(R8P),    intent(in)    :: tnrm(dims, 2 * dims, n) !< b: normals.
+   real(R8P),    intent(in)    :: tk(dims - 1, 2 * dims, nc), tdir(dims, dims - 1, 2 * dims, nc) !< b: curvature.
+   real(R8P),    intent(inout) :: it(2 * dims, n)         !< Crossing coordinates.
+   integer(I4P), intent(inout) :: iel(2 * dims, n)        !< Crossing elements.
+   real(R8P),    intent(inout) :: inrm(dims, 2 * dims, n) !< Normals.
+   real(R8P),    intent(inout) :: ik(dims - 1, 2 * dims, nc), idir(dims, dims - 1, 2 * dims, nc) !< Curvature.
+   integer(I4P), intent(inout) :: ib(2 * dims, n)         !< Crossing bodies.
+   integer(I4P) :: g, l, a, q                             !< Counters.
+
+   if (nc > 0_I4P) then
+      !$acc parallel loop gang vector collapse(2) default(present) present(tt, tel, it, ib, tk, tdir, ik, idir) &
+      !$acc&  private(a, q) if(dev)
+      do g = 1_I4P, n
+         do l = 1_I4P, 2_I4P * dims
+            if (ilw_take_oac(l, tel(l, g), ib(l, g), tt(l, g), it(l, g))) then
+               do q = 1_I4P, dims - 1_I4P
+                  ik(q, l, g) = tk(q, l, g)
+                  do a = 1_I4P, dims
+                     idir(a, q, l, g) = tdir(a, q, l, g)
+                  enddo
+               enddo
+            endif
+         enddo
+      enddo
+   endif
+   !$acc parallel loop gang vector collapse(2) default(present) present(tt, tel, tnrm, it, iel, inrm, ib) private(a) if(dev)
+   do g = 1_I4P, n
+      do l = 1_I4P, 2_I4P * dims
+         if (ilw_take_oac(l, tel(l, g), ib(l, g), tt(l, g), it(l, g))) then
+            ib(l, g) = b ; it(l, g) = tt(l, g) ; iel(l, g) = tel(l, g)
+            do a = 1_I4P, dims
+               inrm(a, l, g) = tnrm(a, l, g)
+            enddo
+         endif
+      enddo
+   enddo
+   endsubroutine merge_ilw
+
+   pure logical function ilw_take_oac(l, tel, ib, tt, it) result(take)
+   !< Kernel: a body's crossing (element tel, coordinate tt) replaces the crossing of ILW slot l (body ib, coordinate it).
+   !$acc routine seq
+   integer(I4P), intent(in) :: l, tel, ib !< Slot, candidate element, current body.
+   real(R8P),    intent(in) :: tt, it     !< Candidate and current coordinates.
+
+   take = .false.
+   if (tel < 1_I4P) return
+   if (ib == 0_I4P) then
+      take = .true.
+   elseif (mod(l, 2_I4P) == 0_I4P) then
+      take = tt > it
+   else
+      take = tt < it
+   endif
+   endfunction ilw_take_oac
+
+   subroutine merge_clear(dev, dims, n, b, qd, qc, own, clr, sb, sf)
+   !< Per ghost not owned by body b: |qd| (the unsigned distance of the owner's foot to b) replaces the clearance when
+   !< the ghost has no second body yet or it is strictly smaller (ties keep the lower body index); second_foot = qc.
+   logical,      intent(in)    :: dev          !< On the device (arrays present).
+   integer(I4P), intent(in)    :: dims, n, b   !< Dimensions, ghosts, body.
+   real(R8P),    intent(in)    :: qd(n)        !< Distances of the feet to b.
+   real(R8P),    intent(in)    :: qc(dims, n)  !< Closest points of b (world).
+   integer(I4P), intent(in)    :: own(n)       !< Owners.
+   real(R8P),    intent(inout) :: clr(n)       !< Clearances.
+   integer(I4P), intent(inout) :: sb(n)        !< Second bodies.
+   real(R8P),    intent(inout) :: sf(dims, n)  !< Second feet.
+   real(R8P)    :: dd                          !< Distance.
+   integer(I4P) :: g, a                        !< Counters.
+
+   !$acc parallel loop gang vector default(present) present(qd, qc, own, clr, sb, sf) private(dd, a) if(dev)
+   do g = 1_I4P, n
+      if (own(g) /= b) then
+         dd = abs(qd(g))
+         if (sb(g) == 0_I4P .or. dd < clr(g)) then
+            clr(g) = dd ; sb(g) = b
+            do a = 1_I4P, dims
+               sf(a, g) = qc(a, g)
+            enddo
+         endif
+      endif
+   enddo
+   endsubroutine merge_clear
+
+   subroutine blocked_3d(dev, surface, b, n, m, posed, pr, pt, nb, tols, own, foot, probe, vis)
+   !< The probes' visibility against body b (B4): for every probe of a ghost body b does not own, still visible, the open
+   !< segment foot - probe (world) moved to b's frame (`to_body`) is tested against b's SAH BVH (`bvh_segment_blocked_oac`,
+   !< the kernel of `probe_many`, with the owner's tolerance); blocked: visible = .false.
+   logical,                  intent(in)         :: dev              !< On the device (arrays present).
+   type(surface_stl_object), intent(in), target :: surface          !< Body b (mapped if dev).
+   integer(I4P),             intent(in)         :: b, n, m, nb      !< Body, ghosts, probes, bodies.
+   logical,                  intent(in)         :: posed            !< A pose.
+   real(R8P),                intent(in)         :: pr(3, 3), pt(3)  !< b's pose.
+   real(R8P),                intent(in)         :: tols(nb)         !< Visibility tolerances (present if dev).
+   integer(I4P),             intent(in)         :: own(n)           !< Owners (present if dev).
+   real(R8P),                intent(in)         :: foot(3, n)       !< Feet (present if dev).
+   real(R8P),                intent(in)         :: probe(3, m, n)   !< Probes (present if dev).
+   logical,                  intent(inout)      :: vis(m, n)        !< Visibility (present if dev).
+   type(aabb_node_object),       pointer :: node_p(:)              !< Alias of surface%aabb%node.
+   type(facet_distance_payload), pointer :: payload_p(:)           !< Alias of surface%aabb%payload.
+   real(R8P),                    pointer :: tv_p(:,:)              !< Alias of surface%tri_vertices.
+   real(R8P)    :: r(3, 3), t(3), ax, ay, az, bx, by, bz           !< Work.
+   integer(I4P) :: g, k, o                                         !< Work.
+
+   r = pr ; t = pt
+   node_p => surface%aabb%node ; payload_p => surface%aabb%payload ; tv_p => surface%tri_vertices
+   !$acc parallel loop gang vector collapse(2) default(present) present(node_p, payload_p, tv_p, tols, own, foot, probe, &
+   !$acc&  vis) copyin(r, t) private(ax, ay, az, bx, by, bz, o) if(dev)
+   do g = 1_I4P, n
+      do k = 1_I4P, m
+         o = own(g)
+         if (o /= b .and. vis(k, g)) then
+            if (posed) then
+               call to_body_3d_oac(r, t, foot(1, g), foot(2, g), foot(3, g), ax, ay, az)
+               call to_body_3d_oac(r, t, probe(1, k, g), probe(2, k, g), probe(3, k, g), bx, by, bz)
+            else
+               ax = foot(1, g) ; ay = foot(2, g) ; az = foot(3, g)
+               bx = probe(1, k, g) ; by = probe(2, k, g) ; bz = probe(3, k, g)
+            endif
+            if (bvh_segment_blocked_oac(node_p, payload_p, tv_p, ax, ay, az, bx, by, bz, tols(o))) vis(k, g) = .false.
+         endif
+      enddo
+   enddo
+   endsubroutine blocked_3d
+
+   subroutine blocked_2d(dev, curve, b, n, m, posed, pr, pt, own, foot, probe, vis)
+   !< 2-D twin of `blocked_3d`: the closed segment foot - probe in curve b's frame against all its segments
+   !< (`curve%segments_blocked_present`).
+   logical,            intent(in)         :: dev             !< On the device (arrays present).
+   type(curve_object), intent(in), target :: curve           !< Curve b (mapped if dev).
+   integer(I4P),       intent(in)         :: b, n, m         !< Curve, ghosts, probes.
+   logical,            intent(in)         :: posed           !< A pose.
+   real(R8P),          intent(in)         :: pr(2, 2), pt(2) !< b's pose.
+   integer(I4P),       intent(in)         :: own(n)          !< Owners (present if dev).
+   real(R8P),          intent(in)         :: foot(2, n)      !< Feet (present if dev).
+   real(R8P),          intent(in)         :: probe(2, m, n)  !< Probes (present if dev).
+   logical,            intent(inout)      :: vis(m, n)       !< Visibility (present if dev).
+   real(R8P), allocatable :: au(:), av(:), bu(:), bv(:)      !< Segments in b's frame.
+   logical,   allocatable :: act(:), blk(:)                  !< Tested, blocked.
+   real(R8P)    :: r(2, 2), t(2)                             !< Pose copies.
+   integer(I4P) :: g, k, l, nm                               !< Work.
+
+   r = pr ; t = pt ; nm = n * m
+   allocate(au(nm), av(nm), bu(nm), bv(nm), act(nm), blk(nm))
+   !$acc data create(au, av, bu, bv, act, blk) copyin(r, t) if(dev)
+   !$acc parallel loop gang vector collapse(2) default(present) present(own, foot, probe, vis, au, av, bu, bv, act, r, t) &
+   !$acc&  private(l) if(dev)
+   do g = 1_I4P, n
+      do k = 1_I4P, m
+         l = k + m * (g - 1_I4P)
+         act(l) = own(g) /= b .and. vis(k, g)
+         if (posed) then
+            call to_body_2d_oac(r, t, foot(1, g), foot(2, g), au(l), av(l))
+            call to_body_2d_oac(r, t, probe(1, k, g), probe(2, k, g), bu(l), bv(l))
+         else
+            au(l) = foot(1, g) ; av(l) = foot(2, g) ; bu(l) = probe(1, k, g) ; bv(l) = probe(2, k, g)
+         endif
+      enddo
+   enddo
+   call curve%segments_blocked_present(nm, au, av, bu, bv, act, blk, dev)
+   !$acc parallel loop gang vector collapse(2) default(present) present(vis, blk) private(l) if(dev)
+   do g = 1_I4P, n
+      do k = 1_I4P, m
+         l = k + m * (g - 1_I4P)
+         if (blk(l)) vis(k, g) = .false.
+      enddo
+   enddo
+   !$acc end data
+   endsubroutine blocked_2d
+
+   subroutine bodies_init(dev, dims, n, nil, ncl, own, d, clr, sb, sf, it, iel, inrm, ib, ik, idir)
+   !< Before the merges: no owner, distance 0, clearance huge, no second body; every ILW slot empty (zeros).
+   logical,      intent(in)    :: dev                     !< On the device (arrays present).
+   integer(I4P), intent(in)    :: dims, n, nil, ncl       !< Dimensions, ghosts, ILW and ILW curvature sizes.
+   integer(I4P), intent(inout) :: own(n), sb(n)           !< Owners, second bodies.
+   real(R8P),    intent(inout) :: d(n), clr(n), sf(dims, n) !< Distances, clearances, second feet.
+   real(R8P),    intent(inout) :: it(2 * dims, nil)       !< Crossing coordinates.
+   integer(I4P), intent(inout) :: iel(2 * dims, nil)      !< Crossing elements.
+   real(R8P),    intent(inout) :: inrm(dims, 2 * dims, nil) !< Normals.
+   integer(I4P), intent(inout) :: ib(2 * dims, nil)       !< Crossing bodies.
+   real(R8P),    intent(inout) :: ik(dims - 1, 2 * dims, ncl), idir(dims, dims - 1, 2 * dims, ncl) !< Curvature.
+   integer(I4P) :: g, l, a, q                             !< Counters.
+
+   !$acc parallel loop gang vector default(present) present(own, sb, d, clr, sf) private(a) if(dev)
+   do g = 1_I4P, n
+      own(g) = 0_I4P ; sb(g) = 0_I4P ; d(g) = 0._R8P ; clr(g) = huge(1._R8P)
+      do a = 1_I4P, dims
+         sf(a, g) = 0._R8P
+      enddo
+   enddo
+   if (nil > 0_I4P) then
+      !$acc parallel loop gang vector collapse(2) default(present) present(it, iel, inrm, ib) private(a) if(dev)
+      do g = 1_I4P, nil
+         do l = 1_I4P, 2_I4P * dims
+            it(l, g) = 0._R8P ; iel(l, g) = 0_I4P ; ib(l, g) = 0_I4P
+            do a = 1_I4P, dims
+               inrm(a, l, g) = 0._R8P
+            enddo
+         enddo
+      enddo
+   endif
+   if (ncl > 0_I4P) then
+      !$acc parallel loop gang vector collapse(2) default(present) present(ik, idir) private(a, q) if(dev)
+      do g = 1_I4P, ncl
+         do l = 1_I4P, 2_I4P * dims
+            do q = 1_I4P, dims - 1_I4P
+               ik(q, l, g) = 0._R8P
+               do a = 1_I4P, dims
+                  idir(a, q, l, g) = 0._R8P
+               enddo
+            enddo
+         enddo
+      enddo
+   endif
+   endsubroutine bodies_init
+
+   subroutine bodies_flags(dev, dims, n, ni, nj, nk, ijk, ncnt, clr, sd, shared, overlap)
+   !< Per ghost: shared = clearance < sd, overlap = its point lies inside two or more bodies.
+   logical,      intent(in)    :: dev                !< On the device (arrays present).
+   integer(I4P), intent(in)    :: dims, n, ni, nj, nk !< Dimensions, ghosts, points per axis.
+   integer(I4P), intent(in)    :: ijk(dims, n)       !< Ghost indexes.
+   integer(I4P), intent(in)    :: ncnt(ni, nj, nk)   !< Bodies per point.
+   real(R8P),    intent(in)    :: clr(n)             !< Clearances.
+   real(R8P),    intent(in)    :: sd                 !< Shared distance.
+   logical,      intent(inout) :: shared(n), overlap(n) !< Flags.
+   integer(I4P) :: g, k                              !< Work.
+
+   !$acc parallel loop gang vector default(present) present(ijk, ncnt, clr, shared, overlap) private(k) if(dev)
+   do g = 1_I4P, n
+      k = 1_I4P ; if (dims == 3_I4P) k = ijk(3, g)
+      overlap(g) = ncnt(ijk(1, g), ijk(2, g), k) >= 2_I4P
+      shared(g) = clr(g) < sd
+   enddo
+   endsubroutine bodies_flags
+
+   subroutine copy_ghosts(dev, dims, n, ijk, pts, mask, steps, ijk_d, pts_d, mask_d, steps_d)
+   !< Copy the ghosts of a table into a work table (arrays present if dev).
+   logical,      intent(in)    :: dev                                   !< On the device.
+   integer(I4P), intent(in)    :: dims, n                               !< Dimensions, ghosts.
+   integer(I4P), intent(in)    :: ijk(dims, n), mask(n), steps(2 * dims, n) !< Source indexes, masks, steps.
+   real(R8P),    intent(in)    :: pts(dims, n)                          !< Source points.
+   integer(I4P), intent(inout) :: ijk_d(dims, n), mask_d(n), steps_d(2 * dims, n) !< Copies.
+   real(R8P),    intent(inout) :: pts_d(dims, n)                        !< Copy.
+   integer(I4P) :: g, a                                                 !< Counters.
+
+   !$acc parallel loop gang vector default(present) present(ijk, pts, mask, steps, ijk_d, pts_d, mask_d, steps_d) &
+   !$acc&  private(a) if(dev)
+   do g = 1_I4P, n
+      mask_d(g) = mask(g)
+      do a = 1_I4P, dims
+         ijk_d(a, g) = ijk(a, g) ; pts_d(a, g) = pts(a, g)
+      enddo
+      do a = 1_I4P, 2_I4P * dims
+         steps_d(a, g) = steps(a, g)
+      enddo
+   enddo
+   endsubroutine copy_ghosts
+
+   subroutine zero_counts_dev(np, ncnt)
+   !< Zero the bodies-per-point counts (present).
+   integer(I4P), intent(in)    :: np       !< Points.
+   integer(I4P), intent(inout) :: ncnt(np) !< Counts (present).
+   integer(I4P) :: p                       !< Counter.
+
+   !$acc parallel loop gang vector default(present) present(ncnt)
+   do p = 1_I4P, np
+      ncnt(p) = 0_I4P
+   enddo
+   endsubroutine zero_counts_dev
+
+   subroutine union_dev(np, ncnt, nd, op)
+   !< The union of the bodies' states (inside if inside one body) and the number of points inside two or more (present).
+   integer(I4P), intent(in)    :: np       !< Points.
+   integer(I4P), intent(in)    :: ncnt(np) !< Bodies per point (present).
+   logical,      intent(inout) :: nd(np)   !< Point inside flags (present).
+   integer(I4P), intent(out)   :: op       !< Points inside two or more bodies.
+   integer(I4P) :: p, c                    !< Work.
+
+   c = 0_I4P
+   !$acc parallel loop gang vector default(present) present(ncnt, nd) reduction(+:c)
+   do p = 1_I4P, np
+      nd(p) = ncnt(p) > 0_I4P
+      if (ncnt(p) >= 2_I4P) c = c + 1_I4P
+   enddo
+   op = c
+   endsubroutine union_dev
+
+   subroutine world_points_3d_dev(n, posed, pr, pt, qc, qw)
+   !< Body-frame points to the world (`to_world`), or copied without a pose (present).
+   integer(I4P), intent(in)    :: n               !< Points.
+   logical,      intent(in)    :: posed           !< A pose.
+   real(R8P),    intent(in)    :: pr(3, 3), pt(3) !< Pose.
+   real(R8P),    intent(in)    :: qc(3, n)        !< Body points (present).
+   real(R8P),    intent(inout) :: qw(3, n)        !< World points (present).
+   real(R8P)    :: r(3, 3), t(3)                  !< Pose copies.
+   integer(I4P) :: g                              !< Counter.
+
+   r = pr ; t = pt
+   !$acc parallel loop gang vector default(present) present(qc, qw) copyin(r, t)
+   do g = 1_I4P, n
+      if (posed) then
+         call to_world_3d_oac(r, t, qc(1, g), qc(2, g), qc(3, g), qw(1, g), qw(2, g), qw(3, g))
+      else
+         qw(1, g) = qc(1, g) ; qw(2, g) = qc(2, g) ; qw(3, g) = qc(3, g)
+      endif
+   enddo
+   endsubroutine world_points_3d_dev
+
+   subroutine world_points_2d_dev(n, posed, pr, pt, qc, qw)
+   !< 2-D twin of `world_points_3d_dev`.
+   integer(I4P), intent(in)    :: n               !< Points.
+   logical,      intent(in)    :: posed           !< A pose.
+   real(R8P),    intent(in)    :: pr(2, 2), pt(2) !< Pose.
+   real(R8P),    intent(in)    :: qc(2, n)        !< Body points (present).
+   real(R8P),    intent(inout) :: qw(2, n)        !< World points (present).
+   real(R8P)    :: r(2, 2), t(2)                  !< Pose copies.
+   integer(I4P) :: g                              !< Counter.
+
+   r = pr ; t = pt
+   !$acc parallel loop gang vector default(present) present(qc, qw) copyin(r, t)
+   do g = 1_I4P, n
+      if (posed) then
+         call to_world_2d_oac(r, t, qc(1, g), qc(2, g), qw(1, g), qw(2, g))
+      else
+         qw(1, g) = qc(1, g) ; qw(2, g) = qc(2, g)
+      endif
+   enddo
+   endsubroutine world_points_2d_dev
+
+   subroutine bodies_velocities(dims, nb, st, linear_velocities, angular_velocities, centres, lvs, avs, cs, wv)
+   !< Resolve the per-body rigid velocity inputs (defaults 0) and check their shapes ([dims, nb], [3, nb], [dims, nb]);
+   !< st = STATUS_INVALID_INPUT if one is wrong.
+   integer(I4P), intent(in)           :: dims, nb                   !< Dimensions, bodies.
+   integer(I4P), intent(inout)        :: st                         !< Status.
+   real(R8P),    intent(in), optional :: linear_velocities(:,:)     !< Linear velocities.
+   real(R8P),    intent(in), optional :: angular_velocities(:,:)    !< Angular velocities [3, nb] (2-D: [0, 0, omega]).
+   real(R8P),    intent(in), optional :: centres(:,:)               !< Centres.
+   real(R8P),    intent(inout)        :: lvs(:,:), avs(:,:), cs(:,:) !< Resolved [3, >= nb].
+   logical,      intent(out)          :: wv                         !< Velocities asked.
+
+   lvs = 0._R8P ; avs = 0._R8P ; cs = 0._R8P
+   wv = present(linear_velocities) .or. present(angular_velocities)
+   if (present(linear_velocities)) then
+      if (size(linear_velocities, 1) /= dims .or. size(linear_velocities, 2) /= nb) then
+         st = STATUS_INVALID_INPUT
+      else
+         lvs(1:dims, 1:nb) = linear_velocities
+      endif
+   endif
+   if (present(angular_velocities)) then
+      if (size(angular_velocities, 1) /= 3 .or. size(angular_velocities, 2) /= nb) then
+         st = STATUS_INVALID_INPUT
+      else
+         avs(:, 1:nb) = angular_velocities
+      endif
+   endif
+   if (present(centres)) then
+      if (size(centres, 1) /= dims .or. size(centres, 2) /= nb) then
+         st = STATUS_INVALID_INPUT
+      else
+         cs(1:dims, 1:nb) = centres
+      endif
+   endif
+   endsubroutine bodies_velocities
+
+   pure function default_shared(x, y, z, reach, dims) result(sd)
+   !< The default shared distance: the largest reach(a) times the largest spacing along axis a.
+   real(R8P),    intent(in) :: x(:), y(:), z(:) !< Point lines.
+   integer(I4P), intent(in) :: reach(:)         !< Reach.
+   integer(I4P), intent(in) :: dims             !< Dimensions.
+   real(R8P)                :: sd               !< Shared distance.
+
+   sd = max(reach(1) * spacing_max(x), reach(2) * spacing_max(y))
+   if (dims == 3_I4P) sd = max(sd, reach(3) * spacing_max(z))
+   endfunction default_shared
+
+   pure function spacing_max(e) result(h)
+   !< The largest spacing of a line (0 with fewer than two points).
+   real(R8P), intent(in) :: e(:) !< Line.
+   real(R8P)                :: h !< Spacing.
+   integer(I4P)             :: i !< Counter.
+
+   h = 0._R8P
+   do i = 2_I4P, size(e, kind=I4P)
+      h = max(h, e(i) - e(i - 1_I4P))
+   enddo
+   endfunction spacing_max
+
    ! private: the table's arrays
 
    subroutine closure_arrays(cl, dims, n, m, wc, wv, wi)
@@ -1515,7 +2790,23 @@ contains
    else
       allocate(cl%ilw_kappa(dims - 1, 2 * dims, 0), cl%ilw_direction(dims, dims - 1, 2 * dims, 0))
    endif
+   allocate(cl%sub_body(0), cl%clearance(0), cl%second_body(0), cl%second_foot(dims, 0), cl%shared(0), cl%overlap(0), &
+            cl%ilw_body(2 * dims, 0))
    endsubroutine closure_arrays
+
+   subroutine closure_arrays_bodies(cl, nb, sd)
+   !< After `closure_arrays`: the several-bodies fields sized for the n ghosts (`ilw_body` with ILW), the flag and scalars.
+   type(ib_closure_t), intent(inout) :: cl !< Table.
+   integer(I4P),       intent(in)    :: nb !< Surfaces (curves).
+   real(R8P),          intent(in)    :: sd !< Shared distance.
+   integer(I4P) :: n, nil                  !< Sizes.
+
+   n = cl%n ; nil = 0_I4P ; if (cl%with_ilw) nil = n
+   cl%with_bodies = .true. ; cl%bodies = nb ; cl%shared_distance = sd ; cl%overlap_points = 0_I4P
+   deallocate(cl%sub_body, cl%clearance, cl%second_body, cl%second_foot, cl%shared, cl%overlap, cl%ilw_body)
+   allocate(cl%sub_body(n), cl%clearance(n), cl%second_body(n), cl%second_foot(cl%dims, n), cl%shared(n), cl%overlap(n), &
+            cl%ilw_body(2 * cl%dims, nil))
+   endsubroutine closure_arrays_bodies
 
    subroutine map_create(w)
    !< Create the device copies of the arrays of a table built on the device (unstructured data on a local table: its
@@ -1523,6 +2814,7 @@ contains
    type(ib_closure_t), intent(inout) :: w !< Table.
 
    logical :: ga, gb, gc, gv, gi, gk !< Non-empty groups (zero-size arrays are never mapped).
+   logical :: gs, gsi                !< Non-empty bodies groups.
 
    call groups(w, ga, gb, gc, gv, gi, gk)
    !$acc enter data create(w%ijk, w%points, w%mask, w%steps, w%distance, w%foot, w%normal, w%element, w%feature, w%body, &
@@ -1533,7 +2825,30 @@ contains
    !$acc enter data create(w%velocity) if(gv)
    !$acc enter data create(w%ilw_t, w%ilw_element, w%ilw_normal) if(gi)
    !$acc enter data create(w%ilw_kappa, w%ilw_direction) if(gk)
+   call groups_bodies(w, gs, gsi)
+   !$acc enter data create(w%sub_body, w%clearance, w%second_body, w%second_foot, w%shared, w%overlap) if(gs)
+   !$acc enter data create(w%ilw_body) if(gsi)
    endsubroutine map_create
+
+   subroutine map_delete(w)
+   !< Release the device copies of a table built on the device without copying them back (the per-body work tables of
+   !< the several-bodies device path).
+   type(ib_closure_t), intent(inout) :: w !< Table.
+   logical :: ga, gb, gc, gv, gi, gk     !< Non-empty groups.
+   logical :: gs, gsi                    !< Non-empty bodies groups.
+
+   call groups(w, ga, gb, gc, gv, gi, gk)
+   !$acc exit data delete(w%ijk, w%points, w%mask, w%steps, w%distance, w%foot, w%normal, w%element, w%feature, w%body, &
+   !$acc&                 w%patch) if(ga)
+   !$acc exit data delete(w%lengths, w%probe, w%visible, w%probe_cell) if(gb)
+   !$acc exit data delete(w%kappa, w%direction) if(gc)
+   !$acc exit data delete(w%velocity) if(gv)
+   !$acc exit data delete(w%ilw_t, w%ilw_element, w%ilw_normal) if(gi)
+   !$acc exit data delete(w%ilw_kappa, w%ilw_direction) if(gk)
+   call groups_bodies(w, gs, gsi)
+   !$acc exit data delete(w%sub_body, w%clearance, w%second_body, w%second_foot, w%shared, w%overlap) if(gs)
+   !$acc exit data delete(w%ilw_body) if(gsi)
+   endsubroutine map_delete
 
    subroutine finish_device(w, res, cl)
    !< End of a device path: resident, the arrays move into the caller's table, flagged; else they are copied back and
@@ -1543,8 +2858,12 @@ contains
    type(ib_closure_t), intent(inout) :: cl  !< Caller's table.
 
    logical :: ga, gb, gc, gv, gi, gk !< Non-empty groups.
+   logical :: gs, gsi                !< Non-empty bodies groups.
 
    if (.not. res .or. w%n < 1_I4P) then
+      call groups_bodies(w, gs, gsi)
+      !$acc exit data copyout(w%sub_body, w%clearance, w%second_body, w%second_foot, w%shared, w%overlap) if(gs)
+      !$acc exit data copyout(w%ilw_body) if(gsi)
       call groups(w, ga, gb, gc, gv, gi, gk)
       !$acc exit data copyout(w%ijk, w%points, w%mask, w%steps, w%distance, w%foot, w%normal, w%element, w%feature, &
       !$acc&                  w%body, w%patch) if(ga)
@@ -1566,6 +2885,11 @@ contains
    call move_alloc(w%ilw_t, cl%ilw_t) ; call move_alloc(w%ilw_element, cl%ilw_element)
    call move_alloc(w%ilw_normal, cl%ilw_normal) ; call move_alloc(w%ilw_kappa, cl%ilw_kappa)
    call move_alloc(w%ilw_direction, cl%ilw_direction)
+   cl%with_bodies = w%with_bodies ; cl%bodies = w%bodies ; cl%overlap_points = w%overlap_points
+   cl%shared_distance = w%shared_distance
+   call move_alloc(w%sub_body, cl%sub_body) ; call move_alloc(w%clearance, cl%clearance)
+   call move_alloc(w%second_body, cl%second_body) ; call move_alloc(w%second_foot, cl%second_foot)
+   call move_alloc(w%shared, cl%shared) ; call move_alloc(w%overlap, cl%overlap) ; call move_alloc(w%ilw_body, cl%ilw_body)
    if (res .and. cl%n > 0_I4P) call mark_resident(cl)
    endsubroutine finish_device
 
@@ -1582,6 +2906,15 @@ contains
    gi = ga .and. c%with_ilw
    gk = gi .and. c%with_curvature
    endsubroutine groups
+
+   subroutine groups_bodies(c, gs, gsi)
+   !< The non-empty several-bodies groups of a table: the per-ghost fields, the ILW crossing bodies.
+   type(ib_closure_t), intent(in)  :: c       !< Table.
+   logical,            intent(out) :: gs, gsi !< Groups.
+
+   gs = c%n > 0_I4P .and. c%with_bodies
+   gsi = gs .and. c%with_ilw
+   endsubroutine groups_bodies
 
    function host_key(c) result(key)
    !< Host address of points (the key of a mapped table; 0 if points is not allocated or empty).
@@ -1721,6 +3054,17 @@ contains
       k = count(bits(reshape(a, [size(a)])) /= bits(reshape(b, [size(b)])))
    endif
    endfunction mis_r4
+
+   integer(I4P) function mis_l1(a, b) result(k)
+   !< Differing entries of two logical rank-1 arrays (sizes differ: the larger size).
+   logical, intent(in) :: a(:), b(:) !< Arrays.
+
+   if (any(shape(a) /= shape(b))) then
+      k = max(size(a), size(b))
+   else
+      k = count(a .neqv. b)
+   endif
+   endfunction mis_l1
 
    integer(I4P) function mis_l(a, b) result(k)
    !< Differing entries of two logical rank-2 arrays (sizes differ: the larger size).
