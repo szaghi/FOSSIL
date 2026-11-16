@@ -278,6 +278,40 @@ shared query kernels, so host and device agree bit for bit (bench lines `load sa
 mismatches`). Map the array's elements themselves (`call bodies(b)%enter_device`): a copy of a mapped surface is not
 mapped.
 
+**Validation.** The validation program `fossil_val_bodies` (about 4 s at -O2, 0.1 GB; its closure part is on the
+[closure page](/guide/advanced/fd-closure#several-bodies)) checks the samples of several bodies and the loads of each
+body through both paths.
+
+- *Locality.* An icosphere and an ellipsoid (3-D, order 3, probes h and 2 h at h = 0.1), a NACA 0012 and an ellipse
+  (2-D, h = 0.01), each at three pose pairs farther apart than the probes: the samples of every body are its
+  single-body set at its pose, bit for bit, in body order (38 400 and 3 936 samples; 0 mismatches).
+- *Loads through the union.* In p = p0 + g · x the force on each closed body is −g V_k and its moment
+  V_k (x_c,k − c) × (−g), whatever the other body. FD: `load_samples_3d_bodies` / `_2d_bodies`, `integrate_loads` with
+  `per_body_force` / `per_body_moment`, rule orders 1–3. FV: `cut_cells_3d_bodies(walls=, piece_bodies=)` /
+  `cut_cells_2d_bodies`; the wall terms of body k are those with `piece_bodies%wall_body == k` (the pressure and its
+  gradient set to zero on the others), summed by `cut_loads_3d` with the merged surface's `cut_walls_gyration` /
+  `cut_loads_2d` with the gradient. Largest errors per case, in units of ε times the sum of the absolute terms of the
+  body (as above):
+
+| Case | Wall terms (body 1, 2) | Contact terms per body | FV F | FV M | FD F (q = 1–3) | FD M (q = 2, 3) |
+|---|---|---|---|---|---|---|
+| two spheres, gap 0.25 h (h = 0.1) | 15 687, 15 693 | 0 | 0.23 | 0.28 | 0.23 | 0.28 |
+| sphere + ellipsoid, gap ≥ 0.5 h | 15 687, 12 657 | 0 | 0.12 | 0.12 | 0.15 | 0.10 |
+| unit cubes in face contact (aligned, shifted; h = 0.13, 0.125) | 678–816 | 113–136 | 0.03 | 0.03 | 0.06 | 0.09 |
+| two circles, gap 0.25 h (h = 0.02) | 1 224, 1 224 | 0 | 0.23 | 0.11 | 0.23 | 0.11 |
+| NACA 0012 + ellipse, gap ≥ 0.5 h | 1 024, 690 | 0 | 0.01 | 0.04 | 0.04 | 0.04 |
+| unit squares in edge contact (aligned, shifted; h = 0.13, 0.125) | 32–36 | 8–9 | 0.06 | 0.07 | 0.12 | 0.07 |
+
+- Every cut cell is trusted, contacts included. In a contact both bodies keep their wall terms on the contact face,
+  with opposite vector areas, so each body's sum is the integral over its own closed surface: −g V_k. That is the
+  identity, not the load in a flow: no fluid wets the contact, and a solver that imposes the contact force replaces the
+  pressure on those terms (they lie on the contact plane; the program counts them).
+
+Pass criteria (`Are all tests passed? T` iff all hold): 0 sample mismatches at every pose pair; per body the force
+within 1 (ε S_F) on both paths and every rule order, the moment within 1 (ε S_M) where it is exact (FD from order 2,
+FV with the gradient and the gyration); every cut cell trusted and every wall term labelled with a body; every call
+`STATUS_OK`.
+
 ## Example
 
 The ellipse at a pose on cell-centred lines, three Gauss points per segment and two probes; then a sphere, the samples

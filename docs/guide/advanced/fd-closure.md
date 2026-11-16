@@ -314,6 +314,41 @@ is one query of the owners' feet per other body, the visibility one segment test
 about one single-body table at the union's ghosts. The surfaces (curves) of the array are mapped themselves: a copy of
 a mapped surface is not mapped, so map the array's elements (`call bodies(b)%enter_device`), not the originals.
 
+**Validation.** The validation program `fossil_val_bodies` (a geometry study, no flow solve; about 4 s at -O2,
+0.1 GB) checks the rule on bodies far apart and across narrow gaps.
+
+- *Locality.* An icosphere and an ellipsoid (3-D, h = 0.1), a NACA 0012 and an ellipse (2-D, h = 0.01), each at three
+  pose pairs with their own rigid velocities, curvature, two probes and ILW crossings, farther apart than 2 × reach × h
+  (least clearance 3.0–4.8 and 8.4–10.4 reach h): every ghost of the bodies table equals the ghost of its body's
+  single-body table, field by field, bit for bit, and the ghosts are the union of the two (3-D 2 662–2 703 ghosts,
+  2-D 600–615; 0 mismatches).
+- *Narrow gap.* Two spheres of radius 1 (5 120 facets, h = 0.1) and two circles of radius 0.5 (1 024 segments,
+  h = 0.02) at gaps δ = 0.25 … 4 h, reach 2 (shared distance 2 h), probes h, 2 h, 3 h. The analytic clearance of a ghost
+  is the distance from its foot f to the true other sphere, |f − c_B| − R. The other body is inscribed in its sphere and
+  contains the ball of radius R − s_B (s_B its sag), so the clearance lies in [analytic, analytic + s_B], the shared
+  ghosts number between the analytic counts N(d < sd − s_B) and N(d < sd), and a probe is blocked if its segment meets
+  the ball R − s_B and visible if it misses the ball R.
+
+| gap / h | 3-D shared | N(d < sd − s_B), N(d < sd) | blocked probes | [N(meet R − s_B), N(meet R)] | 2-D shared | N brackets | blocked | brackets |
+|---|---|---|---|---|---|---|---|---|
+| 0.25 | 130 | 130, 131 | 223 | 222, 223 | 26 | 26, 26 | 66 | 66, 66 |
+| 0.5 | 128 | 128, 129 | 234 | 234, 234 | 28 | 28, 28 | 68 | 68, 68 |
+| 1 | 112 | 112, 112 | 200 | 200, 202 | 40 | 40, 40 | 86 | 86, 86 |
+| 2 | 0 | 0, 0 | 68 | 68, 69 | 0 | 0, 0 | 36 | 36, 36 |
+| 4 | 0 | 0, 0 | 0 | 0, 0 | 0 | 0, 0 | 0 | 0, 0 |
+
+The clearance minus the analytic one stays in [1.1·10⁻⁷, 1.13·10⁻³] in 3-D (s_B = 1.14·10⁻³) and
+[1.5·10⁻¹³, 2.35·10⁻⁶] in 2-D (s_B = 2.35·10⁻⁶); every shared flag agrees with its bracket, and no probe contradicts its
+own. The least clearance is never below the gap (the feet lie in their own ball); it exceeds it by 0.04–0.09 h in 3-D,
+and in 2-D by 0.004 h down to δ = h but by 0.11–0.22 h below: a throat narrower than h holds no fluid point, so the
+points next to it have none within reach along the axes and are not ghosts.
+
+Pass criteria (`Are all tests passed? T` iff all hold): 0 ghost mismatches and the ghost count the sum of the
+single-body ones at every pose pair; the shared count within the analytic bracket with every ghost consistent, the
+clearance error in [−10⁻¹³, s_B + 10⁻¹³], the least clearance at least δ − 10⁻¹³, no probe against its bracket; every
+call `STATUS_OK`. The same program checks the load samples and the cut-cell loads of several bodies
+([surface loads](/guide/advanced/surface-loads#several-bodies)).
+
 ## How a solver uses the table
 
 ![one ghost of the ellipse (teal), its foot (gold) and its image line of three probes (ember), with the cells of the solver's points that enclose the probes shaded: the solver interpolates there](../../examples/images/ref-fd-closure-image-line.svg){.fossil-figure}
