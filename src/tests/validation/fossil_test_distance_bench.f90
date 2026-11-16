@@ -163,7 +163,7 @@ integer                       :: map_mismatch              !< 3-D piece map: dev
 integer                       :: link_inputs_mismatch      !< 3-D link inputs: device vs CPU mismatches (#100 step 5).
 integer                       :: links_mismatch            !< 3-D piece links: device vs CPU mismatches (#100 step 5).
 integer                       :: walls_mismatch            !< 3-D wall terms: device vs CPU mismatches (#109 WP2 step 05).
-integer                       :: bodies_mismatch           !< Cut cells of several bodies: device vs CPU (#109 WP3 step 03).
+integer                       :: cbodies_mismatch          !< Cut cells of several bodies: device vs CPU (#109 WP3 step 03).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -387,8 +387,8 @@ call links_case(mismatch=links_mismatch)
 rich_ok = rich_ok .and. links_mismatch == 0
 call walls_case(mismatch=walls_mismatch)
 rich_ok = rich_ok .and. walls_mismatch == 0
-call bodies_case(mismatch=bodies_mismatch)
-rich_ok = rich_ok .and. bodies_mismatch == 0
+call bodies_case(mismatch=cbodies_mismatch)
+rich_ok = rich_ok .and. cbodies_mismatch == 0
 call swept_case(mismatch=swept_mismatch)
 rich_ok = rich_ok .and. swept_mismatch == 0
 call map_case(mismatch=map_mismatch)
@@ -505,7 +505,7 @@ print '(A,I0)',      '   cut cells 3-D device vs serial mismatches: ', cells_mis
 print '(A,I0)',      '   cut cells 3-D link inputs device vs serial mismatches: ', link_inputs_mismatch
 print '(A,I0)',      '   cut links 3-D device vs serial mismatches: ', links_mismatch
 print '(A,I0)',      '   cut walls 3-D device vs serial mismatches: ', walls_mismatch
-print '(A,I0)',      '   cut bodies device vs serial mismatches: ', bodies_mismatch
+print '(A,I0)',      '   cut bodies device vs serial mismatches: ', cbodies_mismatch
 print '(A,I0)',      '   swept cells 3-D device vs serial mismatches: ', swept_mismatch
 print '(A,I0)',      '   piece map 3-D device vs serial mismatches: ', map_mismatch
 print '(A)',         ''
