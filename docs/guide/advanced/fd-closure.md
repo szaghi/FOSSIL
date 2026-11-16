@@ -245,6 +245,70 @@ at the foot.
 an eikonal equation along the normal needs the signed distance and the normal at the ghosts: `distance` and `normal`
 (or `foot`) replace a level set computed on the grid, with no other change to the solver.
 
+## What accuracy to expect
+
+The table is exact for the faceted wall: its foot, normal and distance are those of the planar facets, not of the
+smooth body they sample. How much accuracy a closure keeps is therefore a question about the facets, answered by the
+validation program `fossil_val_fd_closure` (a geometry study, no flow solve). A circle and a sphere of radius
+R = 0.5 (vertices on them: a regular polygon of N segments, an icosphere) sit on uniform point lines of spacing h
+(h halved from level to level: R/8 to R/1024 in 2-D, R/4 to R/64 in 3-D), reach 2. At every ghost an image-line
+closure rebuilds the smooth field u = cos(1.1 x − 0.7 y + 0.3) e^{0.5 x} + sin(0.9 y) (3-D: e^{0.6 z} and sin(0.9 y + 1.2 z)) from m probes at
+l, 2 l, …, m l (l = √2 h), interpolated from the grid values from their `probe_cell` (tensor Lagrange on 4 points per
+axis, 5 for m = 3), and one wall datum at the foot; the polynomial of degree m along the normal is evaluated at the
+ghost's `distance`. The wall data are those of the true wall: u (Dirichlet) or ∂ₙu (Neumann, along the table's normal)
+at the point of the circle or sphere nearest the foot. The error is the largest |u_ghost − u(ghost)| over the ghosts,
+in three regimes:
+
+- **exact geometry:** the same ghosts with the foot, normal and distance of the circle or sphere: the closure's own
+  error, of design order m + 1;
+- **h_s = c h:** facets refined with the grid (longest edge h_s about 1.05 h in 2-D, 1.3 h in 3-D);
+- **h_s frozen:** the coarsest of those meshes at every level.
+
+The circle with three probes, five levels (a docs program on other point lines than the validation's, so other ghosts
+and errors, the same orders), and the loop that builds the ghost values from the table:
+
+![the largest Dirichlet ghost error of the circle against h, from R/8 to R/128, with three probes: with the exact geometry it falls at order 4 (teal), with facets refined with the grid at order 2 (gold), with the facets frozen it stays at a floor (ember) just under the estimate Lambda |d_n u| s (a grey line)](../../examples/images/ref-fd-closure-accuracy.svg){.fossil-figure}
+
+<<< @/examples/snippets/fig_ref_fd_closure_accuracy-closure.f90
+
+<<< @/examples/output/figref-fd-closure-accuracy.ansi{ansi}
+
+The sphere, from the validation (Dirichlet; the observed order of the two finest levels in the last row):
+
+| h | ghosts | exact, m = 1 | m = 2 | m = 3 | h_s = c h, m = 1 | m = 2 | m = 3 | frozen, m = 1 | m = 2 | m = 3 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| R/4 | 219 | 6.7e-2 | 1.5e-2 | 4.9e-3 | 8.0e-2 | 3.3e-2 | 5.6e-2 | 8.0e-2 | 3.3e-2 | 5.6e-2 |
+| R/8 | 1 112 | 1.7e-2 | 2.1e-3 | 3.3e-4 | 2.2e-2 | 1.3e-2 | 2.1e-2 | 4.0e-2 | 5.4e-2 | 7.7e-2 |
+| R/16 | 4 892 | 5.0e-3 | 3.5e-4 | 2.1e-5 | 6.0e-3 | 3.2e-3 | 4.9e-3 | 3.4e-2 | 5.2e-2 | 7.3e-2 |
+| R/32 | 20 490 | 1.3e-3 | 4.1e-5 | 1.3e-6 | 1.5e-3 | 8.6e-4 | 1.3e-3 | 3.2e-2 | 5.3e-2 | 7.8e-2 |
+| R/64 | 83 830 | 3.2e-4 | 5.3e-6 | 8.0e-8 | 4.0e-4 | 2.4e-4 | 3.6e-4 | 3.6e-2 | 5.9e-2 | 8.5e-2 |
+| order | | 2.03 | 2.96 | 4.03 | 1.96 | 1.85 | 1.83 | −0.14 | −0.15 | −0.13 |
+
+- **The closure is exact to its order.** With the exact geometry the Dirichlet and Neumann errors fall at orders
+  2.00–2.03, 2.96–3.02 and 3.97–4.03 for m = 1, 2, 3 (design 2, 3, 4), in 2-D and 3-D: the probes, their cells and
+  the extrapolation along the normal carry no hidden error.
+- **Planar facets cap the Dirichlet closure at second order.** The faceted foot lies inside the true wall by up to
+  the sag s of its facet (h_s²/(8R) for a chord, about h_s²/(6R) for a triangle), so the wall datum is imposed at the
+  wrong place: an error Λ_m |∂ₙu| s at the ghost, Λ_m the weight of the wall datum in the extrapolation (2.4, 4.1, 6.0
+  for m = 1, 2, 3 at reach 2). With h_s = c h that is O(h²) whatever m (orders 1.83–1.99): m = 2 and 3 converge no
+  faster than m = 1, their error is the facets' (m = 3 above m = 2 by its larger Λ_m, a factor 1.4–1.5), and m = 1
+  is close to its own truncation error.
+- **Frozen facets give a floor, not a slower rate.** The Dirichlet error stops (orders −0.15 to 0.01) at 0.85–0.89
+  of the estimate Λ_m |∂ₙu|_max s (2-D: s = 1.07·10⁻³ for N = 48, floors 3.6·10⁻³ to 8.7·10⁻³; 3-D: 320 facets,
+  s = 8.9·10⁻³, floors 3.6·10⁻² to 8.5·10⁻²).
+- **The Neumann closure degrades more gently.** Its datum enters with a weight of order h, so the normal tilt of a
+  facet, O(h_s/R), costs O(h h_s/R): first order with frozen facets (orders 0.98–1.23, no floor), second order with
+  h_s = c h (the max-norm orders scatter from level to level: 1.45–1.64 between R/32 and R/64 in 3-D, 1.85 between
+  R/512 and R/1024 in 2-D).
+- **What it means for a solver.** To keep a Dirichlet closure of order m + 1 the facets must shrink faster than the
+  grid: Λ_m |∂ₙu| h_s²/(8R) below the closure's own error C h^{m+1}, so h_s = O(h^{(m+1)/2}) (h_s ∝ h^{3/2} for
+  order 3, h_s ∝ h² for order 4). On a body of fixed resolution, refining the grid past the point where Λ_m |∂ₙu| s
+  dominates buys nothing.
+- **Curvature and wall velocity.** At the feet of the h_s = c h tables the principal curvatures of the sphere are
+  within 8.4·10⁻², 2.2·10⁻², 5.8·10⁻³, 1.5·10⁻³, 3.7·10⁻⁴ of 1/R (order 2), the circle's 1/R to round-off. The wall
+  velocity of a spinning body at a pose is the rigid field at the faceted foot to the last bit, and differs from the
+  rigid field at the true wall point by at most |ω| s (attained in 2-D).
+
 ## Example
 
 The NACA 0012 section (the wing cut at z = 0.5, chord from −0.25 to 0.75) on cell-centred lines of spacing chord/64,

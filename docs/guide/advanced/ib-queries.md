@@ -278,7 +278,7 @@ The visibility is one any-hit kernel, shared by the CPU and the device (`fossil_
   tol < t ≤ |length| from the foot point. Each crossing is the exact ray-facet decision of the ray queries
   (`fossil_ray_kernel`, issue #82), on the ray prepared as `intersect_ray_all` prepares it. The answer is therefore
   the former ray query's: 0 differences over the 1 500 probes and images of the dragon in the twin test, and over
-  600 000 on six meshes (bunny, both dragons, the NACA wing, two cube files) in a one-off check. A node is skipped when the ray misses its padded box (the slab test of the ray queries) or when the whole
+  1 200 000 in the validation program `fossil_val_probe_visibility` (nine surfaces, among them the bunny, both dragons, the NACA wing, a thin plate and a narrow gap, and three curves; 100 000 probes and images each). A node is skipped when the ray misses its padded box (the slab test of the ray queries) or when the whole
   padded box projects beyond |length| + pad on the ray: a crossing point lies in its facet's box, so neither skip
   drops a crossing the filter keeps. An octree surface keeps the ray query on the host; the device needs the BVH.
 - **2-D, `curve_segment_blocked_oac`.** The exact segment test of before (`orient2d`, candidates from the segment
@@ -308,7 +308,7 @@ All of them are lengths for `probe_many`, one per point or several at once (`len
 | vector level set: bunny, cube, 256-gon | band values = `query_many`; \|φ\| = \|x − closest\| |
 | cube ghost points in face regions (1100) | closest + \|φ\| n = 2·closest − x |
 | two cubes 0.2 apart | a probe into the other cube, or an image inside it, is reported not visible |
-| visibility kernel vs the ray query of issue #82: dragon, 1 500 probes and images (twin test); 600 000 on six meshes (one-off check) | 0 differences |
+| visibility kernel vs the ray query of issue #82: dragon, 1 500 probes and images (twin test); 1 200 000 on nine surfaces and three curves (`fossil_val_probe_visibility`) | 0 differences |
 | `probe_many_device` / `image_points_device` vs the host, dragon (300 points × 4 lengths, posed too), two cubes | bit for bit (device path run on the host) |
 | 2-D: ellipse with a hole and an island, 400 points × 4 lengths, vs a brute-force exact test | 0 differences; device = host bit for bit |
 | cube centre, diagonal plane, mid-gap, L-shape medial points | flagged; generic points not |
