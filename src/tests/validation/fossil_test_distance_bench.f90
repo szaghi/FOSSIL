@@ -28,7 +28,8 @@
 !<      (`orient3d device vs serial mismatches`, issue #100 step 3c, among them; `swept cells 3-D device vs serial
 !<      mismatches`, issue #100 step 4; `cut cells 3-D link inputs device vs serial mismatches` and `cut links 3-D
 !<      device vs serial mismatches`, step 5; `cut walls 3-D device vs serial mismatches`, the labelled wall terms of
-!<      #109 WP2 step 05; `piece map 3-D device vs serial mismatches`, issue #105 step 3;
+!<      #109 WP2 step 05; `cut bodies device vs serial mismatches`, the cut cells of several posed bodies of #109 WP3
+!<      step 03; `piece map 3-D device vs serial mismatches`, issue #105 step 3;
 !<      `probe device vs serial mismatches`, the probes and images of WP1 step 01; `curvature device vs serial
 !<      mismatches`, the principal curvatures and directions at the feet of WP1 step 03; `closure device vs serial
 !<      mismatches`, the closure table of `fd_closure_3d`, WP1 step 04, every field by bits, copied back and resident,
@@ -89,6 +90,8 @@ use fossil_cut_cells_compare, only : cut_cells_many_mismatches, cut_cells_3d_fac
                                      cut_cells_3d_alpha_mismatches, link_inputs_mismatches, cut_links_mismatches
 use fossil_cut_cells_compare, only : cut_walls_mismatches
 use fossil,              only : cut_walls_3d_t
+use fossil,              only : piece_bodies_t, merge_posed_bodies, cut_cells_3d_bodies
+use fossil_cut_cells_compare, only : piece_bodies_mismatches
 use fossil_orient3d_cases, only : orient3d_quadruples, lcb_cases, orient3d_many, lcb_many
 use fossil_predicates,   only : orient3d_xyz
 use fossil_line_query,   only : line_crossing_before
@@ -160,6 +163,7 @@ integer                       :: map_mismatch              !< 3-D piece map: dev
 integer                       :: link_inputs_mismatch      !< 3-D link inputs: device vs CPU mismatches (#100 step 5).
 integer                       :: links_mismatch            !< 3-D piece links: device vs CPU mismatches (#100 step 5).
 integer                       :: walls_mismatch            !< 3-D wall terms: device vs CPU mismatches (#109 WP2 step 05).
+integer                       :: bodies_mismatch           !< Cut cells of several bodies: device vs CPU (#109 WP3 step 03).
 type(body_t), allocatable     :: sign_bodies(:)            !< Sign-benchmark bodies (issue #39).
 real(R8P), parameter          :: BBOX_INFLATE = 1.5_R8P    !< Probe grid spans 1.5x the surface bbox.
 integer(I4P), parameter       :: N_SAMPLE_MAX = 200_I4P    !< Sub-sample size for the brute-force correctness check.
@@ -383,6 +387,8 @@ call links_case(mismatch=links_mismatch)
 rich_ok = rich_ok .and. links_mismatch == 0
 call walls_case(mismatch=walls_mismatch)
 rich_ok = rich_ok .and. walls_mismatch == 0
+call bodies_case(mismatch=bodies_mismatch)
+rich_ok = rich_ok .and. bodies_mismatch == 0
 call swept_case(mismatch=swept_mismatch)
 rich_ok = rich_ok .and. swept_mismatch == 0
 call map_case(mismatch=map_mismatch)
@@ -499,6 +505,7 @@ print '(A,I0)',      '   cut cells 3-D device vs serial mismatches: ', cells_mis
 print '(A,I0)',      '   cut cells 3-D link inputs device vs serial mismatches: ', link_inputs_mismatch
 print '(A,I0)',      '   cut links 3-D device vs serial mismatches: ', links_mismatch
 print '(A,I0)',      '   cut walls 3-D device vs serial mismatches: ', walls_mismatch
+print '(A,I0)',      '   cut bodies device vs serial mismatches: ', bodies_mismatch
 print '(A,I0)',      '   swept cells 3-D device vs serial mismatches: ', swept_mismatch
 print '(A,I0)',      '   piece map 3-D device vs serial mismatches: ', map_mismatch
 print '(A)',         ''
@@ -1661,6 +1668,79 @@ contains
    print '(3X,A,A,I0,A,I0,A,I0,A,I0,A,I0)', label, ': cells ', size(ch%alpha), ', pieces ', ch%np, ', wall terms ', &
          wh%n, ' (', count(wh%piece == 0), ' without piece), cut walls 3-D mismatches ', mismatch
    endfunction walls_compare
+
+   subroutine bodies_case(mismatch)
+   !< The cut cells of several posed bodies (#109 WP3 step 03): `cut_cells_3d_bodies` on the host against the cut of the
+   !< copies moved by `move` and merged by `merge_solids` (the cut, links and wall terms bitwise), and the device path
+   !< (`device=.true.`) against the host path (the cut, links, wall terms and body labels bitwise), copied back and
+   !< resident: two posed copies of the bench body side by side at grid_n^3 over their union's box, and two posed
+   !< marching-cubes spheres about 0.03 apart (pieces bounded by both) at 7^3, at 63^3 with grid_n >= 32.
+   integer, intent(out)      :: mismatch               !< Mismatches.
+   type(surface_stl_object)  :: sb(2), mg              !< Bodies, merged.
+   type(rigid_pose_t)        :: q(2)                   !< Poses.
+   integer(I4P), allocatable :: fb(:), fs(:)           !< Facet map.
+   real(R8P),    allocatable :: gx(:), gy(:), gz(:)    !< Cell edges.
+   type(vector_R8P)          :: b0, b1                 !< Box.
+   real(R8P)                 :: ext                    !< Box size.
+   integer(I4P)              :: st                     !< Status.
+
+   mismatch = 0
+   sb(1) = surface ; sb(1)%is_on_device = .false. ! a copy: not the mapped arrays
+   sb(2) = sb(1)
+   b0 = surface%get_bmin() ; b1 = surface%get_bmax()
+   ext = (b1%x - b0%x) + (b1%y - b0%y) + (b1%z - b0%z)
+   q(1) = pose_from_axis_angle([0.3_R8P, 0.2_R8P, 1._R8P], 0.25_R8P, [-0.6_R8P * ext, 0._R8P, 0._R8P])
+   q(2) = pose_from_axis_angle([1._R8P, 0.1_R8P, 0.4_R8P], -0.5_R8P, [0.6_R8P * ext, 0.01_R8P * ext, 0._R8P])
+   call merge_posed_bodies(sb, q, mg, fb, fs, status=st)
+   call box_grid(mg, grid_n, gx, gy, gz)
+   mismatch = mismatch + abs(st) + bodies_compare('bench body x 2', sb, q, gx, gy, gz)
+   call mc_body(BODY_SPHERE, 24_I4P, sb(1)) ; sb(2) = sb(1)
+   q(1) = pose_from_axis_angle([1._R8P, 2._R8P, 3._R8P], 0.4_R8P, [-0.515_R8P, 0.02_R8P, 0.01_R8P])
+   q(2) = pose_from_axis_angle([0._R8P, 1._R8P, 1._R8P], -0.7_R8P, [0.515_R8P, -0.01_R8P, 0._R8P])
+   call merge_posed_bodies(sb, q, mg, fb, fs, status=st)
+   call box_grid(mg, merge(63_I4P, 7_I4P, grid_n >= 32_I4P), gx, gy, gz) ! odd: a middle cell holds the gap
+   mismatch = mismatch + abs(st) + bodies_compare('two mc spheres', sb, q, gx, gy, gz)
+   endsubroutine bodies_case
+
+   function bodies_compare(label, s, q, gx, gy, gz) result(mismatch)
+   !< `cut_cells_3d_bodies` on s posed by q, host against the moved + merged copy and device against host (see
+   !< `bodies_case`). Prints the case.
+   character(*),             intent(in) :: label        !< Case.
+   type(surface_stl_object), intent(in) :: s(:)         !< Bodies (host only).
+   type(rigid_pose_t),       intent(in) :: q(:)         !< Poses.
+   real(R8P),                intent(in) :: gx(:), gy(:), gz(:) !< Cell edges.
+   integer                              :: mismatch     !< Mismatches.
+   type(surface_stl_object)             :: a, b         !< Moved copies.
+   type(cut_cells_3d_t)                 :: ch, cb, cd   !< Reference, host, device cut.
+   type(cut_walls_3d_t)                 :: wh, wb, wd   !< Their wall terms.
+   type(cut_links_t)                    :: lh, lb, ld   !< Their links.
+   type(piece_bodies_t)                 :: pb, pd       !< Host, device labels.
+   integer(I4P)                         :: st, st2, r, p, nboth !< Work.
+
+   mismatch = 0
+   a = s(1) ; call a%move(q(1)) ; b = s(2) ; call b%move(q(2)) ; call a%merge_solids(b)
+   call cut_cells_3d(a, gx, gy, gz, ch, status=st, links=lh, walls=wh)
+   call cut_cells_3d_bodies(s, q, gx, gy, gz, cb, status=st2, links=lb, walls=wb, piece_bodies=pb)
+   mismatch = mismatch + abs(st - st2) + cut_cells_3d_mismatches(ch, cb) + cut_links_mismatches(lh, lb) + &
+              cut_walls_mismatches(wh, wb)
+   do r = 1, 2
+      call cut_cells_3d_bodies(s, q, gx, gy, gz, cd, status=st2, links=ld, walls=wd, piece_bodies=pd, device=.true., &
+                               resident=r == 2)
+      if (r == 2) then
+         if (.not. (cd%on_device .and. ld%on_device .and. wd%on_device)) mismatch = mismatch + 1
+         call cd%update_host ; call ld%update_host ; call wd%update_host
+      endif
+      mismatch = mismatch + abs(st - st2) + cut_cells_3d_mismatches(cb, cd) + cut_links_mismatches(lb, ld) + &
+                 cut_walls_mismatches(wb, wd) + piece_bodies_mismatches(pb, pd)
+   enddo
+   call wd%exit_device ; call ld%exit_device ; call cd%exit_device
+   nboth = 0_I4P
+   do p = 1, pb%np
+      if (pb%start(p + 1) - pb%start(p) > 1_I4P) nboth = nboth + 1_I4P
+   enddo
+   print '(3X,A,A,I0,A,I0,A,I0,A,I0,A,I0)', label, ': cells ', size(cb%alpha), ', pieces ', cb%np, ', wall terms ', &
+         wb%n, ', pieces of two bodies ', nboth, ', cut bodies mismatches ', mismatch
+   endfunction bodies_compare
 
    subroutine walls_timing(label, s, m, gx, gy, gz)
    !< One row of the timing table of `walls_case`.

@@ -37,6 +37,7 @@ closures and sub-cell masks.
 | Wall fractions along the grid lines of a block | `surface%cell_wall_fractions` | `curve%cell_wall_fractions` |
 | Cut cells of a block | `cut_cells_3d(surface, x, y, z, cut)` | `curve%cut_cells(x, y, cut)` |
 | Cut cells of a block on the device, copied back or resident | `cut_cells_3d_device(surface, x, y, z, cut, resident=)` | `curve%cut_cells_device(x, y, cut, resident=)` |
+| Cut cells of several posed bodies, pieces and walls labelled by body | `cut_cells_3d_bodies(surfaces, poses, x, y, z, cut, piece_bodies=)` | `cut_cells_2d_bodies(curves, poses, x, y, cut, piece_bodies=)` |
 
 ![a solid ellipse, turned by 0.4 rad, on 8 by 6 cells of 0.125 seen from above: the cells shaded by fluid fraction, cream in the solid to sepia in the fluid; the 16 crossings of the grid lines with the ellipse as gold dots; on every edge the ellipse crosses, the fluid part of the edge in red, ending at the crossing; and from the wetted centroid of every cut cell a teal stroke along its wetted normal integral, pointing out of the ellipse](../../examples/images/ref-cut-cells-outputs.svg){.fossil-figure}
 
@@ -200,6 +201,42 @@ That is 2.1-3.0x copied back and 2.7-3.8x resident at 128³. One resident sphere
 - host work about 100 ms: the candidates, the open cells and the slicing.
 
 The face round trip and the host candidates are what remain to move.
+
+## Several bodies
+
+`cut_cells_3d_bodies(surfaces, poses, x, y, z, cut, ...)` cuts a block by several bodies at once, each with its own
+pose (2-D: `cut_cells_2d_bodies(curves, poses, x, y, cut, ...)`; #109 WP3). It is the cut of one surface: the
+bodies placed as `move` places them and merged as `merge_solids` merges them (`merge_posed_bodies`), so the cut, its
+links and its wall terms are bit for bit those of a copy moved and merged by hand. What it adds:
+- **Labels.** `piece_bodies=` (a `piece_bodies_t`) gives the body of every wall term, `wall_body` (the index of the
+  surface or curve) and `wall_sub_body` (its `facet_body` or `loop_body`), and for every piece the sorted list of the
+  bodies its wall terms belong to (`start`, `body`, `sub_body`, CSR). A piece between two bodies lists both. The wall
+  terms are those of `walls=` in 3-D (one per cell and facet) and of `cut_walls_2d` in 2-D (one per wall segment).
+- **Overlap refused.** The cut of overlapping bodies would need their boolean union, so an overlap returns
+  `STATUS_INVALID_INPUT` and an empty cut. The test is exact: an edge of one body piercing a facet of another
+  transversally, two coplanar facets of the same orientation overlapping, or a vertex of one body (one per shell, off
+  the other body) strictly inside the other by the exact parity of the cut's own line kernels. Bodies whose boxes do
+  not meet are not tested further. Overlaps between the sub-bodies of one surface are that surface's own business,
+  as for one body.
+- **Touching allowed.** Bodies in contact without a common volume are cut as they are: two cubes along a face, an
+  edge or a corner, on grid planes or between them, leave every cell trusted and the solid volume equal to the sum of
+  the bodies' to round-off (`fossil_test_cut_bodies`). `contacts=` counts the facet pairs in contact.
+- **Device.** `device=.true.` runs the cut on the device, `resident=` as for one body; the merge, the check and the
+  labels run on the host. In 2-D the device cut has no oriented boundaries, so the labels come from a host cut with
+  boundaries. Moments and quadrature are host-only, as for one body.
+- **The merged surface.** `merged=` returns it, with `facet_body=` and `facet_sub_body=` (2-D `segment_*`): the
+  surface the loads need (`cut_loads_3d`, `cut_walls_gyration`). Swept cells and the piece map of several bodies are
+  not covered yet.
+
+![a turned ellipse and a circle 0.04 apart on 12 x 7 cells of 0.1 seen from above: the cells shaded by fluid fraction, cream in the solids to sepia in the fluid; the wall segments of the ellipse in gold and of the circle in teal; the two cells between them whose fluid piece is bounded by both bodies outlined in red](../../examples/images/ref-cut-cells-bodies.svg){.fossil-figure}
+
+Two bodies in their own poses, cut together. The two cells in the gap hold a fluid piece bounded by both walls; the
+solid area of the cells is the sum of the two bodies' areas. A pose where the circle crosses the ellipse is refused;
+two squares touching along an edge that lies on a grid line are cut with every cell trusted.
+
+<<< @/examples/snippets/fig_ref_cut_cells_bodies.f90
+
+<<< @/examples/output/figref-cut-cells-bodies.ansi{ansi}
 
 ## Example
 

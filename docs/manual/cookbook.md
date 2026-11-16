@@ -657,6 +657,19 @@ fluid volumes add up to the block's minus the cube's, 7, and the wetted areas to
 digits printed. Optional outputs: `links=`, `edges=`, `moments_order=`, `quadrature=`. See
 [cut-cell geometry](/guide/advanced/cut-cells).
 
+### Cut a grid by several moving bodies
+
+<<< @/examples/snippets/ck_cut_bodies.f90
+
+<<< @/examples/output/ck_cut_bodies.ansi{ansi}
+
+`cut_cells_3d_bodies` cuts the block by every body in its own pose: the cut of the merged posed surface
+(`merge_posed_bodies` returns it, with the body of every facet), bit for bit. `piece_bodies=` labels the wall terms
+and the pieces by body: 8 pieces lie between the two cubes and list both. The solid volume is the two cubes' to the
+12 digits printed. Moving the second cube into the first is refused (status 5, `STATUS_INVALID_INPUT`): the cut of
+overlapping bodies would need their union. Touching bodies are allowed. 2-D: `cut_cells_2d_bodies` over curves. See
+[several bodies](/guide/advanced/cut-cells#several-bodies).
+
 ### Moments and quadrature of cut cells
 
 <<< @/examples/snippets/ck_cut_moments.f90

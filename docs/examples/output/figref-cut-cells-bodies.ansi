@@ -1,0 +1,6 @@
+$ fig_ref_cut_cells_bodies
+cells 84, pieces 73, wall segments 196, pieces bounded by both bodies 2
+solid area  0.2523130, A1 + A2  0.2523130
+fossil cut_cells_2d_bodies: refused -- two bodies overlap (their areas intersect)
+crossing pose: status 5 (refused)
+touching squares: status 0, untrusted cells 0

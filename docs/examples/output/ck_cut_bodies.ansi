@@ -1,0 +1,8 @@
+$ ck_cut_bodies
+merged facets 96, overlap F
+pieces 4057, wall terms 804, pieces bounded by both cubes 8
+solid volume           2.000000000000
+V1 + V2                2.000000000000
+fossil cut_cells_3d_bodies: refused -- two bodies overlap (their volumes intersect)
+overlapping cubes: status 5
+2-D: status 0, pieces 64

@@ -38,7 +38,9 @@ program fossil_test_curve_bench
 !< `integrate_loads` on the device, copied-in, resident and caller-mapped p and tau, against the host, every output by
 !< bits), and `field transfer device vs serial mismatches` (step 04: a vertex and a segment field at the feet and ILW
 !< crossings of the posed closure table and at the load samples, `samples_to_vertices`; host and resident inputs, a
-!< caller-mapped field and output, by bits).
+!< caller-mapped field and output, by bits), and `cut bodies device vs serial mismatches` (#109 WP3 step 03:
+!< `cut_cells_2d_bodies` of a posed NACA 0012 and a posed ellipse, host against the curve of the moved copies and device
+!< against host, with the body labels, copied back and resident).
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
@@ -58,6 +60,8 @@ use fossil, only : ib_closure_t, fd_closure_2d, ib_closure_reset, ib_closure_mis
 use fossil, only : load_samples_t, load_samples_2d, load_samples_reset, load_samples_mismatches, integrate_loads
 use fossil, only : load_samples_2d_bodies
 use fossil, only : transfer_to_closure, transfer_to_samples, samples_to_vertices
+use fossil, only : piece_bodies_t, merge_posed_bodies, cut_cells_2d_bodies
+use fossil_cut_cells_compare, only : piece_bodies_mismatches
 
 implicit none
 
@@ -127,6 +131,7 @@ call feature_case(c)
 call thin_case(c)
 call block_case
 call cut_cells_case
+call bodies_2d_case
 call chain_case
 call swept_case
 call map_case
@@ -975,6 +980,71 @@ contains
       enddo
    enddo
    endsubroutine cut_cells_case
+
+   subroutine bodies_2d_case
+   !< The cut cells of several posed bodies (#109 WP3 step 03): `cut_cells_2d_bodies` of a posed NACA 0012 (510
+   !< vertices) and a posed ellipse (512) on (n/2)^2 cells over their union's box, on the host against the cut of the curve
+   !< of the copies moved by `curve%move` (every output bitwise), and with `device=.true.` against the host (the cut and
+   !< the body labels bitwise), copied back and resident. `cut bodies device vs serial mismatches` = 0.
+   type(curve_object)        :: cb(2), mg, w, a     !< Bodies, merged, moved copy, reference.
+   type(rigid_pose_2d_t)     :: q(2)                !< Poses.
+   type(cut_cells_2d_t)      :: ch, cu, cd          !< Reference, host, device cut.
+   type(piece_bodies_t)      :: pb, pd              !< Host, device labels.
+   integer(I4P), allocatable :: sb(:), ss(:), sz(:) !< Segment map, loop sizes.
+   real(R8P),    allocatable :: uu(:), vv(:), x(:), y(:) !< Work.
+   real(R8P)                 :: th, uv(2)           !< Work.
+   integer(I4P)              :: bad, st, st2, k, r, i, f, e, nboth, ng !< Work.
+
+   allocate(uu(510), vv(510))
+   call naca0012(255_I4P, uu, vv)
+   call cb(1)%adopt_loops(u=uu, v=vv, loop_sizes=[510_I4P])
+   deallocate(uu, vv) ; allocate(uu(512), vv(512))
+   do k = 1, 512
+      th = 2._R8P * PI * (k - 1) / 512
+      uu(k) = 0.4_R8P * cos(th) ; vv(k) = 0.25_R8P * sin(th)
+   enddo
+   call cb(2)%adopt_loops(u=uu, v=vv, loop_sizes=[512_I4P])
+   q(1) = pose_2d(0.12_R8P, [-0.3_R8P, 0.05_R8P]) ; q(2) = pose_2d(-0.4_R8P, [1.25_R8P, -0.02_R8P])
+   bad = 0_I4P
+   call merge_posed_bodies(cb, q, mg, sb, ss, status=st)
+   bad = bad + abs(st)
+   ng = max(16_I4P, n / 2_I4P)
+   call grid_edges(mg%get_bmin() - 0.05_R8P, mg%get_bmax() + 0.05_R8P, ng, x, y)
+   ! the reference: the curve of the copies moved by `curve%move`
+   allocate(sz(0)) ; deallocate(uu, vv) ; allocate(uu(0), vv(0))
+   do k = 1, 2
+      w = cb(k) ; call w%move(q(k))
+      do i = 1, w%get_loops_number()
+         call w%get_loop_range(i, f, e)
+         sz = [sz, e - f + 1_I4P]
+         do r = f, e
+            uv = w%get_vertex(r) ; uu = [uu, uv(1)] ; vv = [vv, uv(2)]
+         enddo
+      enddo
+   enddo
+   call a%adopt_loops(u=uu, v=vv, loop_sizes=sz)
+   call a%cut_cells(x, y, ch, status=st)
+   call cut_cells_2d_bodies(cb, q, x, y, cu, status=st2)
+   bad = bad + abs(st - st2) + cut_cells_2d_mismatches(ch, cu)
+   call cut_cells_2d_bodies(cb, q, x, y, ch, status=st2, piece_bodies=pb)
+   do r = 1, 2
+      call cut_cells_2d_bodies(cb, q, x, y, cd, status=st2, piece_bodies=pd, device=.true., resident=r == 2)
+      if (r == 2) then
+         if (.not. cd%on_device) bad = bad + 1_I4P
+         call cd%update_host
+      endif
+      bad = bad + abs(st - st2) + cut_cells_2d_mismatches(cu, cd) + piece_bodies_mismatches(pb, pd)
+   enddo
+   call cd%exit_device
+   nboth = 0_I4P
+   do k = 1, pb%np
+      if (pb%start(k + 1) - pb%start(k) > 1_I4P) nboth = nboth + 1_I4P
+   enddo
+   print '(A,I0,A,I0,A,I0,A,I0)', 'cut bodies (NACA 0012 + ellipse, ', ng, '^2): pieces ', cu%np, ', wall segments ', pb%nw, &
+         ', pieces of two bodies ', nboth
+   print '(A,I0)', 'cut bodies device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0_I4P
+   endsubroutine bodies_2d_case
 
    subroutine links_2d_case(cc, cname, lo, hi, ngrid)
    !< The 2-D piece links on the device (issue #100 step 5): `cut_links_2d_device` against `cut_links_2d`, every field
