@@ -1,0 +1,7 @@
+$ ref_surface_loads_cut
+wall terms 8559, fluid pieces 12253; wetted area 3.1262326, V 0.5187371
+force   0.0000000  0.0000000  0.5187371   error to (0, 0, V) 4.4E-18
+moment, centroid values  0.1037446 -0.1556225 -0.0000009   error 2.8E-06
+moment, with the gradient  0.1037474 -0.1556211  0.0000000   = V x_c x (0, 0, 1) to 1e-15: T
+load samples (FD) = cut walls (FV) to 1e-15: T
+per piece: force  0.0000337  0.0000532  0.5349629   error 1.6E-02

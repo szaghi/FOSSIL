@@ -1,0 +1,3 @@
+$ ck_cut_loads
+cube, 434 wall terms: force  0.00000  0.00000  1.00000  moment  0.50000 -0.50000  0.00000
+disc, 76 wall segments: force  0.00000  0.50185  moment  0.25092

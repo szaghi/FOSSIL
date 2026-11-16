@@ -1,0 +1,5 @@
+$ fig_ref_surface_loads_cut
+cut pieces 115, wall segments 144, area A  0.081669
+force  0.0000000  0.0816687   buoyancy (0, A)  0.0000000  0.0816687
+moment about the leading edge: centroid values  0.0320783, with the gradient  0.0320760, A x_c  0.0320760
+moment error: centroid values 2.4E-06;  with the gradient below 1e-15: T

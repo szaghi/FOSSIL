@@ -99,6 +99,8 @@ private
 public :: cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device, cut_cells_3d_sections, cut_cells_3d_reset
 ! the wall terms of a cut, labelled by piece and facet (issue #106 step 3: the smallest faces of an overset interface)
 public :: cut_walls_3d_t, cut_walls_reset
+! the clipped polygon of one wall term, for the exact moment of a linear pressure (#109 WP2 step 05, `fossil_cut_loads`)
+public :: cut_wall_polygon_3d
 ! the device stages (issue #100 step 3c), public for the benches and the twin test (not re-exported by `fossil`)
 public :: cut_cells_3d_nodes_device
 ! the node states alone on the host (the twin of `cut_cells_3d_nodes_device`), for the ghost points (#109 WP1 step 03)
@@ -4713,6 +4715,19 @@ contains
 
    c = [a(2) * b(3) - a(3) * b(2), a(3) * b(1) - a(1) * b(3), a(1) * b(2) - a(2) * b(1)]
    endfunction cross3
+
+   pure subroutine cut_wall_polygon_3d(t, c0, c1, poly, np)
+   !< The polygon of the wall term of facet t in the cell [c0, c1] (#109 WP2 step 05): the clip of the cut cells (`clip_cell`
+   !< with the facet's `flat_axis`, the calls of `cell_totals_3d` and `wall_terms_clip`), so the polygon whose terms
+   !< `cut_cells_3d(..., walls=)` returns, bit for bit; np < 3: no term. Host code, for `fossil_cut_loads`.
+   real(R8P),    intent(in)  :: t(3, 3)      !< Facet vertices.
+   real(R8P),    intent(in)  :: c0(3), c1(3) !< Cell corners.
+   real(R8P),    intent(out) :: poly(3, 16)  !< Polygon.
+   integer(I4P), intent(out) :: np           !< Its vertices.
+
+   poly = 0._R8P ; poly(:, 1:3) = t ; np = 3_I4P
+   call clip_cell(poly, np, c0, c1, flat_axis(t))
+   endsubroutine cut_wall_polygon_3d
 
    pure integer(I4P) function flat_axis(t)
    !< The axis along which the facet t is nearly flat (issue #107): 3 if its z extent is not zero and max(|n_x|, |n_y|)

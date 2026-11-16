@@ -313,3 +313,80 @@ A surface without facets or a curve without vertices has no sample. The routines
   `patch` (or reads `per_patch_force`).
 - **The moment of a linear pressure needs order 2.** The centroid rule integrates the force of a linear p exactly, not
   its moment.
+
+## Loads from the cut cells
+
+A finite-volume solver on [cut cells](/guide/advanced/cut-cells) has its pressure per cut cell (per fluid piece), not
+at quadrature points on the facets. Its force on the body is the sum over the cells' wall terms, which the cut already
+returns: `cut_cells_3d(..., walls=)` gives one term per (cell, facet) with its vector area A_w (solid to fluid: the
+body's outward normal times the area), its area |A_w|, its centroid x_w, its piece and its facet; in 2-D
+`cut_walls_2d(cut, walls)` lists the wall segments of the pieces' oriented boundaries
+(`curve%cut_cells(..., boundaries=.true.)`, the fluid on the left, cell-edge segments left out) with their piece, their
+curve segment (`piece_seg_src`), their end points, A_w = (−Δv, Δu) and their midpoint. Then `cut_loads_3d` /
+`cut_loads_2d` sum, with the conventions of the samples (L1, L4):
+
+f_w = −p_w A_w + τ_w |A_w|,   F = Σ f_w,   M = Σ (x_w − c) × f_w,
+
+p_w the pressure at the wall's centroid (`pressure(n)`), or one value per piece spread to its walls
+(`pressure_per_piece(np)`), τ_w the viscous traction (`shear(d, n)`); compensated sums in wall order, per patch and per
+body through the facet (segment) of each wall, given the surface (curve).
+
+![a NACA 0012 at 20 degrees nose up on 14 x 8 cells of 0.1 (grey): the wall segments of its cut pieces in gold, split at the grid lines; at the midpoint of each its contribution −p A_w in the pressure p = −v, in ember, drawn ending on the wall, longer at the trailing edge where the wall is deepest; the total F from the centroid in teal, straight up: the buoyancy](../../examples/images/ref-surface-loads-cut.svg){.fossil-figure}
+
+<<< @/examples/output/figref-surface-loads-cut.ansi{ansi}
+
+**Exact moments.** The walls are flat, so the value at the centroid integrates a linear pressure exactly for the force:
+in p = p0 + g · x the force on a body inside the grid is −g V to round-off. The moment's integrand (x − c) p is then
+quadratic, and the centroid value misses the term ∫ (x − x_w)(x − x_w)ᵀ dA g = |A_w| K_w g of each wall (2.4·10⁻⁶ on a
+moment of 0.032 in the figure). With the pressure's gradient on each wall (`gradient(d, n)`) the sums add −(K_w g_w) × A_w and
+the moment is exact for a pressure linear on each wall: in 2-D K_w = d dᵀ / 12 from the segment d, in 3-D from
+`cut_walls_gyration(walls, surface, x, y, z, gyration)`, which clips each term's polygon again with the cut's own clip
+(`cut_wall_polygon_3d`, the same polygon bit for bit) and sums its fans' exact second moments about the stored centroid.
+Without `gradient` the pressure is constant on each wall, a cell value, whose moment the centroid gives exactly too.
+
+**The checks** (`fossil_test_cut_loads_3d`, `_2d`): bodies inside the grid (cube-01 on a grid through its faces and on
+one off them, an icosphere moved to a pose, two boxes, an irregular tetrahedron; a 64-gon, a disc with a hole, a NACA
+0012 polygon plain and turned, two discs):
+
+- buoyancy through the cut: F = −g V and, with the gradient, M = V (x_c − c) × (−g), within ε times the sum of the
+  absolute terms (largest 0.10 / 0.05 of it in 3-D, 0.07 / 0.06 in 2-D); the centroid values alone miss the moment by
+  7·10⁻⁵ (3-D) and 2·10⁻⁶ (2-D) of that sum;
+- a uniform pressure: the vector areas sum to 0;
+- the walls of each piece sum to its `piece_wet_normal`: bit for bit on every 2-D piece and on 1128 of 1602 3-D
+  pieces; on the others the cut adds the fans in another association, and the sums agree within 1.7 ε times the piece's
+  wall area;
+- FD and FV agree: the same linear p by `integrate_loads` on samples of order 2 and by the cut walls gives the same
+  force and moment, within ε times the two sums of absolute terms (largest 0.18);
+- a uniform shear gives τ times the area; per patch and per body sums add up, each box (disc) its own buoyancy.
+
+<<< @/examples/snippets/ref_surface_loads_cut-cutloads.f90
+
+<<< @/examples/output/ref_surface_loads_cut.ansi{ansi}
+
+The last line takes one pressure per fluid piece, at the piece's fluid centroid, as a cell-centred solver stores it: the
+force is then that of a piecewise-constant field, off by 3 % on 24³ cells. The value a wall needs is the one at the
+wall: reconstruct it (the cell value plus the gradient times x_w − x_cell) before the sum; FOSSIL does not.
+
+```text
+call cut_cells_3d(surface, x, y, z, cut [, status], walls=walls)
+call cut_walls_gyration(walls, surface, x, y, z, gyration [, status])
+call cut_loads_3d(walls, force, moment [, status] [, pressure | pressure_per_piece] [, shear] [, gradient, gyration]
+                  [, about] [, surface] [, per_patch_force] [, per_patch_moment] [, per_body_force] [, per_body_moment]
+                  [, area] [, unassigned])
+call curve%cut_cells(x, y, cut2 [, status], boundaries=.true.) ; call cut_walls_2d(cut2, walls2 [, status])
+call cut_loads_2d(walls2, force, moment [, status] [, pressure | pressure_per_piece] [, shear] [, gradient] [, about]
+                  [, curve] [, per_patch_force] [, per_patch_moment] [, per_body_force] [, per_body_moment] [, area])
+p = cut_loads_linear_pressure(points, p0, gradient)
+```
+
+- **The walls inside the grid only.** The terms cover the body where it lies in the grid's box: a body that leaves it
+  loses those loads.
+- **Terms of no piece.** In a cell without trusted pieces (3-D `pieces = -1`, an open surface) a term has piece 0: with
+  `pressure_per_piece` it takes no pressure, and `unassigned` counts it (one stderr line). Give such walls a pressure of
+  their own through `pressure`.
+- **Refusals** (`STATUS_INVALID_INPUT`, zero outputs, per-patch / per-body arrays of size 0, a stderr line): no pressure
+  and no shear, both pressures, a size that differs, `gradient` without `gyration` (3-D) or without a pressure, per patch
+  or per body without the surface (curve); `cut_walls_2d` on a cut without boundaries; `cut_walls_gyration` on another
+  grid or surface.
+- **CPU only**, free routines of `fossil_cut_loads`, re-exported by `use fossil`. The device computes the wall terms
+  (`cut_cells_3d_device(..., walls=)`); copy them back (`update_host`) before the sum.

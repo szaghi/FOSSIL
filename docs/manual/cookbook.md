@@ -538,6 +538,21 @@ vertex by area: a stress linear along the wall comes back exactly, anything else
 curve; `device=.true.` gives the same bits. See
 [surface loads](/guide/advanced/surface-loads#moving-fields-between-the-wall-and-the-grid).
 
+### Integrate the pressure on the cut walls
+
+<<< @/examples/snippets/ck_cut_loads.f90
+
+<<< @/examples/output/ck_cut_loads.ansi{ansi}
+
+A finite-volume solver on cut cells sums its pressure over the cells' wall terms: `cut_cells_3d(..., walls=)` gives
+them, each with its vector area (out of the body) and centroid, and `cut_loads_3d` sums −p A + τ |A| and its moment, in
+wall order and compensated. In p = 1 − z, evaluated at the walls' centroids, the unit cube feels its buoyancy (0, 0, 1);
+with the pressure gradient on each wall and the walls' second moments (`cut_walls_gyration`) the moment about the origin,
+(0.5, −0.5, 0), is exact too. In 2-D `cut_walls_2d` lists the wall segments of a cut made with `boundaries=.true.` and
+`cut_loads_2d` gives the force and the scalar moment per unit depth: the 64-gon's area, 0.50185, upwards. One value per
+piece goes in as `pressure_per_piece`. See
+[surface loads](/guide/advanced/surface-loads#loads-from-the-cut-cells).
+
 ### Place Lagrangian markers for an IB method
 
 <<< @/examples/snippets/ck_markers.f90

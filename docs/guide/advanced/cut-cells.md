@@ -160,7 +160,8 @@ back, best of 5):
 - with `links=`, the piece links ([cut-solver reference](/guide/advanced/cut-solver#on-the-device));
 - with `walls=`, the labelled wall terms of `cut_cells_3d(..., walls=)` (`cut_walls_3d_t`: one term per cell and
   facet clipped to three vertices or more, with its piece, vector area, wet area and centroid, in cell then facet
-  order), every field bit for bit.
+  order), every field bit for bit. Their force and moment for a solver's pressure: `cut_loads_3d`
+  ([surface loads](/guide/advanced/surface-loads#loads-from-the-cut-cells)).
 
 Moments and quadrature stay on the host.
 
