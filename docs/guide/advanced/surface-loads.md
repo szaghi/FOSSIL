@@ -305,7 +305,7 @@ A surface without facets or a curve without vertices has no sample. The routines
 
 - **The faceted wall.** The samples integrate over the facets, with the facet normals: the force on a coarse
   tessellation of a smooth body is the force on the tessellation. Refine the facets, not the rule, to approach the
-  smooth body.
+  smooth body: the error falls as the square of the facet size ([what accuracy to expect](#what-accuracy-to-expect)).
 - **Probes need the SAH BVH.** An octree surface gets its samples without probes; with `lengths` it is refused.
 - **No interpolation.** FOSSIL gives the cells, not the weights: the solver interpolates with its own stencil and
   decides what to do with a probe that is not visible.
@@ -390,3 +390,88 @@ p = cut_loads_linear_pressure(points, p0, gradient)
   grid or surface.
 - **CPU only**, free routines of `fossil_cut_loads`, re-exported by `use fossil`. The device computes the wall terms
   (`cut_cells_3d_device(..., walls=)`); copy them back (`update_host`) before the sum.
+
+## What accuracy to expect
+
+Both paths integrate over the faceted wall, so two questions decide what a solver gets: are the sums exact where the
+mathematics says they should be, and how fast does the faceted wall's force approach the smooth body's? The validation
+program `fossil_val_surface_loads` (a quadrature study, no flow solve: the pressure is given in closed form) answers
+both, through the load samples (`integrate_loads`, the FD path) and the cut walls (`cut_loads_2d` / `_3d`, the FV path).
+
+**Buoyancy on large meshes.** In p = p0 + g · x the force is −g V and the moment V (x_c − c) × (−g) on any closed
+faceted body, V and x_c from `mass_properties`. The error, in units of ε times the sum of the absolute terms (as in the
+tests), on an icosphere of 81 920 facets with its vertices moved along the sphere (no symmetry) at a pose, a
+marching-cubes torus of 37 440 facets at a pose, a NACA 0012 of 4 000 segments and an ellipse of 8 192 (FV: 64³ cells,
+2-D 512², with the gradient and, in 3-D, the walls' gyration):
+
+| Body | Elements | FD q = 1, F | q = 2, F | q = 2, M | q = 3, F | q = 3, M | FV, F | FV, M |
+|---|---|---|---|---|---|---|---|---|
+| icosphere, stretched, posed | 81 920 | 0.04 | 0.04 | 0.03 | 0.04 | 0.02 | 0.04 | 0.02 |
+| marching-cubes torus, posed | 37 440 | 0.03 | 0.03 | 0.04 | 0.03 | 0.07 | 0.03 | 0.07 |
+| NACA 0012, 10° | 4 000 | 0.01 | 0.01 | 0.01 | 0.01 | 0.01 | 0.01 | 0.02 |
+| ellipse 0.6 × 0.25, turned | 8 192 | 0.29 | 0.29 | 0.23 | 0.29 | 0.23 | 0.29 | 0.23 |
+
+The sums stay exact to round-off at any size: the compensated sums keep the error of the terms, not of their number.
+The order-1 moment and the FV moment without the gradient are not exact (a quadratic integrand): off by 8·10⁻⁸ and
+5·10⁻⁸ of the sum on the icosphere. The bunny, the dragon and dragon-fine are not watertight: they have no volume to
+compare with and are skipped.
+
+**Potential flow.** A cylinder of radius R = 0.5 in a uniform flow U = 1 with circulation Γ = −0.8 (2π U R) has zero
+drag (d'Alembert) and lift −ρ U Γ (Kutta–Joukowski); a sphere in a uniform flow has zero force. The pressure is
+p = p∞ + ρ (U² − |u|²) / 2 with u the exact velocity **on the true wall at the point nearest the sample** (the radial
+projection), the convention of the [closure's validation](/guide/advanced/fd-closure#what-accuracy-to-expect): the
+solver imposes the smooth body's data on the faceted wall, so the error is that of the facets and of the rule alone.
+The walls are polygons and icospheres with their vertices on the circle and the sphere, moved along them towards a point
+so that no symmetry cancels the drag. The figure: the cylinder through both paths, the FD path with samples of order 2,
+the FV path on N/2 cells per axis:
+
+![the drag and lift errors of the cylinder against the number of segments N, 32 to 1024, on log-log axes: four nearly parallel lines, FD drag in teal on top, FV drag in ember, FD lift in gold, FV lift in brown below, all falling along the grey N^-2 slope from a few 1e-3 to a few 1e-6](../../examples/images/ref-surface-loads-accuracy.svg){.fossil-figure}
+
+<<< @/examples/snippets/fig_ref_surface_loads_accuracy-loads.f90
+
+<<< @/examples/output/figref-surface-loads-accuracy.ansi{ansi}
+
+From the validation (errors |F_x| / (ρ U² R), |F_y − L| / |L| in 2-D, |F| / (ρ U² π R² / 2) in 3-D; h_s the longest
+segment or edge; the observed order of the two finest levels in the last row):
+
+| N | h_s | drag, q = 1 | q = 2 | q = 3 | lift, q = 1 | q = 2 | q = 3 |
+|---|---|---|---|---|---|---|---|
+| 32 | 1.4e-1 | 1.6e-3 | 4.3e-3 | 4.3e-3 | 1.8e-3 | 2.8e-3 | 2.8e-3 |
+| 256 | 1.8e-2 | 2.6e-5 | 6.7e-5 | 6.7e-5 | 2.9e-5 | 4.4e-5 | 4.4e-5 |
+| 4 096 | 1.1e-3 | 1.0e-7 | 2.6e-7 | 2.6e-7 | 1.1e-7 | 1.7e-7 | 1.7e-7 |
+| order | | 2.00 | 2.00 | 2.00 | 2.00 | 2.00 | 2.00 |
+
+| Icosphere level | Facets | h_s | q = 1 | q = 2 | q = 3 |
+|---|---|---|---|---|---|
+| 1 | 80 | 4.2e-1 | 2.8e-2 | 4.0e-2 | 3.9e-2 |
+| 4 | 5 120 | 5.8e-2 | 4.7e-4 | 6.9e-4 | 6.9e-4 |
+| 6 | 81 920 | 1.5e-2 | 2.9e-5 | 4.3e-5 | 4.3e-5 |
+| order | | | 2.01 | 2.01 | 2.01 |
+
+| FV | Cells | h | Drag (2-D) / force (3-D) | Lift | FD (q = 3) − FV |
+|---|---|---|---|---|---|
+| cylinder, N = 2 n | 64² | 2.5e-2 | 2.1e-4 | 1.4e-4 | 1.7e-4 |
+| | 1 024² | 1.6e-3 | 7.5e-7 | 5.5e-7 | 7.0e-7 |
+| | order | | 1.99 | 2.00 | 1.99 |
+| sphere, level 1 + log₂(n/4) | 16³ | 1.0e-1 | 2.4e-3 | | 3.7e-4 |
+| | 64³ | 2.5e-2 | 1.5e-4 | | 2.8e-5 |
+| | order | | 1.98 | | 2.08 |
+
+- **Second order in the facet size, set by the facets.** Every error falls as h_s², through both paths, in 2-D and 3-D:
+  the faceted wall's normals and areas carry an O(h_s²) error of the force.
+- **The rule is not the limit.** Orders 2 and 3 agree to three digits: their own quadrature error is far below the
+  facets'. Order 1 comes out 1.4–2.6 times smaller, because its O(h_s²) rule error happens to cancel part of the facets'
+  here; a cancellation, not a property to count on. Refine the facets, not the rule ([Limitations](#limitations)).
+- **FD and FV agree to the discretisation error.** On the same faceted wall the FD path with order 3 is the facets'
+  exact integral to O(h_s⁶); the FV path takes the value at the centroid of each wall fragment, a midpoint rule, so their
+  difference is that rule's error, of order 2 (1.99 in 2-D, 2.08 in 3-D): of the size of either path's error to the
+  smooth body in 2-D, a fifth of it in 3-D.
+- **Which flow at the sample.** The flow continued analytically to the sample point, inside the true body, gives the
+  same order with another constant (cylinder at N = 4 096: drag 6.6·10⁻⁷, lift 7.8·10⁻⁸; sphere at level 6:
+  1.2·10⁻⁴); a solver has no flow there, so the validation uses the true wall's.
+
+Pass criteria of `fossil_val_surface_loads` (it prints `Are all tests passed? T` iff all hold, about 4 s at -O2, 0.4 GB):
+the buoyancy force within 1 (units of ε times the sum of the absolute terms) on every body, path and rule order, the
+moment within 1 where it is exact (FD from order 2, FV with the gradient and the gyration); the d'Alembert and
+Kutta–Joukowski errors and the FD − FV difference decreasing at an observed order of at least 1.8 over the two finest
+levels, for every rule order and on the cut walls.

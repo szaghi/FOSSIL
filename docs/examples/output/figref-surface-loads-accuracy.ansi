@@ -1,0 +1,10 @@
+$ fig_ref_surface_loads_accuracy
+cylinder R = 0.5, U = 1, Gamma = -0.8 (2 pi U R): errors |F_x| / (rho U^2 R) and |F_y - L| / |L|
+     N   FD drag    FD lift    FV drag    FV lift   (FD: order-2 samples; FV: N / 2 cells per axis)
+    32   4.30E-03   2.81E-03   3.72E-03   2.04E-03
+    64   1.07E-03   7.02E-04   8.66E-04   5.51E-04
+   128   2.67E-04   1.76E-04   2.06E-04   1.43E-04
+   256   6.67E-05   4.39E-05   4.76E-05   3.53E-05
+   512   1.67E-05   1.10E-05   1.24E-05   8.85E-06
+  1024   4.17E-06   2.74E-06   2.98E-06   2.19E-06
+ order       2.00       2.00       2.06       2.01
