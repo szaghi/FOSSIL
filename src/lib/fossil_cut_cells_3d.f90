@@ -3181,6 +3181,9 @@ contains
    enddo
    endfunction links_side_piece
 
+   ! nvfortran 26.9 vectorizes the host copy of the region sum sm (#101 item 14: partial sums, so the host and the
+   ! device differ in the last bits); novector keeps it in region order (the device code is unchanged).
+!pgi$r novector
    pure subroutine links_resolve(a, af, npc, fpc, side, np, piece_face, nreg, ar, pr)
    !< Regions left without a piece on one side (side 1: the low cell, its +a face; 2: the high cell, its -a face): the
    !< only piece of that side whose face area is not explained by its matched regions takes them, one at a time, in

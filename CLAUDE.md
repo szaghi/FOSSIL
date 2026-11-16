@@ -72,6 +72,10 @@ Device-code rules (issue #20; see the comments in the named files):
   `norm2([x, y])` returns 0 (`-O0` and `-O2`; `sum`/`maxval` of the same constructor are right), and the device
   `norm2` of an array is 1 ulp off the host's. Use an explicit replica (`norm2_xy` in `fossil_cut_cells_2d`).
   Reproducers: issue #101, items 12 and 9a.
+- Short sums: nvfortran 26.9 vectorizes the host copy of a floating-point sum of >= 4 terms in a routine seq procedure or
+  a shared `if(dev)` loop (partial sums: host and device differ in the last bits; `-Kieee` does not help). Put
+  `!pgi$r novector` in column 1 before such a procedure (`s2v_elements`, `s2v_vertices`, `links_resolve`) and check
+  with `-Minfo=vect` (no "containing reductions" left in it). Reproducer: issue #101, item 14.
 
 The `local_nvf` varset supplies `$NVF_CC` (GPU compute capability, default
 `cc89`); override for a different GPU (`cc80` for A100/V100). The default
