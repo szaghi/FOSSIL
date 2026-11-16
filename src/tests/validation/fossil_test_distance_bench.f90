@@ -35,7 +35,10 @@
 !<      posed with velocities and ILW crossings too; `load samples device vs serial mismatches`, the load samples of
 !<      `load_samples_3d`, #109 WP2 step 01, order 3 with three probes on the closure lines, copied back and resident,
 !<      posed too; `loads device vs serial mismatches`, `integrate_loads` of WP2 step 02 on those samples, copied in,
-!<      resident and with p, tau mapped by the caller, every output by bits).
+!<      resident and with p, tau mapped by the caller, every output by bits; `field transfer device vs serial
+!<      mismatches`, the field transfer of WP2 step 04: a vertex and a facet field at the feet and ILW crossings of the
+!<      posed closure table (host and resident table, the field mapped by the caller) and at the load samples (host and
+!<      resident), `samples_to_vertices` (host and resident samples, values and field mapped by the caller), by bits).
 !<
 !<   6. Timing tables of the 3-D device kernels (sections, cut cells, link inputs, links, wall terms, swept; best / median of 5;
 !<      the piece map, best of 2; the closure table at the bench's grid size, unposed and posed, best of 5 after a
@@ -70,6 +73,8 @@ use fossil_overset,      only : hole_flags, block_logical_t, donor_set_t, donor_
 use fossil,              only : ib_closure_t, fd_closure_3d, ib_closure_reset, ib_closure_mismatches
 use fossil,              only : load_samples_t, load_samples_3d, load_samples_reset, load_samples_mismatches, &
                                integrate_loads
+use fossil,              only : transfer_to_closure, transfer_to_samples, samples_to_vertices
+use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil,              only : curve_object, slice_surface, cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device
 use fossil_boolean_bodies, only : BODY_SPHERE, mc_body
 use fossil_cut_cells_3d, only : cut_cells_3d_sections, cut_cells_3d_nodes_device
@@ -129,6 +134,8 @@ integer                       :: closure_ghosts            !< Ghosts of the clos
 integer                       :: loads_mismatch            !< Load samples: device vs CPU mismatches (WP2 step 01).
 integer                       :: loads_samples             !< Samples of the load-samples case.
 integer                       :: iloads_mismatch           !< Loads (integrate_loads): device vs CPU mismatches (step 02).
+integer                       :: transfer_mismatch         !< Field transfer: device vs CPU mismatches (WP2 step 04).
+integer                       :: transfer_points           !< Points of the field-transfer case.
 integer(I4P)                  :: n_sz                      !< Closure timing size (FOSSIL_CLOSURE_TIMING).
 integer                       :: deviation_mismatch        !< Surface deviation: device vs CPU mismatches (issue #60).
 integer                       :: feature_mismatch          !< Feature-edge boxes: device vs CPU mismatches (issue #61).
@@ -340,6 +347,8 @@ call closure_case(mismatch=closure_mismatch, ghosts=closure_ghosts)
 rich_ok = rich_ok .and. closure_mismatch == 0
 call loads_case(mismatch=loads_mismatch, samples=loads_samples, lmismatch=iloads_mismatch)
 rich_ok = rich_ok .and. loads_mismatch == 0 .and. iloads_mismatch == 0
+call transfer_case(mismatch=transfer_mismatch, points=transfer_points)
+rich_ok = rich_ok .and. transfer_mismatch == 0
 call deviation_case(mismatch=deviation_mismatch)
 rich_ok = rich_ok .and. deviation_mismatch == 0
 call feature_case(mismatch=feature_mismatch)
@@ -460,6 +469,8 @@ print '(A,I0)',      '   curvature device vs serial mismatches: ', curvature_mis
 print '(A,I0,A,I0,A)', '   closure device vs serial mismatches: ', closure_mismatch, '  (', closure_ghosts, ' ghosts)'
 print '(A,I0,A,I0,A)', '   load samples device vs serial mismatches: ', loads_mismatch, '  (', loads_samples, ' samples)'
 print '(A,I0,A)',      '   loads device vs serial mismatches: ', iloads_mismatch, '  (3 device paths)'
+print '(A,I0,A,I0,A)', '   field transfer device vs serial mismatches: ', transfer_mismatch, '  (', transfer_points, &
+                       ' points)'
 print '(A,I0)',      '   deviation device vs serial mismatches: ', deviation_mismatch
 print '(A,I0)',      '   feature device vs serial mismatches: ', feature_mismatch
 print '(A,I0)',      '   thin device vs serial mismatches: ', thin_mismatch
@@ -734,6 +745,83 @@ contains
    enddo
    call surface%exit_device
    endsubroutine loads_case
+
+   subroutine transfer_case(mismatch, points)
+   !< The field transfer (#109 WP2 step 04) on the device against the host, by bits: a two-component vertex field and a
+   !< three-component facet field at the feet and ILW crossings of the posed closure table (the host table copied in; the
+   !< resident table with the field mapped by the caller), at the order-3 load samples (host and resident samples), and
+   !< `samples_to_vertices` of a field at the samples (host samples; resident samples with the values and the field
+   !< mapped by the caller, then `update host`).
+   integer, intent(out)   :: mismatch !< Mismatches.
+   integer, intent(out)   :: points   !< Points (feet, crossings, samples).
+   type(ib_closure_t)     :: ch, cr   !< Host, resident tables.
+   type(load_samples_t)   :: sh, sr   !< Host, resident samples.
+   type(rigid_pose_t)     :: pose     !< Pose.
+   type(vertex_pool_object), pointer :: pool !< Vertex pool.
+   real(R8P), allocatable :: x(:), y(:), z(:), vf(:,:), ff(:,:), hv(:,:), dv(:,:), hi(:,:,:), di(:,:,:), hf(:,:), &
+                             df(:,:), sv(:,:), fh(:,:), fd(:,:) !< Lines, fields, values.
+   type(vector_R8P)       :: c        !< A vertex.
+   real(R8P)              :: h        !< Spacing.
+   integer(I4P)           :: v, f, nv, nf, k !< Counters.
+
+   call closure_lines(grid_n, x, y, z, h, pose)
+   mismatch = 0
+   call surface%enter_device
+   pool => surface%get_vertex_pool()
+   nv = pool%vertex_count() ; nf = surface%get_facets_number()
+   allocate(vf(2, nv), ff(3, nf))
+   do v = 1, nv
+      c = pool%coord(v) ; vf(1, v) = sin(3 * c%x) + c%y * c%z ; vf(2, v) = c%x - 2 * c%z
+   enddo
+   do f = 1, nf
+      ff(:, f) = [real(f, R8P), -real(f, R8P), 0.5_R8P * f]
+   enddo
+   ! closure feet and ILW crossings
+   call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], ch, pose=pose, ilw=.true.)
+   call fd_closure_3d(surface, x, y, z, [3_I4P, 3_I4P, 3_I4P], cr, pose=pose, ilw=.true., resident=.true.)
+   allocate(hv(2, ch%n), dv(2, ch%n), hi(2, 6, ch%n), di(2, 6, ch%n), hf(3, ch%n), df(3, ch%n))
+   call transfer_to_closure(surface, ch, hv, vertex_field=vf, ilw_values=hi, pose=pose)
+   call transfer_to_closure(surface, ch, dv, vertex_field=vf, ilw_values=di, pose=pose, device=.true.)
+   mismatch = mismatch + bits_diff(reshape(hv, [size(hv)]), reshape(dv, [size(dv)])) + &
+              bits_diff(reshape(hi, [size(hi)]), reshape(di, [size(di)]))
+   !$acc enter data copyin(vf)
+   call transfer_to_closure(surface, cr, dv, vertex_field=vf, ilw_values=di, pose=pose, device=.true.)
+   !$acc exit data delete(vf)
+   mismatch = mismatch + bits_diff(reshape(hv, [size(hv)]), reshape(dv, [size(dv)])) + &
+              bits_diff(reshape(hi, [size(hi)]), reshape(di, [size(di)]))
+   call transfer_to_closure(surface, ch, hf, facet_field=ff, pose=pose)
+   call transfer_to_closure(surface, cr, df, facet_field=ff, pose=pose, device=.true.)
+   mismatch = mismatch + bits_diff(reshape(hf, [size(hf)]), reshape(df, [size(df)]))
+   if (ch%n == 0 .or. .not. cr%on_device) mismatch = mismatch + 1
+   points = 7 * ch%n
+   call ib_closure_reset(cr)
+   ! load samples
+   call load_samples_3d(surface, samples=sh, order=3_I4P)
+   call load_samples_3d(surface, samples=sr, order=3_I4P, resident=.true.)
+   deallocate(hv, dv) ; allocate(hv(2, sh%n), dv(2, sh%n), sv(2, sh%n), fh(2, nv), fd(2, nv))
+   call transfer_to_samples(surface, sh, hv, vertex_field=vf)
+   call transfer_to_samples(surface, sh, dv, vertex_field=vf, device=.true.)
+   mismatch = mismatch + bits_diff(reshape(hv, [size(hv)]), reshape(dv, [size(dv)]))
+   call transfer_to_samples(surface, sr, dv, vertex_field=vf, device=.true.)
+   mismatch = mismatch + bits_diff(reshape(hv, [size(hv)]), reshape(dv, [size(dv)]))
+   ! samples to vertices
+   do k = 1, sh%n
+      sv(1, k) = cos(2 * sh%points(1, k)) * sh%points(2, k) ; sv(2, k) = sh%points(3, k) ** 2
+   enddo
+   call samples_to_vertices(surface, sh, sv, fh)
+   call samples_to_vertices(surface, sh, sv, fd, device=.true.)
+   mismatch = mismatch + bits_diff(reshape(fh, [size(fh)]), reshape(fd, [size(fd)]))
+   fd = 0._R8P
+   !$acc enter data copyin(sv) create(fd)
+   call samples_to_vertices(surface, sr, sv, fd, device=.true.)
+   !$acc update host(fd)
+   !$acc exit data delete(sv, fd)
+   mismatch = mismatch + bits_diff(reshape(fh, [size(fh)]), reshape(fd, [size(fd)]))
+   if (sh%n == 0 .or. .not. sr%on_device) mismatch = mismatch + 1
+   points = points + 2 * sh%n
+   call load_samples_reset(sr)
+   call surface%exit_device
+   endsubroutine transfer_case
 
    integer function bits_diff(a, b) result(c)
    !< Entries of two real arrays with different bits (sizes differ: the larger size).

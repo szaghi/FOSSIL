@@ -267,6 +267,9 @@ condition to derivatives along that line. A slip wall adds the curvature conditi
 ([Wall curvature](#wall-curvature)): `ilw_kappa` and `ilw_direction` give S at the crossing, `kappa` and `direction`
 at the foot.
 
+**Wall fields.** A wall value that varies along the wall (a temperature or a deformation per vertex, a value per facet)
+is read at the feet and the ILW crossings by `transfer_to_closure`: [Surface loads](/guide/advanced/surface-loads#moving-fields-between-the-wall-and-the-grid).
+
 **First step: an eikonal extension fed by exact geometry.** A solver that extends its fluid values into the solid by
 an eikonal equation along the normal needs the signed distance and the normal at the ghosts: `distance` and `normal`
 (or `foot`) replace a level set computed on the grid, with no other change to the solver.

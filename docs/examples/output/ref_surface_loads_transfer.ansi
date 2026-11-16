@@ -1,0 +1,4 @@
+$ ref_surface_loads_transfer
+ghosts 1808, ILW crossings 3792;  T at the feet and crossings exact to 1e-12: T
+vertices 1158;  linear stress exact to 1e-14: T;  curved stress, largest error  0.00086
+device = host, bit for bit: T

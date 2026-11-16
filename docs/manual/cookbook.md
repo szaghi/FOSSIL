@@ -524,6 +524,20 @@ sums per patch and per body and the wetted area; with `device=.true.` the contri
 the totals keep their bits. In 2-D the moment is a scalar. See
 [surface loads](/guide/advanced/surface-loads#forces-and-moments).
 
+### Move a wall field to the closure and back
+
+<<< @/examples/snippets/ck_field_transfer.f90
+
+<<< @/examples/output/ck_field_transfer.ansi{ansi}
+
+`transfer_to_closure` reads a field given per vertex (or per facet, `facet_field=`) at the feet of the closure table,
+interpolated linearly on each foot's facet: the wall temperature 300 + 10 z ranges over the cube's height. With
+`ilw_values=` it reads it at the ILW crossings too, with `pose=` on a posed table. The way back,
+`samples_to_vertices`, fits the values at the load samples linearly on each facet and averages the fits at every
+vertex by area: a stress linear along the wall comes back exactly, anything else smoothed. The 2-D forms take a
+curve; `device=.true.` gives the same bits. See
+[surface loads](/guide/advanced/surface-loads#moving-fields-between-the-wall-and-the-grid).
+
 ### Place Lagrangian markers for an IB method
 
 <<< @/examples/snippets/ck_markers.f90

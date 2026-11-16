@@ -18,6 +18,7 @@ per patch and per body too, the same bits on the CPU and on the device.
 | Probes along the normal: points, visibility, enclosing cells on the solver's lines | `load_samples_3d(surface, x, y, z, s, lengths=)` | `load_samples_2d(curve, x, y, s, lengths=)` |
 | The body at a pose; the same on the device bit for bit, or left resident there | `pose=`, `device=.true.`, `resident=.true.` | same |
 | Force, moment (2-D: its z component), per patch and per body, wetted area, from the solver's p and τ | `integrate_loads(s, force, moment, pressure=, shear=)` | same, a scalar moment |
+| A wall field (per vertex or facet) at the closure's feet and ILW crossings, at the samples, at any point on a facet; values at the samples back to the vertices | `transfer_to_closure`, `transfer_to_samples`, `transfer_field_3d`, `samples_to_vertices` | the same generics, `transfer_field_2d` |
 
 ![an ellipse of 40 segments in gold: on every segment its three Gauss points in teal, each with the outward normal in ember, drawn as long as the point's weight times three: the weights follow the segment lengths, shorter at the tips](../../examples/images/ref-surface-loads-samples.svg){.fossil-figure}
 
@@ -152,6 +153,75 @@ mismatches` in the benches). On the host path the host arrays are read: call `up
 
 The [cookbook](/manual/cookbook#integrate-the-pressure-force-on-a-body) integrates the pressure and a uniform shear on
 the unit cube.
+
+## Moving fields between the wall and the grid
+
+A solver keeps fields on the wall, per vertex or per facet (a wall temperature, the displacement of a deforming wall),
+and needs their values where its closure and its loads look at the wall; and it computes fields at points of the wall
+(a wall stress at the load samples) that it wants back on the wall. `fossil_field_transfer` does both, on the geometry
+FOSSIL already has: every point carries the element it lies on.
+
+- **Wall to points (L5).** `transfer_field_3d(surface, facets, points, values, vertex_field=)`: for points on (or
+  projected onto) the facets `facets(n)`, a per-vertex field `vertex_field(ncomp, nv)` (the vertices of the surface's
+  vertex pool) interpolated with the barycentric weights (1 − s − t, s, t) of the point's closest point on its facet,
+  the (s, t) of `triangle_closest_st`, the solve of every distance query. A linear field is reproduced at any point of
+  the facet to round-off; a point equal to a vertex takes that vertex's value bit for bit; a point off the facet takes
+  the value of its closest point. `facet_field=(ncomp, nf)` instead: piecewise constant, copied. `ncomp` components:
+  a scalar or a vector. An id outside 1..nf gives zeros. In 2-D, `transfer_field_2d(curve, segments, points, values,
+  vertex_field= | segment_field=)` with (1 − s, s) of the clamped projection on the segment.
+- **At the closure table and the load samples.** `transfer_to_closure(surface, closure, values, vertex_field=,
+  ilw_values=)` reads the field at the feet (`closure%element`) and, with `ilw_values(ncomp, 2d, n)`, at the ILW
+  crossings: the ghost's coordinates with the slot's axis set to `ilw_t`, on `ilw_element`; a slot without a crossing
+  gives zeros. `transfer_to_samples(surface, samples, values, vertex_field=)` reads it at the load samples with the
+  rule's own barycentric coordinates, the ones that placed them (no closest point, no pose).
+- **Poses.** With `pose=` the points are in the world and the body at the pose, as in a posed closure table: each point
+  is taken to the body frame (`to_body`) before its weights, so the field stays attached to the body's vertices.
+- **Points to wall.** `samples_to_vertices(surface, samples, values, field)`: values at the load samples to a per-vertex
+  field, the direction a solver needs for a wall stress it computes at its samples (the wall-modelled setting of van
+  Noordt et al. 2022). Per element, a linear fit of its q values in the barycentric coordinates (weighted least squares
+  with the rule's weights; order 1: the constant; `linear=.false.`: the weighted mean), evaluated at each of its
+  vertices; per vertex, the average of those values over its incident elements weighted by their areas (2-D lengths),
+  in increasing element order with Neumaier sums. **A smoothing projection, not an interpolation**: a constant comes
+  back exactly; values linear on every element (a field linear in space, on any mesh, or any vertex field brought to
+  the samples by `transfer_to_samples`) come back at every vertex to round-off from order 2; anything else is fitted
+  per element and averaged over the vertex's ring, its noise smoothed with it.
+
+![an ellipse of 24 segments with a band along its wall coloured by T = cos 2θ interpolated linearly between the vertices, teal at the top and bottom (−1), ember at the tips (+1); inside, the ghost points of a grid of spacing 0.1 in grey, each joined to its foot on the wall in gold, where the closure table reads T](../../examples/images/ref-surface-loads-transfer.svg){.fossil-figure}
+
+The figure's vertex field is cos 2θ at 24 vertices: linear along each segment, read at the feet of 80 ghost points.
+Back through the load samples, the same field returns unchanged (it is linear on every segment); cos 2θ evaluated at
+the samples themselves comes back to the vertices with the projection's error:
+
+<<< @/examples/output/figref-surface-loads-transfer.ansi{ansi}
+
+**Host and device.** Every value comes from one kernel per point (`transfer_weights_3d_oac`, `transfer_weights_2d_oac`,
+the rule kernels of the samples), per element and per vertex for the projection, in loops that run on the device with
+`device=.true.`: the inputs are read on the device where they are mapped (a resident closure table or load samples, a
+field the solver mapped itself), else copied in; the output is written on the device where the solver mapped it (then
+`!$acc update host`), else copied back. The per-vertex sums run one thread per vertex in its fixed order, so the two
+paths agree bit for bit (`field transfer device vs serial mismatches` in the benches; tests
+`fossil_test_field_transfer_3d`, `_2d`). The facet vertex ids (2-D the curve's vertices) are gathered on the host per
+call and copied in.
+
+<<< @/examples/snippets/ref_surface_loads_transfer-transfer.f90
+
+<<< @/examples/snippets/ref_surface_loads_transfer-back.f90
+
+<<< @/examples/output/ref_surface_loads_transfer.ansi{ansi}
+
+```text
+call transfer_field_3d(surface, facets, points, values [, status] [, vertex_field | facet_field] [, pose] [, device])
+call transfer_field_2d(curve, segments, points, values [, status] [, vertex_field | segment_field] [, pose] [, device])
+call transfer_to_closure(surface | curve, closure, values [, status] [, vertex_field | facet_field | segment_field]
+                         [, ilw_values] [, pose] [, device])
+call transfer_to_samples(surface | curve, samples, values [, status] [, vertex_field | facet_field | segment_field]
+                         [, device])
+call samples_to_vertices(surface | curve, samples, values, field [, status] [, linear] [, device])
+```
+
+`status = STATUS_INVALID_INPUT` (a stderr message, the outputs zero) on no field or both, a size that differs, a table
+or samples of the other dimension (or not of this surface or curve), `ilw_values` from a table without ILW. The
+[cookbook](/manual/cookbook#move-a-wall-field-to-the-closure-and-back) has the shortest program.
 
 ## Example
 

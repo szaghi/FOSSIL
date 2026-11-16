@@ -1,0 +1,5 @@
+$ fig_ref_surface_loads_transfer
+ellipse of 24 segments: 80 ghost points; T at their feet in -0.97253 ..  0.93885
+linear field, vertices -> samples -> vertices, equal to 1e-14: T
+cos 2 theta from the vertices (linear on each segment), the same round trip, unchanged to 1e-14: T
+cos 2 theta at the samples, back to the vertices: largest error  0.02259 (a smoothing projection)

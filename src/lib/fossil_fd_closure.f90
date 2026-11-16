@@ -73,6 +73,7 @@ public :: ib_closure_t, fd_closure_3d, fd_closure_2d, ib_closure_reset, ib_closu
 ! the per-item kernels, shared by the two paths (public for the tests and for `fossil_surface_loads`)
 public :: fd_cell_index_oac, ilw_select_oac, ilw_item_2d_oac
 public :: to_world_3d_oac, rotate_3d_oac, to_world_2d_oac, rotate_2d_oac
+public :: to_body_3d_oac, to_body_2d_oac ! for `fossil_field_transfer`
 
 type :: ib_closure_t
    !< The closure table of a block (see the module header). dims = 3 or 2 (2-D: the curve's (u, v) plane, nk = 1). Every

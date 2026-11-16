@@ -75,6 +75,8 @@ use fossil_shape_operator, only : normal_curvature
 use fossil_fd_closure, only : ib_closure_t, fd_closure_3d, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
 use fossil_surface_loads, only : load_samples_t, load_samples_3d, load_samples_2d, load_samples_reset, &
                                 load_samples_mismatches, load_rule_size, integrate_loads
+use fossil_field_transfer, only : transfer_field_3d, transfer_field_2d, transfer_to_closure, transfer_to_samples, &
+                                 samples_to_vertices
 use fossil_feature_edges, only : FEATURE_EDGE_SHARP, FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, &
                                  FEATURE_EDGE_DEFAULT_ANGLE
 use fossil_thickness, only : THICKNESS_RAY, THICKNESS_MEDIAL, THICKNESS_DEFAULT_CONE, THICKNESS_DEFAULT_RAYS, &
@@ -133,6 +135,7 @@ public :: normal_curvature
 public :: ib_closure_t, fd_closure_3d, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
 public :: load_samples_t, load_samples_3d, load_samples_2d, load_samples_reset, load_samples_mismatches, load_rule_size
 public :: integrate_loads
+public :: transfer_field_3d, transfer_field_2d, transfer_to_closure, transfer_to_samples, samples_to_vertices
 public :: GHOST_ZM, GHOST_ZP
 public :: FEATURE_EDGE_SHARP, FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, FEATURE_EDGE_DEFAULT_ANGLE
 public :: DEV_STATUS_OK, DEV_STATUS_BAD_INPUT, DEV_STATUS_NOT_CONVERGED

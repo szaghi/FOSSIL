@@ -32,7 +32,9 @@ program fossil_test_curve_bench
 !< and ILW crossings too), and `load samples device vs serial mismatches` (#109 WP2 step 01: `load_samples_2d`, device
 !< and resident against the host, every field by bits, posed too), and `loads device vs serial mismatches` (step 02:
 !< `integrate_loads` on the device, copied-in, resident and caller-mapped p and tau, against the host, every output by
-!< bits).
+!< bits), and `field transfer device vs serial mismatches` (step 04: a vertex and a segment field at the feet and ILW
+!< crossings of the posed closure table and at the load samples, `samples_to_vertices`; host and resident inputs, a
+!< caller-mapped field and output, by bits).
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
@@ -50,6 +52,7 @@ use fossil, only : piece_map_2d_t
 use fossil_piece_map_compare, only : piece_map_2d_mismatches
 use fossil, only : ib_closure_t, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
 use fossil, only : load_samples_t, load_samples_2d, load_samples_reset, load_samples_mismatches, integrate_loads
+use fossil, only : transfer_to_closure, transfer_to_samples, samples_to_vertices
 
 implicit none
 
@@ -173,6 +176,7 @@ contains
       if (a == 1) call curvature(cur, p)
       if (a == 1) call closure(cur, lo, hi)
       if (a == 1) call loads(cur, lo, hi)
+      if (a == 1) call field_transfer(cur, lo, hi)
    enddo
    call cur%exit_device
    endsubroutine bench
@@ -432,6 +436,78 @@ contains
    print '(A,I0,A,I0,A)', '   loads device vs serial mismatches: ', badl, '  (', ns, ' samples, 3 device paths)'
    ok = ok .and. bad == 0 .and. badl == 0
    endsubroutine loads
+
+   subroutine field_transfer(cur, lo, hi)
+   !< The field transfer (#109 WP2 step 04) on the device against the host, by bits: a two-component vertex field and a
+   !< segment field at the feet and ILW crossings of the posed closure table (the host table copied in; the resident table
+   !< with the field mapped by the caller), at the order-3 load samples (host and resident), `samples_to_vertices` of a
+   !< field at the samples (host samples; resident samples with the values and the field mapped by the caller).
+   type(curve_object), intent(inout) :: cur          !< Curve (on device).
+   real(R8P),          intent(in)    :: lo(2), hi(2) !< Grid box.
+   type(rigid_pose_2d_t)     :: pose     !< Pose.
+   type(ib_closure_t)        :: ch, cr   !< Host, resident tables.
+   type(load_samples_t)      :: sh, sr   !< Host, resident samples.
+   real(R8P),    allocatable :: x(:), y(:), vf(:,:), sf(:,:), hv(:,:), dv(:,:), hi4(:,:,:), di4(:,:,:), sv(:,:), &
+                                fh(:,:), fd(:,:) !< Lines, fields, values.
+   real(R8P)                 :: q(2)     !< A vertex.
+   integer(I4P)              :: i, nv, bad, np !< Work.
+
+   allocate(x(n), y(n))
+   do i = 1, n
+      x(i) = lo(1) + (hi(1) - lo(1)) * (i - 0.5_R8P) / n ; y(i) = lo(2) + (hi(2) - lo(2)) * (i - 0.5_R8P) / n
+   enddo
+   pose = pose_2d(0.3_R8P, [0.02_R8P, -0.01_R8P])
+   nv = cur%get_vertices_number()
+   allocate(vf(2, nv), sf(2, nv))
+   do i = 1, nv
+      q = cur%get_vertex(i) ; vf(1, i) = sin(3 * q(1)) + q(2) ; vf(2, i) = q(1) * q(2) ; sf(:, i) = [real(i, R8P), -0.5_R8P * i]
+   enddo
+   bad = 0
+   call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], ch, pose=pose, ilw=.true.)
+   call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], cr, pose=pose, ilw=.true., resident=.true.)
+   allocate(hv(2, ch%n), dv(2, ch%n), hi4(2, 4, ch%n), di4(2, 4, ch%n))
+   call transfer_to_closure(cur, ch, hv, vertex_field=vf, ilw_values=hi4, pose=pose)
+   call transfer_to_closure(cur, ch, dv, vertex_field=vf, ilw_values=di4, pose=pose, device=.true.)
+   bad = bad + count_bits(reshape(hv, [size(hv)]), reshape(dv, [size(dv)])) + &
+         count_bits(reshape(hi4, [size(hi4)]), reshape(di4, [size(di4)]))
+   !$acc enter data copyin(vf)
+   call transfer_to_closure(cur, cr, dv, vertex_field=vf, ilw_values=di4, pose=pose, device=.true.)
+   !$acc exit data delete(vf)
+   bad = bad + count_bits(reshape(hv, [size(hv)]), reshape(dv, [size(dv)])) + &
+         count_bits(reshape(hi4, [size(hi4)]), reshape(di4, [size(di4)]))
+   call transfer_to_closure(cur, ch, hv, segment_field=sf, ilw_values=hi4, pose=pose)
+   call transfer_to_closure(cur, cr, dv, segment_field=sf, ilw_values=di4, pose=pose, device=.true.)
+   bad = bad + count_bits(reshape(hv, [size(hv)]), reshape(dv, [size(dv)])) + &
+         count_bits(reshape(hi4, [size(hi4)]), reshape(di4, [size(di4)]))
+   if (ch%n == 0 .or. .not. cr%on_device) bad = bad + 1
+   np = 5 * ch%n
+   call ib_closure_reset(cr)
+   call load_samples_2d(cur, samples=sh, order=3_I4P)
+   call load_samples_2d(cur, samples=sr, order=3_I4P, resident=.true.)
+   deallocate(hv, dv) ; allocate(hv(2, sh%n), dv(2, sh%n), sv(2, sh%n), fh(2, nv), fd(2, nv))
+   call transfer_to_samples(cur, sh, hv, vertex_field=vf)
+   call transfer_to_samples(cur, sh, dv, vertex_field=vf, device=.true.)
+   bad = bad + count_bits(reshape(hv, [size(hv)]), reshape(dv, [size(dv)]))
+   call transfer_to_samples(cur, sr, dv, vertex_field=vf, device=.true.)
+   bad = bad + count_bits(reshape(hv, [size(hv)]), reshape(dv, [size(dv)]))
+   do i = 1, sh%n
+      sv(1, i) = cos(2 * sh%points(1, i)) * sh%points(2, i) ; sv(2, i) = sh%points(2, i) ** 2
+   enddo
+   call samples_to_vertices(cur, sh, sv, fh)
+   call samples_to_vertices(cur, sh, sv, fd, device=.true.)
+   bad = bad + count_bits(reshape(fh, [size(fh)]), reshape(fd, [size(fd)]))
+   fd = 0._R8P
+   !$acc enter data copyin(sv) create(fd)
+   call samples_to_vertices(cur, sr, sv, fd, device=.true.)
+   !$acc update host(fd)
+   !$acc exit data delete(sv, fd)
+   bad = bad + count_bits(reshape(fh, [size(fh)]), reshape(fd, [size(fd)]))
+   if (sh%n == 0 .or. .not. sr%on_device) bad = bad + 1
+   np = np + 2 * sh%n
+   call load_samples_reset(sr)
+   print '(A,I0,A,I0,A)', '   field transfer device vs serial mismatches: ', bad, '  (', np, ' points)'
+   ok = ok .and. bad == 0
+   endsubroutine field_transfer
 
    pure function bits_r(a) result(b)
    !< The bit patterns of reals.

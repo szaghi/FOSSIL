@@ -63,6 +63,7 @@ public :: load_samples_t, load_samples_3d, load_samples_2d, load_samples_reset, 
 public :: integrate_loads
 ! the per-point kernels, shared by the two paths (public for the tests)
 public :: load_point_3d_oac, load_point_2d_oac, load_force_3d_oac, load_force_2d_oac
+public :: rule_3d_oac ! the 3-D rules, for `fossil_field_transfer`
 
 interface integrate_loads
    !< Force, moment, per patch and per body totals of the solver's p and tau at the load samples (3-D: moment(3); 2-D: a

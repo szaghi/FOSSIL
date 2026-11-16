@@ -1,0 +1,5 @@
+$ ck_field_transfer
+ghosts 784;  T at the feet from  300.00 to  310.00;  the same by transfer_field_3d: T
+T, vertices -> samples -> vertices, unchanged to 1e-12: T
+vertices 26;  the stress 0.5 x at every vertex to 1e-14: T
+2-D: segment 1 at u = 0.25:  12.50
