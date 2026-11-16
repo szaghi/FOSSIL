@@ -28,7 +28,8 @@
 !<      (`orient3d device vs serial mismatches`, issue #100 step 3c, among them; `swept cells 3-D device vs serial
 !<      mismatches`, issue #100 step 4; `cut cells 3-D link inputs device vs serial mismatches` and `cut links 3-D
 !<      device vs serial mismatches`, step 5; `piece map 3-D device vs serial mismatches`, issue #105 step 3;
-!<      `probe device vs serial mismatches`, the probes and images of WP1 step 01).
+!<      `probe device vs serial mismatches`, the probes and images of WP1 step 01; `curvature device vs serial
+!<      mismatches`, the principal curvatures and directions at the feet of WP1 step 03).
 !<
 !<   6. Timing tables of the 3-D device kernels (sections, cut cells, link inputs, links, swept; best / median of 5;
 !<      the piece map, best of 2):
@@ -108,6 +109,7 @@ integer                       :: sign_mismatch             !< Sign benchmark: de
 integer                       :: line_mismatch             !< Grid-line crossings: device vs CPU mismatches (issue #40).
 integer                       :: posed_mismatch            !< Posed queries: device vs CPU mismatches (issue #41).
 integer                       :: probe_mismatch            !< Probes and images: device vs CPU mismatches (WP1 step 01).
+integer                       :: curvature_mismatch        !< Shape operator at the feet: device vs CPU mismatches (step 03).
 integer                       :: deviation_mismatch        !< Surface deviation: device vs CPU mismatches (issue #60).
 integer                       :: feature_mismatch          !< Feature-edge boxes: device vs CPU mismatches (issue #61).
 integer                       :: thin_mismatch             !< Thin-facet boxes: device vs CPU mismatches (issue #62).
@@ -291,6 +293,8 @@ call posed_case(mismatch=posed_mismatch)
 rich_ok = rich_ok .and. posed_mismatch == 0
 call probe_case(mismatch=probe_mismatch)
 rich_ok = rich_ok .and. probe_mismatch == 0
+call curvature_case(mismatch=curvature_mismatch)
+rich_ok = rich_ok .and. curvature_mismatch == 0
 call deviation_case(mismatch=deviation_mismatch)
 rich_ok = rich_ok .and. deviation_mismatch == 0
 call feature_case(mismatch=feature_mismatch)
@@ -405,6 +409,7 @@ print '(A,I0)',      '   sign bench device vs serial mismatches: ', sign_mismatc
 print '(A,I0)',      '   line crossings device vs serial mismatches: ', line_mismatch
 print '(A,I0)',      '   posed device vs serial mismatches: ', posed_mismatch
 print '(A,I0)',      '   probe device vs serial mismatches: ', probe_mismatch
+print '(A,I0)',      '   curvature device vs serial mismatches: ', curvature_mismatch
 print '(A,I0)',      '   deviation device vs serial mismatches: ', deviation_mismatch
 print '(A,I0)',      '   feature device vs serial mismatches: ', feature_mismatch
 print '(A,I0)',      '   thin device vs serial mismatches: ', thin_mismatch
@@ -532,6 +537,38 @@ contains
    enddo
    call surface%exit_device
    endsubroutine probe_case
+
+   subroutine curvature_case(mismatch)
+   !< query_many_device vs query_many (WP1 step 03): principal_curvatures and principal_directions at the feet of the bench
+   !< points, unposed and posed, bit for bit (build_curvature, then enter_device).
+   integer, intent(out)          :: mismatch !< Mismatches.
+   type(rigid_pose_t)            :: pose     !< Pose.
+   type(vector_R8P), allocatable :: q(:)     !< Moved points.
+   real(R8P),        allocatable :: d(:), k1(:,:), k2(:,:), t1(:,:,:), t2(:,:,:) !< Work.
+   real(R8P)                     :: w(3)     !< Work.
+   integer(I4P)                  :: m, nq, k !< Work.
+
+   nq = size(points, kind=I4P)
+   allocate(d(nq), k1(2, nq), k2(2, nq), t1(3, 2, nq), t2(3, 2, nq), q(nq))
+   pose = pose_from_axis_angle([-1._R8P, 0.5_R8P, 2._R8P], 0.6_R8P, [-4._R8P, 1._R8P, 9._R8P])
+   do m = 1, nq
+      w = to_world(pose, [points(m)%x, points(m)%y, points(m)%z]) ; q(m) = vector_R8P(w(1), w(2), w(3))
+   enddo
+   mismatch = 0
+   call surface%build_curvature
+   call surface%enter_device
+   do k = 1, 2
+      if (k == 1) then
+         call surface%query_many(points=points, distances=d, principal_curvatures=k1, principal_directions=t1)
+         call surface%query_many_device(points=points, distances=d, principal_curvatures=k2, principal_directions=t2)
+      else
+         call surface%query_many(points=q, distances=d, principal_curvatures=k1, principal_directions=t1, pose=pose)
+         call surface%query_many_device(points=q, distances=d, principal_curvatures=k2, principal_directions=t2, pose=pose)
+      endif
+      mismatch = mismatch + count(k1 /= k2) + count(t1 /= t2)
+   enddo
+   call surface%exit_device
+   endsubroutine curvature_case
 
    subroutine deviation_case(mismatch)
    !< surface%deviation with device=.true. vs the CPU path (issue #60): a copy of the surface rotated by 2 degrees about

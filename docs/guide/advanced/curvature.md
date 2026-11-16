@@ -28,6 +28,10 @@ the surface:
   - The two operators above stall near 15 % at the valence-5 vertices.
   - Use it when pointwise values matter, as for the wall curvature at a
     foot point (`query_many(curvatures=)`).
+- **`build_curvature(status)`** (roadmap #109) — the principal curvatures
+  k₁ ≥ k₂ and directions d₁, d₂ of the same fit at every vertex, for
+  `query_many(_device)(principal_curvatures=, principal_directions=)` at a
+  foot point: see [Principal curvatures and directions](#principal-curvatures-and-directions).
   - Ring vertices closer than 1e-8 of the ring radius count as one point,
     and the ring grows (up to the 4-ring) if merging leaves fewer than 12
     (issue #91). Where the fit is still rank deficient (a ring on two
@@ -176,7 +180,9 @@ Gauss-Bonnet theorem fixes at $2\pi\chi$ on any closed mesh:
 <<< @/examples/snippets/ref_curvature-bonnet.f90
 
 The principal curvatures follow from H and K pointwise,
-$\kappa_{1,2} = H \pm \sqrt{\max(0, H^2 - K)}$ (no separate routine).
+$\kappa_{1,2} = H \pm \sqrt{\max(0, H^2 - K)}$ (`build_curvature` stores
+them with their directions:
+[Principal curvatures and directions](#principal-curvatures-and-directions)).
 On the torus they are known: $1/r$ around the tube and
 $(\rho - R)/(r\rho)$ along it, with $\rho$ the distance from the axis:
 
@@ -206,6 +212,64 @@ $(\rho - R)/(r\rho)$ along it, with $\rho$ the distance from the axis:
 ### The whole program
 
 <<< @/examples/snippets/ref_curvature.f90
+
+## Principal curvatures and directions
+
+A wall closure needs more than H and K: the curvature along a given tangent direction, the direction of the slip
+velocity for instance. `build_curvature` (roadmap [#109](https://github.com/szaghi/FOSSIL/issues/109)) stores the
+**shape operator** of every vertex, and `query_many` evaluates it at a foot point, on the CPU or on the device:
+
+```text
+call surface%build_curvature([status])                  ! once per geometry; before enter_device for the device
+call surface%query_many(points, distances, ..., principal_curvatures=k, principal_directions=d)   ! k(2, n), d(3, 2, n)
+call surface%query_many_device(points, distances, ..., principal_curvatures=k, principal_directions=d)
+kn = normal_curvature(k(:, i), d(:, :, i), t)           ! Euler: k1 (t.d1)^2 + k2 (t.d2)^2, t tangent
+```
+
+![a torus of 48 x 24 vertices with, at the feet of 400 points spread around it, the principal directions as short crosses: d1 in ember around the tube, where k1 = 1/r, and d2 in teal along it](../../examples/images/ref-curvature-principal.svg){.fossil-figure}
+
+**From the jet to the shape operator.** At each vertex the jet fit of `jet_curvature` gives, in the frame (t₁, t₂, n)
+of the vertex pseudo-normal, the height function z = d x + e y + a x² + b xy + c y² + …. The graph's tangents at the
+origin are r_x = (1, 0, d) and r_y = (0, 1, e), its normal N = (−d, −e, 1)/W with W = √(1 + d² + e²), its second
+fundamental form II = [[2a, b], [b, 2c]]/W. In the orthonormal tangent basis u₁ = r_x/|r_x|, u₂ = N × u₁ (whose
+parameter coordinates are c₁ = (1, 0)/ℓ, c₂ = (−de, 1 + d²)/(Wℓ), ℓ = √(1 + d²)) the shape operator is the symmetric
+2 × 2 matrix S_ij = −c_iᵀ II c_j (minus: convex positive). Its eigenvalues are those of I⁻¹ II, so k₁ + k₂ = 2H and
+k₁k₂ = K of `jet_curvature` to round-off (6.7·10⁻¹⁶ on an icosphere); its eigenvectors, projected on the plane of the
+pseudo-normal and normalised, are the stored d₁ and d₂ = n × d₁. A vertex without a fit (fewer than 6 ring vertices,
+a flat rank-deficient ring, a failed fit: NaN) takes k = H ± √max(H² − K, 0) and the jet frame as directions.
+
+**At the foot.** The vertex tensors S_v = k₁ d₁d₁ᵀ + k₂ d₂d₂ᵀ of the closest facet are interpolated with the foot's
+barycentric weights (the rule of `curvatures=`: clamped to the triangle, along the longest edge on a near-collinear
+facet), restricted to the tangent plane of the foot's pseudo-normal (the `normals=` output) and eigen-decomposed in
+closed form: with h = (p − r)/2 and s = √(h² + q²) for the restriction [[p, q], [q, r]], k₁,₂ = (p + r)/2 ± s and the
+eigenvector of k₁ is (s + h, q) if h ≥ 0, else (q, s − h), the column without cancellation. **Umbilic rule:** where
+h = q = 0 (k₁ = k₂, every direction principal) d₁ is the first vector t₁ of a fixed tangent frame of the normal
+(e_x × n normalised, or e_y × n when |n_x| ≥ 0.9), so the output is deterministic. Square roots and the four
+operations only: the routine (`fossil_shape_operator%foot_principal_oac`) runs unchanged on the device and returns the
+host's bits. Sign: positive where the surface is convex seen from the side the normals point to; a sphere of radius R
+gives k₁ = k₂ = 1/R, a cylinder 1/R around and 0 along. With `pose=` the directions come in the world frame; `move`
+rotates the stored directions. `analyze` drops the operator.
+
+**Curves.** `curve%build_curvature` stores a signed curvature per vertex: the circle through the vertex and its two
+neighbours minus that circle's first-order spacing term, κ_M − κ_s (h₂ − h₁)/3, with the arc-length derivative κ_s
+from a cubic jet of five vertices. It is O(h²) on any spacing where the plain circle is O(h₂ − h₁), and equals the
+circle on uniform spacing (exact on a uniformly sampled circle). `principal_curvatures(1, n)` interpolates it along
+the closest segment; `principal_directions(2, 1, n)` is the unit tangent (−n_v, n_u), the segment direction.
+
+<<< @/examples/snippets/fig_ref_curvature_principal-query.f90
+
+<<< @/examples/output/figref-curvature-principal.ansi{ansi}
+
+- **Curvatures at second order.** On the torus (R = 1, r = 0.45) both errors fall by 4 per halving of h: k₁ = 1/r to
+  9.3·10⁻³ and k₂ = cos b/(R + r cos b) to 3.5·10⁻³ at 192 × 96 vertices, the saddle side (k₂ < 0) included.
+- **Directions.** In the foot's tangent plane d₁ meets the meridian within 0.078° at the finest mesh, second order
+  too. The plane itself is that of the facet normal, tilted from the smooth surface's by O(h) (1.9° there): the
+  directions follow the foot normal of `normals=`, as the closure's other ingredients do.
+- **Other bodies** (`fossil_test_principal_curvature`): icospheres of radius 2, maximum relative error 0.098, 0.023,
+  0.0059 at 2, 3, 4 subdivisions; cylinders of radius 1/2, 0.32, 0.074, 0.018 at 16, 32, 64 sectors, d₂ along the
+  axis within 4·10⁻⁷; an ellipsoid (2, 1.5, 1) at its tip, 0.4 % and 0.6 %. Curves
+  (`fossil_test_principal_curvature_2d`): an ellipse with alternating spacing, 2.9·10⁻², 7.2·10⁻³, 1.8·10⁻³ at 64,
+  128, 256 vertices, against 9.7·10⁻², 4.8·10⁻², 2.4·10⁻² for the plain circle through three vertices.
 
 ## Visual reference
 
@@ -277,12 +341,21 @@ any case. The figures are drawn by
   sign of `H` there will flip. Run `sanitize_normals` (or full
   `sanitize`) before `mean_curvature` if the input is dirty. The
   unsigned magnitude `|H|` is robust regardless.
-- **Principal curvatures and directions** are *not yet* a TBP — only
-  the trace (`H`) and determinant-shadow (`K`) are returned. Computing
-  `(κ₁, κ₂, d₁, d₂)` requires either (a) the algebraic combination
-  shown in the example above for the eigenvalues, or (b) Rusinkiewicz
-  2004 per-vertex 3×3 covariance + `dsyev` LAPACK eigen-decomposition
-  for the directions. The follow-up TBP is small but not yet shipped.
+- **Principal directions follow the foot normal.** `principal_directions`
+  lie in the tangent plane of the foot's pseudo-normal, the facet normal
+  inside a facet, tilted from the smooth surface's by O(h) (1.9° on the
+  finest torus above); within that plane they are second order.
+- **The jet wants vertices on the surface.** A vertex position error ε
+  enters the fitted curvature as ε/h². Marching-cubes vertices interpolate
+  the field linearly along the grid edges, ε = O(h²), so their curvature
+  error does not fall with h: on a marching-cubes spheroid (semi-axes 0.5,
+  0.5, 0.3, step 0.025) the normal curvature along the parallels was off
+  by up to 17 %, on the same spheroid as a scaled icosphere (20 480
+  facets, vertices on the surface) by 0.18 % (the program of
+  [Wall curvature](/guide/advanced/fd-closure#wall-curvature), run once
+  on both meshes). Remesh or
+  project the vertices onto the surface first when the pointwise value
+  matters.
 - **Discrete curvature is per-*vertex*, not per-*facet*.** If you want
   a per-facet curvature scalar (e.g. for face-based segmentation), the
   standard recipe is to average the three incident vertex values —
@@ -300,6 +373,9 @@ any case. The figures are drawn by
 - [`sanitize_normals`](/guide/api/surface-stl-object#sanitize_normals)
   — ensures the pseudo-normals used by mean-curvature sign
   disambiguation are consistently outward-oriented.
+- [Finite-difference wall closure](/guide/advanced/fd-closure#wall-curvature)
+  — the curvature condition of a slip wall, from the principal curvatures
+  at the foot.
 - [Constants](/guide/api/constants) — `CURV_STATUS_*`.
 
 ## References
@@ -311,7 +387,12 @@ any case. The figures are drawn by
   that informs the §2.1 follow-up.
 - Rusinkiewicz, *Estimating curvatures and their derivatives on
   triangle meshes*, 3DPVT 2004. The per-vertex 3×3 covariance method
-  for principal curvatures and directions — the documented follow-up.
+  for principal curvatures and directions, interpolated over a triangle
+  as tensors; `build_curvature` takes its directions from the jet fit
+  instead and interpolates the tensors the same way.
+- Cazals & Pouget, *Estimating differential quantities using polynomial
+  fitting of osculating jets*, CAGD 22 (2005). The jet fit behind
+  `jet_curvature` and `build_curvature`.
 - Crane, *Discrete Differential Geometry: An Applied Introduction*,
   SIGGRAPH course notes 2013–2023. The pedagogical reference covering
   both Gauss–Bonnet on triangle meshes and the `H n = (1/2) M⁻¹ L V`

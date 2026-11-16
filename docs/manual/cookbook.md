@@ -1087,6 +1087,22 @@ for a target of 0.1: the band (0.08, 0.133) but for a few edges. See [isotropic 
 vertices around it: on this unit sphere of 6632 facets, H = 0.9944 and K = 0.9892. It runs on the CPU only. See
 [curvature at the foot point](/guide/advanced/ib-queries#curvature-at-the-foot-point).
 
+### Principal curvatures and directions at the wall
+
+<<< @/examples/snippets/ck_principal_curvature.f90
+
+<<< @/examples/output/ck_principal_curvature.ansi{ansi}
+
+![a marching-cubes ellipsoid with semi-axes 2, 1.5 and 1 and, at the feet of 264 points around it, the principal directions as short crosses: d1, the direction of the larger curvature, in ember, d2 in teal](../examples/images/ck-principal-curvature.svg){.fossil-figure}
+
+`build_curvature` stores the shape operator of the jet fit at every vertex, once; then `query_many` returns at each
+foot the principal curvatures k1 >= k2 and their unit directions, tangent to the foot normal. At the tip of this
+ellipsoid k1 = 2.013 along z and k2 = 0.891 along y (exact 2 and 0.8889), and `normal_curvature` gives the curvature
+along any tangent (1.447 at 45 degrees, exact 1.444): the factor of the slip-wall condition d_n v_t = kappa v_t.
+Called after `build_curvature`, `enter_device` maps the operator too and `query_many_device` returns the same bits;
+`curve_object` has the same calls (one curvature, the tangent). See
+[principal curvatures and directions](/guide/advanced/curvature#principal-curvatures-and-directions).
+
 ### Curvature at every vertex
 
 <<< @/examples/snippets/ck_vertex_curvature.f90

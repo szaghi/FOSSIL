@@ -1,0 +1,34 @@
+# FOSSIL performance bench (issue #94): fossil_val_perf
+# commit:      4318eec+wp1-03
+# host:        adam
+# compiler:    GCC version 16.2.0
+# flags:       -cpp -I exe-validation/mod -imultiarch x86_64-linux-gnu -mtune=generic -march=x86-64 -O2 -frealloc-lhs -ffp-contract=off -J exe-validation/mod -fpre-include=/usr/include/finclude/x86_64-linux-gnu/math-vector-fortran.h
+# date:        2026-11-15 22:52
+# repetitions: 5 timed after one warm-up; wall clock (system_clock int64), one thread
+# group      kernel                       problem size                                              items    t_min[s] t_median[s]  t_min/item hash
+queries      distance_many                dragon-fine 24318 facets, 32^3 pts                        32768  1.5965E-01  1.6165E-01  4.8720E-06 76DF9F63334F0983
+queries      query_many                   dragon-fine 24318 facets, 32^3 pts                        32768  1.6211E-01  1.6358E-01  4.9472E-06 52FB9EA454893CDF
+queries      box_classify_many            dragon-fine 24318 facets, 32^3 boxes                      32768  6.7955E-01  6.8530E-01  2.0738E-05 6C5FB2646B6A2CAC
+queries      curve.distance_many          ellipse 4096 segments, 512^2 pts                         262144  1.1434E-01  1.1569E-01  4.3616E-07 79B6BC6815BB004C
+body         distance_to.cubes            cube vs cube, 12 facets each, 20000 poses                 20000  2.7710E-01  2.8240E-01  1.3855E-05 4CD662321ED71923
+body         distance_to.large            dragon-fine 24318 facets vs copy, 20 poses                   20  2.4734E-02  2.6242E-02  1.2367E-03 6F465E4445A5EDF7
+cut          cut_cells_2d                 ellipse 1024 segments, 512^2 cells (1340 cut)              1340  1.7607E-02  1.9491E-02  1.3140E-05 5C004792371A9D5E
+cut          cut_cells_3d                 mc sphere 2972 facets, 48^3 cells (7532 cut)               7532  7.5416E-02  7.7453E-02  1.0013E-05 56BD23F9176E58F5
+cut          cut_cells_3d.links           mc sphere 2972 facets, 48^3 cells (7532 cut)               7532  9.4490E-02  9.8641E-02  1.2545E-05 13E853765823B361
+swept        swept_cells_2d.translation   ellipse 256 segments, 128^2 cells, 1 step                     1  2.3737E-02  2.3973E-02  2.3737E-02 156ED6DB37420C12
+swept        swept_cells_2d.rotation      ellipse 256 segments, 64^2 cells, 1 step                      1  3.5357E-02  3.7270E-02  3.5357E-02 2C8DECD3188756C5
+swept        swept_cells_3d.translation   cone 62 facets, 16^3 cells, 1 step                            1  2.3739E-01  2.5305E-01  2.3739E-01 70A62DDC5DE8AA79
+swept        swept_cells_3d.rotation      cone 62 facets, 8^3 cells, 1 step                             1  2.1313E-01  2.1707E-01  2.1313E-01 7D70379212EC342B
+ccd          time_of_impact               bunny 5000 vs dragon 2000, 121 steps                          8  4.7901E-02  4.8387E-02  5.9876E-03 1923A18F304E8DE7
+ccd          time_of_impact.sliding       sliding cubes, gap 16 tol, plain, 1000 steps               1000  2.0151E-02  2.0397E-02  2.0151E-05 58146D0574512274
+ccd          curve.time_of_impact         ellipses 256 segments, 159 steps                             16  2.2612E-02  2.3246E-02  1.4132E-03 0AF903742F3CC52C
+processing   isotropic_remesh             dragon 6588 facets -> 11112, defaults                      6588  1.3622E+00  1.3650E+00  2.0677E-04 07E1F8006377E293
+processing   decimate                     dragon 6588 facets -> 1646                                 6588  1.4682E-01  1.4774E-01  2.2286E-05 128201FF5D9F0562
+overset      overset_2d.holes             cylinder O 512x192 + 640^2 cells                         509890  2.7735E-01  2.8819E-01  5.4394E-07 1F73AC071399EDC9
+overset      overset_2d.donors            cylinder O 512x192 + 640^2 cells                         509890  6.3697E-02  6.6364E-02  1.2492E-07 577B964D76242D89
+overset      overset_2d.classify          cylinder O 512x192 + 640^2 cells                         509890  5.6666E-02  5.8073E-02  1.1113E-07 2BA9A84C63B14C85
+overset      overset_3d.holes             sphere shell 64x32x16 + 48^3 cells                       154114  1.0630E+00  1.0801E+00  6.8974E-06 7732640155A8BE48
+overset      overset_3d.donors            sphere shell 64x32x16 + 48^3 cells                       154114  7.8842E-02  8.0369E-02  5.1158E-07 1B35859B020E7C8A
+overset      overset_3d.classify          sphere shell 64x32x16 + 48^3 cells                       154114  4.0416E-02  4.2866E-02  2.6225E-07 1483268312D64028
+# total:     50.1 s
+Are all tests passed? T

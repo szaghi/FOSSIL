@@ -28,6 +28,7 @@ batches, on the CPU or the device, for surfaces (3-D) and
 | Probe along the normal, with visibility; m probes per point (image lines) | `probe_many`, `probe_many_device` | same |
 | Mirror through the closest point, with visibility | `image_points`, `image_points_device` | same |
 | Several foot points (medial axis, thin gaps) | `query_many(..., ambiguous=, second_foot_points=)` | same |
+| Wall curvature at the foot: principal curvatures and directions, CPU or device (after `build_curvature`) | `query_many(_device)(..., principal_curvatures=, principal_directions=)` | same (curvature, tangent) |
 | Bodies | `get_bodies_number`, `facet_body`, `get_shells_number`, `facet_shell` | `get_bodies_number`, `loop_body` |
 | Vector level set | `distance_field_object%compute(..., store_closest=.true.)` | same, 2-D field |
 
@@ -198,6 +199,17 @@ returns it as an optional output (issue #42, CPU):
 
 Both work with `pose=`, since curvature is invariant under rigid motion.
 
+- **Principal curvatures and directions (roadmap #109, CPU and device).** After `build_curvature`, which stores the
+  per-vertex shape operator of the same jet fit once, `query_many` and `query_many_device` return
+  `principal_curvatures(2, n)` = (k₁, k₂), k₁ ≥ k₂, and `principal_directions(3, 2, n)` = (d₁, d₂), unit, tangent to
+  `normals=`: the vertex tensors interpolated with the foot's barycentric weights, then eigen-decomposed in the
+  tangent plane, by one routine shared by the host and the device (bit for bit). The normal curvature along a tangent
+  t is `normal_curvature(k, d, t)`, the factor of ∂ₙv_t = κₙ v_t. Curves: `curve%build_curvature`, then
+  `principal_curvatures(1, n)` (O(h²) on any spacing) and `principal_directions(2, 1, n)`, the tangent. Without
+  `build_curvature` the call returns `STATUS_INVALID_INPUT`. See
+  [principal curvatures and directions](/guide/advanced/curvature#principal-curvatures-and-directions) and the
+  [wall curvature of a finite-difference closure](/guide/advanced/fd-closure#wall-curvature).
+
 ![an ellipsoid with semi-axes 1, 0.7 and 0.45 from marching cubes (5112 facets), each facet coloured by the mean curvature H at the foot of its centroid, from 0.69 (teal) at the ends of the short axis to 3.48 (ember) at the ends of the long axis](../../examples/images/ref-ib-queries-curvature.svg){.fossil-figure}
 
 The exact values are 0.684 at the ends of the short axis, (c/a² + c/b²)/2, and 3.49 at the ends of the long axis,
@@ -304,6 +316,10 @@ All of them are lengths for `probe_many`, one per point or several at once (`len
 | foot curvature, cylinder R = 1/2 (16, 32, 64 sectors) | maximum error 0.21, 0.046, 0.011 |
 | foot curvature, flat faces | 0 exactly |
 | foot curvature, regular N-gons R = 1 | (π/N)/sin(π/N) exactly: the error against 1/R falls by 4.0 per halving of h |
+| principal curvatures at the foot, icospheres R = 2 (2, 3, 4 subdivisions) | maximum relative error 0.098, 0.023, 0.0059; (d₁, d₂, n) orthonormal to 6·10⁻¹⁶ |
+| principal curvatures at the foot, cylinder R = 1/2 (16, 32, 64 sectors) | maximum error 0.32, 0.074, 0.018; d₂ along the axis within 4·10⁻⁷ |
+| principal curvatures at the foot, device path vs host, posed too (ellipsoid; ellipse) | bit for bit (device path run on the host) |
+| curve vertex curvature, ellipse with alternating spacing (64, 128, 256 vertices) | 2.9·10⁻², 7.2·10⁻³, 1.8·10⁻³ (the circle through three vertices: 9.7·10⁻², 4.8·10⁻², 2.4·10⁻²) |
 | markers, unit icosphere, Δx = 0.06 | 2030 markers, area within 0.5 %, 97 % of spacings in [0.8, 1.2] Δx |
 | markers, unit cube, Δx = 0.1, features kept | area 6 to round-off, 73 % of spacings in the window (53 % before roadmap #92 WP5) |
 | remesh of that cube at L = √3 Δx, features kept | every cube edge 7 or 8 vertices, every crease spacing in [4L/5, 4L/3] (0.807 L to 1.019 L); before, 9 vertices at 0.722 L |
@@ -314,9 +330,9 @@ All of them are lengths for `probe_many`, one per point or several at once (`len
 - **GPU validation is manual.** The device paths (`query_many_device`,
   `probe_many_device`, `image_points_device`, 3-D and 2-D) run bit-exact on
   the host in `tests-gnu`; on the GPU they are checked by the manual gate
-  (`rich`, `rich id` and `probe device vs serial mismatches` lines of the
+  (`rich`, `rich id`, `probe` and `curvature device vs serial mismatches` lines of the
   benches, 0 on an RTX 4070 with nvfortran 26.9), not by CI.
-- **Multiple foot points and foot curvature are CPU only.**
+- **Multiple foot points and `curvatures=` are CPU only.** The principal curvatures and directions run on both.
 - **3-D foot curvature needs a resolved surface.** The cubic fit spans the
   2-ring, so the surface must be smooth over about two edge lengths. On
   coarse meshes the error is large: 18 % on an icosphere with 320 facets.

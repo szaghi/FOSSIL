@@ -83,7 +83,9 @@ The immersed-boundary queries of chapter 8 have device twins with the same argum
 - `query_many_device` returns what `query_many` returns: distance, closest point, closest facet, the feature the foot
   lies on (`FEATURE_FACE`, `FEATURE_EDGE`, `FEATURE_VERTEX`), the pseudo-normal and the body. The kernel computes
   every output and copies out the requested ones. The CPU-only extras (`ambiguous`, `second_foot_points`,
-  `curvatures`) have no device twin.
+  `curvatures`) have no device twin; the principal curvatures and directions at the feet do
+  (`principal_curvatures=`, `principal_directions=`, after `build_curvature` and then `enter_device`; see the
+  [cookbook recipe](../cookbook#principal-curvatures-and-directions-at-the-wall)).
 
 <<< @/examples/snippets/tut16_b_queries-wall.f90
 

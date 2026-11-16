@@ -1,0 +1,6 @@
+$ ck_principal_curvature
+k1, k2 at the tip    2.0133  0.8906  (exact 2, 0.8889)
+d1   0.0000  0.0043 -1.0000
+d2  -0.0000  1.0000  0.0043
+normal curvature along (0, 1, 1)   1.4471  (exact 1.4444)
+device = host bit for bit: T

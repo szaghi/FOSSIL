@@ -1,0 +1,7 @@
+$ fig_ref_fd_closure_curvature
+ellipse: ghosts 172, curvature at the feet from   1.251 to   9.860, max relative error  4.33E-04
+osculating circle at the foot   0.3994  0.0110: radius  0.1014
+osculating circle at the foot   0.3315  0.1119: radius  0.2701
+osculating circle at the foot   0.2768 -0.1444: radius  0.4102
+spheroid: facets 20480, ghosts 1340, max relative error of kappa_n along v_t  1.76E-03
+device = host bit for bit: T

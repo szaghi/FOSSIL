@@ -30,6 +30,8 @@ use fossil_box_query,          only : curve_box_contact_oac, curve_box_thin_oac,
                                      BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
 use fossil_line_query,         only : curve_line_crossings_oac, line_crossing_before_2d
 use fossil_segment_visibility, only : curve_segment_blocked_oac
+use fossil_shape_operator,     only : curve_foot_curvature_oac
+use fossil_curvature,          only : menger_curvature, vertex_curvature_2d
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device, &
                                      cut_cells_2d_blocks_t, compute_cut_cells_2d_blocks_device, &
                                      compute_cut_cells_2d_blocks_grids_device
@@ -110,6 +112,9 @@ type :: curve_object
    real(R8P),    allocatable :: thin_node(:)        !< Minimum local size per tree node.
    logical                   :: thin_built = .false. !< build_thin ran on the current curve.
    logical                   :: thin_on_device = .false. !< The thin arrays were mapped by enter_device.
+   real(R8P),    allocatable :: curv_k(:)           !< Signed curvature per vertex [nv] (roadmap #109 WP1 step 03).
+   logical                   :: curv_built = .false. !< build_curvature ran on the current curve.
+   logical                   :: curv_on_device = .false. !< curv_k was mapped by enter_device.
    contains
       ! public methods
       procedure, pass(self) :: adopt_loops          !< Build the curve from vertex arrays and loop sizes.
@@ -180,6 +185,8 @@ type :: curve_object
       procedure, pass(self) :: thin_regions => curve_thin_regions !< Segments thinner than factor*h, in runs (issue #62).
       procedure, pass(self) :: tree_boxes => curve_tree_boxes !< Boxes of the segment BVH down to a depth (issue #89).
       procedure, pass(self) :: build_thin => curve_build_thin !< Local sizes for the thin tagging (issue #62).
+      procedure, pass(self) :: build_curvature => curve_build_curvature !< Curvature per vertex for the foot queries (#109).
+      procedure, pass(self) :: get_vertex_curvature !< Stored curvature of a vertex (build_curvature first).
       procedure, pass(self) :: box_thin_many => curve_box_thin_many !< Boxes meeting a thin segment (issue #62).
       procedure, pass(self) :: box_thin_many_device => curve_box_thin_many_device !< box_thin_many on the device (#62).
       procedure, pass(self) :: nesting_depth        !< Nesting depth of a loop (exact).
@@ -1314,6 +1321,64 @@ contains
    if (present(status)) status = STATUS_OK
    endsubroutine curve_build_thin
 
+   subroutine curve_build_curvature(self, status)
+   !< Store the signed curvature of every vertex (roadmap #109 WP1 step 03) for `query_many(_device)(principal_curvatures=,
+   !< principal_directions=)`. A vertex with two neighbours on each side along its loop takes the circle through it and
+   !< its neighbours minus the circle's first-order spacing term, from the arc-length derivative of the curvature of a
+   !< cubic jet of the five (`fossil_curvature%vertex_curvature_2d`: error O(h^2) on any spacing, the plain circle on
+   !< uniform spacing, exact on a uniformly sampled circle); a vertex of a closed loop of 3 or 4 vertices, the vertex next to an end of an open loop and the end itself
+   !< take the circle through three consecutive vertices (`menger_curvature`; at an end the one-sided circle through the
+   !< end and its next two, error O(h)); an end of an open loop of 2 vertices 0. Sign: positive where the curve is convex
+   !< seen from outside the solid (the solid on the left: a counter-clockwise circle of radius R gives +1/R, a clockwise
+   !< hole -1/R). Explicit, because the queries take the curve intent(in); `adopt_loops` drops it, `move` keeps it (a
+   !< rigid motion changes no curvature). Call it before `enter_device` for the device twin. STATUS_INVALID_INPUT for an
+   !< empty curve.
+   class(curve_object),    intent(inout)         :: self   !< Curve.
+   integer(I4P),           intent(out), optional :: status !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P)                                  :: i, a, b, c, d, l, nl !< Counters, neighbours.
+
+   if (present(status)) status = STATUS_INVALID_INPUT
+   if (self%curv_on_device) return
+   if (allocated(self%curv_k)) deallocate(self%curv_k)
+   self%curv_built = .false.
+   if (self%nv == 0_I4P) return
+   allocate(self%curv_k(self%nv))
+   do i = 1_I4P, self%nv
+      self%curv_k(i) = 0._R8P
+      l = self%loop_of(i) ; nl = self%loop_start(l + 1) - self%loop_start(l)
+      b = self%prev(i) ; c = self%next(i)
+      a = 0_I4P ; if (b > 0_I4P) a = self%prev(b)
+      d = 0_I4P ; if (c > 0_I4P) d = self%next(c)
+      if (self%loop_closed(l) .and. nl < 5_I4P) then ! too short for the jet: the circle through three
+         a = 0_I4P ; d = 0_I4P
+         if (nl < 3_I4P) cycle
+      endif
+      if (a > 0_I4P .and. b > 0_I4P .and. c > 0_I4P .and. d > 0_I4P) then
+         self%curv_k(i) = vertex_curvature_2d([self%u(a), self%u(b), self%u(i), self%u(c), self%u(d)], &
+                                           [self%v(a), self%v(b), self%v(i), self%v(c), self%v(d)])
+      elseif (b > 0_I4P .and. c > 0_I4P) then
+         self%curv_k(i) = menger_curvature(self%u(b), self%v(b), self%u(i), self%v(i), self%u(c), self%v(c))
+      elseif (b == 0_I4P .and. c > 0_I4P .and. d > 0_I4P) then ! first vertex of an open loop
+         self%curv_k(i) = menger_curvature(self%u(i), self%v(i), self%u(c), self%v(c), self%u(d), self%v(d))
+      elseif (c == 0_I4P .and. b > 0_I4P .and. a > 0_I4P) then ! last vertex of an open loop
+         self%curv_k(i) = menger_curvature(self%u(a), self%v(a), self%u(b), self%v(b), self%u(i), self%v(i))
+      endif
+   enddo
+   self%curv_built = .true.
+   if (present(status)) status = STATUS_OK
+   endsubroutine curve_build_curvature
+
+   elemental function get_vertex_curvature(self, i) result(kappa)
+   !< Stored curvature of vertex i (`build_curvature`); 0 if not built or out of range.
+   class(curve_object), intent(in) :: self  !< Curve.
+   integer(I4P),        intent(in) :: i     !< Vertex.
+   real(R8P)                       :: kappa !< Curvature.
+
+   kappa = 0._R8P
+   if (.not. self%curv_built) return
+   if (i >= 1_I4P .and. i <= size(self%curv_k, kind=I4P)) kappa = self%curv_k(i)
+   endfunction get_vertex_curvature
+
    subroutine curve_drop_thin(self)
    !< Forget the stored local sizes. The device copy, if any, is released by exit_device.
    type(curve_object), intent(inout) :: self !< Curve.
@@ -1854,7 +1919,8 @@ contains
 
    recursive subroutine query_many(self, points, distances, closest_points, segments, vertices, normals, bodies, is_signed, &
                                    sign_algorithm, ambiguous, second_foot_points, rel_tolerance, foot_tolerance, status, pose, &
-                                   curvatures, feature_distances, feature_angle, patches)
+                                   curvatures, feature_distances, feature_angle, patches, principal_curvatures, &
+                                   principal_directions)
    !< Batched rich query (issue #37), CPU, OpenMP over the points: distance (signed by default),
    !< closest point, closest segment, closest vertex (0 in a segment interior), pseudo-normal of the
    !< closest feature (segment normal or vertex bisector), body. Every output after `distances` is
@@ -1870,6 +1936,12 @@ contains
    !< segment. Positive where the curve is convex seen from outside the solid (an outer loop turning
    !< left), negative at concave walls and on holes; 0 at the ends of an open loop. A regular N-gon of
    !< circumradius R gives (1/R) (pi/N) / sin(pi/N) = (1/R) (1 + O(h^2)).
+   !< Curvature for a wall closure (roadmap #109 WP1 step 03; `build_curvature` first, else STATUS_INVALID_INPUT and a
+   !< stderr message), the 2-D twin of the surface's shape operator: `principal_curvatures(1, i)` = the stored vertex
+   !< curvatures (cubic jet, O(h^2)) interpolated linearly along the closest segment
+   !< (`fossil_shape_operator%curve_foot_curvature_oac`, the routine of `query_many_device`), `principal_directions(:, 1,
+   !< i)` = the unit tangent (-n_v, n_u) of the foot's pseudo-normal n (the segment direction, the solid on its left).
+   !< Same sign as `curvatures=` (a counter-clockwise circle of radius R: +1/R). With `pose`, the tangent in the world.
    class(curve_object), intent(in)            :: self               !< Curve.
    real(R8P),           intent(in)            :: points(:,:)        !< Points [2, n].
    real(R8P),           intent(out)           :: distances(:)       !< Distances [n].
@@ -1890,6 +1962,8 @@ contains
    real(R8P),           intent(in),  optional :: feature_angle      !< Corner threshold [degrees] (default 30).
    real(R8P),           intent(out), optional :: curvatures(:)      !< Curvature at the foot point [n].
    integer(I4P),        intent(out), optional :: patches(:)         !< Patch of the closest segment [n] (issue #66).
+   real(R8P),           intent(out), optional :: principal_curvatures(:,:)   !< Curvature at the foot [1, n] (#109).
+   real(R8P),           intent(out), optional :: principal_directions(:,:,:) !< Unit tangent at the foot [2, 1, n] (#109).
    real(R8P)                                  :: cp(2), nn(2), cp2(2), rel_, foot_ !< Per-point outputs, tolerances.
    logical                                    :: amb, want_amb      !< Ambiguity.
    integer(I4P)                               :: sg, vx, b, i, n    !< Per-point outputs, counters.
@@ -1901,7 +1975,8 @@ contains
                            patches=patches, &
                            sign_algorithm=sign_algorithm, ambiguous=ambiguous, second_foot_points=second_foot_points, &
                            rel_tolerance=rel_tolerance, foot_tolerance=foot_tolerance, status=status, curvatures=curvatures, &
-                           feature_distances=feature_distances, feature_angle=feature_angle)
+                           feature_distances=feature_distances, feature_angle=feature_angle, &
+                           principal_curvatures=principal_curvatures, principal_directions=principal_directions)
       if (present(status)) then
          if (status /= STATUS_OK) return
       endif
@@ -1909,7 +1984,12 @@ contains
          if (present(closest_points)) closest_points(:, i) = to_world(pose, closest_points(:, i))
          if (present(second_foot_points)) second_foot_points(:, i) = to_world(pose, second_foot_points(:, i))
          if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
+         if (present(principal_directions)) principal_directions(:, 1, i) = rotate(pose, principal_directions(:, 1, i))
       enddo
+      return
+   endif
+   if (.not. principal_ok(self, size(distances, kind=I4P), principal_curvatures, principal_directions, .false.)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
    if (present(feature_distances)) then ! distance to the nearest corner (issue #61)
@@ -1972,9 +2052,39 @@ contains
          if (present(second_foot_points)) second_foot_points(:, i) = cp2
       endif
       if (present(curvatures)) curvatures(i) = foot_curvature_2d(self, sg, cp)
+      if (present(principal_curvatures)) principal_curvatures(1, i) = curve_foot_curvature_oac(self%u, self%v, self%next, &
+                                                                                                 self%curv_k, sg, cp(1), cp(2))
+      if (present(principal_directions)) principal_directions(:, 1, i) = [-nn(2), nn(1)]
    enddo
    !$omp end parallel do
    endsubroutine query_many
+
+   function principal_ok(self, n, principal_curvatures, principal_directions, device) result(ok)
+   !< Checks of the shape-operator outputs of `query_many(_device)` (#109): built (and mapped for the device), sizes
+   !< [1, n] and [2, 1, n]. A stderr message when not built.
+   class(curve_object), intent(in)           :: self                        !< Curve.
+   integer(I4P),        intent(in)           :: n                           !< Points.
+   real(R8P),           intent(in), optional :: principal_curvatures(:,:)   !< Curvatures.
+   real(R8P),           intent(in), optional :: principal_directions(:,:,:) !< Tangents.
+   logical,             intent(in)           :: device                      !< Device query.
+   logical                                   :: ok                          !< Checks passed.
+
+   ok = .true.
+   if (.not. (present(principal_curvatures) .or. present(principal_directions))) return
+   if (.not. self%curv_built .or. (device .and. .not. self%curv_on_device)) then
+      ok = .false.
+      if (device) then
+         write(stderr, '(A)') 'query_many_device(principal_curvatures=, principal_directions=): build_curvature, then '// &
+                              'enter_device, first'
+      else
+         write(stderr, '(A)') 'query_many(principal_curvatures=, principal_directions=): call build_curvature first'
+      endif
+      return
+   endif
+   if (present(principal_curvatures)) ok = size(principal_curvatures, 1) == 1 .and. size(principal_curvatures, 2) == n
+   if (present(principal_directions)) ok = ok .and. size(principal_directions, 1) == 2 .and. &
+                                           size(principal_directions, 2) == 1 .and. size(principal_directions, 3) == n
+   endfunction principal_ok
 
    pure function vertex_curvature(self, i) result(kappa)
    !< Discrete curvature at vertex i (issue #42 step 3): the turning angle between the incoming and
@@ -2095,7 +2205,8 @@ contains
    endsubroutine curve_markers
 
    recursive subroutine query_many_device(self, points, distances, closest_points, segments, vertices, normals, bodies, &
-                                          is_signed, sign_algorithm, status, pose, feature_distances, feature_angle, patches)
+                                          is_signed, sign_algorithm, status, pose, feature_distances, feature_angle, patches, &
+                                          principal_curvatures, principal_directions)
    !< `query_many` on the device (issue #37): same contract and kernel. Requires `enter_device`.
    !< Every output is computed into local arrays (no absent optional in device code), the
    !< requested ones copied out on the host; #20 pointer aliases. GPU validation pending.
@@ -2114,8 +2225,14 @@ contains
    real(R8P),           intent(out), optional :: feature_distances(:) !< Distance to the nearest corner [n] (issue #61).
    real(R8P),           intent(in),  optional :: feature_angle      !< Corner threshold [degrees] (default 30).
    integer(I4P),        intent(out), optional :: patches(:)         !< Patch of the closest segment [n] (issue #66), host lookup.
+   real(R8P),           intent(out), optional :: principal_curvatures(:,:)   !< Curvature at the foot [1, n] (#109): a
+                                                                             !< second kernel, `build_curvature` and
+                                                                             !< `enter_device` first.
+   real(R8P),           intent(out), optional :: principal_directions(:,:,:) !< Unit tangent at the foot [2, 1, n] (#109).
    real(R8P),    allocatable :: dd(:), cpl(:,:), nml(:,:) !< Device-side outputs.
    integer(I4P), allocatable :: sgl(:), vxl(:), bdl(:)    !< Device-side outputs.
+   real(R8P),    allocatable :: pkl(:)                    !< Device-side curvatures.
+   real(R8P),    pointer     :: ck_p(:)                   !< Alias of curv_k.
    logical                   :: signed_, fwn              !< Resolved options.
    integer(I4P)              :: i, n                      !< Work.
    real(R8P),    pointer :: lo_u(:), lo_v(:), hi_u(:), hi_v(:), a_u(:), a_v(:), d_u(:), d_v(:), len2(:) !< Aliases.
@@ -2127,14 +2244,20 @@ contains
       call self%query_many_device(points=body_points2(pose, points), distances=distances, closest_points=closest_points, &
                                   segments=segments, vertices=vertices, normals=normals, bodies=bodies, is_signed=is_signed, &
                                   sign_algorithm=sign_algorithm, status=status, feature_distances=feature_distances, &
-                                  feature_angle=feature_angle, patches=patches)
+                                  feature_angle=feature_angle, patches=patches, principal_curvatures=principal_curvatures, &
+                                  principal_directions=principal_directions)
       if (present(status)) then
          if (status /= STATUS_OK) return
       endif
       do i = 1_I4P, size(points, 2, kind=I4P)
          if (present(closest_points)) closest_points(:, i) = to_world(pose, closest_points(:, i))
          if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
+         if (present(principal_directions)) principal_directions(:, 1, i) = rotate(pose, principal_directions(:, 1, i))
       enddo
+      return
+   endif
+   if (.not. principal_ok(self, size(distances, kind=I4P), principal_curvatures, principal_directions, .true.)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
    if (present(feature_distances)) then ! distance to the nearest corner (issue #61), on the device
@@ -2183,6 +2306,20 @@ contains
    if (present(normals)) normals = nml
    if (present(bodies)) bodies = bdl
    if (present(patches)) patches = self%segment_patch(sgl)
+   if (present(principal_curvatures)) then ! the vertex curvatures at the feet (#109), the routine of query_many
+      allocate(pkl(n))
+      ck_p => self%curv_k
+      !$acc parallel loop present(u, v, next, ck_p) copyin(sgl, cpl) copyout(pkl)
+      do i = 1, n
+         pkl(i) = curve_foot_curvature_oac(u, v, next, ck_p, sgl(i), cpl(1, i), cpl(2, i))
+      enddo
+      principal_curvatures(1, :) = pkl
+   endif
+   if (present(principal_directions)) then
+      do i = 1, n
+         principal_directions(:, 1, i) = [-nml(2, i), nml(1, i)]
+      enddo
+   endif
    endsubroutine query_many_device
 
    subroutine probe_many_one(self, points, lengths, probe_points, visible, foot_points, normals, status, patches, pose)
@@ -2512,6 +2649,10 @@ contains
       !$acc enter data copyin(self%thin_pay, self%thin_node)
       self%thin_on_device = .true.
    endif
+   if (self%curv_built) then                       ! the vertex curvatures, if built (#109)
+      !$acc enter data copyin(self%curv_k)
+      self%curv_on_device = .true.
+   endif
    self%is_on_device = .true.
    endsubroutine enter_device
 
@@ -2528,6 +2669,10 @@ contains
    if (self%thin_on_device) then
       !$acc exit data delete(self%thin_pay, self%thin_node)
       self%thin_on_device = .false.
+   endif
+   if (self%curv_on_device) then
+      !$acc exit data delete(self%curv_k)
+      self%curv_on_device = .false.
    endif
    self%is_on_device = .false.
    endsubroutine exit_device

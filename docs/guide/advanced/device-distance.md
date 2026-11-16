@@ -371,6 +371,17 @@ every output equals the host's bit for bit. Their GPU bench lines, `probe device
 `fossil_test_distance_bench` and `fossil_test_curve_bench`, must be 0. See
 [IB queries](/guide/advanced/ib-queries#image-lines-and-probes-on-the-device).
 
+### Principal curvatures at the feet
+
+`query_many_device(..., principal_curvatures=, principal_directions=)` (surface and curve; WP1 step 03) returns the
+shape operator at the feet: `build_curvature` stores it per vertex, and `enter_device` maps it (`curv_k`, `curv_d`,
+`curv_vid` for a surface, the vertex curvatures for a curve) when it is built first; `exit_device` releases it. A
+second loop over the points runs `foot_principal_oac` (`curve_foot_curvature_oac`) on the feet, normals and facets of
+the first, the routine `query_many` runs, square roots and the four operations only, so every output equals the
+host's bit for bit. Their GPU bench line, `curvature device vs serial mismatches` in `fossil_test_distance_bench` and
+`fossil_test_curve_bench`, must be 0. See
+[principal curvatures and directions](/guide/advanced/curvature#principal-curvatures-and-directions).
+
 ## Known limitations
 
 - **SAH BVH only.** The octree is not supported on the device. The original

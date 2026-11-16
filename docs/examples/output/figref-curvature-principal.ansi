@@ -1,0 +1,6 @@
+$ fig_ref_curvature_principal
+  vertices   facets   max|k1 - 1/r|   max|k2 - exact|   d1 vs meridian [deg]: in plane   normal tilt
+      1152     2304       1.552E-01         5.501E-02               0.9456        7.6209
+      4608     9216       3.750E-02         1.381E-02               0.2975        3.8164
+     18432    36864       9.342E-03         3.523E-03               0.0780        1.8851
+k2 exact from -1.8182 (inner equator) to  0.6897 (outer); 1/r =  2.2222

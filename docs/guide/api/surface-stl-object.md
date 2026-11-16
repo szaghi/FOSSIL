@@ -1086,6 +1086,8 @@ and body. OpenMP over the points; bit-exact with `compute_distance`. See
 | `status`             | `out`, opt. | `integer(I4P)`        | `STATUS_INVALID_INPUT` on a size mismatch.                            |
 | `pose`               | `in`, opt.  | `rigid_pose_t`        | Body pose: world-frame points and outputs (issue #41).                |
 | `curvatures`         | `out`, opt. | `real(R8P)(2, n)`     | Mean and Gaussian curvature at the foot point (issue #42, CPU only).  |
+| `principal_curvatures` | `out`, opt. | `real(R8P)(2, n)`   | k1 >= k2 at the foot (roadmap #109; `build_curvature` first, else `STATUS_INVALID_INPUT`). |
+| `principal_directions` | `out`, opt. | `real(R8P)(3, 2, n)` | d1, d2 at the foot: unit, tangent to `normals`, (d1, d2, n) right-handed; world frame with `pose`. |
 
 **Related.** `query_point` (one point), `query_many_device` (same, on the
 device after `enter_device`; pseudo-normal or fast-winding-number sign),
@@ -1094,6 +1096,11 @@ device after `enter_device`; pseudo-normal or fast-winding-number sign),
 `image_points(points, images, visible, foot_points, status, patches, pose)`, and their device twins
 `probe_many_device`, `image_points_device` (same arguments, bit for bit; WP1 step 01),
 `get_shells_number`, `get_bodies_number`, `facet_shell(i)`, `facet_body(i)`.
+`build_curvature(status)` stores the per-vertex shape operator (public `curv_k(2, nv)`, `curv_d(3, 2, nv)`,
+`curv_vid(3, nf)`) that `principal_curvatures=` / `principal_directions=` need on the CPU and on the device (call it
+before `enter_device`); `analyze` drops it, `move` rotates its directions. `normal_curvature(k, d, t)` (free function)
+is the curvature along a tangent t. See
+[principal curvatures and directions](/guide/advanced/curvature#principal-curvatures-and-directions).
 
 ---
 
@@ -2552,7 +2559,8 @@ fit (issue #42).
   `gaussian_curvature` stall near 15 % at the valence-5 vertices of an
   icosphere.
 - Sign as `mean_curvature`: a sphere gives (1/R, 1/R²). Flat
-  neighbourhoods give 0 exactly. `query_many(curvatures=)` uses it.
+  neighbourhoods give 0 exactly. `query_many(curvatures=)` uses it; `build_curvature` stores the principal
+  curvatures and directions of the same fit (k1 + k2 = 2H, k1 k2 = K to round-off).
 - Near-coincident ring vertices (within 1e-8 of the ring radius) are merged, and the ring grows up to the 4-ring
   if fewer than 12 distinct ones remain. A vertex whose fit stays rank deficient gets NaN and `status` =
   `CURV_STATUS_FIT_FAILED` (issue #91).

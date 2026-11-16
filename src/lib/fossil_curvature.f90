@@ -42,6 +42,7 @@ module fossil_curvature
 
 use fossil_facet_object, only : facet_object
 use fossil_vertex_pool_object, only : vertex_pool_object
+use fossil_shape_operator, only : eig_sym2_oac
 use penf, only : I4P, R8P
 use vecfor, only : vector_R8P
 use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
@@ -52,6 +53,7 @@ private
 public :: build_gaussian_curvature
 public :: build_mean_curvature
 public :: build_jet_curvature
+public :: menger_curvature, vertex_curvature_2d
 public :: CURV_STATUS_OK, CURV_STATUS_BAD_INPUT, CURV_STATUS_DEGENERATE_TRIANGLE, CURV_STATUS_FIT_FAILED
 
 integer(I4P), parameter :: CURV_STATUS_OK                   = 0_I4P
@@ -330,7 +332,7 @@ contains
    if (had_degenerate .and. present(status)) status = CURV_STATUS_DEGENERATE_TRIANGLE
    endsubroutine build_mean_curvature
 
-   subroutine build_jet_curvature(facet, pool, H, K, status)
+   subroutine build_jet_curvature(facet, pool, H, K, status, principal, directions)
    !< Per-vertex mean and Gaussian curvature by a local polynomial fit (osculating jet, Cazals &
    !< Pouget 2005; issue #42).
    !<
@@ -360,11 +362,28 @@ contains
    !<
    !< Sign convention as `build_mean_curvature`: H > 0 where the surface is convex seen from the side
    !< the normals point to (sphere: H = 1/R, K = 1/R^2).
+   !<
+   !< Shape operator (roadmap #109 WP1 step 03, optional `principal(2, nv)`, `directions(3, 2, nv)`; H and K unchanged bit
+   !< for bit): the fitted graph r(x, y) = x t1 + y t2 + z(x, y) n has, at the origin, the tangents r_x = (1, 0, d),
+   !< r_y = (0, 1, e) (frame coordinates), the first fundamental form I = J^T J (J = [r_x r_y]) and the second
+   !< II = [[2a, b], [b, 2c]] / W about the graph normal (-d, -e, 1) / W. In the orthonormal tangent basis u1 = r_x / |r_x|,
+   !< u2 = N x u1, whose parameter coordinates are c1 = (1, 0) / l1 and c2 = (-d e, 1 + d^2) / (W l1), l1 = sqrt(1 + d^2)
+   !< (the first two frame components of a tangent vector are its parameter coordinates, since J's top block is the
+   !< identity), the shape operator is the symmetric S_ij = -c_i^T II c_j / hs (sign: convex positive; hs undoes the
+   !< coordinate scaling). Its eigenvalues are those of I^-1 II, so k1 + k2 = 2 H and k1 k2 = K to round-off; its
+   !< eigenvectors (`fossil_shape_operator%eig_sym2_oac`, closed form, an umbilic takes u1) are the principal directions
+   !< of the fitted surface. They lie in the graph's tangent plane, tilted from the pseudo-normal's by the linear terms
+   !< (d, e): each is stored projected on the plane normal to the pseudo-normal n and normalised, d1 first, d2 = n x d1
+   !< (orthonormal, (d1, d2, n) right-handed). Vertices without a fit (fewer than 6 ring vertices: the cotangent /
+   !< angle-defect H, K; a flat rank-deficient ring: 0; a failed fit: NaN) take k = H +- sqrt(max(H^2 - K, 0)) and the
+   !< jet frame (t1, t2) as directions; vertices of no facet take zero directions.
    type(facet_object),       intent(in)            :: facet(:) !< Facets.
    type(vertex_pool_object), intent(in)            :: pool     !< Vertex pool.
    real(R8P), allocatable,   intent(out)           :: H(:)     !< Mean curvature per pool vertex.
    real(R8P), allocatable,   intent(out)           :: K(:)     !< Gaussian curvature per pool vertex.
    integer(I4P),             intent(out), optional :: status   !< CURV_STATUS_*.
+   real(R8P), allocatable,   intent(out), optional :: principal(:,:)    !< Principal curvatures k1 >= k2 [2, nv].
+   real(R8P), allocatable,   intent(out), optional :: directions(:,:,:) !< Principal directions d1, d2 [3, 2, nv].
    integer(I4P), parameter       :: MAXN = 256_I4P              !< Neighbour cap per vertex (2-ring).
    real(R8P),    allocatable     :: hc(:), kc(:)                !< Fallback curvatures.
    real(R8P),    allocatable     :: xyz(:,:), pn(:,:)           !< Coordinates, pseudo-normals.
@@ -380,9 +399,14 @@ contains
    type(vector_R8P)              :: pv                          !< Pool vertex.
    integer(I4P)                  :: keep(MAXN), nd, nd_at, lo, hi, layer !< Distinct ring vertices (for nd_at), layers.
    logical                       :: failed                      !< Some vertex fit failed.
+   logical                       :: want_sd                     !< Shape operator requested.
+   logical,      allocatable     :: fitted(:)                   !< Vertex shape operator from its fit.
 
    if (present(status)) status = CURV_STATUS_OK
    nf = size(facet, kind=I4P)
+   want_sd = present(principal) .and. present(directions)
+   if (present(principal)) allocate(principal(2, 0))
+   if (present(directions)) allocate(directions(3, 2, 0))
    if (nf == 0_I4P .or. .not. pool%get_is_initialized()) then
       allocate(H(0), K(0))
       if (present(status)) status = CURV_STATUS_BAD_INPUT
@@ -394,6 +418,10 @@ contains
    nv = pool%vertex_count()
    allocate(H(nv), K(nv), xyz(3, nv), pn(3, nv), pn_set(nv), deg(nv), off(nv + 1), stamp(nv), fill(nv))
    H = hc ; K = kc
+   if (want_sd) then
+      deallocate(principal, directions) ; allocate(principal(2, nv), directions(3, 2, nv), fitted(nv))
+      principal = 0._R8P ; directions = 0._R8P ; fitted = .false.
+   endif
    do i = 1_I4P, nv
       pv = pool%coord(i) ; xyz(:, i) = [pv%x, pv%y, pv%z]
    enddo
@@ -512,9 +540,121 @@ contains
       ! z points along the outward normal: a convex surface bends away from it (hh < 0), so H = -hh
       H(i) = -hh / hs
       K(i) = kk / (hs * hs)
+      if (want_sd) then
+         call jet_shape_operator(coef(1:5), hs, t1, t2, nn, principal(:, i), directions(:, :, i))
+         fitted(i) = .true.
+      endif
    enddo
+   if (want_sd) then ! the vertices without a fit: k from H and K, the jet frame as directions
+      do i = 1_I4P, nv
+         if (fitted(i)) cycle
+         hh = sqrt(max(H(i) * H(i) - K(i), 0._R8P))
+         principal(:, i) = [H(i) + hh, H(i) - hh]
+         if (.not. pn_set(i)) cycle
+         nn = pn(:, i) ; hs = norm2(nn)
+         if (hs <= 0._R8P) cycle
+         nn = nn / hs
+         if (abs(nn(1)) < 0.9_R8P) then
+            t1 = [0._R8P, -nn(3), nn(2)]
+         else
+            t1 = [nn(3), 0._R8P, -nn(1)]
+         endif
+         t1 = t1 / norm2(t1)
+         t2 = [nn(2) * t1(3) - nn(3) * t1(2), nn(3) * t1(1) - nn(1) * t1(3), nn(1) * t1(2) - nn(2) * t1(1)]
+         directions(:, 1, i) = t1 ; directions(:, 2, i) = t2
+      enddo
+   endif
    if (failed .and. present(status)) status = CURV_STATUS_FIT_FAILED
    endsubroutine build_jet_curvature
+
+   pure subroutine jet_shape_operator(coef, hs, t1, t2, nn, k, d)
+   !< Principal curvatures and directions of a fitted jet z = d x + e y + a x^2 + b x y + c y^2 + ... at the origin (frame
+   !< (t1, t2, nn), coordinates scaled by hs), see `build_jet_curvature`: S_ij = -c_i^T II c_j / hs in the orthonormal
+   !< tangent basis (u1, u2) of the graph, `eig_sym2_oac`, the eigenvectors projected on the plane normal to nn.
+   real(R8P), intent(in)  :: coef(5)      !< (d, e, a, b, c).
+   real(R8P), intent(in)  :: hs           !< Coordinate scale.
+   real(R8P), intent(in)  :: t1(3), t2(3), nn(3) !< Frame.
+   real(R8P), intent(out) :: k(2)         !< k1 >= k2.
+   real(R8P), intent(out) :: d(3, 2)      !< d1, d2 (unit, normal to nn).
+   real(R8P)              :: dd, ee, w, l1, p11, p12, p22, s11, s12, s22, c, s, u1(3), u2(3), g(3), gl !< Work.
+
+   dd = coef(1) ; ee = coef(2)
+   w = sqrt(1._R8P + dd * dd + ee * ee) ; l1 = sqrt(1._R8P + dd * dd)
+   p11 = -2._R8P * coef(3) / (w * hs) ; p12 = -coef(4) / (w * hs) ; p22 = -2._R8P * coef(5) / (w * hs) ! -II / hs
+   s11 = p11 / (l1 * l1)
+   s12 = (p11 * (-dd * ee) + p12 * (1._R8P + dd * dd)) / (w * l1 * l1)
+   s22 = (p11 * (dd * ee)**2 - 2._R8P * p12 * dd * ee * (1._R8P + dd * dd) + p22 * (1._R8P + dd * dd)**2) / (w * w * l1 * l1)
+   call eig_sym2_oac(s11, s12, s22, k(1), k(2), c, s)
+   u1 = [1._R8P, 0._R8P, dd] / l1                                ! frame coordinates
+   u2 = [-dd * ee, 1._R8P + dd * dd, ee] / (w * l1)
+   g = c * u1 + s * u2                                            ! d1 in the graph's tangent plane
+   g = g(1) * t1 + g(2) * t2                                      ! projected on the plane normal to nn, world coordinates
+   gl = norm2(g)
+   if (gl > 0._R8P) then
+      d(:, 1) = g / gl
+   else
+      d(:, 1) = t1
+   endif
+   d(:, 2) = [nn(2) * d(3, 1) - nn(3) * d(2, 1), nn(3) * d(1, 1) - nn(1) * d(3, 1), nn(1) * d(2, 1) - nn(2) * d(1, 1)]
+   endsubroutine jet_shape_operator
+
+   pure function menger_curvature(ua, va, ub, vb, uc, vc) result(kappa)
+   !< Signed curvature of the circle through three points a, b, c of a planar polyline (roadmap #109 WP1 step 03):
+   !< 2 ((b - a) x (c - b)) / (|b - a| |c - b| |c - a|), positive for a left turn (a counter-clockwise outer loop, the
+   !< solid on the left: convex seen from outside). 0 if two points coincide. At b with uniform spacing the error is
+   !< O(h^2); with spacings h1, h2 it has an O(h2 - h1) term.
+   real(R8P), intent(in) :: ua, va, ub, vb, uc, vc !< Points.
+   real(R8P)             :: kappa                  !< Curvature.
+   real(R8P)             :: lab, lbc, lac          !< Lengths.
+
+   kappa = 0._R8P
+   lab = sqrt((ub - ua)**2 + (vb - va)**2) ; lbc = sqrt((uc - ub)**2 + (vc - vb)**2) ; lac = sqrt((uc - ua)**2 + (vc - va)**2)
+   if (lab <= 0._R8P .or. lbc <= 0._R8P .or. lac <= 0._R8P) return
+   kappa = 2._R8P * ((ub - ua) * (vc - vb) - (vb - va) * (uc - ub)) / (lab * lbc * lac)
+   endfunction menger_curvature
+
+   pure function vertex_curvature_2d(u, v) result(kappa)
+   !< Signed curvature at the middle of five consecutive polyline vertices p1..p5 (roadmap #109 WP1 step 03): the circle
+   !< through p2, p3, p4 (`menger_curvature`) minus its first-order spacing term, kappa_M - kappa_s (h2 - h1) / 3 (h1 =
+   !< |p3 - p2|, h2 = |p4 - p3|; the circumcircle of three points at arc lengths -h1, 0, h2 has curvature
+   !< kappa + kappa_s (h2 - h1) / 3 + O(h^2)), with the arc-length derivative kappa_s of a cubic jet: in the frame of the
+   !< chord t = (p4 - p2) / |p4 - p2| and its left normal (the solid side) the four neighbours are fitted in the
+   !< least-squares sense by y = d x + a x^2 + c x^3 (Householder QR on coordinates scaled by their RMS distance), then
+   !< kappa_s = (y3 (1 + y1^2) - 3 y1 y2^2) / (1 + y1^2)^3 at x = 0 (y1, y2, y3 the derivatives). Error O(h^2) on any
+   !< spacing (the plain circle has an O(h2 - h1) term; the jet's own curvature is O(h^2) too, with a constant about 2-3
+   !< times larger on ellipses); equal to the circle on uniform spacing (exact on a uniformly sampled circle). Positive for
+   !< a left turn. Rank deficient or degenerate fit: the plain circle.
+   real(R8P), intent(in) :: u(5), v(5) !< Vertices p1..p5 (p3 the vertex).
+   real(R8P)             :: kappa      !< Curvature.
+   real(R8P)             :: tu, tv, l, hs, a(4, 3), b(4), coef(3), y1, y2, y3, h1, h2 !< Frame, scale, system, jet.
+   integer(I4P)          :: i, r       !< Counters.
+   logical               :: ok         !< Fit succeeded.
+
+   kappa = menger_curvature(u(2), v(2), u(3), v(3), u(4), v(4))
+   h1 = sqrt((u(3) - u(2))**2 + (v(3) - v(2))**2) ; h2 = sqrt((u(4) - u(3))**2 + (v(4) - v(3))**2)
+   if (h1 == h2) return ! no first-order term
+   tu = u(4) - u(2) ; tv = v(4) - v(2) ; l = sqrt(tu * tu + tv * tv)
+   if (l <= 0._R8P) return
+   tu = tu / l ; tv = tv / l
+   hs = 0._R8P
+   do i = 1_I4P, 5_I4P
+      hs = hs + (u(i) - u(3))**2 + (v(i) - v(3))**2
+   enddo
+   hs = sqrt(hs / 4._R8P)
+   if (hs <= 0._R8P) return
+   r = 0_I4P
+   do i = 1_I4P, 5_I4P
+      if (i == 3_I4P) cycle
+      r = r + 1_I4P
+      a(r, 1) = ((u(i) - u(3)) * tu + (v(i) - v(3)) * tv) / hs
+      b(r) = (-(u(i) - u(3)) * tv + (v(i) - v(3)) * tu) / hs
+      a(r, 2) = a(r, 1) * a(r, 1) ; a(r, 3) = a(r, 2) * a(r, 1)
+   enddo
+   call householder_lsq(a, b, 4_I4P, 3_I4P, coef, ok)
+   if (.not. ok) return
+   y1 = coef(1) ; y2 = 2._R8P * coef(2) / hs ; y3 = 6._R8P * coef(3) / (hs * hs)
+   kappa = kappa - (y3 * (1._R8P + y1 * y1) - 3._R8P * y1 * y2 * y2) / (1._R8P + y1 * y1)**3 * (h2 - h1) / 3._R8P
+   endfunction vertex_curvature_2d
 
    pure subroutine distinct_ring(xyz, centre, ring, keep, nd)
    !< Positions in `ring` of its distinct vertices (issue #91): a vertex within JET_MERGE_TOL of the ring

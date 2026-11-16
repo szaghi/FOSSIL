@@ -23,7 +23,9 @@ program fossil_test_curve_bench
 !< vs serial mismatches` (issue #100 step 5: `cut_links_2d_device` against `cut_links_2d`), and `piece map 2-D device vs
 !< serial mismatches` (issue #105 step 2: the map of `swept_cells_2d_device(map=)` against `swept_cells_2d(map=)`; the
 !< exact rotation's map from the local integration since issue #104), and `probe device vs serial mismatches` (WP1
-!< step 01: `probe_many_device` / `image_points_device` against the host, three lengths per point, posed too).
+!< step 01: `probe_many_device` / `image_points_device` against the host, three lengths per point, posed too), and
+!< `curvature device vs serial mismatches` (WP1 step 03: `principal_curvatures=` / `principal_directions=` of
+!< `query_many_device` against `query_many`, posed too).
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
@@ -128,6 +130,7 @@ contains
       call box(cur, p, (hi - lo) / real(max(n, 1), R8P), ALGO(a), NAME(a))
       call posed(cur, p, ALGO(a), NAME(a))
       if (a == 1) call probe(cur, p(:, 1::3), maxval(hi - lo) / real(max(n, 1), R8P)) ! every third point: the test budget
+      if (a == 1) call curvature(cur, p)
    enddo
    call cur%exit_device
    endsubroutine bench
@@ -175,6 +178,37 @@ contains
    print '(A,I0,A,I0,A)', '   probe device vs serial mismatches: ', bad, '  (', count(.not. v1), ' blocked)'
    ok = ok .and. bad == 0
    endsubroutine probe
+
+   subroutine curvature(cur, p)
+   !< query_many_device vs query_many (WP1 step 03): principal_curvatures and principal_directions (the tangent) at the
+   !< feet, unposed and posed, bit for bit. Builds the vertex curvatures and maps them (exit_device, build, enter_device).
+   type(curve_object), intent(inout) :: cur    !< Curve (on device).
+   real(R8P),          intent(in)    :: p(:,:) !< Points [2, n].
+   type(rigid_pose_2d_t)     :: pose !< Pose.
+   real(R8P),    allocatable :: q(:,:), d(:), k1(:,:), k2(:,:), t1(:,:,:), t2(:,:,:) !< Work.
+   integer(I4P)              :: nq, m, k, bad !< Work.
+
+   call cur%exit_device ; call cur%build_curvature ; call cur%enter_device
+   pose = pose_2d(-0.4_R8P, [1._R8P, 3._R8P])
+   nq = size(p, 2)
+   allocate(q(2, nq), d(nq), k1(1, nq), k2(1, nq), t1(2, 1, nq), t2(2, 1, nq))
+   do m = 1, nq
+      q(:, m) = to_world(pose, p(:, m))
+   enddo
+   bad = 0
+   do k = 1, 2
+      if (k == 1) then
+         call cur%query_many(points=p, distances=d, principal_curvatures=k1, principal_directions=t1)
+         call cur%query_many_device(points=p, distances=d, principal_curvatures=k2, principal_directions=t2)
+      else
+         call cur%query_many(points=q, distances=d, principal_curvatures=k1, principal_directions=t1, pose=pose)
+         call cur%query_many_device(points=q, distances=d, principal_curvatures=k2, principal_directions=t2, pose=pose)
+      endif
+      bad = bad + count(k1 /= k2) + count(t1 /= t2)
+   enddo
+   print '(A,I0)', '   curvature device vs serial mismatches: ', bad
+   ok = ok .and. bad == 0
+   endsubroutine curvature
 
    subroutine rich(cur, p, algo, nm)
    !< query_many_device vs query_many (issue #37): distance, closest point, normal, ids.

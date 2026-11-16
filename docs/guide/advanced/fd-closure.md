@@ -16,6 +16,7 @@ geometry alone, on the solver's own point lines, with the exact inside/outside d
 |---|---|---|
 | Ghost points of a block: indexes, coordinates, direction masks, steps to the fluid | `ghost_points_3d(surface, x, y, z, reach, gp)` | `ghost_points_2d(curve, x, y, reach, gp)` |
 | The same on the device, bit for bit | `ghost_points_3d(..., device=.true.)` | `ghost_points_2d(..., device=.true.)` |
+| Wall curvature at the feet: principal curvatures and directions (2-D: curvature, tangent), CPU or device | `build_curvature`, `query_many(_device)(principal_curvatures=, principal_directions=)`, `normal_curvature` | same |
 
 ![the nose of the NACA 0012 section on cell-centred points of spacing chord/64, the section in gold: inside it the three ghost layers of a stencil of half-width 3, the first layer next to the wall in teal, the second in gold, the third in ember, every other point a grey dot](../../examples/images/ref-fd-closure-ghosts.svg){.fossil-figure}
 
@@ -30,9 +31,10 @@ section. The layers come from the steps to the first fluid point that every ghos
 In 3-D the calls are the same with a third line `z(:)`: on a sphere of radius 0.5 and node spacing 0.05, 1788 of the
 15 625 points are ghosts for a half-width of 2, in two shells.
 
-This page will grow with the rest of the closure table of
-[roadmap #109](https://github.com/szaghi/FOSSIL/issues/109): foot points, normals, probes along the normal with their
-visibility, the curvature at the foot and the grid-line crossings of inverse Lax–Wendroff, per ghost point.
+The wall curvature at the foot of each ghost point, for the curvature condition of a slip wall, comes from the
+principal curvatures and directions of the wall ([Wall curvature](#wall-curvature)). This page will grow with the rest
+of the closure table of [roadmap #109](https://github.com/szaghi/FOSSIL/issues/109): foot points, normals, probes
+along the normal with their visibility and the grid-line crossings of inverse Lax–Wendroff, per ghost point.
 
 ## Definitions
 
@@ -83,6 +85,50 @@ them from a cut-cell grid.
 
 The same circle on node lines and on cell-centre lines of the same spacing gives 16 ghosts each for a reach of 1, at
 different places: a solver that reads the ghosts of the wrong lattice reads values at points it does not store.
+
+## Wall curvature
+
+A slip wall carries no shear stress. With the velocity tangent to the wall (v·n = 0) and n the normal into the fluid,
+the tangential traction of a Newtonian fluid vanishes when
+
+$$\partial_n \mathbf{v}_t = S\,\mathbf{v}_t,$$
+
+S the wall's shape operator (its Weingarten map: ∇_t n = S t). The term comes from ∇vᵀ n: along the wall v·n stays
+0, so (∂_t v)·n = −v·∂_t n. In 2-D, or along a principal direction, it reads ∂ₙv_t = κ v_t: v_t / R on a circle of
+radius R, positive on a convex wall seen from the fluid. A rigid rotation satisfies it exactly, a flat-wall closure
+(∂ₙv_t = 0) does not.
+
+![the right end of an ellipse 0.4 x 0.2 on cell-centred points of spacing 0.02: the ghost points of a stencil of half-width 2 in teal, each joined to its foot on the wall in gold, and the osculating circles of radius 1/kappa at three feet in ember, from 0.10 at the tip to 0.41 on the flank](../../examples/images/ref-fd-closure-curvature.svg){.fossil-figure}
+
+FOSSIL returns S at the foot of each ghost point as its principal curvatures and directions (k₁ ≥ k₂, d₁, d₂; see
+[principal curvatures and directions](/guide/advanced/curvature#principal-curvatures-and-directions)), and in 2-D the
+curvature and the tangent. `build_curvature` stores them per vertex once per geometry (before `enter_device` for the
+device); `query_many` or `query_many_device` with `principal_curvatures=` and `principal_directions=` evaluates them
+at the feet, `normal_curvature(k, d, t)` gives κₙ = k₁ (t·d₁)² + k₂ (t·d₂)² along a tangent t. The solver applies
+the condition in the closure it uses: an image-point closure that extrapolates along the normal line through the foot,
+v_t(η) = v_t(0) (1 + κ η) + O(η²) (η the signed distance, positive in the fluid), sets each component along a
+principal direction from the image I to the ghost G as
+
+$$v_i(G) = v_i(I)\,\frac{1 + k_i\,\eta_G}{1 + k_i\,\eta_I}, \qquad i = 1, 2,$$
+
+with η_G < 0 and η_I > 0 the signed distances `query_many` returns; an inverse Lax–Wendroff closure uses
+∂ₙv_t = S v_t as the boundary value of the normal derivative.
+
+<<< @/examples/snippets/fig_ref_fd_closure_curvature-2d.f90
+
+<<< @/examples/snippets/fig_ref_fd_closure_curvature-3d.f90
+
+<<< @/examples/output/figref-fd-closure-curvature.ansi{ansi}
+
+- **2-D.** At the feet of the 172 ghosts of the ellipse the curvature runs from 1.25 on the flanks to 9.86 at the
+  ends (exact 1.25 and 10), within 4.3·10⁻⁴ of the exact value at each foot.
+- **3-D.** A spheroid of semi-axes 0.5, 0.5, 0.3 spinning about its axis: v = Ω × x is rigid, so stress-free, and
+  along the parallels ∂ₙv_t / v_t = n_ρ / ρ (n_ρ the radial part of the normal, ρ the distance from the axis). At the
+  feet of its 1340 ghost points `normal_curvature` along v_t gives it within 0.18 %; the device query returns the
+  same bits.
+- The spheroid is a unit icosphere of 5 subdivisions scaled, so its vertices lie on it: the jet fit wants vertices on
+  the surface (a marching-cubes mesh of it gave 17 %: see the
+  [curvature limitations](/guide/advanced/curvature#known-limitations)).
 
 ## Example
 
