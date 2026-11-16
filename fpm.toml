@@ -18,6 +18,11 @@ StringiFor = { git="https://github.com/szaghi/StringiFor.git" }
 VTKFortran = { git="https://github.com/szaghi/VTKFortran.git" }
 VecFor = { git="https://github.com/szaghi/VecFor.git" }
 
+# the library is src/lib: src/ also holds the tests, the fossilizer app and, in a release tarball, the bundled
+# dependencies (src/third_party), which fpm would otherwise compile a second time next to its own copies
+[library]
+source-dir = "src/lib"
+
 [build]
 auto-executables = true
 auto-tests = true
