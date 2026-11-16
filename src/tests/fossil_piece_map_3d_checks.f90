@@ -17,14 +17,17 @@ private
 public :: check_map
 
 contains
-   logical function check_map(s, sw, map, q0, q1, g, exact) result(pass)
-   !< The map checks (see the program notes) against an explicit `cut_cells_3d` of copies moved to the end poses.
+   logical function check_map(s, sw, map, q0, q1, g, exact, gy, gz) result(pass)
+   !< The map checks (see the program notes) against an explicit `cut_cells_3d` of copies moved to the end poses, on the
+   !< cell edges g on every axis, or g, gy, gz on x, y, z.
    type(surface_stl_object), intent(in) :: s      !< Surface (body frame).
    type(swept_cells_3d_t),   intent(in) :: sw     !< Swept geometry of the step.
    type(piece_map_3d_t),     intent(in) :: map    !< Its piece map.
    type(rigid_pose_t), intent(in) :: q0, q1 !< End poses.
    real(R8P),          intent(in) :: g(:)   !< Cell edges.
    logical,            intent(in) :: exact  !< Exact paths (per-track residuals at round-off).
+   real(R8P), optional, intent(in) :: gy(:), gz(:) !< Cell edges along y and z (default g).
+   real(R8P), allocatable         :: x(:), y(:), z(:) !< Cell edges along x, y, z.
    type(surface_stl_object)       :: c0, c1 !< Copies.
    type(cut_cells_3d_t)           :: k0, k1 !< Cuts.
    real(R8P)                      :: ef, ew, er, ev, eo, ei, rt, vs, sf(6), cf(6), so, w(3), h(3), area(6) !< Errors, sums.
@@ -32,8 +35,11 @@ contains
    logical                        :: numbering !< Pieces numbered as the explicit cuts.
    real(R8P)                      :: tg, tv, kax(3), ang, em !< Tolerances of the per-cell sums, rotation of the step.
 
-   c0 = s ; call c0%move(q0) ; call cut_cells_3d(c0, g, g, g, k0)
-   c1 = s ; call c1%move(q1) ; call cut_cells_3d(c1, g, g, g, k1)
+   x = g ; y = g ; z = g
+   if (present(gy)) y = gy
+   if (present(gz)) z = gz
+   c0 = s ; call c0%move(q0) ; call cut_cells_3d(c0, x, y, z, k0)
+   c1 = s ; call c1%move(q1) ; call cut_cells_3d(c1, x, y, z, k1)
    numbering = k0%np == map%np0 .and. k1%np == map%np1
    bad = 0_I4P
    if (numbering) then
@@ -59,13 +65,14 @@ contains
    if (.not. exact) then ! the per-interval integration against the step's Gauss nodes: the quadrature error
       call pose_log_3d(q0, q1, kax, ang)
       tg = max(tg, 4._R8P * sw%error_estimate)
-      tv = max(tv, tg * (norm2(q1%t - q0%t) + ang * (maxval(abs(g)) + norm2(q0%t))))
+      tv = max(tv, tg * (norm2(q1%t - q0%t) + ang * (max(maxval(abs(x)), maxval(abs(y)), maxval(abs(z))) + &
+                                                     norm2(q0%t))))
    endif
    ef = 0._R8P ; ew = 0._R8P ; er = 0._R8P ; ev = 0._R8P ; eo = 0._R8P ; ei = 0._R8P ; rt = 0._R8P ; em = 0._R8P
-   do l1 = 1, size(g) - 1
-      do j1 = 1, size(g) - 1
-         do i1 = 1, size(g) - 1
-            h = [g(i1 + 1) - g(i1), g(j1 + 1) - g(j1), g(l1 + 1) - g(l1)]
+   do l1 = 1, size(z) - 1
+      do j1 = 1, size(y) - 1
+         do i1 = 1, size(x) - 1
+            h = [x(i1 + 1) - x(i1), y(j1 + 1) - y(j1), z(l1 + 1) - z(l1)]
             area = [h(2) * h(3), h(2) * h(3), h(3) * h(1), h(3) * h(1), h(1) * h(2), h(1) * h(2)]
             sf = 0._R8P ; w = 0._R8P ; so = 0._R8P ; vs = 0._R8P ; rt = 0._R8P
             do t = map%first_track(i1, j1, l1), map%first_track(i1, j1, l1) + map%tracks(i1, j1, l1) - 1_I4P

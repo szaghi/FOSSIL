@@ -2,10 +2,16 @@
 program fossil_test_piece_map_3d_bodies
 !< FOSSIL test: the piece map of a time step in 3-D on a body (issue #102 step 2).
 !<
-!< The cone of the sign bench (32 faces) on 4^3 cells, translating (exact), then rotating (exact and Gauss): the map
-!< checks of `fossil_piece_map_3d_checks` on every cell (numbering as an explicit `cut_cells_3d` of moved copies,
-!< per-cell sums over the tracks equal to the swept geometry, the residual identity, per-track residuals at round-off
-!< on the exact paths) and no untrusted cell. Then the refusal of `map` with explicit node poses. Last, the cone
+!< The cone of the sign bench (32 faces) on blocks of the 4^3 cells of edges xg, translating (exact), then rotating
+!< (exact and Gauss): the map checks of `fossil_piece_map_3d_checks` on every cell of the block (numbering as an explicit
+!< `cut_cells_3d` of moved copies, per-cell sums over the tracks equal to the swept geometry, the residual identity,
+!< per-track residuals at round-off on the exact paths) and no untrusted cell. A cell's map depends on the cell alone
+!< (its tracks are those of the whole 4^3 grid), so each case keeps only the cells it exists for (issue #114: the
+!< whole grid ran 1.9 s of the 2 s budget). Translation, cells 2:3 x 2 x 2:3: a merge (2, 2, 2) and a split
+!< (3, 2, 3). Rotation, cells 2:4 x 1:2 x 2: two multi-track cells, continuing + fresh (3, 1, 2) and two continuing +
+!< fresh (2, 2, 2), mesh vertices crossing face planes (2, 1, 2), cells with no wall near (4, 1:2, 2). Gauss, cells
+!< 2:4 x 1 x 2: the multi-track cell (3, 1, 2), a single-track cell with vertex events, a cell with no wall near.
+!< Then the refusal of `map` with explicit node poses. Last, the cone
 !< centred and unrotated (its base parallel to the z planes) in the first step of `fossil_val_moving_conservation`'s
 !< translation at 2 cells per step on 24^3, on the 3 x 3 x 3 cells around its cell (15, 12, 7): the base reaches the
 !< cell's plane z = z_7 with corners and edges at one instant computed apart by round-off (intervals narrower than
@@ -36,16 +42,16 @@ type(vector_R8P)                :: b0, b1
 integer(I4P)                    :: i, st
 logical                         :: ok(5)
 
-! 1-3. the cone (32 faces) on 4^3 cells, translating, then rotating: the map checks on every cell
+! 1-3. the cone (32 faces) on blocks of the 4^3 cells, translating, then rotating: the map checks on every cell
 call bench_bodies(bb) ; call to_surface(bb(7)%soup, s)
 xg = [(-0.3_R8P + 0.45_R8P * i, i = 0, 4)]
 p0 = pose_from_axis_angle([1._R8P, 1._R8P, 0._R8P], 0.4_R8P, [0.31_R8P, 0.27_R8P, 0.12_R8P])
 p1 = p0 ; p1%t = p0%t + [0.37_R8P, 0.21_R8P, 0.29_R8P]
-ok(1) = case_grid('cone, translation', xg, p0, p1, .true.)
+ok(1) = case_grid('cone, translation', xg(2:4), xg(2:3), xg(2:4), p0, p1, .true.)
 p1 = pose_from_axis_angle([0.2_R8P, -0.3_R8P, 1._R8P], 0.5_R8P) ; p1%r = matmul(p1%r, p0%r)
 p1%t = p0%t + [0.2_R8P, 0.1_R8P, 0.15_R8P]
-ok(2) = case_grid('cone, rotation', xg, p0, p1, .true.)
-ok(3) = case_grid('cone, rotation, Gauss', xg, p0, p1, .false.)
+ok(2) = case_grid('cone, rotation', xg(2:5), xg(1:3), xg(2:3), p0, p1, .true.)
+ok(3) = case_grid('cone, rotation, Gauss', xg(2:5), xg(1:2), xg(2:3), p0, p1, .false.)
 ! 4. map with explicit node poses: refused
 call gauss_legendre_01(4_I4P, sq, wq)
 allocate(pq(4))
@@ -76,16 +82,16 @@ print '(A,L1)', 'Are all tests passed? ', all(ok)
 if (.not. all(ok)) error stop 1
 
 contains
-   logical function case_grid(name, g, q0, q1, exact) result(pass)
-   !< The map checks on every cell of the block g^3, and no untrusted cell.
-   character(*),       intent(in) :: name   !< Case.
-   real(R8P),          intent(in) :: g(:)   !< Cell edges.
+   logical function case_grid(name, x, y, z, q0, q1, exact) result(pass)
+   !< The map checks on every cell of the block of edges x, y, z, and no untrusted cell.
+   character(*),       intent(in) :: name    !< Case.
+   real(R8P),          intent(in) :: x(:), y(:), z(:) !< Cell edges.
    type(rigid_pose_t), intent(in) :: q0, q1 !< End poses.
    logical,            intent(in) :: exact  !< Exact paths.
    integer(I4P)                   :: st_    !< Status.
 
-   call swept_cells_3d(s, q0, q1, g, g, g, sw, exact=exact, status=st_, map=map)
-   pass = st_ == STATUS_OK .and. check_map(s, sw, map, q0, q1, g, exact) .and. map%untrusted_cells == 0_I4P
+   call swept_cells_3d(s, q0, q1, x, y, z, sw, exact=exact, status=st_, map=map)
+   pass = st_ == STATUS_OK .and. check_map(s, sw, map, q0, q1, x, exact, y, z) .and. map%untrusted_cells == 0_I4P
    print '(A,A,A,I0,A,I0,A,I0,A,I0,A,I0,A,L1)', '  ', name, ': tracks ', map%nt, '  multi-track cells ', &
          map%multi_track_cells, '  evaluated cells ', map%evaluated_cells, '  evaluations ', map%evaluations, &
          '  untrusted ', map%untrusted_cells, '  ok ', pass
