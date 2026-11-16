@@ -1,0 +1,15 @@
+$ fig_ref_surface_loads
+ellipse: segments 40, samples 120, sum of weights  1.9356982, perimeter  1.9356982
+order 1: point  0.45000  0.30000  weight / area  1.000000
+order 2: point  0.22500  0.15000  weight / area  0.333333
+order 2: point  0.72500  0.15000  weight / area  0.333333
+order 2: point  0.40000  0.60000  weight / area  0.333333
+order 3: point  0.48378  0.09729  weight / area  0.223382
+order 3: point  0.26418  0.40135  weight / area  0.223382
+order 3: point  0.60203  0.40135  weight / area  0.223382
+order 3: point  0.37747  0.73516  weight / area  0.109952
+order 3: point  0.84890  0.08242  weight / area  0.109952
+order 3: point  0.12363  0.08242  weight / area  0.109952
+squares: samples 16, probes 32, blocked 4
+sphere: facets 536, samples 1608, area  3.080745, 4 pi r^2  3.141593
+force:  0.0000000  0.2502951  area 0.2502951  equal to 1e-14: T

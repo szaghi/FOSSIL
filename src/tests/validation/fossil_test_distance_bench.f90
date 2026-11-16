@@ -31,7 +31,9 @@
 !<      `probe device vs serial mismatches`, the probes and images of WP1 step 01; `curvature device vs serial
 !<      mismatches`, the principal curvatures and directions at the feet of WP1 step 03; `closure device vs serial
 !<      mismatches`, the closure table of `fd_closure_3d`, WP1 step 04, every field by bits, copied back and resident,
-!<      posed with velocities and ILW crossings too).
+!<      posed with velocities and ILW crossings too; `load samples device vs serial mismatches`, the load samples of
+!<      `load_samples_3d`, #109 WP2 step 01, order 3 with three probes on the closure lines, copied back and resident,
+!<      posed too).
 !<
 !<   6. Timing tables of the 3-D device kernels (sections, cut cells, link inputs, links, swept; best / median of 5;
 !<      the piece map, best of 2; the closure table at the bench's grid size, unposed and posed, best of 5 after a
@@ -64,6 +66,7 @@ use fossil,              only : rigid_pose_t, pose_from_axis_angle, to_world
 use fossil,              only : curvilinear_block_t, detect_topology, topo_record_t, TOPO_BOUNDARY, wall_cutter
 use fossil_overset,      only : hole_flags, block_logical_t, donor_set_t, donor_candidates
 use fossil,              only : ib_closure_t, fd_closure_3d, ib_closure_reset, ib_closure_mismatches
+use fossil,              only : load_samples_t, load_samples_3d, load_samples_reset, load_samples_mismatches
 use fossil,              only : curve_object, slice_surface, cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device
 use fossil_boolean_bodies, only : BODY_SPHERE, mc_body
 use fossil_cut_cells_3d, only : cut_cells_3d_sections, cut_cells_3d_nodes_device
@@ -118,6 +121,8 @@ integer                       :: probe_mismatch            !< Probes and images:
 integer                       :: curvature_mismatch        !< Shape operator at the feet: device vs CPU mismatches (step 03).
 integer                       :: closure_mismatch          !< Closure table: device vs CPU mismatches (WP1 step 04).
 integer                       :: closure_ghosts            !< Ghosts of the closure-table case.
+integer                       :: loads_mismatch            !< Load samples: device vs CPU mismatches (WP2 step 01).
+integer                       :: loads_samples             !< Samples of the load-samples case.
 integer(I4P)                  :: n_sz                      !< Closure timing size (FOSSIL_CLOSURE_TIMING).
 integer                       :: deviation_mismatch        !< Surface deviation: device vs CPU mismatches (issue #60).
 integer                       :: feature_mismatch          !< Feature-edge boxes: device vs CPU mismatches (issue #61).
@@ -326,6 +331,8 @@ call curvature_case(mismatch=curvature_mismatch)
 rich_ok = rich_ok .and. curvature_mismatch == 0
 call closure_case(mismatch=closure_mismatch, ghosts=closure_ghosts)
 rich_ok = rich_ok .and. closure_mismatch == 0
+call loads_case(mismatch=loads_mismatch, samples=loads_samples)
+rich_ok = rich_ok .and. loads_mismatch == 0
 call deviation_case(mismatch=deviation_mismatch)
 rich_ok = rich_ok .and. deviation_mismatch == 0
 call feature_case(mismatch=feature_mismatch)
@@ -442,6 +449,7 @@ print '(A,I0)',      '   posed device vs serial mismatches: ', posed_mismatch
 print '(A,I0)',      '   probe device vs serial mismatches: ', probe_mismatch
 print '(A,I0)',      '   curvature device vs serial mismatches: ', curvature_mismatch
 print '(A,I0,A,I0,A)', '   closure device vs serial mismatches: ', closure_mismatch, '  (', closure_ghosts, ' ghosts)'
+print '(A,I0,A,I0,A)', '   load samples device vs serial mismatches: ', loads_mismatch, '  (', loads_samples, ' samples)'
 print '(A,I0)',      '   deviation device vs serial mismatches: ', deviation_mismatch
 print '(A,I0)',      '   feature device vs serial mismatches: ', feature_mismatch
 print '(A,I0)',      '   thin device vs serial mismatches: ', thin_mismatch
@@ -645,6 +653,40 @@ contains
    call surface%exit_device
    if (timing) call closure_timing(grid_n, mismatch, x, y, z, h, pose)
    endsubroutine closure_case
+
+   subroutine loads_case(mismatch, samples)
+   !< load_samples_3d on the device, copied back and resident (then update_host), against the host (#109 WP2 step 01):
+   !< order 3, three probes h, 2h, -h on the lines of the closure-table case; unposed, then posed (its pose). Every field
+   !< by bits (`load_samples_mismatches`).
+   integer, intent(out)   :: mismatch !< Mismatches.
+   integer, intent(out)   :: samples  !< Samples.
+   type(load_samples_t)   :: sh, sd, sr !< Host, device, resident samples.
+   type(rigid_pose_t)     :: pose     !< Pose.
+   real(R8P), allocatable :: x(:), y(:), z(:) !< Lines.
+   real(R8P)              :: h        !< Spacing.
+   integer(I4P)           :: k        !< Counter.
+
+   call closure_lines(grid_n, x, y, z, h, pose)
+   mismatch = 0 ; samples = 0
+   call surface%enter_device
+   do k = 1, 2
+      if (k == 1) then
+         call load_samples_3d(surface, x, y, z, sh, order=3_I4P, lengths=[h, 2 * h, -h])
+         call load_samples_3d(surface, x, y, z, sd, order=3_I4P, lengths=[h, 2 * h, -h], device=.true.)
+         call load_samples_3d(surface, x, y, z, sr, order=3_I4P, lengths=[h, 2 * h, -h], resident=.true.)
+         samples = sh%n
+      else
+         call load_samples_3d(surface, x, y, z, sh, order=3_I4P, lengths=[h, 2 * h, -h], pose=pose)
+         call load_samples_3d(surface, x, y, z, sd, order=3_I4P, lengths=[h, 2 * h, -h], pose=pose, device=.true.)
+         call load_samples_3d(surface, x, y, z, sr, order=3_I4P, lengths=[h, 2 * h, -h], pose=pose, resident=.true.)
+      endif
+      call sr%update_host
+      mismatch = mismatch + load_samples_mismatches(sh, sd) + load_samples_mismatches(sh, sr)
+      if (sh%n == 0 .or. .not. sr%on_device) mismatch = mismatch + 1
+      call load_samples_reset(sr)
+   enddo
+   call surface%exit_device
+   endsubroutine loads_case
 
    subroutine closure_lines(nn, x, y, z, h, pose)
    !< The lines of the closure-table cases: nn cell-centre points per axis over the surface box inflated by 10 %, their

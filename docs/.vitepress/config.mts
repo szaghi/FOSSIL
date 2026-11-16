@@ -79,6 +79,7 @@ const docs = [
       { text: '2-D geometry (curves)', link: '/guide/advanced/2d-geometry' },
       { text: 'Immersed-boundary queries', link: '/guide/advanced/ib-queries' },
       { text: 'Finite-difference wall closure', link: '/guide/advanced/fd-closure' },
+      { text: 'Surface loads', link: '/guide/advanced/surface-loads' },
       { text: 'AMR tagging', link: '/guide/advanced/amr-tagging' },
       { text: 'Cut-cell geometry', link: '/guide/advanced/cut-cells' },
       { text: 'Cut cells: solver support', link: '/guide/advanced/cut-solver' },

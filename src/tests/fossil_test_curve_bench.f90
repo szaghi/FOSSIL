@@ -29,7 +29,8 @@ program fossil_test_curve_bench
 !< `curvature device vs serial mismatches` (WP1 step 03: `principal_curvatures=` / `principal_directions=` of
 !< `query_many_device` against `query_many`, posed too), and `closure device vs serial mismatches` (WP1 step 04: the
 !< closure table of `fd_closure_2d`, device and resident against the host, every field by bits, posed with velocities
-!< and ILW crossings too).
+!< and ILW crossings too), and `load samples device vs serial mismatches` (#109 WP2 step 01: `load_samples_2d`, device
+!< and resident against the host, every field by bits, posed too).
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
@@ -46,6 +47,7 @@ use fossil_swept_compare, only : swept_twin_mismatches, swept_cells_2d_mismatche
 use fossil, only : piece_map_2d_t
 use fossil_piece_map_compare, only : piece_map_2d_mismatches
 use fossil, only : ib_closure_t, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
+use fossil, only : load_samples_t, load_samples_2d, load_samples_reset, load_samples_mismatches
 
 implicit none
 
@@ -168,6 +170,7 @@ contains
       if (a == 1) call probe(cur, p(:, 1::3), maxval(hi - lo) / real(max(n, 1), R8P)) ! every third point: the test budget
       if (a == 1) call curvature(cur, p)
       if (a == 1) call closure(cur, lo, hi)
+      if (a == 1) call loads(cur, lo, hi)
    enddo
    call cur%exit_device
    endsubroutine bench
@@ -358,6 +361,44 @@ contains
    print '(A,I0,A,I0,A)', '   closure device vs serial mismatches: ', bad, '  (', ng, ' ghosts)'
    ok = ok .and. bad == 0
    endsubroutine closure
+
+   subroutine loads(cur, lo, hi)
+   !< load_samples_2d on the device (copied back, and resident then update_host) vs the host (#109 WP2 step 01): order 3,
+   !< three probes h, 2h, -h, the cell-centre lines of `closure`, unposed and posed; every field by bits.
+   type(curve_object), intent(inout) :: cur          !< Curve (on device).
+   real(R8P),          intent(in)    :: lo(2), hi(2) !< Grid box.
+   type(rigid_pose_2d_t)     :: pose       !< Pose.
+   type(load_samples_t)      :: sh, sd, sr !< Host, device, resident samples.
+   real(R8P),    allocatable :: x(:), y(:) !< Lines.
+   real(R8P)                 :: h          !< Spacing.
+   integer(I4P)              :: i, k, bad, ns !< Work.
+
+   h = maxval(hi - lo) / real(max(n, 1), R8P)
+   allocate(x(n), y(n))
+   do i = 1, n
+      x(i) = lo(1) + (hi(1) - lo(1)) * (i - 0.5_R8P) / n ; y(i) = lo(2) + (hi(2) - lo(2)) * (i - 0.5_R8P) / n
+   enddo
+   pose = pose_2d(0.3_R8P, [0.02_R8P, -0.01_R8P])
+   bad = 0 ; ns = 0
+   do k = 1, 2
+      if (k == 1) then
+         call load_samples_2d(cur, x, y, sh, order=3_I4P, lengths=[h, 2 * h, -h])
+         call load_samples_2d(cur, x, y, sd, order=3_I4P, lengths=[h, 2 * h, -h], device=.true.)
+         call load_samples_2d(cur, x, y, sr, order=3_I4P, lengths=[h, 2 * h, -h], resident=.true.)
+      else
+         call load_samples_2d(cur, x, y, sh, order=3_I4P, lengths=[h, 2 * h, -h], pose=pose)
+         call load_samples_2d(cur, x, y, sd, order=3_I4P, lengths=[h, 2 * h, -h], pose=pose, device=.true.)
+         call load_samples_2d(cur, x, y, sr, order=3_I4P, lengths=[h, 2 * h, -h], pose=pose, resident=.true.)
+      endif
+      call sr%update_host
+      bad = bad + load_samples_mismatches(sh, sd) + load_samples_mismatches(sh, sr)
+      if (sh%n == 0 .or. .not. sr%on_device) bad = bad + 1
+      ns = ns + sh%n
+      call load_samples_reset(sr)
+   enddo
+   print '(A,I0,A,I0,A)', '   load samples device vs serial mismatches: ', bad, '  (', ns, ' samples)'
+   ok = ok .and. bad == 0
+   endsubroutine loads
 
    subroutine rich(cur, p, algo, nm)
    !< query_many_device vs query_many (issue #37): distance, closest point, normal, ids.

@@ -191,6 +191,7 @@ type :: curve_object
       procedure, pass(self) :: is_curvature_on_device !< The vertex curvatures are mapped on the device (#109).
       procedure, pass(self) :: query_present        !< The query_many_device kernel on present arrays (#109).
       procedure, pass(self) :: probes_present       !< The probe_many_device kernel on present arrays (#109).
+      procedure, pass(self) :: path_visible         !< The visibility kernel of the probes on the host (#109 WP2).
       procedure, pass(self) :: curvature_present    !< The foot curvature kernel on present arrays (#109).
       procedure, pass(self) :: box_thin_many => curve_box_thin_many !< Boxes meeting a thin segment (issue #62).
       procedure, pass(self) :: box_thin_many_device => curve_box_thin_many_device !< box_thin_many on the device (#62).
@@ -2382,6 +2383,20 @@ contains
                            nml(1, i), nml(2, i), bdl(i))
    enddo
    endsubroutine query_present_core
+
+   pure function path_visible(self, au, av, bu, bv, sg, vx) result(visible)
+   !< The visibility of the probes on the host (#109 WP2 step 01): the segment a-b (a on the curve) shares no point with a
+   !< segment of the curve other than those containing a, the closest segment sg (vx = 0) or the two at vertex vx; the
+   !< kernel of `probe_many` and `probes_present` (`curve_segment_blocked_oac`), so the bits of the device probes.
+   class(curve_object), intent(in) :: self    !< Curve.
+   real(R8P),           intent(in) :: au, av  !< Start point a (on the curve).
+   real(R8P),           intent(in) :: bu, bv  !< End point b.
+   integer(I4P),        intent(in) :: sg      !< Segment containing a.
+   integer(I4P),        intent(in) :: vx      !< Vertex at a (0: a inside segment sg).
+   logical                         :: visible !< Nothing crossed.
+
+   visible = path_clear(self, [au, av], [bu, bv], sg, vx)
+   endfunction path_visible
 
    subroutine probes_present(self, n, m, cpl, nml, sgl, vxl, ll, ppl, vsl)
    !< The probe kernel of `probe_many_device` on arrays already present on the device (#109 WP1 step 04): probe k of

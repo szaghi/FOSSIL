@@ -73,6 +73,8 @@ use fossil_ghost_points, only : ghost_points_t, ghost_points_3d, ghost_points_2d
                                GHOST_YM, GHOST_YP, GHOST_ZM, GHOST_ZP
 use fossil_shape_operator, only : normal_curvature
 use fossil_fd_closure, only : ib_closure_t, fd_closure_3d, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
+use fossil_surface_loads, only : load_samples_t, load_samples_3d, load_samples_2d, load_samples_reset, &
+                                load_samples_mismatches, load_rule_size
 use fossil_feature_edges, only : FEATURE_EDGE_SHARP, FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, &
                                  FEATURE_EDGE_DEFAULT_ANGLE
 use fossil_thickness, only : THICKNESS_RAY, THICKNESS_MEDIAL, THICKNESS_DEFAULT_CONE, THICKNESS_DEFAULT_RAYS, &
@@ -129,6 +131,7 @@ public :: inertia_to_world, principal_frame
 public :: ghost_points_t, ghost_points_3d, ghost_points_2d, ghost_points_reset, GHOST_XM, GHOST_XP, GHOST_YM, GHOST_YP
 public :: normal_curvature
 public :: ib_closure_t, fd_closure_3d, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
+public :: load_samples_t, load_samples_3d, load_samples_2d, load_samples_reset, load_samples_mismatches, load_rule_size
 public :: GHOST_ZM, GHOST_ZP
 public :: FEATURE_EDGE_SHARP, FEATURE_EDGE_BOUNDARY, FEATURE_EDGE_NONMANIFOLD, FEATURE_EDGE_DEFAULT_ANGLE
 public :: DEV_STATUS_OK, DEV_STATUS_BAD_INPUT, DEV_STATUS_NOT_CONVERGED

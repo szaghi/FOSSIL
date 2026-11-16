@@ -1,0 +1,3 @@
+$ ck_load_samples
+ellipse: samples 128, probe cells found 128, force  0.00000  0.21956  area  0.21956
+cube: samples 48, force  0.00000  0.00000  1.00000

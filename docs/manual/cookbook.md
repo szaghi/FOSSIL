@@ -497,6 +497,19 @@ crossing of every grid line with the wall between a ghost and its first fluid po
 `ib_closure_reset` releases it). On the unit cube the ILW crossings along x lie on the faces x = 0 and x = 1. See
 [finite-difference wall closure](/guide/advanced/fd-closure#the-closure-table).
 
+### Sample a wall for the surface loads
+
+<<< @/examples/snippets/ck_load_samples.f90
+
+<<< @/examples/output/ck_load_samples.ansi{ansi}
+
+`load_samples_2d` puts the Gauss points of a rule (here order 2: two per segment) on every segment of the curve and
+fills a `load_samples_t`: points, weights (the segment length included), outward normals, segment, patch, body, and with
+`lengths` the probes along the normal with their visibility and the cells of the solver's lines that enclose them. The
+solver evaluates its pressure and traction at the samples and sums: in p = 1 − v, a fluid at rest, the force is the
+buoyancy (0, area). `load_samples_3d` is the 3-D twin; without lines it gives the samples only, and the unit cube in
+p = 1 − z feels (0, 0, 1). See [surface loads](/guide/advanced/surface-loads).
+
 ### Place Lagrangian markers for an IB method
 
 <<< @/examples/snippets/ck_markers.f90

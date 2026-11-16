@@ -1,0 +1,7 @@
+$ ref_surface_loads
+ellipse: segments 200, samples 600, visible probes 1200, sum of weights  1.9376100
+sample 1: point  0.43190  0.11888  weight 0.001746  normal  0.94559  0.32537  segment 1
+  probes  0.45082  0.12539,  0.46973  0.13189  cells 48 21, 48 22
+device path vs host path: mismatches 0
+sphere: facets 2312, samples 13872, resident T
+  area  3.126233 (4 pi r^2 = 3.141593), mismatches against the host path 0
