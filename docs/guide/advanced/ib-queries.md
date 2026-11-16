@@ -25,8 +25,8 @@ batches, on the CPU or the device, for surfaces (3-D) and
 |---|---|---|
 | Rich batch: distance, closest point, closest facet or segment, feature, normal, body | `query_many`, `query_many_device` | `query_many`, `query_many_device` |
 | One point | `query_point`, `compute_distance(..., closest_point=, normal=)` | `compute_distance(..., normal=, body=)` |
-| Probe along the normal, with visibility | `probe_many` | `probe_many` |
-| Mirror through the closest point, with visibility | `image_points` | `image_points` |
+| Probe along the normal, with visibility; m probes per point (image lines) | `probe_many`, `probe_many_device` | same |
+| Mirror through the closest point, with visibility | `image_points`, `image_points_device` | same |
 | Several foot points (medial axis, thin gaps) | `query_many(..., ambiguous=, second_foot_points=)` | same |
 | Bodies | `get_bodies_number`, `facet_body`, `get_shells_number`, `facet_shell` | `get_bodies_number`, `loop_body` |
 | Vector level set | `distance_field_object%compute(..., store_closest=.true.)` | same, 2-D field |
@@ -117,9 +117,11 @@ through the wall.
 - **Probe.** The point at a given distance along the normal from the foot
   point: positive outward, negative inward.
 - **Visibility.** Whether the segment from the foot point to the image or
-  probe point crosses the geometry.
-  - **3-D:** a ray from the foot point. Hits within 10⁻⁹ of the box
-    diagonal are ignored: those are the facets containing the foot point.
+  probe point crosses the geometry. One kernel decides it on the CPU and
+  the device (see [image lines and probes on the device](#image-lines-and-probes-on-the-device)).
+  - **3-D:** the exact crossings of the ray queries (issue #82) along the
+    segment from the foot point. Crossings within 10⁻⁹ of the box diagonal
+    are ignored: those are the facets containing the foot point.
   - **2-D:** exact, with `orient2d`, skipping the segments that contain the
     foot point.
 
@@ -237,9 +239,45 @@ forcing needs a spacing of 0.8–1.2 Δx (Cheylan et al. 2023).
 
 ![the unit cube with the 334 markers of surface_markers at dx = 0.1 with features kept, about 56 per face, evenly spaced up to the edges](../../examples/images/ref-ib-queries-markers.svg){.fossil-figure}
 
+## Image lines and probes on the device
+
+An image line (Chaudhuri et al. 2011; Funada & Imamura 2023) samples N + 1 points along the normal of each ghost point,
+and a two-point wall model (van Noordt et al. 2022) samples two. `probe_many` takes all the lengths of a point at once
+(WP1 of [roadmap #109](https://github.com/szaghi/FOSSIL/issues/109)):
+
+- **`lengths(m, n)`**, m per point, signed (+ outward), gives `probe_points(3, m, n)` (2-D: `(2, m, n)`) and
+  `visible(m, n)`, from one closest-point query per point. `lengths(n)` keeps the one-probe form; both are the one
+  generic `probe_many`, and the one-length form equals the m-length form column by column.
+- **`probe_many_device`** and **`image_points_device`** (surface and curve) take the arguments of their host twins
+  after `enter_device`, else `STATUS_INVALID_INPUT`. The foot points and normals come from `query_many_device`, the
+  samples and their visibility from one device loop over the (sample, point) pairs.
+- **`pose=`** (host and device): the points are in the world frame and the body at the pose. The query runs in the
+  body frame and the samples, foot points and normals are mapped back, as for `query_many`.
+
+![the left end of an ellipse and a narrow island beside it over a grid of spacing 0.05, seen from above: the 35 ghost nodes (inside, within one spacing of a wall), each joined through its foot point to the three samples of its image line at 1, 2 and 3 times sqrt(2) h along the normal; 89 samples are visible (teal), 16 are blocked (ember): those of the island's ghosts, which reach into the ellipse, and those of two ellipse ghosts whose lines cross the island](../../examples/images/ck-probes-device.svg){.fossil-figure}
+
+<<< @/examples/output/figck-probes-device.ansi{ansi}
+
+<<< @/examples/output/ck_probes_device.ansi{ansi}
+
+The visibility is one any-hit kernel, shared by the CPU and the device (`fossil_segment_visibility`):
+
+- **3-D, `bvh_segment_blocked_oac`.** A traversal of the SAH BVH that stops at the first facet crossed at
+  tol < t ≤ |length| from the foot point. Each crossing is the exact ray-facet decision of the ray queries
+  (`fossil_ray_kernel`, issue #82), on the ray prepared as `intersect_ray_all` prepares it. The answer is therefore
+  the former ray query's: 0 differences over the 1 500 probes and images of the dragon in the twin test, and over
+  600 000 on six meshes (bunny, both dragons, the NACA wing, two cube files) in a one-off check. A node is skipped when the ray misses its padded box (the slab test of the ray queries) or when the whole
+  padded box projects beyond |length| + pad on the ray: a crossing point lies in its facet's box, so neither skip
+  drops a crossing the filter keeps. An octree surface keeps the ray query on the host; the device needs the BVH.
+- **2-D, `curve_segment_blocked_oac`.** The exact segment test of before (`orient2d`, candidates from the segment
+  BVH, the segments at the foot skipped), now a device routine.
+
+The probe points, foot points, normals, patches, images and visibility of the device equal the host's bit for bit.
+The [cookbook recipe](/manual/cookbook#image-lines-and-probes-on-the-gpu) runs both paths.
+
 ## Placement rules from the literature
 
-All of them are lengths for `probe_many`:
+All of them are lengths for `probe_many`, one per point or several at once (`lengths(m, n)`):
 
 | Rule | Length |
 |---|---|
@@ -258,6 +296,9 @@ All of them are lengths for `probe_many`:
 | vector level set: bunny, cube, 256-gon | band values = `query_many`; \|φ\| = \|x − closest\| |
 | cube ghost points in face regions (1100) | closest + \|φ\| n = 2·closest − x |
 | two cubes 0.2 apart | a probe into the other cube, or an image inside it, is reported not visible |
+| visibility kernel vs the ray query of issue #82: dragon, 1 500 probes and images (twin test); 600 000 on six meshes (one-off check) | 0 differences |
+| `probe_many_device` / `image_points_device` vs the host, dragon (300 points × 4 lengths, posed too), two cubes | bit for bit (device path run on the host) |
+| 2-D: ellipse with a hole and an island, 400 points × 4 lengths, vs a brute-force exact test | 0 differences; device = host bit for bit |
 | cube centre, diagonal plane, mid-gap, L-shape medial points | flagged; generic points not |
 | foot curvature, icospheres R = 2 (2, 3, 4 subdivisions) | maximum relative error 0.183, 0.043, 0.012 (cotangent / angle-defect operators: 0.154, 0.148, 0.124) |
 | foot curvature, cylinder R = 1/2 (16, 32, 64 sectors) | maximum error 0.21, 0.046, 0.011 |
@@ -270,10 +311,11 @@ All of them are lengths for `probe_many`:
 
 ## Limitations
 
-- **GPU not validated yet.** The device paths (`query_many_device`, 3-D and
-  2-D) run bit-exact on the host in `tests-gnu`. The GPU benches print
-  `rich device vs serial max err` and `rich id mismatches` for the manual
-  gate, which has not run yet.
+- **GPU validation is manual.** The device paths (`query_many_device`,
+  `probe_many_device`, `image_points_device`, 3-D and 2-D) run bit-exact on
+  the host in `tests-gnu`; on the GPU they are checked by the manual gate
+  (`rich`, `rich id` and `probe device vs serial mismatches` lines of the
+  benches, 0 on an RTX 4070 with nvfortran 26.9), not by CI.
 - **Multiple foot points and foot curvature are CPU only.**
 - **3-D foot curvature needs a resolved surface.** The cubic fit spans the
   2-ring, so the surface must be smooth over about two edge lengths. On
@@ -284,8 +326,10 @@ All of them are lengths for `probe_many`:
   edges kept (53 to 61 % on a cube: the locked edge vertices keep the
   spacing of their splits, and the spacings next to them gather near
   1.25 Δx). `spacing_fraction` reports how many do.
-- **3-D visibility uses ray casting.** A ray grazing an edge exactly may
-  count or miss a hit, as in any ray caster. The 2-D test is exact.
+- **3-D visibility skips the first 10⁻⁹ of the box diagonal.** The
+  crossings are decided exactly, but a crossing that close to the foot point
+  is taken for the facets at the foot and ignored, whatever facet it is.
+  The 2-D test is exact.
 
 ## Distance to the nearest feature edge
 

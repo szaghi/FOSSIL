@@ -29,6 +29,7 @@ module fossil_curve_object
 use fossil_box_query,          only : curve_box_contact_oac, curve_box_thin_oac, cell_bands, cell_components, BOX_NONE, &
                                      BOX_CUT, BOX_INSIDE, BOX_OUTSIDE
 use fossil_line_query,         only : curve_line_crossings_oac, line_crossing_before_2d
+use fossil_segment_visibility, only : curve_segment_blocked_oac
 use fossil_cut_cells_2d,       only : cut_cells_2d_t, compute_cut_cells_2d, compute_cut_cells_2d_device, &
                                      cut_cells_2d_blocks_t, compute_cut_cells_2d_blocks_device, &
                                      compute_cut_cells_2d_blocks_grids_device
@@ -142,8 +143,16 @@ type :: curve_object
       procedure, pass(self) :: enter_device         !< Map the query arrays to the device.
       procedure, pass(self) :: query_many           !< Batched rich query (issue #37), CPU (OpenMP).
       procedure, pass(self) :: query_many_device    !< Batched rich query on the device (OpenACC).
-      procedure, pass(self) :: probe_many           !< Probe points along the normal, with exact visibility (issue #37).
+      generic               :: probe_many => probe_many_one, probe_many_multi !< Probe points along the normal, with
+                                                    !< exact visibility (issue #37); m lengths per point (WP1 step 01).
+      procedure, pass(self) :: probe_many_one       !< probe_many, one length per point.
+      procedure, pass(self) :: probe_many_multi     !< probe_many, m lengths per point.
       procedure, pass(self) :: image_points         !< Mirror points through the closest point, with visibility (issue #37).
+      generic               :: probe_many_device => probe_many_device_one, probe_many_device_multi !< probe_many on the
+                                                    !< device (WP1 step 01).
+      procedure, pass(self) :: probe_many_device_one   !< probe_many_device, one length per point.
+      procedure, pass(self) :: probe_many_device_multi !< probe_many_device, m lengths per point.
+      procedure, pass(self) :: image_points_device  !< image_points on the device (WP1 step 01).
       procedure, pass(self) :: exit_device          !< Release the device arrays.
       procedure, pass(self) :: get_area             !< Total signed area.
       procedure, pass(self) :: get_bmax             !< Bounding box maximum.
@@ -2176,59 +2185,117 @@ contains
    if (present(patches)) patches = self%segment_patch(sgl)
    endsubroutine query_many_device
 
-   subroutine probe_many(self, points, lengths, probe_points, visible, foot_points, normals, status, patches)
+   subroutine probe_many_one(self, points, lengths, probe_points, visible, foot_points, normals, status, patches, pose)
    !< Probe points (issue #37): for each point (u, v), the point at distance lengths(i) along the
    !< pseudo-normal of its closest feature from its foot point (+ outward, - inward), and whether
    !< the segment from the foot point to the probe point crosses no segment of the curve other than
    !< those containing the foot point (the closest segment, or the two at the closest vertex). The
    !< crossing test is exact (`orient2d_xy`, candidates from the BVH). OpenMP over the points.
-   class(curve_object), intent(in)            :: self              !< Curve.
-   real(R8P),           intent(in)            :: points(:,:)       !< Points [2, n].
-   real(R8P),           intent(in)            :: lengths(:)        !< Probe lengths [n].
-   real(R8P),           intent(out)           :: probe_points(:,:) !< Probe points [2, n].
-   logical,             intent(out)           :: visible(:)        !< Segment foot-probe crosses nothing [n].
-   real(R8P),           intent(out), optional :: foot_points(:,:)  !< Foot points [2, n].
-   real(R8P),           intent(out), optional :: normals(:,:)      !< Pseudo-normals [2, n].
-   integer(I4P),        intent(out), optional :: status            !< STATUS_OK or STATUS_INVALID_INPUT.
-   integer(I4P),        intent(out), optional :: patches(:)        !< Patch of the closest segment [n] (issue #66).
-   real(R8P)                                  :: d, cp(2), nn(2), tip(2) !< Per-point work.
-   integer(I4P)                               :: i, n, sg, vx      !< Work.
+   !<
+   !< One length per point; `probe_many_multi` (the same generic `probe_many`) takes m lengths per point and does the
+   !< work. The visibility is the any-hit kernel `curve_segment_blocked_oac` (WP1 step 01), the routine of
+   !< `probe_many_device`. `pose` (WP1 step 01): world-frame points, the curve at the pose; the query runs in the body
+   !< frame and the probe points, foot points and normals are mapped back.
+   class(curve_object),   intent(in)            :: self              !< Curve.
+   real(R8P),             intent(in)            :: points(:,:)       !< Points [2, n].
+   real(R8P),             intent(in)            :: lengths(:)        !< Probe lengths [n].
+   real(R8P),             intent(out)           :: probe_points(:,:) !< Probe points [2, n].
+   logical,               intent(out)           :: visible(:)        !< Segment foot-probe crosses nothing [n].
+   real(R8P),             intent(out), optional :: foot_points(:,:)  !< Foot points [2, n].
+   real(R8P),             intent(out), optional :: normals(:,:)      !< Pseudo-normals [2, n].
+   integer(I4P),          intent(out), optional :: status            !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),          intent(out), optional :: patches(:)        !< Patch of the closest segment [n] (issue #66).
+   type(rigid_pose_2d_t), intent(in),  optional :: pose              !< Pose of the curve (WP1 step 01).
+   real(R8P), allocatable                       :: pp(:,:,:)         !< Probe points [2, 1, n].
+   logical,   allocatable                       :: vis(:,:)          !< Visibility [1, n].
+   integer(I4P)                                 :: n, st             !< Points, status.
 
-   if (present(status)) status = STATUS_OK
    n = size(points, 2, kind=I4P)
    if (size(points, 1) /= 2 .or. size(lengths) /= n .or. size(probe_points, 1) /= 2 .or. size(probe_points, 2) /= n .or. &
-       size(visible) /= n .or. .not. rich_sizes_ok(n, closest_points=foot_points, normals=normals, patches=patches)) then
+       size(visible) /= n) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
-   !$omp parallel do default(shared) schedule(static) private(i, d, cp, nn, tip, sg, vx)
+   allocate(pp(2, 1, n), vis(1, n))
+   call self%probe_many_multi(points=points, lengths=reshape(lengths, [1_I4P, n]), probe_points=pp, visible=vis, &
+                              foot_points=foot_points, normals=normals, status=st, patches=patches, pose=pose)
+   if (present(status)) status = st
+   if (st /= STATUS_OK) return
+   probe_points = pp(:, 1, :) ; visible = vis(1, :)
+   endsubroutine probe_many_one
+
+   recursive subroutine probe_many_multi(self, points, lengths, probe_points, visible, foot_points, normals, status, &
+                                         patches, pose)
+   !< Probe points with m lengths per point (WP1 step 01; see `probe_many_one`): lengths(k, i) gives
+   !< probe_points(:, k, i) = foot + lengths(k, i) n and visible(k, i). One closest-point query per point. OpenMP over the
+   !< points.
+   class(curve_object),   intent(in)            :: self                !< Curve.
+   real(R8P),             intent(in)            :: points(:,:)         !< Points [2, n].
+   real(R8P),             intent(in)            :: lengths(:,:)        !< Probe lengths [m, n].
+   real(R8P),             intent(out)           :: probe_points(:,:,:) !< Probe points [2, m, n].
+   logical,               intent(out)           :: visible(:,:)        !< Segment foot-probe crosses nothing [m, n].
+   real(R8P),             intent(out), optional :: foot_points(:,:)    !< Foot points [2, n].
+   real(R8P),             intent(out), optional :: normals(:,:)        !< Pseudo-normals [2, n].
+   integer(I4P),          intent(out), optional :: status              !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),          intent(out), optional :: patches(:)          !< Patch of the closest segment [n].
+   type(rigid_pose_2d_t), intent(in),  optional :: pose                !< Pose of the curve.
+   real(R8P)                                    :: d, cp(2), nn(2), tip(2) !< Per-point work.
+   integer(I4P)                                 :: i, k, n, m, sg, vx, st  !< Work.
+
+   if (present(pose)) then ! body-frame query, outputs mapped back to the world frame
+      call self%probe_many_multi(points=body_points2(pose, points), lengths=lengths, probe_points=probe_points, &
+                                 visible=visible, foot_points=foot_points, normals=normals, status=st, patches=patches)
+      if (present(status)) status = st
+      if (st /= STATUS_OK) return
+      call probes_to_world_2d(pose, probe_points, foot_points, normals)
+      return
+   endif
+   if (present(status)) status = STATUS_OK
+   n = size(points, 2, kind=I4P) ; m = size(lengths, 1, kind=I4P)
+   if (probe_bad_sizes_2d(n, points, lengths, probe_points, visible, foot_points, normals, patches)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   !$omp parallel do default(shared) schedule(static) private(i, k, d, cp, nn, tip, sg, vx)
    do i = 1, n
       call self%compute_distance(p=points(:, i), distance=d, closest_point=cp, closest_segment=sg, closest_vertex=vx, &
                                  normal=nn)
-      tip = cp + lengths(i) * nn
-      probe_points(:, i) = tip
-      visible(i) = path_clear(self, cp, tip, sg, vx)
+      do k = 1_I4P, m
+         tip = cp + lengths(k, i) * nn
+         probe_points(:, k, i) = tip
+         visible(k, i) = path_clear(self, cp, tip, sg, vx)
+      enddo
       if (present(foot_points)) foot_points(:, i) = cp
       if (present(normals)) normals(:, i) = nn
       if (present(patches)) patches(i) = self%segment_patch(sg)
    enddo
    !$omp end parallel do
-   endsubroutine probe_many
+   endsubroutine probe_many_multi
 
-   subroutine image_points(self, points, images, visible, foot_points, status, patches)
+   recursive subroutine image_points(self, points, images, visible, foot_points, status, patches, pose)
    !< Image points (issue #37): the mirror of each point through its closest point, 2 foot - x, and
-   !< whether the segment foot-image crosses no other segment (exact, see `probe_many`).
-   class(curve_object), intent(in)            :: self             !< Curve.
-   real(R8P),           intent(in)            :: points(:,:)      !< Points [2, n].
-   real(R8P),           intent(out)           :: images(:,:)      !< Image points [2, n].
-   logical,             intent(out), optional :: visible(:)       !< Segment foot-image crosses nothing [n].
-   real(R8P),           intent(out), optional :: foot_points(:,:) !< Foot points [2, n].
-   integer(I4P),        intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
-   integer(I4P),        intent(out), optional :: patches(:)       !< Patch of the closest segment [n] (issue #66).
-   real(R8P)                                  :: d, cp(2), img(2) !< Per-point work.
-   integer(I4P)                               :: i, n, sg, vx     !< Work.
-   logical                                    :: bad              !< Size check.
+   !< whether the segment foot-image crosses no other segment (exact, see `probe_many`). `pose` (WP1 step 01):
+   !< world-frame points, computed in the body frame, images and foot points mapped back.
+   class(curve_object),   intent(in)            :: self             !< Curve.
+   real(R8P),             intent(in)            :: points(:,:)      !< Points [2, n].
+   real(R8P),             intent(out)           :: images(:,:)      !< Image points [2, n].
+   logical,               intent(out), optional :: visible(:)       !< Segment foot-image crosses nothing [n].
+   real(R8P),             intent(out), optional :: foot_points(:,:) !< Foot points [2, n].
+   integer(I4P),          intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),          intent(out), optional :: patches(:)       !< Patch of the closest segment [n] (issue #66).
+   type(rigid_pose_2d_t), intent(in),  optional :: pose             !< Pose of the curve (WP1 step 01).
+   real(R8P)                                    :: d, cp(2), img(2) !< Per-point work.
+   integer(I4P)                                 :: i, n, sg, vx, st !< Work.
+   logical                                      :: bad              !< Size check.
 
+   if (present(pose)) then ! body-frame query, outputs mapped back to the world frame
+      call self%image_points(points=body_points2(pose, points), images=images, visible=visible, foot_points=foot_points, &
+                             status=st, patches=patches)
+      if (present(status)) status = st
+      if (st /= STATUS_OK) return
+      call images_to_world_2d(pose, images, foot_points)
+      return
+   endif
    if (present(status)) status = STATUS_OK
    n = size(points, 2, kind=I4P)
    bad = size(points, 1) /= 2 .or. size(images, 1) /= 2 .or. size(images, 2) /= n .or. &
@@ -2249,6 +2316,186 @@ contains
    enddo
    !$omp end parallel do
    endsubroutine image_points
+
+   subroutine probe_many_device_one(self, points, lengths, probe_points, visible, foot_points, normals, status, patches, &
+                                    pose)
+   !< `probe_many` on the device (WP1 step 01): same arguments, outputs and defaults, bit for bit. Foot points, normals,
+   !< closest segments and vertices from `query_many_device`, probe points and visibility from one device loop over
+   !< (probe, point) running `curve_segment_blocked_oac` (the host kernel). Requires `enter_device` (else
+   !< STATUS_INVALID_INPUT and a stderr message); #20 pointer aliases. One length per point; `probe_many_device_multi`
+   !< (the same generic) takes m.
+   class(curve_object),   intent(inout), target :: self              !< Curve (target: device aliases).
+   real(R8P),             intent(in)            :: points(:,:)       !< Points [2, n].
+   real(R8P),             intent(in)            :: lengths(:)        !< Probe lengths [n].
+   real(R8P),             intent(out)           :: probe_points(:,:) !< Probe points [2, n].
+   logical,               intent(out)           :: visible(:)        !< Segment foot-probe crosses nothing [n].
+   real(R8P),             intent(out), optional :: foot_points(:,:)  !< Foot points [2, n].
+   real(R8P),             intent(out), optional :: normals(:,:)      !< Pseudo-normals [2, n].
+   integer(I4P),          intent(out), optional :: status            !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),          intent(out), optional :: patches(:)        !< Patch of the closest segment [n].
+   type(rigid_pose_2d_t), intent(in),  optional :: pose              !< Pose of the curve.
+   real(R8P), allocatable                       :: pp(:,:,:)         !< Probe points [2, 1, n].
+   logical,   allocatable                       :: vis(:,:)          !< Visibility [1, n].
+   integer(I4P)                                 :: n, st             !< Points, status.
+
+   n = size(points, 2, kind=I4P)
+   if (size(points, 1) /= 2 .or. size(lengths) /= n .or. size(probe_points, 1) /= 2 .or. size(probe_points, 2) /= n .or. &
+       size(visible) /= n) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   allocate(pp(2, 1, n), vis(1, n))
+   call self%probe_many_device_multi(points=points, lengths=reshape(lengths, [1_I4P, n]), probe_points=pp, visible=vis, &
+                                     foot_points=foot_points, normals=normals, status=st, patches=patches, pose=pose)
+   if (present(status)) status = st
+   if (st /= STATUS_OK) return
+   probe_points = pp(:, 1, :) ; visible = vis(1, :)
+   endsubroutine probe_many_device_one
+
+   recursive subroutine probe_many_device_multi(self, points, lengths, probe_points, visible, foot_points, normals, status, &
+                                                patches, pose)
+   !< `probe_many_multi` on the device (WP1 step 01; see `probe_many_device_one`), bit for bit.
+   class(curve_object),   intent(inout), target :: self                !< Curve (target: device aliases).
+   real(R8P),             intent(in)            :: points(:,:)         !< Points [2, n].
+   real(R8P),             intent(in)            :: lengths(:,:)        !< Probe lengths [m, n].
+   real(R8P),             intent(out)           :: probe_points(:,:,:) !< Probe points [2, m, n].
+   logical,               intent(out)           :: visible(:,:)        !< Segment foot-probe crosses nothing [m, n].
+   real(R8P),             intent(out), optional :: foot_points(:,:)    !< Foot points [2, n].
+   real(R8P),             intent(out), optional :: normals(:,:)        !< Pseudo-normals [2, n].
+   integer(I4P),          intent(out), optional :: status              !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),          intent(out), optional :: patches(:)          !< Patch of the closest segment [n].
+   type(rigid_pose_2d_t), intent(in),  optional :: pose                !< Pose of the curve.
+   real(R8P),    allocatable :: dd(:), cpl(:,:), nml(:,:), ll(:,:), ppl(:,:,:) !< Device-side work.
+   integer(I4P), allocatable :: sgl(:), vxl(:)           !< Closest segments and vertices.
+   logical,      allocatable :: vsl(:,:)                 !< Device-side visibility.
+   real(R8P),    pointer :: lo_u(:), lo_v(:), hi_u(:), hi_v(:), a_u(:), a_v(:), d_u(:), d_v(:), u(:), v(:) !< Aliases.
+   integer(I4P), pointer :: left(:), right(:), first(:), last(:), seg_id(:), next(:) !< Aliases.
+   real(R8P)                 :: cu, cv, nu, nv, pu, pv, lk !< Per-probe work.
+   integer(I4P)              :: i, k, n, m, st, sgi, vxi !< Counters, status, foot segment and vertex.
+
+   if (present(pose)) then ! body-frame query, outputs mapped back on the host
+      call self%probe_many_device_multi(points=body_points2(pose, points), lengths=lengths, probe_points=probe_points, &
+                                        visible=visible, foot_points=foot_points, normals=normals, status=st, &
+                                        patches=patches)
+      if (present(status)) status = st
+      if (st /= STATUS_OK) return
+      call probes_to_world_2d(pose, probe_points, foot_points, normals)
+      return
+   endif
+   if (present(status)) status = STATUS_OK
+   n = size(points, 2, kind=I4P) ; m = size(lengths, 1, kind=I4P)
+   if (probe_bad_sizes_2d(n, points, lengths, probe_points, visible, foot_points, normals, patches)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (.not. self%is_on_device) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_curve_object%probe_many_device: curve not on device -- call enter_device first.'
+      return
+   endif
+   if (n == 0_I4P) return
+   allocate(dd(n), cpl(2, n), nml(2, n), sgl(n), vxl(n))
+   call self%query_many_device(points=points, distances=dd, closest_points=cpl, segments=sgl, vertices=vxl, normals=nml, &
+                               status=st)
+   if (st /= STATUS_OK) then
+      if (present(status)) status = st
+      return
+   endif
+   allocate(ll(m, n), ppl(2, m, n), vsl(m, n))
+   ll = lengths
+   lo_u => self%bvh%lo_u ; lo_v => self%bvh%lo_v ; hi_u => self%bvh%hi_u ; hi_v => self%bvh%hi_v
+   left => self%bvh%left ; right => self%bvh%right ; first => self%bvh%first ; last => self%bvh%last
+   a_u => self%bvh%a_u ; a_v => self%bvh%a_v ; d_u => self%bvh%d_u ; d_v => self%bvh%d_v
+   seg_id => self%bvh%seg_id ; next => self%next ; u => self%u ; v => self%v
+   !$acc parallel loop gang vector collapse(2) present(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, &
+   !$acc&                      d_v, seg_id, next, u, v) copyin(cpl, nml, ll, sgl, vxl) copyout(ppl, vsl) &
+   !$acc&                      private(cu, cv, nu, nv, pu, pv, lk, sgi, vxi)
+   do i = 1_I4P, n
+      do k = 1_I4P, m
+         cu = cpl(1, i) ; cv = cpl(2, i) ; nu = nml(1, i) ; nv = nml(2, i) ; sgi = sgl(i) ; vxi = vxl(i)
+         lk = ll(k, i)
+         pu = cu + lk * nu ; pv = cv + lk * nv
+         ppl(1, k, i) = pu ; ppl(2, k, i) = pv
+         vsl(k, i) = .not. curve_segment_blocked_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, &
+                                                     seg_id, next, u, v, cu, cv, pu, pv, sgi, vxi)
+      enddo
+   enddo
+   probe_points = ppl ; visible = vsl
+   if (present(foot_points)) foot_points = cpl
+   if (present(normals)) normals = nml
+   if (present(patches)) patches = self%segment_patch(sgl)
+   endsubroutine probe_many_device_multi
+
+   recursive subroutine image_points_device(self, points, images, visible, foot_points, status, patches, pose)
+   !< `image_points` on the device (WP1 step 01): same arguments, outputs and defaults, bit for bit. Foot points by
+   !< `query_many_device`, images and visibility in one device loop running `curve_segment_blocked_oac` (the host
+   !< kernel). Requires `enter_device` (else STATUS_INVALID_INPUT and a stderr message); #20 pointer aliases.
+   class(curve_object),   intent(inout), target :: self             !< Curve (target: device aliases).
+   real(R8P),             intent(in)            :: points(:,:)      !< Points [2, n].
+   real(R8P),             intent(out)           :: images(:,:)      !< Image points [2, n].
+   logical,               intent(out), optional :: visible(:)       !< Segment foot-image crosses nothing [n].
+   real(R8P),             intent(out), optional :: foot_points(:,:) !< Foot points [2, n].
+   integer(I4P),          intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),          intent(out), optional :: patches(:)       !< Patch of the closest segment [n].
+   type(rigid_pose_2d_t), intent(in),  optional :: pose             !< Pose of the curve.
+   real(R8P),    allocatable :: dd(:), cpl(:,:), pts(:,:), iml(:,:) !< Device-side work.
+   integer(I4P), allocatable :: sgl(:), vxl(:)           !< Closest segments and vertices.
+   logical,      allocatable :: vsl(:)                   !< Device-side visibility.
+   real(R8P),    pointer :: lo_u(:), lo_v(:), hi_u(:), hi_v(:), a_u(:), a_v(:), d_u(:), d_v(:), u(:), v(:) !< Aliases.
+   integer(I4P), pointer :: left(:), right(:), first(:), last(:), seg_id(:), next(:) !< Aliases.
+   real(R8P)                 :: cu, cv, pu, pv           !< Per-point work.
+   integer(I4P)              :: i, n, st, sgi, vxi       !< Counters, status, foot segment and vertex.
+   logical                   :: bad                      !< Size check.
+
+   if (present(pose)) then ! body-frame query, outputs mapped back on the host
+      call self%image_points_device(points=body_points2(pose, points), images=images, visible=visible, &
+                                    foot_points=foot_points, status=st, patches=patches)
+      if (present(status)) status = st
+      if (st /= STATUS_OK) return
+      call images_to_world_2d(pose, images, foot_points)
+      return
+   endif
+   if (present(status)) status = STATUS_OK
+   n = size(points, 2, kind=I4P)
+   bad = size(points, 1) /= 2 .or. size(images, 1) /= 2 .or. size(images, 2) /= n .or. &
+         .not. rich_sizes_ok(n, closest_points=foot_points, patches=patches)
+   if (present(visible)) bad = bad .or. size(visible) /= n
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (.not. self%is_on_device) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_curve_object%image_points_device: curve not on device -- call enter_device first.'
+      return
+   endif
+   if (n == 0_I4P) return
+   allocate(dd(n), cpl(2, n), sgl(n), vxl(n))
+   call self%query_many_device(points=points, distances=dd, closest_points=cpl, segments=sgl, vertices=vxl, status=st)
+   if (st /= STATUS_OK) then
+      if (present(status)) status = st
+      return
+   endif
+   allocate(pts(2, n), iml(2, n), vsl(n))
+   pts = points
+   lo_u => self%bvh%lo_u ; lo_v => self%bvh%lo_v ; hi_u => self%bvh%hi_u ; hi_v => self%bvh%hi_v
+   left => self%bvh%left ; right => self%bvh%right ; first => self%bvh%first ; last => self%bvh%last
+   a_u => self%bvh%a_u ; a_v => self%bvh%a_v ; d_u => self%bvh%d_u ; d_v => self%bvh%d_v
+   seg_id => self%bvh%seg_id ; next => self%next ; u => self%u ; v => self%v
+   !$acc parallel loop gang vector present(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, seg_id, &
+   !$acc&                      next, u, v) copyin(cpl, pts, sgl, vxl) copyout(iml, vsl) private(cu, cv, pu, pv, sgi, vxi)
+   do i = 1_I4P, n
+      cu = cpl(1, i) ; cv = cpl(2, i) ; sgi = sgl(i) ; vxi = vxl(i)
+      pu = 2._R8P * cu - pts(1, i) ; pv = 2._R8P * cv - pts(2, i)
+      iml(1, i) = pu ; iml(2, i) = pv
+      vsl(i) = .not. curve_segment_blocked_oac(lo_u, lo_v, hi_u, hi_v, left, right, first, last, a_u, a_v, d_u, d_v, &
+                                               seg_id, next, u, v, cu, cv, pu, pv, sgi, vxi)
+   enddo
+   images = iml
+   if (present(visible)) visible = vsl
+   if (present(foot_points)) foot_points = cpl
+   if (present(patches)) patches = self%segment_patch(sgl)
+   endsubroutine image_points_device
 
    subroutine enter_device(self)
    !< Map the query arrays (tree, payload, winding cache, topology, pseudo-normals) to the device.
@@ -3795,28 +4042,70 @@ contains
 
    pure function path_clear(self, a, b, sg, vx) result(clear)
    !< True if the segment a-b crosses no segment of the curve except those containing the foot point
-   !< a: the closest segment sg (vx = 0) or the segments at the closest vertex vx. Exact.
+   !< a: the closest segment sg (vx = 0) or the segments at the closest vertex vx. Exact. The any-hit kernel
+   !< `curve_segment_blocked_oac` of the device probes (WP1 step 01).
    type(curve_object), intent(in) :: self  !< Curve.
    real(R8P),          intent(in) :: a(2)  !< Foot point.
    real(R8P),          intent(in) :: b(2)  !< Probe / image point.
    integer(I4P),       intent(in) :: sg    !< Closest segment.
    integer(I4P),       intent(in) :: vx    !< Closest vertex (0: segment interior).
    logical                        :: clear !< Result.
-   integer(I4P), allocatable      :: ids(:) !< Candidates.
-   integer(I4P)                   :: m, c, q1, q2 !< Work.
 
    clear = .true.
-   call self%bvh%segments_in_box(min(a(1), b(1)), min(a(2), b(2)), max(a(1), b(1)), max(a(2), b(2)), ids, m)
-   do c = 1, m
-      q1 = self%bvh%seg_id(ids(c)) ; q2 = self%next(q1)
-      if (vx == 0_I4P .and. q1 == sg) cycle
-      if (vx > 0_I4P .and. (q1 == vx .or. q2 == vx)) cycle
-      if (segments_intersect(a(1), a(2), b(1), b(2), self%u(q1), self%v(q1), self%u(q2), self%v(q2))) then
-         clear = .false.
-         return
-      endif
-   enddo
+   if (self%bvh%nodes_number == 0_I4P) return
+   clear = .not. curve_segment_blocked_oac(self%bvh%lo_u, self%bvh%lo_v, self%bvh%hi_u, self%bvh%hi_v, self%bvh%left, &
+                                           self%bvh%right, self%bvh%first, self%bvh%last, self%bvh%a_u, self%bvh%a_v, &
+                                           self%bvh%d_u, self%bvh%d_v, self%bvh%seg_id, self%next, self%u, self%v, &
+                                           a(1), a(2), b(1), b(2), sg, vx)
    endfunction path_clear
+
+   pure function probe_bad_sizes_2d(n, points, lengths, probe_points, visible, foot_points, normals, patches) result(bad)
+   !< Size check of the multi-length probes (WP1 step 01).
+   integer(I4P),           intent(in) :: n                   !< Points.
+   real(R8P),              intent(in) :: points(:,:)         !< [2, n].
+   real(R8P),              intent(in) :: lengths(:,:)        !< [m, n].
+   real(R8P),              intent(in) :: probe_points(:,:,:) !< [2, m, n].
+   logical,                intent(in) :: visible(:,:)        !< [m, n].
+   real(R8P),    optional, intent(in) :: foot_points(:,:)    !< [2, n].
+   real(R8P),    optional, intent(in) :: normals(:,:)        !< [2, n].
+   integer(I4P), optional, intent(in) :: patches(:)          !< [n].
+   logical                            :: bad                 !< Result.
+
+   bad = size(points, 1) /= 2 .or. size(lengths, 2) /= n .or. size(probe_points, 1) /= 2 .or. &
+         size(probe_points, 2) /= size(lengths, 1) .or. size(probe_points, 3) /= n .or. &
+         size(visible, 1) /= size(lengths, 1) .or. size(visible, 2) /= n .or. &
+         .not. rich_sizes_ok(n, closest_points=foot_points, normals=normals, patches=patches)
+   endfunction probe_bad_sizes_2d
+
+   subroutine probes_to_world_2d(pose, probe_points, foot_points, normals)
+   !< Probe outputs computed in the body frame mapped to the world frame of `pose` (WP1 step 01).
+   type(rigid_pose_2d_t), intent(in)              :: pose                !< Pose.
+   real(R8P),             intent(inout)           :: probe_points(:,:,:) !< Probe points [2, m, n].
+   real(R8P), optional,   intent(inout)           :: foot_points(:,:)    !< Foot points [2, n].
+   real(R8P), optional,   intent(inout)           :: normals(:,:)        !< Normals [2, n].
+   integer(I4P)                                   :: i, k                !< Counters.
+
+   do i = 1_I4P, size(probe_points, 3, kind=I4P)
+      do k = 1_I4P, size(probe_points, 2, kind=I4P)
+         probe_points(:, k, i) = to_world(pose, probe_points(:, k, i))
+      enddo
+      if (present(foot_points)) foot_points(:, i) = to_world(pose, foot_points(:, i))
+      if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
+   enddo
+   endsubroutine probes_to_world_2d
+
+   subroutine images_to_world_2d(pose, images, foot_points)
+   !< Image outputs computed in the body frame mapped to the world frame of `pose` (WP1 step 01).
+   type(rigid_pose_2d_t), intent(in)    :: pose             !< Pose.
+   real(R8P),             intent(inout) :: images(:,:)      !< Image points [2, n].
+   real(R8P), optional,   intent(inout) :: foot_points(:,:) !< Foot points [2, n].
+   integer(I4P)                         :: i                !< Counter.
+
+   do i = 1_I4P, size(images, 2, kind=I4P)
+      images(:, i) = to_world(pose, images(:, i))
+      if (present(foot_points)) foot_points(:, i) = to_world(pose, foot_points(:, i))
+   enddo
+   endsubroutine images_to_world_2d
 
    pure function rich_sizes_ok(n, closest_points, segments, vertices, normals, bodies, patches) result(good)
    !< True if every present rich output has the right size for n points.

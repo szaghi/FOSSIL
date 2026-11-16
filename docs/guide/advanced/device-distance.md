@@ -361,6 +361,16 @@ on the device is the copied-back mode (the map has no resident form), and the 2-
 `query_many_device` on `other`, entered with `enter_device`: certified Hausdorff bounds bit-identical to the CPU, the
 branch and bound on the host. See [surface deviation](/guide/advanced/surface-deviation#on-the-device).
 
+### Probes and image points
+
+`probe_many_device` and `image_points_device` (surface and curve; WP1 step 01) take the arguments of `probe_many` and
+`image_points`, several probes per point (`lengths(m, n)`, an image line) and `pose=` included. The foot points and
+normals come from `query_many_device`; the samples and their visibility from one device loop over the (sample, point)
+pairs, which runs the any-hit kernel the host runs too (`bvh_segment_blocked_oac`, `curve_segment_blocked_oac`), so
+every output equals the host's bit for bit. Their GPU bench lines, `probe device vs serial mismatches` in
+`fossil_test_distance_bench` and `fossil_test_curve_bench`, must be 0. See
+[IB queries](/guide/advanced/ib-queries#image-lines-and-probes-on-the-device).
+
 ## Known limitations
 
 - **SAH BVH only.** The octree is not supported on the device. The original

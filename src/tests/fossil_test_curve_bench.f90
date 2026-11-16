@@ -22,7 +22,8 @@ program fossil_test_curve_bench
 !< integration of issue #104, its map passes on the device, outflows compared too) too, and `cut links 2-D device
 !< vs serial mismatches` (issue #100 step 5: `cut_links_2d_device` against `cut_links_2d`), and `piece map 2-D device vs
 !< serial mismatches` (issue #105 step 2: the map of `swept_cells_2d_device(map=)` against `swept_cells_2d(map=)`; the
-!< exact rotation's map from the local integration since issue #104).
+!< exact rotation's map from the local integration since issue #104), and `probe device vs serial mismatches` (WP1
+!< step 01: `probe_many_device` / `image_points_device` against the host, three lengths per point, posed too).
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
@@ -126,9 +127,54 @@ contains
       call rich(cur, p, ALGO(a), NAME(a))
       call box(cur, p, (hi - lo) / real(max(n, 1), R8P), ALGO(a), NAME(a))
       call posed(cur, p, ALGO(a), NAME(a))
+      if (a == 1) call probe(cur, p(:, 1::3), maxval(hi - lo) / real(max(n, 1), R8P)) ! every third point: the test budget
    enddo
    call cur%exit_device
    endsubroutine bench
+
+   subroutine probe(cur, p, h)
+   !< probe_many_device / image_points_device vs probe_many / image_points (WP1 step 01) on every third grid point: three
+   !< lengths per point (sqrt(2) h, -h, 12.8 h), unposed and posed; probe points, foot points, normals, images bit for
+   !< bit, visibility and patches equal.
+   type(curve_object), intent(inout) :: cur    !< Curve (on device).
+   real(R8P),          intent(in)    :: p(:,:) !< Points [2, n].
+   real(R8P),          intent(in)    :: h      !< Grid spacing.
+   type(rigid_pose_2d_t)     :: pose !< Pose.
+   real(R8P),    allocatable :: q(:,:), ll(:,:), p1(:,:,:), p2(:,:,:), c1(:,:), c2(:,:), n1(:,:), n2(:,:), i1(:,:), i2(:,:) !< Work.
+   logical,      allocatable :: v1(:,:), v2(:,:), w1(:), w2(:) !< Visibility.
+   integer(I4P), allocatable :: a1(:), a2(:) !< Patches.
+   integer(I4P)              :: nq, m, k, bad !< Work.
+
+   pose = pose_2d(0.9_R8P, [5._R8P, -2._R8P])
+   nq = size(p, 2)
+   allocate(q(2, nq), ll(3, nq), p1(2, 3, nq), p2(2, 3, nq), c1(2, nq), c2(2, nq), n1(2, nq), n2(2, nq), i1(2, nq), &
+            i2(2, nq), v1(3, nq), v2(3, nq), w1(nq), w2(nq), a1(nq), a2(nq))
+   do m = 1, nq
+      q(:, m) = to_world(pose, p(:, m))
+      ll(:, m) = [sqrt(2._R8P) * h, -h, 12.8_R8P * h]
+   enddo
+   bad = 0
+   do k = 1, 2
+      if (k == 1) then
+         call cur%probe_many(points=p, lengths=ll, probe_points=p1, visible=v1, foot_points=c1, normals=n1, patches=a1)
+         call cur%probe_many_device(points=p, lengths=ll, probe_points=p2, visible=v2, foot_points=c2, normals=n2, &
+                                    patches=a2)
+         call cur%image_points(points=p, images=i1, visible=w1)
+         call cur%image_points_device(points=p, images=i2, visible=w2)
+      else
+         call cur%probe_many(points=q, lengths=ll, probe_points=p1, visible=v1, foot_points=c1, normals=n1, patches=a1, &
+                             pose=pose)
+         call cur%probe_many_device(points=q, lengths=ll, probe_points=p2, visible=v2, foot_points=c2, normals=n2, &
+                                    patches=a2, pose=pose)
+         call cur%image_points(points=q, images=i1, visible=w1, pose=pose)
+         call cur%image_points_device(points=q, images=i2, visible=w2, pose=pose)
+      endif
+      bad = bad + count(p1 /= p2) + count(v1 .neqv. v2) + count(c1 /= c2) + count(n1 /= n2) + count(a1 /= a2) + &
+            count(i1 /= i2) + count(w1 .neqv. w2)
+   enddo
+   print '(A,I0,A,I0,A)', '   probe device vs serial mismatches: ', bad, '  (', count(.not. v1), ' blocked)'
+   ok = ok .and. bad == 0
+   endsubroutine probe
 
    subroutine rich(cur, p, algo, nm)
    !< query_many_device vs query_many (issue #37): distance, closest point, normal, ids.

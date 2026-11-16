@@ -27,7 +27,8 @@
 !<      `line crossings device vs serial mismatches` (issue #40) must be 0, and so must every later device line
 !<      (`orient3d device vs serial mismatches`, issue #100 step 3c, among them; `swept cells 3-D device vs serial
 !<      mismatches`, issue #100 step 4; `cut cells 3-D link inputs device vs serial mismatches` and `cut links 3-D
-!<      device vs serial mismatches`, step 5; `piece map 3-D device vs serial mismatches`, issue #105 step 3).
+!<      device vs serial mismatches`, step 5; `piece map 3-D device vs serial mismatches`, issue #105 step 3;
+!<      `probe device vs serial mismatches`, the probes and images of WP1 step 01).
 !<
 !<   6. Timing tables of the 3-D device kernels (sections, cut cells, link inputs, links, swept; best / median of 5;
 !<      the piece map, best of 2):
@@ -106,6 +107,7 @@ integer(I4P)                  :: box_mismatch              !< Box classification
 integer                       :: sign_mismatch             !< Sign benchmark: device vs CPU signed-distance mismatches (issue #39).
 integer                       :: line_mismatch             !< Grid-line crossings: device vs CPU mismatches (issue #40).
 integer                       :: posed_mismatch            !< Posed queries: device vs CPU mismatches (issue #41).
+integer                       :: probe_mismatch            !< Probes and images: device vs CPU mismatches (WP1 step 01).
 integer                       :: deviation_mismatch        !< Surface deviation: device vs CPU mismatches (issue #60).
 integer                       :: feature_mismatch          !< Feature-edge boxes: device vs CPU mismatches (issue #61).
 integer                       :: thin_mismatch             !< Thin-facet boxes: device vs CPU mismatches (issue #62).
@@ -287,6 +289,8 @@ line_mismatch = device_line_mismatches_3d(sign_bodies)
 rich_ok = rich_ok .and. line_mismatch == 0
 call posed_case(mismatch=posed_mismatch)
 rich_ok = rich_ok .and. posed_mismatch == 0
+call probe_case(mismatch=probe_mismatch)
+rich_ok = rich_ok .and. probe_mismatch == 0
 call deviation_case(mismatch=deviation_mismatch)
 rich_ok = rich_ok .and. deviation_mismatch == 0
 call feature_case(mismatch=feature_mismatch)
@@ -400,6 +404,7 @@ print '(A,I0)',      '   box device vs serial mismatches: ', box_mismatch
 print '(A,I0)',      '   sign bench device vs serial mismatches: ', sign_mismatch
 print '(A,I0)',      '   line crossings device vs serial mismatches: ', line_mismatch
 print '(A,I0)',      '   posed device vs serial mismatches: ', posed_mismatch
+print '(A,I0)',      '   probe device vs serial mismatches: ', probe_mismatch
 print '(A,I0)',      '   deviation device vs serial mismatches: ', deviation_mismatch
 print '(A,I0)',      '   feature device vs serial mismatches: ', feature_mismatch
 print '(A,I0)',      '   thin device vs serial mismatches: ', thin_mismatch
@@ -477,6 +482,56 @@ contains
    call surface%exit_device
    mismatch = count(d1 /= d2) + count(c1 /= c2) + count(n1 /= n2) + count(f1 /= f2)
    endsubroutine posed_case
+
+   subroutine probe_case(mismatch)
+   !< probe_many_device / image_points_device vs probe_many / image_points (WP1 step 01) on the bench points: three
+   !< lengths per point (sqrt(2) h, -h, 0.2 diagonal; h = diagonal / 64), unposed and posed; probe points, foot points,
+   !< normals, images bit for bit, visibility and patches equal.
+   integer, intent(out)          :: mismatch !< Mismatches.
+   type(rigid_pose_t)            :: pose     !< Pose.
+   type(vector_R8P), allocatable :: q(:)     !< Moved points.
+   type(vector_R8P)              :: lo, hi   !< Bounding box.
+   real(R8P),        allocatable :: ll(:,:), p1(:,:,:), p2(:,:,:), c1(:,:), c2(:,:), n1(:,:), n2(:,:), i1(:,:), i2(:,:) !< Work.
+   logical,          allocatable :: v1(:,:), v2(:,:), w1(:), w2(:) !< Visibility.
+   integer(I4P),     allocatable :: a1(:), a2(:) !< Patches.
+   real(R8P)                     :: w(3), h  !< Work.
+   integer(I4P)                  :: m, nq, k !< Work.
+
+   nq = size(points, kind=I4P)
+   lo = surface%get_bmin() ; hi = surface%get_bmax()
+   h = norm2([hi%x - lo%x, hi%y - lo%y, hi%z - lo%z]) / 64._R8P
+   allocate(ll(3, nq), p1(3, 3, nq), p2(3, 3, nq), c1(3, nq), c2(3, nq), n1(3, nq), n2(3, nq), i1(3, nq), i2(3, nq))
+   allocate(v1(3, nq), v2(3, nq), w1(nq), w2(nq), a1(nq), a2(nq), q(nq))
+   do m = 1, nq
+      ll(:, m) = [sqrt(2._R8P) * h, -h, 12.8_R8P * h]
+   enddo
+   pose = pose_from_axis_angle([1._R8P, -2._R8P, 0.5_R8P], 1.1_R8P, [20._R8P, 3._R8P, -7._R8P])
+   do m = 1, nq
+      w = to_world(pose, [points(m)%x, points(m)%y, points(m)%z]) ; q(m) = vector_R8P(w(1), w(2), w(3))
+   enddo
+   mismatch = 0
+   call surface%enter_device
+   do k = 1, 2
+      if (k == 1) then
+         call surface%probe_many(points=points, lengths=ll, probe_points=p1, visible=v1, foot_points=c1, normals=n1, &
+                                 patches=a1)
+         call surface%probe_many_device(points=points, lengths=ll, probe_points=p2, visible=v2, foot_points=c2, &
+                                        normals=n2, patches=a2)
+         call surface%image_points(points=points, images=i1, visible=w1)
+         call surface%image_points_device(points=points, images=i2, visible=w2)
+      else
+         call surface%probe_many(points=q, lengths=ll, probe_points=p1, visible=v1, foot_points=c1, normals=n1, &
+                                 patches=a1, pose=pose)
+         call surface%probe_many_device(points=q, lengths=ll, probe_points=p2, visible=v2, foot_points=c2, &
+                                        normals=n2, patches=a2, pose=pose)
+         call surface%image_points(points=q, images=i1, visible=w1, pose=pose)
+         call surface%image_points_device(points=q, images=i2, visible=w2, pose=pose)
+      endif
+      mismatch = mismatch + count(p1 /= p2) + count(v1 .neqv. v2) + count(c1 /= c2) + count(n1 /= n2) + count(a1 /= a2) + &
+                 count(i1 /= i2) + count(w1 .neqv. w2)
+   enddo
+   call surface%exit_device
+   endsubroutine probe_case
 
    subroutine deviation_case(mismatch)
    !< surface%deviation with device=.true. vs the CPU path (issue #60): a copy of the surface rotated by 2 degrees about

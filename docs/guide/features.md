@@ -61,7 +61,7 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 | 2-D curves: closed and open polylines, segment BVH, signed distance, 2-D winding number, repair | `curve_object` | [2-D geometry](/guide/advanced/2d-geometry) | [7](/manual/tutorial/07-curves) | [1](/manual/cookbook#compute-the-signed-distance-to-a-polygon) |
 | Axis-aligned section of an STL as a curve | `slice_surface` | [2-D geometry](/guide/advanced/2d-geometry) | [7](/manual/tutorial/07-curves) | [1](/manual/cookbook#cut-a-2-d-section-of-an-stl) |
 | Rich queries: closest point, feature, pseudo-normal, body; ambiguous feet; wall curvature | `query_point`, `query_many` | [Immersed-boundary queries](/guide/advanced/ib-queries) | [8](/manual/tutorial/08-ib-queries) | [1](/manual/cookbook#find-the-closest-point-and-its-normal), [2](/manual/cookbook#tell-whether-the-closest-point-is-on-a-face-an-edge-or-a-vertex) |
-| Image points and probes with a visibility test | `image_points`, `probe_many` | [Immersed-boundary queries](/guide/advanced/ib-queries) | [8](/manual/tutorial/08-ib-queries) | [1](/manual/cookbook#image-points-and-probes-for-a-ghost-cell-method) |
+| Image points and probes with a visibility test; several probes per point (image lines); on the device, bit-exact | `image_points`, `probe_many`, `probe_many_device`, `image_points_device` | [Immersed-boundary queries](/guide/advanced/ib-queries) | [8](/manual/tutorial/08-ib-queries) | [1](/manual/cookbook#image-points-and-probes-for-a-ghost-cell-method), [2](/manual/cookbook#image-lines-and-probes-on-the-gpu) |
 | Wall distance with body id and early cutoff | `wall_distance_many` | [Immersed-boundary queries](/guide/advanced/ib-queries) | | [1](/manual/cookbook#compute-the-wall-distance-up-to-a-cutoff) |
 | Grid-adapted markers | `surface_markers`, `curve_markers` | [Immersed-boundary queries](/guide/advanced/ib-queries) | | [1](/manual/cookbook#place-lagrangian-markers-for-an-ib-method), [2](/manual/cookbook#place-markers-on-a-curve) |
 | AMR block and cell classification: cut, near, inside, outside | `box_classify_many` | [AMR tagging](/guide/advanced/amr-tagging) | [9](/manual/tutorial/09-amr-tagging) | [1](/manual/cookbook#tag-the-cells-near-the-wall) |
@@ -85,7 +85,7 @@ of a module of its own (named in the row); `use fossil` re-exports the types and
 
 | Capability | Entry point | Reference | Tutorial | Cookbook |
 |---|---|---|---|---|
-| Distance, rich queries, wall distance, box classification, posed queries on the device (OpenACC), bit-exact against the CPU path | `enter_device`, `*_device`, `exit_device` | [GPU queries](/guide/advanced/device-distance) | [16](/manual/tutorial/16-gpu) | [1](/manual/cookbook#run-a-batch-of-queries-on-the-gpu), [2](/manual/cookbook#locate-many-points-on-the-gpu) |
+| Distance, rich queries, probes and image points, wall distance, box classification, posed queries on the device (OpenACC), bit-exact against the CPU path | `enter_device`, `*_device`, `exit_device` | [GPU queries](/guide/advanced/device-distance) | [16](/manual/tutorial/16-gpu) | [1](/manual/cookbook#run-a-batch-of-queries-on-the-gpu), [2](/manual/cookbook#locate-many-points-on-the-gpu), [3](/manual/cookbook#image-lines-and-probes-on-the-gpu) |
 
 ## `fossilizer` CLI
 

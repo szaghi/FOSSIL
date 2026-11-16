@@ -20,6 +20,7 @@ use fossil_box_query, only : bvh_box_contact_oac, bvh_box_thin_oac, box_toleranc
                              BOX_NONE, BOX_CUT, BOX_NEAR, BOX_INSIDE, BOX_OUTSIDE
 use fossil_box_predicates, only : box_triangle_overlap
 use fossil_line_query, only : bvh_line_crossings_oac, tri_line_hit_oac, sort_crossings_oac, line_crossing_before
+use fossil_segment_visibility, only : bvh_segment_blocked_oac
 use fossil_utils, only : EPS, FRLEN, PI, is_inside_bb, triangle_overlaps_aabb
 use fossil_vertex_pool_object, only : vertex_pool_object
 use fossil_winding_number, only : compute_winding_number => winding_number, WN_FOUR_PI => FOUR_PI, WN_DEFAULT_BETA => DEFAULT_BETA
@@ -256,8 +257,16 @@ type :: surface_stl_object
       procedure, pass(self) :: query_many                      !< Batch rich query: distance, closest point, facet, feature, normal, body (issue #37).
       procedure, pass(self) :: query_point                     !< Rich query of one point (issue #37).
       procedure, pass(self) :: query_many_device               !< query_many on the device (issue #37).
-      procedure, pass(self) :: probe_many                      !< Probe points along the normal, with visibility (issue #37).
+      generic               :: probe_many => probe_many_one, probe_many_multi !< Probe points along the normal, with
+                                                               !< visibility (issue #37); m lengths per point (WP1 step 01).
+      procedure, pass(self) :: probe_many_one                  !< probe_many, one length per point.
+      procedure, pass(self) :: probe_many_multi                !< probe_many, m lengths per point.
       procedure, pass(self) :: image_points                    !< Mirror points through the closest point, with visibility (issue #37).
+      generic               :: probe_many_device => probe_many_device_one, probe_many_device_multi !< probe_many on the
+                                                               !< device (WP1 step 01).
+      procedure, pass(self) :: probe_many_device_one           !< probe_many_device, one length per point.
+      procedure, pass(self) :: probe_many_device_multi         !< probe_many_device, m lengths per point.
+      procedure, pass(self) :: image_points_device             !< image_points on the device (WP1 step 01).
       procedure, pass(self) :: box_classify_many               !< Classify boxes: cut, near, inside, outside (issue #38).
       procedure, pass(self) :: box_intersects_surface          !< True if a box meets the surface (issue #38).
       procedure, pass(self) :: box_classify_many_device        !< box_classify_many on the device (issue #38).
@@ -2742,7 +2751,7 @@ contains
    endif
    endsubroutine query_many_device
 
-   subroutine probe_many(self, points, lengths, probe_points, visible, foot_points, normals, status, patches)
+   subroutine probe_many_one(self, points, lengths, probe_points, visible, foot_points, normals, status, patches, pose)
    !< Probe points (issue #37): for each point, the point at distance lengths(i) along the
    !< pseudo-normal of its closest feature, from its foot point (closest point): positive lengths go
    !< outward, negative inward. `visible(i)` is true when the open segment from the foot point to
@@ -2751,6 +2760,12 @@ contains
    !< are hit at t ~ 0). Supports the placement rules of image points at sqrt(2) dx, image lines,
    !< second image layers and fixed-distance probes; `status = STATUS_INVALID_INPUT` on a size
    !< mismatch. OpenMP over the points.
+   !<
+   !< One length per point; `probe_many_multi` (the same generic `probe_many`) takes m lengths per point and does the
+   !< work. On a SAH BVH the visibility is the any-hit kernel `bvh_segment_blocked_oac` (WP1 step 01), the routine of
+   !< `probe_many_device`, equal to the former ray query + filter bit for bit; an octree surface keeps the ray query.
+   !< `pose` (WP1 step 01): the points are in the world frame, the body at the pose; the query runs in the body frame
+   !< and the probe points, foot points and normals are mapped back.
    class(surface_stl_object), intent(in)            :: self              !< Surface.
    type(vector_R8P),          intent(in)            :: points(:)         !< Query points [n].
    real(R8P),                 intent(in)            :: lengths(:)        !< Probe lengths [n] (+ outward).
@@ -2760,38 +2775,83 @@ contains
    real(R8P),                 intent(out), optional :: normals(:,:)      !< Pseudo-normals [3, n].
    integer(I4P),              intent(out), optional :: status            !< STATUS_OK or STATUS_INVALID_INPUT.
    integer(I4P),              intent(out), optional :: patches(:)        !< Patch of the foot point's facet [n] (issue #66).
-   type(vector_R8P)                                 :: cp, pn, tip       !< Per-point work.
-   real(R8P)                                        :: d, tol            !< Work.
-   integer(I4P)                                     :: i, n, f           !< Counters, facet.
+   type(rigid_pose_t),        intent(in),  optional :: pose              !< Pose of the body (WP1 step 01).
+   real(R8P), allocatable                           :: pp(:,:,:)         !< Probe points [3, 1, n].
+   logical,   allocatable                           :: vis(:,:)          !< Visibility [1, n].
+   integer(I4P)                                     :: n, st             !< Points, status.
 
-   if (present(status)) status = STATUS_OK
    n = size(points, kind=I4P)
-   if (size(lengths) /= n .or. size(probe_points, 1) /= 3 .or. size(probe_points, 2) /= n .or. size(visible) /= n .or. &
-       bad_shape3(foot_points, n) .or. bad_shape3(normals, n) .or. bad_size(patches, n)) then
+   if (size(lengths) /= n .or. size(probe_points, 1) /= 3 .or. size(probe_points, 2) /= n .or. size(visible) /= n) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   allocate(pp(3, 1, n), vis(1, n))
+   call self%probe_many_multi(points=points, lengths=reshape(lengths, [1_I4P, n]), probe_points=pp, visible=vis, &
+                              foot_points=foot_points, normals=normals, status=st, patches=patches, pose=pose)
+   if (present(status)) status = st
+   if (st /= STATUS_OK) return
+   probe_points = pp(:, 1, :) ; visible = vis(1, :)
+   endsubroutine probe_many_one
+
+   recursive subroutine probe_many_multi(self, points, lengths, probe_points, visible, foot_points, normals, status, &
+                                         patches, pose)
+   !< Probe points with m lengths per point (WP1 step 01; see `probe_many_one`): lengths(k, i) (+ outward) gives
+   !< probe_points(:, k, i) = foot + lengths(k, i) n and visible(k, i), the open segment from the foot point to that probe
+   !< crosses no facet (tol < t <= |lengths(k, i)|). One closest-point query per point. OpenMP over the points.
+   class(surface_stl_object), intent(in)            :: self                !< Surface.
+   type(vector_R8P),          intent(in)            :: points(:)           !< Query points [n].
+   real(R8P),                 intent(in)            :: lengths(:,:)        !< Probe lengths [m, n] (+ outward).
+   real(R8P),                 intent(out)           :: probe_points(:,:,:) !< Probe points [3, m, n].
+   logical,                   intent(out)           :: visible(:,:)        !< Segment foot-probe crosses no facet [m, n].
+   real(R8P),                 intent(out), optional :: foot_points(:,:)    !< Foot (closest) points [3, n].
+   real(R8P),                 intent(out), optional :: normals(:,:)        !< Pseudo-normals [3, n].
+   integer(I4P),              intent(out), optional :: status              !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),              intent(out), optional :: patches(:)          !< Patch of the foot point's facet [n].
+   type(rigid_pose_t),        intent(in),  optional :: pose                !< Pose of the body.
+   type(vector_R8P)                                 :: cp, pn, tip         !< Per-point work.
+   real(R8P)                                        :: d, tol              !< Work.
+   integer(I4P)                                     :: i, k, n, m, f, st   !< Counters, facet, status.
+   logical                                          :: bvh                 !< Visibility by the BVH kernel.
+
+   if (present(pose)) then ! body-frame query, outputs mapped back to the world frame
+      call self%probe_many_multi(points=body_points(pose, points), lengths=lengths, probe_points=probe_points, &
+                                 visible=visible, foot_points=foot_points, normals=normals, status=st, patches=patches)
+      if (present(status)) status = st
+      if (st /= STATUS_OK) return
+      call probes_to_world(pose, probe_points, foot_points, normals)
+      return
+   endif
+   if (present(status)) status = STATUS_OK
+   n = size(points, kind=I4P) ; m = size(lengths, 1, kind=I4P)
+   if (probe_bad_sizes(n, lengths, probe_points, visible, foot_points, normals, patches)) then
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
    tol = 1.e-9_R8P * vnorm(self%bmax - self%bmin)
-   !$omp parallel do default(shared) schedule(static) private(i, cp, pn, tip, d, f)
+   bvh = visibility_kernel_ok(self)
+   !$omp parallel do default(shared) schedule(static) private(i, k, cp, pn, tip, d, f)
    do i = 1_I4P, n
       call self%query_point(point=points(i), distance=d, closest_point=cp, normal=pn, facet=f)
       if (present(patches)) then
          patches(i) = 0_I4P
          if (f >= 1_I4P .and. f <= self%facets_number) patches(i) = self%facet(f)%patch
       endif
-      tip = cp + lengths(i) * pn
-      probe_points(:, i) = [tip%x, tip%y, tip%z]
-      visible(i) = segment_clear(self, cp, tip, tol)
+      do k = 1_I4P, m
+         tip = cp + lengths(k, i) * pn
+         probe_points(:, k, i) = [tip%x, tip%y, tip%z]
+         visible(k, i) = segment_visible(self, cp, tip, tol, bvh)
+      enddo
       if (present(foot_points)) foot_points(:, i) = [cp%x, cp%y, cp%z]
       if (present(normals)) normals(:, i) = [pn%x, pn%y, pn%z]
    enddo
    !$omp end parallel do
-   endsubroutine probe_many
+   endsubroutine probe_many_multi
 
-   subroutine image_points(self, points, images, visible, foot_points, status, patches)
+   recursive subroutine image_points(self, points, images, visible, foot_points, status, patches, pose)
    !< Image points (issue #37): the mirror of each point through its closest point, 2 foot - x
    !< (the ghost-point image of an IB closure), and whether the open segment from the foot point to
-   !< the image crosses no facet (see `probe_many`). OpenMP over the points.
+   !< the image crosses no facet (see `probe_many`). OpenMP over the points. `pose` (WP1 step 01): world-frame points,
+   !< the body at the pose; computed in the body frame (images 2 foot - x there), images and foot points mapped back.
    class(surface_stl_object), intent(in)            :: self             !< Surface.
    type(vector_R8P),          intent(in)            :: points(:)        !< Query points [n].
    real(R8P),                 intent(out)           :: images(:,:)      !< Image points [3, n].
@@ -2799,11 +2859,20 @@ contains
    real(R8P),                 intent(out), optional :: foot_points(:,:) !< Foot points [3, n].
    integer(I4P),              intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
    integer(I4P),              intent(out), optional :: patches(:)       !< Patch of the foot point's facet [n] (issue #66).
+   type(rigid_pose_t),        intent(in),  optional :: pose             !< Pose of the body (WP1 step 01).
    type(vector_R8P)                                 :: cp, img          !< Per-point work.
    real(R8P)                                        :: d, tol           !< Work.
-   integer(I4P)                                     :: i, n, f          !< Counters, facet.
-   logical                                          :: bad              !< Size check.
+   integer(I4P)                                     :: i, n, f, st      !< Counters, facet, status.
+   logical                                          :: bad, bvh         !< Size check, visibility by the BVH kernel.
 
+   if (present(pose)) then ! body-frame query, outputs mapped back to the world frame
+      call self%image_points(points=body_points(pose, points), images=images, visible=visible, foot_points=foot_points, &
+                             status=st, patches=patches)
+      if (present(status)) status = st
+      if (st /= STATUS_OK) return
+      call images_to_world(pose, images, foot_points)
+      return
+   endif
    if (present(status)) status = STATUS_OK
    n = size(points, kind=I4P)
    bad = size(images, 1) /= 3 .or. size(images, 2) /= n .or. bad_shape3(foot_points, n)
@@ -2814,6 +2883,7 @@ contains
       return
    endif
    tol = 1.e-9_R8P * vnorm(self%bmax - self%bmin)
+   bvh = visibility_kernel_ok(self)
    !$omp parallel do default(shared) schedule(static) private(i, cp, img, d, f)
    do i = 1_I4P, n
       call self%query_point(point=points(i), distance=d, closest_point=cp, facet=f)
@@ -2823,11 +2893,197 @@ contains
       endif
       img%x = 2._R8P * cp%x - points(i)%x ; img%y = 2._R8P * cp%y - points(i)%y ; img%z = 2._R8P * cp%z - points(i)%z
       images(:, i) = [img%x, img%y, img%z]
-      if (present(visible)) visible(i) = segment_clear(self, cp, img, tol)
+      if (present(visible)) visible(i) = segment_visible(self, cp, img, tol, bvh)
       if (present(foot_points)) foot_points(:, i) = [cp%x, cp%y, cp%z]
    enddo
    !$omp end parallel do
    endsubroutine image_points
+
+   subroutine probe_many_device_one(self, points, lengths, probe_points, visible, foot_points, normals, status, patches, &
+                                    pose)
+   !< `probe_many` on the device (WP1 step 01): same arguments, outputs and defaults, bit for bit. The foot points and
+   !< normals come from `query_many_device` (the device closest-point kernel), the probe points and their visibility
+   !< from one device loop over (probe, point) running `bvh_segment_blocked_oac`, the kernel of the host path. Requires
+   !< `enter_device` (else STATUS_INVALID_INPUT and a stderr message); #20 rules (pointer aliases of the mapped arrays).
+   !< One length per point; `probe_many_device_multi` (the same generic) takes m.
+   class(surface_stl_object), intent(inout), target :: self              !< Surface (target: device aliases).
+   type(vector_R8P),          intent(in)            :: points(:)         !< Query points [n].
+   real(R8P),                 intent(in)            :: lengths(:)        !< Probe lengths [n] (+ outward).
+   real(R8P),                 intent(out)           :: probe_points(:,:) !< Probe points [3, n].
+   logical,                   intent(out)           :: visible(:)        !< Segment foot-probe crosses no facet [n].
+   real(R8P),                 intent(out), optional :: foot_points(:,:)  !< Foot (closest) points [3, n].
+   real(R8P),                 intent(out), optional :: normals(:,:)      !< Pseudo-normals [3, n].
+   integer(I4P),              intent(out), optional :: status            !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),              intent(out), optional :: patches(:)        !< Patch of the foot point's facet [n].
+   type(rigid_pose_t),        intent(in),  optional :: pose              !< Pose of the body.
+   real(R8P), allocatable                           :: pp(:,:,:)         !< Probe points [3, 1, n].
+   logical,   allocatable                           :: vis(:,:)          !< Visibility [1, n].
+   integer(I4P)                                     :: n, st             !< Points, status.
+
+   n = size(points, kind=I4P)
+   if (size(lengths) /= n .or. size(probe_points, 1) /= 3 .or. size(probe_points, 2) /= n .or. size(visible) /= n) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   allocate(pp(3, 1, n), vis(1, n))
+   call self%probe_many_device_multi(points=points, lengths=reshape(lengths, [1_I4P, n]), probe_points=pp, visible=vis, &
+                                     foot_points=foot_points, normals=normals, status=st, patches=patches, pose=pose)
+   if (present(status)) status = st
+   if (st /= STATUS_OK) return
+   probe_points = pp(:, 1, :) ; visible = vis(1, :)
+   endsubroutine probe_many_device_one
+
+   recursive subroutine probe_many_device_multi(self, points, lengths, probe_points, visible, foot_points, normals, status, &
+                                                patches, pose)
+   !< `probe_many_multi` on the device (WP1 step 01; see `probe_many_device_one`), bit for bit.
+   class(surface_stl_object), intent(inout), target :: self                !< Surface (target: device aliases).
+   type(vector_R8P),          intent(in)            :: points(:)           !< Query points [n].
+   real(R8P),                 intent(in)            :: lengths(:,:)        !< Probe lengths [m, n] (+ outward).
+   real(R8P),                 intent(out)           :: probe_points(:,:,:) !< Probe points [3, m, n].
+   logical,                   intent(out)           :: visible(:,:)        !< Segment foot-probe crosses no facet [m, n].
+   real(R8P),                 intent(out), optional :: foot_points(:,:)    !< Foot (closest) points [3, n].
+   real(R8P),                 intent(out), optional :: normals(:,:)        !< Pseudo-normals [3, n].
+   integer(I4P),              intent(out), optional :: status              !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),              intent(out), optional :: patches(:)          !< Patch of the foot point's facet [n].
+   type(rigid_pose_t),        intent(in),  optional :: pose                !< Pose of the body.
+   type(aabb_node_object),       pointer :: node_p(:)    !< Alias of self%aabb%node.
+   type(facet_distance_payload), pointer :: payload_p(:) !< Alias of self%aabb%payload.
+   real(R8P),                    pointer :: tv_p(:,:)    !< Alias of self%tri_vertices.
+   real(R8P),    allocatable :: dd(:), cpl(:,:), nml(:,:), ll(:,:), ppl(:,:,:) !< Device-side work.
+   integer(I4P), allocatable :: fcl(:)                   !< Foot facets.
+   logical,      allocatable :: vsl(:,:)                 !< Device-side visibility.
+   real(R8P)                 :: tol, cx, cy, cz, nx, ny, nz, px, py, pz, lk !< Per-probe work.
+   integer(I4P)              :: i, k, n, m, st           !< Counters, status.
+
+   if (present(pose)) then ! body-frame query, outputs mapped back on the host
+      call self%probe_many_device_multi(points=body_points(pose, points), lengths=lengths, probe_points=probe_points, &
+                                        visible=visible, foot_points=foot_points, normals=normals, status=st, &
+                                        patches=patches)
+      if (present(status)) status = st
+      if (st /= STATUS_OK) return
+      call probes_to_world(pose, probe_points, foot_points, normals)
+      return
+   endif
+   if (present(status)) status = STATUS_OK
+   n = size(points, kind=I4P) ; m = size(lengths, 1, kind=I4P)
+   if (probe_bad_sizes(n, lengths, probe_points, visible, foot_points, normals, patches)) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (.not. self%is_on_device) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_surface_stl_object%probe_many_device: surface not on device -- call enter_device first.'
+      return
+   endif
+   if (n == 0_I4P) return
+   allocate(dd(n), cpl(3, n), nml(3, n), fcl(n))
+   call self%query_many_device(points=points, distances=dd, closest_points=cpl, facets=fcl, normals=nml, status=st)
+   if (st /= STATUS_OK) then
+      if (present(status)) status = st
+      return
+   endif
+   allocate(ll(m, n), ppl(3, m, n), vsl(m, n))
+   ll = lengths
+   tol = 1.e-9_R8P * vnorm(self%bmax - self%bmin)
+   node_p => self%aabb%node ; payload_p => self%aabb%payload ; tv_p => self%tri_vertices
+   !$acc parallel loop gang vector collapse(2) present(node_p, payload_p, tv_p) copyin(cpl, nml, ll) copyout(ppl, vsl) &
+   !$acc&  private(cx, cy, cz, nx, ny, nz, px, py, pz, lk)
+   do i = 1_I4P, n
+      do k = 1_I4P, m
+         cx = cpl(1, i) ; cy = cpl(2, i) ; cz = cpl(3, i)
+         nx = nml(1, i) ; ny = nml(2, i) ; nz = nml(3, i)
+         lk = ll(k, i)
+         px = cx + lk * nx ; py = cy + lk * ny ; pz = cz + lk * nz
+         ppl(1, k, i) = px ; ppl(2, k, i) = py ; ppl(3, k, i) = pz
+         vsl(k, i) = .not. bvh_segment_blocked_oac(node_p, payload_p, tv_p, cx, cy, cz, px, py, pz, tol)
+      enddo
+   enddo
+   probe_points = ppl ; visible = vsl
+   if (present(foot_points)) foot_points = cpl
+   if (present(normals)) normals = nml
+   if (present(patches)) then
+      do i = 1_I4P, n
+         patches(i) = 0_I4P
+         if (fcl(i) >= 1_I4P .and. fcl(i) <= self%facets_number) patches(i) = self%facet(fcl(i))%patch
+      enddo
+   endif
+   endsubroutine probe_many_device_multi
+
+   recursive subroutine image_points_device(self, points, images, visible, foot_points, status, patches, pose)
+   !< `image_points` on the device (WP1 step 01): same arguments, outputs and defaults, bit for bit. Foot points by
+   !< `query_many_device`, images and visibility in one device loop over the points running `bvh_segment_blocked_oac`
+   !< (the host kernel). Requires `enter_device` (else STATUS_INVALID_INPUT and a stderr message); #20 rules.
+   class(surface_stl_object), intent(inout), target :: self             !< Surface (target: device aliases).
+   type(vector_R8P),          intent(in)            :: points(:)        !< Query points [n].
+   real(R8P),                 intent(out)           :: images(:,:)      !< Image points [3, n].
+   logical,                   intent(out), optional :: visible(:)       !< Segment foot-image crosses no facet [n].
+   real(R8P),                 intent(out), optional :: foot_points(:,:) !< Foot points [3, n].
+   integer(I4P),              intent(out), optional :: status           !< STATUS_OK or STATUS_INVALID_INPUT.
+   integer(I4P),              intent(out), optional :: patches(:)       !< Patch of the foot point's facet [n].
+   type(rigid_pose_t),        intent(in),  optional :: pose             !< Pose of the body.
+   type(aabb_node_object),       pointer :: node_p(:)    !< Alias of self%aabb%node.
+   type(facet_distance_payload), pointer :: payload_p(:) !< Alias of self%aabb%payload.
+   real(R8P),                    pointer :: tv_p(:,:)    !< Alias of self%tri_vertices.
+   real(R8P),    allocatable :: dd(:), cpl(:,:), pts(:,:), iml(:,:) !< Device-side work.
+   integer(I4P), allocatable :: fcl(:)                   !< Foot facets.
+   logical,      allocatable :: vsl(:)                   !< Device-side visibility.
+   real(R8P)                 :: tol, cx, cy, cz, px, py, pz !< Per-point work.
+   integer(I4P)              :: i, n, st                 !< Counters, status.
+   logical                   :: bad                      !< Size check.
+
+   if (present(pose)) then ! body-frame query, outputs mapped back on the host
+      call self%image_points_device(points=body_points(pose, points), images=images, visible=visible, &
+                                    foot_points=foot_points, status=st, patches=patches)
+      if (present(status)) status = st
+      if (st /= STATUS_OK) return
+      call images_to_world(pose, images, foot_points)
+      return
+   endif
+   if (present(status)) status = STATUS_OK
+   n = size(points, kind=I4P)
+   bad = size(images, 1) /= 3 .or. size(images, 2) /= n .or. bad_shape3(foot_points, n)
+   if (present(visible)) bad = bad .or. size(visible) /= n
+   bad = bad .or. bad_size(patches, n)
+   if (bad) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      return
+   endif
+   if (.not. self%is_on_device) then
+      if (present(status)) status = STATUS_INVALID_INPUT
+      write(stderr, '(A)') 'fossil_surface_stl_object%image_points_device: surface not on device -- call enter_device first.'
+      return
+   endif
+   if (n == 0_I4P) return
+   allocate(dd(n), cpl(3, n), fcl(n))
+   call self%query_many_device(points=points, distances=dd, closest_points=cpl, facets=fcl, status=st)
+   if (st /= STATUS_OK) then
+      if (present(status)) status = st
+      return
+   endif
+   allocate(pts(3, n), iml(3, n), vsl(n))
+   do i = 1_I4P, n
+      pts(1, i) = points(i)%x ; pts(2, i) = points(i)%y ; pts(3, i) = points(i)%z
+   enddo
+   tol = 1.e-9_R8P * vnorm(self%bmax - self%bmin)
+   node_p => self%aabb%node ; payload_p => self%aabb%payload ; tv_p => self%tri_vertices
+   !$acc parallel loop gang vector present(node_p, payload_p, tv_p) copyin(cpl, pts) copyout(iml, vsl) &
+   !$acc&  private(cx, cy, cz, px, py, pz)
+   do i = 1_I4P, n
+      cx = cpl(1, i) ; cy = cpl(2, i) ; cz = cpl(3, i)
+      px = 2._R8P * cx - pts(1, i) ; py = 2._R8P * cy - pts(2, i) ; pz = 2._R8P * cz - pts(3, i)
+      iml(1, i) = px ; iml(2, i) = py ; iml(3, i) = pz
+      vsl(i) = .not. bvh_segment_blocked_oac(node_p, payload_p, tv_p, cx, cy, cz, px, py, pz, tol)
+   enddo
+   images = iml
+   if (present(visible)) visible = vsl
+   if (present(foot_points)) foot_points = cpl
+   if (present(patches)) then
+      do i = 1_I4P, n
+         patches(i) = 0_I4P
+         if (fcl(i) >= 1_I4P .and. fcl(i) <= self%facets_number) patches(i) = self%facet(fcl(i))%patch
+      enddo
+   endif
+   endsubroutine image_points_device
 
    recursive subroutine distance_many(self, points, distances, is_signed, sign_algorithm, is_square_root, status, pose)
    !< Batch distance query over a point array — the Adam/Xall embedded-boundary
@@ -2943,6 +3199,80 @@ contains
       endif
    enddo
    endfunction segment_clear
+
+   function visibility_kernel_ok(self) result(ok)
+   !< The surface has what `bvh_segment_blocked_oac` needs (WP1 step 01): a SAH BVH with its payload and the exact
+   !< facet vertices. Else the probes keep the ray query (`segment_clear`).
+   type(surface_stl_object), intent(in) :: self !< Surface.
+   logical                              :: ok   !< Result.
+
+   ok = self%facets_number > 0_I4P .and. self%aabb%get_tree_kind() == AABB_TREE_SAH_BVH .and. &
+        self%aabb%get_nodes_number() > 0_I4P .and. allocated(self%aabb%node) .and. allocated(self%aabb%payload) .and. &
+        allocated(self%tri_vertices)
+   endfunction visibility_kernel_ok
+
+   function segment_visible(self, a, b, tol, bvh) result(clear)
+   !< True if the open segment from a (on the surface) to b crosses no facet beyond tol from a (issue #37): the any-hit
+   !< kernel of the device probes on a SAH BVH (WP1 step 01), else the ray query.
+   type(surface_stl_object), intent(in) :: self  !< Surface.
+   type(vector_R8P),         intent(in) :: a, b  !< Segment ends.
+   real(R8P),                intent(in) :: tol   !< Hits with t <= tol (the facets at a) are ignored.
+   logical,                  intent(in) :: bvh   !< Use `bvh_segment_blocked_oac` (`visibility_kernel_ok`).
+   logical                              :: clear !< Result.
+
+   if (bvh) then
+      clear = .not. bvh_segment_blocked_oac(self%aabb%node, self%aabb%payload, self%tri_vertices, a%x, a%y, a%z, &
+                                            b%x, b%y, b%z, tol)
+   else
+      clear = segment_clear(self, a, b, tol)
+   endif
+   endfunction segment_visible
+
+   pure function probe_bad_sizes(n, lengths, probe_points, visible, foot_points, normals, patches) result(bad)
+   !< Size check of the multi-length probes (WP1 step 01).
+   integer(I4P),           intent(in) :: n                   !< Points.
+   real(R8P),              intent(in) :: lengths(:,:)        !< [m, n].
+   real(R8P),              intent(in) :: probe_points(:,:,:) !< [3, m, n].
+   logical,                intent(in) :: visible(:,:)        !< [m, n].
+   real(R8P),    optional, intent(in) :: foot_points(:,:)    !< [3, n].
+   real(R8P),    optional, intent(in) :: normals(:,:)        !< [3, n].
+   integer(I4P), optional, intent(in) :: patches(:)          !< [n].
+   logical                            :: bad                 !< Result.
+
+   bad = size(lengths, 2) /= n .or. size(probe_points, 1) /= 3 .or. size(probe_points, 2) /= size(lengths, 1) .or. &
+         size(probe_points, 3) /= n .or. size(visible, 1) /= size(lengths, 1) .or. size(visible, 2) /= n .or. &
+         bad_shape3(foot_points, n) .or. bad_shape3(normals, n) .or. bad_size(patches, n)
+   endfunction probe_bad_sizes
+
+   subroutine probes_to_world(pose, probe_points, foot_points, normals)
+   !< Probe outputs computed in the body frame mapped to the world frame of `pose` (WP1 step 01).
+   type(rigid_pose_t),  intent(in)              :: pose                !< Pose.
+   real(R8P),           intent(inout)           :: probe_points(:,:,:) !< Probe points [3, m, n].
+   real(R8P), optional, intent(inout)           :: foot_points(:,:)    !< Foot points [3, n].
+   real(R8P), optional, intent(inout)           :: normals(:,:)        !< Normals [3, n].
+   integer(I4P)                                 :: i, k                !< Counters.
+
+   do i = 1_I4P, size(probe_points, 3, kind=I4P)
+      do k = 1_I4P, size(probe_points, 2, kind=I4P)
+         probe_points(:, k, i) = to_world(pose, probe_points(:, k, i))
+      enddo
+      if (present(foot_points)) foot_points(:, i) = to_world(pose, foot_points(:, i))
+      if (present(normals)) normals(:, i) = rotate(pose, normals(:, i))
+   enddo
+   endsubroutine probes_to_world
+
+   subroutine images_to_world(pose, images, foot_points)
+   !< Image outputs computed in the body frame mapped to the world frame of `pose` (WP1 step 01).
+   type(rigid_pose_t),  intent(in)    :: pose             !< Pose.
+   real(R8P),           intent(inout) :: images(:,:)      !< Image points [3, n].
+   real(R8P), optional, intent(inout) :: foot_points(:,:) !< Foot points [3, n].
+   integer(I4P)                       :: i                !< Counter.
+
+   do i = 1_I4P, size(images, 2, kind=I4P)
+      images(:, i) = to_world(pose, images(:, i))
+      if (present(foot_points)) foot_points(:, i) = to_world(pose, foot_points(:, i))
+   enddo
+   endsubroutine images_to_world
 
    subroutine second_foot(self, point, cp1, d1sq, rel, foot_tol, found, cp2)
    !< Nearest facet whose closest point is farther than foot_tol from cp1, with a squared distance

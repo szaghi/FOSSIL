@@ -1089,8 +1089,10 @@ and body. OpenMP over the points; bit-exact with `compute_distance`. See
 
 **Related.** `query_point` (one point), `query_many_device` (same, on the
 device after `enter_device`; pseudo-normal or fast-winding-number sign),
-`probe_many(points, lengths, probe_points, visible, foot_points, normals)`,
-`image_points(points, images, visible, foot_points)`,
+`probe_many(points, lengths, probe_points, visible, foot_points, normals, status, patches, pose)` (`lengths(n)`, or
+`lengths(m, n)` with `probe_points(3, m, n)` and `visible(m, n)`: m probes per point),
+`image_points(points, images, visible, foot_points, status, patches, pose)`, and their device twins
+`probe_many_device`, `image_points_device` (same arguments, bit for bit; WP1 step 01),
 `get_shells_number`, `get_bodies_number`, `facet_shell(i)`, `facet_body(i)`.
 
 ---

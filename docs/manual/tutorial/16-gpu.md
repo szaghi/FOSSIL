@@ -94,6 +94,10 @@ The immersed-boundary queries of chapter 8 have device twins with the same argum
 
 - `pose=` (chapter 11) maps the points into the body frame on the host and queries the tree as entered: a moving
   body needs no new `enter_device` per step.
+- `probe_many_device` and `image_points_device` are the probes and images of chapter 8 on the device, with several
+  probes per point (`lengths(m, n)`, an image line) and `pose=`: the foot points from `query_many_device`, the
+  visibility from the any-hit kernel the host runs too, so every output matches the host bit for bit (see the
+  [cookbook recipe](../cookbook#image-lines-and-probes-on-the-gpu)).
 
 <<< @/examples/output/tut16b.ansi{ansi}
 

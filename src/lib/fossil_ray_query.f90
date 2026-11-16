@@ -32,12 +32,14 @@ module fossil_ray_query
 !< A facet with collinear vertices is never crossed. The topology is exact, t is rounded: the crossing point is the
 !< barycentric combination by the side tests (by the line kernel's weights on axis rays), t its projection on d.
 !<
+!< The kernels themselves (`ray_prepare_oac`, `ray_crossing_oac`) live in `fossil_ray_kernel` on plain arrays, device
+!< routines shared with the segment visibility of the probes (WP1 step 01).
+!<
 !< The tree traversals prune boxes with the slab test on boxes padded by `ray%pad` (1e-9 of the ray's extent over
 !< the surface box, plus the octree's facet reach): a crossing on a box face is never lost to round-off.
 
 use fossil_facet_object, only : facet_object
-use fossil_line_kernel,  only : tri_line_hit_oac, first_normal_sign
-use fossil_predicates,   only : orient2d_xy, orient3d_xyz
+use fossil_ray_kernel,   only : ray_prepare_oac, ray_crossing_oac
 use penf,                only : I4P, R8P
 use vecfor,              only : vector_R8P
 
@@ -75,163 +77,36 @@ contains
    pure function ray_prepare(ray_origin, ray_direction, bmin, bmax, reach) result(ray)
    !< Prepare a ray for the exact kernel (issue #82): the far point q = o + s d beyond the box [bmin, bmax] (the surface
    !< box), s = 2 R / |d| with R >= the distance from o to any point of the box (s doubled until q /= o), and the pad
-   !< of the slab test: 1e-9 R plus `reach` (the octree's facet reach; 0 for the BVH).
+   !< of the slab test: 1e-9 R plus `reach` (the octree's facet reach; 0 for the BVH). Runs `ray_prepare_oac`, the
+   !< routine of the device segment visibility (WP1 step 01).
    type(vector_R8P), intent(in)           :: ray_origin    !< Ray origin.
    type(vector_R8P), intent(in)           :: ray_direction !< Ray direction (nonzero).
    type(vector_R8P), intent(in)           :: bmin, bmax    !< Box of the surface.
    real(R8P),        intent(in), optional :: reach         !< Facet reach beyond its tree box (octree).
    type(ray_exact_t)                      :: ray           !< Prepared ray.
-   real(R8P)                              :: lo(3), hi(3), r, s, dn !< Work.
-   integer(I4P)                           :: k             !< Counter.
+   real(R8P)                              :: lo(3), hi(3), r_ !< Box, reach.
 
    ray%o = [ray_origin%x, ray_origin%y, ray_origin%z]
    ray%d = [ray_direction%x, ray_direction%y, ray_direction%z]
    lo = [bmin%x, bmin%y, bmin%z] ; hi = [bmax%x, bmax%y, bmax%z]
-   r = sqrt(sum(max(abs(lo - ray%o), abs(hi - ray%o))**2))
-   r = r + 1.e-6_R8P * maxval(abs(ray%o)) + tiny(1._R8P)
-   dn = sqrt(sum(ray%d**2))
-   s = 2._R8P * r / dn
-   do k = 1, 64
-      ray%q = ray%o + s * ray%d
-      if (any(ray%q /= ray%o)) exit
-      s = 2._R8P * s
-   enddo
-   ray%axis = 0_I4P
-   if (count(ray%d /= 0._R8P) == 1) ray%axis = int(maxloc(abs(ray%d), dim=1), I4P)
-   ray%pad = 1.e-9_R8P * r
-   if (present(reach)) ray%pad = ray%pad + reach
+   r_ = 0._R8P ; if (present(reach)) r_ = reach
+   call ray_prepare_oac(ray%o, ray%d, lo, hi, r_, ray%q, ray%axis, ray%pad)
    endfunction ray_prepare
 
    subroutine ray_facet_crossing(ray, facet, hit, t)
    !< Exact crossing of the prepared ray with a facet (issue #82, see the module header): hit and the parameter t >= 0.
+   !< Runs `ray_crossing_oac` on the facet's vertices, the routine of the device segment visibility (WP1 step 01).
    type(ray_exact_t),  intent(in)  :: ray    !< Prepared ray.
    type(facet_object), intent(in)  :: facet  !< Facet.
    logical,            intent(out) :: hit    !< The ray crosses the facet (t >= 0).
    real(R8P),          intent(out) :: t      !< Parameter of the crossing (0 if the origin is on the facet's plane).
-   real(R8P)                       :: v(3, 3), p(3), w1, w2, w3, s1, s2, s3, tc, oo, qq, a, b !< Work.
-   logical                         :: enter  !< Unused (line kernel's entering flag).
-   integer(I4P)                    :: k      !< Axis.
+   real(R8P)                       :: tv(9)  !< Vertices.
 
-   hit = .false. ; t = 0._R8P
-   v(1, 1) = facet%vertex(1)%x ; v(2, 1) = facet%vertex(1)%y ; v(3, 1) = facet%vertex(1)%z
-   v(1, 2) = facet%vertex(2)%x ; v(2, 2) = facet%vertex(2)%y ; v(3, 2) = facet%vertex(2)%z
-   v(1, 3) = facet%vertex(3)%x ; v(2, 3) = facet%vertex(3)%y ; v(3, 3) = facet%vertex(3)%z
-   k = ray%axis
-   if (k > 0_I4P) then
-      select case (k)
-      case (1_I4P) ; a = ray%o(2) ; b = ray%o(3)
-      case (2_I4P) ; a = ray%o(3) ; b = ray%o(1)
-      case default ; a = ray%o(1) ; b = ray%o(2)
-      endselect
-      call tri_line_hit_oac(reshape(v, [9]), k, a, b, hit, tc, enter)
-      if (.not. hit) return
-      hit = .false.
-   else
-      call side(ray%o, ray%q, v(:, 2), v(:, 3), w1, s1)
-      call side(ray%o, ray%q, v(:, 3), v(:, 1), w2, s2)
-      if (s1 /= s2) return
-      call side(ray%o, ray%q, v(:, 1), v(:, 2), w3, s3)
-      if (s3 /= s1) return
-      if (first_normal_sign(v) == 0._R8P) return ! collinear vertices: never crossed
-   endif
-   oo = o3d(v(:, 1), v(:, 2), v(:, 3), ray%o)
-   if (oo == 0._R8P) then ! the origin on the facet's plane: the crossing is at o
-      hit = .true. ; t = 0._R8P ; return
-   endif
-   qq = o3d(v(:, 1), v(:, 2), v(:, 3), ray%q)
-   if (qq == 0._R8P .or. (oo > 0._R8P .eqv. qq > 0._R8P)) return ! behind the origin (q on the plane: never with a hit)
-   hit = .true.
-   if (k > 0_I4P) then
-      t = (tc - ray%o(k)) / ray%d(k)
-   else
-      if (w1 + w2 + w3 /= 0._R8P) then
-         p = (w1 * v(:, 1) + w2 * v(:, 2) + w3 * v(:, 3)) / (w1 + w2 + w3)
-      else
-         p = (v(:, 1) + v(:, 2) + v(:, 3)) / 3._R8P
-      endif
-      t = dot_product(p - ray%o, ray%d) / dot_product(ray%d, ray%d)
-   endif
-   t = max(t, 0._R8P)
+   tv(1) = facet%vertex(1)%x ; tv(2) = facet%vertex(1)%y ; tv(3) = facet%vertex(1)%z
+   tv(4) = facet%vertex(2)%x ; tv(5) = facet%vertex(2)%y ; tv(6) = facet%vertex(2)%z
+   tv(7) = facet%vertex(3)%x ; tv(8) = facet%vertex(3)%y ; tv(9) = facet%vertex(3)%z
+   call ray_crossing_oac(ray%o, ray%q, ray%d, ray%axis, tv, hit, t)
    endsubroutine ray_facet_crossing
-
-   subroutine side(o, q, x, y, w, sg)
-   !< Plucker side test of the line o -> q against the edge x -> y: w = orient3d(o, q, x, y) (approximate magnitude,
-   !< exact sign) and its sign under the ray's symbolic perturbation (module header): -1 or +1, never 0 for x /= y.
-   real(R8P), intent(in)  :: o(3), q(3), x(3), y(3) !< Line, edge.
-   real(R8P), intent(out) :: w                      !< orient3d(o, q, x, y).
-   real(R8P), intent(out) :: sg                     !< Perturbed sign.
-   real(R8P)              :: g(3), h(3), e(3)       !< g = n(y, q, x), g' = n(y, x, o), e = x - y (signs).
-   integer(I4P)           :: k                      !< Counter.
-   real(R8P), parameter   :: EPS_HALF = epsilon(1._R8P) / 2._R8P                !< Unit roundoff.
-   real(R8P), parameter   :: O3D_BOUND = (7._R8P + 56._R8P * EPS_HALF) * EPS_HALF !< Filter bound (orient3d_xyz).
-   real(R8P)              :: ad1, ad2, ad3, bd1, bd2, bd3, cd1, cd2, cd3, p1, p2, p3, p4, p5, p6 !< Filter.
-
-   ! the filter of orient3d_xyz inlined (the same double when conclusive; the hot path of the ray queries)
-   ad1 = o(1) - y(1) ; ad2 = o(2) - y(2) ; ad3 = o(3) - y(3)
-   bd1 = q(1) - y(1) ; bd2 = q(2) - y(2) ; bd3 = q(3) - y(3)
-   cd1 = x(1) - y(1) ; cd2 = x(2) - y(2) ; cd3 = x(3) - y(3)
-   p1 = bd1 * cd2 ; p2 = cd1 * bd2 ; p3 = cd1 * ad2 ; p4 = ad1 * cd2 ; p5 = ad1 * bd2 ; p6 = bd1 * ad2
-   w = ad3 * (p1 - p2) + bd3 * (p3 - p4) + cd3 * (p5 - p6)
-   if (abs(w) > O3D_BOUND * ((abs(p1) + abs(p2)) * abs(ad3) + (abs(p3) + abs(p4)) * abs(bd3) + &
-                            (abs(p5) + abs(p6)) * abs(cd3))) then
-      sg = sign(1._R8P, w) ; return
-   endif
-   w = orient3d_xyz(o, q, x, y)
-   if (w /= 0._R8P) then
-      sg = sign(1._R8P, w) ; return
-   endif
-   do k = 1, 3
-      g(k) = normal_sign(y, q, x, k)
-      if (g(k) /= 0._R8P) then
-         sg = g(k) ; return
-      endif
-   enddo
-   do k = 1, 3
-      e(k) = 0._R8P
-      if (x(k) > y(k)) e(k) = 1._R8P
-      if (x(k) < y(k)) e(k) = -1._R8P
-   enddo
-   h(1) = normal_sign(y, x, o, 1_I4P)
-   sg = h(1)                 ; if (sg /= 0._R8P) return ! e^8
-   sg = -e(3)                ; if (sg /= 0._R8P) return ! e^10
-   sg = e(2)                 ; if (sg /= 0._R8P) return ! e^12
-   sg = normal_sign(y, x, o, 2_I4P) ; if (sg /= 0._R8P) return ! e^16
-   sg = -e(1)                                            ! e^20: x /= y, so e(1) /= 0 here
-   endsubroutine side
-
-   pure function o3d(a, b, c, d) result(det)
-   !< orient3d_xyz(a, b, c, d) with its filter inlined: the same double when the filter is conclusive (the common case),
-   !< else the exact `orient3d_xyz`. Exact sign either way; it spares the exact stage's large work array, which a debug
-   !< build (-finit-real) initialises on every call.
-   real(R8P), intent(in) :: a(3), b(3), c(3), d(3) !< Points.
-   real(R8P)             :: det                    !< Its sign is exact.
-   real(R8P), parameter  :: EPS_HALF = epsilon(1._R8P) / 2._R8P                !< Unit roundoff.
-   real(R8P), parameter  :: O3D_BOUND = (7._R8P + 56._R8P * EPS_HALF) * EPS_HALF !< Filter bound (orient3d_xyz).
-   real(R8P)             :: ad(3), bd(3), cd(3), bxcy, cxby, cxay, axcy, axby, bxay, perm !< Work.
-
-   ad = a - d ; bd = b - d ; cd = c - d
-   bxcy = bd(1) * cd(2) ; cxby = cd(1) * bd(2)
-   cxay = cd(1) * ad(2) ; axcy = ad(1) * cd(2)
-   axby = ad(1) * bd(2) ; bxay = bd(1) * ad(2)
-   det = ad(3) * (bxcy - cxby) + bd(3) * (cxay - axcy) + cd(3) * (axby - bxay)
-   perm = (abs(bxcy) + abs(cxby)) * abs(ad(3)) + (abs(cxay) + abs(axcy)) * abs(bd(3)) + &
-          (abs(axby) + abs(bxay)) * abs(cd(3))
-   if (abs(det) > O3D_BOUND * perm) return
-   det = orient3d_xyz(a, b, c, d)
-   endfunction o3d
-
-   function normal_sign(t1, t2, t3, k) result(sg)
-   !< Exact sign (-1, 0, +1) of component k of n = (t2 - t1) x (t3 - t1): the orientation of the projection on the
-   !< plane of the other two coordinates (cyclic).
-   real(R8P),    intent(in) :: t1(3), t2(3), t3(3) !< Triangle.
-   integer(I4P), intent(in) :: k                   !< Component.
-   real(R8P)                :: sg                  !< Sign.
-   integer(I4P)             :: i1, i2              !< Projected coordinates.
-
-   i1 = mod(k, 3_I4P) + 1_I4P ; i2 = mod(k + 1_I4P, 3_I4P) + 1_I4P
-   sg = orient2d_xy(t1(i1), t1(i2), t2(i1), t2(i2), t3(i1), t3(i2))
-   if (sg /= 0._R8P) sg = sign(1._R8P, sg)
-   endfunction normal_sign
 
    subroutine ray_intersect_all_flat(facet, ray_origin, ray_direction, hits, status, exclude)
    !< Return all ray-facet intersections via flat O(n) loop, sorted ascending by `t`: one hit per crossing, exactly

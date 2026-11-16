@@ -452,6 +452,21 @@ say whether the segment from the foot crosses the wall anywhere else (`visible`)
 visible, next to a thin wall or a narrow gap some are not. `surface_stl_object` has the same calls. See
 [IB queries](/guide/advanced/ib-queries#definitions).
 
+### Image lines and probes on the GPU
+
+<<< @/examples/snippets/ck_probes_device.f90
+
+<<< @/examples/output/ck_probes_device.ansi{ansi}
+
+![the left end of an ellipse and a narrow island beside it over a grid of spacing 0.05: each ghost node joined through its foot point to the three samples of its image line, visible samples in teal, the samples whose segment from the foot crosses the other body in ember](../examples/images/ck-probes-device.svg){.fossil-figure}
+
+An image line samples several points along the normal of each ghost point: `lengths(m, n)` gives m per point,
+`probe_points(2, m, n)` and `visible(m, n)`, from one closest-point query per point. `probe_many_device` and
+`image_points_device` take the same arguments after `enter_device` and return the same bits: 0 mismatches here. The
+16 blocked samples belong to the island's ghosts, whose lines reach into the ellipse, and to two ellipse ghosts whose
+lines cross the island. This page is built without OpenACC, so the device routines run on the host here. See
+[IB queries](/guide/advanced/ib-queries#image-lines-and-probes-on-the-device).
+
 ### Place Lagrangian markers for an IB method
 
 <<< @/examples/snippets/ck_markers.f90
