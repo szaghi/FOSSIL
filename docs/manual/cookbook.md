@@ -483,6 +483,20 @@ it (the first ghost has the fluid one step away in -u and in -v). `ghost_points_
 unit cube a point on the faces x = 0 is solid and on x = 1 fluid: the 56 ghosts span x = 0 to 0.75. See
 [finite-difference wall closure](/guide/advanced/fd-closure#definitions).
 
+### Build the closure table of a finite-difference wall closure
+
+<<< @/examples/snippets/ck_closure_table.f90
+
+<<< @/examples/output/ck_closure_table.ansi{ansi}
+
+`fd_closure_2d` finds the ghost points of the solver's lines and fills an `ib_closure_t` per ghost: signed distance,
+foot, normal, element, body, patch, the probes of an image line (here two, √2 h apart) with their visibility and the
+cells that enclose them, the wall velocity of the spinning ellipse (V + ω × (foot − c)) and, with `ilw=.true.`, the
+crossing of every grid line with the wall between a ghost and its first fluid point: 88 for the 56 ghosts.
+`fd_closure_3d` is the 3-D twin; with `resident=.true.` the table stays on the device (`update_host` brings it back,
+`ib_closure_reset` releases it). On the unit cube the ILW crossings along x lie on the faces x = 0 and x = 1. See
+[finite-difference wall closure](/guide/advanced/fd-closure#the-closure-table).
+
 ### Place Lagrangian markers for an IB method
 
 <<< @/examples/snippets/ck_markers.f90

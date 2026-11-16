@@ -17,6 +17,8 @@ geometry alone, on the solver's own point lines, with the exact inside/outside d
 | Ghost points of a block: indexes, coordinates, direction masks, steps to the fluid | `ghost_points_3d(surface, x, y, z, reach, gp)` | `ghost_points_2d(curve, x, y, reach, gp)` |
 | The same on the device, bit for bit | `ghost_points_3d(..., device=.true.)` | `ghost_points_2d(..., device=.true.)` |
 | Wall curvature at the feet: principal curvatures and directions (2-D: curvature, tangent), CPU or device | `build_curvature`, `query_many(_device)(principal_curvatures=, principal_directions=)`, `normal_curvature` | same |
+| The closure table in one call: ghosts, wall data, probes, curvature, wall velocity, ILW crossings | `fd_closure_3d(surface, x, y, z, reach, table)` | `fd_closure_2d(curve, x, y, reach, table)` |
+| The same on the device, bit for bit, or left resident there | `fd_closure_3d(..., device=.true.)`, `resident=.true.` | same |
 
 ![the nose of the NACA 0012 section on cell-centred points of spacing chord/64, the section in gold: inside it the three ghost layers of a stencil of half-width 3, the first layer next to the wall in teal, the second in gold, the third in ember, every other point a grey dot](../../examples/images/ref-fd-closure-ghosts.svg){.fossil-figure}
 
@@ -32,9 +34,11 @@ In 3-D the calls are the same with a third line `z(:)`: on a sphere of radius 0.
 15 625 points are ghosts for a half-width of 2, in two shells.
 
 The wall curvature at the foot of each ghost point, for the curvature condition of a slip wall, comes from the
-principal curvatures and directions of the wall ([Wall curvature](#wall-curvature)). This page will grow with the rest
-of the closure table of [roadmap #109](https://github.com/szaghi/FOSSIL/issues/109): foot points, normals, probes
-along the normal with their visibility and the grid-line crossings of inverse Lax–Wendroff, per ghost point.
+principal curvatures and directions of the wall ([Wall curvature](#wall-curvature)). One call gathers everything per
+ghost point into the closure table of [roadmap #109](https://github.com/szaghi/FOSSIL/issues/109)
+([The closure table](#the-closure-table)): foot point, normal, probes along the normal with their visibility and their
+cells, curvature, wall velocity and the grid-line crossings of inverse Lax–Wendroff, on the CPU or resident on the
+device. FOSSIL gives the geometry; the solver picks the closure and interpolates its own flow.
 
 ## Definitions
 
@@ -130,6 +134,117 @@ with η_G < 0 and η_I > 0 the signed distances `query_many` returns; an inverse
   the surface (a marching-cubes mesh of it gave 17 %: see the
   [curvature limitations](/guide/advanced/curvature#known-limitations)).
 
+## The closure table
+
+`fd_closure_3d(surface, x, y, z, reach, table)` and `fd_closure_2d(curve, x, y, reach, table)` find the ghost points
+of the lines (as `ghost_points_3d` / `_2d`) and fill an `ib_closure_t` with, per ghost g:
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `ijk`, `points`, `mask`, `steps` | `[d, n]`, `[d, n]`, `[n]`, `[2d, n]` | The ghost, as in `ghost_points_t` |
+| `distance` | `[n]` | Signed distance to the wall, negative inside |
+| `foot`, `normal` | `[d, n]` | Closest point; pseudo-normal of the closest feature, outward (into the fluid) |
+| `element`, `feature`, `body`, `patch` | `[n]` | Closest facet (2-D segment, by its first vertex); 3-D `FEATURE_FACE` / `_EDGE` / `_VERTEX`, 2-D the closest vertex (0 inside a segment); body; patch |
+| `lengths`, `probe`, `visible`, `probe_cell` | `[m]`, `[d, m, n]`, `[m, n]`, `[d, m, n]` | Probe k at `foot + lengths(k) normal`; the open segment foot–probe crosses no element; the enclosing cell per axis |
+| `kappa`, `direction` | `[d-1, n]`, `[d, d-1, n]` | Principal curvatures and directions at the foot (2-D: curvature and tangent), when `build_curvature` ran |
+| `velocity` | `[d, n]` | Rigid wall velocity at the foot, when velocities are given |
+| `ilw_t`, `ilw_element`, `ilw_normal`, `ilw_kappa`, `ilw_direction` | `[2d, n]`, ... | Per direction slot, the crossing of the grid line with the wall ([ILW crossings](#ilw-crossings)) |
+
+d is 3 or 2 (`table%dims`), m the number of probes (`table%m`). Arrays not asked for are allocated with a zero last
+extent, so a table always has every component.
+
+- **Probe lengths** are absolute and signed (positive outward, along the normal from the foot), the same m lengths
+  for every ghost: an image line of spacing l is `lengths = [l, 2 l, 3 l]`. The mirror image of a ghost is at length
+  −`distance`, ghost by ghost: `2 foot − point`.
+- **Enclosing cell** by the low-side rule on the solver's own lines: x(i) < p ≤ x(i+1) gives i; a probe outside the
+  block, or on its first line, gives 0. The solver interpolates there with its own stencil; FOSSIL gives no weights.
+
+![the right end of an ellipse 0.4 x 0.2 on cell-centred points of spacing 0.02: the ghosts of a stencil of half-width 2 in teal, each joined to its foot on the wall in gold and on to the third probe of its image line, the three probes in ember](../../examples/images/ref-fd-closure-table.svg){.fossil-figure}
+
+<<< @/examples/snippets/ref_fd_closure_table-2d.f90
+
+<<< @/examples/output/ref_fd_closure_table.ansi{ansi}
+
+- The ellipse, turned by 0.3 rad and spinning at its pose, has 168 ghosts for a half-width of 2; all 504 probes of
+  spacing √2 h are visible from their feet (a convex body).
+- The third probe of the first ghost lies below the block (−0.3): its v cell is 0.
+- The device path returns the same table (`ib_closure_mismatches` counts every differing entry, reals by bits).
+
+## ILW crossings
+
+An inverse Lax–Wendroff closure works along the grid lines: it needs, for each ghost and each direction that reaches
+the fluid, the point where that grid line leaves the solid. With `ilw=.true.` every direction slot whose `steps` is
+s > 0 gets the crossing of the grid line with the wall between the last solid point (s − 1 steps away) and the first
+fluid point (s steps): `ilw_t` its coordinate along the axis, `ilw_element` the facet or segment, `ilw_normal` the
+pseudo-normal of the crossing point (a closest-point query of it) and, with the curvature built, `ilw_kappa` and
+`ilw_direction` there. Slots without a crossing hold zeros and element 0.
+
+![the right end of the ellipse on cell-centred points: each ghost (teal) joined along its grid lines, in every direction of its mask, to the crossing of that line with the wall (gold), with a short segment (ember) along the normal at the crossing](../../examples/images/ref-fd-closure-ilw.svg){.fossil-figure}
+
+The crossings are the cut cells' own: the exact crossings of the line (`line_crossings`, its device kernel), placed
+against the perturbed points with the exact `line_crossing_before`. The node states being the parities of the same
+crossings, the segment between a solid and a fluid point holds an odd number of them on a watertight wall; the
+table takes the one nearest the fluid point (ties by element index). When the solver's points are the nodes of its
+cut-cell grid, the crossing lies on the cell edge the cut cells cut, and gives its fluid fraction of
+`cut_cells_3d(edges=.true.)` bit for bit (`fossil_test_fd_closure_3d`; 2-D, the apertures of `curve%cut_cells`).
+
+## Wall velocity
+
+A moving body passes its pose (`pose=`: the body frame is the surface or curve as given) and, for the boundary
+condition of a no-slip or slip wall, its rigid velocity: `linear_velocity` V, `angular_velocity` ω and the `centre`
+c (default: the pose's translation, the body origin in the world; the world origin without a pose). At every foot
+
+$$\mathbf{v} = \mathbf{V} + \boldsymbol{\omega} \times (\mathbf{x}_f - \mathbf{c}),$$
+
+the exact velocity field of the rigid motion at that instant (in 2-D ω is a scalar, ω × r = ω (−r_v, r_u)).
+
+![the ellipse at its pose, turned by 0.3 rad and moved along u, spinning at 2 rad per unit time about the pose's origin (the teal dot) and moving at 0.5 along u: the wall velocity at every second foot as an ember segment](../../examples/images/ref-fd-closure-velocity.svg){.fossil-figure}
+
+With a pose the ghosts and the ILW crossings are those of the body moved by the pose (the geometry the cut cells of
+the moved body see: in 3-D a moved copy of the surface, `move`; in 2-D the vertices placed by `to_world`), and every
+query (foot, normal, probes, visibility, curvature, the ILW normals) runs in the body frame and is mapped back, as
+`query_many(pose=)`. A pure rotation about the centre is tangent to the wall up to the facet's tilt from the smooth
+normal (`fossil_test_fd_closure_3d`, `_2d`).
+
+## Resident use on the device
+
+A GPU solver keeps its flow on the device; the table should stay there too. With `device=.true.` (the surface or
+curve mapped by `enter_device`, after `build_curvature` if it is built) every stage runs on the device in one
+pipeline: the node states, the ghost count, scan and fill, the body-frame points, the closest-point queries, the
+wall data, the probes and their visibility, the curvature, the ILW crossings and their queries. Nothing goes back to
+the host between the stages. With `resident=.true.` the table is left mapped (`table%on_device`): a device solver
+reads its arrays with `present`, through pointer aliases of the members.
+
+![a marching-cubes sphere of radius 0.5 on node lines of spacing 0.05: the table built resident on the device, then brought back, the feet of the ghosts of its lower half in gold, each with its normal to the first probe in ember](../../examples/images/ref-fd-closure-resident.svg){.fossil-figure}
+
+<<< @/examples/snippets/ref_fd_closure_table-3d.f90
+
+The resident pattern is the cut cells': `update_host` copies the table back (the arrays stay mapped), `exit_device`
+releases the device copies, `enter_device` maps a host table; `ib_closure_reset` releases and resets. Every call
+that writes a table takes it `intent(inout)` and releases it first. A copy `b = a` of a resident table is not mapped:
+`device_key` (the host address of `points`) tells, and `update_host` on the copy warns and drops the flag. Call
+`exit_device` (or `ib_closure_reset`) before a resident table goes out of scope.
+
+## How a solver uses the table
+
+![one ghost of the ellipse (teal), its foot (gold) and its image line of three probes (ember), with the cells of the solver's points that enclose the probes shaded: the solver interpolates there](../../examples/images/ref-fd-closure-image-line.svg){.fossil-figure}
+
+**Image-line closure** (Funada & Imamura 2023; Chaudhuri 2011). Ask for the m probes of an image line
+(`lengths = [l, 2 l, ...]`); the solver interpolates its flow at each probe in `probe_cell`, imposes the wall value
+at the foot (`velocity` for the no-slip condition) and extrapolates along the normal to the ghost at `distance` (< 0).
+A probe that is not `visible` lies behind another part of the wall: shorten the line or switch the closure there.
+Two samples per ray (wall-modelled LES, van Noordt 2022) are the same table with m = 2.
+
+**ILW closure and the curvature condition** (Tan & Shu 2010; Liu 2025). `ilw_t` gives the wall point on each grid line
+through the ghost, `ilw_normal` the normal there: the solver converts the normal derivatives of its boundary
+condition to derivatives along that line. A slip wall adds the curvature condition ∂ₙv_t = S v_t
+([Wall curvature](#wall-curvature)): `ilw_kappa` and `ilw_direction` give S at the crossing, `kappa` and `direction`
+at the foot.
+
+**First step: an eikonal extension fed by exact geometry.** A solver that extends its fluid values into the solid by
+an eikonal equation along the normal needs the signed distance and the normal at the ghosts: `distance` and `normal`
+(or `foot`) replace a level set computed on the grid, with no other change to the solver.
+
 ## Example
 
 The NACA 0012 section (the wing cut at z = 0.5, chord from −0.25 to 0.75) on cell-centred lines of spacing chord/64,
@@ -146,7 +261,9 @@ reach 3; then a sphere on node lines in 3-D, checked against the device path.
 - On the sphere, 978 ghosts have the fluid one step away along some axis; the 810 others only at two steps.
 - The device path returns the same list (`T`).
 
-The [cookbook](/manual/cookbook#find-the-ghost-points-of-a-finite-difference-stencil) has the shortest program.
+The [cookbook](/manual/cookbook#find-the-ghost-points-of-a-finite-difference-stencil) has the shortest program;
+[another recipe](/manual/cookbook#build-the-closure-table-of-a-finite-difference-wall-closure) builds the closure
+table.
 
 ## Design: host and device paths
 
@@ -160,7 +277,15 @@ Both paths compute the inside flags first, then classify every point with the sa
   exclusive prefix sum of the counts (`links_scan_dev`) gives every ghost its slot, and one thread per point fills its
   slot. The output is copied back.
 
-The outputs are integers and copied coordinates, so the two paths agree bit for bit; built without OpenACC the device
+The closure table runs the same way (`fossil_fd_closure`, free routines: the module uses the surface, curve,
+ghost-point and cut-cell modules). The host path calls `ghost_points_3d` / `_2d`, `query_many`, `probe_many`,
+`line_crossings` and the ILW selection kernel `ilw_select_oac`; the device path runs the ghost kernels, the kernel of
+`query_many_device` on present arrays (`query_points_present`; curves: `query_present`, `probes_present`,
+`curvature_present`), the probe kernel `bvh_segment_blocked_oac`, `foot_principal_oac` and the ILW kernels (one
+count, scan and sorted fill per direction slot, then a compacted query of the crossings): the same routines, so the
+same bits (`fossil_test_fd_closure_3d`, `_2d`; bench lines `closure device vs serial mismatches`).
+
+The ghost outputs are integers and copied coordinates, so the two paths agree bit for bit; built without OpenACC the device
 loops run on the host in order, and the tests compare the two (`fossil_test_ghost_points_3d`, `_2d`). The 3-D device
 path needs the surface's SAH BVH (the default tree); an octree surface is refused with `STATUS_INVALID_INPUT`, the
 host path accepts both.
@@ -170,6 +295,12 @@ host path accepts both.
 ```text
 call ghost_points_3d(surface, x, y, z, reach, gp [, status] [, device])
 call ghost_points_2d(curve, x, y, reach, gp [, status] [, device])
+call fd_closure_3d(surface, x, y, z, reach, table [, status] [, lengths] [, pose] [, linear_velocity] &
+                   [, angular_velocity] [, centre] [, ilw] [, device] [, resident])
+call fd_closure_2d(curve, x, y, reach, table [, status] [, lengths] [, pose] [, linear_velocity] &
+                   [, angular_velocity] [, centre] [, ilw] [, device] [, resident])
+call table%enter_device ; call table%update_host ; call table%exit_device ; call ib_closure_reset(table)
+n = ib_closure_mismatches(a, b)
 ```
 
 | Argument | Meaning |
@@ -179,14 +310,29 @@ call ghost_points_2d(curve, x, y, reach, gp [, status] [, device])
 | `gp` | `ghost_points_t`, reset first: `n`, `dims`, `ni`, `nj`, `nk` (1 in 2-D), `reach(3)`, `ijk(dims, n)`, `points(dims, n)`, `mask(n)`, `steps(2 dims, n)` |
 | `status` | `STATUS_OK`; `STATUS_INVALID_INPUT` on bad lines or reach, or (device, 3-D) a surface without a SAH BVH: `gp%n = 0` |
 | `device` | Device path (default `.false.`), the same output bit for bit |
+| `table` | `ib_closure_t`, released and reset first ([The closure table](#the-closure-table)) |
+| `lengths(m)` | Probe lengths, absolute, + outward (default: no probe) |
+| `pose` | `rigid_pose_t` (2-D `rigid_pose_2d_t`): the body at the pose |
+| `linear_velocity(d)`, `angular_velocity(3)` (2-D scalar), `centre(d)` | Rigid wall velocity ([Wall velocity](#wall-velocity)) |
+| `ilw` | ILW crossings (default `.false.`) |
+| `resident` | Leave the table mapped on the device (implies `device`) |
+
+`fd_closure_*` return `STATUS_INVALID_INPUT` (and an empty table) on bad lines or reach, a velocity or centre of the
+wrong size, or on the device path a surface or curve not mapped, or with its curvature built but not mapped (a stderr
+message).
 
 `ghost_points_reset(gp)` releases a set. A surface without facets or a curve without vertices has no ghost. The
 routines are free procedures of the module `fossil_ghost_points`, re-exported by `use fossil`.
 
 ## Limitations
 
-- **No residency yet.** The device path returns the ghosts to the host; the 3-D node states go to the host and back
-  between the two device stages. The closure table of the next step keeps them on the device.
+- **Ghost points alone are not resident.** `ghost_points_3d(device=.true.)` returns its ghosts to the host (the 3-D
+  node states go to the host and back between its stages); the closure table keeps everything on the device.
+- **A pose costs a moved copy in 3-D.** The ghosts and ILW crossings of a posed body are those of a moved copy of the
+  surface (built on the host, its tree copied in for the call on the device path): the exact node states of a posed
+  body without the copy are open.
+- **The ILW normal is the pseudo-normal of the crossing point** (a closest-point query of it): at a crossing within
+  round-off of an edge it is the edge's pseudo-normal.
 - **One block.** A ghost needs its fluid point inside the block: across a block boundary the solver's halo exchange,
   not FOSSIL, decides. Points of other blocks are not seen.
 - **Open surfaces.** The flags are parities of crossings; on an open surface they are as meaningful as the cut cells'

@@ -78,13 +78,14 @@ contains
    endif
    endfunction line_crossing_before
 
-   function line_crossing_before_2d(pu, pv, qu, qv, axis, a, c, entering) result(before)
+   pure function line_crossing_before_2d(pu, pv, qu, qv, axis, a, c, entering) result(before)
    !< 2-D twin of `line_crossing_before`: the crossing of the segment p -> q with the line along `axis` (1: v = a, 2:
    !< u = a) lies before the point of the line at coordinate c, exactly. For P on the line, orient2d(p, q, P) =
    !< -(q_v - p_v) (c - t) along u and (q_u - p_u) (c - t) along v, and with the module's entering convention (the
    !< solid on the left) both give: entering, before iff orient2d > 0; leaving, iff < 0. A point on the segment takes
    !< the global perturbation P + (eps1, eps2) (u first, as the 2-D node test): orient2d(p, q, P + delta) has the sign
-   !< of -(q_v - p_v), else of q_u - p_u.
+   !< of -(q_v - p_v), else of q_u - p_u. A device routine since #109 WP1 step 04 (the ILW crossings of the closure table).
+   !$acc routine seq
    real(R8P),    intent(in) :: pu, pv, qu, qv !< Segment.
    integer(I4P), intent(in) :: axis           !< Line axis.
    real(R8P),    intent(in) :: a              !< Line position.

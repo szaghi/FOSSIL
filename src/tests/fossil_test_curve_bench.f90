@@ -25,7 +25,9 @@ program fossil_test_curve_bench
 !< exact rotation's map from the local integration since issue #104), and `probe device vs serial mismatches` (WP1
 !< step 01: `probe_many_device` / `image_points_device` against the host, three lengths per point, posed too), and
 !< `curvature device vs serial mismatches` (WP1 step 03: `principal_curvatures=` / `principal_directions=` of
-!< `query_many_device` against `query_many`, posed too).
+!< `query_many_device` against `query_many`, posed too), and `closure device vs serial mismatches` (WP1 step 04: the
+!< closure table of `fd_closure_2d`, device and resident against the host, every field by bits, posed with velocities
+!< and ILW crossings too).
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
@@ -41,6 +43,7 @@ use fossil, only : pose_interpolate, gauss_legendre_01, swept_cells_2d_t, swept_
 use fossil_swept_compare, only : swept_twin_mismatches, swept_cells_2d_mismatches
 use fossil, only : piece_map_2d_t
 use fossil_piece_map_compare, only : piece_map_2d_mismatches
+use fossil, only : ib_closure_t, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
 
 implicit none
 
@@ -131,6 +134,7 @@ contains
       call posed(cur, p, ALGO(a), NAME(a))
       if (a == 1) call probe(cur, p(:, 1::3), maxval(hi - lo) / real(max(n, 1), R8P)) ! every third point: the test budget
       if (a == 1) call curvature(cur, p)
+      if (a == 1) call closure(cur, lo, hi)
    enddo
    call cur%exit_device
    endsubroutine bench
@@ -209,6 +213,48 @@ contains
    print '(A,I0)', '   curvature device vs serial mismatches: ', bad
    ok = ok .and. bad == 0
    endsubroutine curvature
+
+   subroutine closure(cur, lo, hi)
+   !< fd_closure_2d on the device (copied back, and resident then update_host) vs the host (WP1 step 04): cell-centre lines
+   !< of n points per axis over the grid box, reach 3, three probes, unposed and posed with velocities and ILW crossings;
+   !< every field of the table by bits (`ib_closure_mismatches`). The curvature is built and mapped (`curvature` ran).
+   type(curve_object), intent(inout) :: cur          !< Curve (on device).
+   real(R8P),          intent(in)    :: lo(2), hi(2) !< Grid box.
+   type(rigid_pose_2d_t)     :: pose     !< Pose.
+   type(ib_closure_t)        :: ch, cd, cr !< Host, device, resident tables.
+   real(R8P),    allocatable :: x(:), y(:) !< Lines.
+   real(R8P)                 :: h        !< Spacing.
+   integer(I4P)              :: i, k, bad, ng !< Work.
+
+   h = maxval(hi - lo) / real(max(n, 1), R8P)
+   allocate(x(n), y(n))
+   do i = 1, n
+      x(i) = lo(1) + (hi(1) - lo(1)) * (i - 0.5_R8P) / n ; y(i) = lo(2) + (hi(2) - lo(2)) * (i - 0.5_R8P) / n
+   enddo
+   pose = pose_2d(0.3_R8P, [0.02_R8P, -0.01_R8P])
+   bad = 0 ; ng = 0
+   do k = 1, 2
+      if (k == 1) then
+         call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], ch, lengths=[h, 2 * h, 3 * h], ilw=.true.)
+         call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], cd, lengths=[h, 2 * h, 3 * h], ilw=.true., device=.true.)
+         call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], cr, lengths=[h, 2 * h, 3 * h], ilw=.true., resident=.true.)
+      else
+         call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], ch, lengths=[h, 2 * h, 3 * h], pose=pose, &
+                            linear_velocity=[0.1_R8P, 0.2_R8P], angular_velocity=1.5_R8P, ilw=.true.)
+         call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], cd, lengths=[h, 2 * h, 3 * h], pose=pose, &
+                            linear_velocity=[0.1_R8P, 0.2_R8P], angular_velocity=1.5_R8P, ilw=.true., device=.true.)
+         call fd_closure_2d(cur, x, y, [3_I4P, 3_I4P], cr, lengths=[h, 2 * h, 3 * h], pose=pose, &
+                            linear_velocity=[0.1_R8P, 0.2_R8P], angular_velocity=1.5_R8P, ilw=.true., resident=.true.)
+      endif
+      call cr%update_host
+      bad = bad + ib_closure_mismatches(ch, cd) + ib_closure_mismatches(ch, cr)
+      if (ch%n == 0 .or. .not. cr%on_device) bad = bad + 1
+      ng = ng + ch%n
+      call ib_closure_reset(cr)
+   enddo
+   print '(A,I0,A,I0,A)', '   closure device vs serial mismatches: ', bad, '  (', ng, ' ghosts)'
+   ok = ok .and. bad == 0
+   endsubroutine closure
 
    subroutine rich(cur, p, algo, nm)
    !< query_many_device vs query_many (issue #37): distance, closest point, normal, ids.

@@ -1101,6 +1101,10 @@ device after `enter_device`; pseudo-normal or fast-winding-number sign),
 before `enter_device`); `analyze` drops it, `move` rotates its directions. `normal_curvature(k, d, t)` (free function)
 is the curvature along a tangent t. See
 [principal curvatures and directions](/guide/advanced/curvature#principal-curvatures-and-directions).
+`is_curvature_built()`, `is_curvature_on_device()` tell whether it is built and mapped.
+`query_points_present(n, pts, signed, fwn, d, cp, nml, facet, feature, index, body)` runs the kernel of
+`query_many_device` on arrays already present on the device (the resident closure table of
+[`fd_closure_3d`](/guide/advanced/fd-closure#the-closure-table)).
 
 ---
 

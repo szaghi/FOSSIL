@@ -102,6 +102,8 @@ public :: cut_walls_3d_t
 public :: cut_cells_3d_nodes_device
 ! the node states alone on the host (the twin of `cut_cells_3d_nodes_device`), for the ghost points (#109 WP1 step 03)
 public :: cut_cells_3d_nodes
+! the node states left on the device for the resident closure table (#109 WP1 step 04)
+public :: cut_cells_3d_nodes_present
 ! the inputs of the piece links (issue #100 step 5), for the link stage and the benches (not re-exported by `fossil`)
 public :: cut_link_inputs_3d_t, cut_cells_3d_link_inputs_device, cut_cells_3d_link_inputs, link_inputs_reset
 ! the piece links on the device (issue #100 step 5), the stage of `cut_cells_3d_device(..., links=)`, for the benches
@@ -4084,6 +4086,29 @@ contains
       call move_alloc(ex, edge_x) ; call move_alloc(ey, edge_y) ; call move_alloc(ez, edge_z)
    endif
    endsubroutine cut_cells_3d_nodes_device
+
+   subroutine cut_cells_3d_nodes_present(surface, x, y, z, node_in)
+   !< `cut_cells_3d_nodes_device` with the lines and the flags already present on the device and left there (#109 WP1
+   !< step 04, the resident closure table): `node_in` [size(x), size(y), size(z)] written on the device only, bit for bit
+   !< `cut_cells_3d`'s `cut%node_in`. The surface needs its SAH BVH with facets (the caller checks: `device_grid_check`
+   !< conditions); its tree and vertices may be mapped by `surface%enter_device` or not (then copied in for the call).
+   !< x, y, z (strictly increasing, at least two each) and node_in must be present.
+   type(surface_stl_object), intent(in), target :: surface          !< Surface.
+   real(R8P),                intent(in)         :: x(:), y(:), z(:) !< Lines (present).
+   logical,                  intent(inout)      :: node_in(:,:,:)   !< Point inside flags (present).
+   type(aabb_node_object),       pointer :: node_p(:)    !< Alias of surface%aabb%node.
+   type(facet_distance_payload), pointer :: payload_p(:) !< Alias of surface%aabb%payload.
+   real(R8P),                    pointer :: tv_p(:,:)    !< Alias of surface%tri_vertices.
+   real(R8P), allocatable :: ex(:,:,:), ey(:,:,:), ez(:,:,:) !< Edge fractions (not asked).
+   integer(I4P) :: nx, ny, nz                            !< Cells.
+
+   nx = size(x, kind=I4P) - 1_I4P ; ny = size(y, kind=I4P) - 1_I4P ; nz = size(z, kind=I4P) - 1_I4P
+   node_p => surface%aabb%node ; payload_p => surface%aabb%payload ; tv_p => surface%tri_vertices
+   allocate(ex(1, 1, 1), ey(1, 1, 1), ez(1, 1, 1))
+   !$acc data copyin(node_p, payload_p, tv_p) create(ex, ey, ez)
+   call edge_fractions_dev(node_p, payload_p, tv_p, x, y, z, nx, ny, nz, .false., node_in, ex, ey, ez)
+   !$acc end data
+   endsubroutine cut_cells_3d_nodes_present
 
    subroutine device_grid_check(surface, x, y, z, nx, ny, nz, status)
    !< The checks of the device paths (issue #100 step 3c): the edges (as `cut_cells_3d`) and a SAH BVH with facets

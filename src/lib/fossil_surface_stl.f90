@@ -263,6 +263,9 @@ type :: surface_stl_object
       procedure, pass(self) :: query_many                      !< Batch rich query: distance, closest point, facet, feature, normal, body (issue #37).
       procedure, pass(self) :: query_point                     !< Rich query of one point (issue #37).
       procedure, pass(self) :: query_many_device               !< query_many on the device (issue #37).
+      procedure, pass(self) :: query_points_present            !< The query_many_device kernel on present arrays (#109).
+      procedure, pass(self) :: is_curvature_built              !< build_curvature ran on the current facets (#109).
+      procedure, pass(self) :: is_curvature_on_device          !< The shape operator is mapped on the device (#109).
       generic               :: probe_many => probe_many_one, probe_many_multi !< Probe points along the normal, with
                                                                !< visibility (issue #37); m lengths per point (WP1 step 01).
       procedure, pass(self) :: probe_many_one                  !< probe_many, one length per point.
@@ -395,6 +398,22 @@ contains
 
    b = self%bmin
    endfunction get_bmin
+
+   pure function is_curvature_built(self) result(built)
+   !< True if `build_curvature` ran on the current facets (#109 WP1 step 04).
+   class(surface_stl_object), intent(in) :: self  !< Surface.
+   logical                               :: built !< Built.
+
+   built = self%curvature_built
+   endfunction is_curvature_built
+
+   pure function is_curvature_on_device(self) result(mapped)
+   !< True if `enter_device` mapped the shape operator of `build_curvature` (#109 WP1 step 04).
+   class(surface_stl_object), intent(in) :: self   !< Surface.
+   logical                               :: mapped !< Mapped.
+
+   mapped = self%curvature_on_device
+   endfunction is_curvature_on_device
 
    pure function get_bmax(self) result(b)
    !< Return bmax (bounding-box maximum).
@@ -2630,7 +2649,7 @@ contains
    !<
    !< Requires `enter_device` (else STATUS_INVALID_INPUT and a stderr message). The kernel always
    !< computes every output into local arrays (an absent optional cannot be referenced in device
-   !< code); the requested ones are copied out on the host. The loop body is the one of
+   !< code); the requested ones are copied out on the host (the kernel is `query_points_present`). The loop body is the one of
    !< `distance_many_device` (BVH traversal with region, closest point recomputed by
    !< `triangle_point_distance`, pseudo-normal or fast-winding-number sign), keeping what it
    !< already computes; #20 rules (pointer aliases, `_oac` routines). SIGN_PSEUDO_NORMAL or
@@ -2665,18 +2684,11 @@ contains
    integer(I4P), pointer :: cv_p(:,:)                     !< Alias of curv_vid.
    real(R8P)        :: pk1, pk2, d1x, d1y, d1z, d2x, d2y, d2z !< Per-point shape operator.
    logical          :: want_pc                            !< Shape operator requested.
-   type(aabb_node_object),       pointer :: node_p(:)    !< Alias of self%aabb%node.
-   type(facet_distance_payload), pointer :: payload_p(:) !< Alias of self%aabb%payload.
-   type(pnormal_payload_t),      pointer :: pnormal_p(:) !< Alias of self%pnormal_payload.
-   type(wn_node_t),              pointer :: wn_p(:)      !< Alias of self%wn_payload.
-   integer(I4P),                 pointer :: body_p(:)    !< Alias of self%body_payload.
    real(R8P),    pointer :: fseg_p(:,:), fbox_p(:,:)     !< Aliases of the feature tree (issue #61).
    integer(I4P), pointer :: flink_p(:,:)                 !< Alias of the feature tree links.
    real(R8P),    allocatable :: fdl(:), pts(:,:)         !< Device-side feature distances, points.
-   type(vector_R8P) :: point_i, closest_v, v1_v, e12_v, e13_v !< Per-point work (component-wise stores, #20).
-   real(R8P)        :: d2, nx, ny, nz, side, omega, beta2      !< Per-point work.
-   integer(I4P)     :: best_facet, best_payload, region, n, i, algo !< Per-point work.
-   logical          :: signed_, fwn, bad                       !< Options.
+   integer(I4P)     :: n, i, algo                        !< Work.
+   logical          :: signed_, fwn, bad                  !< Options.
 
    if (present(pose)) then ! body-frame query (issue #41), outputs mapped back on the host
       call self%query_many_device(points=body_points(pose, points), distances=distances, closest_points=closest_points, &
@@ -2751,61 +2763,15 @@ contains
       return
    endif
    fwn = algo == SIGN_FAST_WINDING_NUMBER
-   beta2 = WN_DEFAULT_BETA * WN_DEFAULT_BETA
    allocate(dd(n), cpl(3, n), nml(3, n), fcl(n), ftl(n), fil(n), bdl(n))
-   node_p => self%aabb%node ; payload_p => self%aabb%payload ; pnormal_p => self%pnormal_payload
-   wn_p => self%wn_payload ; body_p => self%body_payload
-
-   !$acc parallel loop present(node_p, payload_p, pnormal_p, wn_p, body_p) copyin(points) &
-   !$acc&  copyout(dd, cpl, nml, fcl, ftl, fil, bdl) &
-   !$acc&  private(point_i, closest_v, v1_v, e12_v, e13_v, d2, nx, ny, nz, side, omega, best_facet, best_payload, region)
+   if (allocated(pts)) deallocate(pts)
+   allocate(pts(3, n))
    do i = 1_I4P, n
-      point_i%x = points(i)%x ; point_i%y = points(i)%y ; point_i%z = points(i)%z
-      d2 = huge(0._R8P) ; best_facet = 0_I4P ; best_payload = 0_I4P ; region = 0_I4P
-      closest_v%x = point_i%x ; closest_v%y = point_i%y ; closest_v%z = point_i%z
-      call bvh_distance_node_with_region_oac(node=node_p, payload=payload_p, n=0_I4P, point=point_i, best=d2, &
-                                             best_facet=best_facet, best_payload_idx=best_payload)
-      nx = 0._R8P ; ny = 0._R8P ; nz = 0._R8P
-      if (best_facet > 0_I4P) then
-         v1_v%x = payload_p(best_payload)%v1(1)
-         v1_v%y = payload_p(best_payload)%v1(2)
-         v1_v%z = payload_p(best_payload)%v1(3)
-         e12_v%x = payload_p(best_payload)%e12(1)
-         e12_v%y = payload_p(best_payload)%e12(2)
-         e12_v%z = payload_p(best_payload)%e12(3)
-         e13_v%x = payload_p(best_payload)%e13(1)
-         e13_v%y = payload_p(best_payload)%e13(2)
-         e13_v%z = payload_p(best_payload)%e13(3)
-         call triangle_point_distance(v1=v1_v, e12=e12_v, e13=e13_v, a=payload_p(best_payload)%a, b=payload_p(best_payload)%b, &
-                                      c=payload_p(best_payload)%c, det=payload_p(best_payload)%det, point=point_i, &
-                                      distance=d2, closest=closest_v, region=region)
-         nx = pnormal_x_oac(pnormal_p(best_facet), region)
-         ny = pnormal_y_oac(pnormal_p(best_facet), region)
-         nz = pnormal_z_oac(pnormal_p(best_facet), region)
-         d2 = sqrt(d2)
-         if (signed_) then
-            if (fwn) then
-               omega = bvh_winding_number_oac(node_p, payload_p, wn_p, point_i%x, point_i%y, point_i%z, beta2)
-               if (omega / WN_FOUR_PI > 0.5_R8P) d2 = -d2
-            else
-               side = (points(i)%x - closest_v%x) * nx + (points(i)%y - closest_v%y) * ny + (points(i)%z - closest_v%z) * nz
-               if (side < 0._R8P) d2 = -d2
-            endif
-         endif
-      endif
-      dd(i) = d2
-      cpl(1, i) = closest_v%x ; cpl(2, i) = closest_v%y ; cpl(3, i) = closest_v%z
-      nml(1, i) = nx ; nml(2, i) = ny ; nml(3, i) = nz
-      fcl(i) = best_facet
-      ftl(i) = 0_I4P ; bdl(i) = 0_I4P
-      if (best_facet > 0_I4P) then
-         ftl(i) = FEATURE_FACE
-         if (region >= 1_I4P .and. region <= 3_I4P) ftl(i) = FEATURE_EDGE
-         if (region <= -1_I4P .and. region >= -3_I4P) ftl(i) = FEATURE_VERTEX
-         bdl(i) = body_p(best_facet)
-      endif
-      fil(i) = abs(region)
+      pts(1, i) = points(i)%x ; pts(2, i) = points(i)%y ; pts(3, i) = points(i)%z
    enddo
+   !$acc data copyin(pts) copyout(dd, cpl, nml, fcl, ftl, fil, bdl)
+   call self%query_points_present(n, pts, signed_, fwn, dd, cpl, nml, fcl, ftl, fil, bdl)
+   !$acc end data
    distances = dd
    if (present(closest_points)) closest_points = cpl
    if (present(normals)) normals = nml
@@ -2835,6 +2801,91 @@ contains
       if (present(principal_directions)) principal_directions = pdl
    endif
    endsubroutine query_many_device
+
+   subroutine query_points_present(self, n, pts, signed_, fwn, dd, cpl, nml, fcl, ftl, fil, bdl)
+   !< The kernel of `query_many_device` on arrays already present on the device (#109 WP1 step 04, the closure table of
+   !< `fossil_fd_closure`, which keeps its points and outputs resident): for each point pts(:, i) the distance (signed
+   !< when `signed_`, by the pseudo-normal or, with `fwn`, the fast winding number), the closest point, pseudo-normal,
+   !< facet, FEATURE_*, local feature index and body, the bits of `query_many_device` (which calls it on its copies).
+   !< The surface must be mapped (`enter_device`); pts and every output must be present. Built without OpenACC the loop
+   !< runs on the host.
+   class(surface_stl_object), intent(in), target :: self      !< Surface (target: device aliases).
+   integer(I4P),              intent(in)         :: n         !< Points.
+   real(R8P),                 intent(in)         :: pts(3, n) !< Query points (present).
+   logical,                   intent(in)         :: signed_   !< Signed distances.
+   logical,                   intent(in)         :: fwn       !< Sign by the fast winding number (else pseudo-normal).
+   real(R8P),                 intent(inout)      :: dd(n)     !< Distances (present).
+   real(R8P),                 intent(inout)      :: cpl(3, n) !< Closest points (present).
+   real(R8P),                 intent(inout)      :: nml(3, n) !< Pseudo-normals (present).
+   integer(I4P),              intent(inout)      :: fcl(n)    !< Closest facets (present).
+   integer(I4P),              intent(inout)      :: ftl(n)    !< FEATURE_* (present).
+   integer(I4P),              intent(inout)      :: fil(n)    !< Local edge/vertex indexes (present).
+   integer(I4P),              intent(inout)      :: bdl(n)    !< Bodies (present).
+   type(aabb_node_object),       pointer :: node_p(:)    !< Alias of self%aabb%node.
+   type(facet_distance_payload), pointer :: payload_p(:) !< Alias of self%aabb%payload.
+   type(pnormal_payload_t),      pointer :: pnormal_p(:) !< Alias of self%pnormal_payload.
+   type(wn_node_t),              pointer :: wn_p(:)      !< Alias of self%wn_payload.
+   integer(I4P),                 pointer :: body_p(:)    !< Alias of self%body_payload.
+   type(vector_R8P) :: point_i, closest_v, v1_v, e12_v, e13_v !< Per-point work (component-wise stores, #20).
+   real(R8P)        :: d2, nx, ny, nz, side, omega, beta2      !< Per-point work.
+   integer(I4P)     :: best_facet, best_payload, region, i     !< Per-point work.
+
+   if (n < 1_I4P) return
+   node_p => self%aabb%node ; payload_p => self%aabb%payload ; pnormal_p => self%pnormal_payload
+   wn_p => self%wn_payload ; body_p => self%body_payload
+   beta2 = WN_DEFAULT_BETA * WN_DEFAULT_BETA
+
+   !$acc parallel loop default(present) present(node_p, payload_p, pnormal_p, wn_p, body_p, pts, dd, cpl, nml, fcl, ftl, &
+   !$acc&  fil, bdl) &
+   !$acc&  private(point_i, closest_v, v1_v, e12_v, e13_v, d2, nx, ny, nz, side, omega, best_facet, best_payload, region)
+   do i = 1_I4P, n
+      point_i%x = pts(1, i) ; point_i%y = pts(2, i) ; point_i%z = pts(3, i)
+      d2 = huge(0._R8P) ; best_facet = 0_I4P ; best_payload = 0_I4P ; region = 0_I4P
+      closest_v%x = point_i%x ; closest_v%y = point_i%y ; closest_v%z = point_i%z
+      call bvh_distance_node_with_region_oac(node=node_p, payload=payload_p, n=0_I4P, point=point_i, best=d2, &
+                                             best_facet=best_facet, best_payload_idx=best_payload)
+      nx = 0._R8P ; ny = 0._R8P ; nz = 0._R8P
+      if (best_facet > 0_I4P) then
+         v1_v%x = payload_p(best_payload)%v1(1)
+         v1_v%y = payload_p(best_payload)%v1(2)
+         v1_v%z = payload_p(best_payload)%v1(3)
+         e12_v%x = payload_p(best_payload)%e12(1)
+         e12_v%y = payload_p(best_payload)%e12(2)
+         e12_v%z = payload_p(best_payload)%e12(3)
+         e13_v%x = payload_p(best_payload)%e13(1)
+         e13_v%y = payload_p(best_payload)%e13(2)
+         e13_v%z = payload_p(best_payload)%e13(3)
+         call triangle_point_distance(v1=v1_v, e12=e12_v, e13=e13_v, a=payload_p(best_payload)%a, b=payload_p(best_payload)%b, &
+                                      c=payload_p(best_payload)%c, det=payload_p(best_payload)%det, point=point_i, &
+                                      distance=d2, closest=closest_v, region=region)
+         nx = pnormal_x_oac(pnormal_p(best_facet), region)
+         ny = pnormal_y_oac(pnormal_p(best_facet), region)
+         nz = pnormal_z_oac(pnormal_p(best_facet), region)
+         d2 = sqrt(d2)
+         if (signed_) then
+            if (fwn) then
+               omega = bvh_winding_number_oac(node_p, payload_p, wn_p, point_i%x, point_i%y, point_i%z, beta2)
+               if (omega / WN_FOUR_PI > 0.5_R8P) d2 = -d2
+            else
+               side = (pts(1, i) - closest_v%x) * nx + (pts(2, i) - closest_v%y) * ny + (pts(3, i) - closest_v%z) * nz
+               if (side < 0._R8P) d2 = -d2
+            endif
+         endif
+      endif
+      dd(i) = d2
+      cpl(1, i) = closest_v%x ; cpl(2, i) = closest_v%y ; cpl(3, i) = closest_v%z
+      nml(1, i) = nx ; nml(2, i) = ny ; nml(3, i) = nz
+      fcl(i) = best_facet
+      ftl(i) = 0_I4P ; bdl(i) = 0_I4P
+      if (best_facet > 0_I4P) then
+         ftl(i) = FEATURE_FACE
+         if (region >= 1_I4P .and. region <= 3_I4P) ftl(i) = FEATURE_EDGE
+         if (region <= -1_I4P .and. region >= -3_I4P) ftl(i) = FEATURE_VERTEX
+         bdl(i) = body_p(best_facet)
+      endif
+      fil(i) = abs(region)
+   enddo
+   endsubroutine query_points_present
 
    subroutine probe_many_one(self, points, lengths, probe_points, visible, foot_points, normals, status, patches, pose)
    !< Probe points (issue #37): for each point, the point at distance lengths(i) along the

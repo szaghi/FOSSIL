@@ -1,0 +1,8 @@
+$ fig_ref_fd_closure_table
+table: ghosts 172, probes drawn visible 138, blocked 0
+ILW: slots with a crossing 240, ghosts 172
+velocity: ghosts 86, speed from  0.0873 to  1.0895
+probe 1 at  0.33309  0.14524 in cell 42 22
+probe 2 at  0.34859  0.16890 in cell 42 23
+probe 3 at  0.36409  0.19256 in cell 43 25
+sphere: ghosts 1788, resident T

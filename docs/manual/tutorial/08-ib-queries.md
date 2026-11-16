@@ -69,6 +69,31 @@ the section, with the probe as well:
 With [named patches](/guide/advanced/patches) (chapter 1), `query_many(patches=)`, `probe_many(patches=)` and
 `image_points(patches=)` also give the patch of each wall point: which boundary condition the ghost point closes.
 
+## The closure table in one call
+
+A finite-difference solver closes its stencils at the wall with the same ingredients for every ghost point: the wall
+point and normal, sample points along the normal, maybe the curvature, the wall velocity and the crossings of its grid
+lines with the wall. `fd_closure_3d` returns them all in one table, on the solver's own grid lines. Its ghosts are
+the solid points with a fluid point within the stencil reach along a grid line, decided by the exact inside test of
+the cut cells (chapter 10), so the surface must be closed: the program takes the wrap of the last section.
+
+<<< @/examples/snippets/tut08_e_closure-closure.f90
+
+- `fd_closure_3d(surface, x, y, z, reach, table)` takes the three grid lines and the stencil half-width per axis
+  (2: two ghost layers) and fills an `ib_closure_t`: `table%n` ghosts with `points`, `distance`, `foot`, `normal`,
+  `element`, `body`, `patch`.
+- `lengths=[h, 2 * h]` asks for an image line of two probes along the normal from the foot: `probe(:, k, g)`, their
+  visibility and the cell of the grid that encloses each (`probe_cell`).
+- `ilw=.true.` adds the crossing of each grid line with the wall between a ghost and its first fluid point (inverse
+  Lax–Wendroff). `pose=`, the velocities and `device=` / `resident=.true.` (chapter 16) complete it.
+
+<<< @/examples/output/tut08-closure.ansi{ansi}
+
+![the grid plane y = 0 seen along y: the ghost points of the wrapped dragon in that plane (teal), each joined through its wall point (gold) to the second probe of its image line (ember)](../../examples/images/tut08-closure.svg){.fossil-figure}
+
+The [finite-difference wall closure](/guide/advanced/fd-closure) page lists every field and how an image-line, an ILW
+or an eikonal closure reads them.
+
 ## Thin walls and gaps
 
 A wall or a gap thinner than a cell is where an immersed boundary goes wrong: ghost points with an ambiguous wall

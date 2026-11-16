@@ -1,0 +1,9 @@
+$ ref_fd_closure_table
+ellipse: ghosts 168, probes 504, visible 504, ILW crossings 244
+ghost 1: ij 15  5  distance -0.00198  foot -0.21049 -0.21192  normal -0.2481 -0.9687
+  curvature  3.1059  velocity  0.9238 -0.5210  probe cells 14  3, 14  2, 13  0
+  ILW slot 1: crossing at  -0.21749 on segment 242, normal -0.2763 -0.9611
+  ILW slot 3: crossing at  -0.21204 on segment 244, normal -0.2481 -0.9687
+device path vs host path: mismatches 0
+sphere: ghosts 1788, resident T
+  ILW crossings 3660, mismatches against the host path 0

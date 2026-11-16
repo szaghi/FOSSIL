@@ -100,6 +100,9 @@ The immersed-boundary queries of chapter 8 have device twins with the same argum
   probes per point (`lengths(m, n)`, an image line) and `pose=`: the foot points from `query_many_device`, the
   visibility from the any-hit kernel the host runs too, so every output matches the host bit for bit (see the
   [cookbook recipe](../cookbook#image-lines-and-probes-on-the-gpu)).
+- `fd_closure_3d(..., resident=.true.)` builds the whole closure table of chapter 8 on the device in one pipeline and
+  leaves it there for a device solver (`update_host`, `exit_device`; see the
+  [cookbook recipe](../cookbook#build-the-closure-table-of-a-finite-difference-wall-closure)).
 
 <<< @/examples/output/tut16b.ansi{ansi}
 

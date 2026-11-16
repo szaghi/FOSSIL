@@ -1,0 +1,4 @@
+$ ck_closure_table
+ellipse: ghosts 56, visible probes 112, ILW crossings 88
+ghost 1: foot  0.4747  0.3211  normal -0.0845 -0.9964  wall velocity  0.1989 -0.0353
+cube: ghosts 56, resident T, ILW x from  0.000 to  1.000

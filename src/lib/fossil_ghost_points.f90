@@ -35,6 +35,8 @@ public :: ghost_points_t, ghost_points_3d, ghost_points_2d, ghost_points_reset
 public :: GHOST_XM, GHOST_XP, GHOST_YM, GHOST_YP, GHOST_ZM, GHOST_ZP
 ! the per-point kernels, shared by the host and the device paths (for the closure table of step 04)
 public :: ghost_side_oac, ghost_mask_oac, ghost_fill_oac
+! the 2-D ghosts of flat vertex arrays and the input check, for the closure table (#109 WP1 step 04; not re-exported)
+public :: ghost_points_2d_flat, ghost_lines_check
 
 integer(I4P), parameter :: GHOST_XM = 1_I4P  !< Mask bit 0: fluid within reach on the -x side.
 integer(I4P), parameter :: GHOST_XP = 2_I4P  !< Mask bit 1: on the +x side.
@@ -118,9 +120,31 @@ contains
    logical,              intent(in),  optional :: device     !< Device path (default .false.).
    real(R8P),    allocatable :: u(:), v(:)                   !< Curve vertices.
    integer(I4P), allocatable :: nxt(:)                       !< Next vertex (0: none).
+   real(R8P)                 :: uv(2)                        !< A vertex.
+   integer(I4P)              :: nv, i                        !< Work.
+
+   nv = curve%get_vertices_number()
+   allocate(u(nv), v(nv), nxt(nv))
+   do i = 1, nv
+      uv = curve%get_vertex(i) ; u(i) = uv(1) ; v(i) = uv(2) ; nxt(i) = curve%get_next(i)
+   enddo
+   call ghost_points_2d_flat(u, v, nxt, x, y, reach, gp, status, device)
+   endsubroutine ghost_points_2d
+
+   subroutine ghost_points_2d_flat(u, v, nxt, x, y, reach, gp, status, device)
+   !< `ghost_points_2d` on the vertices (u, v) and next-vertex links nxt of a curve (0: end of an open loop) instead of
+   !< the curve object (#109 WP1 step 04: the closure table passes the vertices moved by a pose, as `curve%move` places
+   !< them). Same output and statuses.
+   real(R8P),            intent(in)            :: u(:), v(:) !< Vertices.
+   integer(I4P),         intent(in)            :: nxt(:)     !< Next vertex (0: none).
+   real(R8P),            intent(in)            :: x(:), y(:) !< Point lines (u, v; strictly increasing).
+   integer(I4P),         intent(in)            :: reach(:)   !< Stencil half-width per axis [2], >= 1.
+   type(ghost_points_t), intent(inout)         :: gp         !< Ghost points (reset first).
+   integer(I4P),         intent(out), optional :: status     !< STATUS_OK or STATUS_INVALID_INPUT.
+   logical,              intent(in),  optional :: device     !< Device path (default .false.).
    logical,      allocatable :: nd(:,:)                      !< Point inside flags.
    integer(I4P), allocatable :: rstart(:), rseg(:)           !< Segments crossing each row (device path).
-   real(R8P)                 :: z(1), uv(2)                  !< No z line; a vertex.
+   real(R8P)                 :: z(1)                         !< No z line.
    integer(I4P)              :: nv, i, j, nu, nr, ni, nj     !< Work.
    logical                   :: dev                          !< Device path.
 
@@ -132,11 +156,7 @@ contains
       if (present(status)) status = STATUS_INVALID_INPUT
       return
    endif
-   nv = curve%get_vertices_number()
-   allocate(u(nv), v(nv), nxt(nv))
-   do i = 1, nv
-      uv = curve%get_vertex(i) ; u(i) = uv(1) ; v(i) = uv(2) ; nxt(i) = curve%get_next(i)
-   enddo
+   nv = size(u, kind=I4P)
    ni = size(x, kind=I4P) ; nj = size(y, kind=I4P)
    gp%dims = 2_I4P ; gp%ni = ni ; gp%nj = nj ; gp%nk = 1_I4P
    gp%reach(1:2) = reach(1:2) ; gp%reach(3) = 0_I4P
@@ -157,7 +177,17 @@ contains
       call node_flags(u, v, nxt, x, y, nd)
       call ghost_core_host(2_I4P, ni, nj, 1_I4P, nd, x, y, z, gp%reach, gp)
    endif
-   endsubroutine ghost_points_2d
+   endsubroutine ghost_points_2d_flat
+
+   integer(I4P) function ghost_lines_check(x, y, z, reach, nd) result(st)
+   !< The input check of the ghost points (#109 WP1 step 04): STATUS_OK if every line has at least two strictly
+   !< increasing points and reach has nd entries >= 1 (z not checked in 2-D), else STATUS_INVALID_INPUT.
+   real(R8P),    intent(in) :: x(:), y(:), z(:) !< Point lines.
+   integer(I4P), intent(in) :: reach(:)         !< Stencil half-widths.
+   integer(I4P), intent(in) :: nd               !< Dimensions.
+
+   st = lines_check(x, y, z, reach, nd)
+   endfunction ghost_lines_check
 
    subroutine ghost_points_reset(gp)
    !< Reset the ghost points (no ghost, arrays released).
