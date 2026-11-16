@@ -1,0 +1,5 @@
+$ fig_ref_surface_loads_forces
+NACA 0012 at 20 degrees: segments 120, samples 240, area A  0.081669
+force on the upper side -0.058489 -0.119863, lower side  0.058489  0.201531, total  0.000000  0.081669
+moment about c: upper -0.097632, lower  0.129708, total  0.032076
+buoyancy A =   0.081669, A (x_c - c) x (0, 1) =   0.032076;  equal to 1e-14: T

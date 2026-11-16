@@ -33,7 +33,8 @@
 !<      mismatches`, the closure table of `fd_closure_3d`, WP1 step 04, every field by bits, copied back and resident,
 !<      posed with velocities and ILW crossings too; `load samples device vs serial mismatches`, the load samples of
 !<      `load_samples_3d`, #109 WP2 step 01, order 3 with three probes on the closure lines, copied back and resident,
-!<      posed too).
+!<      posed too; `loads device vs serial mismatches`, `integrate_loads` of WP2 step 02 on those samples, copied in,
+!<      resident and with p, tau mapped by the caller, every output by bits).
 !<
 !<   6. Timing tables of the 3-D device kernels (sections, cut cells, link inputs, links, swept; best / median of 5;
 !<      the piece map, best of 2; the closure table at the bench's grid size, unposed and posed, best of 5 after a
@@ -66,7 +67,8 @@ use fossil,              only : rigid_pose_t, pose_from_axis_angle, to_world
 use fossil,              only : curvilinear_block_t, detect_topology, topo_record_t, TOPO_BOUNDARY, wall_cutter
 use fossil_overset,      only : hole_flags, block_logical_t, donor_set_t, donor_candidates
 use fossil,              only : ib_closure_t, fd_closure_3d, ib_closure_reset, ib_closure_mismatches
-use fossil,              only : load_samples_t, load_samples_3d, load_samples_reset, load_samples_mismatches
+use fossil,              only : load_samples_t, load_samples_3d, load_samples_reset, load_samples_mismatches, &
+                               integrate_loads
 use fossil,              only : curve_object, slice_surface, cut_cells_3d_t, cut_cells_3d, cut_cells_3d_device
 use fossil_boolean_bodies, only : BODY_SPHERE, mc_body
 use fossil_cut_cells_3d, only : cut_cells_3d_sections, cut_cells_3d_nodes_device
@@ -123,6 +125,7 @@ integer                       :: closure_mismatch          !< Closure table: dev
 integer                       :: closure_ghosts            !< Ghosts of the closure-table case.
 integer                       :: loads_mismatch            !< Load samples: device vs CPU mismatches (WP2 step 01).
 integer                       :: loads_samples             !< Samples of the load-samples case.
+integer                       :: iloads_mismatch           !< Loads (integrate_loads): device vs CPU mismatches (step 02).
 integer(I4P)                  :: n_sz                      !< Closure timing size (FOSSIL_CLOSURE_TIMING).
 integer                       :: deviation_mismatch        !< Surface deviation: device vs CPU mismatches (issue #60).
 integer                       :: feature_mismatch          !< Feature-edge boxes: device vs CPU mismatches (issue #61).
@@ -331,8 +334,8 @@ call curvature_case(mismatch=curvature_mismatch)
 rich_ok = rich_ok .and. curvature_mismatch == 0
 call closure_case(mismatch=closure_mismatch, ghosts=closure_ghosts)
 rich_ok = rich_ok .and. closure_mismatch == 0
-call loads_case(mismatch=loads_mismatch, samples=loads_samples)
-rich_ok = rich_ok .and. loads_mismatch == 0
+call loads_case(mismatch=loads_mismatch, samples=loads_samples, lmismatch=iloads_mismatch)
+rich_ok = rich_ok .and. loads_mismatch == 0 .and. iloads_mismatch == 0
 call deviation_case(mismatch=deviation_mismatch)
 rich_ok = rich_ok .and. deviation_mismatch == 0
 call feature_case(mismatch=feature_mismatch)
@@ -450,6 +453,7 @@ print '(A,I0)',      '   probe device vs serial mismatches: ', probe_mismatch
 print '(A,I0)',      '   curvature device vs serial mismatches: ', curvature_mismatch
 print '(A,I0,A,I0,A)', '   closure device vs serial mismatches: ', closure_mismatch, '  (', closure_ghosts, ' ghosts)'
 print '(A,I0,A,I0,A)', '   load samples device vs serial mismatches: ', loads_mismatch, '  (', loads_samples, ' samples)'
+print '(A,I0,A)',      '   loads device vs serial mismatches: ', iloads_mismatch, '  (3 device paths)'
 print '(A,I0)',      '   deviation device vs serial mismatches: ', deviation_mismatch
 print '(A,I0)',      '   feature device vs serial mismatches: ', feature_mismatch
 print '(A,I0)',      '   thin device vs serial mismatches: ', thin_mismatch
@@ -654,20 +658,27 @@ contains
    if (timing) call closure_timing(grid_n, mismatch, x, y, z, h, pose)
    endsubroutine closure_case
 
-   subroutine loads_case(mismatch, samples)
+   subroutine loads_case(mismatch, samples, lmismatch)
    !< load_samples_3d on the device, copied back and resident (then update_host), against the host (#109 WP2 step 01):
    !< order 3, three probes h, 2h, -h on the lines of the closure-table case; unposed, then posed (its pose). Every field
-   !< by bits (`load_samples_mismatches`).
-   integer, intent(out)   :: mismatch !< Mismatches.
-   integer, intent(out)   :: samples  !< Samples.
+   !< by bits (`load_samples_mismatches`). Then integrate_loads (step 02) of a pressure and a shear at the samples about
+   !< the box centre, per patch and per body: the device path on the host samples (copied in), on the resident samples
+   !< before update_host (read on the device) and with p, tau mapped by the caller, against the host path, by bits.
+   integer, intent(out)   :: mismatch  !< Mismatches.
+   integer, intent(out)   :: samples   !< Samples.
+   integer, intent(out)   :: lmismatch !< Loads mismatches.
    type(load_samples_t)   :: sh, sd, sr !< Host, device, resident samples.
    type(rigid_pose_t)     :: pose     !< Pose.
    real(R8P), allocatable :: x(:), y(:), z(:) !< Lines.
-   real(R8P)              :: h        !< Spacing.
-   integer(I4P)           :: k        !< Counter.
+   real(R8P), allocatable :: p(:), t(:,:), hpf(:,:), hpm(:,:), hbf(:,:), hbm(:,:), dpf(:,:), dpm(:,:), dbf(:,:), &
+                             dbm(:,:)  !< Loads.
+   real(R8P)              :: h, fh(3), mh(3), ah, fd(3), md(3), ad, ab(3) !< Spacing, loads.
+   type(vector_R8P)       :: lo, hi   !< Surface box.
+   integer(I4P)           :: k, i, j  !< Counters.
 
    call closure_lines(grid_n, x, y, z, h, pose)
-   mismatch = 0 ; samples = 0
+   mismatch = 0 ; samples = 0 ; lmismatch = 0
+   lo = surface%get_bmin() ; hi = surface%get_bmax() ; ab = 0.5_R8P * [lo%x + hi%x, lo%y + hi%y, lo%z + hi%z]
    call surface%enter_device
    do k = 1, 2
       if (k == 1) then
@@ -680,6 +691,35 @@ contains
          call load_samples_3d(surface, x, y, z, sd, order=3_I4P, lengths=[h, 2 * h, -h], pose=pose, device=.true.)
          call load_samples_3d(surface, x, y, z, sr, order=3_I4P, lengths=[h, 2 * h, -h], pose=pose, resident=.true.)
       endif
+      if (allocated(p)) deallocate(p, t)
+      allocate(p(sh%n), t(3, sh%n))
+      do i = 1, sh%n
+         p(i) = 1._R8P - sh%points(3, i) + 0.1_R8P * sin(7 * sh%points(1, i))
+         t(1, i) = 0.05_R8P * cos(5 * sh%points(2, i)) ; t(2, i) = 0.02_R8P * sh%points(3, i)
+         t(3, i) = 0.03_R8P * sh%points(1, i)
+      enddo
+      call integrate_loads(sh, fh, mh, pressure=p, shear=t, about=ab, per_patch_force=hpf, per_patch_moment=hpm, &
+                           per_body_force=hbf, per_body_moment=hbm, area=ah)
+      do j = 1, 3
+         select case (j)
+         case (1) ! host samples, copied in
+            call integrate_loads(sh, fd, md, pressure=p, shear=t, about=ab, per_patch_force=dpf, per_patch_moment=dpm, &
+                                 per_body_force=dbf, per_body_moment=dbm, area=ad, device=.true.)
+         case (2) ! resident samples, read on the device (before update_host)
+            call integrate_loads(sr, fd, md, pressure=p, shear=t, about=ab, per_patch_force=dpf, per_patch_moment=dpm, &
+                                 per_body_force=dbf, per_body_moment=dbm, area=ad, device=.true.)
+         case default ! p and tau mapped by the caller too
+            !$acc enter data copyin(p, t)
+            call integrate_loads(sr, fd, md, pressure=p, shear=t, about=ab, per_patch_force=dpf, per_patch_moment=dpm, &
+                                 per_body_force=dbf, per_body_moment=dbm, area=ad, device=.true.)
+            !$acc exit data delete(p, t)
+         endselect
+         lmismatch = lmismatch + bits_diff([fd, md, ad], [fh, mh, ah])
+         lmismatch = lmismatch + bits_diff(reshape(dpf, [size(dpf)]), reshape(hpf, [size(hpf)]))
+         lmismatch = lmismatch + bits_diff(reshape(dpm, [size(dpm)]), reshape(hpm, [size(hpm)]))
+         lmismatch = lmismatch + bits_diff(reshape(dbf, [size(dbf)]), reshape(hbf, [size(hbf)]))
+         lmismatch = lmismatch + bits_diff(reshape(dbm, [size(dbm)]), reshape(hbm, [size(hbm)]))
+      enddo
       call sr%update_host
       mismatch = mismatch + load_samples_mismatches(sh, sd) + load_samples_mismatches(sh, sr)
       if (sh%n == 0 .or. .not. sr%on_device) mismatch = mismatch + 1
@@ -687,6 +727,17 @@ contains
    enddo
    call surface%exit_device
    endsubroutine loads_case
+
+   integer function bits_diff(a, b) result(c)
+   !< Entries of two real arrays with different bits (sizes differ: the larger size).
+   real(R8P), intent(in) :: a(:), b(:) !< Reals.
+
+   if (size(a) /= size(b)) then
+      c = max(size(a), size(b))
+   else
+      c = count(transfer(a, 0_I8P, size(a)) /= transfer(b, 0_I8P, size(b)))
+   endif
+   endfunction bits_diff
 
    subroutine closure_lines(nn, x, y, z, h, pose)
    !< The lines of the closure-table cases: nn cell-centre points per axis over the surface box inflated by 10 %, their

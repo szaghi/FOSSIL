@@ -36,6 +36,15 @@ module fossil_surface_loads
 !< resident pattern of the closure table (`on_device`, `device_key`, `enter_device` / `update_host` / `exit_device`;
 !< `load_samples_reset`; every writer takes the samples intent(inout) and releases them first). Built without OpenACC
 !< the device loops run on the host in order.
+!<
+!< Loads (#109 WP2 step 02): `integrate_loads(samples, force, moment, ...)` sums, with the solver's pressure p(n) and/or
+!< viscous traction tau(d, n) at the samples, F = sum_s w_s (-p_s n_s + tau_s) and M = sum_s (x_s - c) x f_s (c = `about`,
+!< default the origin; 2-D the z component, per unit depth), the totals per patch and per body and the wetted area
+!< sum_s w_s. Each sample's contribution comes from one kernel (`load_force_3d_oac` / `load_force_2d_oac`), on the device
+!< with `device=.true.` (the samples and p, tau read where they are mapped, else copied in); the contributions are then
+!< summed on the host in sample order with Neumaier compensation, the same code for both paths: the totals agree bit for
+!< bit. A linear p = p0 + g . x is integrated exactly by every rule for the force (F = -g V); the moment's integrand is
+!< then quadratic, exact from order 2 (M = V (x_c - c) x (-g)).
 use fossil_aabb_node_object,   only : aabb_node_object
 use fossil_aabb_tree_object,   only : facet_distance_payload, AABB_TREE_SAH_BVH
 use fossil_curve_object,       only : curve_object
@@ -51,8 +60,15 @@ use vecfor,                    only : vector_R8P
 implicit none
 private
 public :: load_samples_t, load_samples_3d, load_samples_2d, load_samples_reset, load_samples_mismatches, load_rule_size
+public :: integrate_loads
 ! the per-point kernels, shared by the two paths (public for the tests)
-public :: load_point_3d_oac, load_point_2d_oac
+public :: load_point_3d_oac, load_point_2d_oac, load_force_3d_oac, load_force_2d_oac
+
+interface integrate_loads
+   !< Force, moment, per patch and per body totals of the solver's p and tau at the load samples (3-D: moment(3); 2-D: a
+   !< scalar moment).
+   module procedure integrate_loads_3d, integrate_loads_2d
+endinterface integrate_loads
 
 type :: load_samples_t
    !< The load samples of a surface or curve (see the module header). dims = 3 or 2 (2-D: the curve's (u, v) plane). Every
@@ -248,6 +264,128 @@ contains
    nmis = nmis + mis_r(a%lengths, b%lengths) + mis_r(a%probe, b%probe) + mis_l(a%visible, b%visible)
    nmis = nmis + mis_i(a%probe_cell, b%probe_cell)
    endfunction load_samples_mismatches
+
+   ! the loads
+
+   subroutine integrate_loads_3d(samples, force, moment, status, pressure, shear, about, per_patch_force, &
+                                 per_patch_moment, per_body_force, per_body_moment, area, device)
+   !< Force and moment on the wall of 3-D load samples (see the module header): with the pressure p(n) and/or the viscous
+   !< traction tau(3, n) at the samples (at least one), F = sum_s w_s (-p_s n_s + tau_s), M = sum_s (x_s - about) x f_s
+   !< (`about` default the origin), in sample order with Neumaier compensation. Optional: the totals per patch
+   !< `per_patch_force(3, np)`, `per_patch_moment(3, np)` and per body `per_body_force(3, nb)`, `per_body_moment(3, nb)`
+   !< (np, nb the largest patch and body ids of the samples; a sample with an id below 1 enters the totals only), the
+   !< wetted area sum_s w_s. `device` (default .false.): the contributions computed on the device, the samples and p, tau
+   !< read on the device where they are mapped (resident samples, a pressure mapped by the caller), else copied in; the
+   !< host path reads the host arrays (`update_host` resident samples first). Both paths give the same bits.
+   !< `status = STATUS_INVALID_INPUT` (stderr message, outputs zero, per-patch / per-body arrays of size 0) if the samples
+   !< are not 3-D, neither p nor tau is given, or a size differs (p(n), tau(3, n), force(3), moment(3), about(3)).
+   type(load_samples_t),   intent(in)            :: samples                !< Load samples (3-D).
+   real(R8P),              intent(out)           :: force(:)               !< Force [3].
+   real(R8P),              intent(out)           :: moment(:)              !< Moment about `about` [3].
+   integer(I4P),           intent(out), optional :: status                 !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),              intent(in),  optional :: pressure(:)            !< Pressure at the samples [n].
+   real(R8P),              intent(in),  optional :: shear(:,:)             !< Viscous traction at the samples [3, n].
+   real(R8P),              intent(in),  optional :: about(:)               !< Point of the moments [3] (default origin).
+   real(R8P), allocatable, intent(out), optional :: per_patch_force(:,:)   !< Force per patch [3, np].
+   real(R8P), allocatable, intent(out), optional :: per_patch_moment(:,:)  !< Moment per patch [3, np].
+   real(R8P), allocatable, intent(out), optional :: per_body_force(:,:)    !< Force per body [3, nb].
+   real(R8P), allocatable, intent(out), optional :: per_body_moment(:,:)   !< Moment per body [3, nb].
+   real(R8P),              intent(out), optional :: area                   !< Wetted area sum_s w_s.
+   logical,                intent(in),  optional :: device                 !< Device path (default .false.).
+   real(R8P), allocatable :: tot(:), pp(:,:), pb(:,:) !< Totals: all, per patch, per body [7, ...].
+   real(R8P)              :: ab(3)                    !< About.
+   integer(I4P)           :: st                       !< Status.
+   logical                :: dev                      !< Device path.
+
+   dev = .false. ; if (present(device)) dev = device
+   ab = 0._R8P
+   st = loads_check(samples, 3_I4P, present(pressure), present(shear), size(force, kind=I4P), &
+                    size(moment, kind=I4P) == 3_I4P)
+   if (st == STATUS_OK .and. present(pressure)) then
+      if (size(pressure, kind=I4P) /= samples%n) st = STATUS_INVALID_INPUT
+   endif
+   if (st == STATUS_OK .and. present(shear)) then
+      if (size(shear, 1, kind=I4P) /= 3_I4P .or. size(shear, 2, kind=I4P) /= samples%n) st = STATUS_INVALID_INPUT
+   endif
+   if (st == STATUS_OK .and. present(about)) then
+      if (size(about, kind=I4P) /= 3_I4P) then
+         st = STATUS_INVALID_INPUT
+      else
+         ab = about
+      endif
+   endif
+   if (st /= STATUS_OK) then
+      write(stderr, '(A)') 'fossil integrate_loads: refused -- 3-D samples, pressure and/or shear of the samples'' sizes'
+      allocate(tot(7), pp(7, 0), pb(7, 0)) ; tot = 0._R8P
+   else
+      call loads_run(samples, 3_I4P, 7_I4P, pressure, shear, ab, dev, tot, pp, pb)
+   endif
+   force = 0._R8P ; moment = 0._R8P
+   if (size(force) == 3) force = tot(1:3)
+   if (size(moment) == 3) moment = tot(4:6)
+   if (present(per_patch_force)) per_patch_force = pp(1:3, :)
+   if (present(per_patch_moment)) per_patch_moment = pp(4:6, :)
+   if (present(per_body_force)) per_body_force = pb(1:3, :)
+   if (present(per_body_moment)) per_body_moment = pb(4:6, :)
+   if (present(area)) area = tot(7)
+   if (present(status)) status = st
+   endsubroutine integrate_loads_3d
+
+   subroutine integrate_loads_2d(samples, force, moment, status, pressure, shear, about, per_patch_force, &
+                                 per_patch_moment, per_body_force, per_body_moment, area, device)
+   !< 2-D twin of `integrate_loads_3d` per unit depth in the curve's (u, v) plane: tau(2, n), force(2), about(2), the
+   !< scalar moment M = sum_s (r_u f_v - r_v f_u), r = x_s - about (its component along the plane's normal axis);
+   !< `per_patch_moment(np)`, `per_body_moment(nb)`; the wetted length as `area`.
+   type(load_samples_t),   intent(in)            :: samples                !< Load samples (2-D).
+   real(R8P),              intent(out)           :: force(:)               !< Force [2].
+   real(R8P),              intent(out)           :: moment                 !< Moment about `about`.
+   integer(I4P),           intent(out), optional :: status                 !< STATUS_OK or STATUS_INVALID_INPUT.
+   real(R8P),              intent(in),  optional :: pressure(:)            !< Pressure at the samples [n].
+   real(R8P),              intent(in),  optional :: shear(:,:)             !< Viscous traction at the samples [2, n].
+   real(R8P),              intent(in),  optional :: about(:)               !< Point of the moments [2] (default origin).
+   real(R8P), allocatable, intent(out), optional :: per_patch_force(:,:)   !< Force per patch [2, np].
+   real(R8P), allocatable, intent(out), optional :: per_patch_moment(:)    !< Moment per patch [np].
+   real(R8P), allocatable, intent(out), optional :: per_body_force(:,:)    !< Force per body [2, nb].
+   real(R8P), allocatable, intent(out), optional :: per_body_moment(:)     !< Moment per body [nb].
+   real(R8P),              intent(out), optional :: area                   !< Wetted length sum_s w_s.
+   logical,                intent(in),  optional :: device                 !< Device path (default .false.).
+   real(R8P), allocatable :: tot(:), pp(:,:), pb(:,:) !< Totals: all, per patch, per body [4, ...].
+   real(R8P)              :: ab(2)                    !< About.
+   integer(I4P)           :: st                       !< Status.
+   logical                :: dev                      !< Device path.
+
+   dev = .false. ; if (present(device)) dev = device
+   ab = 0._R8P
+   st = loads_check(samples, 2_I4P, present(pressure), present(shear), size(force, kind=I4P), .true.)
+   if (st == STATUS_OK .and. present(pressure)) then
+      if (size(pressure, kind=I4P) /= samples%n) st = STATUS_INVALID_INPUT
+   endif
+   if (st == STATUS_OK .and. present(shear)) then
+      if (size(shear, 1, kind=I4P) /= 2_I4P .or. size(shear, 2, kind=I4P) /= samples%n) st = STATUS_INVALID_INPUT
+   endif
+   if (st == STATUS_OK .and. present(about)) then
+      if (size(about, kind=I4P) /= 2_I4P) then
+         st = STATUS_INVALID_INPUT
+      else
+         ab = about
+      endif
+   endif
+   if (st /= STATUS_OK) then
+      write(stderr, '(A)') 'fossil integrate_loads: refused -- 2-D samples, pressure and/or shear of the samples'' sizes'
+      allocate(tot(4), pp(4, 0), pb(4, 0)) ; tot = 0._R8P
+   else
+      call loads_run(samples, 2_I4P, 4_I4P, pressure, shear, ab, dev, tot, pp, pb)
+   endif
+   force = 0._R8P
+   if (size(force) == 2) force = tot(1:2)
+   moment = tot(3)
+   if (present(per_patch_force)) per_patch_force = pp(1:2, :)
+   if (present(per_patch_moment)) per_patch_moment = pp(3, :)
+   if (present(per_body_force)) per_body_force = pb(1:2, :)
+   if (present(per_body_moment)) per_body_moment = pb(3, :)
+   if (present(area)) area = tot(4)
+   if (present(status)) status = st
+   endsubroutine integrate_loads_2d
 
    ! the resident pattern
 
@@ -578,6 +716,143 @@ contains
    enddo
    endsubroutine cells_stage
 
+   ! private: the loads
+
+   integer(I4P) function loads_check(samples, d, hp, ht, nforce, moment_ok) result(st)
+   !< The checks of `integrate_loads` common to both dimensions: the samples' dimensions, p and/or tau, the force's size,
+   !< the moment's.
+   type(load_samples_t), intent(in) :: samples   !< Samples.
+   integer(I4P),         intent(in) :: d         !< Dimensions of the routine.
+   logical,              intent(in) :: hp, ht    !< Pressure, shear given.
+   integer(I4P),         intent(in) :: nforce    !< Size of force.
+   logical,              intent(in) :: moment_ok !< The moment's size is right.
+
+   st = STATUS_OK
+   if (samples%dims /= d .or. .not. (hp .or. ht) .or. nforce /= d .or. .not. moment_ok) st = STATUS_INVALID_INPUT
+   if (st == STATUS_OK .and. samples%n > 0_I4P) then
+      if (.not. (allocated(samples%points) .and. allocated(samples%weight) .and. allocated(samples%normal))) &
+         st = STATUS_INVALID_INPUT
+   endif
+   endfunction loads_check
+
+   subroutine loads_run(samples, d, nc, pressure, shear, ab, dev, tot, pp, pb)
+   !< `integrate_loads` after the checks: the contributions of every sample (one kernel per sample, `if(dev)` on the
+   !< device), then their compensated sums in sample order on the host (`loads_reduce`), the same code for both paths.
+   type(load_samples_t),   intent(in)           :: samples          !< Samples (checked).
+   integer(I4P),           intent(in)           :: d, nc            !< Dimensions, components (3-D 7, 2-D 4).
+   real(R8P),              intent(in), optional :: pressure(:)      !< Pressure [n].
+   real(R8P),              intent(in), optional :: shear(:,:)       !< Shear [d, n].
+   real(R8P),              intent(in)           :: ab(d)            !< About.
+   logical,                intent(in)           :: dev              !< Device path.
+   real(R8P), allocatable, intent(out)          :: tot(:), pp(:,:), pb(:,:) !< Totals: all, per patch, per body.
+   real(R8P),    allocatable :: ctr(:,:), p1(:), t1(:,:) !< Contributions [nc, n]; placeholders of an absent p or tau.
+   integer(I4P), allocatable :: idp(:), idb(:)           !< Patch and body of every sample.
+   integer(I4P)              :: n                        !< Samples.
+   logical                   :: hp, ht                   !< Pressure, shear given.
+
+   n = samples%n ; hp = present(pressure) ; ht = present(shear)
+   allocate(ctr(nc, n), idp(n), idb(n), p1(1), t1(d, 1)) ; p1 = 0._R8P ; t1 = 0._R8P
+   if (n > 0_I4P) then
+      if (hp .and. ht) then
+         call loads_stage(d, nc, n, hp, ht, samples%points, samples%weight, samples%normal, samples%patch, samples%body, &
+                          n, pressure, n, shear, ab, dev, ctr, idp, idb)
+      elseif (hp) then
+         call loads_stage(d, nc, n, hp, ht, samples%points, samples%weight, samples%normal, samples%patch, samples%body, &
+                          n, pressure, 1_I4P, t1, ab, dev, ctr, idp, idb)
+      else
+         call loads_stage(d, nc, n, hp, ht, samples%points, samples%weight, samples%normal, samples%patch, samples%body, &
+                          1_I4P, p1, n, shear, ab, dev, ctr, idp, idb)
+      endif
+   endif
+   call loads_reduce(nc, n, ctr, idp, idb, tot, pp, pb)
+   endsubroutine loads_run
+
+   subroutine loads_stage(d, nc, n, hp, ht, pts, wt, nrm, pa, bo, npr, pres, nsh, shr, ab, dev, ctr, idp, idb)
+   !< One thread per sample: its contribution (`load_force_3d_oac` / `load_force_2d_oac`) and its patch and body ids. The
+   !< samples, p and tau copied in on the device path unless already mapped (resident samples, a pressure mapped by the
+   !< caller: read there); the contributions copied out.
+   integer(I4P), intent(in)    :: d, nc, n         !< Dimensions, components, samples.
+   logical,      intent(in)    :: hp, ht           !< Pressure, shear given.
+   real(R8P),    intent(in)    :: pts(d, n)        !< Points.
+   real(R8P),    intent(in)    :: wt(n)            !< Weights.
+   real(R8P),    intent(in)    :: nrm(d, n)        !< Normals.
+   integer(I4P), intent(in)    :: pa(n), bo(n)     !< Patches, bodies.
+   integer(I4P), intent(in)    :: npr, nsh         !< Sizes of pres and shr (1 if absent).
+   real(R8P),    intent(in)    :: pres(npr)        !< Pressure.
+   real(R8P),    intent(in)    :: shr(d, nsh)      !< Shear.
+   real(R8P),    intent(in)    :: ab(d)            !< About.
+   logical,      intent(in)    :: dev              !< Device.
+   real(R8P),    intent(inout) :: ctr(nc, n)       !< Contributions.
+   integer(I4P), intent(inout) :: idp(n), idb(n)   !< Patch and body ids.
+   real(R8P)    :: a(3), p, t1, t2, t3             !< About copy, the sample's p and tau.
+   integer(I4P) :: s                               !< Counter.
+
+   a = 0._R8P ; a(1:d) = ab
+   !$acc data copyin(pts, wt, nrm, pa, bo, pres, shr) copyout(ctr, idp, idb) if(dev)
+   !$acc parallel loop gang vector default(present) present(pts, wt, nrm, pa, bo, pres, shr, ctr, idp, idb) copyin(a) &
+   !$acc&  private(p, t1, t2, t3) if(dev)
+   do s = 1_I4P, n
+      p = 0._R8P ; t1 = 0._R8P ; t2 = 0._R8P ; t3 = 0._R8P
+      if (hp) p = pres(s)
+      if (ht) then
+         t1 = shr(1, s) ; t2 = shr(2, s)
+         if (d == 3_I4P) t3 = shr(3, s)
+      endif
+      if (d == 3_I4P) then
+         call load_force_3d_oac(hp, ht, p, t1, t2, t3, wt(s), nrm(1, s), nrm(2, s), nrm(3, s), pts(1, s), pts(2, s), &
+                                pts(3, s), a(1), a(2), a(3), ctr(1, s), ctr(2, s), ctr(3, s), ctr(4, s), ctr(5, s), &
+                                ctr(6, s), ctr(7, s))
+      else
+         call load_force_2d_oac(hp, ht, p, t1, t2, wt(s), nrm(1, s), nrm(2, s), pts(1, s), pts(2, s), a(1), a(2), &
+                                ctr(1, s), ctr(2, s), ctr(3, s), ctr(4, s))
+      endif
+      idp(s) = pa(s) ; idb(s) = bo(s)
+   enddo
+   !$acc end data
+   endsubroutine loads_stage
+
+   subroutine loads_reduce(nc, n, ctr, idp, idb, tot, pp, pb)
+   !< The compensated (Neumaier) sums of the contributions in sample order: all, per patch, per body (ids below 1 enter
+   !< the totals only). Host code, the same for both paths.
+   integer(I4P),           intent(in)  :: nc, n          !< Components, samples.
+   real(R8P),              intent(in)  :: ctr(nc, n)     !< Contributions.
+   integer(I4P),           intent(in)  :: idp(n), idb(n) !< Patch and body ids.
+   real(R8P), allocatable, intent(out) :: tot(:), pp(:,:), pb(:,:) !< Totals.
+   real(R8P), allocatable :: ct(:), cp(:,:), cb(:,:)     !< Compensations.
+   integer(I4P)           :: np, nb, s, c, ip, ib        !< Work.
+
+   np = 0_I4P ; nb = 0_I4P
+   if (n > 0_I4P) then
+      np = max(0_I4P, maxval(idp)) ; nb = max(0_I4P, maxval(idb))
+   endif
+   allocate(tot(nc), pp(nc, np), pb(nc, nb), ct(nc), cp(nc, np), cb(nc, nb))
+   tot = 0._R8P ; pp = 0._R8P ; pb = 0._R8P ; ct = 0._R8P ; cp = 0._R8P ; cb = 0._R8P
+   do s = 1_I4P, n
+      ip = idp(s) ; ib = idb(s)
+      do c = 1_I4P, nc
+         call neumaier_add(tot(c), ct(c), ctr(c, s))
+         if (ip >= 1_I4P) call neumaier_add(pp(c, ip), cp(c, ip), ctr(c, s))
+         if (ib >= 1_I4P) call neumaier_add(pb(c, ib), cb(c, ib), ctr(c, s))
+      enddo
+   enddo
+   tot = tot + ct ; pp = pp + cp ; pb = pb + cb
+   endsubroutine loads_reduce
+
+   pure subroutine neumaier_add(sm, cm, x)
+   !< Add x to the running sum sm with the compensation cm (Neumaier): the total is sm + cm.
+   real(R8P), intent(inout) :: sm, cm !< Sum, compensation.
+   real(R8P), intent(in)    :: x      !< Term.
+   real(R8P) :: t                     !< New sum.
+
+   t = sm + x
+   if (abs(sm) >= abs(x)) then
+      cm = cm + ((sm - t) + x)
+   else
+      cm = cm + ((x - t) + sm)
+   endif
+   sm = t
+   endsubroutine neumaier_add
+
    ! private: the samples' arrays
 
    subroutine resolve_inputs(dims, ord, lengths, x, y, z, st, ll, wl, xl, yl, zl)
@@ -890,4 +1165,57 @@ contains
       w = 0._R8P ; nu = 0._R8P ; nv = 0._R8P
    endif
    endsubroutine load_point_2d_oac
+
+   pure subroutine load_force_3d_oac(hp, ht, p, tx, ty, tz, w, nx, ny, nz, px, py, pz, ax, ay, az, fx, fy, fz, mx, my, &
+                                     mz, wa)
+   !< Kernel: the contribution of one sample to the loads: the traction g = -p n + tau (only the given terms: hp, ht),
+   !< f = w g, m = (x - a) x f, and the weight wa = w (the area). The same operations in the same order on the host and
+   !< the device.
+   !$acc routine seq
+   logical,   intent(in)  :: hp, ht                 !< Pressure, shear given.
+   real(R8P), intent(in)  :: p, tx, ty, tz          !< Pressure, shear.
+   real(R8P), intent(in)  :: w, nx, ny, nz          !< Weight, unit normal.
+   real(R8P), intent(in)  :: px, py, pz, ax, ay, az !< Point, point of the moments.
+   real(R8P), intent(out) :: fx, fy, fz, mx, my, mz !< Force and moment contributions.
+   real(R8P), intent(out) :: wa                     !< Area contribution.
+   real(R8P) :: gx, gy, gz, rx, ry, rz              !< Traction, arm.
+
+   if (hp .and. ht) then
+      gx = tx - p * nx ; gy = ty - p * ny ; gz = tz - p * nz
+   elseif (hp) then
+      gx = -(p * nx) ; gy = -(p * ny) ; gz = -(p * nz)
+   else
+      gx = tx ; gy = ty ; gz = tz
+   endif
+   fx = w * gx ; fy = w * gy ; fz = w * gz
+   rx = px - ax ; ry = py - ay ; rz = pz - az
+   mx = ry * fz - rz * fy
+   my = rz * fx - rx * fz
+   mz = rx * fy - ry * fx
+   wa = w
+   endsubroutine load_force_3d_oac
+
+   pure subroutine load_force_2d_oac(hp, ht, p, tu, tv, w, nu, nv, pu, pv, au, av, fu, fv, m, wa)
+   !< Kernel: 2-D twin of `load_force_3d_oac`: f = w (-p n + tau), the scalar moment m = r_u f_v - r_v f_u, r = x - a.
+   !$acc routine seq
+   logical,   intent(in)  :: hp, ht         !< Pressure, shear given.
+   real(R8P), intent(in)  :: p, tu, tv      !< Pressure, shear.
+   real(R8P), intent(in)  :: w, nu, nv      !< Weight, unit normal.
+   real(R8P), intent(in)  :: pu, pv, au, av !< Point, point of the moments.
+   real(R8P), intent(out) :: fu, fv, m      !< Force and moment contributions.
+   real(R8P), intent(out) :: wa             !< Length contribution.
+   real(R8P) :: gu, gv, ru, rv              !< Traction, arm.
+
+   if (hp .and. ht) then
+      gu = tu - p * nu ; gv = tv - p * nv
+   elseif (hp) then
+      gu = -(p * nu) ; gv = -(p * nv)
+   else
+      gu = tu ; gv = tv
+   endif
+   fu = w * gu ; fv = w * gv
+   ru = pu - au ; rv = pv - av
+   m = ru * fv - rv * fu
+   wa = w
+   endsubroutine load_force_2d_oac
 endmodule fossil_surface_loads

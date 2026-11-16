@@ -1,0 +1,5 @@
+$ ref_surface_loads_forces
+force   0.0000000  0.0000000  0.5187371   buoyancy (0, 0, V), V = 0.5187371 (faceted)
+moment  0.1037474 -0.1556211  0.0000000   V x_c x (0, 0, 1) =  0.1037474 -0.1556211  0.0000000
+wetted area 3.1262326;  the identities to 1e-15: T
+device = host, bit for bit: T

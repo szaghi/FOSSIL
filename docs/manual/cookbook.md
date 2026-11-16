@@ -510,6 +510,20 @@ solver evaluates its pressure and traction at the samples and sums: in p = 1 −
 buoyancy (0, area). `load_samples_3d` is the 3-D twin; without lines it gives the samples only, and the unit cube in
 p = 1 − z feels (0, 0, 1). See [surface loads](/guide/advanced/surface-loads).
 
+### Integrate the pressure force on a body
+
+<<< @/examples/snippets/ck_integrate_loads.f90
+
+<<< @/examples/output/ck_integrate_loads.ansi{ansi}
+
+`integrate_loads` sums −p n + τ over the samples, each weighted by its share of the facet area, and the moment of
+every contribution about `about` (the origin by default). In p = 1 − z the unit cube feels its buoyancy (0, 0, 1),
+whose moment about the origin is (0.5, −0.5, 0): that of the buoyancy at the centroid. A uniform shear of 0.1 along x
+adds 0.1 times the area, 6, to the force and nothing to the moment about the centre. Optional outputs give the same
+sums per patch and per body and the wetted area; with `device=.true.` the contributions are computed on the device and
+the totals keep their bits. In 2-D the moment is a scalar. See
+[surface loads](/guide/advanced/surface-loads#forces-and-moments).
+
 ### Place Lagrangian markers for an IB method
 
 <<< @/examples/snippets/ck_markers.f90

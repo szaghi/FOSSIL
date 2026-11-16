@@ -30,7 +30,9 @@ program fossil_test_curve_bench
 !< `query_many_device` against `query_many`, posed too), and `closure device vs serial mismatches` (WP1 step 04: the
 !< closure table of `fd_closure_2d`, device and resident against the host, every field by bits, posed with velocities
 !< and ILW crossings too), and `load samples device vs serial mismatches` (#109 WP2 step 01: `load_samples_2d`, device
-!< and resident against the host, every field by bits, posed too).
+!< and resident against the host, every field by bits, posed too), and `loads device vs serial mismatches` (step 02:
+!< `integrate_loads` on the device, copied-in, resident and caller-mapped p and tau, against the host, every output by
+!< bits).
 
 use fossil, only : curve_object, SIGN_PSEUDO_NORMAL, SIGN_FAST_WINDING_NUMBER, THICKNESS_MEDIAL
 use penf,   only : I4P, I8P, R8P
@@ -47,7 +49,7 @@ use fossil_swept_compare, only : swept_twin_mismatches, swept_cells_2d_mismatche
 use fossil, only : piece_map_2d_t
 use fossil_piece_map_compare, only : piece_map_2d_mismatches
 use fossil, only : ib_closure_t, fd_closure_2d, ib_closure_reset, ib_closure_mismatches
-use fossil, only : load_samples_t, load_samples_2d, load_samples_reset, load_samples_mismatches
+use fossil, only : load_samples_t, load_samples_2d, load_samples_reset, load_samples_mismatches, integrate_loads
 
 implicit none
 
@@ -364,14 +366,18 @@ contains
 
    subroutine loads(cur, lo, hi)
    !< load_samples_2d on the device (copied back, and resident then update_host) vs the host (#109 WP2 step 01): order 3,
-   !< three probes h, 2h, -h, the cell-centre lines of `closure`, unposed and posed; every field by bits.
+   !< three probes h, 2h, -h, the cell-centre lines of `closure`, unposed and posed; every field by bits. Then
+   !< integrate_loads (step 02) of a pressure and a shear at the samples, about the box centre, per patch and per body:
+   !< the device path on host samples (copied in), on the resident samples before update_host (read on the device), and
+   !< with p and tau mapped by the caller, against the host path; every output by bits (`loads device vs serial`).
    type(curve_object), intent(inout) :: cur          !< Curve (on device).
    real(R8P),          intent(in)    :: lo(2), hi(2) !< Grid box.
    type(rigid_pose_2d_t)     :: pose       !< Pose.
    type(load_samples_t)      :: sh, sd, sr !< Host, device, resident samples.
    real(R8P),    allocatable :: x(:), y(:) !< Lines.
-   real(R8P)                 :: h          !< Spacing.
-   integer(I4P)              :: i, k, bad, ns !< Work.
+   real(R8P),    allocatable :: p(:), t(:,:), hpf(:,:), hpm(:), hbf(:,:), hbm(:), dpf(:,:), dpm(:), dbf(:,:), dbm(:) !< Loads.
+   real(R8P)                 :: h, fh(2), mh, ah, fd(2), md, ad, ab(2) !< Spacing, loads.
+   integer(I4P)              :: i, k, bad, ns, badl, j !< Work.
 
    h = maxval(hi - lo) / real(max(n, 1), R8P)
    allocate(x(n), y(n))
@@ -379,7 +385,7 @@ contains
       x(i) = lo(1) + (hi(1) - lo(1)) * (i - 0.5_R8P) / n ; y(i) = lo(2) + (hi(2) - lo(2)) * (i - 0.5_R8P) / n
    enddo
    pose = pose_2d(0.3_R8P, [0.02_R8P, -0.01_R8P])
-   bad = 0 ; ns = 0
+   bad = 0 ; ns = 0 ; badl = 0 ; ab = 0.5_R8P * (lo + hi)
    do k = 1, 2
       if (k == 1) then
          call load_samples_2d(cur, x, y, sh, order=3_I4P, lengths=[h, 2 * h, -h])
@@ -390,6 +396,32 @@ contains
          call load_samples_2d(cur, x, y, sd, order=3_I4P, lengths=[h, 2 * h, -h], pose=pose, device=.true.)
          call load_samples_2d(cur, x, y, sr, order=3_I4P, lengths=[h, 2 * h, -h], pose=pose, resident=.true.)
       endif
+      if (allocated(p)) deallocate(p, t)
+      allocate(p(sh%n), t(2, sh%n))
+      do i = 1, sh%n
+         p(i) = 1._R8P - sh%points(2, i) + 0.1_R8P * sin(7 * sh%points(1, i))
+         t(1, i) = 0.05_R8P * cos(5 * sh%points(2, i)) ; t(2, i) = 0.02_R8P * sh%points(1, i)
+      enddo
+      call integrate_loads(sh, fh, mh, pressure=p, shear=t, about=ab, per_patch_force=hpf, per_patch_moment=hpm, &
+                           per_body_force=hbf, per_body_moment=hbm, area=ah)
+      do j = 1, 3
+         select case (j)
+         case (1) ! host samples, copied in
+            call integrate_loads(sh, fd, md, pressure=p, shear=t, about=ab, per_patch_force=dpf, per_patch_moment=dpm, &
+                                 per_body_force=dbf, per_body_moment=dbm, area=ad, device=.true.)
+         case (2) ! resident samples, read on the device (before update_host)
+            call integrate_loads(sr, fd, md, pressure=p, shear=t, about=ab, per_patch_force=dpf, per_patch_moment=dpm, &
+                                 per_body_force=dbf, per_body_moment=dbm, area=ad, device=.true.)
+         case default ! p and tau mapped by the caller too
+            !$acc enter data copyin(p, t)
+            call integrate_loads(sr, fd, md, pressure=p, shear=t, about=ab, per_patch_force=dpf, per_patch_moment=dpm, &
+                                 per_body_force=dbf, per_body_moment=dbm, area=ad, device=.true.)
+            !$acc exit data delete(p, t)
+         endselect
+         badl = badl + count(bits_r([fd, md, ad]) /= bits_r([fh, mh, ah]))
+         badl = badl + count_bits(reshape(dpf, [size(dpf)]), reshape(hpf, [size(hpf)])) + count_bits(dpm, hpm)
+         badl = badl + count_bits(reshape(dbf, [size(dbf)]), reshape(hbf, [size(hbf)])) + count_bits(dbm, hbm)
+      enddo
       call sr%update_host
       bad = bad + load_samples_mismatches(sh, sd) + load_samples_mismatches(sh, sr)
       if (sh%n == 0 .or. .not. sr%on_device) bad = bad + 1
@@ -397,8 +429,28 @@ contains
       call load_samples_reset(sr)
    enddo
    print '(A,I0,A,I0,A)', '   load samples device vs serial mismatches: ', bad, '  (', ns, ' samples)'
-   ok = ok .and. bad == 0
+   print '(A,I0,A,I0,A)', '   loads device vs serial mismatches: ', badl, '  (', ns, ' samples, 3 device paths)'
+   ok = ok .and. bad == 0 .and. badl == 0
    endsubroutine loads
+
+   pure function bits_r(a) result(b)
+   !< The bit patterns of reals.
+   real(R8P), intent(in) :: a(:)       !< Reals.
+   integer(I8P)          :: b(size(a)) !< Bits.
+
+   b = transfer(a, 0_I8P, size(a))
+   endfunction bits_r
+
+   integer(I4P) function count_bits(a, b) result(c)
+   !< Differing entries by bits (sizes differ: the larger size).
+   real(R8P), intent(in) :: a(:), b(:) !< Reals.
+
+   if (size(a) /= size(b)) then
+      c = max(size(a), size(b))
+   else
+      c = count(bits_r(a) /= bits_r(b))
+   endif
+   endfunction count_bits
 
    subroutine rich(cur, p, algo, nm)
    !< query_many_device vs query_many (issue #37): distance, closest point, normal, ids.

@@ -9,13 +9,15 @@ title: Surface loads
 A flow solver gets the force and the moment on a body from integrals over its wall. FOSSIL gives the geometry of those
 integrals, on the faceted wall itself: quadrature points on every facet (segment in 2-D) with their weights and normals,
 and probe points along the normal where the solver reads its flow. The solver evaluates the pressure p and the viscous
-traction τ at the samples; FOSSIL never interpolates the flow.
+traction τ at the samples; FOSSIL never interpolates the flow. With p and τ given, FOSSIL sums the force and the moment,
+per patch and per body too, the same bits on the CPU and on the device.
 
 | Query | 3-D (`surface_stl_object`) | 2-D (`curve_object`) |
 |---|---|---|
 | Quadrature points, weights, normals, element, patch, body of every facet / segment | `load_samples_3d(surface, samples=s)` | `load_samples_2d(curve, samples=s)` |
 | Probes along the normal: points, visibility, enclosing cells on the solver's lines | `load_samples_3d(surface, x, y, z, s, lengths=)` | `load_samples_2d(curve, x, y, s, lengths=)` |
 | The body at a pose; the same on the device bit for bit, or left resident there | `pose=`, `device=.true.`, `resident=.true.` | same |
+| Force, moment (2-D: its z component), per patch and per body, wetted area, from the solver's p and τ | `integrate_loads(s, force, moment, pressure=, shear=)` | same, a scalar moment |
 
 ![an ellipse of 40 segments in gold: on every segment its three Gauss points in teal, each with the outward normal in ember, drawn as long as the point's weight times three: the weights follow the segment lengths, shorter at the tips](../../examples/images/ref-surface-loads-samples.svg){.fossil-figure}
 
@@ -26,7 +28,8 @@ figure program prints the counts of every figure on this page:
 
 ## Conventions
 
-The samples follow three conventions, which the later load integration (force, moment, per patch and body) keeps:
+The samples follow three conventions, which the load integration (`integrate_loads`, [below](#forces-and-moments))
+keeps:
 
 - **L1, the integrand.** The force on the body is F = ∫ (−p n + τ) dA over its wall, n the outward normal of the body,
   into the fluid; the moment about c is M = ∫ (x − c) × (−p n + τ) dA. τ is the viscous part of the wall traction (a
@@ -64,7 +67,8 @@ centre on an outer loop, towards it on a hole.
 - A **degenerate element** (zero area or length; in 2-D also the missing segment at the end of an open polyline) gets
   zero weights and a zero normal; its probes sit at the sample and are not visible.
 - A pressure linear in x is integrated exactly by every order (the centroid rule is exact for degree 1 on a flat
-  facet): the buoyancy of a closed body comes out to round-off ([below](#how-a-solver-fills-p-and-tau)).
+  facet): the buoyancy force of a closed body comes out to round-off. Its moment has a quadratic integrand, (x − c) p,
+  exact from order 2 ([below](#forces-and-moments)).
 
 ## Probes, visibility and cells
 
@@ -86,7 +90,8 @@ signed lengths (+ into the fluid), the same for every sample; a zero length give
 ## How a solver fills p and tau
 
 The solver evaluates p and τ at the samples, by its own means: at the wall from its closure, or from the flow at the
-probes (an image line, a wall model), interpolated in the cells FOSSIL gives. The force is then a plain sum:
+probes (an image line, a wall model), interpolated in the cells FOSSIL gives. The force is then a sum over the samples,
+which `integrate_loads` does for it ([below](#forces-and-moments)); written out:
 
 ```fortran
 force = 0._R8P
@@ -100,6 +105,53 @@ enddo
 In p = 1 − v the force is the buoyancy, (0, area) per unit depth: one sample per segment gives it to round-off (the
 last line of the figure program's output). The weights and normals are the facet's, so the sum is the integral over
 the faceted wall; how close it is to the smooth body's depends on the facets, not on the rule.
+
+## Forces and moments
+
+`integrate_loads(samples, force, moment, pressure=p, shear=tau)` sums the loads of the samples with the solver's
+pressure p(n) and viscous traction τ(d, n) at the samples (either or both):
+
+- **The integrand (L1).** Each sample contributes f = w (−p n + τ), n the outward normal, into the fluid; its moment
+  about c (`about`, default the origin) is (x − c) × f. The force on the body is F = Σ f, the moment M = Σ (x − c) × f.
+  In 2-D both are per unit depth and the moment is its component along the plane's normal axis, a scalar
+  r_u f_v − r_v f_u.
+- **The sums (L4).** Compensated (Neumaier) sums in sample order, so in facet (segment) order: deterministic, and their
+  error is that of the terms, not of their number. The same sums per patch (`per_patch_force`, `per_patch_moment`) and
+  per body (`per_body_force`, `per_body_moment`), sized by the largest patch and body ids of the samples; the wetted area
+  (2-D length) Σ w as `area`.
+
+![a NACA 0012 at 20 degrees nose up in the pressure p = −v of a fluid at rest: the contributions −p n w of its samples in ember, pressing on the wall below v = 0, the force on the upper and on the lower side drawn from the leading edge c in teal, and their sum from the centroid in gold, pointing straight up: the buoyancy (0, A)](../../examples/images/ref-surface-loads-moment.svg){.fossil-figure}
+
+The two sides of the airfoil are two patches; their forces add up to the buoyancy (0, A), A the enclosed area, and their
+moments about the leading edge to that of the buoyancy at the centroid, A (x_c − c) × (0, 1):
+
+<<< @/examples/output/figref-surface-loads-forces.ansi{ansi}
+
+**The exactness check: buoyancy.** In a linear pressure p = p0 + g · x with τ = 0 the divergence theorem gives, on any
+closed faceted body of volume V (2-D: area A) and centroid x_c,
+
+F = −g V,   M = V (x_c − c) × (−g).
+
+The force's integrand p n is linear on a flat facet, integrated exactly by every rule; the moment's, (x − c) p, is
+quadratic, integrated exactly from order 2 (the centroid rule misses it: 5·10⁻³ of the moment on an irregular
+tetrahedron, nothing on a body symmetric enough to cancel it). The tests `fossil_test_integrate_loads_3d` and `_2d`
+check both identities on cube-01, an icosphere at a pose, two boxes (per body too), an irregular tetrahedron, a
+64-gon, a disc with a hole, a NACA 0012 polygon unposed and posed and two discs, against V and x_c from
+`mass_properties`: every component within ε times the sum of the absolute terms (Σ w |p| + V |g|, for the moment
+Σ w |p| |x − c| + V |g| |x_c − c|); the largest error measured is 0.34 of that bound.
+
+**Host and device.** Each sample's contribution comes from one kernel (`load_force_3d_oac`, `load_force_2d_oac`), in a
+loop that runs on the device with `device=.true.`: the samples, p and τ are read on the device where they are mapped
+(resident samples, a pressure the solver mapped itself), else copied in. The contributions then come back and are summed
+on the host in sample order, by the same code for both paths, so the totals agree bit for bit (`loads device vs serial
+mismatches` in the benches). On the host path the host arrays are read: call `update_host` on resident samples first.
+
+<<< @/examples/snippets/ref_surface_loads_forces-loads.f90
+
+<<< @/examples/output/ref_surface_loads_forces.ansi{ansi}
+
+The [cookbook](/manual/cookbook#integrate-the-pressure-force-on-a-body) integrates the pressure and a uniform shear on
+the unit cube.
 
 ## Example
 
@@ -131,6 +183,10 @@ The [cookbook](/manual/cookbook#sample-a-wall-for-the-surface-loads) has the sho
 - **Resident** (`resident=.true.`): the resident pattern of the closure table: `on_device`, `device_key`,
   `enter_device` / `update_host` / `exit_device`, `load_samples_reset`; every writer takes the samples
   `intent(inout)` and releases them first.
+- **Loads** (`integrate_loads`, a generic over the 3-D and the 2-D form, told apart by the moment's rank): one thread per
+  sample writes its contribution (force, moment, weight) and its patch and body ids; the reduction stays on the host,
+  in sample order, compensated, the same code for both paths. A sum in a fixed order on the host costs a copy of the
+  contributions and ids (64 bytes per sample in 3-D, 40 in 2-D) and needs no device reduction, whose order would differ.
 
 ## API
 
@@ -139,6 +195,8 @@ call load_samples_3d(surface [, x, y, z], samples [, status] [, order] [, length
 call load_samples_2d(curve [, x, y], samples [, status] [, order] [, lengths] [, pose] [, device] [, resident])
 call samples%enter_device ; call samples%update_host ; call samples%exit_device ; call load_samples_reset(samples)
 n = load_samples_mismatches(a, b) ; q = load_rule_size(order, dims)
+call integrate_loads(samples, force, moment [, status] [, pressure] [, shear] [, about] [, per_patch_force]
+                     [, per_patch_moment] [, per_body_force] [, per_body_moment] [, area] [, device])
 ```
 
 | Field of `load_samples_t` | Shape | Meaning |
@@ -161,6 +219,18 @@ n = load_samples_mismatches(a, b) ; q = load_rule_size(order, dims)
 A surface without facets or a curve without vertices has no sample. The routines are free procedures of the module
 `fossil_surface_loads`, re-exported by `use fossil`.
 
+| Argument of `integrate_loads` | Meaning |
+|---|---|
+| `samples` | Load samples, 3-D or 2-D (the form of the call must match) |
+| `force(d)`, `moment` | Totals: F, and M about `about`: `moment(3)` in 3-D, a scalar in 2-D |
+| `pressure(n)`, `shear(d, n)` | The solver's p and τ at the samples; at least one |
+| `about(d)` | Point of the moments (default the origin) |
+| `per_patch_force(d, np)`, `per_patch_moment` | Per patch (allocatable; 3-D `(3, np)`, 2-D `(np)`); np the largest patch id |
+| `per_body_force(d, nb)`, `per_body_moment` | Per body, the same layout; a sample with an id below 1 enters the totals only |
+| `area` | Σ w: the wetted area (2-D length) |
+| `device` | Contributions on the device (the samples, p, τ read there when mapped); the same bits |
+| `status` | `STATUS_OK`; `STATUS_INVALID_INPUT` (zero outputs, per-patch / per-body arrays of size 0, a stderr message) if the samples are of the other dimension, neither p nor τ is given, or a size differs |
+
 ## Limitations
 
 - **The faceted wall.** The samples integrate over the facets, with the facet normals: the force on a coarse
@@ -170,4 +240,6 @@ A surface without facets or a curve without vertices has no sample. The routines
 - **No interpolation.** FOSSIL gives the cells, not the weights: the solver interpolates with its own stencil and
   decides what to do with a probe that is not visible.
 - **All facets.** Every facet (segment) is sampled; a solver that wants some patches only selects the samples by
-  `patch`.
+  `patch` (or reads `per_patch_force`).
+- **The moment of a linear pressure needs order 2.** The centroid rule integrates the force of a linear p exactly, not
+  its moment.
